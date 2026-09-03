@@ -25,9 +25,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Advisory:
-    """One security advisory entry.
-
-    ``id`` is lowercase-hyphen, stable and never reused (it is what acks key on). ``remediation``
+    """``id`` is lowercase-hyphen, stable and never reused (it is what acks key on). ``remediation``
     is ordered: uninstall command first, then credential audit/rotation guidance.
     """
 
@@ -58,9 +56,7 @@ ADVISORIES: tuple[Advisory, ...] = (
             "the compromised 2.4.6 is still installed."
         ),
         url="https://socket.dev/blog/mini-shai-hulud-worm-pypi",
-        compromised=(
-            ("mistralai", frozenset({"2.4.6"})),
-        ),
+        compromised=(("mistralai", frozenset({"2.4.6"})),),
         remediation=(
             "Run: pip uninstall -y mistralai  (or: uv pip uninstall mistralai)",
             "Rotate API keys in ~/.hermes/.env (OpenRouter, Anthropic, OpenAI, "
@@ -76,9 +72,6 @@ ADVISORIES: tuple[Advisory, ...] = (
         severity="critical",
     ),
 )
-
-
-# ─── Detection ────────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -104,9 +97,7 @@ def _installed_version(pkg_name: str) -> Optional[str]:
         return None
 
 
-def detect_compromised(
-    advisories: Iterable[Advisory] = ADVISORIES,
-) -> list[AdvisoryHit]:
+def detect_compromised(advisories: Iterable[Advisory] = ADVISORIES) -> list[AdvisoryHit]:
     """All hits: package installed AND version in the compromised set (or the set is empty)."""
     return [
         AdvisoryHit(advisory, pkg_name, installed)
@@ -120,18 +111,16 @@ def detect_compromised(
 # Acks live under ``security.acked_advisories`` in config.yaml as a list of advisory IDs — the only
 # state (no per-host data or timestamps), so a shared config.yaml dismisses everywhere.
 
-
 def get_acked_ids() -> set[str]:
     """Advisory IDs the user has dismissed; empty when config can't be loaded (never block startup —
     the advisory keeps firing until config is repaired).
     """
     try:
         from hermes_cli.config import load_config
-        cfg = load_config()
+        raw = (load_config().get("security") or {}).get("acked_advisories") or []
     except Exception:
         logger.debug("Could not load config for advisory acks", exc_info=True)
         return set()
-    raw = (cfg.get("security") or {}).get("acked_advisories") or []
     return {str(x).strip() for x in raw if str(x).strip()} if isinstance(raw, list) else set()
 
 
@@ -149,7 +138,8 @@ def ack_advisory(advisory_id: str) -> bool:
         cfg = load_config()
         sec = cfg.setdefault("security", {})
         existing = sec.get("acked_advisories") or []
-        existing = existing if isinstance(existing, list) else []
+        if not isinstance(existing, list):
+            existing = []
         if advisory_id not in existing:
             sec["acked_advisories"] = existing + [advisory_id]
             save_config(cfg)
@@ -163,9 +153,6 @@ def filter_unacked(hits: list[AdvisoryHit]) -> list[AdvisoryHit]:
     """Only hits whose advisories the user has not dismissed."""
     acked = get_acked_ids() if hits else set()
     return [h for h in hits if h.advisory.id not in acked]
-
-
-# ─── Rendering ────────────────────────────────────────────────────────────────
 
 
 def _term_supports_color() -> bool:
@@ -183,8 +170,7 @@ def short_banner_lines(hits: list[AdvisoryHit]) -> list[str]:
         "  Run 'hermes doctor' for remediation steps.",
     ]
     if len(hits) > 1:
-        lines.insert(1, f"  ({len(hits) - 1} additional advisor"
-                       f"{'ies' if len(hits) > 2 else 'y'} also active.)")
+        lines.insert(1, f"  ({len(hits) - 1} additional advisor{'ies' if len(hits) > 2 else 'y'} also active.)")
     return lines
 
 
@@ -209,7 +195,6 @@ def full_remediation_text(hit: AdvisoryHit) -> list[str]:
 # ``<id> <timestamp>`` line per advisory). Acked advisories never re-banner; cached-but-not-acked
 # ones re-banner after 24h so the user doesn't fully forget.
 
-
 _BANNER_CACHE_FILE = "advisory_banner_seen"
 _BANNER_REPEAT_HOURS = 24
 
@@ -226,37 +211,29 @@ def _banner_cache_path() -> Optional[Path]:
 
 def _read_banner_cache() -> dict[str, float]:
     p = _banner_cache_path()
-    if p is None or not p.exists():
-        return {}
-    out: dict[str, float] = {}
     try:
-        for line in p.read_text(encoding="utf-8").splitlines():
-            parts = line.split(None, 1)
-            try:
-                if len(parts) == 2:
-                    out[parts[0]] = float(parts[1])
-            except ValueError:
-                continue
+        lines = p.read_text(encoding="utf-8").splitlines() if p is not None and p.exists() else []
     except Exception:
         return {}
+    out: dict[str, float] = {}
+    for parts in (line.split(None, 1) for line in lines):
+        try:
+            if len(parts) == 2:
+                out[parts[0]] = float(parts[1])
+        except ValueError:
+            continue
     return out
 
 
 def _write_banner_cache(seen: dict[str, float]) -> None:
-    p = _banner_cache_path()
-    if p is None:
-        return
     try:
-        p.write_text("\n".join(f"{aid} {ts}" for aid, ts in seen.items()) + "\n", encoding="utf-8")
+        if (p := _banner_cache_path()) is not None:
+            p.write_text("\n".join(f"{aid} {ts}" for aid, ts in seen.items()) + "\n", encoding="utf-8")
     except Exception:
         logger.debug("Could not write advisory banner cache", exc_info=True)
 
 
-def hits_due_for_banner(
-    hits: list[AdvisoryHit],
-    *,
-    repeat_hours: int = _BANNER_REPEAT_HOURS,
-) -> list[AdvisoryHit]:
+def hits_due_for_banner(hits: list[AdvisoryHit], *, repeat_hours: int = _BANNER_REPEAT_HOURS) -> list[AdvisoryHit]:
     """Hits whose banner is due (not acked, not recently shown). Side effect: stamps the banner
     cache for every returned hit, so callers must render the result.
     """
@@ -268,16 +245,12 @@ def hits_due_for_banner(
     now = time.time()
     cache = _read_banner_cache()
     cutoff = now - (repeat_hours * 3600)
-
     due = [hit for hit in fresh if cache.get(hit.advisory.id, 0.0) < cutoff]
     for hit in due:
         cache[hit.advisory.id] = now
     if due:
         _write_banner_cache(cache)
     return due
-
-
-# ─── Public entry points used by doctor / CLI / gateway ───────────────────────
 
 
 def startup_banner(hits: list[AdvisoryHit]) -> Optional[str]:
@@ -296,11 +269,7 @@ def gateway_log_message(hits: list[AdvisoryHit]) -> Optional[str]:
         return None
     if len(fresh) == 1:
         h = fresh[0]
-        return (
-            f"Security advisory [{h.advisory.id}] active: {h.package}=={h.installed_version} "
-            f"matches {h.advisory.title}. See {h.advisory.url}"
-        )
-    return (
-        f"{len(fresh)} security advisories active (IDs: {', '.join(h.advisory.id for h in fresh)}). "
-        "Run `hermes doctor` on the gateway host for details."
-    )
+        return (f"Security advisory [{h.advisory.id}] active: {h.package}=={h.installed_version} "
+                f"matches {h.advisory.title}. See {h.advisory.url}")
+    return (f"{len(fresh)} security advisories active (IDs: {', '.join(h.advisory.id for h in fresh)}). "
+            "Run `hermes doctor` on the gateway host for details.")

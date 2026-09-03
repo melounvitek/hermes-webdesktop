@@ -28,14 +28,10 @@ def _is_root() -> bool:
 
 
 def _running_as_root() -> Optional[str]:
-    if not _is_root():
-        return None
-    return (
-        "Running as ROOT. The agent's terminal/file tools execute with full "
-        "root privileges — a single prompt-injection or exposed endpoint is a "
-        "full host compromise. Run Hermes as an unprivileged user (or in a "
-        "sandboxed terminal backend / container with a non-root user)."
-    )
+    return None if not _is_root() else (
+        "Running as ROOT. The agent's terminal/file tools execute with full root privileges — a single "
+        "prompt-injection or exposed endpoint is a full host compromise. Run Hermes as an unprivileged user "
+        "(or in a sandboxed terminal backend / container with a non-root user).")
 
 
 def _iter_sshd_config_lines() -> list[str]:
@@ -43,9 +39,7 @@ def _iter_sshd_config_lines() -> list[str]:
     lines: list[str] = []
     paths: list[Path] = [Path("/etc/ssh/sshd_config")]
     try:
-        d = Path("/etc/ssh/sshd_config.d")
-        if d.is_dir():
-            paths.extend(sorted(d.glob("*.conf")))
+        paths.extend(sorted(Path("/etc/ssh/sshd_config.d").glob("*.conf")))
     except Exception:
         pass
     for p in paths:
@@ -65,19 +59,12 @@ def _ssh_password_auth_enabled() -> Optional[str]:
     if not lines:
         return None
     # Last directive wins in sshd_config. Default (no directive) is "yes".
-    directives = [
-        m.group(1).lower()
-        for m in (re.match(r"(?i)^PasswordAuthentication\s+(\w+)", line) for line in lines)
-        if m
-    ]
+    directives = [m.group(1).lower() for m in map(re.compile(r"(?i)^PasswordAuthentication\s+(\w+)").match, lines) if m]
     if directives and directives[-1] == "no":
         return None
     qualifier = "" if directives else " (default — no explicit directive)"
-    return (
-        f"SSH password authentication is ENABLED{qualifier}. Password auth is "
-        "brute-forceable and dangerous on an internet-facing box. Set "
-        "'PasswordAuthentication no' in sshd_config and use key-based auth."
-    )
+    return (f"SSH password authentication is ENABLED{qualifier}. Password auth is brute-forceable and dangerous "
+            "on an internet-facing box. Set 'PasswordAuthentication no' in sshd_config and use key-based auth.")
 
 
 def _in_container() -> bool:
@@ -126,12 +113,9 @@ def _container_no_volume_mount(hermes_home: Optional[Path]) -> Optional[str]:
         hermes_home = get_hermes_home()
     if _path_is_mounted(hermes_home):  # any error propagates to run_security_audit (= no finding)
         return None
-    return (
-        f"Running in a container but the data dir ({hermes_home}) is NOT on a "
-        "persistent volume mount — sessions, memory, skills, and API keys are "
-        "ephemeral and lost on container restart. Mount a host volume over the "
-        "HERMES_HOME data directory."
-    )
+    return (f"Running in a container but the data dir ({hermes_home}) is NOT on a persistent volume mount — "
+            "sessions, memory, skills, and API keys are ephemeral and lost on container restart. Mount a host "
+            "volume over the HERMES_HOME data directory.")
 
 
 def _network_listener_without_auth(config: Optional[dict]) -> list[str]:
@@ -150,27 +134,18 @@ def _network_listener_without_auth(config: Optional[dict]) -> list[str]:
     key = extra.get("key") or os.environ.get("API_SERVER_KEY", "")
     if not is_network_accessible(str(host)) or str(key).strip():
         return []
-    return [
-        f"OpenAI-compatible API server is network-accessible ({host}) "
-        "with NO API_SERVER_KEY. It dispatches terminal-capable agent "
-        "work — an unauthenticated network endpoint is remote code "
-        "execution. Set a strong API_SERVER_KEY."
-    ]
+    return [f"OpenAI-compatible API server is network-accessible ({host}) with NO API_SERVER_KEY. It dispatches "
+            "terminal-capable agent work — an unauthenticated network endpoint is remote code execution. "
+            "Set a strong API_SERVER_KEY."]
 
 
-def run_security_audit(
-    *, hermes_home: Optional[Path] = None, config: Optional[dict] = None
-) -> list[str]:
+def run_security_audit(*, hermes_home: Optional[Path] = None, config: Optional[dict] = None) -> list[str]:
     """Run all checks and return human-readable warning strings. Pure (no logging); a check that
     raises simply contributes no finding.
     """
     findings: list[str] = []
-    for check in (
-        _running_as_root,
-        _ssh_password_auth_enabled,
-        lambda: _container_no_volume_mount(hermes_home),
-        lambda: _network_listener_without_auth(config),
-    ):
+    for check in (_running_as_root, _ssh_password_auth_enabled, lambda: _container_no_volume_mount(hermes_home),
+                  lambda: _network_listener_without_auth(config)):
         try:
             r = check()
         except Exception:
@@ -183,10 +158,7 @@ def run_security_audit(
 
 
 def log_startup_security_warnings(
-    *,
-    hermes_home: Optional[Path] = None,
-    config: Optional[dict] = None,
-    force: bool = False,
+    *, hermes_home: Optional[Path] = None, config: Optional[dict] = None, force: bool = False
 ) -> list[str]:
     """Run the audit once per process (``force=True`` re-runs) and log each finding as a warning."""
     global _AUDIT_RAN
@@ -195,9 +167,7 @@ def log_startup_security_warnings(
     _AUDIT_RAN = True
     findings = run_security_audit(hermes_home=hermes_home, config=config)
     if findings:
-        logger.warning(
-            "Security posture audit found %d issue(s) — review your deployment:", len(findings)
-        )
+        logger.warning("Security posture audit found %d issue(s) — review your deployment:", len(findings))
         for i, f in enumerate(findings, 1):
             logger.warning("  [security %d/%d] %s", i, len(findings), f)
     return findings

@@ -53,39 +53,24 @@ class Finding:
     vuln: Vulnerability
 
 
-# ─── Component discovery ──────────────────────────────────────────────────────
-
-
 def _discover_venv() -> list[Component]:
     """Every dist installed in the running Python's import path."""
     from importlib.metadata import distributions
 
-    out: list[Component] = []
-    seen: set[tuple[str, str]] = set()
+    out: dict[tuple[str, str], Component] = {}
     for dist in distributions():
         try:
             name = (dist.metadata["Name"] or "").strip()
         except Exception:
             continue
         version = (dist.version or "").strip()
-        key = (name.lower(), version)
-        if name and version and key not in seen:
-            seen.add(key)
-            out.append(Component(name=name, version=version, ecosystem="PyPI", source="venv"))
-    return out
+        if name and version:
+            out.setdefault((name.lower(), version), Component(name=name, version=version, ecosystem="PyPI", source="venv"))
+    return list(out.values())
 
 
-# requirements.txt line: drop comments, environment markers, options, extras
-_REQ_LINE = re.compile(
-    r"""^\s*
-        (?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)
-        (?:\[[^\]]+\])?              # extras
-        \s*==\s*
-        (?P<version>[A-Za-z0-9._+!-]+)
-        \s*(?:;.*)?$
-    """,
-    re.VERBOSE,
-)
+# ``name[extras]==version ; marker`` — an exact pin, optionally with extras and an environment marker.
+_REQ_LINE = re.compile(r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]+\])?\s*==\s*(?P<version>[A-Za-z0-9._+!-]+)\s*(?:;.*)?$")
 
 
 def _match_pins(specs: Iterable[str]) -> list[tuple[str, str]]:
@@ -105,20 +90,16 @@ def _parse_pyproject_pins(text: str) -> list[tuple[str, str]]:
     """Pull ``name==version`` pins from a ``pyproject.toml`` ``dependencies`` list."""
     try:
         import tomllib
-        data = tomllib.loads(text)
+        project = tomllib.loads(text).get("project") or {}
     except Exception:
         return []
-    project = data.get("project") or {}
     optional = project.get("optional-dependencies") or {}
     groups = [project.get("dependencies")] + (list(optional.values()) if isinstance(optional, dict) else [])
     return _match_pins(str(x) for group in groups if isinstance(group, list) for x in group)
 
 
-_PLUGIN_PIN_FILES = (
-    ("requirements.txt", _parse_requirements),
-    ("requirements-dev.txt", _parse_requirements),
-    ("pyproject.toml", _parse_pyproject_pins),
-)
+_PLUGIN_PIN_FILES = (("requirements.txt", _parse_requirements), ("requirements-dev.txt", _parse_requirements),
+                     ("pyproject.toml", _parse_pyproject_pins))
 
 
 def _discover_plugins(hermes_home: Path) -> list[Component]:
@@ -128,7 +109,6 @@ def _discover_plugins(hermes_home: Path) -> list[Component]:
     plugins_dir = hermes_home / "plugins"
     if not plugins_dir.is_dir():
         return []
-
     out: list[Component] = []
     for plugin_dir in sorted(plugins_dir.iterdir()):
         if not plugin_dir.is_dir() or plugin_dir.name.startswith("."):
@@ -172,21 +152,15 @@ def _discover_mcp() -> list[Component]:
         from hermes_cli.mcp_config import _get_mcp_servers
     except Exception:
         return []
-
     servers = _get_mcp_servers()
     if not isinstance(servers, dict):
         return []
-    out: list[Component] = []
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict) or not isinstance(cfg.get("args") or [], list):
-            continue
-        comp = _extract_mcp_component(name, cfg.get("command", "") or "", [str(a) for a in cfg.get("args") or []])
-        if comp:
-            out.append(comp)
-    return out
-
-
-# ─── OSV client ───────────────────────────────────────────────────────────────
+    comps = (
+        _extract_mcp_component(name, cfg.get("command", "") or "", [str(a) for a in cfg.get("args") or []])
+        for name, cfg in servers.items()
+        if isinstance(cfg, dict) and isinstance(cfg.get("args") or [], list)
+    )
+    return [c for c in comps if c]
 
 
 _HTTP_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
@@ -194,12 +168,8 @@ _HTTP_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)
 
 def _http_json(url: str, payload: Optional[dict] = None) -> dict:
     """GET ``url`` (or POST ``payload`` as JSON when given) and decode the JSON body."""
-    if payload is None:
-        req = urllib.request.Request(url, method="GET")
-    else:
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST"
-        )
+    req = urllib.request.Request(url, method="GET") if payload is None else urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST", headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -209,16 +179,13 @@ def _osv_query_batch(components: list[Component]) -> dict[Component, list[str]]:
     findings: dict[Component, list[str]] = {}
     for chunk_start in range(0, len(components), OSV_BATCH_MAX):
         chunk = components[chunk_start:chunk_start + OSV_BATCH_MAX]
-        payload = {
-            "queries": [{"package": {"name": c.name, "ecosystem": c.ecosystem}, "version": c.version} for c in chunk]
-        }
+        payload = {"queries": [{"package": {"name": c.name, "ecosystem": c.ecosystem}, "version": c.version} for c in chunk]}
         try:
             resp = _http_json(OSV_BATCH_URL, payload)
         except _HTTP_ERRORS as exc:
             raise RuntimeError(f"OSV batch query failed: {exc}") from exc
         for comp, result in zip(chunk, resp.get("results") or []):
-            ids = [v.get("id") for v in (result or {}).get("vulns") or [] if v.get("id")]
-            if ids:
+            if ids := [v.get("id") for v in (result or {}).get("vulns") or [] if v.get("id")]:
                 findings[comp] = ids
     return findings
 
@@ -230,105 +197,57 @@ def _osv_severity_from_record(record: dict) -> str:
     ``database_specific`` bucket first, then the per-affected ``ecosystem_specific`` one.
     """
     candidates = [(record.get("database_specific") or {}).get("severity")] + [
-        (entry.get("ecosystem_specific") or {}).get("severity") for entry in record.get("affected") or []
-    ]
-    for sev in candidates:
-        if isinstance(sev, str) and sev.strip().upper() in SEVERITY_ORDER:
-            return sev.strip().upper()
-    return "UNKNOWN"
+        (entry.get("ecosystem_specific") or {}).get("severity") for entry in record.get("affected") or []]
+    tiers = (sev.strip().upper() for sev in candidates if isinstance(sev, str))
+    return next((tier for tier in tiers if tier in SEVERITY_ORDER), "UNKNOWN")
 
 
 def _osv_fixed_versions(record: dict) -> list[str]:
-    fixes = [
-        str(event["fixed"])
-        for entry in record.get("affected") or []
-        for rng in entry.get("ranges") or []
-        for event in rng.get("events") or []
-        if "fixed" in event
-    ]
+    fixes = [str(event["fixed"]) for entry in record.get("affected") or [] for rng in entry.get("ranges") or []
+             for event in rng.get("events") or [] if "fixed" in event]
     return list(dict.fromkeys(fixes))  # dedupe, preserve order
 
 
 def _osv_fetch_details(vuln_ids: Iterable[str]) -> dict[str, Vulnerability]:
     """Fetch summary/severity for each unique vuln id, in parallel."""
-    unique = sorted({vid for vid in vuln_ids if vid})
-    if not unique:
-        return {}
-
     def _fetch_one(vid: str) -> Vulnerability:
         try:
             rec = _http_json(OSV_VULN_URL.format(vid=vid))
         except _HTTP_ERRORS:
             return Vulnerability(osv_id=vid)
-        return Vulnerability(
-            osv_id=vid,
-            severity=_osv_severity_from_record(rec),
-            summary=(rec.get("summary") or "").strip(),
-            fixed_versions=_osv_fixed_versions(rec),
-        )
+        return Vulnerability(vid, _osv_severity_from_record(rec), (rec.get("summary") or "").strip(), _osv_fixed_versions(rec))
 
+    unique = sorted({vid for vid in vuln_ids if vid})
+    if not unique:
+        return {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=DETAIL_PARALLELISM) as pool:
         return {vuln.osv_id: vuln for vuln in pool.map(_fetch_one, unique)}
 
 
-# ─── Orchestration ────────────────────────────────────────────────────────────
-
-
 def _discover_components(
-    *,
-    skip_venv: bool = False,
-    skip_plugins: bool = False,
-    skip_mcp: bool = False,
-    hermes_home: Optional[Path] = None,
+    *, skip_venv: bool = False, skip_plugins: bool = False, skip_mcp: bool = False, hermes_home: Optional[Path] = None
 ) -> list[Component]:
     """Discover all scannable components across the enabled sources."""
     home = hermes_home or Path(get_hermes_home())
-    components: list[Component] = []
-    if not skip_venv:
-        components.extend(_discover_venv())
-    if not skip_plugins:
-        components.extend(_discover_plugins(home))
-    if not skip_mcp:
-        components.extend(_discover_mcp())
-    return components
+    sources = ((skip_venv, _discover_venv), (skip_plugins, lambda: _discover_plugins(home)), (skip_mcp, _discover_mcp))
+    return [c for skip, discover in sources if not skip for c in discover()]
 
 
-def run_audit(
-    *,
-    skip_venv: bool = False,
-    skip_plugins: bool = False,
-    skip_mcp: bool = False,
-    hermes_home: Optional[Path] = None,
-    components: Optional[list[Component]] = None,
-) -> list[Finding]:
-    """Query OSV for the given (or freshly discovered) components; ``components`` lets callers
-    that already ran discovery reuse it instead of scanning a second time.
+def run_audit(*, components: Optional[list[Component]] = None, **discover_kwargs) -> list[Finding]:
+    """Query OSV for ``components`` (or discover them with ``discover_kwargs`` when None; passing
+    an already-discovered list avoids scanning the venv/plugins/MCP config a second time).
     """
     if components is None:
-        components = _discover_components(
-            skip_venv=skip_venv, skip_plugins=skip_plugins, skip_mcp=skip_mcp, hermes_home=hermes_home
-        )
+        components = _discover_components(**discover_kwargs)
     raw = _osv_query_batch(components) if components else {}
     if not raw:
         return []
     details = _osv_fetch_details(vid for ids in raw.values() for vid in ids)
-    findings = [
-        Finding(component=comp, vuln=details.get(vid) or Vulnerability(osv_id=vid))
-        for comp, ids in raw.items()
-        for vid in ids
-    ]
-    findings.sort(
-        key=lambda f: (
-            -SEVERITY_ORDER.get(f.vuln.severity, 0),
-            f.component.source,
-            f.component.name.lower(),
-            f.vuln.osv_id,
-        )
-    )
+    findings = [Finding(comp, details.get(vid) or Vulnerability(osv_id=vid)) for comp, ids in raw.items() for vid in ids]
+    findings.sort(key=lambda f: (
+        -SEVERITY_ORDER.get(f.vuln.severity, 0), f.component.source, f.component.name.lower(), f.vuln.osv_id
+    ))
     return findings
-
-
-# ─── Rendering ────────────────────────────────────────────────────────────────
 
 
 def _render_human(findings: list[Finding], total_components: int) -> str:
@@ -338,14 +257,15 @@ def _render_human(findings: list[Finding], total_components: int) -> str:
     lines = [f"Found {len(findings)} known vulnerability finding(s) across {total_components} component(s):", ""]
     last_source = None
     for f in findings:
-        if f.component.source != last_source:
-            lines.append(f"[{f.component.source}]")
-            last_source = f.component.source
-        lines.append(f"  {f.vuln.severity.ljust(8)}  {f.component.name}=={f.component.version}  {f.vuln.osv_id}")
-        if summary := f.vuln.summary:
+        c, v = f.component, f.vuln
+        if c.source != last_source:
+            lines.append(f"[{c.source}]")
+            last_source = c.source
+        lines.append(f"  {v.severity.ljust(8)}  {c.name}=={c.version}  {v.osv_id}")
+        if summary := v.summary:
             lines.append(f"           {summary if len(summary) <= 100 else summary[:97] + '...'}")
-        if f.vuln.fixed_versions:
-            lines.append(f"           fixed in: {', '.join(f.vuln.fixed_versions[:3])}")
+        if v.fixed_versions:
+            lines.append(f"           fixed in: {', '.join(v.fixed_versions[:3])}")
     return "\n".join(lines)
 
 
@@ -353,19 +273,12 @@ def _render_json(findings: list[Finding], total_components: int) -> str:
     payload = {
         "total_components_scanned": total_components,
         "finding_count": len(findings),
-        "findings": [
-            {
-                "package": f.component.name,
-                "version": f.component.version,
-                "ecosystem": f.component.ecosystem,
-                "source": f.component.source,
-                "vuln_id": f.vuln.osv_id,
-                "severity": f.vuln.severity,
-                "summary": f.vuln.summary,
-                "fixed_versions": f.vuln.fixed_versions,
-            }
-            for f in findings
-        ],
+        "findings": [{
+            "package": f.component.name, "version": f.component.version,
+            "ecosystem": f.component.ecosystem, "source": f.component.source,
+            "vuln_id": f.vuln.osv_id, "severity": f.vuln.severity,
+            "summary": f.vuln.summary, "fixed_versions": f.vuln.fixed_versions,
+        } for f in findings],
     }
     return json.dumps(payload, indent=2)
 
@@ -376,26 +289,15 @@ def cmd_security_audit(args: argparse.Namespace) -> int:
     output_json = bool(getattr(args, "json", False))
     fail_on = (getattr(args, "fail_on", None) or "critical").upper()
     if fail_on not in SEVERITY_ORDER:
-        print(
-            f"unknown --fail-on value: {fail_on.lower()} "
-            f"(choose from: low, moderate, high, critical)",
-            file=sys.stderr,
-        )
+        print(f"unknown --fail-on value: {fail_on.lower()} (choose from: low, moderate, high, critical)", file=sys.stderr)
         return 2
 
-    components = _discover_components(
-        skip_venv=bool(getattr(args, "skip_venv", False)),
-        skip_plugins=bool(getattr(args, "skip_plugins", False)),
-        skip_mcp=bool(getattr(args, "skip_mcp", False)),
-        hermes_home=home,
-    )
+    skips = {k: bool(getattr(args, k, False)) for k in ("skip_venv", "skip_plugins", "skip_mcp")}
+    components = _discover_components(hermes_home=home, **skips)
     total = len(components)
     if total == 0:
-        print(
-            json.dumps({"total_components_scanned": 0, "finding_count": 0, "findings": []})
-            if output_json
-            else "No components discovered (everything skipped, or empty environment)."
-        )
+        print(json.dumps({"total_components_scanned": 0, "finding_count": 0, "findings": []}) if output_json
+              else "No components discovered (everything skipped, or empty environment).")
         return 0
 
     try:

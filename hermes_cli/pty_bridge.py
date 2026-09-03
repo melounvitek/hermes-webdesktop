@@ -72,40 +72,23 @@ class PtyBridge:
 
     @classmethod
     def spawn(
-        cls,
-        argv: Sequence[str],
-        *,
-        cwd: Optional[str] = None,
-        env: Optional[dict] = None,
-        cols: int = 80,
-        rows: int = 24,
+        cls, argv: Sequence[str], *, cwd: Optional[str] = None, env: Optional[dict] = None, cols: int = 80, rows: int = 24
     ) -> "PtyBridge":
         """Spawn ``argv`` behind a new PTY and return a bridge."""
         if not _PTY_AVAILABLE:
             if sys.platform.startswith("win"):
-                raise PtyUnavailableError(
-                    "Pseudo-terminals are unavailable on this platform. "
-                    "Hermes Agent supports Windows only via WSL."
-                )
-            if ptyprocess is None:
-                raise PtyUnavailableError(
-                    "The `ptyprocess` package is missing. "
-                    "Install with: pip install ptyprocess (or pip install -e '.[pty]')."
-                )
-            raise PtyUnavailableError("Pseudo-terminals are unavailable.")
+                raise PtyUnavailableError("Pseudo-terminals are unavailable on this platform. "
+                                          "Hermes Agent supports Windows only via WSL.")
+            raise PtyUnavailableError("The `ptyprocess` package is missing. "  # only other way _PTY_AVAILABLE is False
+                                      "Install with: pip install ptyprocess (or pip install -e '.[pty]').")
         # env=None: callers own env policy (process_registry already sanitizes), so inherit via the
         # factory with exact preservation. Backfill TERM when missing/blank — CI often lacks it and
         # probes like `tput cols` then fail before winsize reads; explicit overrides are kept.
         from tools.environments.local import build_subprocess_env
-        spawn_env = (
-            build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
-            if env is None else env.copy()
-        )
+        spawn_env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False) if env is None else env.copy()
         if not spawn_env.get("TERM"):
             spawn_env["TERM"] = "xterm-256color"
-        proc = ptyprocess.PtyProcess.spawn(  # type: ignore[union-attr]
-            list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols)
-        )
+        proc = ptyprocess.PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols))  # type: ignore[union-attr]
         return cls(proc)
 
     @property
@@ -113,10 +96,8 @@ class PtyBridge:
         return int(self._proc.pid)
 
     def is_alive(self) -> bool:
-        if self._closed:
-            return False
         try:
-            return bool(self._proc.isalive())
+            return not self._closed and bool(self._proc.isalive())
         except Exception:
             return False
 
@@ -169,9 +150,7 @@ class PtyBridge:
         if self._closed:
             return
         # struct winsize: rows, cols, xpixel, ypixel (all unsigned short)
-        winsize = struct.pack(
-            "HHHH", _clamp_dimension(rows, _MAX_ROWS), _clamp_dimension(cols, _MAX_COLS), 0, 0
-        )
+        winsize = struct.pack("HHHH", _clamp_dimension(rows, _MAX_ROWS), _clamp_dimension(cols, _MAX_COLS), 0, 0)
         try:
             fcntl.ioctl(self._fd, termios.TIOCSWINSZ, winsize)
         except OSError:

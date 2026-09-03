@@ -41,12 +41,7 @@ class StashEntry:
 
     def as_dict(self) -> dict:
         """Shape ``HermesCLI._render_stash_panel`` consumes."""
-        return {
-            "text": self.text,
-            "images": list(self.images),
-            "stashed_at": self.stashed_at,
-            "preview": self.preview,
-        }
+        return {"text": self.text, "images": list(self.images), "stashed_at": self.stashed_at, "preview": self.preview}
 
 
 class PromptStash:
@@ -78,11 +73,9 @@ class PromptStash:
     def placeholder_hint(self) -> str:
         """Composer placeholder text advertising the stashed draft."""
         n = len(self._items)
-        if not n:
-            return ""
         if n == 1:
             return f"Ctrl+S to restore: {self._items[0].preview}"
-        return f"Ctrl+S to browse {n} stashed drafts"
+        return f"Ctrl+S to browse {n} stashed drafts" if n else ""
 
     def stash(self, text: str, images: Optional[Sequence[Any]] = None) -> bool:
         """Push a draft. A blank buffer with no images is a no-op (returns False) so Ctrl+S on an
@@ -91,12 +84,8 @@ class PromptStash:
         if not (text or "").strip() and not images:
             return False
 
-        entry = StashEntry(
-            text=text or "",
-            images=list(images or []),
-            stashed_at=self._clock(),
-            preview=build_preview(text or "") or "(images only)",
-        )
+        entry = StashEntry(text=text or "", images=list(images or []), stashed_at=self._clock(),
+                           preview=build_preview(text or "") or "(images only)")
         self._items.insert(0, entry)
         del self._items[self._max_items:]  # drop the oldest past the cap
         self.close_panel()  # a push invalidates any open browse session
@@ -122,9 +111,7 @@ class PromptStash:
     # ------------------------------------------------------------ panel state
 
     def _clamp_cursor(self, value: int) -> int:
-        if not self._items:
-            return 0
-        return max(0, min(int(value), len(self._items) - 1))
+        return max(0, min(int(value), len(self._items) - 1)) if self._items else 0
 
     def open_panel(self) -> bool:
         """Open the browse panel. False when there is nothing to browse."""
@@ -173,9 +160,7 @@ ACTION_CLOSE_PANEL = "close_panel"
 
 
 def resolve_ctrl_s(
-    stash: PromptStash,
-    buffer_text: str,
-    images: Optional[Sequence[Any]] = None,
+    stash: PromptStash, buffer_text: str, images: Optional[Sequence[Any]] = None
 ) -> Tuple[str, Optional[Tuple[str, List[Any]]]]:
     """Decide what one Ctrl+S press does. Returns ``(action, payload)`` where ``payload`` is
     ``(text, images)`` for :data:`ACTION_RESTORED`, else None.
