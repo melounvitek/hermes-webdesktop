@@ -27,13 +27,13 @@ _TRUNCATION_MARKER = "… [truncated]"
 TODO_INJECTION_HEADER = (
     "[Your active task list was preserved across context compression]"
 )
+_STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
+_ACTIVE_STATUSES = {"pending", "in_progress"}
 
 
 class TodoStore:
     """In-memory todo list, one per AIAgent. List position is priority.
-
-    Items: ``{id, content, status, parent?}`` — ``parent`` nests a subtask.
-    """
+    Items: ``{id, content, status, parent?}`` — ``parent`` nests a subtask."""
 
     def __init__(self):
         self._items: List[Dict[str, str]] = []
@@ -46,13 +46,12 @@ class TodoStore:
     def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
         """Replace the list (default) or merge by id; returns the full list after writing."""
         before = self.read()
-        if not merge:
-            self._items = self._fresh_items(todos)
-        else:
+        if merge:
             self._merge(todos)
+        else:
+            self._items = self._fresh_items(todos)
         # Keep the highest-priority head so a replayed list can't grow re-injection unbounded.
-        if len(self._items) > MAX_TODO_ITEMS:
-            self._items = self._items[:MAX_TODO_ITEMS]
+        del self._items[MAX_TODO_ITEMS:]
         self._sanitize_parents(self._items)
         if self._items != before:
             self._revision += 1
@@ -104,12 +103,7 @@ class TodoStore:
         """Return the full state clients can reconcile atomically."""
         return {"todos": self.read(), "revision": self._revision}
 
-    def restore(
-        self,
-        todos: List[Dict[str, Any]],
-        *,
-        revision: Any = 0,
-    ) -> List[Dict[str, str]]:
+    def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
         """Restore a trusted snapshot without manufacturing a new revision."""
         self._items = self._fresh_items(todos)[:MAX_TODO_ITEMS]
         try:
@@ -120,16 +114,11 @@ class TodoStore:
 
     def format_for_injection(self) -> Optional[str]:
         """Render the list for post-compression injection, or None if nothing active.
-
         Only pending/in_progress items are injected — finished ones make the
         model re-do work after compression. A parent is kept (with its real
-        status marker) when any descendant is active so subtasks keep context.
-        """
+        status marker) when any descendant is active so subtasks keep context."""
         if not self._items:
             return None
-
-        markers = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
-        active = {"pending", "in_progress"}
         children: Dict[str, List[Dict[str, str]]] = {}
         roots: List[Dict[str, str]] = []
         for item in self._items:
@@ -144,9 +133,9 @@ class TodoStore:
             has_active_kid = False
             for kid in children.get(item["id"], []):
                 has_active_kid |= render(kid, depth + 1, kid_lines)
-            keep = item["status"] in active or has_active_kid
+            keep = item["status"] in _ACTIVE_STATUSES or has_active_kid
             if keep:
-                marker = markers.get(item["status"], "[?]")
+                marker = _STATUS_MARKERS.get(item["status"], "[?]")
                 out.append(
                     f"{'  ' * depth}- {marker} {item['id']}. "
                     f"{item['content']} ({item['status']})"
@@ -157,17 +146,13 @@ class TodoStore:
         lines = [TODO_INJECTION_HEADER]
         for item in roots:
             render(item, 0, lines)
-        if len(lines) == 1:
-            return None
-
-        return "\n".join(lines)
+        return "\n".join(lines) if len(lines) > 1 else None
 
     @staticmethod
     def _cap_content(content: str) -> str:
         """Truncate to MAX_TODO_CONTENT_CHARS keeping the head (the actionable part) + marker."""
         if len(content) > MAX_TODO_CONTENT_CHARS:
-            keep = MAX_TODO_CONTENT_CHARS - len(_TRUNCATION_MARKER)
-            return content[:keep] + _TRUNCATION_MARKER
+            return content[:MAX_TODO_CONTENT_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
         return content
 
     @staticmethod
@@ -175,14 +160,12 @@ class TodoStore:
         """Normalize one item to ``{id, content, status, parent?}`` with placeholders for missing fields."""
         if not isinstance(item, dict):
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
-
         item_id = str(item.get("id", "")).strip() or "?"
         content = str(item.get("content", "")).strip()
         content = TodoStore._cap_content(content) if content else "(no description)"
         status = str(item.get("status", "pending")).strip().lower()
         if status not in VALID_STATUSES:
             status = "pending"
-
         result = {"id": item_id, "content": content, "status": status}
         parent = str(item.get("parent") or "").strip()
         if parent and parent != item_id:
@@ -215,16 +198,13 @@ class TodoStore:
                 # Non-dict items get a synthetic key so _validate can handle them
                 last_index[f"__invalid_{i}"] = i
                 continue
-            item_id = str(item.get("id", "")).strip() or "?"
-            last_index[item_id] = i
+            last_index[str(item.get("id", "")).strip() or "?"] = i
         return [todos[i] for i in sorted(last_index.values())]
 
     @staticmethod
     def _normalize_order(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Lift the in_progress step ahead of any earlier pending placeholder.
-
-        Nested lists keep authored order — reordering would tear a subtask from its siblings.
-        """
+        Nested lists keep authored order — reordering would tear a subtask from its siblings."""
         if any(item.get("parent") for item in items):
             return items
         statuses = [item["status"] for item in items]
@@ -233,11 +213,8 @@ class TodoStore:
         active_index = statuses.index("in_progress")
         if "pending" not in statuses[:active_index]:
             return items
-        pending_index = statuses.index("pending")
-
         normalized = items.copy()
-        active_item = normalized.pop(active_index)
-        normalized.insert(pending_index, active_item)
+        normalized.insert(statuses.index("pending"), normalized.pop(active_index))
         return normalized
 
 
@@ -249,7 +226,6 @@ def todo_tool(
     """Write ``todos`` (replace or ``merge`` by id) or read when None; returns list + summary JSON."""
     if store is None:
         return tool_error("TodoStore not initialized")
-
     if todos is not None:
         if isinstance(todos, str):  # LLMs sometimes send a JSON string instead of a list
             try:
@@ -257,9 +233,7 @@ def todo_tool(
             except (json.JSONDecodeError, TypeError):
                 return tool_error("todos must be a list of objects, got unparseable string")
         if not isinstance(todos, list):
-            return tool_error(
-                f"todos must be a list, got {type(todos).__name__}"
-            )
+            return tool_error(f"todos must be a list, got {type(todos).__name__}")
         items = store.write(todos, merge)
     else:
         items = store.read()
@@ -267,7 +241,6 @@ def todo_tool(
     summary = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
-
     return json.dumps({
         "todos": items,
         "revision": store.snapshot()["revision"],
