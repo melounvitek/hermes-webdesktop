@@ -188,17 +188,11 @@ def _assert_not_delegated_child_mutation() -> None:
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
-    """Fire a kanban lifecycle plugin hook, fully best-effort.
-
-    Called by the claim/complete/block transitions AFTER their write txn has
-    committed, so plugin code never runs while a SQLite write lock is held and
-    always observes durable board state. Any failure (plugins unavailable,
-    a plugin raising, import error) is swallowed — a misbehaving observer must
-    never break a board state transition.
-
-    ``profile_name`` is resolved from the active HERMES_HOME so dispatcher- and
-    worker-side hooks both carry the right profile without the caller plumbing
-    it through.
+    """Fire a lifecycle plugin hook, best-effort. Callers invoke it AFTER their
+    write txn commits so plugins never run under a SQLite write lock and
+    always see durable state; any failure is swallowed so an observer can
+    never break a transition. ``profile_name`` comes from the active
+    HERMES_HOME so dispatcher- and worker-side hooks agree without plumbing.
     """
     try:
         from hermes_cli.lifecycle import invoke_hook
@@ -219,14 +213,10 @@ def _hook_profile_name() -> str:
 
 
 def _kanban_observer_consumed(event: str) -> bool:
-    """Return whether any first-party observer or plugin consumes *event*.
-
-    Hot-path short-circuit for the worker-lifecycle / task-mutation /
-    dispatch-tick observers (RFC #58548): those fire on every dispatcher
-    tick and every task write, so call sites skip payload assembly entirely
-    when nothing subscribes. Best-effort — if inspection fails the event is
-    treated as unconsumed (the invoke path would fail the same way, and
-    these are observers, so dropping is always safe).
+    """Whether any observer/plugin consumes *event* — hot-path short-circuit
+    so per-tick / per-write observers skip payload assembly when nothing
+    subscribes. If inspection fails the event counts as unconsumed (the
+    invoke path would fail identically; dropping an observer is always safe).
     """
     try:
         from hermes_cli.lifecycle import has_hook
@@ -244,12 +234,9 @@ def _fire_worker_spawned_hook(
     *,
     board: Optional[str] = None,
 ) -> None:
-    """Fire ``on_kanban_worker_spawned`` for one dispatched spawn.
-
-    Called by the dispatch loop AFTER ``spawn_fn`` returned and the worker
-    PID (when one was reported) has been durably persisted — the RFC #58548
-    timing contract. Fully best-effort: any failure is swallowed so a
-    misbehaving observer can never break the dispatch loop.
+    """Fire ``on_kanban_worker_spawned`` AFTER ``spawn_fn`` returned and the
+    reported PID is durably persisted. Best-effort: a misbehaving observer can
+    never break the dispatch loop.
     """
     if not _kanban_observer_consumed("on_kanban_worker_spawned"):
         return
@@ -274,16 +261,11 @@ def notify_task_updated(
     *,
     board: Optional[str] = None,
 ) -> None:
-    """Fire ``on_kanban_task_updated`` for a committed task-row mutation.
-
-    Task-mutation boundary primitive from RFC #58548: a surface that mutates
-    a task row outside the claim/complete/block lifecycle calls this AFTER
-    its write txn has committed — including surfaces that write with direct
-    SQL and bypass every ``kanban_db`` mutator (the dashboard plugin API's
-    priority/title/body editors). ``changed_fields`` carries field NAMES
-    only, never values. Observer-only and fully best-effort: it can never
-    fail a task mutation, and it costs one ``has_hook`` probe when nothing
-    subscribes.
+    """Fire ``on_kanban_task_updated`` AFTER a task-row mutation outside the
+    claim/complete/block lifecycle has committed — including direct-SQL
+    surfaces that bypass every ``kanban_db`` mutator (dashboard field
+    editors). ``changed_fields`` carries field NAMES only, never values.
+    Observer-only, best-effort; one ``has_hook`` probe when nothing subscribes.
     """
     if not _kanban_observer_consumed("on_kanban_task_updated"):
         return
@@ -310,14 +292,10 @@ def _fire_dispatch_tick_hook(
     board: Optional[str] = None,
     dry_run: bool = False,
 ) -> None:
-    """Fire ``on_kanban_dispatch_tick`` after one dispatcher tick.
-
-    Re-port of PR #56066 per the #64231 batch disposition: renamed to the
-    taxonomy form and called by ``dispatch_once`` strictly AFTER
-    ``_dispatch_tick_lock`` has been released — the original fired inside
-    the lock, so a slow subscriber could extend the single-writer critical
-    section and stall a sibling dispatcher's tick. Observer-only and fully
-    best-effort: any subscriber failure is swallowed.
+    """Fire ``on_kanban_dispatch_tick`` after one tick — strictly AFTER
+    ``_dispatch_tick_lock`` is released, so a slow subscriber cannot extend
+    the single-writer critical section and stall a sibling dispatcher.
+    Observer-only, best-effort: subscriber failures are swallowed.
     """
     if not _kanban_observer_consumed("on_kanban_dispatch_tick"):
         return
@@ -362,116 +340,71 @@ def _fire_dispatch_tick_hook(
         _log.debug("kanban dispatch tick hook failed: %s", exc)
 
 
-# A running task's claim is valid for 15 minutes by default; after that the
-# next dispatcher tick reclaims it. Workers that outlive this window should
-# call ``heartbeat_claim(task_id)`` periodically. In practice most kanban
-# workloads either finish within 15m, set a longer claim explicitly, or use
-# ``HERMES_KANBAN_CLAIM_TTL_SECONDS`` to raise the default claim window for
-# long single-call MCP workflows.
+# Claim window before the next tick reclaims a running task; long workers
+# ``heartbeat_claim`` or raise it via HERMES_KANBAN_CLAIM_TTL_SECONDS.
 DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
 
-# If a worker's PID is still alive but its ``last_heartbeat_at`` is
-# older than this when ``release_stale_claims`` runs, treat the worker
-# as wedged and reclaim regardless of PID liveness (#29747 gap 3).
-# This catches the logic-loop case where the process is technically
-# running but not making observable progress.  ``_touch_activity``
-# bridges chunk-level liveness into ``last_heartbeat_at`` via #31752,
-# so any genuinely active worker keeps its heartbeat fresh as a side
-# effect of normal API traffic.
+# A live PID whose ``last_heartbeat_at`` is older than this is treated as
+# wedged (logic loop, no observable progress) and reclaimed regardless of
+# liveness. ``_touch_activity`` bridges chunk-level API liveness into the
+# heartbeat, so a genuinely active worker never trips this.
 DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
 
-# Grace added to a claim when a reclaim is deferred because the previous
-# host-local worker is still alive after a termination attempt. Releasing the
-# claim in that state would spawn a duplicate alongside the surviving worker —
-# the runaway seen when a cgroup memory.high throttle parks a worker in
-# uninterruptible (D) state, where a pending SIGKILL cannot be delivered until
-# the throttle lifts. Holding the claim a short grace and retrying next tick
-# stops the duplication; once no duplicate is spawned the pressure eases, the
-# signal lands, and the following tick reclaims cleanly.
+# Grace added when a reclaim is deferred because the host-local worker
+# survived a termination attempt (cgroup memory.high throttle parking it in
+# D state, SIGKILL pending). Releasing the claim then would spawn a duplicate
+# beside the survivor; holding it a tick lets the signal land.
 RECLAIM_DEFER_GRACE_SECONDS = 120
 
 
 def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
-    """Return the effective claim TTL, honoring the kanban env override.
-
-    Explicit call-site values win. Otherwise a positive integer from
-    ``HERMES_KANBAN_CLAIM_TTL_SECONDS`` overrides the built-in default.
-    Invalid or non-positive env values fall back silently so existing
-    installs keep working.
-    """
+    """Explicit ``ttl_seconds`` wins; else a positive
+    ``HERMES_KANBAN_CLAIM_TTL_SECONDS`` overrides ``DEFAULT_CLAIM_TTL_SECONDS``
+    (invalid values fall back silently so existing installs keep working)."""
     if ttl_seconds is not None:
         return max(1, int(ttl_seconds))
 
     return _env_int("HERMES_KANBAN_CLAIM_TTL_SECONDS", DEFAULT_CLAIM_TTL_SECONDS, minimum=1)
 
 
-# Grace period after a task transitions to ``running`` during which
-# ``detect_crashed_workers`` skips the ``_pid_alive`` check. Covers the
-# fork() → /proc-visibility window where liveness can transiently report
-# False for a freshly-spawned worker. The 15-minute claim TTL still
-# catches genuinely-crashed workers; this only suppresses false positives
-# during the launch window.
+# After ``running`` starts, ``detect_crashed_workers`` skips ``_pid_alive`` for
+# this long: the fork() -> /proc-visibility window can transiently report a
+# fresh worker dead. The claim TTL still catches real crashes.
 DEFAULT_CRASH_GRACE_SECONDS = 30
 
-
-# Sentinel exit code a kanban worker uses to signal "I bailed because the
-# provider rate-limited / exhausted quota, not because the task failed."
-# The dispatcher's reap classifier maps this to a ``rate_limited`` exit kind
-# so ``detect_crashed_workers`` can release the task back to ``ready``
-# WITHOUT counting a failure (the circuit breaker must never trip on a
-# transient throttle). 75 == BSD ``EX_TEMPFAIL`` (sysexits.h) — the
-# conventional "temporary failure, retry later" code, and well clear of the
-# 0/1/2 codes the worker uses for success / generic failure / usage error.
+# Worker exit code meaning "provider rate-limited / quota exhausted, not a task
+# failure": the reap classifier maps it to ``rate_limited`` so the task is
+# released WITHOUT counting a failure (the breaker must never trip on a
+# throttle). 75 == BSD EX_TEMPFAIL, clear of the worker's 0/1/2 codes.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
 
 def _resolve_crash_grace_seconds() -> int:
-    """Return the crash-detection grace period in seconds.
-
-    Reads ``HERMES_KANBAN_CRASH_GRACE_SECONDS`` from the environment;
-    falls back to ``DEFAULT_CRASH_GRACE_SECONDS`` when absent, empty,
-    non-integer, or negative. A value of 0 restores immediate-reclaim
-    behaviour (useful for tests).
-    """
+    """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate reclaim, for tests)
+    else ``DEFAULT_CRASH_GRACE_SECONDS``."""
     return _env_int("HERMES_KANBAN_CRASH_GRACE_SECONDS", DEFAULT_CRASH_GRACE_SECONDS)
 
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
-    """Return the rate-limit requeue cooldown in seconds.
-
-    Reads ``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` from the environment;
-    falls back to ``DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS`` when absent, empty,
-    non-integer, or negative. A value of 0 disables the cooldown (re-spawn on
-    the next tick) — useful for tests that want to assert the task becomes
-    spawnable again immediately.
-    """
+    """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = respawn next tick, for
+    tests) else ``DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS``."""
     return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
 
 
-# Worker-context caps so build_worker_context() stays bounded on
-# pathological boards (retry-heavy tasks, comment storms, giant
-# summaries). Values chosen to fit a typical 100k-char LLM prompt with
-# plenty of headroom. Each constant is tuned independently so users
-# who need to relax one don't have to relax all of them.
+# build_worker_context() caps (independently tunable) so the prompt stays
+# bounded on pathological boards; sized for a ~100k-char prompt with headroom.
 _CTX_MAX_PRIOR_ATTEMPTS = 10      # most recent N prior runs shown in full
 _CTX_MAX_COMMENTS       = 30      # most recent N comments shown in full
-_CTX_MAX_FIELD_BYTES    = 4 * 1024   # 4 KB per summary/error/metadata/result
-_CTX_MAX_BODY_BYTES     = 8 * 1024   # 8 KB per task.body (opening post)
-_CTX_MAX_COMMENT_BYTES  = 2 * 1024   # 2 KB per comment
+_CTX_MAX_FIELD_BYTES    = 4 * 1024   # per summary/error/metadata/result
+_CTX_MAX_BODY_BYTES     = 8 * 1024   # per task.body (opening post)
+_CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
-    """Render the age of an epoch-seconds timestamp as a coarse, human-
-    readable string like ``just now``, ``18h ago``, ``3d ago``.
-
-    Workers read parent handoffs, comments, and prior-attempt summaries as
-    if they describe *current* state. A bare absolute timestamp
-    (``2026-06-25 14:30``) doesn't make an LLM reason about staleness — it
-    reads the content as fact regardless of how old it is. A relative age
-    ("18h ago") is the signal that prompts the worker to re-verify against
-    the live source before acting on stale sibling work. Returns an empty
-    string for missing/invalid timestamps so callers can append
-    unconditionally.
+    """Coarse relative age (``just now`` / ``18h ago`` / ``3d ago``); "" for a
+    missing/invalid timestamp so callers append unconditionally. An LLM reads
+    a bare absolute timestamp as current fact; the relative age is what
+    prompts a worker to re-verify stale sibling work before acting on it.
     """
     if ts is None:
         return ""
@@ -639,14 +572,9 @@ def clear_current_board() -> None:
 
 
 def board_dir(board: Optional[str] = None) -> Path:
-    """Return the on-disk directory for ``board``.
-
-    ``default`` is ``<root>/kanban/boards/default/`` **for metadata only**
-    (board.json + workspaces/ + logs/). Its DB file stays at
-    ``<root>/kanban.db`` for back-compat — see :func:`kanban_db_path`.
-
-    All other boards live at ``<root>/kanban/boards/<slug>/`` with
-    everything inside that directory including the ``kanban.db``.
+    """``<root>/kanban/boards/<slug>/``. For ``default`` this holds metadata
+    only (board.json, workspaces/, logs/) — its DB stays at ``<root>/kanban.db``
+    for back-compat (:func:`kanban_db_path`).
     """
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
     return boards_root() / slug
@@ -1378,14 +1306,10 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 # ---------------------------------------------------------------------------
 
 def _new_task_id() -> str:
-    """Generate a short, URL-safe task id.
-
-    4 hex bytes = ~4.3B possibilities. At 10k tasks the collision
-    probability is ~1.2e-5; at 100k it's ~1.2e-3. Previously we used 2
-    hex bytes (65k possibilities) which hit the birthday paradox hard:
-    ~5% collision probability at 1k tasks, ~50% at 10k. Callers that
-    care about idempotency should pass ``idempotency_key`` to
-    :func:`create_task` rather than rely on id uniqueness.
+    """Short URL-safe id: 4 hex bytes (~4.3B; collision ~1.2e-5 at 10k tasks,
+    ~1.2e-3 at 100k — 2 bytes hit the birthday paradox at ~50% by 10k).
+    Idempotency belongs to ``create_task(idempotency_key=...)``, not to id
+    uniqueness.
     """
     return "t_" + secrets.token_hex(4)
 
