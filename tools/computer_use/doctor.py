@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 from contextlib import contextmanager, suppress
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.computer_use.permissions import _child_env as _sanitized_cua_env
@@ -33,6 +33,7 @@ _ZERO_DISPLAY_HINT = ("Wake the built-in display, connect a monitor or HDMI dumm
                       "or enable a virtual display (Screen Sharing/VNC, BetterDisplay). "
                       "Verify with `system_profiler SPDisplaysDataType`.")
 Report = Dict[str, Any]
+_Row = Tuple[str, str, Report]  # (status, message, extra kwargs for _check)
 
 
 class HealthReportUnavailable(RuntimeError):
@@ -46,6 +47,14 @@ def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedPro
     return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, env=_sanitized_cua_env())
 
+def _cli_text(binary: str, *args: str, timeout: float,
+              exc_types: Tuple[type, ...]) -> Union[subprocess.CompletedProcess, BaseException]:
+    """``_run_cli`` that returns (not raises) any exception in *exc_types*."""
+    try:
+        return _run_cli(binary, *args, timeout=timeout)
+    except exc_types as e:
+        return e
+
 def _combined_output(completed: subprocess.CompletedProcess) -> str:
     return ((completed.stdout or "") + (completed.stderr or "")).strip()
 
@@ -56,30 +65,25 @@ def _first_line(text: str) -> Optional[str]:
 def _read_cli_version(binary: str, *, timeout: float = 5.0) -> Optional[str]:
     """First line of ``cua-driver --version`` or None. health_report's ``driver_version``
     can disagree with the real binary (seen on Windows); doctor surfaces both."""
-    try:
-        completed = _run_cli(binary, "--version", timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
-        return None
-    return _first_line(completed.stdout or completed.stderr or "")
+    cp = _cli_text(binary, "--version", timeout=timeout,
+                   exc_types=(OSError, subprocess.TimeoutExpired, ValueError, TypeError))
+    return None if isinstance(cp, BaseException) else _first_line(cp.stdout or cp.stderr or "")
 
 def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optional[str]]:
     """Return (status, version_or_message) from ``cua-driver --version``."""
-    try:
-        completed = _run_cli(binary, "--version", timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return "fail", f"--version failed: {e}"
-    text, failed = _combined_output(completed), completed.returncode != 0
+    cp = _cli_text(binary, "--version", timeout=timeout, exc_types=(OSError, subprocess.TimeoutExpired))
+    if isinstance(cp, BaseException):
+        return "fail", f"--version failed: {cp}"
+    text, failed = _combined_output(cp), cp.returncode != 0
     if failed and not text:
-        return "fail", f"--version exited {completed.returncode}"
+        return "fail", f"--version exited {cp.returncode}"
     m = re.search(r"(\d+\.\d+\.\d+(?:[-+][\w.]+)?)", text)  # typical: "cua-driver 0.10.0"
     return ("fail" if failed else "pass"), m.group(1) if m else (_first_line(text) or "unknown")
 
 def _cli_doctor_snippet(binary: str, timeout: float = 8.0) -> Optional[str]:
     """Optional one-shot ``cua-driver doctor`` text (best-effort, never fatal)."""
-    try:
-        return _combined_output(_run_cli(binary, "doctor", timeout=timeout)) or None
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    cp = _cli_text(binary, "doctor", timeout=timeout, exc_types=(OSError, subprocess.TimeoutExpired))
+    return None if isinstance(cp, BaseException) else (_combined_output(cp) or None)
 
 def _build_identity(binary: str, report: Report) -> Report:
     """Hermes-side identity block comparing resolved binary vs health_report."""
@@ -138,16 +142,8 @@ def _open_mcp(binary: str) -> subprocess.Popen:
                             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
                             bufsize=1, creationflags=windows_hide_flags(), env=_sanitized_cua_env())
 
-def _stderr_tail(proc: subprocess.Popen) -> List[str]:
-    """Last 3 stderr lines of *proc* (best-effort, ``[]`` when unreadable)."""
-    with suppress(Exception):
-        if proc.stderr is not None:
-            return [str(x) for x in (proc.stderr.read() or "").strip().splitlines()[-3:]]
-    return []
-
 def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = None) -> Report:
     """Write one JSON-RPC request and read one response line."""
-    assert proc.stdin is not None and proc.stdout is not None
     payload: Report = {"jsonrpc": "2.0", "id": msg_id, "method": method}
     if params is not None:
         payload["params"] = params
@@ -155,7 +151,10 @@ def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = Non
     proc.stdin.flush()
     line = proc.stdout.readline()
     if not line:
-        raise RuntimeError(f"cua-driver mcp produced no response for {method!r}. stderr tail: {_stderr_tail(proc) or '(empty)'}")
+        tail: List[str] = []
+        with suppress(Exception):  # last 3 stderr lines, best-effort
+            tail = [str(x) for x in (proc.stderr.read() or "").strip().splitlines()[-3:]]
+        raise RuntimeError(f"cua-driver mcp produced no response for {method!r}. stderr tail: {tail or '(empty)'}")
     try:
         resp = json.loads(line)
     except (ValueError, TypeError) as e:
@@ -176,8 +175,7 @@ def _mcp_session(binary: str, timeout: float) -> Iterator[subprocess.Popen]:
         yield proc
     finally:
         with suppress(Exception):
-            if proc.stdin is not None:
-                proc.stdin.close()
+            proc.stdin.close()
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -222,21 +220,16 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
     out: Report = dict.fromkeys(("init_version", "permissions", "permissions_error",
                                  "list_apps_ok", "list_apps_error", "list_apps_count"))
     with _mcp_session(binary, timeout) as proc:
-        init_resp = _mcp_rpc(proc, 1, "initialize", {})
-        server_info = ((init_resp.get("result") or {}).get("serverInfo") or {})
+        server_info = (_mcp_rpc(proc, 1, "initialize", {}).get("result") or {}).get("serverInfo") or {}
         if isinstance(server_info, dict):
             out["init_version"] = server_info.get("version")
-        perms, err = _probe_tool(proc, 2, "check_permissions")  # primary TCC signal on 0.10
-        if perms is None:
-            out["permissions_error"] = err
-        else:
+        perms, out["permissions_error"] = _probe_tool(proc, 2, "check_permissions")  # primary TCC signal on 0.10
+        if perms is not None:
             out["permissions"] = _structured(perms)
         # list_apps — light AX capability probe; text-only success still counts as AX working
-        apps, err = _probe_tool(proc, 3, "list_apps")
+        apps, out["list_apps_error"] = _probe_tool(proc, 3, "list_apps")
         out["list_apps_ok"] = apps is not None
-        if apps is None:
-            out["list_apps_error"] = err
-        else:
+        if apps is not None:
             app_list = _structured(apps).get("apps")
             out["list_apps_count"] = len(app_list) if isinstance(app_list, list) else None
     return out
@@ -248,49 +241,62 @@ def _check(name: str, status: str, message: str, **extra: Any) -> Report:
     """Build one health check dict (``hint`` / ``data`` only when given)."""
     return {"name": name, "status": status, "message": message, **extra}
 
-def _tcc_checks(perms: Optional[Report], perm_err: Optional[str], plat: str) -> List[Report]:
-    """tcc_accessibility + tcc_screen_recording checks from check_permissions output."""
+def _tcc_row(field: str, label: str, platform_bound: bool, ctx: Report) -> _Row:
+    """tcc_* row for one check_permissions boolean *field* (Accessibility / Screen Recording)."""
+    perms = ctx["perms"]
     if perms is None:
-        status, msg = ("fail" if perm_err else "skip"), perm_err or "check_permissions unavailable"
-        return [_check("tcc_accessibility", status, msg), _check("tcc_screen_recording", status, msg)]
-    # Only real booleans select a branch; anything else (missing/odd) is the "absent" row.
-    ax, scr, capturable = (perms.get(k) for k in ("accessibility", "screen_recording", "screen_recording_capturable"))
-    ax = ax if isinstance(ax, bool) else None
-    scr = scr if isinstance(scr, bool) else None
-    ax_rows = {
-        True: ("pass", "Accessibility is granted.", {"data": {"accessibility": True}}),
-        False: ("fail", "Accessibility is not granted.",
-                {"hint": _TCC_HINT.format("Accessibility"), "data": {"accessibility": False}}),
-        None: ("skip", "accessibility field absent from check_permissions", {}),
-    }
-    scr_rows = {  # (scr, capturable is False) — the granted-but-not-capturable row wins first.
-        (True, True): ("fail", "Screen Recording granted but not capturable.",
-                       {"hint": "Screen Recording permission may need a restart of CuaDriver "
-                                "or a re-grant in System Settings.",
-                        "data": {"screen_recording": True, "screen_recording_capturable": False}}),
-        (True, False): ("pass", "Screen Recording is granted.",
-                        {"data": {"screen_recording": True, "screen_recording_capturable": capturable}}),
-        (False, False): ("fail", "Screen Recording is not granted.",
-                         {"hint": _TCC_HINT.format("Screen Recording"), "data": {"screen_recording": False}}),
-        (None, False): ("skip", "screen_recording field absent from check_permissions" if plat == "darwin"
-                        else f"not applicable on {plat}", {}),
-    }
-    ax_status, ax_msg, ax_extra = ax_rows[ax]
-    scr_status, scr_msg, scr_extra = scr_rows[(scr, capturable is False and scr is True)]
-    return [_check("tcc_accessibility", ax_status, ax_msg, **ax_extra), _check("tcc_screen_recording", scr_status, scr_msg, **scr_extra)]
+        err = ctx["perm_err"]
+        return ("fail" if err else "skip"), err or "check_permissions unavailable", {}
+    granted = perms.get(field)
+    if not isinstance(granted, bool):  # only real booleans select a branch; anything else is "absent"
+        if platform_bound and ctx["plat"] != "darwin":
+            return "skip", f"not applicable on {ctx['plat']}", {}
+        return "skip", f"{field} field absent from check_permissions", {}
+    if not granted:
+        return "fail", f"{label} is not granted.", {"hint": _TCC_HINT.format(label), "data": {field: False}}
+    data = {field: True}
+    if field == "screen_recording":  # the granted-but-not-capturable row wins over plain pass
+        data["screen_recording_capturable"] = perms.get("screen_recording_capturable")
+        if data["screen_recording_capturable"] is False:
+            return "fail", "Screen Recording granted but not capturable.", {
+                "hint": "Screen Recording permission may need a restart of CuaDriver or a re-grant in System Settings.",
+                "data": data}
+    return "pass", f"{label} is granted.", {"data": data}
 
-def _ax_capability_check(probes: Report, ax_granted: bool) -> Report:
+def _ax_capability_row(ctx: Report) -> _Row:
     """ax_capability — inferred from list_apps success or the accessibility grant."""
+    probes, ax_granted = ctx["probes"], ctx["ax_granted"]
     list_ok, list_count = probes.get("list_apps_ok"), probes.get("list_apps_count")
     if list_ok is True:
-        count_msg = f" ({list_count} apps)" if isinstance(list_count, int) else ""
-        return _check("ax_capability", "pass", f"list_apps succeeded{count_msg}")
+        return "pass", "list_apps succeeded" + (f" ({list_count} apps)" if isinstance(list_count, int) else ""), {}
     if list_ok is False:
         default = "list_apps failed despite accessibility grant" if ax_granted else "list_apps failed"
-        return _check("ax_capability", "fail", probes.get("list_apps_error") or default)
+        return "fail", probes.get("list_apps_error") or default, {}
     if ax_granted:
-        return _check("ax_capability", "pass", "inferred from accessibility grant (list_apps not probed)")
-    return _check("ax_capability", "skip", "not probed")
+        return "pass", "inferred from accessibility grant (list_apps not probed)", {}
+    return "skip", "not probed", {}
+
+def _cli_doctor_row(ctx: Report) -> Optional[_Row]:
+    txt = ctx["doctor_txt"]
+    if not txt:
+        return None
+    cli_ok = "[ok" in txt.lower() or "ok  ]" in txt
+    return ("pass" if cli_ok else "skip"), txt.splitlines()[0].strip(), {"data": {"snippet": txt[:2000]}}
+
+# Fallback composite probe table, in emitted order: (check name, row builder(ctx) -> _Row | None to omit).
+_FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
+    ("binary_version", lambda c: (c["ver_status"], c["ver_msg"], {})),
+    ("platform_supported", lambda c: (("pass", f"platform={c['plat']}", {}) if c["plat"] in _SUPPORTED_PLATFORMS
+                                      else ("fail", f"platform={c['plat']} (unsupported)", {}))),
+    # doctor does not start a session, so session_active is never probed
+    ("session_active", lambda c: ("skip", "not probed (doctor does not open a cua session)", {})),
+    ("tcc_accessibility", lambda c: _tcc_row("accessibility", "Accessibility", False, c)),
+    ("tcc_screen_recording", lambda c: _tcc_row("screen_recording", "Screen Recording", True, c)),
+    ("ax_capability", _ax_capability_row),
+    ("health_report_path", lambda c: ("skip", "fallback composite (cua-driver 0.10 unclassified health_report); "
+                                              f"cause: {c['reason_short']}", {})),
+    ("cli_doctor", _cli_doctor_row),
+)
 
 def _overall_from(checks: List[Report]) -> str:
     """failed if binary missing/bad; ok if accessibility fine and nothing failed;
@@ -308,35 +314,20 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
     ver_status, ver_value = _cli_driver_version(binary)
     probes = _drive_fallback_probes(binary, timeout=timeout)
     if probes.get("init_version"):  # MCP initialize version beats a messy CLI parse
-        ver_status, driver_version = "pass", str(probes["init_version"])
-    else:
-        driver_version = ver_value if ver_status == "pass" else (ver_value or "?")
-    ver_msg = f"cua-driver {driver_version}" if ver_status == "pass" else (ver_value or "version unknown")
-    supported = plat in _SUPPORTED_PLATFORMS
+        ver_status, ver_value = "pass", str(probes["init_version"])
     perms = probes.get("permissions") if isinstance(probes.get("permissions"), dict) else None
     reason_short = (reason or "health_report unavailable").strip()
     if len(reason_short) > 160:
         reason_short = reason_short[:157] + "..."
-    checks: List[Report] = [
-        _check("binary_version", ver_status, ver_msg),
-        _check("platform_supported", "pass" if supported else "fail",
-               f"platform={plat}" + ("" if supported else " (unsupported)")),
-        # doctor does not start a session, so session_active is never probed
-        _check("session_active", "skip", "not probed (doctor does not open a cua session)"),
-        *_tcc_checks(perms, probes.get("permissions_error"), plat),
-        _ax_capability_check(probes, bool(perms and perms.get("accessibility") is True)),
-        _check("health_report_path", "skip",
-               f"fallback composite (cua-driver 0.10 unclassified health_report); cause: {reason_short}"),
-    ]
-    doctor_txt = _cli_doctor_snippet(binary)  # optional CLI doctor text (best-effort)
-    if doctor_txt:
-        cli_ok = "[ok" in doctor_txt.lower() or "ok  ]" in doctor_txt
-        checks.append(_check("cli_doctor", "pass" if cli_ok else "skip",
-                             doctor_txt.splitlines()[0].strip(), data={"snippet": doctor_txt[:2000]}))
-    for c in checks:  # normalize any accidental non-vocab status values
-        if c.get("status") not in ("pass", "fail", "skip"):
-            c["status"] = "fail"
-    return {"schema_version": "1", "platform": plat, "driver_version": str(driver_version),
+    ctx: Report = {"plat": plat, "ver_status": ver_status, "probes": probes, "perms": perms,
+                   "perm_err": probes.get("permissions_error"), "reason_short": reason_short,
+                   "ver_msg": f"cua-driver {ver_value}" if ver_status == "pass" else (ver_value or "version unknown"),
+                   "ax_granted": bool(perms and perms.get("accessibility") is True),
+                   "doctor_txt": _cli_doctor_snippet(binary)}  # optional CLI doctor text (best-effort)
+    checks = [_check(name, row[0], row[1], **row[2])
+              for name, build in _FALLBACK_PROBES if (row := build(ctx)) is not None]
+    return {"schema_version": "1", "platform": plat,
+            "driver_version": str(ver_value if ver_status == "pass" else (ver_value or "?")),
             "overall": _overall_from(checks), "checks": checks,
             "fallback": True, "fallback_reason": reason or "health_report unavailable"}
 
