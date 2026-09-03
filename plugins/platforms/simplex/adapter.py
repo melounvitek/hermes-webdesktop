@@ -43,12 +43,10 @@ _MEDIA_KIND_PRECEDENCE = (("audio/", MessageType.VOICE), ("image/", MessageType.
 
 
 def _parse_comma_list(value: str) -> List[str]:
-    """Split a comma-separated string into a stripped list."""
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
 def _redact_id(contact_id: str) -> str:
-    """Redact a contact/group ID for logging."""
     if not contact_id:
         return "<none>"
     s = str(contact_id)
@@ -129,7 +127,6 @@ class SimplexAdapter(BasePlatformAdapter):
             self.ws_url, self.auto_accept, "enabled" if self.group_allow_from else "disabled")
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """Connect to the simplex-chat daemon and start the WebSocket listener."""
         try:
             import websockets as _wsclient
         except ImportError:
@@ -154,7 +151,6 @@ class SimplexAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        """Stop WebSocket listener and clean up."""
         self._running = False
         await _cancel_task(self._ws_task)
         await _cancel_task(self._health_task)
@@ -175,7 +171,6 @@ class SimplexAdapter(BasePlatformAdapter):
         logger.info("SimpleX: disconnected")
 
     async def _ws_listener(self) -> None:
-        """Maintain a persistent WebSocket connection to the daemon."""
         import websockets as _wsclient
         from websockets.exceptions import ConnectionClosed
         backoff = WS_RETRY_DELAY_INITIAL
@@ -223,7 +218,6 @@ class SimplexAdapter(BasePlatformAdapter):
                 logger.debug("SimpleX: WS application-idle for %.0fs", elapsed)
 
     async def _handle_event(self, event: dict) -> None:
-        """Dispatch a daemon event to the appropriate handler."""
         # Usually {"corrId": ..., "resp": {"type": ...}}, but some daemons put the
         # response fields at top level — normalize both.
         resp = event.get("resp") if isinstance(event.get("resp"), dict) else event
@@ -296,7 +290,6 @@ class SimplexAdapter(BasePlatformAdapter):
             logger.exception(err_msg)
 
     async def _handle_chat_item(self, chat_item: dict) -> None:
-        """Process a single chat item from a newChatItems event."""
         chat_info = chat_item.get("chatInfo", {}) or {}
         chat_item_data = chat_item.get("chatItem", {}) or {}
         chat_type = chat_info.get("type", "")
@@ -421,7 +414,6 @@ class SimplexAdapter(BasePlatformAdapter):
             logger.warning("SimpleX: WS send error: %s", e)
 
     async def _send_command(self, command: str, timeout: float = 30.0) -> Optional[dict]:
-        """Send a command and await the correlated response."""
         ws = self._ws
         if not ws:
             logger.warning("SimpleX: command sent but WebSocket not connected")
@@ -694,7 +686,6 @@ def interactive_setup() -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
         name="simplex", label="SimpleX Chat", adapter_factory=lambda cfg: SimplexAdapter(cfg),
         check_fn=check_requirements, validate_config=validate_config, is_connected=is_connected,

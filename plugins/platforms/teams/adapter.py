@@ -150,12 +150,10 @@ def _credentials(config) -> tuple[str, str, str]:
 
 
 def validate_config(config) -> bool:
-    """True when the config has the minimum required credentials."""
     return bool(all(_credentials(config)))
 
 
 def is_connected(config) -> bool:
-    """Check whether Teams is configured (env or config.yaml)."""
     return validate_config(config)
 
 
@@ -451,7 +449,6 @@ class TeamsAdapter(BasePlatformAdapter):
                 return await _read_httpx_body_with_limit(response, media_type="attachment")
 
     async def _on_message(self, ctx: ActivityContext[MessageActivity]) -> None:
-        """Process an incoming Teams message and dispatch to the gateway."""
         activity = ctx.activity
         bot_id = self._app.id if self._app else None
         if bot_id and getattr(activity.from_, "id", None) == bot_id:
@@ -570,7 +567,6 @@ class TeamsAdapter(BasePlatformAdapter):
     async def _on_card_action(
         self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
     ) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
-        """Handle an Adaptive Card Action.Execute button click."""
         from tools.approval import resolve_gateway_approval, has_blocking_approval
 
         data = ctx.activity.value.action.data or {}
@@ -615,7 +611,6 @@ class TeamsAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None, allow_permanent: bool = True, allow_session: bool = True,
         smart_denied: bool = False) -> SendResult:
-        """Send an Adaptive Card approval prompt with Allow/Deny buttons."""
         if not self._app:
             return SendResult(success=False, error="Teams app not initialized")
         # Button data carries a truncated cmd — just enough to reconstruct the card body.
@@ -739,7 +734,6 @@ _SETUP_INTRO = (  # "" → blank line
 
 
 def interactive_setup() -> None:
-    """Guide the user through Teams setup using the Teams CLI."""
     from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli.cli_output import prompt, prompt_yes_no, print_info, print_success, print_warning
     existing_id = get_env_value("TEAMS_CLIENT_ID")
@@ -787,7 +781,6 @@ def _install_hint() -> str:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
         name="teams", label="Microsoft Teams", adapter_factory=lambda cfg: TeamsAdapter(cfg),
         check_fn=check_requirements,  # PASSIVE probe — never installs

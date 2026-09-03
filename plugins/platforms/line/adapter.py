@@ -262,7 +262,6 @@ class _LineClient:
             logger.debug("LINE loading indicator failed: %s", exc)
 
     async def fetch_content(self, message_id: str) -> bytes:
-        """Download an inbound media message's binary content."""
         async with self._session(30.0) as session:
             url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
             async with session.get(url, headers={"Authorization": f"Bearer {self._token}"}) as resp:
@@ -380,10 +379,13 @@ class LineAdapter(BasePlatformAdapter):
         # Slow-LLM postback button threshold + user-overridable copy
         threshold = env_or("LINE_SLOW_RESPONSE_THRESHOLD", "slow_response_threshold", DEFAULT_SLOW_RESPONSE_THRESHOLD)
         self.slow_response_threshold = _coerce(float, threshold, DEFAULT_SLOW_RESPONSE_THRESHOLD)
-        self.pending_text = env_or("LINE_PENDING_TEXT", "pending_text", DEFAULT_PENDING_REPLY_TEXT)
-        self.button_label = env_or("LINE_BUTTON_LABEL", "button_label", DEFAULT_BUTTON_LABEL)
-        self.delivered_text = env_or("LINE_DELIVERED_TEXT", "delivered_text", DEFAULT_DELIVERED_TEXT)
-        self.interrupted_text = env_or("LINE_INTERRUPTED_TEXT", "interrupted_text", DEFAULT_INTERRUPTED_TEXT)
+        for attr, env, default in (
+            ("pending_text", "LINE_PENDING_TEXT", DEFAULT_PENDING_REPLY_TEXT),
+            ("button_label", "LINE_BUTTON_LABEL", DEFAULT_BUTTON_LABEL),
+            ("delivered_text", "LINE_DELIVERED_TEXT", DEFAULT_DELIVERED_TEXT),
+            ("interrupted_text", "LINE_INTERRUPTED_TEXT", DEFAULT_INTERRUPTED_TEXT),
+        ):
+            setattr(self, attr, env_or(env, attr, default))
         # Runtime state
         self._client: Optional[_LineClient] = None
         self._app = self._runner = self._site = None  # aiohttp web.Application / AppRunner / TCPSite
@@ -398,7 +400,6 @@ class LineAdapter(BasePlatformAdapter):
         self._pending_buttons: Dict[str, str] = {}  # one outstanding button per chat: chat_id → request_id
 
     def _fail(self, code: str, detail: str, *, retryable: bool = False) -> bool:
-        """Record a fatal connect error and return False."""
         self._set_fatal_error(code, detail, retryable=retryable)
         return False
 
@@ -713,7 +714,6 @@ class LineAdapter(BasePlatformAdapter):
         return token
 
     def _media_url(self, token: str, filename: str) -> str:
-        """Build the public HTTPS URL for a media token."""
         if self.public_base_url:
             base = self.public_base_url
         else:
@@ -724,7 +724,6 @@ class LineAdapter(BasePlatformAdapter):
         return f"{base}{DEFAULT_MEDIA_PATH_PREFIX}/{token}/{_urlquote(filename, safe='')}"
 
     def _serve_file(self, path: Path) -> str:
-        """Register ``path`` for serving and return its public URL."""
         return self._media_url(self._register_media(str(path.resolve())), path.name)
 
     def _missing_public_url(self) -> bool:
@@ -949,7 +948,6 @@ def interactive_setup() -> None:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
         name="line", label="LINE", adapter_factory=lambda cfg: LineAdapter(cfg), check_fn=check_requirements,
         validate_config=validate_config, is_connected=is_connected,
