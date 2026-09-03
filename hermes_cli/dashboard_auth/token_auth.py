@@ -1,16 +1,16 @@
 """Route-agnostic non-interactive (bearer-token) auth seam for the dashboard.
 
-The generic API-token capability any machine-credential provider plugs into
-(the drain bearer-secret plugin is merely the first consumer). A route opts in
-by registering its exact path via :func:`register_token_route`; only registered
-paths are token-authable, so the auth surface of existing routes never widens.
+Any machine-credential provider plugs in here (the drain bearer-secret plugin is
+the first consumer). A route opts in by registering its exact path via
+:func:`register_token_route`; only registered paths are token-authable, so the
+auth surface of existing routes never widens.
 
 :func:`token_auth_middleware` runs OUTERMOST (installed last in web_server.py)
 and fully owns the decision for a token route: a recognised token attaches
 ``request.state.token_principal`` + ``token_authenticated`` (the cookie gates
-honour that flag and never bounce the request to /login); otherwise 401, or
-503 when a provider's backing store was unreachable. Fails closed: no
-provider, no token, or an unrecognised token is always 401.
+honour that flag and never bounce to /login); otherwise 401, or 503 when a
+provider's backing store was unreachable. Fails closed: no provider, no token,
+or an unrecognised token is always 401.
 """
 from __future__ import annotations
 
@@ -25,10 +25,7 @@ from hermes_cli.dashboard_auth import list_token_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import ProviderError, TokenPrincipal
 from hermes_cli.dashboard_auth.request_utils import (
-    client_ip as _client_ip,
-    extract_bearer as extract_bearer_token,
-    unreachable_response,
-)
+    client_ip as _client_ip, extract_bearer as extract_bearer_token, unreachable_response)
 
 _log = logging.getLogger(__name__)
 
@@ -55,9 +52,7 @@ def clear_token_routes() -> None:
         _token_routes.clear()
 
 
-def authenticate_token(
-    request: Request,
-) -> Tuple[Optional[TokenPrincipal], Optional[str]]:
+def authenticate_token(request: Request) -> Tuple[Optional[TokenPrincipal], Optional[str]]:
     """Try every token provider against the request's bearer token.
 
     Returns ``(principal, None)`` on success; ``(None, None)`` for no token or
@@ -73,18 +68,14 @@ def authenticate_token(
         try:
             principal = provider.verify_token(token=token)
         except ProviderError as e:
-            _log.warning(
-                "dashboard-auth: token provider %r unreachable during verify: %s",
-                provider.name, e,
-            )
+            _log.warning("dashboard-auth: token provider %r unreachable during verify: %s",
+                         provider.name, e)
             if unreachable is None:
                 unreachable = provider.name
             continue
         except Exception as e:  # noqa: BLE001 — a buggy provider must not 500 the gate
-            _log.warning(
-                "dashboard-auth: token provider %r raised during verify: %s",
-                provider.name, e,
-            )
+            _log.warning("dashboard-auth: token provider %r raised during verify: %s",
+                         provider.name, e)
             continue
         if principal is not None:
             return principal, None
@@ -92,9 +83,7 @@ def authenticate_token(
 
 
 async def token_auth_middleware(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """Outermost auth seam: pass-through for unregistered paths; for a token
     route, valid token -> attach principal + flag, unreachable -> 503, else 401."""
     path = request.url.path
@@ -109,21 +98,11 @@ async def token_auth_middleware(
 
     if unreachable:
         audit_log(
-            AuditEvent.TOKEN_AUTH_FAILURE,
-            provider=unreachable,
-            reason="provider_unreachable",
-            path=path,
-            ip=_client_ip(request),
-        )
+            AuditEvent.TOKEN_AUTH_FAILURE, provider=unreachable, reason="provider_unreachable",
+            path=path, ip=_client_ip(request))
         return unreachable_response(unreachable)
 
     audit_log(
-        AuditEvent.TOKEN_AUTH_FAILURE,
-        reason="no_provider_recognises_token",
-        path=path,
-        ip=_client_ip(request),
-    )
-    return JSONResponse(
-        {"error": "unauthenticated", "detail": "Unauthorized"},
-        status_code=401,
-    )
+        AuditEvent.TOKEN_AUTH_FAILURE, reason="no_provider_recognises_token", path=path,
+        ip=_client_ip(request))
+    return JSONResponse({"error": "unauthenticated", "detail": "Unauthorized"}, status_code=401)

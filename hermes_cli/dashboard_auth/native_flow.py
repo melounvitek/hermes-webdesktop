@@ -1,32 +1,15 @@
 """Gateway-brokered RFC 8252 (OAuth 2.0 for Native Apps) authorization store.
 
 The desktop cannot be a direct OAuth client of the upstream IDP (the Portal
-``client_id`` is per gateway instance and only accepts the gateway's own
-``/auth/callback`` redirect), so the gateway brokers: it is the authorization
-server *to the desktop* and an OAuth client *to the Portal* — still textbook
-RFC 8252: system browser, loopback redirect, PKCE, tokens returned to the app
-and never as cookies.
-
-  1. Desktop generates its own PKCE pair (cv_d, cc_d) + ``state``, opens a
-     loopback listener, and opens the system browser at
-     ``/auth/native/authorize`` with cc_d, state and its loopback redirect_uri.
-  2. The gateway stashes a *pending authorization* (:func:`register_pending`)
-     keyed by an opaque ``broker_state`` and runs the EXISTING upstream flow;
-     broker_state rides inside the gateway's own PKCE cookie, so no desktop
-     secret reaches the Portal.
-  3. On the upstream callback (or a successful password login) the gateway
-     mints a one-time gateway code bound to cc_d (:func:`complete_pending`) and
-     302s the browser to ``redirect_uri?code=<gw_code>&state=<state>``.
-  4. The desktop POSTs ``/auth/native/token`` with gw_code + cv_d; the gateway
-     checks ``S256(cv_d) == cc_d`` (:func:`redeem_code`), consumes the code and
-     returns the upstream tokens in the JSON body.
-  5. The desktop keeps them in the OS keychain and uses ``Authorization: Bearer``.
-
-Security properties: PKCE binding (an intercepted gw_code is useless without
-cv_d), single use (redemption pops the entry), short TTLs, 256-bit opaque
-handles compared in constant time, no secret logging. In-memory and
-process-local (single dashboard process); functional API keeps ``time.time``
-patchable in tests.
+``client_id`` is per gateway and only accepts the gateway's ``/auth/callback``),
+so the gateway brokers: authorization server *to the desktop*, OAuth client
+*to the Portal*. Desktop PKCE pair (cv_d, cc_d) + state -> ``/auth/native/authorize``
+stashes a pending entry (:func:`register_pending`) keyed by an opaque
+``broker_state`` riding in the gateway's own PKCE cookie -> upstream callback
+or password login mints a one-time code bound to cc_d (:func:`complete_pending`)
+-> desktop redeems it with cv_d at ``/auth/native/token`` (:func:`redeem_code`).
+PKCE binding, single use, short TTLs, 256-bit handles compared in constant time,
+no secret logging; in-memory, process-local, ``time.time`` patchable in tests.
 """
 
 from __future__ import annotations
@@ -49,8 +32,7 @@ _CODE_TTL_SECONDS = 120
 # Global cap so a misbehaving client cannot grow the store unbounded.
 _MAX_ENTRIES = 256
 # Per-IP cap on PENDING entries: /auth/native/authorize is a public pre-auth
-# route, so one spammer must not fill the global store (600 s each) and lock
-# out legitimate native logins.
+# route, so one spammer must not fill the global store and lock out logins.
 _MAX_PENDING_PER_IP = 8
 
 _lock = threading.Lock()
@@ -92,14 +74,10 @@ class CodeInvalid(NativeFlowError):
     """The gateway code is unknown, expired, already redeemed, or PKCE-mismatched."""
 
 
-def _b64url_no_pad(raw: bytes) -> str:
-    """Base64url without ``=`` padding (RFC 7636 §4)."""
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
 def _s256(verifier: str) -> str:
-    """RFC 7636 S256 transform: base64url(sha256(ascii(verifier)))."""
-    return _b64url_no_pad(hashlib.sha256(verifier.encode("ascii")).digest())
+    """RFC 7636 S256 transform: base64url(sha256(ascii(verifier))), no padding."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 def _gc_locked(now: int) -> None:
@@ -118,65 +96,41 @@ def _now(now: Optional[int]) -> int:
 
 
 def register_pending(
-    *,
-    code_challenge: str,
-    redirect_uri: str,
-    client_state: str,
-    client_ip: str = "",
-    now: Optional[int] = None,
-) -> str:
+    *, code_challenge: str, redirect_uri: str, client_state: str, client_ip: str = "",
+    now: Optional[int] = None) -> str:
     """Stash a pending native authorization; return an opaque ``broker_state``.
-
-    ``code_challenge`` is the DESKTOP's cc_d (the verifier is never seen until
-    redemption). Raises ``NativeFlowError`` (fail closed) when the store is at
-    capacity or ``client_ip`` already holds ``_MAX_PENDING_PER_IP`` entries.
-    """
+    ``code_challenge`` is the DESKTOP's cc_d. Raises ``NativeFlowError`` (fail closed)
+    at store capacity or when ``client_ip`` holds ``_MAX_PENDING_PER_IP`` entries."""
     now = _now(now)
     broker_state = secrets.token_urlsafe(32)
     with _lock:
         _gc_locked(now)
         if not _capacity_ok_locked():
             raise NativeFlowError("native-flow authorization store at capacity")
-        if client_ip and (
-            sum(1 for v in _pending.values() if v.client_ip == client_ip)
-            >= _MAX_PENDING_PER_IP
-        ):
-            raise NativeFlowError(
-                "too many pending native authorizations from this address"
-            )
+        per_ip = sum(1 for v in _pending.values() if v.client_ip == client_ip)
+        if client_ip and per_ip >= _MAX_PENDING_PER_IP:
+            raise NativeFlowError("too many pending native authorizations from this address")
         _pending[broker_state] = _Pending(
-            code_challenge=code_challenge,
-            redirect_uri=redirect_uri,
-            client_state=client_state,
-            client_ip=client_ip,
-            expires_at=now + _PENDING_TTL_SECONDS,
-        )
+            code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=client_state,
+            client_ip=client_ip, expires_at=now + _PENDING_TTL_SECONDS)
     return broker_state
 
 
 def get_pending(broker_state: str, *, now: Optional[int] = None) -> _Pending:
     """Peek (without consuming) the pending authorization; raises
     :class:`PendingNotFound` if unknown or expired."""
-    now = _now(now)
     with _lock:
-        _gc_locked(now)
+        _gc_locked(_now(now))
         entry = _pending.get(broker_state)
         if entry is None:
             raise PendingNotFound("unknown or expired native authorization")
         return entry
 
 
-def complete_pending(
-    broker_state: str,
-    *,
-    session: Session,
-    now: Optional[int] = None,
-) -> str:
-    """Consume a pending authorization (single use) and mint a one-time gateway
-    code bound to the desktop's challenge + the verified ``session``.
-
-    Raises :class:`PendingNotFound` if the broker_state is unknown/expired.
-    """
+def complete_pending(broker_state: str, *, session: Session, now: Optional[int] = None) -> str:
+    """Consume a pending authorization (single use) and mint a one-time gateway code
+    bound to the desktop's challenge + ``session``; :class:`PendingNotFound` if
+    unknown/expired."""
     now = _now(now)
     with _lock:
         _gc_locked(now)
@@ -187,25 +141,15 @@ def complete_pending(
             raise NativeFlowError("native-flow code store at capacity")
         gw_code = secrets.token_urlsafe(32)
         _issued[gw_code] = _IssuedCode(
-            code_challenge=pending.code_challenge,
-            session=session,
-            expires_at=now + _CODE_TTL_SECONDS,
-        )
+            code_challenge=pending.code_challenge, session=session,
+            expires_at=now + _CODE_TTL_SECONDS)
     return gw_code
 
 
-def redeem_code(
-    *,
-    code: str,
-    code_verifier: str,
-    now: Optional[int] = None,
-) -> Session:
-    """Verify PKCE + consume a gateway code; return the bound :class:`Session`.
-
-    The entry is popped BEFORE the PKCE check so a wrong verifier cannot be
-    retried against the same code: on any failure the code is already consumed
-    (no oracle, no replay). Raises :class:`CodeInvalid`.
-    """
+def redeem_code(*, code: str, code_verifier: str, now: Optional[int] = None) -> Session:
+    """Verify PKCE + consume a gateway code; return the bound :class:`Session`. The
+    entry is popped BEFORE the PKCE check so a wrong verifier cannot be retried
+    (no oracle, no replay). Raises :class:`CodeInvalid`."""
     now = _now(now)
     with _lock:
         _gc_locked(now)
