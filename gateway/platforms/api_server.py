@@ -107,8 +107,7 @@ _CAPABILITY_ENDPOINTS = (
     ("browser_control_register", ("POST", "/v1/browser-control/register")),
     ("browser_control_ws", ("GET", "/v1/browser-control/ws")),
     ("artifact_upload", ("POST", "/v1/artifacts/upload")),
-    ("artifact_download", ("GET", "/v1/artifacts/download/{artifact_id}")),
-)
+    ("artifact_download", ("GET", "/v1/artifacts/download/{artifact_id}")))
 _BROWSER_CONTROL_WS_PROTOCOL = "hermes-browser-control-v1"
 _BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX = "hermes-browser-control-ticket."
 
@@ -642,8 +641,7 @@ def _reap_disconnected_agent_processes(
     threading.Thread(
         target=_reap_gateway_turn_processes, args=(process_task_id, process_baseline),
         kwargs={"source": source, "is_still_current": is_still_current},
-        name=f"api-turn-reaper-{process_task_id[:12]}", daemon=True,
-    ).start()
+        name=f"api-turn-reaper-{process_task_id[:12]}", daemon=True).start()
 
 
 # Per-task-id run epochs for the reap gate: monotonic counter (never reused),
@@ -1258,8 +1256,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return None
         return _error_response(
             "Gateway is draining existing work; retry shortly.", 503, code="gateway_draining",
-            headers={"Retry-After": "1"},
-        )
+            headers={"Retry-After": "1"})
 
     def _activate_admitted_request(self) -> None:
         """Transfer this request's drain reservation to agent bookkeeping."""
@@ -1510,8 +1507,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.exception("Platform HTTP event dispatch failed for %s", platform_name)
             return _error_response(
                 "Platform event dispatch failed", 500, err_type="server_error",
-                code="platform_event_dispatch_failed",
-            )
+                code="platform_event_dispatch_failed")
         return web.json_response(result if isinstance(result, dict) else {})
 
     # -- Multi-profile multiplexing (/p/<profile>/...) --------------------------------
@@ -1687,13 +1683,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if current and current != key:
                 logger.debug(
                     "[%s] refusing to rebind session %s from a different declared conversation",
-                    self.name, sid,
-                )
+                    self.name, sid)
                 return
             db.record_gateway_session_peer(
                 sid, source=self._SESSION_SOURCE, session_key=key,
-                include_compression_ancestors=True,
-            )
+                include_compression_ancestors=True)
         except Exception:
             logger.debug(
                 "[%s] declared-conversation bind failed for %s", self.name, sid, exc_info=True)
@@ -1937,8 +1931,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 session_id, model=model or None, provider=provider or None,
                 model_options=runtime_request.get("model_options") or {},
                 route_source=runtime_request.get("route_source") or "",
-                confirmed=bool(runtime_request.get("require_model_lock")),
-            )
+                confirmed=bool(runtime_request.get("require_model_lock")))
             return True
         except Exception:
             logger.warning("[%s] failed to persist session runtime lock for %s", self.name, session_id, exc_info=True)
@@ -2096,8 +2089,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 raise _ProviderAuthResolutionError(str(exc)) from exc
             logger.debug(
                 "api_server provider-runtime refresh failed for provider=%s model=%s",
-                provider_name, target_model or "", exc_info=True,
-            )
+                provider_name, target_model or "", exc_info=True)
             return None
 
     def _recover_or_record_model(self, model: str, runtime_kwargs: Dict[str, Any], gateway_session_key) -> str:
@@ -2315,8 +2307,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         readiness = collect_runtime_readiness(
             configured_model=_resolve_gateway_model(), runtime_status=runtime,
             active_api_runs=active_api_runs, process_completion_queue_depth=process_depth,
-            active_delegations=active_delegations,
-        )
+            active_delegations=active_delegations)
         return web.json_response({
             "status": readiness["status"],
             "readiness": readiness,
@@ -2436,8 +2427,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "set API_SERVER_KEY to enable authenticated browser control.")
             return _error_response(
                 "Browser control registration requires a configured API key.", 403,
-                err_type="gateway_auth_error", code="browser_control_auth_required",
-            )
+                err_type="gateway_auth_error", code="browser_control_auth_required")
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2463,8 +2453,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not await asyncio.to_thread(db.get_session, session_id):
             return _error_response(
                 "Browser control may register only for an existing server session.", 403,
-                err_type="gateway_auth_error", code="browser_control_session_forbidden",
-            )
+                err_type="gateway_auth_error", code="browser_control_session_forbidden")
         profile = _api_request_profile.get() or "default"
         developer_mode = self._browser_control_developer_mode()
         capabilities = filter_browser_control_capabilities(payload.get("capabilities"), developer_mode=developer_mode)
@@ -2482,8 +2471,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             session_id=session_id or None, controller_id=controller_id,
             browser_profile_id=browser_profile_id,
             transport_family=self._browser_control_transport_family(request),
-            capabilities=capabilities,
-        )
+            capabilities=capabilities)
         ticket = self._browser_control_broker.mint_ticket(scope)
         ticket_ttl = self._browser_control_broker.ticket_ttl_seconds
         return web.json_response(
@@ -2584,8 +2572,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 ok = params.get("ok") is True
                 self._browser_control_broker.complete(
                     command_id, scope=scope, ok=ok,
-                    result=params.get("result") if ok else params.get("error"),
-                )
+                    result=params.get("result") if ok else params.get("error"))
         elif method == "browser.controller.cancel":
             tool_call_id = params.get("tool_call_id")
             if isinstance(tool_call_id, str) and tool_call_id:
@@ -3126,8 +3113,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         await asyncio.to_thread(db.end_session, source_id, "branched")
         await asyncio.to_thread(
             db.create_session, fork_id, "api_server", model=source.get("model"),
-            system_prompt=source.get("system_prompt"), parent_session_id=source_id,
-        )
+            system_prompt=source.get("system_prompt"), parent_session_id=source_id)
         messages = await asyncio.to_thread(db.get_messages, source_id)
         await asyncio.to_thread(db.replace_messages, fork_id, messages)
         title = body.get("title")
@@ -3196,8 +3182,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             selection_error = self._request_route_conflict_error(
                 session_id=session_id, gateway_session_key=gateway_session_key,
                 requested_model=agent_overrides.get("requested_model"),
-                requested_provider=agent_overrides.get("requested_provider"), route=route,
-            )
+                requested_provider=agent_overrides.get("requested_provider"), route=route)
             if selection_error:
                 return None, _error_response(selection_error, 400)
         run_kwargs = dict(
@@ -3364,8 +3349,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._set_run_status(
                     run_id, "completed", session_id=effective_session_id, usage=usage,
                     last_event="run.completed",
-                    ** ({"pending_steer": pending_steer} if pending_steer else {}),
-                )
+                    **({"pending_steer": pending_steer} if pending_steer else {}))
             except asyncio.CancelledError:
                 self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
                 raise

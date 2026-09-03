@@ -722,8 +722,7 @@ class OpenAICompatRoutesMixin:
         self, request: "web.Request", response_id: str, model: str, created_at: int, stream_q,
         agent_task, agent_ref, conversation_history: List[Dict[str, str]], user_message: str,
         instructions: Optional[str], conversation: Optional[str], store: bool, session_id: str,
-        gateway_session_key: Optional[str] = None,
-    ) -> "web.StreamResponse":
+        gateway_session_key: Optional[str] = None) -> "web.StreamResponse":
         """Write the SSE stream for POST /v1/responses (OpenAI Responses API).
 
         Events: ``response.created`` → ``response.output_text.delta/done`` and
@@ -980,8 +979,7 @@ class OpenAICompatRoutesMixin:
     @staticmethod
     def _build_response_conversation_history(
         conversation_history: List[Dict[str, Any]], user_message: Any, result: Dict[str, Any],
-        final_response: Any,
-    ) -> List[Dict[str, Any]]:
+        final_response: Any) -> List[Dict[str, Any]]:
         """Build the stored Responses transcript without duplicating history.
 
         A compressed transcript (``result["_compressed"]``) does not share the input
