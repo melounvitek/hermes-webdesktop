@@ -8,14 +8,10 @@ appears together with ``browser_cdp``. Design: ``website/docs/developer-guide/br
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any, Dict, Optional
 
 from tools.browser_supervisor import SUPERVISOR_REGISTRY
 from tools.registry import registry
-
-logger = logging.getLogger(__name__)
-
 
 BROWSER_DIALOG_SCHEMA: Dict[str, Any] = {
     "name": "browser_dialog",
@@ -106,12 +102,8 @@ registry.register(
     name="browser_dialog",
     toolset="browser-cdp",
     schema=BROWSER_DIALOG_SCHEMA,
-    handler=lambda args, **kw: browser_dialog(
-        action=args.get("action", ""),
-        prompt_text=args.get("prompt_text"),
-        dialog_id=args.get("dialog_id"),
-        task_id=kw.get("task_id"),
-    ),
+    handler=lambda args, **kw: browser_dialog(action=args.get("action", ""), prompt_text=args.get("prompt_text"),
+                                              dialog_id=args.get("dialog_id"), task_id=kw.get("task_id")),
     check_fn=_browser_dialog_check,
     emoji="💬",
 )
