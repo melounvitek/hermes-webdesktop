@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from cron import executions as _executions
 from cron.executions import ledger_transaction, open_ledger, prepare_ledger
 from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
@@ -45,15 +46,9 @@ def _db_path() -> Path:
     """Shared cron DB path. The ``cron.executions`` override wins when installed so redirecting the
     executions ledger also redirects the incident table (they must stay in the SAME database); then
     this module's own override, then the canonical profile home."""
-    try:
-        from cron.executions import EXECUTIONS_FILE as _EXEC_OVERRIDE
-
-        if _EXEC_OVERRIDE is not None:
-            return Path(_EXEC_OVERRIDE)
-    except Exception:
-        pass
-    if EXECUTIONS_FILE is not None:
-        return Path(EXECUTIONS_FILE)
+    for override in (_executions.EXECUTIONS_FILE, EXECUTIONS_FILE):
+        if override is not None:
+            return Path(override)
     return get_hermes_home().resolve() / "cron" / "executions.db"
 
 

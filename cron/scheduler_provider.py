@@ -163,19 +163,18 @@ class CronScheduler(ABC):
 
 
 def provider_supports_force_fire(provider: Any) -> bool:
-    """Return whether a provider can safely receive ``fire_due(force=...)``."""
+    """Return whether a provider can safely receive ``fire_due(force=...)`` (signature-detected)."""
     try:
         parameters = inspect.signature(provider.fire_due).parameters.values()
     except (TypeError, ValueError):
         return False
     return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        p.kind is inspect.Parameter.VAR_KEYWORD
         or (
-            parameter.name == "force"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            p.name == "force"
+            and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         )
-        for parameter in parameters
+        for p in parameters
     )
 
 
@@ -184,14 +183,14 @@ def provider_supports_split_fire(provider: Any) -> bool:
     ``fire_due`` must keep being driven through it — routing around the override would drop its
     custom claim/re-arm/telemetry behavior."""
     cls = type(provider)
-    fire_due_impl = getattr(cls, "fire_due", None)
-    claim_fire_impl = getattr(cls, "claim_fire", None)
-    fire_claimed_impl = getattr(cls, "fire_claimed", None)
-    if claim_fire_impl is not None and claim_fire_impl is not CronScheduler.claim_fire:
+
+    def overrides(name: str) -> bool:
+        impl = getattr(cls, name, None)
+        return impl is not None and impl is not getattr(CronScheduler, name)
+
+    if overrides("claim_fire") or overrides("fire_claimed"):
         return True
-    if fire_claimed_impl is not None and fire_claimed_impl is not CronScheduler.fire_claimed:
-        return True
-    return fire_due_impl is None or fire_due_impl is CronScheduler.fire_due
+    return not overrides("fire_due")
 
 
 def _misfire_grace_minutes() -> float:
