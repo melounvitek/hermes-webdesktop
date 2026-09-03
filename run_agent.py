@@ -197,6 +197,24 @@ def _positive_int(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+def _review_should_defer(agent: Any, task_cfg: Optional[Dict[str, Any]]) -> bool:
+    """True when an automatic background review targets the managed local runtime under ``defer: auto``."""
+    from agent.review_idle_queue import defer_mode, review_targets_managed_local
+    return defer_mode(task_cfg) == "auto" and review_targets_managed_local(agent, task_cfg)
+
+
+def _review_queue_key(agent: Any) -> str:
+    return str(getattr(agent, "session_id", None) or id(agent))
+
+
+def _notify_context_engine_session_end(agent: Any, messages: Optional[list]) -> None:
+    """Tell the context engine the session ended (flush DAG, close DBs) at the same lifecycle moment as the
+    memory manager, so per-session engine state never leaks into the next session."""
+    engine = getattr(agent, "context_compressor", None)
+    if engine:
+        _quietly(lambda: engine.on_session_end(agent.session_id or "", messages or []))
+
+
 def _pool_may_recover_from_rate_limit(pool) -> bool:
     """Wait for credential-pool rotation (True) or fall back to ``fallback_model`` (False) after a 429.
 
@@ -842,19 +860,11 @@ class AIAgent(
             focus=focus,
             task_cfg=task_cfg,
         )
-        if focus is None and not explicit and self._review_should_defer(task_cfg):
+        if focus is None and not explicit and _review_should_defer(self, task_cfg):
             from agent.review_idle_queue import QUEUE
-            QUEUE.enqueue(self, self._review_queue_key(), kwargs)
+            QUEUE.enqueue(self, _review_queue_key(self), kwargs)
             return
         self._spawn_background_review_now(**kwargs)
-
-    def _review_should_defer(self, task_cfg: Optional[Dict[str, Any]]) -> bool:
-        """True when an automatic review targets the managed local runtime under ``defer: auto``."""
-        from agent.review_idle_queue import defer_mode, review_targets_managed_local
-        return defer_mode(task_cfg) == "auto" and review_targets_managed_local(self, task_cfg)
-
-    def _review_queue_key(self) -> str:
-        return str(getattr(self, "session_id", None) or id(self))
 
     def _spawn_background_review_now(
         self,
@@ -919,11 +929,11 @@ class AIAgent(
                 logger.info("Preempted background review dropped after %d requeues",
                             self._REVIEW_REQUEUE_MAX_ATTEMPTS)
                 return
-            if not self._review_should_defer(kwargs.get("task_cfg")):
+            if not _review_should_defer(self, kwargs.get("task_cfg")):
                 return
             from agent.review_idle_queue import QUEUE
             # kwargs carries the incremented _requeue_attempts through the queue so the cap survives.
-            QUEUE.enqueue(self, self._review_queue_key(), dict(kwargs))
+            QUEUE.enqueue(self, _review_queue_key(self), dict(kwargs))
         except Exception:  # noqa: BLE001 — requeue is best-effort
             logger.debug("Preempted-review requeue failed", exc_info=True)
 
@@ -960,20 +970,14 @@ class AIAgent(
             except Exception as e:
                 logger.warning("Memory provider on_session_end failed during shutdown: %s", e, exc_info=True)
             _quietly(lambda: self._memory_manager.shutdown_all())
-        self._notify_context_engine_session_end(messages)
-
-    def _notify_context_engine_session_end(self, messages: list = None) -> None:
-        """Tell the context engine the session ended (flush DAG, close DBs); same lifecycle moment as the
-        memory manager, so per-session engine state never leaks into the next session."""
-        if hasattr(self, "context_compressor") and self.context_compressor:
-            _quietly(lambda: self.context_compressor.on_session_end(self.session_id or "", messages or []))
+        _notify_context_engine_session_end(self, messages)
 
     def commit_memory_session(self, messages: list = None) -> None:
         """Flush end-of-session extraction on session_id rotation (/new, compression) without tearing providers
         down."""
         if self._memory_manager:
             _quietly(lambda: self._memory_manager.on_session_end(messages or []))
-        self._notify_context_engine_session_end(messages)
+        _notify_context_engine_session_end(self, messages)
 
     def _sync_external_memory_for_turn(
         self,
