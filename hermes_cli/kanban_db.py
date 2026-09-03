@@ -1346,86 +1346,82 @@ def _resolve_project_link(
     task id exists. An unresolvable id/slug drops the link (never a dangling
     reference, never a crash).
     """
-    project_obj = None
+    project_id = (str(project_id).strip() or None) if project_id is not None else None
+    if not project_id:
+        return None, None, None, workspace_kind
+    from hermes_cli import projects_db as _pdb
+
     project_repo: Optional[str] = None
-    if project_id is not None:
-        project_id = str(project_id).strip() or None
-    if project_id:
-        from hermes_cli import projects_db as _pdb
+    try:
+        with _pdb.connect_closing() as _pconn:
+            project_obj = _pdb.get_project(_pconn, project_id)
+    except Exception:
+        project_obj = None
+    if project_obj is None and project_source_task_id:
+        project_obj, project_repo = _project_from_source_task(
+            conn, _pdb, project_id, str(project_source_task_id),
+        )
+        if project_obj is not None and workspace_kind == "scratch":
+            workspace_kind = "worktree"
+    if project_obj is None:
+        # Unresolvable id/slug: drop the link (never a dangling reference,
+        # never a crash) and create an ordinary scratch task.
+        return None, None, None, workspace_kind
+    # Canonicalise (a slug may have been passed) and anchor the worktree
+    # under the project's primary repo.
+    if workspace_kind == "scratch" and project_obj.primary_path:
+        workspace_kind = "worktree"
+    if workspace_kind == "worktree" and workspace_path is None and project_obj.primary_path:
+        # Concrete path is deferred to the insert loop: a fresh
+        # ``<repo>/.worktrees/<task-id>`` keyed on the new task id.
+        project_repo = str(project_obj.primary_path)
+    return project_obj.id, project_obj, project_repo, workspace_kind
 
+
+def _project_from_source_task(
+    conn: sqlite3.Connection, _pdb: Any, project_id: str, source_task_id: str,
+) -> tuple[Any, Optional[str]]:
+    """Recover a Project (and its repo) from a canonical project-linked
+    worktree task on this board. Worker profiles have their own projects.db
+    while the Kanban DB is shared, so this carries the repo + branch
+    convention forward without opening the creator's store and without
+    reusing the source task's literal worktree path. ``(None, None)`` when
+    the source task is not a ``<repo>/.worktrees/<id>`` project worktree."""
+    source_task = get_task(conn, source_task_id)
+    if not (
+        source_task is not None
+        and source_task.project_id == project_id
+        and source_task.workspace_kind == "worktree"
+        and source_task.workspace_path
+    ):
+        return None, None
+    source_path = Path(source_task.workspace_path)
+    if not (
+        source_path.is_absolute()
+        and source_path.name == source_task.id
+        and source_path.parent.name == ".worktrees"
+    ):
+        return None, None
+    project_slug = None
+    if source_task.branch_name:
+        prefix, separator, leaf = source_task.branch_name.partition("/")
+        if separator and (leaf == source_task.id or leaf.startswith(f"{source_task.id}-")):
+            try:
+                project_slug = _pdb.normalize_slug(prefix)
+            except ValueError:
+                project_slug = None
+    if project_slug is None:
         try:
-            with _pdb.connect_closing() as _pconn:
-                project_obj = _pdb.get_project(_pconn, project_id)
-        except Exception:
-            project_obj = None
-        if project_obj is None and project_source_task_id:
-            # Worker profiles have their own projects.db, while the Kanban DB is
-            # intentionally shared. Recover routing only from a canonical
-            # project-linked source task in this same board. This carries the
-            # repo + project branch convention forward without copying or
-            # opening the creator profile's project store, and without reusing
-            # the source task's literal worktree path.
-            source_task = get_task(conn, str(project_source_task_id))
-            if (
-                source_task is not None
-                and source_task.project_id == project_id
-                and source_task.workspace_kind == "worktree"
-                and source_task.workspace_path
-            ):
-                source_path = Path(source_task.workspace_path)
-                if (
-                    source_path.is_absolute()
-                    and source_path.name == source_task.id
-                    and source_path.parent.name == ".worktrees"
-                ):
-                    project_slug = None
-                    if source_task.branch_name:
-                        prefix, separator, leaf = source_task.branch_name.partition("/")
-                        if separator and (
-                            leaf == source_task.id
-                            or leaf.startswith(f"{source_task.id}-")
-                        ):
-                            try:
-                                project_slug = _pdb.normalize_slug(prefix)
-                            except ValueError:
-                                project_slug = None
-                    if project_slug is None:
-                        try:
-                            project_slug = _pdb.normalize_slug(project_id)
-                        except ValueError:
-                            project_slug = None
-                    if project_slug:
-                        project_repo = str(source_path.parent.parent)
-                        project_obj = _pdb.Project(
-                            id=project_id,
-                            slug=project_slug,
-                            name=project_slug,
-                            created_at=0,
-                            primary_path=project_repo,
-                        )
-                        if workspace_kind == "scratch":
-                            workspace_kind = "worktree"
-
-        if project_obj is None:
-            # A project id/slug that doesn't resolve must not crash task
-            # creation or persist a dangling reference — drop the link and
-            # create the task as an ordinary (scratch) task.
-            project_id = None
-        else:
-            # Canonicalise (a slug may have been passed) and anchor the
-            # worktree under the project's primary repo.
-            project_id = project_obj.id
-            if workspace_kind == "scratch" and project_obj.primary_path:
-                workspace_kind = "worktree"
-            if (
-                workspace_kind == "worktree"
-                and workspace_path is None
-                and project_obj.primary_path
-            ):
-                # Defer the concrete path to the insert loop: it's a fresh
-                # ``<repo>/.worktrees/<task-id>`` dir keyed on the new task id.
-                project_repo = str(project_obj.primary_path)
-    return project_id, project_obj, project_repo, workspace_kind
+            project_slug = _pdb.normalize_slug(project_id)
+        except ValueError:
+            return None, None
+    if not project_slug:
+        return None, None
+    project_repo = str(source_path.parent.parent)
+    project_obj = _pdb.Project(
+        id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
+    )
+    return project_obj, project_repo
 
 
 def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
@@ -2948,48 +2944,13 @@ def release_stale_claims(
         (now,),
     ).fetchall()
     for row in stale:
-        lock = row["claim_lock"] or ""
-        host_local = lock.startswith(host_prefix)
+        host_local = (row["claim_lock"] or "").startswith(host_prefix)
         hb = row["last_heartbeat_at"]
-        # Heartbeat staleness backstop: if we have a heartbeat at all
-        # and it's older than the max-stale threshold, the worker is
-        # not making observable progress.  Reclaim instead of extending,
-        # even if the PID is still alive (it's likely in a logic loop).
-        heartbeat_stale = (
-            hb is not None
-            and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
-        )
-        if (
-            host_local
-            and row["worker_pid"]
-            and _pid_alive(row["worker_pid"])
-            and not heartbeat_stale
-        ):
-            new_expires = now + _resolve_claim_ttl_seconds()
-            with write_txn(conn):
-                cur = conn.execute(
-                    "UPDATE tasks SET claim_expires = ? "
-                    "WHERE id = ? AND status = 'running' "
-                    "  AND claim_lock IS ? "
-                    "  AND claim_expires IS NOT NULL "
-                    "  AND claim_expires < ?",
-                    (new_expires, row["id"], row["claim_lock"], now),
-                )
-                if cur.rowcount != 1:
-                    continue
-                run_id = _extend_run_claim(conn, row["id"], new_expires)
-                _append_event(
-                    conn, row["id"], "claim_extended",
-                    {
-                        "reason": "pid_alive",
-                        "worker_pid": int(row["worker_pid"]),
-                        "claim_lock": row["claim_lock"],
-                        "claim_expires_was": int(row["claim_expires"]),
-                        "claim_expires_now": new_expires,
-                        "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
-                    },
-                    run_id=run_id,
-                )
+        # Backstop: a heartbeat older than the max-stale threshold means no
+        # observable progress — reclaim even if the PID is alive (logic loop).
+        heartbeat_stale = hb is not None and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        if host_local and row["worker_pid"] and _pid_alive(row["worker_pid"]) and not heartbeat_stale:
+            _extend_live_stale_claim(conn, row, now)
             continue
 
         termination = _terminate_reclaimed_worker(
@@ -3058,6 +3019,37 @@ def _record_reclaim(
     payload.update(termination)
     _append_event(conn, task_id, "reclaimed", payload, run_id=run_id)
     return run_id
+
+
+def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: int) -> None:
+    """TTL-expired claim whose host-local worker is alive: extend instead of
+    reclaiming (``claim_extended`` event). CAS on the same expired lock so a
+    concurrent reclaimer wins cleanly."""
+    new_expires = now + _resolve_claim_ttl_seconds()
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET claim_expires = ? "
+            "WHERE id = ? AND status = 'running' "
+            "  AND claim_lock IS ? "
+            "  AND claim_expires IS NOT NULL "
+            "  AND claim_expires < ?",
+            (new_expires, row["id"], row["claim_lock"], now),
+        )
+        if cur.rowcount != 1:
+            return
+        run_id = _extend_run_claim(conn, row["id"], new_expires)
+        _append_event(
+            conn, row["id"], "claim_extended",
+            {
+                "reason": "pid_alive",
+                "worker_pid": int(row["worker_pid"]),
+                "claim_lock": row["claim_lock"],
+                "claim_expires_was": int(row["claim_expires"]),
+                "claim_expires_now": new_expires,
+                "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
+            },
+            run_id=run_id,
+        )
 
 
 def reclaim_task(
@@ -3746,8 +3738,7 @@ def block_task(
             else "ready"
         )
         prev_kind = _row_get(cur_row, "block_kind")
-        prev_recurrences = _row_get(cur_row, "block_recurrences")
-        prev_recurrences = int(prev_recurrences) if prev_recurrences is not None else 0
+        prev_recurrences = int(_row_get(cur_row, "block_recurrences") or 0)
 
         # Dependency blocks never enter the human ``blocked`` bucket — they
         # wait in ``todo`` and let ``recompute_ready`` gate on parents. Routing
@@ -3911,34 +3902,24 @@ def request_review(
                 "ORDER BY id DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
-            changes_event = None
             if changes_run is not None:
-                changes_event = _latest_event(
-                    conn, task_id, "changes_requested", changes_run["id"],
-                )
-            prior_reviewer = _json_dict(_row_get(changes_event, "payload")).get("reviewer")
-            if changes_run is not None:
-                if not isinstance(prior_reviewer, str) or not prior_reviewer.strip():
+                changes_event = _latest_event(conn, task_id, "changes_requested", changes_run["id"])
+                reviewer = _json_dict(_row_get(changes_event, "payload")).get("reviewer")
+                if not isinstance(reviewer, str) or not reviewer.strip():
                     return _ret(
                         False,
                         "re-review has no durable reviewer provenance (the "
                         "latest changes_requested event is missing or "
                         "malformed); pass reviewer= explicitly",
                     )
-                reviewer = prior_reviewer
-        reviewer = _canonical_assignee(reviewer) if reviewer is not None else None
+        reviewer = _canonical_assignee(reviewer)
         assignee_sql = ", assignee = ?" if reviewer is not None else ""
-        params: tuple[Any, ...]
-        if expected_run_id is None:
-            params = (reviewer, task_id) if reviewer is not None else (task_id,)
-            run_guard = ""
-        else:
-            params = (
-                (reviewer, task_id, int(expected_run_id))
-                if reviewer is not None
-                else (task_id, int(expected_run_id))
-            )
-            run_guard = " AND current_run_id = ?"
+        run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
+        params: tuple[Any, ...] = (
+            *(() if reviewer is None else (reviewer,)),
+            task_id,
+            *(() if expected_run_id is None else (int(expected_run_id),)),
+        )
         cur = conn.execute(
             """
             UPDATE tasks
@@ -4032,10 +4013,7 @@ def request_changes(
         if not isinstance(implementer, str) or not implementer.strip():
             return False, "review handoff has no valid implementer provenance"
         reviewer = task_row["assignee"]
-        if isinstance(reviewer, str) and reviewer.strip():
-            reviewer = _canonical_assignee(reviewer)
-        else:
-            reviewer = None
+        reviewer = _canonical_assignee(reviewer) if isinstance(reviewer, str) and reviewer.strip() else None
 
         new_status = _landing_status_after_parents(conn, task_id)
         # NOTE: consecutive_failures is deliberately PRESERVED (neither
@@ -4270,19 +4248,13 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         implementer = handoff.get("implementer")
         if not isinstance(implementer, str) or not implementer.strip():
             implementer = None
-        assignee_sql = ", assignee = ?" if implementer else ""
-        params: tuple[Any, ...] = (
-            (new_status, implementer, task_id)
-            if implementer
-            else (new_status, task_id)
-        )
+        params: tuple[Any, ...] = (new_status, *((implementer,) if implementer else ()), task_id)
         cur = conn.execute(
+            # consecutive_failures deliberately PRESERVED: review reopen is not
+            # a success signal; only complete_task resets the breaker (#35072).
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            # consecutive_failures deliberately PRESERVED: review reopen is
-            # not a success signal; only complete_task resets the breaker
-            # counter (mirrors unblock_task, #35072).
-            + assignee_sql
+            + (", assignee = ?" if implementer else "")
             + " WHERE id = ? AND status = 'review'",
             params,
         )
@@ -4372,15 +4344,10 @@ def invalidate_descendants_for_parent_reopen(
             if previous_status == "review":
                 resume_status = "review"
             elif previous_status == "running":
-                resume_status = _retry_status_for_run(
-                    conn, row["id"], row["current_run_id"]
-                )
+                resume_status = _retry_status_for_run(conn, row["id"], row["current_run_id"])
                 terminations.append((row["worker_pid"], row["claim_lock"]))
                 run_id = _end_run(
-                    conn,
-                    row["id"],
-                    outcome="reclaimed",
-                    status="todo",
+                    conn, row["id"], outcome="reclaimed", status="todo",
                     summary=f"ancestor {task_id} reopened",
                 )
             # consecutive_failures = 0: deliberate operator reset — see
@@ -4391,30 +4358,22 @@ def invalidate_descendants_for_parent_reopen(
                 "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?",
                 (row["id"],),
             )
+            entry = {
+                "id": row["id"], "prior_status": previous_status,
+                "new_status": "todo", "resume_status": resume_status,
+            }
             _append_event(
-                conn,
-                row["id"],
-                "descendant_invalidated",
-                {
-                    "ancestor": task_id,
-                    "prior_status": previous_status,
-                    "new_status": "todo",
-                    "resume_status": resume_status,
-                },
+                conn, row["id"], "descendant_invalidated",
+                {"ancestor": task_id, **{k: v for k, v in entry.items() if k != "id"}},
                 run_id=run_id,
             )
-            # Legacy 'status' event kept so existing live-feed consumers
-            # still see the move without learning the new event kind.
+            # Legacy 'status' event so existing live-feed consumers still see
+            # the move without learning the new event kind.
             _append_event(
-                conn,
-                row["id"],
-                "status",
+                conn, row["id"], "status",
                 {
-                    "status": "todo",
-                    "reason": "ancestor_reopened",
-                    "parent": task_id,
-                    "previous_status": previous_status,
-                    "resume_status": resume_status,
+                    "status": "todo", "reason": "ancestor_reopened", "parent": task_id,
+                    "previous_status": previous_status, "resume_status": resume_status,
                 },
                 run_id=run_id,
             )
@@ -4425,14 +4384,7 @@ def invalidate_descendants_for_parent_reopen(
                 f"(will resume via '{resume_status}').",
                 now,
             )
-            invalidated.append(
-                {
-                    "id": row["id"],
-                    "prior_status": previous_status,
-                    "new_status": "todo",
-                    "resume_status": resume_status,
-                }
-            )
+            invalidated.append(entry)
     if not caller_owns_txn:
         # Standalone call: we committed above, so the audit trail is durable
         # — safe to kill workers now. Composed calls leave this to the
@@ -4551,22 +4503,21 @@ def _validate_children_graph(children: list) -> None:
             if p == idx:
                 raise ValueError(f"child[{idx}] cannot list itself as a parent")
 
-    _in_deg = [0] * len(children)
-    _adj: list[list[int]] = [[] for _ in range(len(children))]
-    for _i, _c in enumerate(children):
-        for _p in (_c.get("parents") or []):
-            _adj[_p].append(_i)
-            _in_deg[_i] += 1
-    _queue = [_i for _i in range(len(children)) if _in_deg[_i] == 0]
-    _seen = 0
-    while _queue:
-        _node = _queue.pop()
-        _seen += 1
-        for _nb in _adj[_node]:
-            _in_deg[_nb] -= 1
-            if _in_deg[_nb] == 0:
-                _queue.append(_nb)
-    if _seen != len(children):
+    in_deg = [0] * len(children)
+    adj: list[list[int]] = [[] for _ in children]
+    for i, c in enumerate(children):
+        for p in (c.get("parents") or []):
+            adj[p].append(i)
+            in_deg[i] += 1
+    queue = [i for i in range(len(children)) if in_deg[i] == 0]
+    seen = 0
+    while queue:
+        seen += 1
+        for nb in adj[queue.pop()]:
+            in_deg[nb] -= 1
+            if in_deg[nb] == 0:
+                queue.append(nb)
+    if seen != len(children):
         raise ValueError("cyclic dependency detected in decomposed children list")
 
 
@@ -4597,121 +4548,43 @@ def decompose_triage_task(
         return None
     if root_assignee is not None:
         root_assignee = _canonical_assignee(root_assignee)
-
     _validate_children_graph(children)
 
-    # We do the full decomposition in a SINGLE write_txn so it's
-    # atomic: either every child is created AND the root flips to
-    # ``todo``, or nothing changes. We deliberately do NOT call any
-    # kb helper that opens its own write_txn (create_task, link_tasks,
-    # add_comment) from inside this block — see architecture.md
-    # write_txn pitfalls. Instead we inline the INSERTs and
-    # _append_event calls.
+    # ONE write_txn so the fan-out is atomic (every child + the root flip, or
+    # nothing). Helpers that open their own write_txn (create_task,
+    # link_tasks, add_comment) must not be called in here — INSERTs and
+    # _append_event are inlined instead.
     now = int(time.time())
-    child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
-        if root_row is None:
+        if root_row is None or root_row["status"] != "triage":
             return None
-        if root_row["status"] != "triage":
-            return None
-        tenant = root_row["tenant"]
-        # Children inherit the root's workspace by default so a fan-out
-        # of a code-gen task lands in the parent's project dir/worktree
-        # rather than throwaway scratch tmp dirs. A child dict can still
-        # override with its own 'workspace_kind' / 'workspace_path'.
-        root_ws_kind = root_row["workspace_kind"] or "scratch"
-        root_ws_path = root_row["workspace_path"]
-
-        # Create children. Status is 'todo' regardless of parents — we
-        # link them under the root AFTER creation so the dispatcher
-        # sees a coherent state, and recompute_ready() at the end
-        # promotes parent-free children to 'ready'.
-        for idx, child in enumerate(children):
-            new_id = _new_task_id()
-            title = child["title"].strip()
-            body = child.get("body")
-            assignee = _canonical_assignee(child.get("assignee"))
-            # Per-child override wins; otherwise inherit the root's
-            # workspace. A child that sets workspace_kind without a path
-            # falls back to the root path only when kinds match (so a
-            # child can't accidentally point a 'dir' at the root's
-            # worktree path or vice versa).
-            child_ws_kind = child.get("workspace_kind") or root_ws_kind
-            if child.get("workspace_path"):
-                child_ws_path = child.get("workspace_path")
-            elif child_ws_kind == "worktree":
-                # Never share one worktree checkout between siblings: the
-                # root's literal path would put every child in the same
-                # directory on the first-dispatched sibling's branch, with
-                # no lock — siblings can be promoted and dispatched
-                # concurrently. Leave the path unset so dispatch
-                # materializes a fresh <repo>/.worktrees/<child-id> per
-                # child from the board anchor.
-                child_ws_path = None
-            elif child_ws_kind == root_ws_kind:
-                child_ws_path = root_ws_path
-            else:
-                child_ws_path = None
-            conn.execute(
-                "INSERT INTO tasks "
-                "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
-                (
-                    new_id,
-                    title,
-                    body if isinstance(body, str) else None,
-                    assignee,
-                    child_ws_kind,
-                    child_ws_path,
-                    tenant,
-                    now,
-                    (author or "decomposer"),
-                ),
-            )
-            _append_event(
-                conn, new_id, "created",
-                {"by": author or "decomposer", "from_decompose_of": task_id},
-            )
-            _inherit_notify_subs(conn, new_id, (task_id,), created_at=now)
-            child_ids.append(new_id)
-
-        # Link children to their sibling parents (within the decomposed graph).
+        child_ids = [
+            _insert_decomposed_child(conn, task_id, root_row, child, author, now)
+            for child in children
+        ]
+        # Sibling edges within the decomposed graph.
         for idx, child in enumerate(children):
             for p_idx in child.get("parents") or []:
-                parent_id = child_ids[p_idx]
-                child_id = child_ids[idx]
+                parent_id, child_id = child_ids[p_idx], child_ids[idx]
                 _link(conn, parent_id, child_id)
-                _append_event(
-                    conn, child_id, "linked",
-                    {"parent": parent_id, "child": child_id},
-                )
-
-        # Link the ROOT task as a child of every leaf child — i.e. the
-        # root waits for the whole graph. Simpler than computing leaves:
-        # link root under every child. Cycle-free because the root is
-        # only ever a child here, never a parent of children.
+                _append_event(conn, child_id, "linked", {"parent": parent_id, "child": child_id})
+        # Root waits for the whole graph: link it under EVERY child (simpler
+        # than computing leaves; cycle-free since the root is only ever a child).
         for cid in child_ids:
             _link(conn, cid, task_id)
-
-        # Flip the root: triage -> todo, set assignee to the orchestrator.
+        # Flip the root triage -> todo, assignee -> orchestrator.
         sets = ["status = 'todo'"]
         params: list[Any] = []
         if root_assignee is not None:
             sets.append("assignee = ?")
             params.append(root_assignee)
         params.append(task_id)
-        conn.execute(
-            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
-            tuple(params),
-        )
-
-        # Audit comment + event on the root so the timeline shows the fan-out.
+        conn.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", tuple(params))
         if author and author.strip():
             _insert_comment(
                 conn, task_id, author.strip(),
@@ -4720,21 +4593,57 @@ def decompose_triage_task(
                 now,
             )
         _append_event(
-            conn, task_id, "decomposed",
-            {
-                "child_ids": child_ids,
-                "root_assignee": root_assignee,
-            },
+            conn, task_id, "decomposed", {"child_ids": child_ids, "root_assignee": root_assignee},
         )
-
-    # Outside the write_txn: promote parent-free children to 'ready'
-    # so the dispatcher picks them up on its next tick. Same pattern
-    # specify_triage_task uses.  When auto_promote is False children
-    # stay in 'todo' until the user manually promotes them — useful
-    # for manual-review-first workflows.
+    # Outside the txn (own IMMEDIATE txn). ``auto_promote=False`` leaves the
+    # children in ``todo`` for manual-review-first workflows.
     if auto_promote:
         recompute_ready(conn)
     return child_ids
+
+
+def _insert_decomposed_child(
+    conn: sqlite3.Connection, root_id: str, root_row: sqlite3.Row, child: dict,
+    author: Optional[str], now: int,
+) -> str:
+    """Insert one decomposed child as ``todo`` (linked under the root later so
+    the dispatcher only ever sees a coherent graph); returns its id.
+
+    Workspace: per-child override wins, else inherit the root's kind. Path
+    inherits only when kinds match (a 'dir' child must not point at the
+    root's worktree) and NEVER for worktrees — siblings dispatch concurrently
+    and one shared checkout would put them all on the first sibling's branch
+    with no lock; leaving it unset makes dispatch materialize a fresh
+    ``<repo>/.worktrees/<child-id>`` per child from the board anchor.
+    """
+    root_ws_kind = root_row["workspace_kind"] or "scratch"
+    child_ws_kind = child.get("workspace_kind") or root_ws_kind
+    if child.get("workspace_path"):
+        child_ws_path = child.get("workspace_path")
+    elif child_ws_kind == "worktree":
+        child_ws_path = None
+    elif child_ws_kind == root_ws_kind:
+        child_ws_path = root_row["workspace_path"]
+    else:
+        child_ws_path = None
+    new_id = _new_task_id()
+    body = child.get("body")
+    conn.execute(
+        "INSERT INTO tasks "
+        "(id, title, body, assignee, status, workspace_kind, "
+        " workspace_path, tenant, created_at, created_by) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        (
+            new_id, child["title"].strip(), body if isinstance(body, str) else None,
+            _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
+            root_row["tenant"], now, (author or "decomposer"),
+        ),
+    )
+    _append_event(
+        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
+    )
+    _inherit_notify_subs(conn, new_id, (root_id,), created_at=now)
+    return new_id
 
 
 def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
