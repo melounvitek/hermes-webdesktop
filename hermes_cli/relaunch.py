@@ -45,11 +45,8 @@ def _extract_inherited_flags(argv: Sequence[str]) -> list[str]:
     while i < len(argv):
         arg = argv[i]
         if "=" in arg:
-            key = arg.split("=", 1)[0]
-            for flag, _ in _INHERITED_FLAGS_TABLE:
-                if key == flag:
-                    flags.append(arg)
-                    break
+            if any(arg.split("=", 1)[0] == flag for flag, _ in _INHERITED_FLAGS_TABLE):
+                flags.append(arg)
             i += 1
             continue
 

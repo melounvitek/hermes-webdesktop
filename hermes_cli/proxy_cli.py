@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from agent.proxy_sources import iron_proxy as ip
-from hermes_cli.config import load_config, save_config
+from hermes_cli.config import load_config, load_env, save_config
 
 
 def register_cli(parent_parser: argparse.ArgumentParser) -> None:
@@ -29,32 +29,25 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
             ("--force", dict(action="store_true", help="Re-download even if a managed copy already exists")),
         ]),
         ("setup", "Interactive wizard: install + CA + mint tokens + write config", cmd_setup, [
-            ("--tunnel-port", dict(
-                type=int, default=None,
-                help=f"Override the tunnel port (default {ip._DEFAULT_TUNNEL_PORT})")),
-            ("--from-bitwarden", dict(
-                action="store_true",
-                help="Treat secrets as managed by Bitwarden — discover provider keys "
-                     "from secrets.bitwarden config instead of the current env.  Fails "
-                     "loudly if BW is unreachable rather than silently falling back.")),
-            ("--no-bitwarden", dict(
-                action="store_true",
-                help="Explicitly switch credential_source back to env on re-setup "
-                     "(only meaningful when the previous setup used --from-bitwarden).")),
-            ("--rotate-tokens", dict(
-                action="store_true",
-                help="Mint fresh proxy tokens for every provider (default is to "
-                     "preserve tokens for providers that already had one — avoids "
-                     "401-ing already-running sandboxes on re-setup).")),
-            ("--restart", dict(
-                dest="restart", action="store_true", default=None,
-                help="If a daemon is already running, restart it automatically after "
-                     "writing the new config/tokens (non-interactive default on a tty "
-                     "is to ask).")),
-            ("--no-restart", dict(
-                dest="restart", action="store_false",
-                help="Do not restart a running daemon after setup; you'll need to run "
-                     "`hermes egress restart` yourself for changes to take effect.")),
+            ("--tunnel-port", dict(type=int, default=None,
+                                   help=f"Override the tunnel port (default {ip._DEFAULT_TUNNEL_PORT})")),
+            ("--from-bitwarden", dict(action="store_true", help=(
+                "Treat secrets as managed by Bitwarden — discover provider keys "
+                "from secrets.bitwarden config instead of the current env.  Fails "
+                "loudly if BW is unreachable rather than silently falling back."))),
+            ("--no-bitwarden", dict(action="store_true", help=(
+                "Explicitly switch credential_source back to env on re-setup "
+                "(only meaningful when the previous setup used --from-bitwarden)."))),
+            ("--rotate-tokens", dict(action="store_true", help=(
+                "Mint fresh proxy tokens for every provider (default is to "
+                "preserve tokens for providers that already had one — avoids "
+                "401-ing already-running sandboxes on re-setup)."))),
+            ("--restart", dict(dest="restart", action="store_true", default=None, help=(
+                "If a daemon is already running, restart it automatically after "
+                "writing the new config/tokens (non-interactive default on a tty is to ask)."))),
+            ("--no-restart", dict(dest="restart", action="store_false", help=(
+                "Do not restart a running daemon after setup; you'll need to run "
+                "`hermes egress restart` yourself for changes to take effect."))),
         ]),
         ("start", "Start the managed iron-proxy", cmd_start, []),
         ("stop", "Stop the managed iron-proxy", cmd_stop, []),
@@ -62,10 +55,9 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
         ("reload", "Hot-reload the running daemon's ruleset from proxy.yaml "
                    "(management API — no restart, no dropped connections)", cmd_reload, []),
         ("status", "Show proxy state and mappings", cmd_status, [
-            ("--show-tokens", dict(
-                action="store_true",
-                help="Print the proxy tokens (default: redacted prefix only). "
-                     "Beware: tokens may persist in your shell history.")),
+            ("--show-tokens", dict(action="store_true", help=(
+                "Print the proxy tokens (default: redacted prefix only). "
+                "Beware: tokens may persist in your shell history."))),
         ]),
         ("disable", "Turn off the proxy integration", cmd_disable, []),
         ("config", "Print the generated proxy.yaml path", cmd_config, []),
@@ -75,11 +67,6 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
         for flag, kwargs in arguments:
             parser.add_argument(flag, **kwargs)
         parser.set_defaults(func=func)
-
-
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -228,13 +215,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
             "credentials inside the sandbox.  Egress isolation is INCOMPLETE for these.[/dim]"
         )
 
-    table = Table(show_header=True, header_style="bold")
-    table.add_column("Provider env", style="cyan")
-    table.add_column("Upstream hosts", style="dim")
-    table.add_column("Proxy token", style="green")
-    for m in mappings:
-        table.add_row(m.real_env_name, ", ".join(m.upstream_hosts), _redact_token(m.proxy_token))
-    console.print(table)
+    console.print(_mappings_table(mappings, "Provider env", "Upstream hosts", show_tokens=False))
     return mappings
 
 
@@ -528,14 +509,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if mappings:
         console.print()
         console.print("[bold]Token mappings[/bold]")
-        m_table = Table(show_header=True, header_style="bold")
-        m_table.add_column("Real env", style="cyan")
-        m_table.add_column("Upstream", style="dim")
-        m_table.add_column("Proxy token", style="green")
-        for m in mappings:
-            tok = m.proxy_token if args.show_tokens else _redact_token(m.proxy_token)
-            m_table.add_row(m.real_env_name, ", ".join(m.upstream_hosts), tok)
-        console.print(m_table)
+        console.print(_mappings_table(mappings, "Real env", "Upstream", show_tokens=args.show_tokens))
         if args.show_tokens:
             console.print(
                 "[yellow]⚠[/yellow]  proxy tokens just printed in full — "
@@ -580,11 +554,6 @@ def cmd_config(args: argparse.Namespace) -> int:
         return 1
     console.print(str(status.config_path))
     return 0
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
@@ -635,10 +604,6 @@ def _load_env_file_into_environ() -> int:
     names, so unrelated secrets are never slurped into the process.
     """
     try:
-        from hermes_cli.config import load_env
-    except ImportError:
-        return 0
-    try:
         file_env = load_env()
     except Exception:  # noqa: BLE001 — best-effort convenience, never fatal
         return 0
@@ -652,6 +617,17 @@ def _load_env_file_into_environ() -> int:
             os.environ[name] = val
             added += 1
     return added
+
+
+def _mappings_table(mappings, env_header: str, hosts_header: str, *, show_tokens: bool) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column(env_header, style="cyan")
+    table.add_column(hosts_header, style="dim")
+    table.add_column("Proxy token", style="green")
+    for m in mappings:
+        tok = m.proxy_token if show_tokens else _redact_token(m.proxy_token)
+        table.add_row(m.real_env_name, ", ".join(m.upstream_hosts), tok)
+    return table
 
 
 def _step(console: Console, n: int, title: str) -> None:
