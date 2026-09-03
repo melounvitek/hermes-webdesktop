@@ -720,6 +720,7 @@ class TestLocalEnvironmentWindowsTempDir:
         assert "if _IS_WINDOWS:" in source
         assert "get_hermes_home" in source
         assert 'cache_dir = get_hermes_home() / "cache" / "terminal"' in source
+        assert "_default_terminal_temp_dir() or Path(tempfile.gettempdir())" in source
 
 
 class TestLocalEnvironmentPathInjectionGated:
