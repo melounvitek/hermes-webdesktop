@@ -1,24 +1,19 @@
 """Bundled-skill maintenance ops: reset, diff, list-modified, opt-out, remove-pristine.
 
-Extracted from ``tools.skills_sync``. Profile-scoped paths and patchable helpers
-(``_get_bundled_dir``, ``sync_skills``, ...) are resolved through ``_ss()`` at
-call time so monkeypatching ``tools.skills_sync`` keeps working.
+Profile-scoped paths and patchable helpers (``_get_bundled_dir``, ``sync_skills``, ...)
+are resolved through ``_ss()`` at call time so monkeypatching ``tools.skills_sync`` works.
 """
 
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-
-def _ss():
-    from tools import skills_sync
-
-    return skills_sync
+from tools.skills_sync_optional import _skill_file_list, _ss
 
 
 def _is_tracked_user_modification(origin_hash: str, user_hash: str) -> bool:
-    """Whether an on-disk skill is a user modification ``hermes update`` keeps. Shared by
-    the sync loop and ``list_user_modified_bundled_skills`` so they never drift: needs a
-    recorded origin hash (un-baselined v1 entries don't count) AND differing content."""
+    """User modification ``hermes update`` keeps: a recorded origin hash (un-baselined v1
+    entries don't count) AND differing content. Shared by the sync loop and
+    ``list_user_modified_bundled_skills`` so they never drift."""
     return bool(origin_hash) and user_hash != origin_hash
 
 
@@ -29,12 +24,10 @@ def _bundled_by_name(bundled_dir: Path) -> dict:
 def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     """Reset a bundled skill's manifest tracking so future syncs work normally.
 
-    An edited bundled skill stays ``user_modified`` forever — even after copying the
-    bundled version back — because the manifest holds the OLD origin hash; clearing
-    the entry breaks that loop. ``restore`` also deletes the user's copy so the next
-    sync re-copies bundled. Returns ``{ok, action, message, synced}``; action is
-    manifest_cleared / restored / not_in_manifest / bundled_missing / not_reset.
-    """
+    An edited bundled skill stays ``user_modified`` forever because the manifest holds
+    the OLD origin hash; clearing the entry breaks that loop. ``restore`` also deletes
+    the user's copy so the next sync re-copies bundled. Returns ``{ok, action, message,
+    synced}``; action is manifest_cleared / restored / not_in_manifest / bundled_missing / not_reset."""
     ss = _ss()
     manifest = ss._read_manifest()
     bundled_dir = ss._get_bundled_dir()
@@ -49,8 +42,8 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
         return _fail("not_in_manifest", f"'{name}' is not a tracked bundled skill. Nothing to reset. "
                      f"(Hub-installed skills use `hermes skills uninstall`.)")
 
-    # Delete the user's copy BEFORE touching the manifest so a failed rmtree
-    # cannot leave the skill in a manifest-less limbo state.
+    # Delete the user's copy BEFORE touching the manifest so a failed rmtree can't
+    # leave the skill in a manifest-less limbo.
     deleted_user_copy = False
     if restore:
         if not is_bundled:
@@ -115,8 +108,6 @@ def diff_bundled_skill(name: str) -> dict:
     modified / added (only in user copy) / removed (only in bundled) / binary."""
     import difflib
 
-    from tools.skills_sync_optional import _skill_file_list
-
     ss = _ss()
 
     def _fail(found: bool, message: str) -> dict:
@@ -165,9 +156,8 @@ _OPT_OUT_MESSAGES = {  # (enabled, changed) -> message
 
 
 def set_bundled_skills_opt_out(enabled: bool) -> dict:
-    """Toggle the .no-bundled-skills marker: the on-disk half of ``hermes skills
-    opt-out`` / ``opt-in`` that stops installer/update/sync seeding. Removing
-    already-present skills is a separate step (``remove_pristine_bundled_skills``).
+    """Toggle the .no-bundled-skills marker (the on-disk half of ``hermes skills
+    opt-out`` / ``opt-in``); removing present skills is ``remove_pristine_bundled_skills``.
     Returns ``{ok, changed, marker, message}``."""
     ss = _ss()
     marker = ss._hermes_home() / ss.NO_BUNDLED_SKILLS_MARKER
@@ -189,14 +179,10 @@ def set_bundled_skills_opt_out(enabled: bool) -> dict:
 
 
 def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
-    """Delete bundled skills that are present, manifest-tracked, AND unmodified.
-
-    Removed ONLY when in the sync manifest (genuinely bundled, not hub/hand-written),
-    still in the bundled source (hash-comparable), and byte-identical to the origin
-    hash; everything else lands in ``skipped``. Removed skills lose their manifest
-    entry so a later opt-in re-seed treats them as new.
-    Returns ``{ok, removed, skipped: [{name, reason}], dry_run, message}``.
-    """
+    """Delete bundled skills that are manifest-tracked (genuinely bundled), still in the
+    bundled source (hash-comparable) AND byte-identical to the origin hash; everything
+    else lands in ``skipped``. Removed skills lose their manifest entry so a later
+    opt-in re-seed treats them as new. Returns ``{ok, removed, skipped: [{name, reason}], dry_run, message}``."""
     ss = _ss()
     manifest = ss._read_manifest()
     bundled_dir = ss._get_bundled_dir()
@@ -211,8 +197,7 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
             continue
         dest = ss._compute_relative_dest(src, bundled_dir)
         if not dest.exists():
-            # Already gone from disk; just forget the stale manifest entry.
-            if not dry_run:
+            if not dry_run:  # already gone from disk; forget the stale manifest entry
                 manifest.pop(name, None)
             continue
         if ss._dir_hash(dest) != origin_hash:
