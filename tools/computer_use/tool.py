@@ -94,19 +94,17 @@ _session_auto_approve: Dict[str, bool] = {}   # sid -> "always_approve everythin
 _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_mode) scope keys
 _escalation_warned: set = set()               # sids already warned that a bypass widened the driver mode
 
-def _configured_permission_mode() -> str:
-    """Configured cua mode (standard | bounded; "standard" if unresolvable). bounded needs a
-    computer_use.capability_manifest — the backend fails loudly without it."""
-    with contextlib.suppress(Exception):
-        from tools.computer_use.cua_backend import _cua_configured_permission_mode
-        return _cua_configured_permission_mode()
-    return "standard"
-
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's approval bypass onto Cua's immutable mode; fails closed. Both identity namespaces are consulted
     (DB ``session_id`` and gateway ``session_key`` contextvar) or a gateway ``/yolo`` would be invisible here.
     Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted`` daemon, dropping
     the configured ceiling: deliberate (``unrestricted`` is not a config value) but easy to trigger by accident."""
+    # Configured cua mode (standard | bounded; "standard" if unresolvable). bounded needs a
+    # computer_use.capability_manifest — the backend fails loudly without it.
+    configured = "standard"
+    with contextlib.suppress(Exception):
+        from tools.computer_use.cua_backend import _cua_configured_permission_mode
+        configured = _cua_configured_permission_mode()
     with contextlib.suppress(Exception):
         from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
         if is_approval_bypass_active_for_session(session_id) or (
@@ -115,14 +113,13 @@ def _cua_permission_mode(session_id: str) -> str:
                 warn = (key := str(session_id or "")) not in _escalation_warned
                 _escalation_warned.add(key)
             if warn:
-                configured = _configured_permission_mode()
                 logger.warning(
                     "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
                     "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
                     "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
                     "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
             return "unrestricted"
-    return _configured_permission_mode()
+    return configured
 
 def _new_backend(permission_mode: str) -> ComputerUseBackend:
     backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
@@ -360,8 +357,8 @@ def _do_focus_app(backend, action, args, **_):
         return json.dumps({"error": "focus_app requires `app`"})
     return backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
 
-def _listing(key: str, method: str):
-    return lambda backend, action, args, **_: json.dumps({key: (items := getattr(backend, method)()), "count": len(items)})
+def _do_listing(backend, action, args, key, **_):
+    return json.dumps({key: (items := getattr(backend, action)()), "count": len(items)})
 
 def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
     where = (f" element #{args['element']}" if args.get("element") is not None
@@ -373,30 +370,29 @@ def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
 # ``summarize(action, args, fg_suffix)`` renders the one-line approval prompt.
 _ActionSpec = namedtuple("_ActionSpec", "handler input destructive summarize",
                          defaults=(False, False, lambda a, args, fg: a + fg))
-
-def _input(handler, summarize=None) -> _ActionSpec:
-    return _ActionSpec(handler, True, True, **({"summarize": summarize} if summarize else {}))
+_input = partial(_ActionSpec, input=True, destructive=True)
 
 _ACTIONS: Dict[str, _ActionSpec] = {
-    "click": _input(_do_click, _summarize_click),
-    "double_click": _input(partial(_do_click, count=2), _summarize_click),
-    "right_click": _input(partial(_do_click, button="right"), _summarize_click),
-    "middle_click": _input(partial(_do_click, button="middle"), _summarize_click),
-    "drag": _input(_do_drag, lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
-                                                  f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
-    "scroll": _input(_do_scroll, lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
+    "click": _input(_do_click, summarize=_summarize_click),
+    "double_click": _input(partial(_do_click, count=2), summarize=_summarize_click),
+    "right_click": _input(partial(_do_click, button="right"), summarize=_summarize_click),
+    "middle_click": _input(partial(_do_click, button="middle"), summarize=_summarize_click),
+    "drag": _input(_do_drag, summarize=lambda a, args, fg: (
+        f"drag {args.get('from_element') or args.get('from_coordinate')} → "
+        f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
+    "scroll": _input(_do_scroll, summarize=lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
     "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
-                   lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
-                                        + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
+                   summarize=lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
+                                                  + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
     "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
-                  lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
+                  summarize=lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
     "set_value": _input(_do_set_value),
     "focus_app": _ActionSpec(_do_focus_app, destructive=True, summarize=lambda a, args, fg: (
         f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""))),
     "capture": _ActionSpec(_do_capture),
     "wait": _ActionSpec(lambda backend, action, args, **_: _text_response(backend.wait(float(args.get("seconds", 1.0))))),
-    "list_apps": _ActionSpec(_listing("apps", "list_apps")),
-    "list_windows": _ActionSpec(_listing("windows", "list_windows")),
+    "list_apps": _ActionSpec(partial(_do_listing, key="apps")),
+    "list_windows": _ActionSpec(partial(_do_listing, key="windows")),
 }
 # Native input actions deliver to the backend's sticky target; `app=` on these calls is NOT a
 # targeting parameter — see the mismatch guard in _dispatch.
@@ -477,12 +473,11 @@ _MAX_ELEMENT_LABEL_CHARS = 120
 # Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
 _MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
 
-def _capture_mime(cap: CaptureResult) -> str:
-    # cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/, PNG with iVBOR).
-    return cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
-
-def _capture_image_ext(cap: CaptureResult) -> str:
-    return ".jpg" if _capture_mime(cap).lower() == "image/jpeg" else ".png"  # matches on-disk bytes for MIME sniffing
+def _capture_image_format(cap: CaptureResult) -> Tuple[str, str]:
+    # (MIME, file extension): cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/,
+    # PNG with iVBOR). The extension matches the on-disk bytes for MIME sniffing.
+    mime = cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
+    return mime, (".jpg" if mime.lower() == "image/jpeg" else ".png")
 
 def _bounds_unknown(bounds) -> bool:
     # No real geometry: KDE/Qt apps report [0, 0, 0, 0] for elements clickable by index; serializing that as a
@@ -582,7 +577,7 @@ def _multimodal_capture(v: SimpleNamespace, summary: str) -> Dict[str, Any]:
     return {
         "_multimodal": True,
         "content": [{"type": "text", "text": summary},
-                    {"type": "image_url", "image_url": {"url": f"data:{_capture_mime(cap)};base64,{cap.png_b64}"}}],
+                    {"type": "image_url", "image_url": {"url": f"data:{_capture_image_format(cap)[0]};base64,{cap.png_b64}"}}],
         "text_summary": summary,
         "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total,
                  "png_bytes": cap.png_bytes_len, **_present(screenshot_path=v.screenshot_path,
@@ -682,7 +677,7 @@ def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: s
 def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
     """Copy of the capture in Hermes' media cache so attachment surfaces can deliver it (None without an image)."""
     return _write_cache_file(
-        "screenshot persistence", "cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}",
+        "screenshot persistence", "cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_format(cap)[1]}",
         "computer_use_*.*", _MAX_CAPTURE_FILES, lambda p: p.write_bytes(base64.b64decode(cap.png_b64, validate=False)),
     ) if cap.png_b64 else None
 
@@ -776,7 +771,7 @@ def _route_capture_through_aux_vision(
         problem = "failed to decode capture base64"
         raw = base64.b64decode(cap.png_b64, validate=False)
         problem = None  # from here on failures are loud (warning)
-        ext = _capture_image_ext(cap)
+        ext = _capture_image_format(cap)[1]
         temp_image_path = _cache_file("cache/vision", "temp_vision_images", f"computer_use_{uuid.uuid4().hex}{ext}")
         raw, scale_note = _shrink_capture_for_vision(raw, ext)
         temp_image_path.write_bytes(raw)
