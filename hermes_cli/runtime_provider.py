@@ -302,9 +302,7 @@ def _host_derived_api_key(base_url: str) -> str:
     labels = [lbl for lbl in hostname.split(".") if lbl]
     while labels and labels[0] in ("api", "www"):
         labels.pop(0)
-    if len(labels) < 2:
-        return ""
-    sanitized = "".join(ch if ch.isalnum() else "_" for ch in labels[-2]).upper()
+    sanitized = "".join(ch if ch.isalnum() else "_" for ch in labels[-2]).upper() if len(labels) >= 2 else ""
     if not sanitized or not sanitized[0].isalpha() or sanitized in ("OPENAI", "OPENROUTER", "OLLAMA"):
         return ""
     return (_getenv(f"{sanitized}_API_KEY", "") or "").strip()
@@ -368,9 +366,7 @@ def _auto_detect_local_model(base_url: str) -> str:
     try:
         import requests
         url = base_url.rstrip("/")
-        if not url.endswith("/v1"):
-            url += "/v1"
-        resp = requests.get(url + "/models", timeout=(2, 3))
+        resp = requests.get((url if url.endswith("/v1") else url + "/v1") + "/models", timeout=(2, 3))
         if resp.ok:
             models = resp.json().get("data", [])
             if len(models) == 1 and models[0].get("id", ""):
@@ -529,8 +525,7 @@ def _refresh_nous_pool_entry(pool: CredentialPool, entry: Any, pool_api_key: str
         logger.debug("Nous pool entry refresh failed: %s", exc)
         refreshed = None
     if refreshed is not None:
-        entry = refreshed
-        pool_api_key = _pool_entry_api_key(entry)
+        entry, pool_api_key = refreshed, _pool_entry_api_key(refreshed)
     if not pool_api_key or not _nous_entry_key_usable(entry, min_ttl):
         logger.debug("Nous pool entry agent_key still unavailable, falling through to runtime resolution")
         pool_api_key = ""
@@ -614,6 +609,10 @@ def _actual_local_key(provider: str, api_key: str, base_url: str) -> str:
     return api_key
 
 
+def _actual_url(provider: str, base_url: str) -> str:
+    return normalize_actual_base_url(base_url) if provider == "actual" else base_url
+
+
 def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, api_key, base_url, target_model):
     if not base_url:
         if provider in {"kimi-coding", "kimi-coding-cn"}:
@@ -621,15 +620,12 @@ def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg,
         else:
             env_url = _getenv(pconfig.base_url_env_var, "").strip().rstrip("/") if pconfig.base_url_env_var else ""
             base_url = env_url or pconfig.inference_base_url
-    if provider == "actual":
-        base_url = normalize_actual_base_url(base_url)
+    base_url = _actual_url(provider, base_url)
     if not api_key:
         creds = resolve_api_key_provider_credentials(provider)
         api_key = creds.get("api_key", "")
         if not base_url:
-            base_url = creds.get("base_url", "").rstrip("/")
-            if provider == "actual":
-                base_url = normalize_actual_base_url(base_url)
+            base_url = _actual_url(provider, creds.get("base_url", "").rstrip("/"))
     api_mode = _api_key_provider_api_mode(provider, model_cfg, api_key, base_url, target_model or model_cfg.get("default", ""),
                                           opencode_by_model=False)
     api_key = _actual_local_key(provider, api_key, base_url)
@@ -767,9 +763,7 @@ def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, 
     if provider == "actual" and not has_usable_secret(creds.get("api_key")):
         cfg_url = _config_base_url_for_provider(model_cfg, provider)
         if is_actual_local_base_url(normalize_actual_base_url(cfg_url or creds.get("base_url", "").rstrip("/"))):
-            creds = dict(creds)
-            creds["api_key"] = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
-            creds["source"] = creds.get("source") or "local-offline"
+            creds = {**creds, "api_key": ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, "source": creds.get("source") or "local-offline"}
     # An explicitly selected API-key provider is authoritative: an empty key would defer failure
     # to the first request and make a later fallback look like a silent provider switch.
     if not has_usable_secret(creds.get("api_key")):
@@ -777,9 +771,7 @@ def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, 
         hint = f" Set {env_names}." if env_names else ""
         raise AuthError(f"No usable credentials found for provider '{provider}'.{hint}", provider=provider, code="missing_api_key")
     # Honour model.base_url when the configured provider matches (e.g. api.minimaxi.com China endpoint).
-    base_url = _config_base_url_for_provider(model_cfg, provider) or creds.get("base_url", "").rstrip("/")
-    if provider == "actual":
-        base_url = normalize_actual_base_url(base_url)
+    base_url = _actual_url(provider, _config_base_url_for_provider(model_cfg, provider) or creds.get("base_url", "").rstrip("/"))
     api_mode = _api_key_provider_api_mode(provider, model_cfg, creds.get("api_key", ""), base_url,
                                           target_model or model_cfg.get("default", ""), opencode_by_model=True)
     base_url = _finalize_base_url(provider, api_mode, base_url)

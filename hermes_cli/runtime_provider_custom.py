@@ -357,12 +357,8 @@ def _try_resolve_from_custom_pool(
     for pool_key in candidates:
         try:
             pool = rp.load_pool(pool_key)
-            if not pool.has_credentials():
-                continue
-            entry = pool.select()
-            if entry is None:
-                continue
-            pool_api_key = rp._pool_entry_api_key(entry)
+            entry = pool.select() if pool.has_credentials() else None
+            pool_api_key = rp._pool_entry_api_key(entry) if entry is not None else ""
             if not pool_api_key:
                 continue
             if not rp.has_usable_secret(pool_api_key) and rp._loopback_hostname(base_url_hostname(base_url)):
@@ -399,7 +395,7 @@ def _apply_custom_provider_extras(custom_provider: Dict[str, Any], target_model:
         result["extra_headers"] = dict(custom_provider["extra_headers"])
     request_overrides = _custom_provider_request_overrides(custom_provider)
     if request_overrides:
-        result["request_overrides"] = {**dict(result.get("request_overrides") or {}), **request_overrides}
+        result["request_overrides"] = {**(result.get("request_overrides") or {}), **request_overrides}
 
 
 def _resolve_llamacpp_runtime(requested_provider: str, explicit_api_key: Optional[str]) -> Dict[str, Any]:
