@@ -62,9 +62,7 @@ class RateLimitCreditsMixin:
         except Exception:
             fixture = None
         if fixture is not None:
-            self._credits_state = fixture
-            if self._credits_session_start_micros is None:
-                self._credits_session_start_micros = fixture.remaining_micros
+            self._adopt_credits_state(fixture)
             latch = getattr(self, "_credits_latch", None)
             if isinstance(latch, dict):
                 # Only seen_below_90 — priming seen_grant_unspent would fire grant_spent on first observation.
@@ -96,10 +94,7 @@ class RateLimitCreditsMixin:
                 )
             return
 
-        self._credits_state = state
-        # Latch session-start remaining the first time we ever see a header.
-        if self._credits_session_start_micros is None:
-            self._credits_session_start_micros = state.remaining_micros
+        self._adopt_credits_state(state)
         if dev:
             # HERMES_DEV_CREDITS streams each capture to agent.log (`hermes logs -f`, grep 'credits ▸').
             spent = self.get_credits_spent_micros()
@@ -113,6 +108,12 @@ class RateLimitCreditsMixin:
                 (" · disabled=%s" % state.disabled_reason) if state.disabled_reason else "",
             )
         self._emit_credits_notices()
+
+    def _adopt_credits_state(self, state) -> None:
+        """Retain-last-known: overwrite state and latch session-start remaining on the first header ever seen."""
+        self._credits_state = state
+        if self._credits_session_start_micros is None:
+            self._credits_session_start_micros = state.remaining_micros
 
     def _emit_credits_notices(self) -> None:
         """Run the threshold policy on the current credits state and emit notices.

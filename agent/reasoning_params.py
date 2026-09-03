@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
+from agent.message_sanitization import matches_reasoning_echo_family
 from utils import base_url_host_matches
 
 # Static OpenRouter fallback when the live /v1/models capability cache is cold.
@@ -52,10 +53,7 @@ class ReasoningParamsMixin:
         # Live-catalog metadata first (OpenRouter /v1/models supported_parameters) — the static prefix
         # allowlist repeatedly went stale one vendor at a time. Unknown falls back to the static list.
         try:
-            from hermes_cli.models import (
-                openrouter_model_reasoning_capabilities,
-                warm_openrouter_reasoning_caps_async,
-            )
+            from hermes_cli.models import openrouter_model_reasoning_capabilities, warm_openrouter_reasoning_caps_async
             caps = openrouter_model_reasoning_capabilities(self.model)
             if caps is None:
                 warm_openrouter_reasoning_caps_async()  # cache cold — warm in the background, never block
@@ -102,9 +100,7 @@ class ReasoningParamsMixin:
             from hermes_cli.models import ollama_model_supports_thinking
         except Exception:
             return False
-        return bool(self._cached_probe(
-            "_ollama_thinking_cache", ollama_model_supports_thinking, None, lambda v: v is not None,
-        ))
+        return bool(self._cached_probe("_ollama_thinking_cache", ollama_model_supports_thinking, None, lambda v: v is not None))
 
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
         """Safe top-level ``reasoning_effort`` for LM Studio; shared with the iteration-limit summary call."""
@@ -182,17 +178,14 @@ class ReasoningParamsMixin:
     # provider and no model (its rule matches exact provider ids + hosts only).
     def _needs_kimi_tool_reasoning(self) -> bool:
         """True when the current provider is Kimi / Moonshot thinking mode."""
-        from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family("kimi", self.provider, None, self.base_url)
 
     def _needs_deepseek_tool_reasoning(self) -> bool:
         """True when the current provider is DeepSeek thinking mode (omitting the echo is an HTTP 400)."""
-        from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family("deepseek", (self.provider or "").lower(), self.model, self.base_url)
 
     def _needs_mimo_tool_reasoning(self) -> bool:
         """True when the current provider is Xiaomi MiMo thinking mode."""
-        from agent.message_sanitization import matches_reasoning_echo_family
         return matches_reasoning_echo_family("mimo", (self.provider or "").lower(), self.model, self.base_url)
 
     _copy_reasoning_content_for_api = _forward("agent.agent_runtime_helpers", "copy_reasoning_content_for_api")

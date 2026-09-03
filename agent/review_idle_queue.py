@@ -24,6 +24,7 @@ import logging
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -73,14 +74,12 @@ def review_targets_managed_local(agent: Any, task_cfg: Optional[Dict[str, Any]])
         return False
 
 
+@dataclass(slots=True)
 class _PendingReview:
-    __slots__ = ("agent", "kwargs", "enqueued_at", "session_key")
-
-    def __init__(self, agent: Any, session_key: str, kwargs: Dict[str, Any], enqueued_at: float):
-        self.agent = agent
-        self.session_key = session_key
-        self.kwargs = kwargs
-        self.enqueued_at = enqueued_at
+    agent: Any
+    session_key: str
+    kwargs: Dict[str, Any]
+    enqueued_at: float
 
 
 class ReviewIdleQueue:
@@ -155,14 +154,13 @@ class ReviewIdleQueue:
             aged = [p for p in self._pending.values()
                     if now - p.enqueued_at >= defer_max_age_s(p.kwargs.get("task_cfg"))]
             candidate = min(aged, key=lambda p: p.enqueued_at) if aged else None
-        if candidate is None:
-            if self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle():
-                return None
-            with self._lock:
+        if candidate is None and (self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle()):
+            return None
+        with self._lock:
+            if candidate is None:
                 if not self._pending:
                     return None
                 candidate = min(self._pending.values(), key=lambda p: p.enqueued_at)
-        with self._lock:
             return self._pending.pop(candidate.session_key, None)
 
     def _run(self) -> None:

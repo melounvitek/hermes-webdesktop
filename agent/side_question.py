@@ -125,10 +125,7 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     stays byte-identical for cache parity, but the side question can never mutate anything.
     """
     from agent.background_review import (
-        _digest_history,
-        _record_review_usage_to_parent,
-        _snapshot_review_usage,
-        build_cache_parity_fork,
+        _digest_history, _record_review_usage_to_parent, _snapshot_review_usage, build_cache_parity_fork,
     )
     from hermes_cli.plugins import clear_thread_tool_whitelist, set_thread_tool_whitelist
 
@@ -173,15 +170,10 @@ def _answer_via_oneshot(question: str, history: Optional[List[Dict[str, Any]]], 
     from agent.oneshot import run_oneshot
 
     user_input = (
-        "Conversation transcript (snapshot):\n"
-        "-----\n"
-        f"{render_history_for_side_question(history)}\n"
-        "-----\n\n"
+        f"Conversation transcript (snapshot):\n-----\n{render_history_for_side_question(history)}\n-----\n\n"
         f"Side question: {question}"
     )
-    return run_oneshot(
-        instructions=_ONESHOT_INSTRUCTIONS, user_input=user_input, task=SIDE_QUESTION_TASK, **run_kwargs
-    )
+    return run_oneshot(instructions=_ONESHOT_INSTRUCTIONS, user_input=user_input, task=SIDE_QUESTION_TASK, **run_kwargs)
 
 
 def answer_side_question(

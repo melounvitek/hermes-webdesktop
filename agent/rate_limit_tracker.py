@@ -156,12 +156,7 @@ def format_rate_limit_display(state: RateLimitState) -> str:
         return "No rate limit data yet — make an API request first."
 
     age = state.age_seconds
-    if age < 5:
-        freshness = "just now"
-    elif age < 60:
-        freshness = f"{int(age)}s ago"
-    else:
-        freshness = f"{_fmt_seconds(age)} ago"
+    freshness = "just now" if age < 5 else f"{int(age)}s ago" if age < 60 else f"{_fmt_seconds(age)} ago"
 
     provider_label = state.provider.title() if state.provider else "Provider"
     labeled = [
