@@ -2,12 +2,10 @@
 
 Walks the user through the 6 credentials Meta requires + recipient allowlist, auto-generates the
 verify token, and prints exact follow-up instructions for the parts that can't happen inside the
-wizard process (starting cloudflared, starting the gateway, configuring Meta's webhook dashboard,
-adding their phone to the recipient list).
+wizard process (cloudflared, gateway, Meta's webhook dashboard, recipient list).
 
-The wizard intentionally does NOT smoke-test the webhook itself — the Hermes gateway and the
-cloudflared tunnel both run in separate processes the user starts AFTER this wizard exits, so any
-in-wizard probe would fail by design.
+The wizard intentionally does NOT smoke-test the webhook: the gateway and the tunnel both run in
+separate processes the user starts AFTER this wizard exits, so any in-wizard probe would fail.
 """
 
 from __future__ import annotations
@@ -19,32 +17,21 @@ import sys
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
-# Field-shape validators
-# ---------------------------------------------------------------------------
-#
-# Each validator returns (ok, reason_if_not_ok). The wizard uses them to
-# reject obviously-malformed input before saving — saves users a round
-# trip with Meta's 401 / 400 errors.
-
+# --- Field-shape validators: each returns (ok, reason_if_not_ok) so obviously-malformed input is
+# rejected before saving, sparing a round trip with Meta's 401 / 400 errors.
 
 def _validate_phone_number_id(value: str) -> tuple[bool, Optional[str]]:
-    """Phone Number ID is a 15-17 digit numeric ID assigned by Meta.
+    """Phone Number ID is a 15-17 digit numeric ID assigned by Meta — NOT a phone number.
 
-    It's NOT a phone number. The #1 setup mistake is pasting the actual phone number (e.g.
-    ``15556422442``) into this field — that's only 10-11 digits and gets rejected by Graph as
-    "Object with ID does not exist."
+    The #1 setup mistake is pasting the actual phone number (10-11 digits), which Graph rejects
+    with "Object with ID does not exist."
     """
     if not value:
         return False, "Phone Number ID is required"
     s = value.strip()
     if not s.isdigit():
         return False, "Phone Number ID must be numeric (no '+', spaces, or dashes)"
-    # Real phone numbers are 10-11 digits (US/CA country code + area code
-    # + 7 digits). Meta's internal IDs are 15-17 digits. If we see a
-    # phone-number-sized value, the user almost certainly pasted the
-    # phone number by mistake.
-    if 10 <= len(s) <= 12:
+    if 10 <= len(s) <= 12:  # phone-number-sized: almost certainly the number itself
         return False, (
             "That looks like a phone number — but this field needs the "
             "Phone Number ID (Meta's internal ID, 15-17 digits, e.g. "
@@ -104,16 +91,11 @@ def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
 
 
 def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
-    """Meta access tokens start with ``EAA`` and are 100-300+ characters.
-
-    Both temp tokens (24h) and System User permanent tokens share this prefix. We don't try to
-    distinguish them.
-    """
+    """Meta access tokens (temp and System User alike) start with ``EAA``, 100-300+ chars."""
     if not value:
         return False, "Access token is required"
     s = value.strip()
     if not s.startswith("EAA"):
-        # Diagnose common paste mistakes
         for prefixes, reason in _FOREIGN_TOKEN_PREFIXES:
             if s.startswith(prefixes):
                 return False, reason
@@ -128,10 +110,7 @@ def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
     return True, None
 
 
-# ---------------------------------------------------------------------------
-# Prompt helpers
-# ---------------------------------------------------------------------------
-
+# --- Prompt helpers
 
 def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -> str:
     """Read one line of input. Returns "" on EOF / Ctrl+C / empty input.
@@ -145,21 +124,15 @@ def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -
         if secret and sys.stdin.isatty():
             import getpass
 
-            raw = getpass.getpass(f"{message}{suffix} (input hidden): ").strip()
-        else:
-            raw = line_input(f"{message}{suffix}: ").strip()
+            return getpass.getpass(f"{message}{suffix} (input hidden): ").strip()
+        return line_input(f"{message}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return ""
-    return raw
 
 
 def _prompt_validated(
-    message: str,
-    validator,
-    *,
-    current: Optional[str] = None,
-    help_text: Optional[str] = None,
+    message: str, validator, *, current: Optional[str] = None, help_text: Optional[str] = None,
     secret: bool = False,
 ) -> Optional[str]:
     """Repeat the prompt until the user enters a valid value or aborts.
@@ -190,15 +163,18 @@ def _prompt_validated(
             attempts = 0
 
 
-# ---------------------------------------------------------------------------
-# Wizard
-# ---------------------------------------------------------------------------
-
+# --- Wizard
 
 def _header(title: str) -> None:
     print("─" * 50)
     print(title)
     print("─" * 50)
+
+
+def _lines(*lines: str) -> None:
+    """print() each line; ``""`` yields a blank line."""
+    for line in lines:
+        print(line)
 
 
 def _save_optional(key: str, value: Optional[str], current: Optional[str]) -> None:
@@ -211,6 +187,87 @@ def _save_optional(key: str, value: Optional[str], current: Optional[str]) -> No
         print(f"  ✓ Keeping existing: {current}")
 
 
+# Credential steps 1-3: (step title, env var, prompt label, validator, secret, preview chars of
+# the existing value shown as default (0 = full), "saved" line, "kept" line, lines printed when
+# nothing is configured, abort-when-missing). ``{v}`` in the saved/kept lines is the value.
+_CREDENTIAL_STEPS = (
+    ("STEP 1 — Phone Number ID", "WHATSAPP_CLOUD_PHONE_NUMBER_ID", "Phone Number ID",
+     _validate_phone_number_id, False, 0, "  ✓ Saved: {v}", "  ✓ Keeping existing: {v}",
+     ("\n✗ Phone Number ID is required. Aborting.",), True,
+     "Found in: App Dashboard → WhatsApp → API Setup, in the\n"
+     "'Send and receive messages' section.\n"
+     "Look BELOW the 'From' dropdown — there's a 'Phone number ID'\n"
+     "line with the value (15-17 digits, e.g. '7794189252778687').\n"
+     "It is NOT the phone number itself (+1 555-...). That's the\n"
+     "single most common setup mistake."),
+    ("STEP 2 — Access Token", "WHATSAPP_CLOUD_ACCESS_TOKEN", "Access Token",
+     _validate_access_token, True, 15, "  ✓ Saved (token hidden)", "  ✓ Keeping existing token",
+     ("\n✗ Access Token is required. Aborting.",), True,
+     "Two options for getting one:\n\n"
+     "  (a) TEMP — App Dashboard → WhatsApp → API Setup →\n"
+     "      'Generate access token' button. Lasts 24 hours.\n"
+     "      Fine for testing today; you'll have to regenerate\n"
+     "      tomorrow.\n\n"
+     "  (b) PERMANENT (production) — System User token. One-time\n"
+     "      setup, never expires:\n"
+     "      • business.facebook.com → Settings → System users →\n"
+     "        Add → Admin role\n"
+     "      • Assign Assets → your app (Manage app), your\n"
+     "        WhatsApp account (Manage WABAs)\n"
+     "      • Generate token → expiration: Never → permissions:\n"
+     "        business_management, whatsapp_business_messaging,\n"
+     "        whatsapp_business_management\n\n"
+     "Tokens start with 'EAA'."),
+    ("STEP 3 — App Secret (required for webhook signature verification)", "WHATSAPP_CLOUD_APP_SECRET",
+     "App Secret", _validate_app_secret, True, 8, "  ✓ Saved (secret hidden)",
+     "  ✓ Keeping existing App Secret",
+     ("\n⚠ Skipping App Secret — inbound webhooks will be refused",
+      "   until you set WHATSAPP_CLOUD_APP_SECRET manually."), False,
+     "Found in: App Dashboard → Settings → Basic →\n"
+     "'App secret' field (click 'Show', enter your Facebook password).\n\n"
+     "If 'Show' doesn't appear, you may need Admin role on the app.\n"
+     "It's a 32-character lowercase hex string.\n\n"
+     "Without the App Secret, inbound webhook POSTs are refused\n"
+     "with HTTP 503 (we can't verify they actually came from Meta)."),
+)
+
+# Optional step-4 IDs: (prompt label, env var, validator, help text).
+_OPTIONAL_ID_STEPS = (
+    ("App ID (optional, press Enter to skip)", "WHATSAPP_CLOUD_APP_ID", _validate_app_id,
+     "Found in: App Dashboard → Settings → Basic → 'App ID' at the\n"
+     "top of the page. Numeric, ~15-16 digits.\n"
+     "Not required for messaging — useful only for analytics later."),
+    ("WABA ID (optional, press Enter to skip)", "WHATSAPP_CLOUD_WABA_ID", _validate_waba_id,
+     "WhatsApp Business Account ID. Found in: App Dashboard →\n"
+     "WhatsApp → API Setup, near the top — 'WhatsApp Business\n"
+     "Account ID'. Numeric, ~15+ digits.\n"
+     "Not required for messaging — useful for analytics."),
+)
+
+
+def _credential_step(step) -> tuple[Optional[str], bool]:
+    """Run one _CREDENTIAL_STEPS entry. Returns (effective value, abort)."""
+    from hermes_cli.config import get_env_value, save_env_value
+
+    title, env_var, label, validator, secret, preview, saved, kept, missing, required, help_text = step
+    _header(title)
+    current = get_env_value(env_var) or None
+    shown = (current[:preview] + "...") if (preview and current) else current
+    value = _prompt_validated(label, validator, current=shown, secret=secret, help_text=help_text)
+    if value:
+        save_env_value(env_var, value)
+        print(saved.format(v=value))
+    elif current:
+        value = current
+        print(kept.format(v=value))
+    else:
+        _lines(*missing)
+        if required:
+            return None, True
+    print()
+    return value, False
+
+
 def run_whatsapp_cloud_setup() -> int:
     """Interactive wizard for the WhatsApp Cloud API adapter.
 
@@ -219,28 +276,23 @@ def run_whatsapp_cloud_setup() -> int:
     """
     from hermes_cli.config import get_env_value, save_env_value
 
-    print()
-    print("⚕ WhatsApp Business Cloud API Setup")
-    print("=" * 50)
-    print()
-    print("This wizard configures Hermes to talk to WhatsApp via Meta's")
-    print("official Cloud API. It's the production-grade path:")
-    print()
-    print("  • No QR codes, no Node.js bridge subprocess")
-    print("  • Stable connection — no account-ban risk")
-    print("  • Business account required (not personal WhatsApp)")
-    print("  • Public webhook URL required (Cloudflare Tunnel, ngrok,")
-    print("    or your own reverse proxy with TLS)")
-    print()
-    print("If you don't have a Meta app set up yet, follow these steps")
-    print("FIRST, then come back and re-run this wizard:")
-    print()
-    print("  1. https://developers.facebook.com/apps → Create App")
-    print("     → 'Connect with customers through WhatsApp'")
-    print("  2. App Dashboard → WhatsApp → API Setup")
-    print("  3. Click 'Generate access token' (temp 24h token is fine to")
-    print("     start; switch to a System User permanent token later)")
-    print()
+    _lines(
+        "", "⚕ WhatsApp Business Cloud API Setup", "=" * 50, "",
+        "This wizard configures Hermes to talk to WhatsApp via Meta's",
+        "official Cloud API. It's the production-grade path:", "",
+        "  • No QR codes, no Node.js bridge subprocess",
+        "  • Stable connection — no account-ban risk",
+        "  • Business account required (not personal WhatsApp)",
+        "  • Public webhook URL required (Cloudflare Tunnel, ngrok,",
+        "    or your own reverse proxy with TLS)", "",
+        "If you don't have a Meta app set up yet, follow these steps",
+        "FIRST, then come back and re-run this wizard:", "",
+        "  1. https://developers.facebook.com/apps → Create App",
+        "     → 'Connect with customers through WhatsApp'",
+        "  2. App Dashboard → WhatsApp → API Setup",
+        "  3. Click 'Generate access token' (temp 24h token is fine to",
+        "     start; switch to a System User permanent token later)", "",
+    )
     try:
         input("Press Enter to continue, or Ctrl+C to abort... ")
     except (EOFError, KeyboardInterrupt):
@@ -248,128 +300,21 @@ def run_whatsapp_cloud_setup() -> int:
         return 1
 
     print()
-    _header("STEP 1 — Phone Number ID")
-    current_phone_id = get_env_value("WHATSAPP_CLOUD_PHONE_NUMBER_ID") or None
-    phone_id = _prompt_validated(
-        "Phone Number ID",
-        _validate_phone_number_id,
-        current=current_phone_id,
-        help_text=(
-            "Found in: App Dashboard → WhatsApp → API Setup, in the\n"
-            "'Send and receive messages' section.\n"
-            "Look BELOW the 'From' dropdown — there's a 'Phone number ID'\n"
-            "line with the value (15-17 digits, e.g. '7794189252778687').\n"
-            "It is NOT the phone number itself (+1 555-...). That's the\n"
-            "single most common setup mistake."
-        ),
-    )
-    if not phone_id:
-        if current_phone_id:
-            phone_id = current_phone_id
-            print(f"  ✓ Keeping existing: {phone_id}")
-        else:
-            print("\n✗ Phone Number ID is required. Aborting.")
+    for step in _CREDENTIAL_STEPS:
+        _, abort = _credential_step(step)
+        if abort:
             return 1
-    else:
-        save_env_value("WHATSAPP_CLOUD_PHONE_NUMBER_ID", phone_id)
-        print(f"  ✓ Saved: {phone_id}")
-    print()
-
-    _header("STEP 2 — Access Token")
-    current_token = get_env_value("WHATSAPP_CLOUD_ACCESS_TOKEN") or None
-    current_display = (current_token[:15] + "...") if current_token else None
-    token = _prompt_validated(
-        "Access Token",
-        _validate_access_token,
-        current=current_display,
-        secret=True,
-        help_text=(
-            "Two options for getting one:\n\n"
-            "  (a) TEMP — App Dashboard → WhatsApp → API Setup →\n"
-            "      'Generate access token' button. Lasts 24 hours.\n"
-            "      Fine for testing today; you'll have to regenerate\n"
-            "      tomorrow.\n\n"
-            "  (b) PERMANENT (production) — System User token. One-time\n"
-            "      setup, never expires:\n"
-            "      • business.facebook.com → Settings → System users →\n"
-            "        Add → Admin role\n"
-            "      • Assign Assets → your app (Manage app), your\n"
-            "        WhatsApp account (Manage WABAs)\n"
-            "      • Generate token → expiration: Never → permissions:\n"
-            "        business_management, whatsapp_business_messaging,\n"
-            "        whatsapp_business_management\n\n"
-            "Tokens start with 'EAA'."
-        ),
-    )
-    # If they had a current token and just hit Enter, keep it.
-    if not token:
-        if current_token:
-            token = current_token
-            print("  ✓ Keeping existing token")
-        else:
-            print("\n✗ Access Token is required. Aborting.")
-            return 1
-    else:
-        save_env_value("WHATSAPP_CLOUD_ACCESS_TOKEN", token)
-        print("  ✓ Saved (token hidden)")
-    print()
-
-    _header("STEP 3 — App Secret (required for webhook signature verification)")
-    current_secret = get_env_value("WHATSAPP_CLOUD_APP_SECRET") or None
-    current_secret_display = (current_secret[:8] + "...") if current_secret else None
-    app_secret = _prompt_validated(
-        "App Secret",
-        _validate_app_secret,
-        current=current_secret_display,
-        secret=True,
-        help_text=(
-            "Found in: App Dashboard → Settings → Basic →\n"
-            "'App secret' field (click 'Show', enter your Facebook password).\n\n"
-            "If 'Show' doesn't appear, you may need Admin role on the app.\n"
-            "It's a 32-character lowercase hex string.\n\n"
-            "Without the App Secret, inbound webhook POSTs are refused\n"
-            "with HTTP 503 (we can't verify they actually came from Meta)."
-        ),
-    )
-    if not app_secret:
-        if current_secret:
-            app_secret = current_secret
-            print("  ✓ Keeping existing App Secret")
-        else:
-            print("\n⚠ Skipping App Secret — inbound webhooks will be refused")
-            print("   until you set WHATSAPP_CLOUD_APP_SECRET manually.")
-    else:
-        save_env_value("WHATSAPP_CLOUD_APP_SECRET", app_secret)
-        print("  ✓ Saved (secret hidden)")
-    print()
 
     _header("STEP 4 — App ID & WABA ID (optional, for analytics)")
-    current_app_id = get_env_value("WHATSAPP_CLOUD_APP_ID") or None
-    app_id = _prompt_validated(
-        "App ID (optional, press Enter to skip)",
-        lambda v: (True, None) if not v else _validate_app_id(v),
-        current=current_app_id,
-        help_text=(
-            "Found in: App Dashboard → Settings → Basic → 'App ID' at the\n"
-            "top of the page. Numeric, ~15-16 digits.\n"
-            "Not required for messaging — useful only for analytics later."
-        ),
-    )
-    _save_optional("WHATSAPP_CLOUD_APP_ID", app_id, current_app_id)
-
-    current_waba_id = get_env_value("WHATSAPP_CLOUD_WABA_ID") or None
-    waba_id = _prompt_validated(
-        "WABA ID (optional, press Enter to skip)",
-        lambda v: (True, None) if not v else _validate_waba_id(v),
-        current=current_waba_id,
-        help_text=(
-            "WhatsApp Business Account ID. Found in: App Dashboard →\n"
-            "WhatsApp → API Setup, near the top — 'WhatsApp Business\n"
-            "Account ID'. Numeric, ~15+ digits.\n"
-            "Not required for messaging — useful for analytics."
-        ),
-    )
-    _save_optional("WHATSAPP_CLOUD_WABA_ID", waba_id, current_waba_id)
+    ids = {}
+    for label, env_var, validator, help_text in _OPTIONAL_ID_STEPS:
+        current = get_env_value(env_var) or None
+        value = _prompt_validated(
+            label, lambda v, _val=validator: (True, None) if not v else _val(v),
+            current=current, help_text=help_text,
+        )
+        _save_optional(env_var, value, current)
+        ids[env_var] = value or current
     print()
 
     _header("STEP 5 — Verify Token (auto-generated)")
@@ -391,18 +336,16 @@ def run_whatsapp_cloud_setup() -> int:
         verify_token = secrets.token_urlsafe(32)
         save_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN", verify_token)
         print(f"  ✓ Generated: {verify_token}")
-    print()
-    print("  → COPY THIS TOKEN NOW. You'll paste it into Meta's webhook")
-    print("    configuration dialog (next step).")
-    print()
+    _lines("", "  → COPY THIS TOKEN NOW. You'll paste it into Meta's webhook",
+           "    configuration dialog (next step).", "")
 
     _header("STEP 6 — Recipient Allowlist")
-    print()
-    print("  Who is allowed to message the bot? (Comma-separated phone")
-    print("  numbers with country code, no '+' / spaces / dashes. Use '*'")
-    print("  to allow anyone — only safe if you've also configured Meta's")
-    print("  recipient whitelist for app-development mode.)")
-    print()
+    _lines(
+        "", "  Who is allowed to message the bot? (Comma-separated phone",
+        "  numbers with country code, no '+' / spaces / dashes. Use '*'",
+        "  to allow anyone — only safe if you've also configured Meta's",
+        "  recipient whitelist for app-development mode.)", "",
+    )
     allow_default = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
     try:
         allowed = line_input(
@@ -412,84 +355,70 @@ def run_whatsapp_cloud_setup() -> int:
         allowed = ""
     if allowed:
         # Light normalization — strip spaces and dashes from each entry.
-        allowed = ",".join(
-            re.sub(r"[\s\-+]", "", part) for part in allowed.split(",") if part.strip()
-        )
+        allowed = ",".join(re.sub(r"[\s\-+]", "", part) for part in allowed.split(",") if part.strip())
         save_env_value("WHATSAPP_CLOUD_ALLOWED_USERS", allowed)
         print(f"  ✓ Saved: {allowed}")
     else:
-        print("  ⚠ No allowlist — every inbound message will be denied.")
-        print("    Re-run this wizard or set WHATSAPP_CLOUD_ALLOWED_USERS manually.")
+        _lines("  ⚠ No allowlist — every inbound message will be denied.",
+               "    Re-run this wizard or set WHATSAPP_CLOUD_ALLOWED_USERS manually.")
     print()
 
     _header("SETUP COMPLETE — Next steps")
-    print()
-    print("  Hermes needs a public HTTPS URL to receive WhatsApp messages.")
-    print("  The recommended path is Cloudflare Tunnel (free, no port")
-    print("  forwarding, no DNS setup).")
-    print()
-    print("    1. Install cloudflared (one-time, if you don't have it):")
-    print("         Windows:  winget install Cloudflare.cloudflared")
-    print("         macOS:    brew install cloudflared")
-    print("         Linux:    https://github.com/cloudflare/cloudflared/releases")
-    print()
-    print("       Alternatives: ngrok, or your own domain + reverse proxy")
-    print("       with TLS.")
-    print()
-    print("    2. Start the tunnel in a separate terminal:")
-    print("         cloudflared tunnel --url http://localhost:8090")
-    print("       Note the printed https://<random>.trycloudflare.com URL.")
-    print()
-    print("    3. Start the Hermes gateway in another terminal:")
-    print("         hermes gateway")
-    print()
-    print("    4. Verify your local config is reachable. From a third")
-    print("       terminal, with the tunnel URL substituted:")
-    print()
-    print("         curl 'https://YOUR-TUNNEL.trycloudflare.com/whatsapp/webhook?\\")
-    print(f"               hub.mode=subscribe&hub.verify_token={verify_token}&\\")
-    print("               hub.challenge=hello'")
-    print()
-    print("       Expected: HTTP 200 with body 'hello'.")
-    print("       Also try: curl https://YOUR-TUNNEL.trycloudflare.com/health")
-    print("       (should return JSON with verify_token_configured: true).")
-    print()
-    print("    5. Configure Meta to point at your tunnel:")
-    print("         App Dashboard → WhatsApp → Configuration → Edit webhook")
-    print("         Callback URL: <tunnel-url>/whatsapp/webhook")
-    print(f"         Verify Token: {verify_token}")
-    print("         → Click 'Verify and save'")
-    print("         → Then 'Manage' webhook fields → subscribe to 'messages'")
-    print()
-    print("    6. Add your phone to Meta's recipient list:")
-    print("         App Dashboard → WhatsApp → API Setup → 'To' →")
-    print("         'Manage phone number list'")
-    print()
-    print("    7. DM the bot's test number from your phone.")
-    print()
+    _lines(
+        "", "  Hermes needs a public HTTPS URL to receive WhatsApp messages.",
+        "  The recommended path is Cloudflare Tunnel (free, no port",
+        "  forwarding, no DNS setup).", "",
+        "    1. Install cloudflared (one-time, if you don't have it):",
+        "         Windows:  winget install Cloudflare.cloudflared",
+        "         macOS:    brew install cloudflared",
+        "         Linux:    https://github.com/cloudflare/cloudflared/releases", "",
+        "       Alternatives: ngrok, or your own domain + reverse proxy",
+        "       with TLS.", "",
+        "    2. Start the tunnel in a separate terminal:",
+        "         cloudflared tunnel --url http://localhost:8090",
+        "       Note the printed https://<random>.trycloudflare.com URL.", "",
+        "    3. Start the Hermes gateway in another terminal:",
+        "         hermes gateway", "",
+        "    4. Verify your local config is reachable. From a third",
+        "       terminal, with the tunnel URL substituted:", "",
+        "         curl 'https://YOUR-TUNNEL.trycloudflare.com/whatsapp/webhook?\\",
+        f"               hub.mode=subscribe&hub.verify_token={verify_token}&\\",
+        "               hub.challenge=hello'", "",
+        "       Expected: HTTP 200 with body 'hello'.",
+        "       Also try: curl https://YOUR-TUNNEL.trycloudflare.com/health",
+        "       (should return JSON with verify_token_configured: true).", "",
+        "    5. Configure Meta to point at your tunnel:",
+        "         App Dashboard → WhatsApp → Configuration → Edit webhook",
+        "         Callback URL: <tunnel-url>/whatsapp/webhook",
+        f"         Verify Token: {verify_token}",
+        "         → Click 'Verify and save'",
+        "         → Then 'Manage' webhook fields → subscribe to 'messages'", "",
+        "    6. Add your phone to Meta's recipient list:",
+        "         App Dashboard → WhatsApp → API Setup → 'To' →",
+        "         'Manage phone number list'", "",
+        "    7. DM the bot's test number from your phone.", "",
+    )
     _header("Optional: polish your bot's WhatsApp profile")
-    print()
-    print("  WhatsApp shows a display name and profile picture for your bot")
-    print("  in every chat header and contact list. These are set in Meta's")
-    print("  Business Manager, not via this wizard — but here's where to do")
-    print("  it once you're up and running:")
-    print()
-    effective_waba = waba_id or current_waba_id
-    print("    • Display name + profile picture:")
-    print("        https://business.facebook.com/wa/manage/phone-numbers/"
-          + (f"?waba_id={effective_waba}" if effective_waba else ""))
+    effective_waba = ids["WHATSAPP_CLOUD_WABA_ID"]
+    _lines(
+        "", "  WhatsApp shows a display name and profile picture for your bot",
+        "  in every chat header and contact list. These are set in Meta's",
+        "  Business Manager, not via this wizard — but here's where to do",
+        "  it once you're up and running:", "",
+        "    • Display name + profile picture:",
+        "        https://business.facebook.com/wa/manage/phone-numbers/"
+        + (f"?waba_id={effective_waba}" if effective_waba else ""),
+    )
     if not effective_waba:
         print("        (select your WhatsApp Business Account on that page)")
-    print("        Display-name changes go through a ~24-48h Meta review.")
-    print()
-    print("    • About, description, website, hours, business category:")
-    print("        Same page → click your phone number → 'Edit profile'.")
-    print()
-    print("    • Verified badge (the green check):")
-    print("        Requires Meta's business verification process —")
-    print("        Business Manager → Security Center → Start Verification.")
-    print()
-    print("  Docs: https://hermes-agent.nousresearch.com/docs/user-guide/")
-    print("        messaging/whatsapp-cloud")
-    print()
+    _lines(
+        "        Display-name changes go through a ~24-48h Meta review.", "",
+        "    • About, description, website, hours, business category:",
+        "        Same page → click your phone number → 'Edit profile'.", "",
+        "    • Verified badge (the green check):",
+        "        Requires Meta's business verification process —",
+        "        Business Manager → Security Center → Start Verification.", "",
+        "  Docs: https://hermes-agent.nousresearch.com/docs/user-guide/",
+        "        messaging/whatsapp-cloud", "",
+    )
     return 0
