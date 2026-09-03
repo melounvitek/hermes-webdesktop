@@ -322,7 +322,6 @@ def _attribution_headers() -> Dict[str, str]:
 def _client_timeout(timeout):
     """httpx.Timeout with the caller's read timeout (default 900s) and a 10s connect."""
     from httpx import Timeout
-
     read = timeout if (isinstance(timeout, (int, float)) and timeout > 0) else 900.0
     return Timeout(timeout=float(read), connect=10.0)
 
@@ -353,9 +352,7 @@ def _build_anthropic_client_with_bearer_hook(
     placeholder ``auth_token`` is still required at construction and makes any leak diagnosable."""
     sdk = _require_sdk("Azure Foundry Anthropic-style endpoints with Entra ID auth", verb="Install with")
     normalize_proxy_env_vars()
-
     from agent.azure_identity_adapter import build_bearer_http_client
-
     normalized_base_url, kwargs = _base_client_kwargs(base_url, timeout)
     kwargs["http_client"] = build_bearer_http_client(token_provider, timeout=kwargs["timeout"])
     kwargs["auth_token"] = "entra-id-bearer-via-http-hook"
@@ -406,13 +403,11 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
         return _build_anthropic_client_with_bearer_hook(
             api_key, base_url, timeout, drop_context_1m_beta=drop_context_1m_beta
         )
-
     normalize_proxy_env_vars()
     normalized_base_url, kwargs = _base_client_kwargs(base_url, timeout)
     if "default_query" in kwargs:  # historical: this path also strips a stray trailing slash on Azure
         kwargs["base_url"] = normalized_base_url.rstrip("/")
     common_betas = _common_betas_for_base_url(normalized_base_url, drop_context_1m_beta=drop_context_1m_beta)
-
     style = _auth_style(api_key, base_url, normalized_base_url)
     kwargs["auth_token" if style in ("bearer", "oauth") else "api_key"] = api_key
     headers = _beta_header(common_betas + _OAUTH_ONLY_BETAS if style == "oauth" else common_betas)
@@ -421,7 +416,6 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
     elif style == "oauth":
         headers["user-agent"] = f"claude-code/{_get_claude_code_version()} (external, cli)"
         headers["x-app"] = "cli"
-
     if _is_opencode_endpoint(base_url):
         # OpenCode identifies clients by request headers (like OpenRouter). The OpenAI-wire paths
         # get these from profile.default_headers, but this route never sees the profile.
@@ -503,14 +497,12 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
             for old, new in _OAUTH_SYSTEM_REPLACEMENTS:
                 text = text.replace(old, new)
             block["text"] = _apply_oauth_prose_aliases(text)
-
     for tool in anthropic_tools or []:
         if "name" in tool:
             tool["name"] = to_wire(tool["name"])
         description = tool.get("description")
         if isinstance(description, str):
             tool["description"] = _apply_oauth_prose_aliases(description)  # prose-safe aliases only
-
     for msg in anthropic_messages:
         content = msg.get("content")
         if isinstance(content, list):
@@ -645,7 +637,6 @@ def _is_stream_unavailable_error(exc: Exception) -> bool:
     if "invokemodelwithresponsestream" not in err_lower:
         return False
     from agent.bedrock_adapter import is_streaming_access_denied_error
-
     return is_streaming_access_denied_error(exc)
 
 

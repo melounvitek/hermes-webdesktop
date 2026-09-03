@@ -102,7 +102,6 @@ def finish_background_review_run(agent: Any, run: Optional[_BackgroundReviewRun]
 def _interrupt_background_review(review_agent: Any) -> None:
     """Request abort off-thread so a wedged abort hook cannot stall the live turn (the bounded
     ``request_done`` wait in the canceller relies on this returning fast)."""
-
     def _interrupt() -> None:
         try:
             from agent.interrupt_compat import request_hard_interrupt
@@ -165,7 +164,6 @@ def _background_review_task_config(task_cfg: Optional[Dict[str, Any]] = None) ->
         return task_cfg if isinstance(task_cfg, dict) else {}
     try:
         from hermes_cli.config import load_config_readonly
-
         return _task_block(load_config_readonly())
     except Exception:
         return {}
@@ -187,7 +185,6 @@ def load_background_review_settings() -> tuple[bool, Dict[str, Any]]:
     try:
         from hermes_cli.config import load_config_readonly
         from utils import is_truthy_value
-
         task = _task_block(load_config_readonly())
         return is_truthy_value(task.get("enabled"), default=True), task
     except Exception:
@@ -618,7 +615,6 @@ def summarize_background_review_actions(
     verbose = mode == "verbose"
     existing_tool_call_ids, existing_tool_contents = _prior_tool_keys(prior_snapshot)
     all_tool_call_ids, call_details = _collect_review_call_details(review_messages)
-
     actions: List[str] = []
     for msg in _tool_messages(review_messages):
         tcid = msg.get("tool_call_id")
@@ -679,11 +675,9 @@ def _record_review_usage_to_parent(parent_agent: Any, usage: Dict[str, Any]) -> 
     try:
         session_db = getattr(parent_agent, "_session_db", None)
         session_id = getattr(parent_agent, "session_id", None)
-        if session_db is None or not session_id:
-            return
         counts = {key: int(usage.get(key) or 0) for key in _USAGE_COUNTERS}
-        if not any(counts.values()):
-            return  # fork made no successful API calls (e.g. failed at spawn)
+        if session_db is None or not session_id or not any(counts.values()):
+            return  # no DB, or the fork made no successful API calls (e.g. failed at spawn)
         session_db.record_auxiliary_usage(
             session_id, task="background_review", model=usage.get("model"),
             billing_provider=usage.get("provider"), billing_base_url=usage.get("base_url"),
@@ -734,17 +728,13 @@ def _same_model_parity_kwargs(agent: Any) -> Dict[str, Any]:
         # is appended to the cached system prompt at API-call time (without it the prompt diverges).
         "reasoning_config": getattr(agent, "reasoning_config", None),
         "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None),
+        **{attr: val for attr in _PROVIDER_PIN_ATTRS if (val := getattr(agent, attr, None))},
     }
     # Prefill sits right after the system message, so a parent with prefill would diverge at
     # index 1. Deep copy: unicode-error recovery sanitizes prefill entries IN PLACE and must not
     # rewrite the parent's bytes.
-    parent_prefill = copy.deepcopy(getattr(agent, "prefill_messages", None) or [])
-    if parent_prefill:
+    if parent_prefill := copy.deepcopy(getattr(agent, "prefill_messages", None) or []):
         kwargs["prefill_messages"] = parent_prefill
-    for attr in _PROVIDER_PIN_ATTRS:
-        val = getattr(agent, attr, None)
-        if val:
-            kwargs[attr] = val
     return kwargs
 
 
@@ -797,8 +787,7 @@ def _fork_init_kwargs(agent: Any, rt: Dict[str, Any], routed: bool, max_iteratio
     if isinstance(rt.get("max_tokens"), int):
         kwargs["max_tokens"] = rt["max_tokens"]
     if isinstance(rt.get("command"), str) and rt["command"]:
-        kwargs["acp_command"] = rt["command"]
-        kwargs["acp_args"] = rt.get("args") or []
+        kwargs.update(acp_command=rt["command"], acp_args=rt.get("args") or [])
     if not routed:
         kwargs.update(_same_model_parity_kwargs(agent))
     return kwargs
@@ -816,7 +805,6 @@ def build_cache_parity_fork(
     replay a digest). The caller owns registration, whitelisting, running, usage attribution and
     teardown."""
     from run_agent import AIAgent  # local: avoids a circular import at load
-
     # Inherit the parent's live runtime: AIAgent.__init__'s env auto-resolution fails for
     # OAuth-only providers, session-scoped creds and credential pools.
     _rt = _resolve_review_runtime(agent, task_cfg)
@@ -859,7 +847,6 @@ def _bg_review_auto_deny(command, description, **kwargs):
 
 def _set_thread_approval_callback(callback: Any) -> None:
     from tools.terminal_tool import set_approval_callback
-
     with suppress(Exception):
         set_approval_callback(callback)
 
@@ -891,12 +878,10 @@ def _review_tool_whitelist(review_agent: Any, task_cfg: Optional[Dict[str, Any]]
     """``(whitelist, configured_extra_tools)`` for the review fork — DISPATCH-side only, so the
     advertised ``tools[]`` stays byte-identical to the parent's (prompt-cache parity)."""
     from model_tools import get_tool_definitions
-
     # Gate the built-in memory tool on the profile's memory flags so a memory-disabled profile
     # is never contaminated by the review LLM.
-    review_toolsets = ["skills"]
-    if review_agent._memory_enabled or review_agent._user_profile_enabled:
-        review_toolsets.insert(0, "memory")
+    memory_on = review_agent._memory_enabled or review_agent._user_profile_enabled
+    review_toolsets = ["memory", "skills"] if memory_on else ["skills"]
     whitelist = {t["function"]["name"] for t in get_tool_definitions(enabled_toolsets=review_toolsets, quiet_mode=True)}
     # Read-only file tools: denying read_file/search_files caused a per-review denial storm that
     # starved the loop (read_file also registers the read with the read-before-write guard).
@@ -906,9 +891,9 @@ def _review_tool_whitelist(review_agent: Any, task_cfg: Optional[Dict[str, Any]]
     # can only admit, never advertise: a listed tool must already exist in the inherited schema.
     configured_extra_tools: set = set()
     try:
-        _extra_raw = _background_review_task_config(task_cfg).get("extra_tools", [])
-        if isinstance(_extra_raw, list):
-            configured_extra_tools = {name.strip() for name in _extra_raw if isinstance(name, str) and name.strip()}
+        extra_raw = _background_review_task_config(task_cfg).get("extra_tools", [])
+        if isinstance(extra_raw, list):
+            configured_extra_tools = {name.strip() for name in extra_raw if isinstance(name, str) and name.strip()}
     except Exception:
         logger.debug("background_review extra_tools parse failed", exc_info=True)
     return whitelist | configured_extra_tools, configured_extra_tools
@@ -930,12 +915,6 @@ def _release_fork_clients(review_agent: Any) -> None:
         review_agent.release_clients()
 
 
-def _finish_request_phase(agent: Any, review_agent: Any, review_run: Optional[_BackgroundReviewRun]) -> None:
-    """Unregister the fork and publish request completion (identity-scoped, idempotent)."""
-    _track_review_fork(agent, review_agent, register=False)
-    finish_background_review_run(agent, review_run)
-
-
 def _run_review_fork(
     agent: Any, messages_snapshot: List[Dict], prompt: str, task_cfg: Optional[Dict[str, Any]],
     review_run: Optional[_BackgroundReviewRun], st: _ReviewForkState,
@@ -945,9 +924,7 @@ def _run_review_fork(
     so the caller's error path still sees usage and the fork to clean up."""
     st.review_agent, _rt, _routed = build_cache_parity_fork(agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
     _track_review_fork(agent, st.review_agent, register=True)
-
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
-
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg)
     extra_list = ", ".join(sorted(configured_extra_tools))
     deny_extra = f" Configured extra tools also allowed: {extra_list}." if configured_extra_tools else ""
@@ -963,9 +940,7 @@ def _run_review_fork(
     )
     with suppress(Exception):
         from tools.skill_manager_tool import _reset_background_review_read_marks
-
         _reset_background_review_read_marks()
-
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
@@ -986,9 +961,9 @@ def _run_review_fork(
             st.review_usage.update(_snapshot_review_usage(st.review_agent))
             _record_review_usage_to_parent(agent, st.review_usage)
         # Publish completion as soon as the provider-capable phase has returned or startup
-        # cancellation has fenced it out.
-        _finish_request_phase(agent, st.review_agent, review_run)
-
+        # cancellation has fenced it out (unregister + finish are identity-scoped and idempotent).
+        _track_review_fork(agent, st.review_agent, register=False)
+        finish_background_review_run(agent, review_run)
     st.review_messages = list(getattr(st.review_agent, "_session_messages", []))
     _release_fork_clients(st.review_agent)
     st.review_agent = None
@@ -997,10 +972,9 @@ def _run_review_fork(
 def _publish_review_summary(agent: Any, actions: List[str]) -> None:
     summary = " · ".join(dict.fromkeys(actions))
     agent._safe_print(f"  💾 Self-improvement review: {summary}")
-    _bg_cb = agent.background_review_callback
-    if _bg_cb:
+    if agent.background_review_callback:
         with suppress(Exception):
-            _bg_cb(f"💾 Self-improvement review: {summary}")
+            agent.background_review_callback(f"💾 Self-improvement review: {summary}")
 
 
 def _run_review_in_thread(
@@ -1014,9 +988,7 @@ def _run_review_in_thread(
     if review_run is not None and review_run.cancel_requested.is_set():
         finish_background_review_run(agent, review_run)
         return
-
     _set_thread_approval_callback(_bg_review_auto_deny)
-
     # A client that can't carry Hermes tool calls back would spawn a fork that cannot write
     # anything. Checked BEFORE the thread-scoped silence so the warning is not swallowed; cheap
     # check first so the normal path never resolves the runtime twice.
@@ -1029,14 +1001,12 @@ def _run_review_in_thread(
         )
         _set_thread_approval_callback(None)
         return
-
     st = _ReviewForkState()
     try:
         # Silence stdout/stderr for THIS thread only: a process-global redirect would blank every
         # other thread's console for the whole review.
         with thread_scoped_silence():
             _run_review_fork(agent, messages_snapshot, prompt, task_cfg, review_run, st)
-
         # A buggy/legacy tool response shape must NOT take down the whole review (the outer
         # except would discard every action the fork DID complete), so coerce to an empty list.
         try:
@@ -1052,11 +1022,9 @@ def _run_review_in_thread(
                 e,
             )
             actions = []
-
         _log_review_completion(st.review_usage, _classify_review_result(actions))
         if actions:
             _publish_review_summary(agent, actions)
-
     except Exception as e:
         logger.warning("Background memory/skill review failed: %s", e)
         if st.review_usage:
@@ -1066,7 +1034,8 @@ def _run_review_in_thread(
         # Safety net for the exception path (setup failures before the request-phase finally).
         # Both cleanups are identity-scoped and idempotent; re-enter thread-scoped silence so
         # cleanup output stays quiet without blanking other threads.
-        _finish_request_phase(agent, st.review_agent, review_run)
+        _track_review_fork(agent, st.review_agent, register=False)
+        finish_background_review_run(agent, review_run)
         if st.review_agent is not None:
             with suppress(Exception), thread_scoped_silence():
                 _release_fork_clients(st.review_agent)

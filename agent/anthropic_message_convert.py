@@ -145,9 +145,7 @@ def _normalize_tool_input_schema(schema: Any) -> Dict[str, Any]:
     generic 400, so they are dropped in favour of a plain object."""
     if not schema:
         return dict(_EMPTY_SCHEMA)
-
     from tools.schema_sanitizer import strip_nullable_unions
-
     normalized = strip_nullable_unions(schema, keep_nullable_hint=False)
     if not isinstance(normalized, dict):
         return dict(_EMPTY_SCHEMA)
@@ -398,7 +396,6 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
         replayed = _replay_ordered_blocks(m, ordered_blocks)
         if replayed:
             return {"role": "assistant", "content": replayed}
-
     blocks = _extract_preserved_thinking_blocks(m)
     # Blank text blocks are dropped; a cache marker riding on one is relocated onto the last
     # surviving cacheable block (prompt_caching sets cache_control on content[-1], which may be
@@ -505,7 +502,6 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
         if len(kept) != len(m["content"]) and _has_block_type(m["content"], _THINKING_TYPES):
             m["_thinking_signature_invalidated"] = True
         m["content"] = kept if kept else [_text_block("(tool call removed)")]
-
     # Pass 2: tool_result whose tool_use no longer exists anywhere.
     surviving_tool_use_ids: set = set()
     for _, m in _assistant_block_lists(result):
@@ -580,7 +576,6 @@ def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | No
     is_kimi = _is_kimi_family_endpoint(base_url, model)
     is_deepseek = _is_deepseek_anthropic_endpoint(base_url)
     last_assistant_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "assistant"), None)
-
     for idx, m in _assistant_block_lists(result):
         if is_kimi:
             pass  # shared cleanup below still strips cache markers + the flag
@@ -596,7 +591,6 @@ def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | No
         else:
             new_content = _keep_valid_latest_thinking(m["content"], bool(m.get("_thinking_signature_invalidated")))
             m["content"] = new_content or [_text_block("(empty)")]
-
         # cache_control on thinking blocks interferes with signature validation.
         for b in m["content"]:
             if _block_type(b) in _THINKING_TYPES:

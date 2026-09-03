@@ -89,7 +89,6 @@ def _is_nous_portal_endpoint(base_url: str | None) -> bool:
         return True
     try:
         from hermes_cli.auth import _nous_inference_env_override
-
         override = _nous_inference_env_override()
     except Exception:
         return False
