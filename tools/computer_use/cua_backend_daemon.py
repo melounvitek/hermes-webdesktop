@@ -34,13 +34,9 @@ def _resolve_cua_driver_app_path(driver_cmd: str) -> Optional[str]:
     """Return the CuaDriver.app bundle that CARRIES *driver_cmd*, if any. Derived from the resolved binary path
     only — no /Applications fallback, which could be a DIFFERENT install than the one the manifest resolved,
     running code the resolution chain never validated."""
-    resolved = os.path.realpath(driver_cmd)
-    marker_index = resolved.find(".app/Contents/MacOS/")
-    if marker_index < 0:
-        return None
-    candidate = resolved[: marker_index + len(".app")]
-    executable = os.path.join(candidate, "Contents", "MacOS", "cua-driver")
-    return candidate if os.path.isfile(executable) and os.access(executable, os.X_OK) else None
+    head, marker, _ = os.path.realpath(driver_cmd).partition(".app/Contents/MacOS/")
+    executable = os.path.join(head + ".app", "Contents", "MacOS", "cua-driver")
+    return head + ".app" if marker and os.path.isfile(executable) and os.access(executable, os.X_OK) else None
 
 def _validate_cua_driver_app_signature(app_path: str) -> None:
     """Fail closed unless *app_path* is the genuinely-signed CuaDriver.app. ``/usr/bin/open`` hands LaunchServices
@@ -52,27 +48,22 @@ def _validate_cua_driver_app_signature(app_path: str) -> None:
     if not codesign:
         raise RuntimeError("codesign is required to verify CuaDriver.app before launching it.")
     try:
-        proc = _cb()._run_quiet([codesign, "-dv", app_path], timeout=15)
+        proc = _cb()._run_quiet([codesign, "-dv", app_path], timeout=15, stdin=None)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"could not verify CuaDriver.app signature: {exc}") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"CuaDriver.app at {app_path} is not code-signed; refusing to launch it "
-                           f"({(proc.stderr or '').strip()})")
-    fields: Dict[str, str] = {}
-    for key, sep, value in (line.partition("=") for line in (proc.stderr or "").splitlines()):
-        if sep:  # codesign -dv reports on stderr
-            fields.setdefault(key.strip(), value.strip())
+        raise RuntimeError(f"CuaDriver.app at {app_path} is not code-signed; refusing to launch it ({(proc.stderr or '').strip()})")
+    parts = [line.partition("=") for line in (proc.stderr or "").splitlines()]  # codesign -dv reports on stderr
+    fields = {k.strip(): v.strip() for k, sep, v in reversed(parts) if sep}  # first occurrence of a key wins
     identifier, team = fields.get("Identifier", ""), fields.get("TeamIdentifier", "")
     if identifier != _CUA_DRIVER_BUNDLE_ID:
-        raise RuntimeError(f"CuaDriver.app at {app_path} has identifier {identifier!r}, "
-                           f"expected {_CUA_DRIVER_BUNDLE_ID!r}; refusing to launch it.")
-    if team in _CUA_DRIVER_TEAM_IDS or (
-            team in ("", "not set") and _cb()._computer_use_cfg().get("allow_unsigned_driver") is True):
+        raise RuntimeError(f"CuaDriver.app at {app_path} has identifier {identifier!r}, expected {_CUA_DRIVER_BUNDLE_ID!r}; "
+                           "refusing to launch it.")
+    if team in _CUA_DRIVER_TEAM_IDS or (team in ("", "not set") and _cb()._computer_use_cfg().get("allow_unsigned_driver") is True):
         return
-    raise RuntimeError(
-        f"CuaDriver.app at {app_path} is signed by team {team!r}, expected one of "
-        f"{_CUA_DRIVER_TEAM_IDS!r}; refusing to launch it. (Set computer_use.allow_unsigned_driver: "
-        "true in config.yaml only for local unsigned driver builds.)")
+    raise RuntimeError(f"CuaDriver.app at {app_path} is signed by team {team!r}, expected one of {_CUA_DRIVER_TEAM_IDS!r}; "
+                       "refusing to launch it. (Set computer_use.allow_unsigned_driver: true in config.yaml only for "
+                       "local unsigned driver builds.)")
 
 def _embedded_daemon_spawn_command(driver_cmd: str, serve_args: List[str], *, platform: str,
                                    app_path: Optional[str] = None) -> List[str]:
@@ -81,8 +72,7 @@ def _embedded_daemon_spawn_command(driver_cmd: str, serve_args: List[str], *, pl
         return [driver_cmd, *serve_args]
     resolved_app = app_path or _resolve_cua_driver_app_path(driver_cmd)
     if not resolved_app:
-        raise RuntimeError("CuaDriver.app is required for private computer-use sessions on macOS. "
-                           "Run `hermes computer-use install` to restore it.")
+        raise RuntimeError("CuaDriver.app is required for private computer-use sessions on macOS. Run `hermes computer-use install` to restore it.")
     _validate_cua_driver_app_signature(resolved_app)
     return ["/usr/bin/open", "-n", "-g", "-a", resolved_app, "--args", *serve_args]
 
@@ -117,22 +107,18 @@ class _EmbeddedCuaDaemon:
         manifest = str(capability_manifest or "").strip()
         if not manifest and permission_mode == "bounded":
             raise ValueError("bounded permission mode requires computer_use.capability_manifest")
-        if manifest:
-            manifest = os.path.abspath(os.path.expanduser(manifest))
-            if not os.path.isfile(manifest):
-                raise ValueError(f"capability manifest not found: {manifest}")
+        manifest = os.path.abspath(os.path.expanduser(manifest)) if manifest else ""
+        if manifest and not os.path.isfile(manifest):
+            raise ValueError(f"capability manifest not found: {manifest}")
         self.capability_manifest: Optional[str] = manifest or None
-        # bounded always forwards (the driver validates it); other modes accept only a v3 manifest — a legacy one
-        # would abort startup instead.
+        # bounded always forwards (driver validates it); other modes accept only v3 — a legacy manifest aborts startup.
         self.manifest_applies = bool(manifest) and (
             permission_mode == "bounded" or _cb()._manifest_is_mode_independent(manifest))
         if manifest and not self.manifest_applies:
-            logger.warning("computer_use.capability_manifest is a legacy (v1/v2) manifest, "
-                           "which cua-driver only accepts in bounded mode — it will NOT "
-                           "bound this %s session. Migrate the manifest to version 3 to "
-                           "keep a ceiling on approval-bypassed runs.", permission_mode)
-        self.permission_mode = permission_mode
-        self._driver_cmd = self._command = driver_cmd
+            logger.warning("computer_use.capability_manifest is a legacy (v1/v2) manifest, which cua-driver only accepts in "
+                           "bounded mode — it will NOT bound this %s session. Migrate the manifest to version 3 to keep a "
+                           "ceiling on approval-bypassed runs.", permission_mode)
+        self.permission_mode, self._driver_cmd, self._command = permission_mode, driver_cmd, driver_cmd
         self._mcp_args: List[str] = list(_cb()._CUA_DRIVER_ARGS)
         self._process: Any = None
         self._owns_runtime = self._running = False
@@ -142,8 +128,7 @@ class _EmbeddedCuaDaemon:
                             else os.path.join(tempfile.gettempdir(), f"hc-{token}.sock"))
 
     def child_env(self) -> Dict[str, str]:
-        env = _cb().cua_driver_child_env()
-        env["CUA_DRIVER_PERMISSION_MODE"] = self.permission_mode
+        env = {**_cb().cua_driver_child_env(), "CUA_DRIVER_PERMISSION_MODE": self.permission_mode}
         if self.permission_mode == "unrestricted":
             env["CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS"] = "1"
         return env
@@ -161,10 +146,8 @@ class _EmbeddedCuaDaemon:
                     logger.debug("embedded cua-driver: %s", text)
 
     def _serve_args(self) -> List[str]:
-        serve_args = ["serve", "--embedded", "--socket", self.socket_path,
-                      "--no-permissions-gate", "--permission-mode", self.permission_mode]
-        if self.permission_mode == "unrestricted":
-            serve_args.append("--dangerously-bypass-approvals")
+        serve_args = ["serve", "--embedded", "--socket", self.socket_path, "--no-permissions-gate", "--permission-mode",
+                      self.permission_mode, *(["--dangerously-bypass-approvals"] if self.permission_mode == "unrestricted" else [])]
         if self.manifest_applies:
             serve_args += ["--capability-manifest", str(self.capability_manifest), "--approve-capability-manifest"]
         # The private daemon owns the cursor overlay, so the overlay policy must apply to this long-lived serve
@@ -184,13 +167,11 @@ class _EmbeddedCuaDaemon:
         self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.PIPE, text=True, env=env)
         self._owns_runtime = True
-        threading.Thread(target=self._drain_stderr, args=(self._process,),
-                         name="hermes-cua-daemon-stderr", daemon=True).start()
+        threading.Thread(target=self._drain_stderr, args=(self._process,), name="hermes-cua-daemon-stderr", daemon=True).start()
         deadline = time.monotonic() + self._START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             return_code = self._process.poll()
-            # `open` exits 0 once LaunchServices took the request, so on macOS only a non-zero exit means the
-            # daemon itself died.
+            # `open` exits 0 once LaunchServices took the request: on macOS only a non-zero exit means the daemon died.
             if return_code is not None and (sys.platform != "darwin" or return_code != 0):
                 self._startup_failure("embedded cua-driver exited during startup", "no diagnostic output")
             if self._socket_ready(env):
@@ -205,8 +186,7 @@ class _EmbeddedCuaDaemon:
 
     def _socket_ready(self, env: Dict[str, str]) -> bool:
         """``cua-driver status --socket`` exits 0 once the private daemon accepts connections."""
-        probe = _cb()._run_quiet([self._command, "status", "--socket", self.socket_path],
-                                 timeout=2.0, env=env, swallow=_QUIET_ERRORS)
+        probe = _cb()._run_quiet([self._command, "status", "--socket", self.socket_path], timeout=2.0, env=env, swallow=_QUIET_ERRORS)
         return probe is not None and probe.returncode == 0
 
     def proxy_invocation(self) -> Tuple[str, List[str]]:
@@ -216,12 +196,10 @@ class _EmbeddedCuaDaemon:
 
     def stop(self) -> None:
         process, self._process = self._process, None
-        owns_runtime, self._owns_runtime = self._owns_runtime, False
-        self._running = False
+        owns_runtime, self._owns_runtime, self._running = self._owns_runtime, False, False
         if owns_runtime:
-            _cb()._run_quiet([self._command, "stop", "--socket", self.socket_path], timeout=3.0,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             env=self._sanitized_env(), swallow=_QUIET_ERRORS)
+            _cb()._run_quiet([self._command, "stop", "--socket", self.socket_path], timeout=3.0, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, env=self._sanitized_env(), swallow=_QUIET_ERRORS)
         if process is not None:
             _wait_or_kill(process)
         if sys.platform != "win32" and os.path.exists(self.socket_path):
