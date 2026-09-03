@@ -1323,15 +1323,14 @@ def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tup
     if not isinstance(record, dict) or not _record_looks_like_gateway(record):
         return None
     owner_pid = _pid_from_record(record)
-    if owner_pid is None or owner_pid <= 0 or owner_pid == os.getpid():
-        return None
     owner_start_time = record.get("start_time")
-    if not isinstance(owner_start_time, int) or isinstance(owner_start_time, bool):
-        return None
     raw_home = record.get("hermes_home")
-    if not isinstance(raw_home, str) or not raw_home.strip():
-        return None
-    if not Path(raw_home).expanduser().is_absolute():
+    if (
+        owner_pid is None or owner_pid <= 0 or owner_pid == os.getpid()
+        or not isinstance(owner_start_time, int) or isinstance(owner_start_time, bool)
+        or not isinstance(raw_home, str) or not raw_home.strip()
+        or not Path(raw_home).expanduser().is_absolute()
+    ):
         return None
     target_home = _canonical_hermes_home(raw_home)
     if _scoped_lock_owner_state(owner_pid, owner_start_time) != "same":
@@ -1339,15 +1338,16 @@ def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tup
     live_cmdline = _read_process_cmdline(owner_pid)
     if live_cmdline is not None and not looks_like_gateway_runtime_command_line(live_cmdline):
         return None
-    pid_record = _read_json_file(target_home / "gateway.pid")
-    if pid_record is None or not _record_looks_like_gateway(pid_record):
-        return None
-    if _pid_from_record(pid_record) != owner_pid:
-        return None
-    if pid_record.get("start_time") != owner_start_time:
-        return None
+    # The target home's own PID record must corroborate the claim.
+    pid_record = _read_json_file(target_home / "gateway.pid") or {}
     pid_record_home = pid_record.get("hermes_home")
-    if not isinstance(pid_record_home, str) or not _same_hermes_home(pid_record_home, target_home):
+    if (
+        not _record_looks_like_gateway(pid_record)
+        or _pid_from_record(pid_record) != owner_pid
+        or pid_record.get("start_time") != owner_start_time
+        or not isinstance(pid_record_home, str)
+        or not _same_hermes_home(pid_record_home, target_home)
+    ):
         return None
     return owner_pid, owner_start_time, target_home
 
