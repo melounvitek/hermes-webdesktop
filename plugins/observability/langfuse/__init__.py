@@ -1,26 +1,10 @@
-"""langfuse — Hermes plugin for Langfuse observability.
+"""langfuse — Hermes plugin tracing conversations, LLM calls and tool usage to Langfuse.
 
-Traces Hermes conversations, LLM calls, and tool usage to Langfuse.
-
-Activation is handled by the Hermes plugin system (``plugins.enabled``). At
-runtime the plugin also requires the ``langfuse`` SDK and credentials; if
-either is missing the hooks are inert.
-
-Required env vars (set via ``hermes tools`` or ~/.hermes/.env):
-  HERMES_LANGFUSE_PUBLIC_KEY  - Langfuse project public key (pk-lf-...)
-  HERMES_LANGFUSE_SECRET_KEY  - Langfuse project secret key (sk-lf-...)
-  HERMES_LANGFUSE_BASE_URL    - Langfuse server URL (default: https://cloud.langfuse.com)
-
-Optional env vars:
-  HERMES_LANGFUSE_ENV         - environment tag (e.g. "production", "local")
-  HERMES_LANGFUSE_RELEASE     - release/version tag
-  HERMES_LANGFUSE_SAMPLE_RATE - sampling rate 0.0–1.0 (default: 1.0)
-  HERMES_LANGFUSE_MAX_CHARS   - max chars per field (default: 12000)
-  HERMES_LANGFUSE_CAPTURE     - content capture mode (default: "sanitized")
-      metadata  - no content: sizes, roles, tool names, IDs, usage, cost only
-      sanitized - content with secret-pattern redaction + truncation
-      full      - raw content (truncated only); explicit opt-in
-  HERMES_LANGFUSE_DEBUG       - set to "true" for verbose logging
+Activated via ``plugins.enabled``; hooks are inert without the ``langfuse`` SDK
+and credentials. Env: HERMES_LANGFUSE_PUBLIC_KEY / SECRET_KEY (required),
+BASE_URL, ENV, RELEASE, SAMPLE_RATE, MAX_CHARS (12000), DEBUG, and CAPTURE =
+metadata (sizes/ids/usage only) | sanitized (default: secret redaction +
+truncation) | full (truncated raw content). See README.md.
 """
 from __future__ import annotations
 
@@ -62,10 +46,9 @@ class TraceState:
 
 _STATE_LOCK = threading.Lock()
 _TRACE_STATE: Dict[str, TraceState] = {}
-# Ceiling on live trace state, keyed per turn_id. Turns that never reach
-# _finish_trace (interrupted / tool-only / empty final) would otherwise leak
-# forever; over the cap the least-recently-updated entries are evicted. Far
-# above any real concurrent working set — bounds the leak, not concurrency.
+# Ceiling on live trace state (per turn_id): turns that never reach _finish_trace
+# would leak forever, so over the cap the least-recently-updated are evicted.
+# Bounds the leak, not concurrency.
 _MAX_TRACE_STATE = 256
 _LANGFUSE_CLIENT = None
 # Separate from _STATE_LOCK (hot path) so the two never nest; serializes the
@@ -102,22 +85,15 @@ def _debug(message: str) -> None:
         logger.info("Langfuse tracing: %s", message)
 
 
-# ---------------------------------------------------------------------------
-# Capture modes
-# ---------------------------------------------------------------------------
-
 _CAPTURE_MODES = ("metadata", "sanitized", "full")
 _DEFAULT_CAPTURE_MODE = "sanitized"
 _warned_invalid_capture = False
 
 
 def _capture_mode() -> str:
-    """Resolve ``metadata | sanitized | full``.
-
-    Read per call so tests and long-lived processes can flip modes without a
-    client reset. Invalid values warn once and fall back to the default rather
-    than silently capturing more than the operator intended.
-    """
+    """Resolve ``metadata | sanitized | full``; read per call so long-lived processes
+    can flip modes. Invalid values warn once and fall back to the default (never
+    capture more than the operator intended)."""
     global _warned_invalid_capture
     value = _env("HERMES_LANGFUSE_CAPTURE").lower()
     if not value:
@@ -161,8 +137,7 @@ def _describe_content(value: Any) -> Any:
     return {"omitted": True, "type": type(value).__name__}
 
 
-def _capture_content(value: Any, *, parse_json_strings: bool = False,
-                     tool_name: str = "", args: Any = None) -> Any:
+def _capture_content(value: Any, *, parse_json_strings: bool = False) -> Any:
     """Apply the active capture mode to a CONTENT value.
 
     Only prompt/response text, tool arguments and tool results are content;
@@ -170,9 +145,16 @@ def _capture_content(value: Any, *, parse_json_strings: bool = False,
     """
     if _capture_mode() == "metadata":
         return _describe_content(value)
-    if tool_name or args is not None:
-        value = _normalize_payload(value, tool_name=tool_name, args=args)
     return _safe_value(value, parse_json_strings=parse_json_strings)
+
+
+def _capture_tool_result(result: Any, *, tool_name: str, args: Any) -> Any:
+    """Capture a tool result: JSON strings are parsed first so a read_file
+    payload can be collapsed to a preview keyed by the call's ``args``."""
+    if _capture_mode() == "metadata":
+        return _describe_content(result)
+    value = _maybe_parse_json_string(result) if isinstance(result, str) else result
+    return _safe_value(_normalize_payload(value, tool_name=tool_name, args=args), parse_json_strings=True)
 
 
 # Sentinel: "_get_langfuse() has tried and failed". Tests reset by reloading
@@ -181,11 +163,8 @@ _INIT_FAILED = object()
 
 
 def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
-    """Return a log-ready error if ``value`` lacks the documented prefix for ``env_name``.
-
-    The preview shows enough to spot placeholders (``placeholder``, ``test-key``)
-    without echoing a real secret pasted into the wrong env var.
-    """
+    """Log-ready error if ``value`` lacks the prefix for ``env_name``; the preview
+    exposes placeholders without echoing a real secret pasted into the wrong var."""
     expected = _LANGFUSE_KEY_PREFIXES.get(env_name, "")
     if not expected or value.startswith(expected):
         return None
@@ -194,26 +173,18 @@ def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
 
 
 def _get_langfuse() -> Optional[Langfuse]:
-    """Return a cached Langfuse client, or ``None`` if unavailable.
-
-    Runtime-availability gate only (SDK installed + credentials present);
-    activation is the plugin system's job. The first build is serialized by
-    ``_LANGFUSE_CLIENT_LOCK`` so racing callers can't each construct a client
-    and leak the loser's HTTP connection + flush thread.
-    """
+    """Cached Langfuse client, or ``None`` if the SDK/credentials are unavailable.
+    The first build is serialized so racing callers can't each construct a client
+    and leak the loser's HTTP connection + flush thread."""
     global _LANGFUSE_CLIENT
     # Fast path — already settled (success or _INIT_FAILED); no lock needed.
-    if _LANGFUSE_CLIENT is _INIT_FAILED:
-        return None
     if _LANGFUSE_CLIENT is not None:
-        return _LANGFUSE_CLIENT
+        return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
 
     with _LANGFUSE_CLIENT_LOCK:
         # Re-check: a racing thread may have finished init while we waited.
-        if _LANGFUSE_CLIENT is _INIT_FAILED:
-            return None
         if _LANGFUSE_CLIENT is not None:
-            return _LANGFUSE_CLIENT
+            return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
 
         if Langfuse is None:
             logger.warning(
@@ -287,14 +258,10 @@ def _scope_prefix(task_id: str, session_id: str) -> str:
 
 
 def _trace_key(task_id: str, session_id: str, *, turn_id: str = "", api_request_id: str = "") -> str:
-    """Stable in-process trace scope key for one agent turn.
-
-    ``turn_id``/``api_request_id`` scope state so concurrent requests sharing a
-    task/session never collide. ``turn_id`` wins over ``api_request_id`` so the
-    turn-level post_llm_call hook (no api_request_id) resolves to the same key
-    as request-level hooks. Legacy shape: bare ``task_id`` (no ``task:`` prefix),
-    kept for keys minted before turn/request scoping existed.
-    """
+    """In-process trace scope key for one agent turn. ``turn_id`` wins over
+    ``api_request_id`` so the turn-level post_llm_call hook (no api_request_id)
+    resolves to the same key as request-level hooks; a bare ``task_id`` is the
+    legacy shape from before turn/request scoping."""
     if turn_id:
         return f"{_scope_prefix(task_id, session_id)}:turn:{turn_id}"
     if api_request_id:
@@ -304,20 +271,14 @@ def _trace_key(task_id: str, session_id: str, *, turn_id: str = "", api_request_
     return _scope_prefix(task_id, session_id)
 
 
-def _state_for_turn(turn_id: str) -> Optional[str]:
-    """Resolve a live trace key from a turn id alone. Caller must hold ``_STATE_LOCK``.
-
-    Subagent hooks carry ``parent_turn_id`` but no ``task_id``, and the key
-    prefix prefers task_id — so rebuilding the key would miss; match on the
-    unique ``:turn:<id>`` suffix instead.
-    """
+def _state_for_turn(turn_id: str) -> Optional[TraceState]:
+    """Live trace state for a turn id alone (caller holds ``_STATE_LOCK``). Subagent
+    hooks carry ``parent_turn_id`` but no ``task_id``, so rebuilding the key would
+    miss; match on the unique ``:turn:<id>`` suffix instead."""
     if not turn_id:
         return None
     suffix = f":turn:{turn_id}"
-    for key in _TRACE_STATE:
-        if key.endswith(suffix):
-            return key
-    return None
+    return next((state for key, state in _TRACE_STATE.items() if key.endswith(suffix)), None)
 
 
 def _redact_data_uri(value: str) -> dict[str, Any]:
@@ -498,11 +459,8 @@ def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
 def _messages_for_langfuse_input(*, request_messages: Any = None, messages: Any = None,
                                  conversation_history: Any = None, user_message: Any = None,
                                  system_prompt: Any = None, pre_coerced: Any = None) -> list[dict[str, Any]]:
-    """Generation input, prepending ``system_prompt`` when the provider split it out of messages.
-
-    ``pre_coerced`` lets the caller pass an already-coerced list and skip a
-    second ``_coerce_request_messages`` per hook.
-    """
+    """Generation input, prepending ``system_prompt`` when the provider split it out
+    of messages. ``pre_coerced`` skips a second ``_coerce_request_messages``."""
     raw = pre_coerced if pre_coerced is not None else _coerce_request_messages(
         request_messages=request_messages, messages=messages,
         conversation_history=conversation_history, user_message=user_message,
@@ -549,15 +507,11 @@ def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 
 
 def _serialize_assistant_message(message: Any) -> dict[str, Any]:
-    reasoning = None
-    for attr in ("reasoning", "reasoning_content", "reasoning_details"):
-        value = getattr(message, attr, None)
-        if value is not None:
-            reasoning = _capture_content(value)
-            break
+    reasoning = next((getattr(message, attr, None) for attr in ("reasoning", "reasoning_content", "reasoning_details")
+                      if getattr(message, attr, None) is not None), None)
     return {
         "content": _capture_content(getattr(message, "content", None)),
-        "reasoning": reasoning,
+        "reasoning": None if reasoning is None else _capture_content(reasoning),
         "tool_calls": _serialize_tool_calls(getattr(message, "tool_calls", None)),
     }
 
@@ -739,6 +693,15 @@ def _exit_root_ctx(state: TraceState) -> None:
             pass
 
 
+def _end_root(state: TraceState, label: str) -> None:
+    """End the root span then unwind its context; never raises."""
+    try:
+        state.root_span.end()
+        _exit_root_ctx(state)
+    except Exception as exc:  # pragma: no cover - fail-open
+        _debug(f"{label} failed: {exc}")
+
+
 def _merge_trace_output(output: Any, state: TraceState) -> Any:
     if not state.turn_tool_calls:
         return output
@@ -748,50 +711,43 @@ def _merge_trace_output(output: Any, state: TraceState) -> Any:
 
 
 def _evict_stale_locked() -> None:
-    """Evict least-recently-updated state down to ``_MAX_TRACE_STATE - 1``.
-
-    Caller MUST hold ``_STATE_LOCK`` and insert exactly one entry afterwards.
-    Evicted roots are ended so they are not left dangling on the Langfuse side.
-    """
+    """Evict least-recently-updated state down to ``_MAX_TRACE_STATE - 1``. Caller
+    holds ``_STATE_LOCK`` and inserts exactly one entry afterwards; evicted roots
+    are ended so they don't dangle on the Langfuse side."""
     over = len(_TRACE_STATE) - (_MAX_TRACE_STATE - 1)
     if over <= 0:
         return
     stale = sorted(_TRACE_STATE.items(), key=lambda kv: kv[1].last_updated_at)[:over]
     for key, state in stale:
         _TRACE_STATE.pop(key, None)
-        try:
-            state.root_span.end()
-            _exit_root_ctx(state)
-        except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"evict stale trace failed: {exc}")
+        _end_root(state, "evict stale trace")
 
 
 def _finalize_all_traces() -> None:
-    """atexit: end every open root span so short-lived processes export complete traces.
-
-    Short-lived CLI processes (kanban workers, ``chat -q``, cron) can exit with
-    tool calls still queued; children export via the SDK's own flush but the
-    un-ended root never arrives, leaving an anonymous trace on the backend.
-    Registered after the client is built, so (atexit is LIFO) it runs before
-    the SDK's shutdown hook and the ended spans still get flushed.
-    """
+    """atexit: end every open root span. Short-lived processes (kanban workers,
+    ``chat -q``, cron) exit with tool calls queued; children export via the SDK
+    flush but an un-ended root leaves an anonymous trace. Registered after the
+    client is built so (LIFO) it runs before the SDK's shutdown hook."""
     with _STATE_LOCK:
         states = list(_TRACE_STATE.items())
         _TRACE_STATE.clear()
-    for _key, state in states:
+    for key, state in states:
         try:
             _end_children(state, include_subagents=True)
             state.root_span.end()
             _exit_root_ctx(state)
         except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"atexit finalize failed for {_key}: {exc}")
+            _debug(f"atexit finalize failed for {key}: {exc}")
     if states:
-        client = _get_langfuse()
-        if client is not None:
-            try:
-                client.flush()
-            except Exception:
-                pass
+        _flush(_get_langfuse())
+
+
+def _flush(client: Any) -> None:
+    if client is not None:
+        try:
+            client.flush()
+        except Exception:
+            pass
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
@@ -828,10 +784,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
         except Exception:
             pass
     finally:
-        try:
-            client.flush()
-        except Exception:
-            pass
+        _flush(client)
 
 
 def _request_key(api_call_count: Any) -> str:
@@ -860,9 +813,8 @@ def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
 def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                     provider: str = "", api_mode: str = "", messages: Any = None,
                     turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
-    # Only legacy request-shaped calls carry an API ``messages`` list. Current
-    # Hermes fires a turn-scoped pre_llm_call for context injection; tracing
-    # that would create an orphan root trace before the real request trace.
+    # Only legacy request-shaped calls carry an API ``messages`` list; the
+    # turn-scoped pre_llm_call would otherwise open an orphan root trace.
     if not isinstance(messages, list):
         return
     client = _get_langfuse()
@@ -879,12 +831,9 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
 
 
 def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, references: Any) -> None:
-    """Record each MoA advisor as its own generation under the turn.
-
-    MoA returns only the aggregator's response; advisors routinely run on a
-    different provider/model, so without this the whole fan-out would collapse
-    into one generation priced at the aggregator's rate.
-    """
+    """Record each MoA advisor as its own generation: advisors routinely run on a
+    different provider/model, so otherwise the fan-out would collapse into one
+    generation priced at the aggregator's rate."""
     if not isinstance(references, list) or not references:
         return
     fingerprint = json.dumps(
@@ -937,19 +886,17 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
 
     # The request body carries the model actually dispatched (mid-session
     # switch, fallback, middleware rewrite) — prefer it over the agent attribute.
-    if isinstance(request, dict) and isinstance(request.get("body"), dict):
-        body_model = request["body"].get("model")
-        if isinstance(body_model, str) and body_model:
-            model = body_model
+    body_model = request["body"].get("model") if isinstance(request, dict) and isinstance(request.get("body"), dict) else None
+    if isinstance(body_model, str) and body_model:
+        model = body_model
 
     input_messages = _coerce_request_messages(
         request_messages=request_messages, messages=messages,
         conversation_history=conversation_history, user_message=user_message,
     )
     langfuse_input = _messages_for_langfuse_input(system_prompt=system_prompt, pre_coerced=input_messages)
-    system_chars = 0
-    if langfuse_input and langfuse_input[0].get("role") == "system":
-        system_chars = len(str(langfuse_input[0].get("content") or ""))
+    has_system = bool(langfuse_input) and langfuse_input[0].get("role") == "system"
+    system_chars = len(str(langfuse_input[0].get("content") or "")) if has_system else 0
 
     task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     req_key = _request_key(api_call_count)
@@ -1081,12 +1028,7 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     if observation is None:
         return
 
-    if _capture_mode() == "metadata":
-        safe_result_value = _describe_content(result)
-    else:
-        result_value = _maybe_parse_json_string(result) if isinstance(result, str) else result
-        result_value = _normalize_payload(result_value, tool_name=tool_name, args=args)
-        safe_result_value = _safe_value(result_value, parse_json_strings=True)
+    safe_result_value = _capture_tool_result(result, tool_name=tool_name, args=args)
 
     # Backfill so the generation's tool_call record carries the result alongside arguments.
     if tool_call_id:
@@ -1111,12 +1053,9 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
                          api_duration: float = 0.0, status_code: Any = None, retry_count: Any = None,
                          max_retries: Any = None, retryable: Any = None, reason: Any = None, error: Any = None,
                          turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
-    """Close the open generation for a failed API request.
-
-    Without this a failed request leaves its generation open until eviction and
-    the turn looks hung in Langfuse. Marks it ERROR; if the request is not
-    retryable the turn is finished too, since the agent loop is about to unwind.
-    """
+    """Close (as ERROR) the open generation for a failed API request so the turn
+    doesn't look hung until eviction; a non-retryable failure also finishes the
+    turn, since the agent loop is about to unwind."""
     client = _get_langfuse()
     if client is None:
         return
@@ -1126,10 +1065,8 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     if state is None:
         return
 
-    error_type = error_message = ""
-    if isinstance(error, dict):
-        error_type = str(error.get("type") or "")
-        error_message = str(error.get("message") or "")
+    error = error if isinstance(error, dict) else {}
+    error_type, error_message = str(error.get("type") or ""), str(error.get("message") or "")
 
     # Error messages can embed request fragments (URLs w/ keys, prompt echoes) — capture-pipeline them.
     error_metadata: Dict[str, Any] = {"error": True, "error_type": error_type, "error_message": _capture_content(error_message)}
@@ -1158,20 +1095,16 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
 
 
 def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> None:
-    """Session-end boundary: close any traces still open and flush.
-
-    A turn that ended on a tool-only or empty final response never reaches
-    ``_finish_trace``; without this its root dangles until eviction and queued
-    events can be lost on process exit.
-    """
+    """Session-end boundary: close still-open traces and flush. A turn ending on a
+    tool-only or empty final response never reaches ``_finish_trace``; its root
+    would dangle until eviction and queued events could be lost on exit."""
     # Never lazily initialize a client here — if init never happened there are no traces.
     client = _LANGFUSE_CLIENT
     if client is None or client is _INIT_FAILED or not hasattr(client, "flush"):
         return
 
-    # Close every trace of this session (or all, when no session_id: process-
-    # level finalization). Keys carry the session as "session:<id>" or
-    # "task:<id>" (gateway sets task_id == session_id) plus the legacy bare id.
+    # This session's traces (all, when no session_id). Keys carry the session as
+    # "session:<id>" or "task:<id>" (gateway: task_id == session_id) or bare legacy id.
     with _STATE_LOCK:
         if session_id:
             fragments = (f"session:{session_id}", f"task:{session_id}")
@@ -1180,23 +1113,16 @@ def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> 
             keys = list(_TRACE_STATE)
     for key in keys:
         _finish_trace(key)
+    _flush(client)
 
-    try:
-        client.flush()
-    except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"finalize flush failed: {exc}")
-
-    # Shut down only at a true process-exit boundary (not /new, /reset, session
-    # expiry, where the cached client must keep exporting). Doing it here, while
-    # all modules are intact, keeps the SDK's own atexit handler from hitting
-    # torn-down opentelemetry globals and printing a TypeError on quit.
-    if reason == "shutdown":
-        shutdown = getattr(client, "shutdown", None)
-        if callable(shutdown):
-            try:
-                shutdown()
-            except Exception as exc:  # pragma: no cover - fail-open
-                _debug(f"langfuse shutdown failed: {exc}")
+    # Shut down only at true process exit (not /new, /reset, session expiry: the
+    # cached client must keep exporting). Doing it while modules are intact keeps
+    # the SDK's atexit handler off torn-down opentelemetry globals (TypeError on quit).
+    if reason == "shutdown" and callable(getattr(client, "shutdown", None)):
+        try:
+            client.shutdown()
+        except Exception as exc:  # pragma: no cover - fail-open
+            _debug(f"langfuse shutdown failed: {exc}")
 
 
 def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = None,
@@ -1207,8 +1133,7 @@ def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = Non
         return
 
     with _STATE_LOCK:
-        key = _state_for_turn(parent_turn_id)
-        state = _TRACE_STATE.get(key) if key else None
+        state = _state_for_turn(parent_turn_id)
         if state is None:
             return
         metadata = {"child_session_id": child_session_id, "child_subagent_id": child_subagent_id, "child_role": child_role}
@@ -1227,8 +1152,7 @@ def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, 
         return
 
     with _STATE_LOCK:
-        key = _state_for_turn(parent_turn_id)
-        state = _TRACE_STATE.get(key) if key else None
+        state = _state_for_turn(parent_turn_id)
         if state is None:
             return
         observation = state.subagents.pop(str(child_session_id), None)
@@ -1236,10 +1160,7 @@ def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, 
         return
 
     metadata: Dict[str, Any] = {"child_role": child_role}
-    if child_status:
-        metadata["status"] = child_status
-    if duration_ms:
-        metadata["duration_ms"] = duration_ms
+    metadata.update({k: v for k, v in (("status", child_status), ("duration_ms", duration_ms)) if v})
     if isinstance(tool_call_history, list):
         metadata["tool_call_count"] = len(tool_call_history)
         metadata["tool_calls"] = _capture_content(tool_call_history)
