@@ -28,6 +28,11 @@ from agent.model_metadata import (
 logger = logging.getLogger(__name__)
 
 
+def _str_attr(agent: Any, name: str) -> str:
+    """``getattr(agent, name, "") or ""`` — route facts read off partial agents/doubles."""
+    return getattr(agent, name, "") or ""
+
+
 def _preflight_request_tokens(
     agent: Any, messages: List[Dict[str, Any]], system_prompt: str
 ) -> int:
@@ -64,8 +69,7 @@ def _agent_stale_thinking_on_wire(agent: Any) -> bool:
         from agent.message_sanitization import stale_thinking_reaches_wire
 
         return stale_thinking_reaches_wire(
-            getattr(agent, "api_mode", "") or "", getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "", getattr(agent, "base_url", "") or "",
+            *(_str_attr(agent, k) for k in ("api_mode", "provider", "model", "base_url"))
         )
     except Exception:
         return True
@@ -167,8 +171,9 @@ def _maybe_title_session_at_turn_start(agent: Any, messages: List[Any]) -> None:
                 return
         # Snapshot runtime identity so the background titler can skip if the user
         # switches models before it fires.
-        _model = getattr(agent, "model", None)
-        _provider = getattr(agent, "provider", None)
+        main_runtime = {
+            k: getattr(agent, k, None) for k in ("model", "provider", "base_url", "api_key", "api_mode")
+        }
         maybe_auto_title(
             session_db,
             session_id,
@@ -178,17 +183,11 @@ def _maybe_title_session_at_turn_start(agent: Any, messages: List[Any]) -> None:
                 getattr(agent, "_title_failure_callback", None)
                 or getattr(agent, "_emit_auxiliary_failure", None)
             ),
-            main_runtime={
-                "model": _model,
-                "provider": _provider,
-                "base_url": getattr(agent, "base_url", None),
-                "api_key": getattr(agent, "api_key", None),
-                "api_mode": getattr(agent, "api_mode", None),
-            },
+            main_runtime=main_runtime,
             title_callback=getattr(agent, "_on_session_title", None),
             runtime_validator=lambda: (
-                getattr(agent, "model", None) == _model
-                and getattr(agent, "provider", None) == _provider
+                getattr(agent, "model", None) == main_runtime["model"]
+                and getattr(agent, "provider", None) == main_runtime["provider"]
             ),
         )
     except Exception:
@@ -304,29 +303,18 @@ def _should_idle_compact(
 class TurnContext:
     """Values produced by the turn prologue and consumed by the turn loop."""
 
-    # Sanitized inbound message (surrogates stripped).
-    user_message: str
-    # Clean message preserved for transcripts / memory queries (no nudge injection).
-    original_user_message: Any
-    # Working message list for this turn (loop appends to it).
-    messages: List[Dict[str, Any]]
-    # May be reset to None by preflight compression (new session created).
-    conversation_history: Optional[List[Dict[str, Any]]]
-    # Cached system prompt active for this turn (may be rebuilt by compression).
-    active_system_prompt: Optional[str]
-    # Task / turn identifiers.
+    user_message: str  # sanitized inbound message (surrogates stripped)
+    original_user_message: Any  # clean text for transcripts / memory queries (no nudges)
+    messages: List[Dict[str, Any]]  # working list for this turn (loop appends to it)
+    conversation_history: Optional[List[Dict[str, Any]]]  # None after rotation
+    active_system_prompt: Optional[str]  # may be rebuilt by compression
     effective_task_id: str
     turn_id: str
-    # Index of the current user turn within ``messages``.
-    current_turn_user_idx: int
-    # Whether the post-turn memory review should fire.
-    should_review_memory: bool = False
-    # Context contributed by ``pre_llm_call`` plugins (appended to user message).
-    plugin_user_context: str = ""
-    # External-memory prefetch result, reused across loop iterations.
-    ext_prefetch_cache: str = ""
-    # Turn-start preflight already proved an immediate retry ineffective.
-    preflight_compression_blocked: bool = False
+    current_turn_user_idx: int  # index of the current user turn within ``messages``
+    should_review_memory: bool = False  # post-turn memory review should fire
+    plugin_user_context: str = ""  # ``pre_llm_call`` context (appended to user message)
+    ext_prefetch_cache: str = ""  # external-memory prefetch, reused across iterations
+    preflight_compression_blocked: bool = False  # immediate retry proved ineffective
 
 
 def _persist_under_lock(agent: Any, fn, failure_msg: str, pending_cli_message: Any) -> None:
@@ -358,13 +346,11 @@ def _publish_runtime_main(agent: Any) -> None:
         # session uses the physical id until build_api_kwargs re-resolves.
         _cache_scope = resolve_prompt_cache_scope_safe(agent) or ""
         set_runtime_main(
-            getattr(agent, "provider", "") or "", getattr(agent, "model", "") or "",
-            requested_provider=getattr(agent, "requested_provider", "") or "",
-            base_url=getattr(agent, "base_url", "") or "",
-            api_key=getattr(agent, "api_key", "") or "",
-            api_mode=getattr(agent, "api_mode", "") or "",
-            auth_mode=getattr(agent, "auth_mode", "") or "",
-            session_id=getattr(agent, "session_id", "") or "", cache_scope=_cache_scope,
+            _str_attr(agent, "provider"), _str_attr(agent, "model"),
+            **{k: _str_attr(agent, k) for k in (
+                "requested_provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id"
+            )},
+            cache_scope=_cache_scope,
         )
     except Exception:
         pass
@@ -412,26 +398,30 @@ def _bind_turn_identity(
     return effective_task_id, turn_id
 
 
+# Per-turn agent state reset at turn start (retry counters, guardrail halt, file-mutation
+# verifier). ``_turns_since_memory`` / ``_iters_since_skill`` are deliberately NOT reset.
+_PER_TURN_RESET_STATE: Tuple[Tuple[str, Any], ...] = (
+    ("_invalid_tool_retries", 0), ("_invalid_json_retries", 0), ("_empty_content_retries", 0),
+    ("_incomplete_scratchpad_retries", 0), ("_codex_incomplete_retries", 0),
+    ("_thinking_prefill_retries", 0), ("_post_tool_empty_retried", False),
+    ("_last_content_with_tools", None), ("_last_content_tools_all_housekeeping", False),
+    ("_mute_post_response", False), ("_unicode_sanitization_passes", 0),
+    ("_tool_guardrail_halt_decision", None), ("_vision_supported", True),
+    ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
+    ("_pre_verify_nudges", 0),
+)
+
+
 def _reset_per_turn_agent_state(agent: Any) -> None:
-    """Reset retry counters, guardrails, iteration and run budgets at turn start.
-    ``_turns_since_memory`` / ``_iters_since_skill`` are deliberately NOT reset."""
-    agent._invalid_tool_retries = 0
-    agent._invalid_json_retries = 0
-    agent._empty_content_retries = 0
-    agent._incomplete_scratchpad_retries = 0
-    agent._codex_incomplete_retries = 0
-    agent._thinking_prefill_retries = 0
-    agent._post_tool_empty_retried = False
-    agent._last_content_with_tools = None
-    agent._last_content_tools_all_housekeeping = False
-    agent._mute_post_response = False
-    agent._unicode_sanitization_passes = 0
+    """Reset retry counters, guardrails, iteration and run budgets at turn start."""
+    for name, value in _PER_TURN_RESET_STATE:
+        setattr(agent, name, value)
+    agent._turn_failed_file_mutations = {}
+    agent._turn_file_mutation_paths = set()
     agent._tool_guardrails.reset_for_turn()
-    agent._tool_guardrail_halt_decision = None
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
         _reset_consol()
-    agent._vision_supported = True
 
     # Pre-turn connection health check: clean up dead TCP connections.
     if agent.api_mode != "anthropic_messages":
@@ -450,20 +440,10 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
         agent._compression_warning = None  # send once
 
     agent.iteration_budget = IterationBudget(agent.max_iterations)
-
-    # Wall-clock run budget: stamped only when configured; the wrap-up latch resets per
-    # turn (one notice per run).
+    # Wall-clock run budget: stamped only when configured (one wrap-up notice per run).
     agent._run_budget_started_at = (
         time.time() if getattr(agent, "run_budget_seconds", None) else None
     )
-    agent._run_budget_wrapup_injected = False
-
-    # Per-turn file-mutation verifier state.
-    agent._turn_failed_file_mutations = {}
-    agent._turn_file_mutation_paths = set()
-    agent._verification_stop_nudges = 0
-    agent._pre_verify_nudges = 0
-
     # Reset the streaming context / think scrubbers at the top of each turn.
     for name in ("_stream_context_scrubber", "_stream_think_scrubber"):
         scrubber = getattr(agent, name, None)
@@ -519,6 +499,7 @@ def _hydrate_from_history(agent: Any, conversation_history: Optional[List[Any]])
         return
     if not agent._todo_store.has_items():
         agent._hydrate_todo_store(conversation_history)
+    # Hydrate per-session nudge counters from persisted history.
     if agent._user_turn_count == 0:
         prior_user_turns = sum(1 for m in conversation_history if m.get("role") == "user")
         if prior_user_turns > 0:
@@ -587,7 +568,6 @@ def _collect_pre_llm_call_context(
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
         )
-        _ctx_parts: list[str] = []
         try:
             from tools.hook_output_spill import (
                 get_spill_config as _spill_cfg, spill_if_oversized as _spill_if_oversized
@@ -596,6 +576,7 @@ def _collect_pre_llm_call_context(
         except Exception:
             _spill_if_oversized = None  # type: ignore[assignment]
             _spill_config_cached = None
+        _ctx_parts: list[str] = []
         for r in _pre_results:
             if isinstance(r, dict) and r.get("context"):
                 _piece = str(r["context"])
@@ -612,8 +593,7 @@ def _collect_pre_llm_call_context(
                 except Exception as _spill_exc:
                     logger.warning("hook context spill failed: %s", _spill_exc)
             _ctx_parts.append(_piece)
-        if _ctx_parts:
-            return "\n\n".join(_ctx_parts)
+        return "\n\n".join(_ctx_parts)
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
     return ""
@@ -637,7 +617,9 @@ def _merge_gateway_notes(
     if isinstance(_gw_turn_content, list):
         append_notes_to_multimodal_content(_gw_turn_content, _gateway_notes)
         return plugin_user_context
-    return plugin_user_context + "\n\n" + _gateway_notes if plugin_user_context else _gateway_notes
+    return (
+        plugin_user_context + "\n\n" + _gateway_notes if plugin_user_context else _gateway_notes
+    )
 
 
 def _bind_interrupt_scope(agent: Any, ra) -> None:
@@ -780,7 +762,7 @@ def build_turn_context(
     _reset_per_turn_agent_state(agent)
 
     _preview_text = summarize_user_message_for_log(user_message)
-    _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
+    _msg_preview = _preview_text[:80] + ("..." if len(_preview_text) > 80 else "")
     logger.info(
         "conversation turn: session=%s model=%s provider=%s platform=%s history=%d msg=%r",
         agent.session_id or "none", agent.model, agent.provider or "unknown",
@@ -946,7 +928,10 @@ def build_api_messages(
                 )
                 if _composed is not None:
                     api_msg["content"] = _composed
-        elif isinstance(_api_content, str) and _api_content and msg.get("role") in ("user", "assistant"):
+        elif (
+            isinstance(_api_content, str) and _api_content
+            and msg.get("role") in ("user", "assistant")
+        ):
             # Historical row: replay the exact bytes sent live so the prompt-cache
             # prefix stays byte-stable. User rows carry the injection sidecar; user
             # and assistant rows may carry a sanitize-divergence sidecar.

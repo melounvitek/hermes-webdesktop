@@ -37,7 +37,7 @@ class CompactionOutcome:
     blocked: bool = False
 
 
-# ── Helpers shared by every compression-attempt site ──────────────────────────
+# ── Helpers shared by every compression-attempt site ──
 
 
 def _clear_overflow_warn(agent: Any) -> None:
@@ -100,7 +100,7 @@ def _reanchor(agent: Any, messages: List[Any], user_message: Any) -> int:
     return idx
 
 
-# ── Turn-start passes ─────────────────────────────────────────────────────────
+# ── Turn-start passes ──
 
 
 def run_turn_start_compaction(
