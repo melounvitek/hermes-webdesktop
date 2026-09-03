@@ -184,8 +184,8 @@ def _linux_session_locked() -> Optional[bool]:
         return None
 
     def _loginctl(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["loginctl", *args], capture_output=True, text=True,
-                              timeout=2.0, stdin=subprocess.DEVNULL)
+        return subprocess.run(["loginctl", *args], capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=2.0, stdin=subprocess.DEVNULL)
 
     try:
         proc = _loginctl("list-sessions", "--no-legend")
