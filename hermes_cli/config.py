@@ -705,32 +705,16 @@ def _ensure_hermes_home_managed(home: Path):
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: E402,F401
 from hermes_cli.config_providers import (  # noqa: E402,F401  (re-exported; callers/tests use hermes_cli.config.<name>)
-    _API_MODE_ALIASES,
-    _CAMEL_ALIASES,
-    _KNOWN_PROVIDER_KEYS,
-    _PROVIDER_NORMALIZE_WARNED,
-    _canonical_api_mode,
-    _coerce_ssl_verify,
-    _custom_provider_entry_to_provider_config,
-    _entries_for_route,
-    _normalize_custom_provider_entry,
-    _normalize_provider_models,
-    _pick_provider_base_url,
-    _route_model_cfg,
-    _warn_once_per_provider,
+    _API_MODE_ALIASES, _CAMEL_ALIASES, _KNOWN_PROVIDER_KEYS, _PROVIDER_NORMALIZE_WARNED,
+    _canonical_api_mode, _coerce_ssl_verify, _custom_provider_entry_to_provider_config,
+    _entries_for_route, _normalize_custom_provider_entry, _normalize_provider_models,
+    _pick_provider_base_url, _route_model_cfg, _warn_once_per_provider,
     apply_custom_provider_extra_headers_to_client_kwargs,
-    apply_custom_provider_tls_to_client_kwargs,
-    coerce_provider_id,
-    find_provider_entry,
-    get_compatible_custom_providers,
-    get_custom_provider_context_length,
-    get_custom_provider_extra_headers,
-    get_custom_provider_model_capability,
-    get_custom_provider_tls_settings,
-    is_provider_enabled,
-    normalize_extra_headers,
-    providers_dict_to_custom_providers,
-    stringify_provider_map,
+    apply_custom_provider_tls_to_client_kwargs, coerce_provider_id, find_provider_entry,
+    get_compatible_custom_providers, get_custom_provider_context_length,
+    get_custom_provider_extra_headers, get_custom_provider_model_capability,
+    get_custom_provider_tls_settings, is_provider_enabled, normalize_extra_headers,
+    providers_dict_to_custom_providers, stringify_provider_map,
 )
 # Back-compat re-exports — :mod:`hermes_cli.personality` owns personality/overlay semantics.
 from hermes_cli.personality import (  # noqa: E402,F401
@@ -2682,13 +2666,17 @@ def _env_write_blocked(key: str, action: str) -> bool:
         return True
 
     if managed_scope.is_env_managed(key):
-        managed_dir = managed_scope.get_managed_dir()
-        src = (managed_dir / ".env") if managed_dir else "the managed scope"
         print(
-            f"Cannot {action} {key}: it is managed by your administrator ({src}) "
+            f"Cannot {action} {key}: it is managed by your administrator ({_managed_source('.env')}) "
             f"and cannot be changed.", file=sys.stderr)
         return True
     return False
+
+
+def _managed_source(filename: str):
+    """``<managed dir>/<filename>`` for refusal messages, or a generic label without a managed dir."""
+    managed_dir = managed_scope.get_managed_dir()
+    return (managed_dir / filename) if managed_dir else "the managed scope"
 
 
 def save_env_value(key: str, value: str):
@@ -3533,10 +3521,8 @@ def _exit_if_key_managed(key: str, action: str) -> None:
     hard-reject and name the source. Distinct from ``is_managed()``; env-shaped keys route to the
     .env writers, which carry their own guard."""
     if managed_scope.is_key_managed(key):
-        managed_dir = managed_scope.get_managed_dir()
-        src = (managed_dir / "config.yaml") if managed_dir else "the managed scope"
         print(
-            f"Cannot {action} '{key}': it is managed by your administrator ({src}) "
+            f"Cannot {action} '{key}': it is managed by your administrator ({_managed_source('config.yaml')}) "
             f"and cannot be changed. Contact your administrator to modify it.", file=sys.stderr)
         sys.exit(1)
 
