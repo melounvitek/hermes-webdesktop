@@ -188,9 +188,7 @@ def _wrap_markdown_tables(text: str) -> str:
         if line.lstrip().startswith("```"):
             in_fence = not in_fence
         elif (
-            not in_fence
-            and "|" in line
-            and i + 1 < len(lines)
+            not in_fence and "|" in line and i + 1 < len(lines)
             and _TABLE_SEPARATOR_RE.match(lines[i + 1])):
             block = [line, lines[i + 1]]
             j = i + 2
@@ -1242,8 +1240,7 @@ class SlackAdapter(BasePlatformAdapter):
     def _purge_stale_slash_contexts(self) -> None:
         now = time.monotonic()
         for k in [
-            k
-            for k, v in self._slash_command_contexts.items()
+            k for k, v in self._slash_command_contexts.items()
             if now - v["ts"] > self._SLASH_CTX_TTL]:
             self._slash_command_contexts.pop(k, None)
 
@@ -1912,28 +1909,8 @@ class SlackAdapter(BasePlatformAdapter):
                 # delivery attempt, so the "is thinking..." status must clear.
                 await self._clear_thread_status_quietly(chat_id, metadata)
                 return SendResult(success=True)
-            chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
-            last_result = None
-            # reply_broadcast: also post thread replies to the main channel.
-            broadcast = self.config.extra.get("reply_broadcast", False)
-            # Block Kit only for single-chunk messages (a >39k response is pathological for the
-            # 50-block / 3000-char limits); ``text`` stays the notification/accessibility fallback.
-            blocks = self._maybe_blocks(content) if len(chunks) == 1 else None
-            for i, chunk in enumerate(chunks):
-                kwargs = {
-                    "channel": chat_id, "text": chunk,
-                    "mrkdwn": True, **_slack_unfurl_kwargs(self.config.extra)}
-                if blocks and i == 0:
-                    kwargs["blocks"] = blocks
-                if thread_ts:
-                    kwargs["thread_ts"] = thread_ts
-                    # Only broadcast the first chunk of the first reply
-                    if broadcast and i == 0:
-                        kwargs["reply_broadcast"] = True
-                client_fn = lambda: self._get_client(chat_id, team_id=team_id)  # noqa: E731
-                last_result = await self._call_with_block_fallback(
-                    client_fn, "chat_postMessage", kwargs, "send")
+            last_result = await self._post_chunks(chat_id, team_id, content, formatted, thread_ts)
             # Clear Slack Assistant status as soon as the final message is posted.
             if thread_ts:
                 await self.stop_typing(chat_id, metadata=metadata)
@@ -1955,6 +1932,32 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(
                 success=False, error=str(e), retryable=_retryable,
                 retry_after=self._retry_after_from_exc(e) if _retryable else None)
+
+    async def _post_chunks(
+        self, chat_id: str, team_id: str, content: str, formatted: str, thread_ts: Optional[str]
+    ) -> Any:
+        """``chat.postMessage`` each ``MAX_MESSAGE_LENGTH`` chunk; returns the last response.
+        Block Kit only for single-chunk messages (a >39k response is pathological for the 50-block /
+        3000-char limits); ``text`` stays the notification/accessibility fallback. With
+        ``reply_broadcast`` only the first chunk is also posted to the main channel."""
+        chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        broadcast = self.config.extra.get("reply_broadcast", False)
+        blocks = self._maybe_blocks(content) if len(chunks) == 1 else None
+        last_result = None
+        for i, chunk in enumerate(chunks):
+            kwargs = {
+                "channel": chat_id, "text": chunk,
+                "mrkdwn": True, **_slack_unfurl_kwargs(self.config.extra)}
+            if blocks and i == 0:
+                kwargs["blocks"] = blocks
+            if thread_ts:
+                kwargs["thread_ts"] = thread_ts
+                if broadcast and i == 0:
+                    kwargs["reply_broadcast"] = True
+            client_fn = lambda: self._get_client(chat_id, team_id=team_id)  # noqa: E731
+            last_result = await self._call_with_block_fallback(
+                client_fn, "chat_postMessage", kwargs, "send")
+        return last_result
 
     @staticmethod
     def _retry_after_from_exc(e: BaseException) -> Optional[float]:
@@ -3263,10 +3266,7 @@ class SlackAdapter(BasePlatformAdapter):
         self, channel_id: str, thread_ts: str, title_source: str, *, team_id: str = "") -> None:
         """Best-effort title for visible Slack AI DM threads."""
         if (
-            not self._app
-            or not channel_id
-            or not thread_ts
-            or not title_source
+            not self._app or not channel_id or not thread_ts or not title_source
             or not self._assistant_thread_title_enabled()):
             return
         key = self._workspace_thread_key(team_id, channel_id, thread_ts)
@@ -3704,8 +3704,7 @@ class SlackAdapter(BasePlatformAdapter):
             return False
         self_uids = {u for u in (bot_uid, self._bot_user_id) if u}
         if (
-            self._slack_ignore_other_user_mentions()
-            and not is_mentioned
+            self._slack_ignore_other_user_mentions() and not is_mentioned
             and not self._slack_message_mentions_self(routing_text, self_uids)
             and self._slack_message_addressed_to_other_user(routing_text, self_uids)):
             logger.debug(
@@ -4009,8 +4008,7 @@ class SlackAdapter(BasePlatformAdapter):
         # thread_require_mention, which it would defeat). Session-scoped ``thread_ts`` because a
         # top-level @mention STARTS a thread whose replies must trigger too.
         if (
-            thread_ts
-            and not self._slack_strict_mention()
+            thread_ts and not self._slack_strict_mention()
             and not self._slack_thread_require_mention()):
             self._register_mentioned_thread(thread_ts, team_id=team_id)
         return text, original_text, command_probe_text, is_command_text
@@ -4081,13 +4079,11 @@ class SlackAdapter(BasePlatformAdapter):
         if await self._peer_bot_drop(event, user_id, bot_uid, channel_id, team_id, is_mentioned):
             return
         if (
-            not is_one_to_one_dm
-            and bot_uid
-            and not await self._channel_gate_allows(
-                channel_id=channel_id, routing_text=routing_text, bot_uid=bot_uid,
-                is_mentioned=is_mentioned, is_thread_reply=is_thread_reply,
-                event_thread_ts=event_thread_ts, user_id=user_id, team_id=team_id, is_dm=is_dm,
-                force_process=force_process)):
+            not is_one_to_one_dm and bot_uid and not await self._channel_gate_allows(
+            channel_id=channel_id, routing_text=routing_text, bot_uid=bot_uid,
+            is_mentioned=is_mentioned, is_thread_reply=is_thread_reply,
+            event_thread_ts=event_thread_ts, user_id=user_id, team_id=team_id, is_dm=is_dm,
+            force_process=force_process)):
             return
         # Claim the message ts HERE: a link unfurl emits `message_changed` with a different event
         # ts, so only the `_processed_message_ts` guard stops a duplicate turn, and it must be set
@@ -5042,37 +5038,12 @@ class SlackAdapter(BasePlatformAdapter):
     async def _handle_slash_command(self, command: dict) -> None:
         """Slash commands: native ``/<command> [args]`` for every COMMAND_REGISTRY entry, or
         ``/hermes <subcommand> [args]``; other text after ``/hermes`` is a regular message."""
-        slash_name = (command.get("command") or "").lstrip("/").strip()
-        raw_text = str(command.get("text") or "")
-        text = raw_text
         user_id = command.get("user_id", "")
         channel_id = command.get("channel_id", "")
         team_id = command.get("team_id", "")
         if team_id and channel_id:
             self._remember_channel_team(channel_id, team_id)
-        if slash_name in {"hermes", ""}:
-            # /hermes <subcommand> [args] + free-form questions; empty
-            # slash_name lands here for callers that omit command["command"].
-            legacy_text = raw_text.strip()
-            from hermes_cli.commands import slack_subcommand_map
-
-            subcommand_map = slack_subcommand_map()
-            subcommand_map["compact"] = "/compress"
-            first_word = legacy_text.split()[0] if legacy_text.split() else ""
-            if first_word in subcommand_map:
-                rest = legacy_text[len(first_word) :].strip()
-                text = (
-                    f"{subcommand_map[first_word]} {rest}".strip()
-                    if rest
-                    else subcommand_map[first_word])
-            elif legacy_text:
-                text = legacy_text  # Treat as a regular question
-            else:
-                text = "/help"
-        else:
-            # Native slash: preserve Slack's raw argument payload verbatim,
-            # including internal/trailing spacing.
-            text = f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
+        text = self._slash_command_text(command)
         thread_id = self._slash_thread_id(command)
         is_dm = str(channel_id).startswith("D")
         if is_dm and self._slack_disable_dms():
@@ -5099,6 +5070,26 @@ class SlackAdapter(BasePlatformAdapter):
             await self.handle_message(event)
         finally:
             _slash_user_id.reset(_slash_user_id_token)
+
+    @staticmethod
+    def _slash_command_text(command: dict) -> str:
+        """Gateway message text for a slash payload. Native slashes keep Slack's raw argument
+        payload verbatim (internal/trailing spacing). ``/hermes`` (or a missing ``command``) maps
+        ``<subcommand> [args]`` via the registry, else free-form text is a regular question."""
+        slash_name = (command.get("command") or "").lstrip("/").strip()
+        raw_text = str(command.get("text") or "")
+        if slash_name not in {"hermes", ""}:
+            return f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
+        legacy_text = raw_text.strip()
+        from hermes_cli.commands import slack_subcommand_map
+
+        subcommand_map = slack_subcommand_map()
+        subcommand_map["compact"] = "/compress"
+        first_word = legacy_text.split()[0] if legacy_text.split() else ""
+        if first_word in subcommand_map:
+            rest = legacy_text[len(first_word) :].strip()
+            return f"{subcommand_map[first_word]} {rest}".strip() if rest else subcommand_map[first_word]
+        return legacy_text or "/help"
 
     @staticmethod
     def _slash_thread_id(command: dict) -> Optional[str]:
@@ -5520,8 +5511,7 @@ async def _slack_json_post(session, token: str, method: str, payload: dict, req_
     """POST ``payload`` to ``https://slack.com/api/<method>`` with a bearer token; JSON body."""
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     async with session.post(
-        f"https://slack.com/api/{method}", headers=headers, json=payload, **req_kw
-    ) as resp:
+        f"https://slack.com/api/{method}", headers=headers, json=payload, **req_kw) as resp:
         return await resp.json()
 
 
@@ -5748,41 +5738,55 @@ async def _standalone_send(
         return {"error": f"Slack send failed: {e}"}
 
 
+_SETUP_STEPS = (
+    "Steps to create a Slack app:",
+    "   1. Go to https://api.slack.com/apps → Create New App",
+    "      Pick 'From an app manifest' — we'll generate one for you below.",
+    "   2. Enable Socket Mode: Settings → Socket Mode → Enable",
+    "      • Create an App-Level Token with 'connections:write' scope",
+    "   3. Install to Workspace: Settings → Install App",
+    "   4. After installing, invite the bot to channels: /invite @YourBot",)
+_SETUP_HOME_CHANNEL_HELP = (
+    "📬 Home Channel: where Hermes delivers cron job results,",
+    "   cross-platform messages, and notifications.",
+    "   To get a channel ID: open the channel in Slack, then right-click",
+    "   the channel name → Copy link — the ID starts with C (e.g. C01ABC2DE3F).",
+    "   You can also set this later by typing /set-home in a Slack channel.",)
+
+
+def _write_slack_manifest_and_instruct() -> None:
+    """Write the manifest under HERMES_HOME and print paste instructions; non-fatal."""
+    from hermes_cli.cli_output import print_info, print_success, print_warning
+
+    try:
+        from hermes_cli.slack_cli import _build_full_manifest
+        from hermes_constants import get_hermes_home
+
+        manifest = _build_full_manifest(bot_name="Hermes", bot_description="Your Hermes agent on Slack")
+        target = _Path(get_hermes_home()) / "slack-manifest.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print_success(f"Slack app manifest written to: {target}")
+        print_info(
+            "   Paste it into https://api.slack.com/apps → your app → Features "
+            "→ App Manifest → Edit, then Save.  Slack will prompt to "
+            "reinstall if scopes or slash commands changed.")
+        print_info(
+            "   Re-run `hermes slack manifest --write` anytime to refresh after "
+            "Hermes adds new commands.")
+    except Exception as e:
+        print_warning(f"Could not write Slack manifest: {e}")
+
+
 def interactive_setup() -> None:
     """Guide the user through Slack bot setup (manifest, tokens, allowlist, home channel).
     CLI helpers are lazy-imported to keep the plugin's import surface small."""
-    from pathlib import Path
     from hermes_cli.config import get_env_value, remove_env_value, save_env_value
     from hermes_cli.cli_output import (
         prompt, prompt_yes_no, print_header, print_info, print_success, print_warning)
 
-    def _write_slack_manifest_and_instruct() -> None:
-        """Write the manifest under HERMES_HOME and print paste instructions; non-fatal."""
-        try:
-            from hermes_cli.slack_cli import _build_full_manifest
-            from hermes_constants import get_hermes_home
-            import json as _json
-
-            manifest = _build_full_manifest(
-                bot_name="Hermes", bot_description="Your Hermes agent on Slack")
-            target = Path(get_hermes_home()) / "slack-manifest.json"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(
-                _json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            print_success(f"Slack app manifest written to: {target}")
-            print_info(
-                "   Paste it into https://api.slack.com/apps → your app → Features "
-                "→ App Manifest → Edit, then Save.  Slack will prompt to "
-                "reinstall if scopes or slash commands changed.")
-            print_info(
-                "   Re-run `hermes slack manifest --write` anytime to refresh after "
-                "Hermes adds new commands.")
-        except Exception as e:
-            print_warning(f"Could not write Slack manifest: {e}")
-
     print_header("Slack")
-    existing = get_env_value("SLACK_BOT_TOKEN")
-    if existing:
+    if get_env_value("SLACK_BOT_TOKEN"):
         print_info("Slack: already configured")
         if not prompt_yes_no("Reconfigure Slack?", False):
             # Still offer a manifest refresh so new commands get registered.
@@ -5791,14 +5795,7 @@ def interactive_setup() -> None:
                 "list? (recommended after `hermes update`)", True):
                 _write_slack_manifest_and_instruct()
             return
-    for line in (
-        "Steps to create a Slack app:",
-        "   1. Go to https://api.slack.com/apps → Create New App",
-        "      Pick 'From an app manifest' — we'll generate one for you below.",
-        "   2. Enable Socket Mode: Settings → Socket Mode → Enable",
-        "      • Create an App-Level Token with 'connections:write' scope",
-        "   3. Install to Workspace: Settings → Install App",
-        "   4. After installing, invite the bot to channels: /invite @YourBot",):
+    for line in _SETUP_STEPS:
         print_info(line)
     print()
     print_info("   Full guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack/")
@@ -5830,12 +5827,7 @@ def interactive_setup() -> None:
             "   Set SLACK_ALLOW_ALL_USERS=true or GATEWAY_ALLOW_ALL_USERS=true only if you intentionally want open workspace access."
         )
     print()
-    for line in (
-        "📬 Home Channel: where Hermes delivers cron job results,",
-        "   cross-platform messages, and notifications.",
-        "   To get a channel ID: open the channel in Slack, then right-click",
-        "   the channel name → Copy link — the ID starts with C (e.g. C01ABC2DE3F).",
-        "   You can also set this later by typing /set-home in a Slack channel.",):
+    for line in _SETUP_HOME_CHANNEL_HELP:
         print_info(line)
     home_channel = prompt("Home channel ID (leave empty to set later with /set-home)").strip()
     if home_channel:
