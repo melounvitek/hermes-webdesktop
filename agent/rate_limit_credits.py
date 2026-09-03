@@ -22,6 +22,13 @@ def _pct(fraction) -> str:
     return ("%.0f%%" % (fraction * 100)) if fraction is not None else "n/a"
 
 
+def _adopt_credits_state(agent, state) -> None:
+    """Retain-last-known: overwrite state and latch session-start remaining on the first header ever seen."""
+    agent._credits_state = state
+    if agent._credits_session_start_micros is None:
+        agent._credits_session_start_micros = state.remaining_micros
+
+
 class RateLimitCreditsMixin:
     """Rate-limit + credits header capture and notices (see module docstring)."""
 
@@ -60,7 +67,7 @@ class RateLimitCreditsMixin:
         except Exception:
             fixture = None
         if fixture is not None:
-            self._adopt_credits_state(fixture)
+            _adopt_credits_state(self, fixture)
             latch = getattr(self, "_credits_latch", None)
             if isinstance(latch, dict):
                 # Only seen_below_90 — priming seen_grant_unspent would fire grant_spent on first observation.
@@ -89,7 +96,7 @@ class RateLimitCreditsMixin:
                             "(miss — producer off / non-Nous path / >TTL stale)")
             return
 
-        self._adopt_credits_state(state)
+        _adopt_credits_state(self, state)
         if dev:
             # HERMES_DEV_CREDITS streams each capture to agent.log (`hermes logs -f`, grep 'credits ▸').
             spent = self.get_credits_spent_micros()
@@ -100,12 +107,6 @@ class RateLimitCreditsMixin:
                 ("%.0fs" % state.age_seconds) if state.age_seconds != float("inf") else "n/a",
                 (" · disabled=%s" % state.disabled_reason) if state.disabled_reason else "")
         self._emit_credits_notices()
-
-    def _adopt_credits_state(self, state) -> None:
-        """Retain-last-known: overwrite state and latch session-start remaining on the first header ever seen."""
-        self._credits_state = state
-        if self._credits_session_start_micros is None:
-            self._credits_session_start_micros = state.remaining_micros
 
     def _emit_credits_notices(self) -> None:
         """Run the threshold policy and emit notices (shared by the warm path and the cold-start seed).

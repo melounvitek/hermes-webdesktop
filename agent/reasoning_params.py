@@ -23,6 +23,27 @@ _OPENROUTER_REASONING_PREFIXES = (
 _PROBE_TTL_S = 60
 
 
+def _cached_probe(agent, cache_attr: str, probe, unknown, definitive):
+    """``probe(model, base_url, api_key)`` once per (model, base_url); ``unknown`` is what a raising probe
+    yields, ``definitive(value)`` decides permanent vs 60s TTL."""
+    cache = getattr(agent, cache_attr, None)
+    if cache is None:
+        cache = {}
+        setattr(agent, cache_attr, cache)
+    key = (agent.model, agent.base_url)
+    cached = cache.get(key)
+    if cached is not None:
+        value, ts = cached
+        if definitive(value) or (time.monotonic() - ts) < _PROBE_TTL_S:
+            return value
+    try:
+        value = probe(agent.model, agent.base_url, getattr(agent, "api_key", ""))
+    except Exception:
+        value = unknown
+    cache[key] = (value, time.monotonic())
+    return value
+
+
 class ReasoningParamsMixin:
     """Reasoning-parameter gating and echo policy (see module docstring)."""
 
@@ -61,33 +82,13 @@ class ReasoningParamsMixin:
         model = (self.model or "").lower()
         return any(model.startswith(prefix) for prefix in _OPENROUTER_REASONING_PREFIXES)
 
-    def _cached_probe(self, cache_attr: str, probe, unknown, definitive):
-        """``probe(model, base_url, api_key)`` once per (model, base_url); ``unknown`` is what a raising probe
-        yields, ``definitive(value)`` decides permanent vs 60s TTL."""
-        cache = getattr(self, cache_attr, None)
-        if cache is None:
-            cache = {}
-            setattr(self, cache_attr, cache)
-        key = (self.model, self.base_url)
-        cached = cache.get(key)
-        if cached is not None:
-            value, ts = cached
-            if definitive(value) or (time.monotonic() - ts) < _PROBE_TTL_S:
-                return value
-        try:
-            value = probe(self.model, self.base_url, getattr(self, "api_key", ""))
-        except Exception:
-            value = unknown
-        cache[key] = (value, time.monotonic())
-        return value
-
     def _lmstudio_reasoning_options_cached(self) -> list[str]:
         """LM Studio's published reasoning ``allowed_options`` (gate + clamp so toggle models don't 400 on ``high``)."""
         try:
             from hermes_cli.models import lmstudio_model_reasoning_options
         except Exception:
             return []
-        return self._cached_probe("_lm_reasoning_opts_cache", lmstudio_model_reasoning_options, [], bool)
+        return _cached_probe(self, "_lm_reasoning_opts_cache", lmstudio_model_reasoning_options, [], bool)
 
     def _ollama_supports_thinking_cached(self) -> bool:
         """True only if Ollama's ``/api/show`` declares the ``thinking`` capability."""
@@ -95,7 +96,7 @@ class ReasoningParamsMixin:
             from hermes_cli.models import ollama_model_supports_thinking
         except Exception:
             return False
-        return bool(self._cached_probe("_ollama_thinking_cache", ollama_model_supports_thinking, None, lambda v: v is not None))
+        return bool(_cached_probe(self, "_ollama_thinking_cache", ollama_model_supports_thinking, None, lambda v: v is not None))
 
     def _resolve_lmstudio_summary_reasoning_effort(self) -> Optional[str]:
         """Safe top-level ``reasoning_effort`` for LM Studio; shared with the iteration-limit summary call."""
