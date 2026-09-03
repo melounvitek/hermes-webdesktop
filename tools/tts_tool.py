@@ -355,7 +355,8 @@ def _text_to_speech_single(
     try:
         if command_provider_config is not None:
             logger.info("Generating speech with command TTS provider '%s'...", provider)
-            file_str = _generate_command_tts(text, file_str, provider, command_provider_config, tts_config)
+            file_str = _generate_command_tts(
+                text, file_str, provider, command_provider_config, tts_config)
         elif provider not in BUILTIN_TTS_PROVIDERS and (
             _plugin_path := _dispatch_to_plugin_provider(text, file_str, provider, tts_config)
         ) is not None:
@@ -370,7 +371,8 @@ def _text_to_speech_single(
 
         # Sniff once for every provider: MP3/WAV bytes in a .ogg path render as 0-second bubbles.
         file_str = _repair_ogg_container(file_str)
-        file_str, voice_compatible = _finalize_voice_delivery(file_str, provider, command_provider_config, want_opus)
+        file_str, voice_compatible = _finalize_voice_delivery(
+            file_str, provider, command_provider_config, want_opus)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{os.path.getsize(file_str):,}", provider)
         return json.dumps({
             "success": True, "file_path": file_str, "media_tag": _media_tag([file_str], voice_compatible),
@@ -446,7 +448,8 @@ def text_to_speech_tool(
                     provider, len(chunks), len(text), max_len)
     platform, want_opus = _session_platform()
     delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
-    base_path, error = _resolve_output_base(output_path, provider, command_provider_config, want_opus)
+    base_path, error = _resolve_output_base(
+        output_path, provider, command_provider_config, want_opus)
     if error:
         return error
     generated_artifacts: set[str] = set()

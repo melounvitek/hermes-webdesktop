@@ -33,7 +33,8 @@ _TTS_MODEL_CACHE_MAX = 3
 # (+cuda flag); KittenTTS on model name.
 _piper_voice_cache: Dict[str, Any] = {}
 _kittentts_model_cache: Dict[str, Any] = {}
-_LOCAL_TTS_MODEL_CACHES: Dict[str, Dict[str, Any]] = {"piper": _piper_voice_cache, "kittentts": _kittentts_model_cache}
+_LOCAL_TTS_MODEL_CACHES: Dict[str, Dict[str, Any]] = {
+    "piper": _piper_voice_cache, "kittentts": _kittentts_model_cache}
 
 
 def _tts_cache_get_or_load(cache: Dict[str, Any], key: str, load: Callable[[], Any]) -> Any:

@@ -252,7 +252,9 @@ def _finalize_wav_output(wav_path: str, output_path: str) -> str:
         return output_path
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
-        _ffmpeg_run(ffmpeg, ["-i", wav_path, "-y", "-loglevel", "error", output_path], check=True, capture=False)
+        _ffmpeg_run(
+            ffmpeg, ["-i", wav_path, "-y", "-loglevel", "error", output_path], check=True,
+            capture=False)
         _remove_quietly(wav_path)
     else:
         os.rename(wav_path, output_path)
@@ -288,7 +290,8 @@ def _write_wav_bytes_as(wav_bytes: bytes, output_path: str) -> str:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg:
             opus = _OPUS_VOICE_ARGS if output_path.lower().endswith(".ogg") else []
-            result = _ffmpeg_run(ffmpeg, ["-i", wav_path, *opus, "-y", "-loglevel", "error", output_path])
+            result = _ffmpeg_run(
+                ffmpeg, ["-i", wav_path, *opus, "-y", "-loglevel", "error", output_path])
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="ignore")[:300]
                 raise RuntimeError(f"ffmpeg conversion failed: {stderr}")

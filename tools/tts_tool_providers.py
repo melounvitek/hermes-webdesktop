@@ -309,7 +309,8 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     optimize_streaming_latency = _clamped_number(
         xai_config.get("optimize_streaming_latency", tts_config.get("optimize_streaming_latency")),
         int, 0, 2)
-    text_normalization = _config_bool(xai_config.get("text_normalization"), DEFAULT_XAI_TEXT_NORMALIZATION_DEFAULT)
+    text_normalization = _config_bool(
+        xai_config.get("text_normalization"), DEFAULT_XAI_TEXT_NORMALIZATION_DEFAULT)
     if creds.get("provider") == "xai-oauth":
         base_url = creds.get("base_url")
     else:
@@ -571,7 +572,8 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     tts_script = text
     if _gemini_audio_tags_enabled(gemini_config, model):
         tts_script = _rewrite_gemini_tts_audio_tags(text, persona_prompt=persona_prompt)
-    prompt_text = _compose_gemini_tts_prompt(tts_script, gemini_config, persona_prompt=persona_prompt)
+    prompt_text = _compose_gemini_tts_prompt(
+        tts_script, gemini_config, persona_prompt=persona_prompt)
     max_len = origin._resolve_max_text_length("gemini", tts_config)
     if len(prompt_text) > max_len:
         raise ValueError(

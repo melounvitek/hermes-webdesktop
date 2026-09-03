@@ -154,7 +154,8 @@ class _StreamerPlayback:
 
     def _create_output_stream(self):
         sd = _origin()._import_sounddevice()
-        stream = sd.OutputStream(samplerate=self.streamer.sample_rate, channels=self.streamer.channels, dtype="int16")
+        stream = sd.OutputStream(
+            samplerate=self.streamer.sample_rate, channels=self.streamer.channels, dtype="int16")
         stream.start()
         return stream
 
@@ -207,7 +208,8 @@ class _StreamerPlayback:
             self._prefetch_sem.release()
 
     def _play_sentence_via_tempfile(self, chunk_queue) -> None:
-        _play_via_tempfile(iter(_drain_chunks(chunk_queue)), self.stop_event, self.streamer.sample_rate)
+        _play_via_tempfile(
+            iter(_drain_chunks(chunk_queue)), self.stop_event, self.streamer.sample_rate)
 
     def _for_each_sentence(self, play: Callable[[queue.Queue], None]) -> None:
         """Feed queued sentences to *play* in order until the end sentinel; stopped sentences are skipped."""
@@ -305,7 +307,8 @@ def stream_tts_to_speaker(
             sync_pipeline = _SyncSentencePipeline(stop_event)
         else:
             with contextlib.suppress(Exception):
-                stream_max_len = origin._resolve_max_text_length(provider or origin._get_provider(tts_config), tts_config)
+                stream_max_len = origin._resolve_max_text_length(
+                    provider or origin._get_provider(tts_config), tts_config)
             playback = _StreamerPlayback(streamer, stop_event)
         chunker = SentenceChunker()
         spoken_sentences: list[str] = []  # skip duplicate/near-duplicate sentences (LLM repetition)
