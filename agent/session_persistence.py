@@ -170,9 +170,11 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
         api_content = None
     # get_messages_as_conversation replays rows through sanitize_context().strip(); capture the
     # sent bytes when they would differ (compared in wire form).
-    if api_content is None and role in ("user", "assistant") and isinstance(content, str) and content:
-        if sanitize_context(content).strip() != content.strip():
-            api_content = content
+    if (
+        api_content is None and role in ("user", "assistant") and isinstance(content, str) and content
+        and sanitize_context(content).strip() != content.strip()
+    ):
+        api_content = content
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
         "role": role,
