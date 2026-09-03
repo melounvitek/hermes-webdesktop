@@ -9,6 +9,7 @@ truncation) | full (truncated raw content). See README.md.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import json
 import logging
 import os
@@ -85,6 +86,15 @@ def _env(name: str, default: str = "") -> str:
 def _debug(message: str) -> None:
     if _env("HERMES_LANGFUSE_DEBUG").lower() in {"1", "true", "yes", "on"}:
         logger.info("Langfuse tracing: %s", message)
+
+
+@contextlib.contextmanager
+def _failsafe(label: str):
+    """Swallow + debug-log any exception: telemetry must never block the agent turn."""
+    try:
+        yield
+    except Exception as exc:  # pragma: no cover - fail-open
+        _debug(f"{label} failed: {exc}")
 
 
 _CAPTURE_MODES = ("metadata", "sanitized", "full")
@@ -551,11 +561,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if root_ctx is None:
         root_ctx, root_span = open_root()
 
-    # SDK v3 uses update_trace(); failures must never block the turn.
-    try:
+    with _failsafe("update_trace(input)"):  # SDK v3 uses update_trace()
         root_span.update_trace(input=trace_input)
-    except Exception as exc:
-        _debug(f"update_trace(input) failed: {exc}")
 
     _debug(f"started trace {trace_id} for {task_key}")
     return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
@@ -572,15 +579,13 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
                      usage_details: Optional[dict] = None, cost_details: Optional[dict] = None) -> None:
     if observation is None:
         return
-    try:
+    with _failsafe("end observation"):
         update_kwargs = {**({} if output is None else {"output": output}),
                          **{k: v for k, v in (("metadata", metadata), ("usage_details", usage_details),
                                               ("cost_details", cost_details)) if v}}
         if update_kwargs:
             observation.update(**update_kwargs)
         observation.end()
-    except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"end observation failed: {exc}")
 
 
 def _end_children(state: TraceState, *, include_subagents: bool = False) -> None:
@@ -592,15 +597,13 @@ def _end_children(state: TraceState, *, include_subagents: bool = False) -> None
 
 def _end_root(state: TraceState, label: str) -> None:
     """End the root span then unwind its context; never raises."""
-    try:
+    with _failsafe(label):
         state.root_span.end()
         # Unwind the root context manager now, while opentelemetry.trace.Span is
         # still a real type; GC-driven close at interpreter teardown raises
         # TypeError inside use_span's isinstance check.
         if state.root_ctx is not None:
             state.root_ctx.__exit__(None, None, None)
-    except Exception as exc:  # pragma: no cover - fail-open
-        _debug(f"{label} failed: {exc}")
 
 
 def _finalize_all_traces() -> None:
@@ -612,11 +615,8 @@ def _finalize_all_traces() -> None:
         states = list(_TRACE_STATE.items())
         _TRACE_STATE.clear()
     for key, state in states:
-        try:
+        with _failsafe(f"atexit finalize for {key}"):  # _end_root never raises
             _end_children(state, include_subagents=True)
-        except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"atexit finalize failed for {key}: {exc}")
-        else:
             _end_root(state, f"atexit finalize for {key}")
     if states:
         _flush(_get_langfuse())
@@ -624,10 +624,8 @@ def _finalize_all_traces() -> None:
 
 def _flush(client: Any) -> None:
     if client is not None:
-        try:
+        with contextlib.suppress(Exception):
             client.flush()
-        except Exception:
-            pass
 
 
 def _finish_trace(task_key: str, *, output: Any = None) -> None:
@@ -650,18 +648,13 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             # update_trace sets TRACE-level I/O (SDK v3); root I/O via update().
             # Neither may prevent end(), else children export without a root.
             for method, label in (("update_trace", "update_trace(output)"), ("update", "root update(output)")):
-                try:
+                with _failsafe(label):
                     getattr(state.root_span, method)(output=final_output)
-                except Exception as exc:
-                    _debug(f"{label} failed: {exc}")
         _end_root(state, "root end()")
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
-        # Last-chance end so an unexpected error still exports the root.
-        try:
+        with contextlib.suppress(Exception):  # last-chance end so the root still exports
             state.root_span.end()
-        except Exception:
-            pass
     finally:
         _flush(client)
 
@@ -945,10 +938,8 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     _add_duration(error_metadata, api_duration)
 
     if generation is not None:
-        try:
+        with _failsafe("error-level update"):
             generation.update(level="ERROR", status_message=(error_type or "api_request_error")[:200])
-        except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"error-level update failed: {exc}")
         _end_observation(generation, metadata=error_metadata)
 
     # A retryable failure is followed by another pre_api_request on the same
@@ -984,10 +975,8 @@ def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> 
     # cached client must keep exporting). Doing it while modules are intact keeps
     # the SDK's atexit handler off torn-down opentelemetry globals (TypeError on quit).
     if reason == "shutdown" and callable(getattr(client, "shutdown", None)):
-        try:
+        with _failsafe("langfuse shutdown"):
             client.shutdown()
-        except Exception as exc:  # pragma: no cover - fail-open
-            _debug(f"langfuse shutdown failed: {exc}")
 
 
 def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = None,
