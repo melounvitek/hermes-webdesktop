@@ -63,10 +63,7 @@ def _require_sdk(purpose: str, verb: str = "Install it with"):
     """``_get_anthropic_sdk()`` or ImportError naming the feature that needs it."""
     sdk = _get_anthropic_sdk()
     if sdk is None:
-        raise ImportError(
-            f"The 'anthropic' package is required for {purpose}. "
-            f"{verb}: pip install 'anthropic>=0.39.0'"
-        )
+        raise ImportError(f"The 'anthropic' package is required for {purpose}. {verb}: pip install 'anthropic>=0.39.0'")
     return sdk
 
 
@@ -333,9 +330,8 @@ def _base_client_kwargs(base_url, timeout) -> tuple[str, Dict[str, Any]]:
     SDK appends ``/v1/messages``. Azure's ``api-version`` goes through ``default_query`` so the
     base_url is not corrupted into ``/anthropic?api-version=.../v1/messages``."""
     kwargs: Dict[str, Any] = {"timeout": _client_timeout(timeout), "max_retries": 0}
-    normalized = _normalize_base_url_text(base_url)
+    normalized = re.sub(r"/v1/?$", "", _normalize_base_url_text(base_url).rstrip("/"))
     if normalized:
-        normalized = re.sub(r"/v1/?$", "", normalized.rstrip("/"))
         kwargs["base_url"] = normalized
         if _is_azure_anthropic_endpoint(normalized) and "api-version" not in normalized:
             kwargs["default_query"] = {"api-version": "2025-04-15"}
@@ -431,13 +427,9 @@ def build_anthropic_bedrock_client(region: str):
     ``context-1m-2025-08-07`` are attached: without the latter Bedrock caps Opus 4.6/4.7 at 200K."""
     sdk = _require_sdk("the Bedrock provider")
     if not hasattr(sdk, "AnthropicBedrock"):
-        raise ImportError(
-            "anthropic.AnthropicBedrock not available. "
-            "Upgrade with: pip install 'anthropic>=0.39.0'"
-        )
+        raise ImportError("anthropic.AnthropicBedrock not available. Upgrade with: pip install 'anthropic>=0.39.0'")
     return sdk.AnthropicBedrock(
-        aws_region=region,
-        timeout=_client_timeout(None),
+        aws_region=region, timeout=_client_timeout(None),
         max_retries=0,  # retry belongs to hermes's outer loop (honors Retry-After)
         default_headers=_beta_header([*_COMMON_BETAS, _CONTEXT_1M_BETA]),
     )
@@ -451,9 +443,7 @@ def _normalize_to_mcp_wire(name: str) -> str:
     land on the double-underscore form. normalize_response reverses both via registry lookup."""
     if name.startswith("mcp__"):
         return name  # already correct, don't double-prefix
-    if name.startswith("mcp_"):
-        return "mcp__" + name[len("mcp_"):]
-    return _MCP_TOOL_PREFIX + name
+    return _MCP_TOOL_PREFIX + name.removeprefix("mcp_")
 
 
 def _oauth_wire_namer(anthropic_tools: List[Dict[str, Any]]):
@@ -500,15 +490,12 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     for tool in anthropic_tools or []:
         if "name" in tool:
             tool["name"] = to_wire(tool["name"])
-        description = tool.get("description")
-        if isinstance(description, str):
-            tool["description"] = _apply_oauth_prose_aliases(description)  # prose-safe aliases only
+        if isinstance(tool.get("description"), str):
+            tool["description"] = _apply_oauth_prose_aliases(tool["description"])  # prose-safe aliases only
     for msg in anthropic_messages:
-        content = msg.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use" and "name" in block:
-                    block["name"] = to_wire(block["name"])  # tool_result pairs by id, not name
+        for block in msg.get("content") if isinstance(msg.get("content"), list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and "name" in block:
+                block["name"] = to_wire(block["name"])  # tool_result pairs by id, not name
     return system
 
 
@@ -526,15 +513,12 @@ def _thinking_kwargs(reasoning_config: Dict[str, Any], model: str, effective_max
     if "haiku" in model.lower():
         return {}
     effort = str(reasoning_config.get("effort", "medium")).lower()
-    budget = THINKING_BUDGET.get(effort, 8000)
     if _supports_adaptive_thinking(model):
         adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
         if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
             adaptive_effort = "max"
-        return {
-            "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": adaptive_effort},
-        }
+        return {"thinking": {"type": "adaptive", "display": "summarized"}, "output_config": {"effort": adaptive_effort}}
+    budget = THINKING_BUDGET.get(effort, 8000)
     return {
         "thinking": {"type": "enabled", "budget_tokens": budget},
         "temperature": 1,  # required when thinking is enabled on older models
@@ -648,18 +632,17 @@ def _stream_final_message(stream_fn, api_kwargs, log_prefix, on_stream_event, on
                 on_response(getattr(stream, "response", None))
             except Exception:
                 logger.debug("%son_response callback failed", log_prefix, exc_info=True)
-        if callable(on_stream_event):
-            # Consume manually so each event ticks the progress callback; get_final_message then
-            # returns the accumulated snapshot.
-            for _event in stream:
-                try:
-                    on_stream_event(_event)
-                except TimeoutError:
-                    # The callback is the caller's deadline seam: the host has given up, so abandon
-                    # the stream (``with`` closes it) instead of streaming an answer nobody reads.
-                    raise
-                except Exception:
-                    logger.debug("%son_stream_event callback failed", log_prefix, exc_info=True)
+        # Consume manually so each event ticks the progress callback; get_final_message then
+        # returns the accumulated snapshot. TimeoutError is the caller's deadline seam: the host
+        # has given up, so abandon the stream (``with`` closes it) instead of streaming an answer
+        # nobody reads.
+        for event in stream if callable(on_stream_event) else ():
+            try:
+                on_stream_event(event)
+            except TimeoutError:
+                raise
+            except Exception:
+                logger.debug("%son_stream_event callback failed", log_prefix, exc_info=True)
         return stream.get_final_message()
 
 

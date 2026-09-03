@@ -1,11 +1,8 @@
-"""OpenAI-style -> Anthropic Messages API request conversion.
-
-Everything here rewrites *request payloads*: model-id normalization, tool schemas, and the
-message list (content blocks, thinking blocks and their signatures, tool_use/tool_result
-pairing, cache_control placement, screenshot eviction, blank-block scrubbing). Endpoint
-predicates come from ``agent/anthropic_endpoints.py``, so this module never imports the adapter
-and there is no cycle. ``agent.anthropic_adapter`` re-exports every name below.
-"""
+"""OpenAI-style -> Anthropic Messages API request conversion: model-id normalization, tool
+schemas, and the message list (content blocks, thinking blocks and their signatures,
+tool_use/tool_result pairing, cache_control placement, screenshot eviction, blank-block
+scrubbing). Endpoint predicates come from ``agent/anthropic_endpoints.py`` so this module never
+imports the adapter (no cycle); ``agent.anthropic_adapter`` re-exports the public names."""
 
 import copy
 import json
@@ -24,9 +21,7 @@ _THINKING_TYPES = frozenset(("thinking", "redacted_thinking"))
 _CACHEABLE_TYPES = frozenset(("text", "tool_use"))
 _EMPTY_TEXT_PLACEHOLDER = "(empty)"
 _EMPTY_SCHEMA = {"type": "object", "properties": {}}
-_BEDROCK_REGION_PREFIXES = (
-    "global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca.", "sa.", "me.", "af.",
-)
+_BEDROCK_REGION_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca.", "sa.", "me.", "af.")
 
 
 def _block_type(b: Any) -> Any:
@@ -41,10 +36,7 @@ def _has_block_type(blocks: List[Any], types) -> bool:
 def _is_blank_text_block(b: Any) -> bool:
     """A text block whose ``text`` is not a non-whitespace string (None/int/blank all count) —
     Anthropic 400s on them ("text content blocks must contain non-whitespace text")."""
-    if _block_type(b) != "text":
-        return False
-    text = b.get("text")
-    return not (isinstance(text, str) and text.strip())
+    return _block_type(b) == "text" and not (isinstance(b.get("text"), str) and b["text"].strip())
 
 
 def _cache_control_of(b: Any) -> Optional[Dict[str, Any]]:
@@ -97,17 +89,10 @@ def _carry_cache_control(out: Dict[str, Any], b: Any, *, copy: bool = False) -> 
 def _split_blank_text_blocks(blocks: List[Any]) -> Tuple[List[Any], Any, List[int]]:
     """``(kept, relocated_cache_control, dropped_indexes)``: drop blank text blocks, remembering
     the cache_control of the last one dropped so the caller can relocate the breakpoint."""
-    kept: List[Any] = []
-    relocated_cc = None
-    dropped: List[int] = []
-    for i, blk in enumerate(blocks):
-        if _is_blank_text_block(blk):
-            if _cache_control_of(blk) is not None:
-                relocated_cc = blk["cache_control"]
-            dropped.append(i)
-        else:
-            kept.append(blk)
-    return kept, relocated_cc, dropped
+    dropped = [i for i, blk in enumerate(blocks) if _is_blank_text_block(blk)]
+    kept = [blk for i, blk in enumerate(blocks) if i not in dropped]
+    relocated = [cc for i in dropped if (cc := _cache_control_of(blocks[i])) is not None]
+    return kept, relocated[-1] if relocated else None, dropped
 
 
 def _is_bedrock_model_id(model: str) -> bool:
@@ -143,10 +128,9 @@ def _normalize_tool_input_schema(schema: Any) -> Dict[str, Any]:
     optionality is already expressed by ``required``; ``keep_nullable_hint=False`` because the
     OpenAPI ``nullable`` keyword is not recognized. Top-level oneOf/allOf/anyOf are rejected with a
     generic 400, so they are dropped in favour of a plain object."""
-    if not schema:
-        return dict(_EMPTY_SCHEMA)
     from tools.schema_sanitizer import strip_nullable_unions
-    normalized = strip_nullable_unions(schema, keep_nullable_hint=False)
+
+    normalized = strip_nullable_unions(schema, keep_nullable_hint=False) if schema else None
     if not isinstance(normalized, dict):
         return dict(_EMPTY_SCHEMA)
     banned = {"oneOf", "allOf", "anyOf"}
@@ -207,8 +191,7 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
         block = {"type": "image", "source": _image_source_from_openai_url(url)}
     else:
         block = dict(part)
-    cache_control = _cache_control_of(part)
-    if cache_control is not None:
+    if (cache_control := _cache_control_of(part)) is not None:
         block.setdefault("cache_control", dict(cache_control))
     return block
 
@@ -359,15 +342,12 @@ def _replay_ordered_blocks(m: Dict[str, Any], ordered_blocks: List[Any]) -> Opti
     for b in ordered_blocks:
         clean = _sanitize_replay_block(b)
         if clean is None:
-            if _block_type(b) == "text":
-                dropped_blank_text = True
-            if _cache_control_of(b) is not None:  # relocate a dropped block's breakpoint
-                relocated_cc = b["cache_control"]
+            dropped_blank_text = dropped_blank_text or _block_type(b) == "text"
+            if (cc := _cache_control_of(b)) is not None:  # relocate a dropped block's breakpoint
+                relocated_cc = cc
             continue
-        if clean.get("type") == "tool_use":
-            redacted = redacted_input_by_id.get(clean.get("id", ""))
-            if redacted is not None:
-                clean["input"] = redacted
+        if clean.get("type") == "tool_use" and (redacted := redacted_input_by_id.get(clean.get("id", ""))) is not None:
+            clean["input"] = redacted
         replayed.append(clean)
     # Nothing cacheable survived (e.g. signed thinking + blank text): emit the placeholder so the
     # turn stays schema-valid and a relocated marker has a carrier.
@@ -610,9 +590,8 @@ def _evict_old_screenshots(result: List[Dict[str, Any]]) -> None:
                 continue
             image_count += 1
             if image_count > 3:
-                block["content"] = [
-                    b if b.get("type") != "image" else _text_block("[screenshot removed to save context]") for b in inner
-                ]
+                placeholder = _text_block("[screenshot removed to save context]")
+                block["content"] = [placeholder if b.get("type") == "image" else b for b in inner]
 
 
 def _ensure_leading_user_turn(result: List[Dict[str, Any]]) -> None:
@@ -637,8 +616,7 @@ def _fix_blank_text_blocks_in_list(
             "(message_index=%d role=%s location=%s block_index=%d block_type=text)",
             msg_index, role, location, block_index,
         )
-    if not kept:
-        kept.append(_text_block(placeholder_text))
+    kept = kept or [_text_block(placeholder_text)]
     _apply_assistant_cache_control_to_last_cacheable_block(kept, relocated_cache_control)
     return kept
 

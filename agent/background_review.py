@@ -31,8 +31,7 @@ class _BackgroundReviewRun:
         self.request_done = threading.Event()
         self._lock = threading.Lock()
         self._review_agent = None
-        self._request_finished = False
-        self._cancel_dispatched = False
+        self._request_finished = self._cancel_dispatched = False
 
     def begin_request(self, review_agent: Any) -> bool:
         """Atomically admit the first provider-capable review phase."""
@@ -46,18 +45,17 @@ class _BackgroundReviewRun:
         """Fence startup and return the running fork, if one was admitted."""
         with self._lock:
             self.cancel_requested.set()
-            if self._review_agent is not None and not self._cancel_dispatched:
-                self._cancel_dispatched = True
-                return self._review_agent
-            return None
+            if self._review_agent is None or self._cancel_dispatched:
+                return None
+            self._cancel_dispatched = True
+            return self._review_agent
 
     def mark_request_finished(self) -> bool:
         """Latch request completion once; the caller publishes the event."""
         with self._lock:
             if self._request_finished:
                 return False
-            self._request_finished = True
-            self._review_agent = None
+            self._request_finished, self._review_agent = True, None
             return True
 
 
@@ -251,11 +249,9 @@ def _parent_can_emit_tool_calls(agent: Any) -> bool:
 
 def _msg_text(m: Dict) -> str:
     c = m.get("content")
-    if isinstance(c, str):
-        return c.strip()
     if isinstance(c, list):
-        return " ".join(b.get("text", "") for b in c if isinstance(b, dict)).strip()
-    return ""
+        c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+    return c.strip() if isinstance(c, str) else ""
 
 
 def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]:
@@ -274,8 +270,7 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
     for m in msgs[:-len(keep)]:
         if not isinstance(m, dict):
             continue
-        role = m.get("role")
-        text = _msg_text(m).replace("\n", " ")
+        role, text = m.get("role"), _msg_text(m).replace("\n", " ")
         if role == "user" and text:
             lines.append(f"USER: {text[:300]}")
         elif role == "assistant":
@@ -507,13 +502,12 @@ def _verbose_skill_line(data: Dict, detail: Dict, message: str) -> str:
     change: dict = change_raw if isinstance(change_raw, dict) else {}
     old_string = change.get("old", "") or detail.get("old_string", "")
     new_string = change.get("new", "") or detail.get("new_string", "")
-    description = change.get("description", "")
     if action == "patch" and (old_string or new_string):
         old_preview, new_preview = (_preview(t, 80).replace("\n", " ") for t in (old_string, new_string))
         return f"📝 Skill '{skill_name}' patched: \"{old_preview}\" → \"{new_preview}\""
     verb = {"create": "created", "edit": "rewritten"}.get(action)
-    if verb and description:
-        return f"📝 Skill '{skill_name}' {verb}: {description}"
+    if verb and change.get("description"):
+        return f"📝 Skill '{skill_name}' {verb}: {change['description']}"
     return f"📝 {message}" if message else f"Skill {action}"
 
 
@@ -581,24 +575,16 @@ def _action_lines(data: Dict, detail: Dict, verbose: bool) -> List[str]:
     message = data.get("message", "")
     target = data.get("target", "") or detail.get("target", "")
     is_skill = detail.get("tool") == "skill_manage"
-    message_lower = message.lower()
-    if not verbose and (
-        "created" in message_lower or "updated" in message_lower or (is_skill and "patched" in message_lower)
-    ):
+    lower = message.lower()
+    if not verbose and ("created" in lower or "updated" in lower or (is_skill and "patched" in lower)):
         return [message]
-    if is_skill:
-        label = "Skill"
-    elif target:
-        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
-    else:
+    if not is_skill and not target:
         return []
+    label = "Skill" if is_skill else {"memory": "Memory", "user": "User profile"}.get(target, target)
     if verbose:
         return [_verbose_skill_line(data, detail, message)] if is_skill else _verbose_memory_lines(label, detail)
-    if any(k in message_lower for k in ("added", "replaced", "removed", "applied")) or (
-        target and "add" in message_lower
-    ):
-        return [f"{label} updated"]
-    return []
+    hit = any(k in lower for k in ("added", "replaced", "removed", "applied")) or (target and "add" in lower)
+    return [f"{label} updated"] if hit else []
 
 
 def summarize_background_review_actions(
@@ -847,6 +833,7 @@ def _bg_review_auto_deny(command, description, **kwargs):
 
 def _set_thread_approval_callback(callback: Any) -> None:
     from tools.terminal_tool import set_approval_callback
+
     with suppress(Exception):
         set_approval_callback(callback)
 
@@ -940,6 +927,7 @@ def _run_review_fork(
     )
     with suppress(Exception):
         from tools.skill_manager_tool import _reset_background_review_read_marks
+
         _reset_background_review_read_marks()
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
@@ -992,7 +980,7 @@ def _run_review_in_thread(
     # A client that can't carry Hermes tool calls back would spawn a fork that cannot write
     # anything. Checked BEFORE the thread-scoped silence so the warning is not swallowed; cheap
     # check first so the normal path never resolves the runtime twice.
-    if not _parent_can_emit_tool_calls(agent) and not bool(_resolve_review_runtime(agent, task_cfg).get("routed")):
+    if not _parent_can_emit_tool_calls(agent) and not _resolve_review_runtime(agent, task_cfg).get("routed"):
         logger.warning(
             "Background review skipped: provider %r cannot emit Hermes tool calls, "
             "so the review fork could not write memories or skills. Set "
@@ -1064,8 +1052,7 @@ def spawn_background_review_thread(
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
-    focus = (focus or "").strip()
-    if focus:
+    if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "
             f"focus — prioritize it over the general instructions above:\n{focus}"
