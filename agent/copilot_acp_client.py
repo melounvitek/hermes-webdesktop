@@ -276,8 +276,7 @@ class CopilotACPClient:
         acp_command: str | None = None, acp_args: list[str] | None = None, acp_cwd: str | None = None, command: str | None = None,
         args: list[str] | None = None, **_: Any,
     ):
-        self.api_key = api_key or "copilot-acp"
-        self.base_url = base_url or ACP_MARKER_BASE_URL
+        self.api_key, self.base_url = api_key or "copilot-acp", base_url or ACP_MARKER_BASE_URL
         self._default_headers = dict(default_headers or {})
         self._acp_command = acp_command or command or _resolve_command()
         self._acp_args = list(acp_args or args or _resolve_args())
@@ -308,8 +307,8 @@ class CopilotACPClient:
         response_text, reasoning = self._run_prompt(prompt_text, timeout_seconds=_effective_timeout(timeout), model=model)
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
         message = SimpleNamespace(
-            content=cleaned_text, tool_calls=tool_calls, reasoning=reasoning or None,
-            reasoning_content=reasoning or None, reasoning_details=None,
+            content=cleaned_text, tool_calls=tool_calls, reasoning=reasoning or None, reasoning_content=reasoning or None,
+            reasoning_details=None,
         )
         completion = SimpleNamespace(
             choices=[SimpleNamespace(message=message, finish_reason="tool_calls" if tool_calls else "stop")],
@@ -330,14 +329,12 @@ class CopilotACPClient:
                 "HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS to a working pair."
             )
         try:
-            # Hide the console the child would flash on Windows; stdio pipes stay intact.
-            from hermes_cli._subprocess_compat import windows_hide_flags
+            from hermes_cli._subprocess_compat import windows_hide_flags  # hide the Windows console flash; pipes intact
 
             proc = subprocess.Popen(
-                [self._acp_command] + self._acp_args,
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding='utf-8', errors='replace', bufsize=1,
-                cwd=self._acp_cwd, env=_build_subprocess_env(), creationflags=windows_hide_flags(),
+                [self._acp_command] + self._acp_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding='utf-8', errors='replace', bufsize=1, cwd=self._acp_cwd, env=_build_subprocess_env(),
+                creationflags=windows_hide_flags(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -392,7 +389,6 @@ class CopilotACPClient:
                     err = msg.get("error") or {}
                     raise RuntimeError(f"Copilot ACP {method} failed: {err.get('message') or err}")
                 return msg.get("result")
-
             stderr_text = "\n".join(stderr_tail).strip()
             if proc.poll() is not None and stderr_text:
                 if _is_gh_copilot_deprecation_message(stderr_text):
@@ -418,10 +414,8 @@ class CopilotACPClient:
                     )
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
-            _request(
-                "session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]},
-                text_parts=text_parts, reasoning_parts=reasoning_parts,
-            )
+            prompt = {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]}
+            _request("session/prompt", prompt, text_parts=text_parts, reasoning_parts=reasoning_parts)
             return "".join(text_parts), "".join(reasoning_parts)
         finally:
             self.close()

@@ -5,37 +5,30 @@ from __future__ import annotations
 import math
 from typing import Any, Dict
 
-# Gemini's ``FunctionDeclaration.parameters`` accepts the ``Schema`` object,
-# only a subset of OpenAPI 3.0 / JSON Schema; everything else is stripped.
+# Gemini's ``FunctionDeclaration.parameters`` accepts only a subset of OpenAPI 3.0 /
+# JSON Schema (the ``Schema`` object); everything else is stripped.
 _GEMINI_SCHEMA_ALLOWED_KEYS = {
-    "type", "format", "title", "description", "nullable", "enum",
-    "maxItems", "minItems", "properties", "required", "minProperties",
-    "maxProperties", "minLength", "maxLength", "pattern", "example",
-    "anyOf", "propertyOrdering", "default", "items", "minimum", "maximum",
+    "type", "format", "title", "description", "nullable", "enum", "maxItems", "minItems", "properties", "required",
+    "minProperties", "maxProperties", "minLength", "maxLength", "pattern", "example", "anyOf", "propertyOrdering",
+    "default", "items", "minimum", "maximum",
 }
 
 
 def _stringify_enum_value(item: Any) -> Any:
     """Gemini-safe string for a scalar enum entry, or None to drop it."""
-    if isinstance(item, str):
-        return item
     if isinstance(item, bool):
         return "true" if item else "false"
     if isinstance(item, (int, float)) and math.isfinite(item):
         return str(item)
-    return None
+    return item if isinstance(item, str) else None
 
 
 def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
-    """Return a Gemini-compatible copy of a tool parameter schema.
-
-    Keeps only the documented Gemini subset (drops e.g. ``$schema`` /
-    ``additionalProperties``) and recursively sanitizes nested
-    ``properties`` / ``items`` / ``anyOf`` definitions.
-    """
+    """Gemini-compatible copy of a tool parameter schema: keeps only the documented subset
+    (drops e.g. ``$schema`` / ``additionalProperties``) and recursively sanitizes nested
+    ``properties`` / ``items`` / ``anyOf``."""
     if not isinstance(schema, dict):
         return {}
-
     cleaned: Dict[str, Any] = {}
     for key, value in schema.items():
         if key not in _GEMINI_SCHEMA_ALLOWED_KEYS:
@@ -56,17 +49,15 @@ def sanitize_gemini_schema(schema: Any) -> Dict[str, Any]:
     # still emits typed tool arguments at runtime. dict.fromkeys = ordered dedupe.
     enum_val = cleaned.get("enum")
     if isinstance(enum_val, list) and cleaned.get("type") in {"integer", "number", "boolean"}:
-        stringified = list(dict.fromkeys(v for v in map(_stringify_enum_value, enum_val) if v is not None))
-        if stringified:
+        if stringified := list(dict.fromkeys(v for v in map(_stringify_enum_value, enum_val) if v is not None)):
             cleaned["enum"] = stringified
         else:
             cleaned.pop("enum", None)
 
-    # Gemini validates ``required`` strictly against the same node's
-    # ``properties`` (HTTP 400 "property is not defined"), and one bad tool
-    # schema fails the ENTIRE request. MCP servers routinely emit ``required``
-    # without ``properties``, so keep only names that exist here; the tool
-    # handler still validates required fields at execution time.
+    # Gemini validates ``required`` strictly against the same node's ``properties`` (HTTP 400
+    # "property is not defined") and one bad tool schema fails the ENTIRE request. MCP servers
+    # routinely emit ``required`` without ``properties``, so keep only names that exist here;
+    # the tool handler still validates required fields at execution time.
     required_val = cleaned.get("required")
     if isinstance(required_val, list):
         props_val = cleaned.get("properties")
