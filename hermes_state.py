@@ -32,10 +32,7 @@ from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
 from hermes_state_common import (  # noqa: F401  (re-exported; tests import from hermes_state)
-    AUTO_VACUUM_MIN_FREELIST_RATIO, _FTS_CJK_TRIGGERS, _FTS_TRIGGERS, _LISTABLE_CHILD_SQL,
-    _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS, _RECOVERABLE_END_REASONS_SQL,
-    _RESET_END_REASONS, _legacy_reset_child_sql, _shape_preview, _sql_session_last_active,
-    _sql_session_last_active_by_id, escape_like as _escape_like, FTS_CJK_STALE_KEY,
+    AUTO_VACUUM_MIN_FREELIST_RATIO, _FTS_TRIGGERS, escape_like as _escape_like, FTS_CJK_STALE_KEY,
     FTS_REBUILD_DEFERRAL_KEY, FTS_SQL, FTS_STALE_KEY, FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL,
     LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL, SCHEMA_VERSION, stat_db_file_identity as _stat_db_file_identity,
 )
@@ -102,11 +99,10 @@ except ImportError:  # pragma: no cover - stripped/scaffold installs only
 
 logger = logging.getLogger(__name__)
 
-MAX_SAFE_RESUME_MESSAGES = 20_000
-MAX_SAFE_EXPORT_MESSAGES = 20_000
+_MAX_SAFE_MESSAGES = 20_000  # resume/export guard default
 
 
-def _configured_transcript_limit(key: str, fallback: int) -> int:
+def _configured_transcript_limit(key: str, fallback: int = _MAX_SAFE_MESSAGES) -> int:
     """``sessions.<key>`` from config.yaml (lazy import: circular at load), else
     *fallback*. 0 disables the guard. Not cached (load_config_readonly is)."""
     try:
@@ -121,22 +117,18 @@ def _configured_transcript_limit(key: str, fallback: int) -> int:
 
 
 def resolved_max_resume_messages() -> int:
-    """Config-resolved resume guard limit (0 disables the guard)."""
-    return _configured_transcript_limit("max_resume_messages", MAX_SAFE_RESUME_MESSAGES)
+    return _configured_transcript_limit("max_resume_messages")
 
 
 def resolved_max_export_messages() -> int:
-    """Config-resolved in-memory export guard limit (0 disables the guard)."""
-    return _configured_transcript_limit("max_export_messages", MAX_SAFE_EXPORT_MESSAGES)
+    return _configured_transcript_limit("max_export_messages")
 
 
 class SessionResumeTooLargeError(ValueError):
     def __init__(
-        self, message_count: int, limit: int = MAX_SAFE_RESUME_MESSAGES,
-        scope: str = "across its lineage",
+        self, message_count: int, limit: int = _MAX_SAFE_MESSAGES, scope: str = "across its lineage",
     ):
-        self.message_count = message_count
-        self.limit = limit
+        self.message_count, self.limit = message_count, limit
         super().__init__(
             f"session has at least {message_count} active messages {scope}; "
             f"safe resume limit is {limit}. Export the session instead, or set "
@@ -145,21 +137,12 @@ class SessionResumeTooLargeError(ValueError):
 
 
 class SessionExportTooLargeError(ValueError):
-    def __init__(self, session_id: str, message_count: int, limit: int = MAX_SAFE_EXPORT_MESSAGES):
-        self.session_id = session_id
-        self.message_count = message_count
-        self.limit = limit
+    def __init__(self, session_id: str, message_count: int, limit: int = _MAX_SAFE_MESSAGES):
+        self.session_id, self.message_count, self.limit = session_id, message_count, limit
         super().__init__(
             f"session '{session_id}' has at least {message_count} active messages; "
             f"safe in-memory export limit is {limit}"
         )
-
-
-_COMPRESSION_LOCK_HOLDER_PID_RE = re.compile(r"(?:^|:)pid=(\d+)(?::|$)")
-
-
-def _system_prompt_hash(system_prompt: str) -> str:
-    return hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
 
 
 def _compression_lock_holder_process_is_dead(holder: str) -> bool:
@@ -167,7 +150,7 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
     Reclaim on kernel proof only: unstructured/same-process holders (another
     thread's live lease) and any probe doubt keep the lease until TTL expiry
     (PID reuse must never steal a live lease; a wrongly-kept one self-heals)."""
-    match = _COMPRESSION_LOCK_HOLDER_PID_RE.search(holder or "")
+    match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
     pid = int(match.group(1)) if match else 0
     if pid <= 0 or pid == os.getpid():
         return False
@@ -184,7 +167,7 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
         os.kill(pid, 0)  # windows-footgun: ok — nt early-returns just above
     except ProcessLookupError:
         return True
-    except (PermissionError, OSError, OverflowError):
+    except (OSError, OverflowError):  # PermissionError is an OSError: alive but foreign
         return False
     return False
 
@@ -239,16 +222,6 @@ _STATE_DB_GUARD_BYPASS = False
 _STATE_DB_GUARD_EXTRA_DENY_ROOTS: Tuple[Path, ...] = ()
 
 
-def _production_state_roots() -> List[Path]:
-    roots = [r for r in (_real_platform_state_root(),) if r is not None]
-    for extra in _STATE_DB_GUARD_EXTRA_DENY_ROOTS:
-        try:
-            roots.append(Path(extra).expanduser().resolve())
-        except Exception:
-            continue
-    return roots
-
-
 def _ensure_test_isolation(db_path: Path) -> None:
     """Raise RuntimeError before any connection/mkdir/pragma/byte probe when a
     pytest-context process (env OR ancestry) resolves a production DB."""
@@ -258,7 +231,13 @@ def _ensure_test_isolation(db_path: Path) -> None:
         resolved = Path(db_path).expanduser().resolve()
     except Exception:
         return
-    for root in _production_state_roots():
+    roots = [r for r in (_real_platform_state_root(),) if r is not None]
+    for extra in _STATE_DB_GUARD_EXTRA_DENY_ROOTS:
+        try:
+            roots.append(Path(extra).expanduser().resolve())
+        except Exception:
+            continue
+    for root in roots:
         if _is_production_state_db(resolved, root):
             raise RuntimeError(
                 "live-system guard: test attempted to open production "
@@ -339,10 +318,8 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
     cause = get_last_init_error()
     if not cause:
         return f"{prefix}."
-    hint = ""
-    if any(marker in cause.lower() for marker in _WAL_INCOMPAT_MARKERS):
-        hint = " (state.db may be on NFS/SMB/FUSE/ZFS — see https://www.sqlite.org/wal.html)"
-    return f"{prefix}: {cause}{hint}."
+    hint = " (state.db may be on NFS/SMB/FUSE/ZFS — see https://www.sqlite.org/wal.html)"
+    return f"{prefix}: {cause}{hint if any(m in cause.lower() for m in _WAL_INCOMPAT_MARKERS) else ''}."
 
 
 # Auto-repair at most once per DB path per process (no repair loops; serialises
@@ -439,10 +416,9 @@ class SessionDB(
     def _store_system_prompt(conn, system_prompt: Optional[str]) -> Optional[str]:
         if system_prompt is None:
             return None
-        prompt_hash = _system_prompt_hash(system_prompt)
+        prompt_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
         conn.execute(
-            "INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)",
-            (prompt_hash, system_prompt),
+            "INSERT OR IGNORE INTO system_prompts (hash, prompt) VALUES (?, ?)", (prompt_hash, system_prompt),
         )
         return prompt_hash
 
@@ -471,6 +447,13 @@ class SessionDB(
             conn.close()
         except Exception:
             logger.debug("Could not close a SessionDB connection", exc_info=True)
+
+    def _close_conn_logged(self, conn, label: str) -> None:
+        """Close *conn*; a failing close leaks a tracked fd: logged at WARNING, never swallowed."""
+        try:
+            conn.close()
+        except Exception as exc:
+            logger.warning("%s close failed for %s: %s", label, self.db_path, exc)
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
         self.db_path = db_path or _default_db_path()
@@ -527,36 +510,8 @@ class SessionDB(
         try:
             if read_only:
                 self._open_read_only()
-                self._record_db_file_identity()
-                initialization_complete = True
-                return
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            # Read-only file/sidecar preflight BEFORE the first connection: an
-            # actionable message instead of an opaque "attempt to write a readonly
-            # database" from deep inside _init_schema.
-            preflight_db_writability(self.db_path, db_label="state.db")
-            # Serialize zero-byte check, quarantine, connect and schema commit so
-            # concurrent openers don't race the absent-path -> schema-commit window.
-            needs_startup_guard = not self.db_path.exists() or is_zeroed_state_db(self.db_path)
-            try:
-                self._open_with_optional_startup_guard(needs_startup_guard)
-            except sqlite3.DatabaseError as exc:
-                # Malformed schema fails on the very first statement (before
-                # _init_schema), so it can't be caught at the FTS-rebuild layer:
-                # repair sqlite_master in place (backup first) and reopen once.
-                if not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
-                    raise
-                logger.error(
-                    "state.db schema is malformed (%s) — attempting automatic "
-                    "repair (a backup copy is made first).", exc,
-                )
-                self._close_connection_quietly(self._conn)
-                if not repair_state_db_schema(self.db_path).get("repaired"):
-                    raise
-                self._connect_and_init_with_lock_patience()
-            # The v23 FTS optimization is OPT-IN (`hermes db optimize`), never
-            # auto-started on open (no background worker racing session lifecycle).
-            self._ensure_db_file_generation()
+            else:
+                self._open_writer()
             self._record_db_file_identity()
             initialization_complete = True
         except Exception as exc:
@@ -568,6 +523,47 @@ class SessionDB(
             if not initialization_complete:
                 conn, self._conn = self._conn, None
                 self._close_connection_quietly(conn)
+
+    def _open_writer(self) -> None:
+        """Writable open: preflight, quarantine/zero-byte guard, connect + schema,
+        one in-place schema repair on a malformed sqlite_master, generation stamp."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Read-only file/sidecar preflight BEFORE the first connection: an
+        # actionable message instead of an opaque "attempt to write a readonly
+        # database" from deep inside _init_schema.
+        preflight_db_writability(self.db_path, db_label="state.db")
+        try:
+            # Serialize zero-byte check, quarantine, connect and schema commit so
+            # concurrent openers don't race the absent-path -> schema-commit window.
+            if not self.db_path.exists() or is_zeroed_state_db(self.db_path):
+                with quarantine_cross_process_lock(self.db_path) as lock_acquired:
+                    if not lock_acquired:
+                        logger.warning(
+                            "startup quarantine lock for %s not acquired within 5s; proceeding",
+                            self.db_path,
+                        )
+                    self._handle_quarantine_if_zeroed(already_locked=lock_acquired)
+                    self._connect_and_init_with_lock_patience()
+            else:
+                self._handle_quarantine_if_zeroed(already_locked=False)
+                self._connect_and_init_with_lock_patience()
+        except sqlite3.DatabaseError as exc:
+            # Malformed schema fails on the very first statement (before
+            # _init_schema), so it can't be caught at the FTS-rebuild layer:
+            # repair sqlite_master in place (backup first) and reopen once.
+            if not is_malformed_schema_error(exc) or not _claim_repair_attempt(self.db_path):
+                raise
+            logger.error(
+                "state.db schema is malformed (%s) — attempting automatic "
+                "repair (a backup copy is made first).", exc,
+            )
+            self._close_connection_quietly(self._conn)
+            if not repair_state_db_schema(self.db_path).get("repaired"):
+                raise
+            self._connect_and_init_with_lock_patience()
+        # The v23 FTS optimization is OPT-IN (`hermes db optimize`), never
+        # auto-started on open (no background worker racing session lifecycle).
+        self._ensure_db_file_generation()
 
     def _open_read_only(self) -> None:
         """Read-only attach for cross-profile aggregation: no schema init, NO write
@@ -672,20 +668,6 @@ class SessionDB(
                     max(deadline - now, 0.001),
                 ))
 
-    def _open_with_optional_startup_guard(self, needs_startup_guard: bool) -> None:
-        if needs_startup_guard:
-            with quarantine_cross_process_lock(self.db_path) as lock_acquired:
-                if not lock_acquired:
-                    logger.warning(
-                        "startup quarantine lock for %s not acquired within 5s; proceeding",
-                        self.db_path,
-                    )
-                self._handle_quarantine_if_zeroed(already_locked=lock_acquired)
-                self._connect_and_init_with_lock_patience()
-        else:
-            self._handle_quarantine_if_zeroed(already_locked=False)
-            self._connect_and_init_with_lock_patience()
-
     # ── Read-path split ──
 
     def _get_read_conn(self) -> Optional[sqlite3.Connection]:
@@ -723,20 +705,20 @@ class SessionDB(
             apply_database_pragmas(conn, db_label="state.db")
             if self._fts_cjk_loaded:  # registers in the connection, not the file: ro is fine
                 load_fts5_cjk_extension(conn)
-        except sqlite3.Error:
+        except BaseException as exc:
             # A half-open connection (open ok, extension load failed) is a live
-            # tracked descriptor — the leak shape this pool exists to fix.
-            self._discard_partial_read_conn(conn)
+            # tracked descriptor — the leak shape this pool exists to fix; a
+            # stranded permit would permanently shrink the read path by one slot.
+            # (Not _close_read_conn: callers release their own permit.)
+            if conn is not None:
+                self._close_conn_logged(conn, "partially-opened read conn")
+            self._read_budget.release()
+            if not isinstance(exc, sqlite3.Error):
+                raise
             with self._read_conns_lock:
                 self._read_open_failed_at = time.monotonic()
             logger.debug("read-only connection open failed for %s", self.db_path, exc_info=True)
-            self._read_budget.release()
             return None
-        except BaseException:
-            # A stranded permit permanently shrinks the read path by one slot.
-            self._discard_partial_read_conn(conn)
-            self._read_budget.release()
-            raise
         return conn
 
     def _evict_one_idle_read_conn(self) -> bool:
@@ -749,25 +731,12 @@ class SessionDB(
         self._close_read_conn(conn)
         return True
 
-    def _discard_partial_read_conn(self, conn) -> None:
-        """Close a connection that failed between open and hand-off; unlike
-        _close_read_conn this does NOT release a permit (callers release their own)."""
-        if conn is None:
-            return
-        try:
-            conn.close()
-        except Exception as exc:
-            logger.warning("partially-opened read conn close failed for %s: %s", self.db_path, exc)
-
     def _close_read_conn(self, conn) -> None:
-        """Close a pooled read connection and release its permit. A failing close
-        leaks a tracked fd (logged, never swallowed) but still releases the permit:
-        withholding it would permanently narrow the read path. Pairs with
+        """Close a pooled read connection and release its permit even when the close
+        fails (withholding it would permanently narrow the read path). Pairs with
         _get_read_conn(); over-releasing the BoundedSemaphore raises ValueError."""
         try:
-            conn.close()
-        except Exception as exc:
-            logger.warning("read-conn close failed for %s: %s", self.db_path, exc)
+            self._close_conn_logged(conn, "read-conn")
         finally:
             self._read_budget.release()
 
@@ -960,9 +929,7 @@ class SessionDB(
             (conn.executemany if many else conn.execute)(sql, params)
         self._execute_write(_do, patience_s=patience_s)
 
-    def _write_rowcount(
-        self, sql: str, params: Any = (), *, patience_s: Optional[float] = None
-    ) -> int:
+    def _write_rowcount(self, sql: str, params: Any = (), *, patience_s: Optional[float] = None) -> int:
         """Run one UPDATE/DELETE through ``_execute_write``; return rows changed
         (``SELECT changes()`` when the driver reports None / negative)."""
         def _do(conn):
@@ -1141,8 +1108,7 @@ class SessionDB(
         <3.12 has no setconfig; the residual checkpoint only carries
         pre-quarantine committed frames, which is tolerable."""
         flag = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
-        conn = self._conn
-        setconfig = getattr(conn, "setconfig", None)
+        setconfig = getattr(self._conn, "setconfig", None)
         if flag is None or setconfig is None:
             return
         try:
@@ -1184,10 +1150,7 @@ class SessionDB(
         if psutil is None:
             return [(-1, "open-file scan unavailable")]
         db_path = os.path.abspath(os.fspath(self.db_path))
-        watched = {
-            _canonical_sqlite_path(db_path), _canonical_sqlite_path(db_path + "-wal"),
-            _canonical_sqlite_path(db_path + "-shm"),
-        }
+        watched = {_canonical_sqlite_path(db_path + suffix) for suffix in ("", "-wal", "-shm")}
         holders: List[Tuple[int, str]] = []
         # Linux: readlink /proc/<pid>/fd directly; psutil.open_files() stats the
         # literal path and silently drops "state.db-wal (deleted)" entries.
@@ -1303,12 +1266,11 @@ class SessionDB(
     def __del__(self) -> None:
         """Safety net: close() if the caller forgot. Attribute access stays
         guarded: module teardown order is undefined."""
-        if self.__dict__.get("_conn") is None:
-            return
-        try:
-            self.close()
-        except Exception:
-            pass
+        if self.__dict__.get("_conn") is not None:
+            try:
+                self.close()
+            except Exception:
+                pass
 
     # ── Async token accounting (SessionUsageMixin) ──
     # queue_token_counts() reduces the critical path to a deque append; a
@@ -1359,9 +1321,7 @@ class SessionDB(
         """Read state_meta[key] on self._lock (not _read_ctx): fts_rebuild_step reads
         progress before its write transaction and a WAL reader would not see it."""
         with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM state_meta WHERE key = ?", (key,)
-            ).fetchone()
+            row = self._conn.execute("SELECT value FROM state_meta WHERE key = ?", (key,)).fetchone()
         return None if row is None else row[0]
 
     def set_meta(self, key: str, value: str, *, cursor: Optional[sqlite3.Cursor] = None) -> None:
@@ -1403,8 +1363,7 @@ class SessionDB(
         if not prefix:
             return []
         rows = self._read_all(
-            "SELECT key, value FROM state_meta WHERE key LIKE ? ESCAPE '\\'",
-            (_escape_like(prefix) + "%",),
+            "SELECT key, value FROM state_meta WHERE key LIKE ? ESCAPE '\\'", (_escape_like(prefix) + "%",),
         )
         return [(row[0], row[1]) for row in rows]
 
