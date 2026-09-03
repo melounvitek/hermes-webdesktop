@@ -362,12 +362,10 @@ def _fetch_browse_results(c: Console, source: str):
         # parallel_search_sources invokes the callback from the collecting thread as each
         # source completes; the page itself is rendered once over the final, fully sorted set.
         _done: List[str] = []
-
         def _on_source_done(sid: str, count: int) -> None:
             _done.append(f"{sid} ({count})")
             status.update(
                 f"[bold]Fetching skills from registries...[/]  [dim]done: {', '.join(_done)}[/]")
-
         return parallel_search_sources(
             _sources(), query="", per_source_limits=_BROWSE_LIMITS, source_filter=source,
             overall_timeout=30, on_source_done=_on_source_done)
@@ -467,7 +465,6 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
     if not meta:
         _print_error(c, f"Could not find '{identifier}' in any source.")
         return
-
     c.print()
     info_lines = [
         f"[bold]Name:[/] {meta.name}",
@@ -487,11 +484,9 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
 
 def inspect_skill(identifier: str) -> Optional[dict]:
     """Skill metadata (+ SKILL.md preview) for programmatic callers."""
-
     class _Q:
         def print(self, *a, **k):
             pass
-
     ident, meta, bundle, _ = _resolve_identifier(identifier, _sources(), _Q())
     if not ident or not meta:
         return None
@@ -1002,15 +997,12 @@ def do_list_modified(console: Optional[Console] = None, as_json: bool = False) -
 
 
 def _print_diff_line(c: Console, line: str) -> None:
-    """Unified-diff line with light coloring."""
-    if line.startswith("+") and not line.startswith("+++"):
-        c.print(f"[green]{line}[/]")
-    elif line.startswith("-") and not line.startswith("---"):
-        c.print(f"[red]{line}[/]")
-    elif line.startswith("@@"):
-        c.print(f"[cyan]{line}[/]")
-    else:
-        c.print(line, highlight=False)
+    """Unified-diff line with light coloring (file headers +++/--- stay plain)."""
+    for prefix, style in (("+", "green"), ("-", "red"), ("@@", "cyan")):
+        if line.startswith(prefix) and not line.startswith(prefix * 3):
+            c.print(f"[{style}]{line}[/]")
+            return
+    c.print(line, highlight=False)
 
 
 def do_diff(name: str, console: Optional[Console] = None) -> None:
@@ -1302,12 +1294,10 @@ def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> N
         "hermes_version": "0.1.0",
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "skills": [
-            {
-                "name": entry["name"],
-                "source": entry.get("source", ""),
-                "identifier": entry.get("identifier", ""),
-                "category": str(Path(entry.get("install_path", "")).parent)
-                            if "/" in entry.get("install_path", "") else ""}
+            {"name": entry["name"], "source": entry.get("source", ""),
+             "identifier": entry.get("identifier", ""),
+             "category": str(Path(entry.get("install_path", "")).parent)
+                         if "/" in entry.get("install_path", "") else ""}
             for entry in installed],
         "taps": tap_list}
     payload = json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n"
@@ -1465,22 +1455,16 @@ def _slash_search(args, c):
 
 
 def _slash_snapshot(args, c):
-    if args and args[0] == "export" and len(args) > 1:
+    if len(args) > 1 and args[0] == "export":
         do_snapshot_export(args[1], console=c)
-    elif args and args[0] == "import" and len(args) > 1:
+    elif len(args) > 1 and args[0] == "import":
         do_snapshot_import(args[1], force="--force" in args, console=c)
     else:
         c.print("[bold red]Usage:[/] /skills snapshot export <file> | /skills snapshot import <file>\n")
 
 
-def _slash_tap(args, c):
-    if not args:
-        do_tap("list", console=c)
-        return
-    do_tap(args[0], repo=args[1] if len(args) > 1 else "", console=c)
-
-
 def _first_positional(args):
+    """First argument unless it is a flag (audit's historical parse)."""
     return args[0] if args and not args[0].startswith("--") else None
 
 
@@ -1517,7 +1501,8 @@ _SLASH_ACTIONS = {
         args[0], target=_opt_value(args, "--to", "github", last=True),
         repo=_opt_value(args, "--repo", "", last=True), console=c),
     "snapshot": _slash_snapshot,
-    "tap": _slash_tap,
+    "tap": lambda args, c: (do_tap(args[0], repo=args[1] if len(args) > 1 else "", console=c) if args
+                            else do_tap("list", console=c)),
     "help": lambda args, c: _print_skills_help(c),
     "--help": lambda args, c: _print_skills_help(c),
     "-h": lambda args, c: _print_skills_help(c)}

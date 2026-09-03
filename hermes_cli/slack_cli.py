@@ -19,7 +19,6 @@ def _build_full_manifest(
     UI after pasting.
     """
     from hermes_cli.commands import slack_app_manifest
-
     if messaging_experience is None:
         messaging_experience = "assistant" if include_assistant else "none"
     messaging_experience = str(messaging_experience).strip().lower()
@@ -115,7 +114,6 @@ def slack_manifest_command(args) -> int:
 
     if slashes_only:
         from hermes_cli.commands import slack_app_manifest
-
         manifest = slack_app_manifest()["features"]["slash_commands"]
     else:
         manifest = _build_full_manifest(
@@ -129,7 +127,6 @@ def slack_manifest_command(args) -> int:
         return 0
     if isinstance(write_target, bool) and write_target:  # bare --write → default location
         from hermes_constants import get_hermes_home
-
         target = Path(get_hermes_home()) / "slack-manifest.json"
     else:
         target = Path(write_target).expanduser()

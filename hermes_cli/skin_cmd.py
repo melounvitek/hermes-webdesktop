@@ -23,7 +23,6 @@ def _skins_dir() -> Path:
 
 def _active_skin() -> str:
     from hermes_cli.config import load_config
-
     display = (load_config() or {}).get("display") or {}
     return str(display.get("skin") or "default")
 
@@ -31,13 +30,11 @@ def _active_skin() -> str:
 def _use(name: str) -> None:
     """Activate a skin (persists display.skin via the shared config writer)."""
     from hermes_cli.config import config_command
-
     config_command(argparse.Namespace(config_command="set", key="display.skin", value=name, force=True))
 
 
 def _skin_set(key: str, value: str, skin: str | None) -> int:
     import yaml
-
     if not _HEX_RE.match(value):
         print(f"✗ {value!r} is not a #rrggbb hex color", file=sys.stderr)
         return 1
@@ -52,7 +49,6 @@ def _skin_set(key: str, value: str, skin: str | None) -> int:
         # Built-in (or missing): fork into an editable copy that keeps its full palette, under a
         # fresh name so the built-in stays intact for revert.
         from hermes_cli.skin_engine import load_skin
-
         resolved = load_skin(name)
         target = f"{name}-custom"
         path = _skins_dir() / f"{target}.yaml"
@@ -66,7 +62,6 @@ def _skin_set(key: str, value: str, skin: str | None) -> int:
     # Atomic write: write_text truncates with no fsync; safe_load("") → None → {} would
     # permanently lose the palette on the next set.
     from utils import atomic_yaml_write
-
     atomic_yaml_write(path, data, sort_keys=False)
     if target != name:
         _use(target)
@@ -76,7 +71,6 @@ def _skin_set(key: str, value: str, skin: str | None) -> int:
 
 def _skin_list() -> int:
     from hermes_cli.skin_engine import list_skins
-
     active = _active_skin()
     for s in list_skins():
         mark = "*" if s["name"] == active else " "

@@ -89,7 +89,6 @@ def _select_platform() -> Optional[str]:
 def _toggle_by_category(skills: List[dict], disabled: Set[str]) -> Set[str]:
     """Toggle all skills in a category at once."""
     from hermes_cli.curses_ui import curses_checklist
-
     categories = _get_categories(skills)
     cat_skills = [{s["name"] for s in skills if (s["category"] or "uncategorized") == cat}
                   for cat in categories]
@@ -111,7 +110,6 @@ def _toggle_by_category(skills: List[dict], disabled: Set[str]) -> Set[str]:
 def skills_command(args=None):
     """Entry point for `hermes skills`."""
     from hermes_cli.curses_ui import curses_checklist
-
     config = load_config()
     skills = _list_all_skills()
     if not skills:

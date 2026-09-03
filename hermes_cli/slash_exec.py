@@ -18,7 +18,6 @@ __all__ = ["CommandContext", "CommandReply", "EXECUTORS", "execute_command", "re
 @dataclass(frozen=True)
 class CommandContext:
     """Surface-provided inputs for a shared command executor."""
-
     surface: str = "cli"                # "cli" | "gateway" | "tui" — decoration only
     args: str = ""                      # raw argument string after the command word
     options: Mapping[str, Any] = field(default_factory=dict)  # surface params (page_size, ...)
@@ -29,7 +28,6 @@ class CommandContext:
 class CommandReply:
     """Canonical result of a shared executor: surface-independent ``text`` plus the structured
     ``data`` it derived so a surface can re-render with its own decoration."""
-
     text: str
     data: Mapping[str, Any] = field(default_factory=dict)
     format: str = "plain"               # "plain" | "markdown" (hint, not a contract)
@@ -39,14 +37,12 @@ class CommandReply:
 def _exec_version(ctx: CommandContext) -> CommandReply:
     """Core /version text — the banner version label."""
     from hermes_cli.banner import format_banner_version_label
-
     return CommandReply(format_banner_version_label())
 
 
 def _exec_egress(ctx: CommandContext) -> CommandReply:
     """Core /egress text — Docker egress proxy status."""
     from hermes_cli.proxy_cli import format_status_text
-
     return CommandReply(format_status_text())
 
 
@@ -60,17 +56,14 @@ def _exec_profile(ctx: CommandContext) -> CommandReply:
     home_display = str(ctx.options.get("home_display") or "").strip()
     if not profile_name:
         from hermes_cli.profiles import get_active_profile_name
-
         profile_name = get_active_profile_name()
     if not home_display:
         from hermes_constants import display_hermes_home
-
         home_display = display_hermes_home()
     # Presentation-only display name (profile.yaml); `data.profile` stays the canonical id.
     label = profile_name
     try:
         from hermes_cli.profiles import format_profile_label, get_profile_dir, read_profile_meta
-
         display = read_profile_meta(get_profile_dir(profile_name)).get("display_name", "")
         label = format_profile_label(profile_name, display)
     except Exception:
@@ -107,7 +100,6 @@ def _skill_commands() -> dict:
     """Registered skill commands, or ``{}`` when the skill subsystem is unavailable."""
     try:
         from agent.skill_commands import get_skill_commands
-
         return get_skill_commands() or {}
     except Exception:
         return {}
@@ -117,7 +109,6 @@ def _exec_help(ctx: CommandContext) -> CommandReply:
     """Core gateway /help body (pre platform mention decoration)."""
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
-
     lines = [t("gateway.help.header"), *gateway_help_lines()]
     skill_cmds = _skill_commands()
     try:
@@ -140,7 +131,6 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
     """
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
-
     raw_args = (ctx.args or "").strip()
     if raw_args:
         try:
@@ -209,7 +199,6 @@ def run_execute(cmd_def: Any, ctx: CommandContext) -> CommandReply | None:
 def execute_command(name: str, ctx: CommandContext) -> CommandReply:
     """Run the shared executor for ``name``; ``LookupError`` when unknown or not migrated."""
     from hermes_cli.commands import resolve_command
-
     cmd_def = resolve_command(name)
     reply = run_execute(cmd_def, ctx) if cmd_def is not None else None
     if reply is None:

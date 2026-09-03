@@ -369,7 +369,6 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
     """Build a SkinConfig from a raw dict (built-in or loaded from YAML)."""
     default = _BUILTIN_SKINS["default"]
     skin_name = str(data.get("name", "unknown"))
-
     def section(key: str) -> Dict[str, Any]:
         value = data.get(key)
         if isinstance(value, dict):
@@ -378,10 +377,8 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
             logger.warning("Skin '%s' has invalid '%s' section type (%s); ignoring section",
                            skin_name, key, type(value).__name__)
         return {}
-
     def merged(key: str) -> Dict[str, Any]:
         return {**default.get(key, {}), **section(key)}
-
     # Paired palettes are NOT merged over the default skin's blocks: an empty block means
     # "no hand-tuned variant for that polarity" and consumers (the TUI) fall back to `colors`
     # + automatic adaptation, which beats the default's gold light palette under a crimson skin.

@@ -32,7 +32,6 @@ def _resolve_origin() -> Optional[Dict[str, Any]]:
     accepted job delivers back to the accepting chat; None lets create_job use the home channel."""
     try:
         from gateway.session_context import get_session_env
-
         platform = get_session_env("HERMES_SESSION_PLATFORM")
         chat_id = get_session_env("HERMES_SESSION_CHAT_ID")
         if platform and chat_id:
@@ -50,7 +49,6 @@ def _accept(store, rest: str, origin, surface: str) -> str:
     if not rest:
         return "Usage: /suggestions accept <number|id>"
     from cron.scheduler import CronSchedulerRegistrationError
-
     try:
         job = store.accept_suggestion(rest, origin=origin)
     except CronSchedulerRegistrationError as e:
@@ -75,7 +73,6 @@ def _dismiss(store, rest: str, origin, surface: str) -> str:
 def _catalog(store, rest: str, origin, surface: str) -> str:
     try:
         from cron.suggestion_catalog import seed_catalog_suggestions
-
         created = seed_catalog_suggestions()
     except Exception as e:
         logger.debug("catalog seed failed: %s", e)
@@ -117,7 +114,6 @@ def handle_suggestions_command(
     except Exception as e:  # pragma: no cover - import guard
         logger.debug("suggestions store import failed: %s", e)
         return "Suggestions are unavailable in this build."
-
     parts = (args or "").strip().split()
     handler = _SUBCOMMANDS.get(parts[0].lower() if parts else "")
     if handler is None:
