@@ -1071,9 +1071,7 @@ def get_runtime_status_running_pid(
     recycled onto a different profile's gateway is not reported running for the dead one.
     """
     payload = runtime if runtime is not None else read_runtime_status()
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("gateway_state") in {None, "stopped", "startup_failed"}:
+    if not isinstance(payload, dict) or payload.get("gateway_state") in {None, "stopped", "startup_failed"}:
         return None
     pid = _live_pid_from_record(payload)
     if pid is None:
@@ -1091,15 +1089,13 @@ def remove_pid_file() -> None:
     During --replace the old process's atexit can fire AFTER the new process wrote
     its own record; blind removal would leave the gateway invisible.
     """
-    try:
+    with contextlib.suppress(Exception):
         path = _get_pid_path()
         file_pid = _pid_from_record(_read_json_file(path))
         if file_pid is not None and file_pid != os.getpid():
             return  # Belongs to a different process — leave it alone.
         path.unlink(missing_ok=True)
         _clear_running_pid_cache()
-    except Exception:
-        pass
 
 
 def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optional[int]) -> bool:
@@ -1119,10 +1115,7 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
         return True
     if not _looks_like_gateway_process(existing_pid) and (
         _read_process_cmdline(existing_pid) is not None
-        or (
-            (existing.get("start_time") is None or current_start is None)
-            and not _record_looks_like_gateway(existing)
-        )
+        or ((existing.get("start_time") is None or current_start is None) and not _record_looks_like_gateway(existing))
     ):
         return True
     # Stopped / tracing-stop state (T/t) in /proc/<pid>/status.
@@ -1154,7 +1147,6 @@ def acquire_scoped_lock(
     profile = _profile_label_for_home(_get_process_hermes_home())
     if profile:
         record["profile"] = profile
-
     existing = _read_json_file(lock_path)
     if existing is None and lock_path.exists():
         # Empty/invalid JSON: previous process died between O_EXCL create and
@@ -1178,7 +1170,6 @@ def acquire_scoped_lock(
         with contextlib.suppress(OSError):
             os.replace(lock_path, tombstone)
             _unlink_quietly(tombstone)
-
     try:
         _write_json_excl(lock_path, record)
     except FileExistsError:
@@ -1207,9 +1198,9 @@ def release_all_scoped_locks(
     narrows against PID reuse); with no owner every lock file is removed.
     """
     lock_dir = _get_lock_dir()
-    removed = 0
     if not lock_dir.exists():
         return 0
+    removed = 0
     for lock_file in lock_dir.glob("*.lock"):
         if owner_pid is not None:
             record = _read_json_file(lock_file)
@@ -1265,15 +1256,12 @@ def _read_live_pid_marker(path: Path, ttl_s: int) -> Optional[tuple[dict[str, An
         return None
     try:
         target_pid = int(record["target_pid"])
-        target_start_time = record.get("target_start_time")
-        written_at = record.get("written_at") or ""
     except (KeyError, TypeError, ValueError):
+        target_pid = None
+    if target_pid is None or _marker_is_stale(record.get("written_at") or "", ttl_s):
         _unlink_quietly(path)
         return None
-    if _marker_is_stale(written_at, ttl_s):
-        _unlink_quietly(path)
-        return None
-    return record, target_pid, target_start_time
+    return record, target_pid, record.get("target_start_time")
 
 
 def _pid_marker_names_self(target_pid: int, target_start_time: Any) -> bool:
