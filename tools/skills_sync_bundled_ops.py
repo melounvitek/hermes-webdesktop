@@ -17,8 +17,12 @@ def _is_tracked_user_modification(origin_hash: str, user_hash: str) -> bool:
     return bool(origin_hash) and user_hash != origin_hash
 
 
-def _bundled_by_name(bundled_dir: Path) -> dict:
-    return dict(_ss()._discover_bundled_skills(bundled_dir))
+def _bundled_state():
+    """``(skills_sync, manifest, bundled_dir, {skill_name: bundled_src})`` — the shared
+    preamble of every maintenance op."""
+    ss = _ss()
+    bundled_dir = ss._get_bundled_dir()
+    return ss, ss._read_manifest(), bundled_dir, dict(ss._discover_bundled_skills(bundled_dir))
 
 
 def reset_bundled_skill(name: str, restore: bool = False) -> dict:
@@ -28,10 +32,7 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     the OLD origin hash; clearing the entry breaks that loop. ``restore`` also deletes
     the user's copy so the next sync re-copies bundled. Returns ``{ok, action, message,
     synced}``; action is manifest_cleared / restored / not_in_manifest / bundled_missing / not_reset."""
-    ss = _ss()
-    manifest = ss._read_manifest()
-    bundled_dir = ss._get_bundled_dir()
-    bundled_by_name = _bundled_by_name(bundled_dir)
+    ss, manifest, bundled_dir, bundled_by_name = _bundled_state()
     in_manifest = name in manifest
     is_bundled = name in bundled_by_name
 
@@ -53,7 +54,7 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
         if dest.exists():
             try:
                 ss._rmtree_writable(dest)
-            except (OSError, IOError) as e:
+            except OSError as e:
                 return _fail("not_reset", f"Could not delete user copy at {dest}: {e}. "
                              f"Manifest entry preserved — nothing was changed.")
             deleted_user_copy = True
@@ -91,8 +92,7 @@ def list_user_modified_bundled_skills() -> List[dict]:
 
 
 def _read_for_diff(path: Path) -> Tuple[Optional[bytes], Optional[str]]:
-    """Read a file once for diffing: ``(raw_bytes, text)`` with ``text=None`` for
-    binary content, ``(None, None)`` if unreadable."""
+    """``(raw_bytes, text)`` for diffing; ``text=None`` for binary, ``(None, None)`` if unreadable."""
     try:
         data = path.read_bytes()
         return data, (None if b"\x00" in data else data.decode("utf-8"))
@@ -108,13 +108,12 @@ def diff_bundled_skill(name: str) -> dict:
     modified / added (only in user copy) / removed (only in bundled) / binary."""
     import difflib
 
-    ss = _ss()
+    ss, _, bundled_dir, bundled_by_name = _bundled_state()
 
     def _fail(found: bool, message: str) -> dict:
         return {"ok": False, "name": name, "found": found, "modified": False, "diffs": [], "message": message}
 
-    bundled_dir = ss._get_bundled_dir()
-    bundled_src = _bundled_by_name(bundled_dir).get(name)
+    bundled_src = bundled_by_name.get(name)
     if bundled_src is None:
         return _fail(False, f"'{name}' is not a tracked bundled skill (no stock version to "
                      f"diff against). Hub-installed skills use `hermes skills inspect`.")
@@ -133,8 +132,7 @@ def diff_bundled_skill(name: str) -> dict:
         else:
             user_bytes, user_text = _read_for_diff(dest / rel)
             stock_bytes, stock_text = _read_for_diff(bundled_src / rel)
-            if user_text is None or stock_text is None:
-                # At least one side is binary — report only if the bytes differ.
+            if user_text is None or stock_text is None:  # a binary side: report only if bytes differ
                 if user_bytes != stock_bytes:
                     diffs.append({"path": rel, "status": "binary", "diff": "<binary file differs>"})
             elif user_text != stock_text:
@@ -183,11 +181,7 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
     bundled source (hash-comparable) AND byte-identical to the origin hash; everything
     else lands in ``skipped``. Removed skills lose their manifest entry so a later
     opt-in re-seed treats them as new. Returns ``{ok, removed, skipped: [{name, reason}], dry_run, message}``."""
-    ss = _ss()
-    manifest = ss._read_manifest()
-    bundled_dir = ss._get_bundled_dir()
-    bundled_by_name = _bundled_by_name(bundled_dir)
-
+    ss, manifest, bundled_dir, bundled_by_name = _bundled_state()
     removed: List[str] = []
     skipped: List[dict] = []
     for name, origin_hash in sorted(manifest.items()):
@@ -206,7 +200,7 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
         if not dry_run:
             try:
                 ss._rmtree_writable(dest)
-            except (OSError, IOError) as e:
+            except OSError as e:
                 skipped.append({"name": name, "reason": f"delete failed: {e}"})
                 continue
             manifest.pop(name, None)

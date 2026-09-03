@@ -14,6 +14,7 @@ import os
 import shutil
 import stat
 import sys
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
@@ -87,10 +88,7 @@ def _iter_active_skill_mds(sort: bool = False) -> Iterator[Path]:
 def _build_external_skill_index() -> Set[str]:
     """Names (directory and frontmatter) of every skill provided by external_dirs,
     so sync_skills never shadows an externally-delegated skill."""
-    try:
-        from agent.skill_utils import get_external_skills_dirs, _external_dirs_cache_clear
-    except ImportError:
-        return set()
+    from agent.skill_utils import get_external_skills_dirs, _external_dirs_cache_clear
 
     _external_dirs_cache_clear()  # so a config edit (or a test patch) is seen
     external_names: Set[str] = set()
@@ -103,18 +101,13 @@ def _build_external_skill_index() -> Set[str]:
 
 
 def _read_manifest() -> Dict[str, str]:
-    """Read the manifest as ``{skill_name: origin_hash}``; v1 plain-name lines get an
-    empty hash, which triggers migration on the next sync."""
+    """``{skill_name: origin_hash}``; v1 plain-name lines get an empty hash (migrates next sync)."""
     try:
         lines = _manifest_file().read_text(encoding="utf-8").splitlines() if _manifest_file().exists() else []
-    except (OSError, IOError):
+    except OSError:
         return {}
-    result = {}
-    for line in map(str.strip, lines):
-        if line:
-            name, _, hash_val = line.partition(":")
-            result[name.strip()] = hash_val.strip()
-    return result
+    pairs = (line.partition(":") for line in map(str.strip, lines) if line)
+    return {name.strip(): hash_val.strip() for name, _, hash_val in pairs}
 
 
 def _read_suppressed_names() -> set:
@@ -123,8 +116,7 @@ def _read_suppressed_names() -> set:
 
 
 def _write_manifest(entries: Dict[str, str]):
-    """Write the manifest atomically in v2 format, preserving an existing file's
-    permission bits/owner instead of resetting them to mkstemp's 0600."""
+    """Atomic v2 write, preserving an existing file's mode/owner (not mkstemp's 0600)."""
     _manifest_file().parent.mkdir(parents=True, exist_ok=True)
     data = "\n".join(f"{name}:{hash_val}" for name, hash_val in sorted(entries.items())) + "\n"
     try:
@@ -146,8 +138,7 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
 
 
 def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
-    """Destination in the skills dir preserving category structure
-    (bundled/skills/mlops/axolotl -> ~/.hermes/skills/mlops/axolotl)."""
+    """Destination preserving category structure (bundled/mlops/axolotl -> skills/mlops/axolotl)."""
     return _skills_dir() / skill_dir.relative_to(bundled_dir)
 
 
@@ -159,7 +150,7 @@ def _dir_hash(directory: Path) -> str:
             if fpath.is_file():
                 hasher.update(str(fpath.relative_to(directory)).encode("utf-8"))
                 hasher.update(fpath.read_bytes())
-    except (OSError, IOError):
+    except OSError:
         pass
     return hasher.hexdigest()
 
@@ -216,7 +207,7 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
             continue
         try:
             _move_dir(candidate, dest)
-        except (OSError, IOError):
+        except OSError:
             logger.warning("Could not relocate renamed skill %s -> %s", candidate, dest, exc_info=True)
             return None
         logger.info("Relocated renamed bundled skill: %s -> %s", candidate, dest)
@@ -256,7 +247,7 @@ def _recover_orphan_backup(dest: Path) -> None:
     try:
         _move_dir(orphan, dest)
         logger.info("Recovered orphaned skill backup: %s", orphan)
-    except (OSError, IOError):
+    except OSError:
         logger.warning("Could not recover orphaned skill backup %s", orphan, exc_info=True)
 
 
@@ -293,7 +284,7 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
             st.copied.append(skill_name)
             st.manifest[skill_name] = bundled_hash
             st.say(f"  + {skill_name}")
-    except (OSError, IOError) as e:
+    except OSError as e:
         st.say(f"  ! Failed to copy {skill_name}: {e}")  # not in manifest — next sync retries
 
 
@@ -306,19 +297,19 @@ def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
     shutil.move(str(dest), str(backup))
     try:
         shutil.copytree(skill_src, dest)
-    except (OSError, IOError):
+    except OSError:
         # Clear a partially-written dest so it can't shadow or block the restore.
         if backup.exists() and dest.exists():
             try:
                 _rmtree_writable(dest)
-            except (OSError, IOError):
+            except OSError:
                 logger.warning("Could not clear partial copy %s during restore", dest, exc_info=True)
         if backup.exists() and not dest.exists():
             shutil.move(str(backup), str(dest))
         raise
     try:
         _rmtree_writable(backup)
-    except (OSError, IOError):
+    except OSError:
         logger.debug("Could not remove backup %s", backup, exc_info=True)
 
 
@@ -341,7 +332,7 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
     # bundled changed and the user copy is pristine -> update
     try:
         _replace_skill_dir(skill_src, dest)
-    except (OSError, IOError) as e:
+    except OSError as e:
         st.say(f"  ! Failed to update {skill_name}: {e}")
         return
     st.manifest[skill_name] = bundled_hash
@@ -359,7 +350,7 @@ def _seed_category_descriptions(bundled_dir: Path, only_dirs: Optional[Set[Path]
         try:
             dest_desc.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(desc_md, dest_desc)
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.debug("Could not copy %s: %s", desc_md, e)
 
 
@@ -411,11 +402,9 @@ def sync_skills(quiet: bool = False) -> dict:
     cleaned = [] if essential_only else sorted(set(st.manifest) - {name for name, _ in bundled_skills})
     for name in cleaned:
         del st.manifest[name]
-
     _seed_category_descriptions(
         bundled_dir,
-        {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None,
-    )
+        {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None)
 
     _write_manifest(st.manifest)
     return {
@@ -440,10 +429,8 @@ def _rmtree_writable(path: Path) -> None:
 
     def _on_error(func, fpath, exc_info):
         for p in (os.path.dirname(fpath), fpath):
-            try:
+            with suppress(OSError):
                 os.chmod(p, stat.S_IRWXU)
-            except OSError:
-                pass
         func(fpath)
 
     shutil.rmtree(path, onerror=_on_error)
@@ -463,12 +450,11 @@ if __name__ == "__main__":
     print("Syncing bundled skills into ~/.hermes/skills/ ...")
     result = sync_skills(quiet=False)
     parts = [f"{len(result['copied'])} new", f"{len(result['updated'])} updated", f"{result['skipped']} unchanged"]
-    names = result["user_modified"]
-    if names:
+    if names := result["user_modified"]:
         shown = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
         parts.append(f"{len(names)} user-modified (kept): {shown}")
     if result["cleaned"]:
         parts.append(f"{len(result['cleaned'])} cleaned from manifest")
-    if result.get("optional_provenance_backfilled"):
-        parts.append(f"{len(result['optional_provenance_backfilled'])} official optional backfilled")
+    if backfilled := result.get("optional_provenance_backfilled"):
+        parts.append(f"{len(backfilled)} official optional backfilled")
     print(f"\nDone: {', '.join(parts)}. {result['total_bundled']} total bundled.")
