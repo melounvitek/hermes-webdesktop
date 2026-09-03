@@ -1,9 +1,8 @@
 """Website access policy helpers for URL-capable tools.
 
-Loads a user-managed website blocklist (``security.website_blocklist`` in
-~/.hermes/config.yaml plus optional shared list files) without pulling in the
-heavier CLI config stack. The parsed policy is cached with a short TTL so config
-edits take effect quickly without re-parsing YAML on every URL check.
+Loads a user-managed website blocklist (``security.website_blocklist`` in ~/.hermes/config.yaml plus
+optional shared list files) without the heavier CLI config stack. The parsed policy is cached with a
+short TTL so config edits take effect quickly without re-parsing YAML on every URL check.
 """
 
 from __future__ import annotations
@@ -21,11 +20,7 @@ from tools.url_safety import _normalize_hostname as _normalize_host
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_WEBSITE_BLOCKLIST = {
-    "enabled": False,
-    "domains": [],
-    "shared_files": [],
-}
+_DEFAULT_WEBSITE_BLOCKLIST = {"enabled": False, "domains": [], "shared_files": []}
 
 # Without this cache a 50-URL extract would mean 51 YAML parses of config.yaml.
 _CACHE_TTL_SECONDS = 30.0
@@ -33,10 +28,6 @@ _cache_lock = threading.Lock()
 _cached_policy: Optional[Dict[str, Any]] = None
 _cached_policy_path: Optional[str] = None
 _cached_policy_time: float = 0.0
-
-
-def _get_default_config_path() -> Path:
-    return get_hermes_home() / "config.yaml"
 
 
 class WebsitePolicyError(Exception):
@@ -60,11 +51,8 @@ def _normalize_rule(rule: Any) -> Optional[str]:
 
 
 def _iter_blocklist_file_rules(path: Path) -> List[str]:
-    """Load rules from a shared blocklist file.
-
-    Missing or unreadable files warn and yield nothing rather than raising — a bad
-    file path must not disable all web tools.
-    """
+    """Rules from a shared blocklist file; missing/unreadable files warn and yield nothing rather than
+    raising — a bad file path must not disable all web tools."""
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -78,42 +66,30 @@ def _iter_blocklist_file_rules(path: Path) -> List[str]:
 
 def _require_mapping(value: Any, label: str) -> Dict[str, Any]:
     """``None`` (empty YAML section) counts as an empty mapping; other non-dicts are errors."""
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
+    if value is not None and not isinstance(value, dict):
         raise WebsitePolicyError(f"{label} must be a mapping")
-    return value
+    return value or {}
 
 
-def _load_policy_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    config_path = config_path or _get_default_config_path()
+def _load_policy_config(config_path: Path) -> Dict[str, Any]:
     if not config_path.exists():
         return dict(_DEFAULT_WEBSITE_BLOCKLIST)
-
     try:
         import yaml
     except ImportError:
         logger.debug("PyYAML not installed — website blocklist disabled")
         return dict(_DEFAULT_WEBSITE_BLOCKLIST)
-
     try:
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise WebsitePolicyError(f"Invalid config YAML at {config_path}: {exc}") from exc
     except OSError as exc:
         raise WebsitePolicyError(f"Failed to read config file {config_path}: {exc}") from exc
     if not isinstance(config, dict):
         raise WebsitePolicyError("config root must be a mapping")
-
     security = _require_mapping(config.get("security", {}), "security")
-    website_blocklist = _require_mapping(
-        security.get("website_blocklist", {}), "security.website_blocklist"
-    )
-
-    policy = dict(_DEFAULT_WEBSITE_BLOCKLIST)
-    policy.update(website_blocklist)
-    return policy
+    website_blocklist = _require_mapping(security.get("website_blocklist", {}), "security.website_blocklist")
+    return {**_DEFAULT_WEBSITE_BLOCKLIST, **website_blocklist}
 
 
 def _require_type(policy: Dict[str, Any], key: str, kind: type, default: Any) -> Any:
@@ -122,66 +98,42 @@ def _require_type(policy: Dict[str, Any], key: str, kind: type, default: Any) ->
     if kind is list:
         value = value or []
     if not isinstance(value, kind):
-        raise WebsitePolicyError(f"security.website_blocklist.{key} must be a {'boolean' if kind is bool else 'list'}")
+        kind_name = "boolean" if kind is bool else "list"
+        raise WebsitePolicyError(f"security.website_blocklist.{key} must be a {kind_name}")
     return value
 
 
 def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load and return the parsed website blocklist policy (``{"enabled", "rules"}``).
-
-    Cached for ``_CACHE_TTL_SECONDS`` for the default config path only; an
-    explicit ``config_path`` (tests) always bypasses and never populates the cache.
-    """
+    """Parsed website blocklist policy (``{"enabled", "rules"}``); cached for ``_CACHE_TTL_SECONDS`` for
+    the default config path only — an explicit ``config_path`` (tests) bypasses and never populates it."""
     global _cached_policy, _cached_policy_path, _cached_policy_time
-
-    default_path = _get_default_config_path()
-    resolved_path = str(config_path) if config_path else str(default_path)
+    default_path = get_hermes_home() / "config.yaml"
+    resolved_path = str(config_path or default_path)
     now = time.monotonic()
-
     if config_path is None:
         with _cache_lock:
-            if (
-                _cached_policy is not None
-                and _cached_policy_path == resolved_path
-                and (now - _cached_policy_time) < _CACHE_TTL_SECONDS
-            ):
+            fresh = _cached_policy_path == resolved_path and (now - _cached_policy_time) < _CACHE_TTL_SECONDS
+            if _cached_policy is not None and fresh:
                 return _cached_policy
 
     config_path = config_path or default_path
     policy = _load_policy_config(config_path)
-
-    raw_domains = _require_type(policy, "domains", list, [])
-    raw_shared_files = _require_type(policy, "shared_files", list, [])
+    domains = map(_normalize_rule, _require_type(policy, "domains", list, []))
+    pairs: List[Tuple[str, str]] = [(p, "config") for p in domains if p]
+    shared_files = _require_type(policy, "shared_files", list, [])
     enabled = _require_type(policy, "enabled", bool, True)
-
-    rules: List[Dict[str, str]] = []
-    seen: set[Tuple[str, str]] = set()
-
-    def _add(pattern: Optional[str], source: str) -> None:
-        if pattern and (source, pattern) not in seen:
-            rules.append({"pattern": pattern, "source": source})
-            seen.add((source, pattern))
-
-    for raw_rule in raw_domains:
-        _add(_normalize_rule(raw_rule), "config")
-
-    for shared_file in raw_shared_files:
+    for shared_file in shared_files:
         if not isinstance(shared_file, str) or not shared_file.strip():
             continue
         path = Path(shared_file).expanduser()
         if not path.is_absolute():
             path = (get_hermes_home() / path).resolve()
-        for normalized in _iter_blocklist_file_rules(path):
-            _add(normalized, str(path))
-
-    result = {"enabled": enabled, "rules": rules}
-
+        pairs += [(normalized, str(path)) for normalized in _iter_blocklist_file_rules(path)]
+    # dict.fromkeys dedupes (pattern, source) while keeping first-seen order.
+    result = {"enabled": enabled, "rules": [{"pattern": p, "source": s} for p, s in dict.fromkeys(pairs)]}
     if config_path == default_path:  # explicit paths are tests — never cache them
         with _cache_lock:
-            _cached_policy = result
-            _cached_policy_path = resolved_path
-            _cached_policy_time = now
-
+            _cached_policy, _cached_policy_path, _cached_policy_time = result, resolved_path, now
     return result
 
 
@@ -199,29 +151,25 @@ def _extract_host_from_urlish(url: str) -> str:
     parsed = urlparse(url)
     host = _normalize_host(parsed.hostname or parsed.netloc)
     if not host and "://" not in url:
-        schemeless = urlparse(f"//{url}")
-        host = _normalize_host(schemeless.hostname or schemeless.netloc)
+        parsed = urlparse(f"//{url}")
+        host = _normalize_host(parsed.hostname or parsed.netloc)
     return host
 
 
 def check_website_access(url: str, config_path: Optional[Path] = None) -> Optional[Dict[str, str]]:
-    """Check whether a URL is allowed by the website blocklist policy.
+    """``None`` if the URL is allowed by the blocklist policy, else block metadata (host/rule/source/message).
 
-    Returns ``None`` if allowed, else block metadata (``host``, ``rule``,
-    ``source``, ``message``). Fails open on policy errors (warn + ``None``) so a
-    config typo can't break all web tools — except with an explicit ``config_path``
-    (tests), where errors propagate.
+    Fails open on policy errors (warn + ``None``) so a config typo can't break all web tools — except with
+    an explicit ``config_path`` (tests), where errors propagate.
     """
     # Fast path: cached policy disabled/empty → no YAML read, no host extraction.
     if config_path is None:
         with _cache_lock:
             if _cached_policy is not None and not _cached_policy.get("enabled"):
                 return None
-
     host = _extract_host_from_urlish(url)
     if not host:
         return None
-
     try:
         policy = load_website_blocklist(config_path)
     except WebsitePolicyError as exc:
@@ -232,23 +180,15 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
     except Exception as exc:
         logger.warning("Unexpected error loading website policy (failing open): %s", exc)
         return None
-
     if not policy.get("enabled"):
         return None
-
     for rule in policy.get("rules", []):
         pattern = rule.get("pattern", "")
         if _match_host_against_rule(host, pattern):
             source = rule.get("source", "config")
             logger.info("Blocked URL %s — matched rule '%s' from %s", url, pattern, source)
             return {
-                "url": url,
-                "host": host,
-                "rule": pattern,
-                "source": source,
-                "message": (
-                    f"Blocked by website policy: '{host}' matched rule '{pattern}'"
-                    f" from {source}"
-                ),
+                "url": url, "host": host, "rule": pattern, "source": source,
+                "message": f"Blocked by website policy: '{host}' matched rule '{pattern}' from {source}",
             }
     return None

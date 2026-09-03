@@ -1,17 +1,10 @@
-"""Result caching for web_search / web_extract.
-
-Two caches, both TTL-bounded (default 20 min, ``web.cache_ttl_minutes``;
-disable with ``web.cache_enabled: false``). Only successful responses cache.
-
-* **Search memo** — in-memory, per-process, single-flighted: concurrent
-  identical queries share one paid request. Limits are bucketed to
-  10/20/50/100 so near-identical requests share an entry; callers slice.
-* **Extract cache** — disk-backed under ``cache/web`` (cross-process) with a
-  JSON sidecar index: URL digest → (file, fetched_at, title). Hits re-run the
-  normal truncate pipeline with the caller's char_limit.
-
-Lives here, not in generic tool dispatch, so hits sit *after* every safety
-check (secret-in-URL, SSRF, policy) and skip only the vendor call.
+"""Result caching for web_search / web_extract; both caches TTL-bounded (default 20 min,
+``web.cache_ttl_minutes``; disable with ``web.cache_enabled: false``), only successful responses cache.
+* **Search memo** — in-memory, per-process, single-flighted: concurrent identical queries share one
+  paid request. Limits bucket to 10/20/50/100 so near-identical requests share an entry.
+* **Extract cache** — disk-backed under ``cache/web`` (cross-process) with a JSON sidecar index:
+  URL digest → (file, fetched_at, title). Hits re-run the normal truncate pipeline.
+Lives here, not in tool dispatch, so hits sit *after* every safety check and skip only the vendor call.
 """
 
 import hashlib
@@ -46,8 +39,7 @@ def _web_config() -> dict:
 
 def cache_enabled() -> bool:
     """Both caches honor ``web.cache_enabled`` (default: on)."""
-    val = _web_config().get("cache_enabled")
-    return True if val is None else bool(val)
+    return True if (val := _web_config().get("cache_enabled")) is None else bool(val)
 
 
 def ttl_seconds() -> float:
@@ -62,10 +54,7 @@ def ttl_seconds() -> float:
 
 def bucket_limit(limit: int) -> int:
     """Round a requested result count up to the nearest bucket."""
-    for b in _LIMIT_BUCKETS:
-        if limit <= b:
-            return b
-    return _LIMIT_BUCKETS[-1]
+    return next((b for b in _LIMIT_BUCKETS if limit <= b), _LIMIT_BUCKETS[-1])
 
 
 def normalize_query(query: str) -> str:
@@ -88,20 +77,15 @@ def _deep_copy(response: dict) -> dict:
     return json.loads(json.dumps(response))
 
 
-# ---------------------------------------------------------------------------
-# Search memo (in-memory, single-flight)
-# ---------------------------------------------------------------------------
+# ─── Search memo (in-memory, single-flight) ───────────────────────────────────
 
 class SearchMemo:
-    """TTL memo + single-flight coalescer for search responses.
-
-    Thread-safe: the parallel tool-dispatch pool and subagents share this
-    process, so identical queries genuinely race. Per-key locks make the
-    losers wait for (and share) the winner's response.
-    """
+    """TTL memo + single-flight coalescer for search responses. Thread-safe: the parallel tool-dispatch pool
+    and subagents share this process, so identical queries genuinely race; per-key locks make the losers
+    wait for (and share) the winner's response."""
 
     def __init__(self) -> None:
-        self._store: Dict[tuple, Tuple[float, dict]] = {}
+        self._store: Dict[tuple, Tuple[float, dict]] = {}  # key -> (expires_at, response)
         self._store_lock = threading.Lock()
         self._key_locks: Dict[tuple, threading.Lock] = {}
 
@@ -114,20 +98,16 @@ class SearchMemo:
         key = self._key(provider, query, limit)
         with self._store_lock:
             hit = self._store.get(key)
-            if hit is None:
+            if hit is None or time.monotonic() >= hit[0]:
+                self._store.pop(key, None)
                 return None
-            expires, response = hit
-            if time.monotonic() >= expires:
-                del self._store[key]
-                return None
+            response = hit[1]
         logger.info("web_search cache hit: %r via %s", query, provider)
         return _deep_copy(response)
 
     def store(self, provider: str, query: str, limit: int, response: dict) -> None:
         """Cache a SUCCESSFUL response for the bucketed key."""
-        if not cache_enabled():
-            return
-        if not isinstance(response, dict) or not response.get("success"):
+        if not cache_enabled() or not isinstance(response, dict) or not response.get("success"):
             return
         key = self._key(provider, query, limit)
         with self._store_lock:
@@ -142,16 +122,12 @@ class SearchMemo:
         with self._store_lock:
             lock = self._key_locks.get(key)
             if lock is None:
-                # Bound the lock table, but never evict a HELD lock: dropping
-                # one lets a concurrent identical request mint a fresh lock and
-                # issue a duplicate paid call. locked() is a safe snapshot under
-                # _store_lock because holders already have their reference.
+                # Bound the lock table, but never evict a HELD lock: dropping one lets a concurrent
+                # identical request mint a fresh lock and issue a duplicate paid call. locked() is a
+                # safe snapshot under _store_lock because holders already have their reference.
                 if len(self._key_locks) > 256:
-                    self._key_locks = {
-                        k: v for k, v in self._key_locks.items() if v.locked()
-                    }
-                lock = threading.Lock()
-                self._key_locks[key] = lock
+                    self._key_locks = {k: v for k, v in self._key_locks.items() if v.locked()}
+                lock = self._key_locks[key] = threading.Lock()
             return lock
 
     def clear(self) -> None:
@@ -177,9 +153,7 @@ def slice_search_response(response: dict, limit: int) -> dict:
     return response
 
 
-# ---------------------------------------------------------------------------
-# Extract cache (disk-backed, reuses cache/web)
-# ---------------------------------------------------------------------------
+# ─── Extract cache (disk-backed, reuses cache/web) ────────────────────────────
 
 _index_lock = threading.Lock()
 
@@ -194,37 +168,25 @@ def _cache_dir() -> Optional[Path]:
         return None
 
 
-def _index_path() -> Optional[Path]:
-    d = _cache_dir()
-    return (d / _INDEX_FILENAME) if d else None
-
-
 def _load_index() -> dict:
-    path = _index_path()
-    if path is None or not path.exists():
-        return {}
+    path = (d / _INDEX_FILENAME) if (d := _cache_dir()) else None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8")) if path else {}
         return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001 — corrupt index == empty cache
+    except Exception:  # noqa: BLE001 — missing/corrupt index == empty cache
         return {}
 
 
 def _save_index(index: dict) -> None:
-    path = _index_path()
-    if path is None:
+    if (d := _cache_dir()) is None:
         return
+    path = d / _INDEX_FILENAME
     try:
         if len(index) > _INDEX_MAX_ENTRIES:
-            newest = sorted(
-                index.items(),
-                key=lambda kv: kv[1].get("fetched_at", 0),
-                reverse=True,
-            )[:_INDEX_MAX_ENTRIES]
-            index = dict(newest)
-        # Per-process tmp name: CLI, gateway, cron, and subagents all write this
-        # index; a shared tmp name would let concurrent writers truncate each
-        # other. os.replace is atomic, so the worst outcome is a lost insert.
+            newest = sorted(index.items(), key=lambda kv: kv[1].get("fetched_at", 0), reverse=True)
+            index = dict(newest[:_INDEX_MAX_ENTRIES])
+        # Per-process tmp name: CLI, gateway, cron, and subagents all write this index; a shared tmp name
+        # would let concurrent writers truncate each other. os.replace is atomic: worst case is a lost insert.
         tmp = path.with_suffix(f".tmp.{os.getpid()}")
         tmp.write_text(json.dumps(index), encoding="utf-8")
         tmp.replace(path)
@@ -233,20 +195,15 @@ def _save_index(index: dict) -> None:
 
 
 def _url_digest(url: str, format: Optional[str], provider: str = "") -> str:
-    # format AND provider are part of the key: an html extract is not a
-    # markdown one, and one backend's rendering is not another's.
+    # format AND provider are part of the key: html != markdown, and one backend's rendering is not another's.
     raw = f"{url}\n{format or 'markdown'}\n{provider or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional[Path]:
-    """Dedicated cache file per (url, format, provider).
-
-    Deliberately NOT the truncate-store file (keyed on URL alone), which
-    html/markdown or two providers' copies of one URL would overwrite.
-    """
-    d = _cache_dir()
-    if d is None:
+    """Dedicated cache file per (url, format, provider) — deliberately NOT the truncate-store file
+    (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
+    if (d := _cache_dir()) is None:
         return None
     try:
         slug = _host_slug(url)
@@ -259,23 +216,17 @@ def _host_matches_pattern(host: str, pattern: str) -> bool:
     """Case-insensitive: exact, ``*.wildcard``, or bare-domain suffix
     (``mysite.dev`` also matches ``preview.mysite.dev``)."""
     host = host.lower().strip(".")
-    pattern = (pattern or "").lower().strip().strip(".")
-    if not pattern:
-        return False
-    if pattern.startswith("*."):
-        pattern = pattern[2:]
-    return host == pattern or host.endswith("." + pattern)
+    pattern = (pattern or "").lower().strip().strip(".").removeprefix("*.")
+    return bool(pattern) and (host == pattern or host.endswith("." + pattern))
 
 
 def _is_cache_exempt_host(url: str) -> bool:
-    """True when the host matches ``web.cache_exempt_hosts`` — sites the user is
-    developing over public DNS (staging, tunnels, previews) that must fetch live."""
+    """True when the host matches ``web.cache_exempt_hosts`` — sites the user develops over public DNS
+    (staging, tunnels, previews) that must fetch live."""
     try:
         patterns = _web_config().get("cache_exempt_hosts") or []
-        if not isinstance(patterns, (list, tuple)) or not patterns:
-            return False
         host = _url_host(url)
-        if not host:
+        if not isinstance(patterns, (list, tuple)) or not host:
             return False
         return any(_host_matches_pattern(host, str(p)) for p in patterns)
     except Exception:  # noqa: BLE001 — config problems never break tools
@@ -283,18 +234,14 @@ def _is_cache_exempt_host(url: str) -> bool:
 
 
 def _is_local_dev_url(url: str) -> bool:
-    """True for loopback/private/LAN URLs — never cached.
-
-    Private-address pages are the user's own fast-changing dev servers;
-    freshness is the point of fetching them. Hostname heuristics only, no DNS:
-    this is a freshness decision, not a security boundary (SSRF enforcement
-    lives in tools/url_safety.py, which blocks these by default anyway).
-    """
+    """True for loopback/private/LAN URLs — never cached: they are the user's own fast-changing dev servers.
+    Hostname heuristics only, no DNS: this is a freshness decision, not a security boundary (SSRF enforcement
+    lives in tools/url_safety.py, which blocks these by default anyway)."""
     try:
         host = _url_host(url).lower()
         if not host:
             return True  # unparseable → don't cache
-        if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        if host == "localhost" or host.endswith((".localhost", ".local")):
             return True
         if "." not in host and ":" not in host:
             return True  # single-label LAN name, not public DNS
@@ -303,10 +250,7 @@ def _is_local_dev_url(url: str) -> bool:
             ip = ipaddress.ip_address(host)
         except ValueError:
             return False  # public DNS name
-        return bool(
-            ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_unspecified
-        )
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified
     except Exception:  # noqa: BLE001 — on doubt, don't cache
         return True
 
@@ -316,24 +260,16 @@ def _cacheable(url: str) -> bool:
     return cache_enabled() and not (_is_local_dev_url(url) or _is_cache_exempt_host(url))
 
 
-def extract_cache_get(
-    url: str,
-    format: Optional[str] = None,
-    provider: str = "",
-) -> Optional[dict]:
+def extract_cache_get(url: str, format: Optional[str] = None, provider: str = "") -> Optional[dict]:
     """Return {'url','title','content'} for a fresh cached page, else None."""
     if not _cacheable(url):
         return None
     with _index_lock:
-        index = _load_index()
-        entry = index.get(_url_digest(url, format, provider))
-    if not entry:
-        return None
-    if (time.time() - float(entry.get("fetched_at", 0))) >= ttl_seconds():
+        entry = _load_index().get(_url_digest(url, format, provider))
+    if not entry or (time.time() - float(entry.get("fetched_at", 0))) >= ttl_seconds():
         return None
     try:
-        file_path = Path(entry["file"])
-        cache_root = _cache_dir()
+        file_path, cache_root = Path(entry["file"]), _cache_dir()
         # The index is plain JSON on disk; never let a tampered entry read outside cache/web.
         if cache_root is None or cache_root.resolve() not in file_path.resolve().parents:
             return None
@@ -341,27 +277,14 @@ def extract_cache_get(
     except Exception:  # noqa: BLE001 — evicted/pruned file == miss
         return None
     logger.info("web_extract cache hit: %s", url)
-    return {
-        "url": url,
-        "title": entry.get("title", ""),
-        "content": content,
-        "error": None,
-        "cached": True,
-    }
+    return {"url": url, "title": entry.get("title", ""), "content": content, "error": None, "cached": True}
 
 
 def extract_cache_put(
-    url: str,
-    content: str,
-    title: str = "",
-    format: Optional[str] = None,
-    provider: str = "",
+    url: str, content: str, title: str = "", format: Optional[str] = None, provider: str = ""
 ) -> None:
-    """Store one successful extraction's full clean text for TTL reuse.
-
-    Pages over the truncate-store ceiling are not cached: serving a capped copy
-    back as if whole would silently lose the tail.
-    """
+    """Store one successful extraction's full clean text for TTL reuse; pages over the truncate-store
+    ceiling are not cached (serving a capped copy back as if whole would silently lose the tail)."""
     if not content or not _cacheable(url):
         return
     try:
@@ -376,10 +299,7 @@ def extract_cache_put(
         with _index_lock:
             index = _load_index()
             index[_url_digest(url, format, provider)] = {
-                "url": url,
-                "file": str(file_path),
-                "title": title or "",
-                "fetched_at": time.time(),
+                "url": url, "file": str(file_path), "title": title or "", "fetched_at": time.time(),
             }
             _save_index(index)
     except Exception as exc:  # noqa: BLE001 — cache writes are best-effort
