@@ -16,16 +16,12 @@ from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
 
-# Kept for backward compatibility (e.g. test monkeypatching); prefer _get_config().
-_HASS_URL: str = ""
-_HASS_TOKEN: str = ""
-
 
 def _get_config():
     """Return the active profile's Home Assistant URL and token."""
     return (
-        (_HASS_URL or get_secret("HASS_URL", "http://homeassistant.local:8123") or "").rstrip("/"),
-        _HASS_TOKEN or get_secret("HASS_TOKEN", "") or "")
+        (get_secret("HASS_URL", "http://homeassistant.local:8123") or "").rstrip("/"),
+        get_secret("HASS_TOKEN", "") or "")
 
 
 # Valid HA entity_id (e.g. "light.living_room", "sensor.temperature_1").
