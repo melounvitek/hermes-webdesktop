@@ -1,22 +1,13 @@
 """User OAuth helper for the Google Chat gateway adapter.
 
 Google Chat's ``media.upload`` rejects service-account auth, so for native file
-attachments each user grants the bot ``chat.messages.create`` ONCE in their own
-DM; the bot stores per-user refresh tokens and uploads *as the user*
-(https://developers.google.com/chat/api/guides/auth/users).
-
-Library: load_user_credentials(email=None), refresh_or_none(creds, email=None),
-build_user_chat_service(creds), list_authorized_emails().
-CLI (driven by ``/setup-files``): --check | --client-secret PATH | --auth-url |
---auth-code CODE | --revoke | --install-deps [--email EMAIL] (legacy single-user
-mode when --email is omitted).
-
-Token storage layout (all under ``${HERMES_HOME}``):
-- Per-user tokens:       ``google_chat_user_tokens/<sanitized_email>.json``
-- Legacy single-user:    ``google_chat_user_token.json``
-- Per-user pending PKCE: ``google_chat_user_oauth_pending/<sanitized_email>.json``
-- Legacy pending state:  ``google_chat_user_oauth_pending.json``
-- OAuth client secret:   ``google_chat_user_client_secret.json``
+attachments each user grants the bot ``chat.messages.create`` ONCE in their own DM;
+the bot stores per-user refresh tokens and uploads *as the user*
+(https://developers.google.com/chat/api/guides/auth/users). Library API for the
+adapter plus a CLI driven by ``/setup-files`` (``--help``; ``--email`` omitted ==
+legacy single-user mode). Files under ``${HERMES_HOME}``: ``google_chat_user_tokens/
+<email>.json`` (per-user) / ``google_chat_user_token.json`` (legacy); pending PKCE state
+in ``google_chat_user_oauth_pending[/<email>].json``; ``google_chat_user_client_secret.json``.
 """
 
 from __future__ import annotations
