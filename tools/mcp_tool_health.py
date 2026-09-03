@@ -44,12 +44,9 @@ class MCPServerHealthMixin:
         servers or while an RPC holds the lock."""
         if self._is_http() or self._rpc_lock.locked():
             return []
-        deadlines = []
-        if self._max_lifetime_seconds is not None:
-            deadlines.append((self._lifecycle_started_at + self._max_lifetime_seconds, "max_lifetime_seconds"))
-        if self._idle_timeout_seconds is not None:
-            deadlines.append((self._last_tool_call_at + self._idle_timeout_seconds, "idle_timeout_seconds"))
-        return deadlines
+        limits = ((self._lifecycle_started_at, self._max_lifetime_seconds, "max_lifetime_seconds"),
+                  (self._last_tool_call_at, self._idle_timeout_seconds, "idle_timeout_seconds"))
+        return [(start + limit, reason) for start, limit, reason in limits if limit is not None]
 
     def _stdio_recycle_reason(self, now: Optional[float] = None) -> Optional[str]:
         """The stdio recycle reason if idle/age limits have elapsed (lifetime wins), else None."""

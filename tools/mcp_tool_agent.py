@@ -206,8 +206,7 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
         return True
 
     def _schema_getter(attr: str, method: str):
-        owner = getattr(agent, attr, None)
-        getter = getattr(owner, method, None) if owner else None
+        getter = getattr(getattr(agent, attr, None) or None, method, None)
         return getter if callable(getter) else None
 
     enabled = getattr(agent, "enabled_toolsets", None)
