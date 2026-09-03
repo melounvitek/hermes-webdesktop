@@ -252,8 +252,7 @@ def _claim_payload_json(previous_gateway_id: str, new_gateway_id: str, epoch: in
 
 def user_event_id(client_event_id: Any) -> str:
     """Map a client retry key into the server-owned user-event namespace."""
-    normalized = _event_id(client_event_id)
-    return f"user:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+    return f"user:{hashlib.sha256(_event_id(client_event_id).encode('utf-8')).hexdigest()}"
 
 
 def _validate_members(value: Any) -> tuple[list[dict[str, Any]], str]:
@@ -279,11 +278,8 @@ def _legacy_members_match(existing_json: str, proposed: list[dict[str, Any]]) ->
         if not isinstance(previous, dict):
             return False
         previous, current = dict(previous), dict(current)
-        previous_target = previous.pop("target", None)
-        current_target = current.pop("target", None)
-        if previous != current:
-            return False
-        if previous_target not in (None, {}) and previous_target != current_target:
+        previous_target, current_target = previous.pop("target", None), current.pop("target", None)
+        if previous != current or (previous_target not in (None, {}) and previous_target != current_target):
             return False
     return True
 
@@ -317,15 +313,11 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
 # --- schema / connections -------------------------------------------------------
 
 
-def _primary_key_columns(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
-    rows = [row for row in conn.execute(f"PRAGMA table_info({table})") if row[5]]
-    return tuple(str(row[1]) for row in sorted(rows, key=lambda row: int(row[5])))
-
-
 def _remote_run_schema_current(conn: sqlite3.Connection, columns: frozenset[str]) -> bool:
-    return (
-        _REMOTE_RUN_SCHEMA_COLUMNS.issubset(columns)
-        and _primary_key_columns(conn, "hosted_room_remote_runs") == _REMOTE_RUN_IDENTITY_COLUMNS)
+    if not _REMOTE_RUN_SCHEMA_COLUMNS.issubset(columns):
+        return False
+    pk_rows = [row for row in conn.execute("PRAGMA table_info(hosted_room_remote_runs)") if row[5]]
+    return tuple(str(row[1]) for row in sorted(pk_rows, key=lambda row: int(row[5]))) == _REMOTE_RUN_IDENTITY_COLUMNS
 
 
 def _migrate_remote_run_schema(conn: sqlite3.Connection) -> None:
@@ -415,14 +407,13 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _schema_is_current(conn: sqlite3.Connection) -> bool:
     # Read every table first (fixed PRAGMA order), then compare.
     actual = [table_columns(conn, table) for table, _ in _REQUIRED_COLUMNS]
-    for (table, required), columns in zip(_REQUIRED_COLUMNS, actual, strict=True):
-        if not required.issubset(columns):
-            return False
-        if table == "hosted_room_remote_runs" and not _remote_run_schema_current(conn, columns):
-            return False
-    index = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hosted_room_events_cursor'").fetchone()
-    return index is not None
+    return all(
+        required.issubset(columns)
+        and (table != "hosted_room_remote_runs" or _remote_run_schema_current(conn, columns))
+        for (table, required), columns in zip(_REQUIRED_COLUMNS, actual, strict=True)
+    ) and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hosted_room_events_cursor'"
+    ).fetchone() is not None
 
 
 def default_db_path() -> Path:
@@ -454,11 +445,11 @@ def _read_connection(db_path: DbPath) -> sqlite3.Connection:
     if not path.is_file():
         _connect(path).close()
     conn = open_sqlite(path)
-    if _schema_is_current(conn):
-        return conn
-    conn.close()
-    _connect(path).close()
-    return open_sqlite(path)
+    if not _schema_is_current(conn):
+        conn.close()
+        _connect(path).close()
+        conn = open_sqlite(path)
+    return conn
 
 
 _transaction = partial(transaction, _connect, immediate=False)
@@ -623,9 +614,8 @@ def _prune_disbanded_rooms_locked(
 
 def prune_disbanded_rooms(db_path: DbPath, *, now: float | None = None) -> int:
     """Purge deleted Group Chat payloads while reserving their identities."""
-    timestamp = _now(now)
     with _transaction(db_path, immediate=True) as conn:
-        return _prune_disbanded_rooms_locked(conn, now=timestamp)
+        return _prune_disbanded_rooms_locked(conn, now=_now(now))
 
 
 # --- room links / grants / reservations / remote runs ---------------------------------
@@ -788,21 +778,18 @@ def _read_one(db_path: DbPath, sql: str, params: tuple[Any, ...]) -> sqlite3.Row
 
 def peer_room_is_reserved(db_path: DbPath, *, room_id: str, target_profile: str, now: float | None = None) -> bool:
     """Return whether a live target-side RoomLink reservation fences Desktop."""
-    timestamp = _now(now)
-    params = (_room_id(room_id), _actor_id(target_profile, "target_profile"), timestamp)
+    params = (_room_id(room_id), _actor_id(target_profile, "target_profile"), _now(now))
     return _read_one(db_path, _SELECT_LIVE_RESERVATION, params) is not None
 
 
 def peer_room_grant_is_current(db_path: DbPath, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
     """Require a grant to match the target's current live reservation."""
     timestamp = _now(now)
-    values = _reservation_claims(claims)
-    row = _read_one(
+    return _read_one(
         db_path,
         """SELECT 1 FROM hosted_room_peer_reservations WHERE room_id=? AND member_id=?
             AND target_profile=? AND authority_gateway_id=? AND authority_epoch=?
-            AND expires_at>? AND revoked_at IS NULL LIMIT 1""", (*values, timestamp))
-    return row is not None
+            AND expires_at>? AND revoked_at IS NULL LIMIT 1""", (*_reservation_claims(claims), timestamp)) is not None
 
 
 def room_grant_is_revoked(db_path: DbPath, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
@@ -846,11 +833,8 @@ def list_remote_run_receipts(
     db_path: DbPath, *, room_id: str | None = None, target_profile: str | None = None, session_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return remote run handles in durable task order."""
-    filters = [
-        (column, value)
-        for column,
-        value in (("room_id", room_id), ("target_profile", target_profile), ("session_id", session_id))
-        if value is not None]
+    candidates = (("room_id", room_id), ("target_profile", target_profile), ("session_id", session_id))
+    filters = [(column, value) for column, value in candidates if value is not None]
     where = f" WHERE {' AND '.join(f'{column}=?' for column, _ in filters)}" if filters else ""
     with _transaction(db_path) as conn:
         rows = conn.execute(
@@ -976,13 +960,13 @@ def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now:
             result["event"] = _event_from_row(existing, idempotent=True)
             return result
         seq = int(room["next_seq"])
-        epoch = int(room["authority_epoch"])
         event_bytes = _prepare_event(conn, room, event_id, "room.renamed", actor_json, payload_json)
         # Rename updates the room row before inserting its event (order is load-bearing).
         conn.execute("""UPDATE hosted_rooms
                 SET name=?, next_seq=?, event_bytes=event_bytes+?, revision=revision+1, updated_at=?
                 WHERE room_id=?""", (name, seq + 1, event_bytes, now, room_id))
-        conn.execute(_INSERT_EVENT, (room_id, seq, event_id, "room.renamed", actor_json, epoch, payload_json, now))
+        conn.execute(_INSERT_EVENT, (
+            room_id, seq, event_id, "room.renamed", actor_json, int(room["authority_epoch"]), payload_json, now))
         updated = conn.execute(_SELECT_ROOM, (room_id,)).fetchone()
         event = _load_event(conn, room_id, event_id)
     result = _room_from_row(updated)
@@ -1041,13 +1025,10 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
     if not path.is_file():
         return False
     try:
-        conn = sqlite3.connect(path, timeout=0.05)
-        try:
+        with closing(sqlite3.connect(path, timeout=0.05)) as conn:
             table_row = conn.execute(
                 f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}' LIMIT 1").fetchone()
             return table_row is not None and conn.execute(query, params).fetchone() is not None
-        finally:
-            conn.close()
     except sqlite3.Error as exc:
         raise RoomProbeUnavailableError(unavailable) from exc
 
@@ -1058,20 +1039,18 @@ def probe_hosted_room(db_path: DbPath, *, room_id: Any) -> bool:
     Runs on the synchronous prompt-admission path for older Desktop clients, so it fails fast
     under contention instead of blocking the WebSocket reader for SQLite's ten-second timeout.
     """
-    checked_room_id = _room_id(room_id)
     return _probe(
         Path(db_path), "hosted_rooms", "SELECT 1 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL LIMIT 1",
-        (checked_room_id,), "hosted room ownership is temporarily unavailable")
+        (_room_id(room_id),), "hosted room ownership is temporarily unavailable")
 
 
 def probe_peer_room_reservation(
     db_path: DbPath, *, room_id: Any, target_profile: Any, now: float | None = None) -> bool:
     """Check a peer reservation without creating or migrating shared state."""
-    checked_room_id = _room_id(room_id)
-    checked_profile = _actor_id(target_profile, "target_profile")
+    params = (_room_id(room_id), _actor_id(target_profile, "target_profile"), _now(now))
     return _probe(
-        Path(db_path), "hosted_room_peer_reservations", _SELECT_LIVE_RESERVATION,
-        (checked_room_id, checked_profile, _now(now)), "peer room ownership is temporarily unavailable")
+        Path(db_path), "hosted_room_peer_reservations", _SELECT_LIVE_RESERVATION, params,
+        "peer room ownership is temporarily unavailable")
 
 
 def room_state(db_path: DbPath, *, room_id: Any, include_disbanded: bool = False) -> dict[str, Any]:
@@ -1096,28 +1075,11 @@ def request_room_stop(
     db_path: DbPath, *, room_id: Any, cancel_id: Any, expected_gateway_id: Any, expected_epoch: Any) -> dict[str, Any]:
     """Append an idempotent fence that supersedes earlier user turns."""
     cancel_id = _validate_identifier(cancel_id, label="cancel_id", max_chars=MAX_EVENT_ID_CHARS)
-    digest = hashlib.sha256(cancel_id.encode()).hexdigest()[:32]
     return append_event(
-        db_path, room_id=room_id, event_id=f"room-stop:{digest}", kind="room.stop_requested",
+        db_path, room_id=room_id, event_id=f"room-stop:{hashlib.sha256(cancel_id.encode()).hexdigest()[:32]}",
+        kind="room.stop_requested",
         actor={"kind": "gateway", "id": expected_gateway_id}, payload={"cancel_id": cancel_id},
         authority_gateway_id=expected_gateway_id, authority_epoch=expected_epoch)
-
-
-def _append_authority_claim(
-    conn: sqlite3.Connection, row: sqlite3.Row, *, room_id: str, event_id: str, expected_gateway_id: str,
-    expected_epoch: int, new_gateway_id: str, target_epoch: int, actor_json: str, payload_json: str, now: float
-) -> sqlite3.Row | None:
-    """Insert the claim event and CAS the room's authority; returns the stored claim event."""
-    claim_bytes = _insert_event(
-        conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", actor_json, target_epoch, payload_json,
-        now, allow_control=True)
-    _fenced_update(conn, """UPDATE hosted_rooms SET authority_gateway_id=?,
-            authority_epoch=authority_epoch+1, next_seq=next_seq+1,
-            event_bytes=event_bytes+?, revision=revision+1, updated_at=? WHERE room_id=?
-            AND disbanded_at IS NULL AND authority_gateway_id=? AND authority_epoch=?""",
-        (new_gateway_id, claim_bytes, now, room_id, expected_gateway_id, expected_epoch),
-        AuthorityConflictError("hosted room authority changed"))
-    return _load_event(conn, room_id, event_id)
 
 
 def claim_authority(
@@ -1142,22 +1104,27 @@ def claim_authority(
             conn,
             """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes
                 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,), room_id)
-        current_gateway = str(row["authority_gateway_id"])
-        current_epoch = int(row["authority_epoch"])
         existing_event = _load_event(conn, room_id, event_id)
         idempotent = existing_event is not None
         if idempotent:
             if _event_content(existing_event) != (
                 "authority.claimed", claim_actor_json, target_epoch, claim_payload_json):
                 raise EventConflictError("event_id already exists with different content")
-            if current_gateway != new_gateway_id or current_epoch != target_epoch:
+            if str(row["authority_gateway_id"]) != new_gateway_id or int(row["authority_epoch"]) != target_epoch:
                 raise AuthoritySupersededError("authority claim succeeded but was later superseded")
         else:
             _require_authority(row, expected_gateway_id, expected_epoch, "hosted room authority changed")
-            existing_event = _append_authority_claim(
-                conn, row, room_id=room_id, event_id=event_id, expected_gateway_id=expected_gateway_id,
-                expected_epoch=expected_epoch, new_gateway_id=new_gateway_id, target_epoch=target_epoch,
-                actor_json=claim_actor_json, payload_json=claim_payload_json, now=now)
+            # Insert the claim event, then CAS the room's authority behind the epoch fence.
+            claim_bytes = _insert_event(
+                conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", claim_actor_json,
+                target_epoch, claim_payload_json, now, allow_control=True)
+            _fenced_update(conn, """UPDATE hosted_rooms SET authority_gateway_id=?,
+            authority_epoch=authority_epoch+1, next_seq=next_seq+1,
+            event_bytes=event_bytes+?, revision=revision+1, updated_at=? WHERE room_id=?
+            AND disbanded_at IS NULL AND authority_gateway_id=? AND authority_epoch=?""",
+                (new_gateway_id, claim_bytes, now, room_id, expected_gateway_id, expected_epoch),
+                AuthorityConflictError("hosted room authority changed"))
+            existing_event = _load_event(conn, room_id, event_id)
         state_row = _reload(
             conn,
             """SELECT room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq,
