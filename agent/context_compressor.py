@@ -108,8 +108,7 @@ _SUMMARY_PERMANENT_QUOTA_MARKERS: tuple[str, ...] = (
 _SUMMARY_MISSING_CREDENTIAL_MARKERS: tuple[str, ...] = ("no api key was found", "no api key found")
 
 _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS: tuple[str, ...] = (
-    "session hygiene compression timed out",
-    "hygiene compression deferred: turn-hold budget expired",
+    "session hygiene compression timed out", "hygiene compression deferred: turn-hold budget expired",
 )
 
 
@@ -796,8 +795,7 @@ def _skill_pruned_marker(skill_name: str) -> str:
 
 # Anchored on the shared prefix so marker wording changes stay in sync.
 _SKILL_PRUNED_MARKER_RE = re.compile(
-    re.escape(SKILL_PRUNED_MARKER_PREFIX)
-    + r"[^\]]*?reload with skill_view\(name='([^']+)'\)"
+    re.escape(SKILL_PRUNED_MARKER_PREFIX) + r"[^\]]*?reload with skill_view\(name='([^']+)'\)",
 )
 
 
@@ -2000,8 +1998,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if getattr(self, "tail_mode", "lean") == "lean":
                 # Lean mode: tail is a small clamped recency window; the summary carries continuity.
                 self._tail_token_budget = max(
-                    LEAN_TAIL_FLOOR_TOKENS,
-                    min(LEAN_TAIL_CAP_TOKENS, int(self.context_length * 0.025)),
+                    LEAN_TAIL_FLOOR_TOKENS, min(LEAN_TAIL_CAP_TOKENS, int(self.context_length * 0.025)),
                 )
             else:
                 self._tail_token_budget = int(self.threshold_tokens * self.summary_target_ratio)
@@ -2372,8 +2369,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return
         # A store without the recorder or a failed write both leave the durable row unauthoritative.
         self._cooldown_persist_failed = not self._durable_write(
-            "record_compression_failure_cooldown", "compression failure cooldown",
-            cooldown_until, error,
+            "record_compression_failure_cooldown", "compression failure cooldown", cooldown_until, error,
         )
 
     def record_timeout_failure(self, error: str, failure_kind: str = "timeout") -> None:
@@ -2390,8 +2386,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # Fence check BEFORE cooldown-clear: a late cancelled worker must not undo the host's timeout cooldown.
         if self._compression_cancelled():
             logger.info(
-                "Skipping compression cooldown clear: host already "
-                "cancelled this compression attempt"
+                "Skipping compression cooldown clear: host already cancelled this compression attempt",
             )
             return
         self._summary_failure_cooldown_until = 0.0
@@ -2819,8 +2814,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if _cooldown_remaining > 0 and not ignore_cooldown:
             if not self.quiet_mode:
                 logger.debug(
-                    "Compression deferred — summary LLM in cooldown for %.0fs more",
-                    _cooldown_remaining,
+                    "Compression deferred — summary LLM in cooldown for %.0fs more", _cooldown_remaining,
                 )
             return True
         # Structural no-op backoff is transient (in-memory, no strikes); auto-compaction resumes when it lapses.
@@ -3415,8 +3409,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             summary += _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))
         if _LEAN_RECOVERY_HEADING not in summary:
             summary += _build_recovery_footer(
-                getattr(self, "_session_id", "") or "",
-                len(turns_to_summarize),
+                getattr(self, "_session_id", "") or "", len(turns_to_summarize),
             )
         return summary
 
@@ -3608,11 +3601,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
         prompt = self._build_summary_prompt(
-            content_to_summarize,
-            summary_budget,
-            focus_topic,
-            memory_context,
-            has_user_turn,
+            content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn,
         )
 
         try:
@@ -3898,8 +3887,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # RuntimeErrors are transient and must get the main-model retry below first.
         if isinstance(e, RuntimeError) and "no llm provider configured" in str(e).lower():
             self._record_compression_failure_cooldown(
-                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
-                "no auxiliary LLM provider configured",
+                _SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured",
             )
             self._last_summary_error = "no auxiliary LLM provider configured"
             logger.warning("Context compression: no provider available for "
@@ -4453,10 +4441,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             return 0, 0
         first_non_system = 1 if messages[0].get("role") == "system" else 0
         return first_non_system, min(
-            len(messages),
-            first_non_system
-            + self.protect_first_n
-            + _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES,
+            len(messages), first_non_system + self.protect_first_n + _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES,
         )
 
     def _effective_protect_first_n(self, messages: Optional[List[Dict[str, Any]]] = None) -> int:
@@ -4714,8 +4699,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             cut = n  # start from beyond the end
             for i in range(n - 1, head_end - 1, -1):
                 msg_tokens = _estimate_msg_budget_tokens(
-                    messages[i],
-                    charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
+                    messages[i], charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
                 )
                 if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
                     return (i if cut_at_break else cut), accumulated
@@ -5162,8 +5146,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         _pruned_replay = _prune_stale_reasoning_replay(compressed)
         if _pruned_replay and not self.quiet_mode:
             logger.info(
-                "Pruned stale replay items from %d assistant message(s) during compaction",
-                _pruned_replay,
+                "Pruned stale replay items from %d assistant message(s) during compaction", _pruned_replay,
             )
         self._last_compression_made_progress = True
 
@@ -5216,8 +5199,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Phase 1: Prune old tool results (cheap, no LLM call)
         messages, pruned_count = self._prune_old_tool_results(
-            messages, protect_tail_count=self.protect_last_n,
-            protect_tail_tokens=self.tail_token_budget,
+            messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=self.tail_token_budget,
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
