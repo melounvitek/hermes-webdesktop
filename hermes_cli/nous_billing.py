@@ -1,11 +1,9 @@
-"""Nous Portal Remote Spending HTTP client (Phase 2b).
+"""Nous Portal Remote Spending HTTP client.
 
-Thin, fail-loud client for the four ``/api/billing/*`` endpoints the terminal billing screens drive.
-Companion to ``hermes_cli/nous_account.py`` (which owns read-only entitlement/balance) — this module
-owns the *write* side: buy credits, poll a charge, configure auto-reload.
-
-- **Money is decimal, never float.** The server emits decimal STRINGS (``"142.5"`` — not fixed 2dp).
-We parse with :class:`decimal.Decimal` and never round-trip through float.
+Thin, fail-loud client for the ``/api/billing/*`` endpoints the terminal billing screens drive.
+``nous_account.py`` owns read-only entitlement/balance; this module owns the *write* side: buy
+credits, poll a charge, configure auto-reload, change plan. Money is decimal, never float: the
+server emits decimal STRINGS (``"142.5"``), parsed with :class:`decimal.Decimal` by callers.
 """
 
 from __future__ import annotations
@@ -20,8 +18,7 @@ from typing import Any, Optional
 
 DEFAULT_PORTAL_BASE_URL = "https://portal.nousresearch.com"
 
-# Default HTTP timeout (seconds). Charge/poll calls are quick; keep this tight so
-# a hung portal doesn't freeze the TUI.
+# Tight so a hung portal doesn't freeze the TUI (charge/poll calls are quick).
 DEFAULT_TIMEOUT = 15.0
 
 
@@ -34,8 +31,8 @@ class BillingError(Exception):
     """A billing HTTP call failed.
 
     Carries what a surface needs to render the right message and affordance: server ``error``
-    code, HTTP ``status``, optional ``message``, the ``portalUrl`` deep-link (present on every
-    gate denial), ``retry_after`` seconds (429/503), and the parsed ``payload`` when available.
+    code, HTTP ``status``, the ``portalUrl`` deep-link (present on every gate denial),
+    ``retry_after`` seconds (429/503), and the parsed ``payload`` when available.
     """
 
     def __init__(
@@ -57,10 +54,9 @@ class BillingError(Exception):
         self.portal_url = portal_url
         self.retry_after = retry_after
         self.payload = payload or {}
-        # Remote-Spending contract extras (NAS PR #481): `actor` (self|admin) on a
-        # revoke, `code` (the new machine code dual-emitted alongside `error`), and
-        # `recovery` (reconnect|login|enable_account_toggle). Additive — absent on
-        # older NAS / unrelated errors.
+        # Remote-Spending contract extras: `actor` (self|admin) on a revoke, `code` (machine code
+        # dual-emitted alongside `error`), `recovery` (reconnect|login|enable_account_toggle).
+        # Additive — absent on older NAS / unrelated errors.
         self.actor = actor
         self.code = code
         self.recovery = recovery
@@ -69,9 +65,9 @@ class BillingError(Exception):
 class BillingScopeRequired(BillingError):
     """``403 insufficient_scope`` — the held token lacks ``billing:manage``.
 
-    The lazy step-up trigger: catching this kicks off a fresh device-connect that requests
-    ``billing:manage`` (and tells the user an ADMIN must select "Allow Remote Spending"). Also fires
-    mid-session if the scope is stripped on refresh after the user loses ADMIN.
+    The lazy step-up trigger: catching this kicks off a device-connect requesting ``billing:manage``
+    (an ADMIN must select "Allow Remote Spending"). Also fires mid-session if the scope is stripped
+    on refresh after the user loses ADMIN.
     """
 
 
@@ -82,55 +78,48 @@ class BillingAuthError(BillingError):
 class BillingRemoteSpendingRevoked(BillingError):
     """``403 remote_spending_revoked`` — THIS terminal's spending was revoked.
 
-    Distinct from ``insufficient_scope`` (never had the grant) and from ``session_revoked`` (full
-    logout). The terminal stays logged in; only the money path is cut. ``actor`` is ``"admin"`` or
-    ``"self"`` (absent → treat as ``"self"``); recovery is **reconnect** (re-consent device-auth).
+    Distinct from ``insufficient_scope`` (never had the grant) and ``session_revoked`` (full logout):
+    the terminal stays logged in, only the money path is cut. ``actor`` is ``"admin"``/``"self"``
+    (absent → ``"self"``); recovery is **reconnect** (re-consent device-auth).
     """
 
 
 class BillingSessionRevoked(BillingAuthError):
-    """``401 session_revoked`` — the whole session was logged out.
+    """``401 session_revoked`` — the whole session was logged out; recovery is **re-login**.
 
-    Stronger than a spend-revoke: recovery is **re-login** (full device-auth), not just reconnect.
-    Subclass of :class:`BillingAuthError` so existing 401 handling still treats it as not-logged-in,
-    but the typed code lets the surface route to re-login with the right copy.
+    A :class:`BillingAuthError` so 401 handling still treats it as not-logged-in, while the typed
+    code lets the surface route to re-login with the right copy.
     """
 
 
 class BillingTransient(BillingError):
-    """A deterministic non-charge outcome: the request definitely did NOT reach/complete at Stripe, so
-    it's always safe to retry after backoff — never the "maybe charged" ambiguity of a real
-    5xx/timeout. Covers 429 rate limiting, 503 gate-unavailable, Stripe being down, and the daily
-    upgrade cap — distinct failure modes that share this one contract property. Catch this (not the
-    old ad-hoc subclass hierarchy) wherever the intent is "any transient, definitely-not-charged
-    billing failure, back off and retry/poll".
+    """Deterministic non-charge outcome: the request definitely did NOT complete at Stripe, so a
+    retry after backoff is always safe — never the "maybe charged" ambiguity of a real 5xx/timeout.
+    Covers 429 rate limiting, 503 gate-unavailable, Stripe down, and the daily upgrade cap. Catch
+    this wherever the intent is "any transient, definitely-not-charged failure: back off, retry".
     """
 
 
 class BillingRateLimited(BillingTransient):
-    """``429 rate_limited`` or ``503 temporarily_unavailable``.
+    """``429 rate_limited`` or ``503 temporarily_unavailable`` — NOT a payment failure.
 
-    NOT a payment failure. Carries ``retry_after`` (seconds) — back off and tell the user "try again
-    in N min"; never auto-retry-spam (the limiter is 5/org/hr + 5/token/hr and easy to dig deeper
-    into). A 503 is the gate backend failing closed — back off, do NOT treat as revoked.
+    Carries ``retry_after`` seconds; never auto-retry-spam (limiter is 5/org/hr + 5/token/hr).
+    A 503 is the gate failing closed — back off, do NOT treat as revoked.
     """
 
 
 class BillingStripeUnavailable(BillingTransient):
-    """``503 stripe_unavailable`` — Stripe itself is down.
+    """``503 stripe_unavailable`` — Stripe itself is down; retry using Retry-After.
 
-    TRANSIENT: back off and retry using Retry-After; this is NOT the same as being throttled by our
-    own rate limiter, so surfaces must not render "rate limited" copy for it — they should read
-    ``.error`` to tell the two apart.
+    Not our rate limiter: surfaces must read ``.error`` and not render "rate limited" copy.
     """
 
 
 class BillingUpgradeCapExceeded(BillingTransient):
     """``429 upgrade_cap_exceeded`` — the org hit its 5-upgrades/day cap.
 
-    Distinct from the hourly ``rate_limited`` charge cap (same HTTP status, different meaning + no
-    useful short-Retry-After backoff). A BillingTransient sibling of BillingRateLimited (not a
-    subclass) — surfaces must read ``.error`` to distinguish the failure mode.
+    Same HTTP status as the hourly ``rate_limited`` charge cap but no useful short backoff; a
+    sibling (not subclass) of BillingRateLimited — surfaces read ``.error`` to tell them apart.
     """
 
 
@@ -140,50 +129,40 @@ class BillingUpgradeCapExceeded(BillingTransient):
 
 
 def resolve_portal_base_url(state: Optional[dict[str, Any]] = None) -> str:
-    """Resolve the portal base URL with login-time precedence."""
+    """Resolve the portal base URL with login-time precedence: env, stored state, default."""
     env = os.getenv("HERMES_PORTAL_BASE_URL") or os.getenv("NOUS_PORTAL_BASE_URL")
-    if env and env.strip():
-        return env.strip().rstrip("/")
-    if state:
-        stored = state.get("portal_base_url")
-        if isinstance(stored, str) and stored.strip():
-            return stored.strip().rstrip("/")
+    stored = state.get("portal_base_url") if state else None
+    for candidate in (env, stored):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip().rstrip("/")
     return DEFAULT_PORTAL_BASE_URL
 
 
 def _absolutize_portal_url(portal_url: Optional[str]) -> Optional[str]:
-    """Resolve a (possibly relative) server portalUrl to an absolute URL.
+    """Resolve a (possibly relative) server portalUrl against the client's portal base.
 
-    The server emits ``portalUrl`` relative by design — it doesn't know which deployment the
-    client points at — so it is resolved against the client's portal base (preview/staging/prod)
-    to be clickable. Idempotent: absolute URLs pass through unchanged.
+    The server emits ``portalUrl`` relative by design (it doesn't know which deployment the client
+    points at). Idempotent: absolute URLs pass through unchanged. urljoin needs the trailing slash
+    on the base to join an absolute path like "/billing?..." against the host.
     """
     if not (isinstance(portal_url, str) and portal_url.strip()):
         return portal_url
-    base = resolve_portal_base_url()
-    # urljoin needs a trailing slash on the base to treat it as a directory and
-    # join an absolute path like "/billing?..." against the host. An already-
-    # absolute portal_url (with its own scheme/host) is returned as-is.
-    return urllib.parse.urljoin(base.rstrip("/") + "/", portal_url)
+    return urllib.parse.urljoin(resolve_portal_base_url().rstrip("/") + "/", portal_url)
 
 
-# Short-lived cache for the resolved (token, base). `resolve_nous_access_token`
-# acquires two cross-process file locks + reads two files on every call (even on
-# its fast path), which is wasteful when the 2s/5-min charge poll loop calls a
-# billing endpoint ~150x per purchase. Cache the result briefly: the resolver
-# only ever returns a token with >=120s of life (its refresh skew), so a 30s
-# cache can never hand back an about-to-expire token. A 401 still surfaces
-# normally (the cache holds a valid token, not the HTTP outcome).
+# Short-lived cache for the resolved (token, base): `resolve_nous_access_token` takes two
+# cross-process file locks + reads two files per call, wasteful for the 2s charge poll loop
+# (~150 calls per purchase). The resolver only returns tokens with >=120s of life (its refresh
+# skew), so a 30s cache can never hand back an about-to-expire token; a 401 still surfaces.
 _TOKEN_CACHE_TTL_SECONDS = 30.0
 _token_cache: tuple[float, str, str] | None = None  # (cached_at, token, base)
 
 
 def invalidate_cached_token() -> None:
-    """Bust the 30s token cache so post-step-up replays use the freshly-scoped token.
+    """Bust the token cache so post-step-up replays use the freshly-scoped token.
 
-    ``_request`` only self-busts the cache on a 401 (an expired/invalid token), not on a 403 scope
-    denial — so after a step-up grant, the cache would otherwise still hold the pre-grant unscoped
-    token and the immediate replay would 403 again. Callers outside this module (e.g.
+    ``_request`` only self-busts on a 401, not on a 403 scope denial — after a step-up grant the
+    cache would otherwise still hold the pre-grant unscoped token and the replay would 403 again.
     """
     global _token_cache
     _token_cache = None
@@ -202,11 +181,9 @@ def _billing_not_logged_in(exc: Optional[BaseException] = None) -> "BillingAuthE
 
 
 def _resolve_token_and_base(*, use_cache: bool = True) -> tuple[str, str]:
-    """Return ``(access_token, portal_base_url)`` for billing calls.
+    """Return ``(access_token, portal_base_url)``; cached for ``_TOKEN_CACHE_TTL_SECONDS``.
 
-    The result is cached for ``_TOKEN_CACHE_TTL_SECONDS`` to keep the charge poll loop from re-
-    locking + re-reading the auth store on every 2s tick. Pass ``use_cache=False`` to force a fresh
-    resolution (e.g. after a 401).
+    ``use_cache=False`` forces a fresh resolution (e.g. after a 401).
     """
     global _token_cache
 
@@ -254,14 +231,10 @@ def _retry_after_seconds(headers: Any) -> Optional[int]:
     return None if seconds is None else int(seconds)
 
 
-# Error routing for _raise_for_error: server ``error`` code alone, then
-# (status, error), then status alone, then the generic fallback.  Values are
-# (exception class, fallback message when the server sent no ``message``).
-# session_revoked is a full logout (→ re-login), stronger than a 401 expired
-# token; both stay BillingAuthError-compatible.  remote_spending_revoked is NOT
-# the same as never having the scope: disable spend UI, recovery is reconnect.
-# Business 403s (cli_billing_disabled / role_required / no_payment_method /
-# monthly_cap_exceeded / …) fall through to a generic BillingError with
+# Error routing for _raise_for_error: server ``error`` code alone, then (status, error), then
+# status alone, then the generic fallback. Values: (exception class, fallback message when the
+# server sent no ``message``). Business 403s (cli_billing_disabled / role_required /
+# no_payment_method / monthly_cap_exceeded / …) fall through to a generic BillingError carrying
 # code/recovery, using the raw error code as the message.
 _ERRORS_BY_CODE: dict[str, tuple[type[BillingError], str]] = {
     "stripe_unavailable": (BillingStripeUnavailable, "Stripe is temporarily unavailable — try again shortly."),
@@ -281,13 +254,7 @@ _ERRORS_BY_STATUS: dict[int, tuple[type[BillingError], str]] = {
 
 
 def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) -> None:
-    """Map an HTTP error response to the right typed :class:`BillingError`.
-
-    Recognizes the Remote-Spending gate contract: 403 ``remote_spending_revoked`` (reconnect),
-    401 ``session_revoked`` (re-login), 503 ``temporarily_unavailable`` (fail-closed → back off,
-    NOT revoked). Business-denial codes flow through as a generic BillingError carrying
-    ``error``/``code``/``recovery`` for the surface to map.
-    """
+    """Map an HTTP error response to the right typed :class:`BillingError` (see tables above)."""
     p = payload if isinstance(payload, dict) else {}
     error = p.get("error")
     message = p.get("message")
@@ -320,19 +287,14 @@ def _request(
     timeout: float = DEFAULT_TIMEOUT,
     _retried_auth: bool = False,
 ) -> dict[str, Any]:
-    """Make an authenticated billing request; return the parsed JSON dict.
+    """Authenticated billing request -> parsed JSON dict (``{}`` for an empty 2xx body).
 
-    Raises a typed :class:`BillingError` on any non-2xx response (or transport failure). 2xx with an
-    empty body returns ``{}``. A 401 triggers exactly one retry with a freshly-resolved token
-    (bypassing the short token cache) so a cached-but-just-expired token self-heals instead of
-    failing the call.
+    Raises a typed :class:`BillingError` on any non-2xx or transport failure. A 401 triggers exactly
+    one retry with a freshly-resolved token so a cached-but-just-expired token self-heals.
     """
     token, base = _resolve_token_and_base(use_cache=not _retried_auth)
     url = f"{base}{path}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if extra_headers:
@@ -349,12 +311,8 @@ def _request(
             try:
                 return json.loads(raw)
             except json.JSONDecodeError as exc:
-                # A 2xx with a non-JSON body means the endpoint isn't actually
-                # serving the billing API here — e.g. a reverse-proxy / SPA
-                # fallback HTML page when the route isn't deployed on this
-                # deployment. Surface it as a typed, non-auth error so callers
-                # degrade gracefully ("unavailable") instead of crashing with a
-                # raw JSONDecodeError that reads as "not logged in".
+                # A 2xx non-JSON body (SPA/reverse-proxy fallback HTML when the route isn't
+                # deployed) is a typed non-auth error so callers degrade to "unavailable".
                 raise BillingError(
                     "Billing endpoint returned a non-JSON response "
                     "(it may not be available on this deployment).",
@@ -362,18 +320,10 @@ def _request(
                     status=getattr(resp, "status", None),
                 ) from exc
     except urllib.error.HTTPError as exc:
-        # A 401 on a cached token → drop the cache and retry once with a fresh
-        # (refresh-aware) resolve before surfacing the auth error.
+        # 401 on a cached token → drop the cache and retry once with a fresh (refresh-aware) resolve.
         if exc.code == 401 and not _retried_auth:
             invalidate_cached_token()
-            return _request(
-                method,
-                path,
-                body=body,
-                extra_headers=extra_headers,
-                timeout=timeout,
-                _retried_auth=True,
-            )
+            return _request(method, path, body=body, extra_headers=extra_headers, timeout=timeout, _retried_auth=True)
         try:
             raw = exc.read().decode("utf-8")
         except Exception:
@@ -385,16 +335,11 @@ def _request(
         _raise_for_error(exc.code, payload, getattr(exc, "headers", None))
         raise  # unreachable; _raise_for_error always raises
     except urllib.error.URLError as exc:
-        raise BillingError(
-            f"Could not reach Nous Portal: {exc.reason}", error="network_error"
-        ) from exc
+        raise BillingError(f"Could not reach Nous Portal: {exc.reason}", error="network_error") from exc
     except TimeoutError as exc:
-        # urlopen() wraps CONNECT-phase timeouts in URLError, but a timeout
-        # during resp.read() surfaces as a bare TimeoutError — normalize it so
-        # transport failures always honor the typed-BillingError contract.
-        raise BillingError(
-            "Could not reach Nous Portal: timed out", error="network_error"
-        ) from exc
+        # urlopen() wraps CONNECT-phase timeouts in URLError, but a timeout during resp.read()
+        # surfaces as a bare TimeoutError — normalize to the typed-BillingError contract.
+        raise BillingError("Could not reach Nous Portal: timed out", error="network_error") from exc
 
 
 # =============================================================================
@@ -411,9 +356,7 @@ def _require_str(value: Any, message: str, error: str) -> str:
 
 def _post_idempotent(path: str, body: dict[str, Any], idempotency_key: str, what: str, timeout: float) -> dict[str, Any]:
     """POST with a mandatory ``Idempotency-Key`` header (missing header is a server 400)."""
-    key = _require_str(
-        idempotency_key, f"Idempotency-Key is required for {what}.", "idempotency_key_required"
-    )
+    key = _require_str(idempotency_key, f"Idempotency-Key is required for {what}.", "idempotency_key_required")
     return _request("POST", path, body=body, extra_headers={"Idempotency-Key": key}, timeout=timeout)
 
 
@@ -431,8 +374,7 @@ def patch_auto_top_up(
 ) -> dict[str, Any]:
     """``PATCH /api/billing/auto-top-up`` — configure auto-reload (scope required).
 
-    Body is strict server-side: extra keys (``maxMonthlySpend``, a payment method) are rejected with
-    400. Numbers are sent as JSON numbers per the contract.
+    Body is strict server-side (extra keys are a 400); numbers are sent as JSON numbers.
     """
     body = {"enabled": bool(enabled), "threshold": float(threshold), "topUpAmount": float(top_up_amount)}
     return _request("PATCH", "/api/billing/auto-top-up", body=body, timeout=timeout)
@@ -446,65 +388,45 @@ def post_charge(
 ) -> dict[str, Any]:
     """``POST /api/billing/charge`` — buy credits (scope required).
 
-    ``Idempotency-Key`` is MANDATORY (missing header is a server 400): generate a UUID per user-
-    confirmed purchase and reuse it on retry. Returns ``202 {chargeId}`` — money is NOT
-    confirmed yet; poll with :func:`get_charge_status`.
+    Generate a UUID ``idempotency_key`` per user-confirmed purchase and reuse it on retry. Returns
+    ``202 {chargeId}`` — money is NOT confirmed yet; poll with :func:`get_charge_status`.
     """
-    return _post_idempotent(
-        "/api/billing/charge", {"amountUsd": float(amount_usd)}, idempotency_key, "a charge", timeout
-    )
+    return _post_idempotent("/api/billing/charge", {"amountUsd": float(amount_usd)}, idempotency_key, "a charge", timeout)
 
 
 def get_charge_status(charge_id: str, *, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """``GET /api/billing/charge/{id}`` — poll a charge (scope required).
 
     Returns ``{status: "pending"|"settled"|"failed", ...}``. An unknown or foreign id returns
-    ``{status:"pending"}`` (never 404, never another org's data) — so a ``pending`` that never
-    resolves past the 5-min cap is a *timeout*, not an error.
+    ``{status:"pending"}`` (never 404) — a ``pending`` past the 5-min cap is a *timeout*, not an error.
     """
     charge_id = _require_str(charge_id, "A charge id is required.", "invalid_charge_id")
-    # urllib does not need manual quoting for the opaque ids the server mints, but
-    # guard against a stray slash that would change the path shape.
+    # Guard against a stray slash that would change the path shape.
     safe_id = urllib.parse.quote(charge_id, safe="")
     return _request("GET", f"/api/billing/charge/{safe_id}", timeout=timeout)
 
 
 def get_subscription_state(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """``GET /api/billing/subscription`` — current plan, tiers, usage (no scope).
-
-    Returns the raw JSON dict from NAS (WS1 Phase A). Read-only — no ``billing:manage`` scope
-    required. Raises :class:`BillingAuthError` on 401 and :class:`BillingError` on other non-2xx.
-    """
+    """``GET /api/billing/subscription`` — current plan, tiers, usage (raw JSON; no scope)."""
     return _request("GET", "/api/billing/subscription", timeout=timeout)
 
 
 # =============================================================================
-# Subscription change (V3) — preview + the pending-change resource + upgrade
+# Subscription change — preview + the pending-change resource + upgrade
 # =============================================================================
-#
-# Mutating the plan splits into a chargeless lane and the single money route:
-#   - preview  → a quote (no mutation, no charge) of what a change would do.
-#   - PUT/DELETE pending-change → schedule / clear a downgrade or cancellation
-#     (chargeless; takes effect at period end).
-#   - POST upgrade → the ONE route that charges (prorate + charge the card on the
-#     subscription + flip the plan, in one Stripe op).
-# All require the ``billing:manage`` scope (a 403 insufficient_scope raises
-# :class:`BillingScopeRequired`, driving the device step-up) — including preview,
-# which issues live Stripe calls and reveals charge amounts.
+# Chargeless lane: preview (quote only) and PUT/DELETE pending-change (schedule/clear a downgrade
+# or cancellation, effective at period end). The ONE money route: POST upgrade (prorate + charge
+# + flip the plan in one Stripe op). All require ``billing:manage`` (403 insufficient_scope ->
+# BillingScopeRequired, driving the device step-up) — including preview, which reveals amounts.
 
 
 def post_subscription_preview(*, subscription_type_id: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """``POST /api/billing/subscription/preview`` — a chargeless effect quote.
 
-    Quotes a change to ``subscription_type_id`` without mutating anything: ``effect`` is
-    ``charge_now`` (an upgrade → ``amountDueNowCents`` is the prorated upfront charge),
-    ``scheduled`` (a downgrade → ``effectiveAt`` is period end), ``no_op`` (already on the tier), or
-    ``blocked`` (``reason`` says why the commit would be refused).
+    ``effect`` is ``charge_now`` (upgrade; ``amountDueNowCents`` prorated), ``scheduled``
+    (downgrade; ``effectiveAt`` period end), ``no_op``, or ``blocked`` (``reason`` says why).
     """
-    return _request(
-        "POST", "/api/billing/subscription/preview",
-        body={"subscriptionTypeId": subscription_type_id}, timeout=timeout,
-    )
+    return _request("POST", "/api/billing/subscription/preview", body={"subscriptionTypeId": subscription_type_id}, timeout=timeout)
 
 
 def put_subscription_pending_change(
@@ -513,33 +435,26 @@ def put_subscription_pending_change(
     cancel: bool = False,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """``PUT /api/billing/subscription/pending-change`` — set the end-of-period intent.
+    """``PUT /api/billing/subscription/pending-change`` — set the single end-of-period intent.
 
-    A subscription has at most one pending disposition: ``cancel=True`` schedules a
-    cancellation, a ``subscription_type_id`` schedules a downgrade / same-price change. UPGRADES
-    are rejected here — they charge immediately, use :func:`post_subscription_upgrade`.
-    Chargeless; needs ``billing:manage``.
+    ``cancel=True`` schedules a cancellation; ``subscription_type_id`` a downgrade / same-price
+    change. UPGRADES are rejected here (they charge now — use :func:`post_subscription_upgrade`).
     """
     if cancel:
         body: dict[str, Any] = {"type": "cancellation"}
     else:
-        body = {
-            "type": "tier_change",
-            "subscriptionTypeId": _require_str(
-                subscription_type_id,
-                "A subscription tier is required to schedule a plan change.",
-                "invalid_subscription_type",
-            ),
-        }
+        tier = _require_str(
+            subscription_type_id, "A subscription tier is required to schedule a plan change.", "invalid_subscription_type"
+        )
+        body = {"type": "tier_change", "subscriptionTypeId": tier}
     return _request("PUT", "/api/billing/subscription/pending-change", body=body, timeout=timeout)
 
 
 def delete_subscription_pending_change(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
-    """``DELETE /api/billing/subscription/pending-change`` — clear it (resume / undo).
+    """``DELETE /api/billing/subscription/pending-change`` — clear a scheduled downgrade/cancellation.
 
-    Removes a scheduled downgrade OR cancellation in one call, restoring the active tier and
-    renewal. Chargeless, but it re-enables recurring spend, so it requires ``billing:manage``
-    and honors the org kill-switch.
+    Chargeless, but re-enables recurring spend, so it needs ``billing:manage`` and honors the org
+    kill-switch.
     """
     return _request("DELETE", "/api/billing/subscription/pending-change", timeout=timeout)
 
@@ -550,16 +465,11 @@ def post_subscription_upgrade(
     idempotency_key: str,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> dict[str, Any]:
-    """``POST /api/billing/subscription/upgrade`` — immediate paid upgrade.
+    """``POST /api/billing/subscription/upgrade`` — immediate paid upgrade, the SINGLE money route.
 
-    The SINGLE money route: one Stripe op prorates, charges the card already on the subscription,
-    and flips the plan. ``Idempotency-Key`` is MANDATORY (a missing header is a server 400, not a
-    default) — reuse the same key on retry so a replay cannot double-charge.
+    One Stripe op prorates, charges the card on file, and flips the plan. Reuse the same
+    ``idempotency_key`` on retry so a replay cannot double-charge.
     """
     return _post_idempotent(
-        "/api/billing/subscription/upgrade",
-        {"subscriptionTypeId": subscription_type_id},
-        idempotency_key,
-        "an upgrade",
-        timeout,
+        "/api/billing/subscription/upgrade", {"subscriptionTypeId": subscription_type_id}, idempotency_key, "an upgrade", timeout
     )
