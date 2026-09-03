@@ -176,10 +176,7 @@ def _write_allowlist_env(env_var: str, ids: list) -> None:
     with contextlib.suppress(Exception):
         from hermes_cli.config import save_env_value, remove_env_value
 
-        if ids:
-            save_env_value(env_var, ",".join(ids))
-        else:
-            remove_env_value(env_var)
+        save_env_value(env_var, ",".join(ids)) if ids else remove_env_value(env_var)
 
 
 def _sync_allowlist_add(platform: str, user_id: str) -> None:
@@ -200,7 +197,7 @@ def _iter_live_gateway_adapters():
 
         runner = _gateway_runner_ref()
     except Exception:
-        return
+        runner = None
     if runner is None:
         return
     mappings = [getattr(runner, "adapters", None) or {}]
@@ -221,15 +218,14 @@ def _adapter_platform_name(adapter) -> str:
 def _purge_allowlist_entries(entries, platform: str, user_id: str):
     """Drop alias-equivalent allowlist entries while preserving ``*``."""
     def keep(entry) -> bool:
-        entry = str(entry)
-        return entry.strip() == "*" or not _user_ids_match(platform, entry, str(user_id))
+        return str(entry).strip() == "*" or not _user_ids_match(platform, str(entry), str(user_id))
 
     if isinstance(entries, str):
-        return ",".join(part for part in _split_allowlist(entries) if keep(part))
+        return ",".join(filter(keep, _split_allowlist(entries)))
     if isinstance(entries, (set, frozenset)):
-        return {entry for entry in entries if keep(entry)}
+        return set(filter(keep, entries))
     if isinstance(entries, (list, tuple)):
-        return [entry for entry in entries if keep(entry)]
+        return list(filter(keep, entries))
     return entries
 
 
@@ -457,9 +453,7 @@ class PairingStore:
     def _hash_code(code: str, salt: bytes) -> str:
         return hashlib.sha256(salt + code.encode("utf-8")).hexdigest()
 
-    def _finish_approval(
-        self, platform: str, pending: dict, matched_key: str, matched_entry: dict
-    ) -> dict:
+    def _finish_approval(self, platform: str, pending: dict, matched_key: str, matched_entry: dict) -> dict:
         """Remove a pending request and approve its user. Must hold self._lock."""
         del pending[matched_key]
         self._save_json(self._pending_path(platform), pending)
@@ -468,18 +462,11 @@ class PairingStore:
         # must not carry over (isolated typos would accumulate into a spurious lockout).
         self._reset_failed_attempts(platform)
 
-        self._approve_user(
-            platform, matched_entry["user_id"], matched_entry.get("user_name", "")
-        )
+        result = {"user_id": matched_entry["user_id"], "user_name": matched_entry.get("user_name", "")}
+        self._approve_user(platform, result["user_id"], result["user_name"])
+        return result
 
-        return {
-            "user_id": matched_entry["user_id"],
-            "user_name": matched_entry.get("user_name", ""),
-        }
-
-    def generate_code(
-        self, platform: str, user_id: str, user_name: str = ""
-    ) -> Optional[str]:
+    def generate_code(self, platform: str, user_id: str, user_name: str = "") -> Optional[str]:
         """Generate a pairing code for a new user.
 
         Returns None if the user is rate-limited, the platform hit
@@ -628,7 +615,7 @@ class PairingStore:
         limits[fail_key] = fails
         if fails >= MAX_FAILED_ATTEMPTS:
             limits[f"_lockout:{platform}"] = time.time() + LOCKOUT_SECONDS
-            limits[fail_key] = 0  # Reset counter
+            limits[fail_key] = 0
             print(f"[pairing] Platform {platform} locked out for {LOCKOUT_SECONDS}s "
                   f"after {MAX_FAILED_ATTEMPTS} failed attempts", flush=True)
         self._save_json(self._rate_limit_path(), limits)
@@ -655,9 +642,7 @@ class PairingStore:
             or (now - info["created_at"]) > CODE_TTL_SECONDS
         ]
         if expired:
-            for entry_id in expired:
-                del pending[entry_id]
-            self._save_json(path, pending)
+            self._save_json(path, {k: v for k, v in pending.items() if k not in expired})
 
     def _all_platforms(self, suffix: str) -> list:
         """Platforms that have a ``-<suffix>.json`` data file (``_``-prefixed files are shared state)."""

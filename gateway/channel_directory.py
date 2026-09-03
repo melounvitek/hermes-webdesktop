@@ -5,6 +5,7 @@ send_message reads it for action="list" and to resolve friendly channel names to
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -75,12 +76,10 @@ def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
                 continue
             chat_id = str(chat_id)
             friendly = friendly.strip()
-            matched = False
-            for e in entries:
-                if isinstance(e, dict) and e.get("id") == chat_id:
-                    e["name"] = friendly
-                    matched = True
-            if not matched:
+            matches = [e for e in entries if isinstance(e, dict) and e.get("id") == chat_id]
+            for e in matches:
+                e["name"] = friendly
+            if not matches:
                 entries.append({
                     "id": chat_id, "name": friendly,
                     "type": "group" if chat_id.endswith("@g.us") else "dm", "thread_id": None,
@@ -218,11 +217,8 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
 
 def _slack_api_error_code(error: Exception) -> Optional[str]:
     """Slack Web API error code from SlackApiError-like exceptions."""
-    response = getattr(error, "response", None)
-    if response is None:
-        return None
     try:
-        value = response.get("error")
+        value = getattr(error, "response").get("error")
     except Exception:
         return None
     return str(value) if value else None
@@ -232,9 +228,7 @@ def _normalize_adapter_channels(raw_channels: Any) -> List[Dict[str, Any]]:
     """Validate and dedupe entries returned by an adapter's ``list_channels()`` hook."""
     channels: List[Dict[str, Any]] = []
     seen_ids = set()
-    if not isinstance(raw_channels, list):
-        return channels
-    for raw in raw_channels:
+    for raw in raw_channels if isinstance(raw_channels, list) else ():
         if not isinstance(raw, dict):
             continue
         channel_id = str(raw.get("id") or "").strip()
@@ -276,8 +270,7 @@ async def _slack_team_channels(team_id: str, client, seen_ids: set) -> List[Dict
                 _report_slack_failure(team_id, error_code, f"users.conversations not ok: {error_code}")
                 break
             for ch in response.get("channels", []):
-                cid = ch.get("id")
-                name = ch.get("name")
+                cid, name = ch.get("id"), ch.get("name")
                 if not cid or not name or cid in seen_ids:
                     continue
                 seen_ids.add(cid)
@@ -306,23 +299,19 @@ async def _slack_resolve_raw_names(client, channels: List[Dict[str, Any]]) -> No
             if not resp.get("ok"):
                 return
             ch_info = resp.get("channel", {})
-            resolved_name = None
-            resolved_type = None
-            if ch_info.get("is_im"):
-                peer_user = ch_info.get("user", "")
-                if peer_user:
-                    user_resp = await client.users_info(user=peer_user)
-                    if user_resp.get("ok"):
-                        u = user_resp["user"]
-                        resolved_name = u.get("profile", {}).get("display_name") or u.get("real_name") or u.get("name")
-                        resolved_type = "dm"
-            else:
+            resolved_name = resolved_type = None
+            if not ch_info.get("is_im"):
                 resolved_name = ch_info.get("name") or ch_info.get("name_normalized")
-            if resolved_name:
-                for entry in entries:
-                    entry["name"] = resolved_name
-                    if resolved_type:
-                        entry["type"] = resolved_type
+            elif ch_info.get("user", ""):
+                user_resp = await client.users_info(user=ch_info["user"])
+                if user_resp.get("ok"):
+                    u = user_resp["user"]
+                    resolved_name = u.get("profile", {}).get("display_name") or u.get("real_name") or u.get("name")
+                    resolved_type = "dm"
+            for entry in entries if resolved_name else ():
+                entry["name"] = resolved_name
+                if resolved_type:
+                    entry["type"] = resolved_type
         except Exception as e:
             logger.debug("Channel directory: failed to resolve %s: %s", base_id, e)
 
@@ -348,10 +337,8 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
         eid = entry.get("id")
         if not isinstance(eid, str) or eid in seen_ids:
             continue
-        if _slack_has_raw_name(entry):
-            base_id = _slack_base_id(eid)
-            if base_id in api_name_lookup:
-                entry["name"] = api_name_lookup[base_id]
+        if _slack_has_raw_name(entry) and _slack_base_id(eid) in api_name_lookup:
+            entry["name"] = api_name_lookup[_slack_base_id(eid)]
         channels.append(entry)
         seen_ids.add(eid)
 
@@ -404,14 +391,9 @@ def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
             release_or_close(db)
         for row in rows:
             origin = None
-            if row.get("origin_json"):
-                try:
-                    parsed = json.loads(row["origin_json"])
-                    if isinstance(parsed, dict) and parsed:
-                        origin = parsed
-                except (TypeError, ValueError):
-                    pass
-            if origin is None:
+            with contextlib.suppress(TypeError, ValueError):
+                origin = json.loads(row["origin_json"]) if row.get("origin_json") else None
+            if not isinstance(origin, dict) or not origin:
                 origin = {"chat_id": row.get("chat_id"), "thread_id": row.get("thread_id"), "chat_name": row.get("display_name")}
             yield origin, row.get("chat_type") or "dm"
 
@@ -444,14 +426,12 @@ def load_directory() -> Dict[str, Any]:
     """Load the cached directory from disk, with aliases re-applied on read."""
     directory_path = _directory_path()
     if directory_path.exists():
-        try:
+        with contextlib.suppress(Exception):
             with open(directory_path, encoding="utf-8") as f:
                 data = json.load(f)
             # Aliases apply on read too, so new names take effect between timed rebuilds.
             _apply_channel_aliases(data.setdefault("platforms", {}))
             return data
-        except Exception:
-            pass
     base = {"updated_at": None, "platforms": {}}
     _apply_channel_aliases(base["platforms"])
     return base
