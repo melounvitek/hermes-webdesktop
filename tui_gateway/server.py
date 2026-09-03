@@ -34,8 +34,7 @@ from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX  # noqa: 
 from tui_gateway import git_probe  # noqa: F401
 from tui_gateway._env import env_float, env_int
 from tui_gateway.turn_marker import clear_turn_marker, read_turn_marker, record_turn_start  # noqa: F401
-from tui_gateway.transport import (
-    StdioTransport, Transport, bind_transport, current_transport, reset_transport)
+from tui_gateway.transport import (StdioTransport, Transport, bind_transport, current_transport, reset_transport)
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +289,7 @@ class _SlashWorker:
                     raise RuntimeError(msg.get("error", "slash worker failed"))
                 return str(msg.get("output", "")).rstrip()
             raise RuntimeError(
-                f"slash worker closed pipe{': ' + chr(10).join(self.stderr_tail[-8:]) if self.stderr_tail else ''}"
-            )
+                f"slash worker closed pipe{': ' + chr(10).join(self.stderr_tail[-8:]) if self.stderr_tail else ''}")
 
     def close(self):
         if getattr(self, "_closed", False):
@@ -413,9 +411,8 @@ def _transfer_db_to_agent(agent, db) -> bool:
         if getattr(agent, "_session_db", None) is not db:
             return False
         if db is _get_db():
-            logger.warning(
-                "Refused transfer of the shared launch SessionDB to a session "
-                "agent — the caller's owns_db gate should have prevented this.")
+            logger.warning("Refused transfer of the shared launch SessionDB to a session "
+                           "agent — the caller's owns_db gate should have prevented this.")
             return False
         agent._owns_session_db = True
         return True
@@ -457,8 +454,7 @@ def _response_profile_name(profile: str | None = None) -> str:
 
 
 def _db_unavailable_error(rid, *, code: int):
-    detail = _db_error or "state.db unavailable"
-    return _err(rid, code, f"state.db unavailable: {detail}")
+    return _err(rid, code, f"state.db unavailable: {_db_error or 'state.db unavailable'}")
 
 
 # ── per-session profile scoping (global remote mode) ───────────────────────────
@@ -467,8 +463,7 @@ def _db_unavailable_error(rid, *, code: int):
 # call so config/skills/model/persistence resolve to it. Omitted/own profile → launch profile.
 def _profile_home(profile: str | None) -> Path | None:
     """Resolve a named profile's home on THIS host, or None for the launch profile."""
-    name = (profile or "").strip()
-    if not name:
+    if not (name := (profile or "").strip()):
         return None
     try:
         from hermes_cli import profiles as profiles_mod
@@ -587,10 +582,9 @@ _live_transports_lock = threading.Lock()
 
 def register_live_transport(transport: Transport | None) -> None:
     """Track a connected client transport for global broadcasts. Idempotent."""
-    if transport is None:
-        return
-    with _live_transports_lock:
-        _live_transports.add(transport)
+    if transport is not None:
+        with _live_transports_lock:
+            _live_transports.add(transport)
 
 
 def unregister_live_transport(transport: Transport | None) -> None:
@@ -606,8 +600,7 @@ def _broadcast_global_event(event: str, payload: dict | None = None) -> None:
     with _live_transports_lock:
         targets = list(_live_transports)
     if not targets:
-        _emit(event, "", payload)
-        return
+        return _emit(event, "", payload)
     frame = _event_frame(event, "", payload)
     for transport in targets:
         try:
@@ -645,14 +638,11 @@ def _pending_clarify_request_payload(sid: str) -> dict | None:
             event, prompt_payload = _pending_prompt_payloads.get(rid, ("", {}))
             if event == "clarify.request":
                 snapshot = dict(prompt_payload)
-                # Batch clarify: replay the answers locked so far so a reconnecting
-                # client restores its per-question ✓ state.
-                batch = _batch_clarify.get(rid)
-                if batch is not None and batch["answers"]:
+                # Batch clarify: replay the answers locked so far so a reconnecting client restores its ✓ state.
+                if (batch := _batch_clarify.get(rid)) is not None and batch["answers"]:
                     snapshot["answers"] = dict(batch["answers"])
                 return snapshot
-    session = _sessions.get(sid)
-    if session is not None:
+    if (session := _sessions.get(sid)) is not None:
         with session.get("history_lock", threading.Lock()):
             pending = session.get("_compute_host_pending_clarify")
             if isinstance(pending, dict):
@@ -679,8 +669,7 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
 
 
 def _status_update(sid: str, kind: str, text: str | None = None):
-    body = (text if text is not None else kind).strip()
-    if not body:
+    if not (body := (text if text is not None else kind).strip()):
         return
     out_kind = kind if text is not None else "status"
     # Auto-compaction arrives as a generic "lifecycle" status; re-tag so drivers can show a
@@ -694,9 +683,7 @@ def _status_update(sid: str, kind: str, text: str | None = None):
 
 def _estimate_image_tokens(width: int, height: int) -> int:
     """Rough attachment-display estimate: 512px tiles at ~85 tokens/tile (cross-provider hint)."""
-    if width <= 0 or height <= 0:
-        return 0
-    return max(1, (width + 511) // 512) * max(1, (height + 511) // 512) * 85
+    return max(1, (width + 511) // 512) * max(1, (height + 511) // 512) * 85 if width > 0 and height > 0 else 0
 
 
 def _image_meta(path: Path) -> dict:
@@ -747,8 +734,7 @@ def handle_request(req: dict) -> dict | None:
     if isinstance(normalized, dict):
         return normalized
     rid, method, params = normalized
-    fn = _methods.get(method)
-    if not fn:
+    if not (fn := _methods.get(method)):
         return _err(rid, -32601, f"unknown method: {method}")
     token = _current_rpc_method.set(method)
     try:
@@ -767,10 +753,8 @@ def _current_session_steer_authority(session_id: str) -> tuple[Transport | None,
     expected_session = _current_runtime_session_record.get()
     with _sessions_lock:
         session = _sessions.get(session_id)
-        if (
-            session is None
-            or (expected_session is not None and session is not expected_session)
-            or session.get("transport") is not transport):
+        if (session is None or (expected_session is not None and session is not expected_session)
+                or session.get("transport") is not transport):
             return None, None
         return transport, session
 
@@ -880,7 +864,6 @@ def _bind_build_profile_scopes(profile_home: str) -> "_TurnScopes":
     scopes = _TurnScopes()
     scopes.home = set_hermes_home_override(profile_home)
     with contextlib.suppress(Exception):
-        from agent.secret_scope import build_profile_secret_scope, set_secret_scope
         scopes.secret = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
     try:
         from tools.terminal_scope import install_profile_terminal_scope
@@ -895,7 +878,6 @@ def _release_build_profile_scopes(scopes: "_TurnScopes") -> None:
         reset_hermes_home_override(scopes.home)
     if scopes.secret is not None:
         with contextlib.suppress(Exception):
-            from agent.secret_scope import reset_secret_scope
             reset_secret_scope(scopes.secret)
     if scopes.terminal is not None:
         with contextlib.suppress(Exception):
@@ -948,8 +930,8 @@ def _wire_session_agent(sid: str, key: str, agent) -> bool:
 def _start_session_services(sid: str, key: str, current: dict) -> None:
     """Start the notification poller and fire the session-reset boundary hook."""
     with _sessions_lock:
-        if sid in _sessions:
-            _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
+        if (rec := _sessions.get(sid)) is not None:
+            rec["_notif_stop"] = _start_notification_poller(sid, rec)
     _notify_session_boundary("on_session_reset", key, _session_source(current))
 
 
@@ -1030,8 +1012,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
     # through _sess() and would otherwise upgrade it mid-stream. Lifts once the child completes.
     if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
         return
-    lock = session.setdefault("agent_build_lock", threading.Lock())
-    with lock:
+    with session.setdefault("agent_build_lock", threading.Lock()):
         if ready.is_set() or session.get("agent_build_started"):
             return
         session["agent_build_started"] = True
@@ -1290,8 +1271,7 @@ _EXPIRING_REQUESTS = frozenset({
 
 
 def _block(
-    event: str, sid: str, payload: dict, timeout: float | None = 300, batch_qids: list[str] | None = None,
-) -> str:
+    event: str, sid: str, payload: dict, timeout: float | None = 300, batch_qids: list[str] | None = None) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
     with _prompt_lock:
@@ -1315,8 +1295,7 @@ def _block(
             _pending_prompt_payloads.pop(rid, None)
             answer_present = rid in _answers
             answer = _answers.pop(rid, "")
-            batch_state = _batch_clarify.pop(rid, None)
-            if batch_state is not None:
+            if (batch_state := _batch_clarify.pop(rid, None)) is not None:
                 batch_answers = dict(batch_state["answers"])
     expire = lambda: _emit(f"{event.removesuffix('.request')}.expire", sid, {"request_id": rid})
     if batch_qids is not None:
@@ -1370,16 +1349,15 @@ _TOUR_TIMEOUT_S = 45
 # renderer cannot miss. See _tour_request.
 _TOUR_PROBE_TIMEOUT_S = 10
 
-_TOUR_BRIDGE_UNAVAILABLE = json.dumps(
-    {
-        "success": False,
-        "error": (
-            "No Hermes Desktop window answered the tour request. The tour is "
-            "driven by the desktop app's renderer, which updates separately "
-            "from this backend, so an app build older than the tour tool has "
-            "nothing listening. Update the Hermes Desktop app and start a new "
-            "session. Do not retry tour in this session."),
-    })
+_TOUR_BRIDGE_UNAVAILABLE = json.dumps({
+    "success": False,
+    "error": (
+        "No Hermes Desktop window answered the tour request. The tour is "
+        "driven by the desktop app's renderer, which updates separately "
+        "from this backend, so an app build older than the tour tool has "
+        "nothing listening. Update the Hermes Desktop app and start a new "
+        "session. Do not retry tour in this session."),
+})
 
 
 def _tour_request(sid: str, payload: dict) -> str:
@@ -1393,9 +1371,8 @@ def _tour_request(sid: str, payload: dict) -> str:
     state = session.get("tour_bridge")
     if state == "unanswered":
         return _TOUR_BRIDGE_UNAVAILABLE
-    answer = _block(
-        "tour.request", sid, dict(payload),
-        timeout=_TOUR_TIMEOUT_S if state == "answered" else _TOUR_PROBE_TIMEOUT_S)
+    answer = _block("tour.request", sid, dict(payload),
+                    timeout=_TOUR_TIMEOUT_S if state == "answered" else _TOUR_PROBE_TIMEOUT_S)
     if answer:
         session["tour_bridge"] = "answered"
     elif state != "answered":
@@ -2360,11 +2337,8 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
                 # Failing identity recovery, still hand the base_url to the direct-alias branch so
                 # pool/env credentials resolve for it.
                 resolve_kwargs["explicit_base_url"] = override_base_url
-        resolve_kwargs["requested"] = requested_provider
-        resolve_kwargs["target_model"] = model or None
-        overrides = {
-            "base_url": override_base_url, "api_key": model_override.get("api_key"), "api_mode": model_override.get("api_mode"),
-        }
+        resolve_kwargs.update(requested=requested_provider, target_model=model or None)
+        overrides = {k: model_override.get(k) for k in ("base_url", "api_key", "api_mode")}
     else:
         model, requested_provider = _resolve_startup_runtime()
         if isinstance(model_override, str) and model_override:
@@ -2374,13 +2348,12 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
         resolve_kwargs = {"requested": requested_provider, "target_model": model or None}
         overrides = {}
     resolution = _resolve_runtime_with_fallback(resolve_kwargs)
-    runtime = resolution.runtime
     if resolution.used_fallback:
         if not resolution.selected_model:
             raise RuntimeError("Auth fallback resolved without a model")
-        return resolution.selected_model, runtime
-    runtime.update({k: v for k, v in overrides.items() if v})
-    return model, runtime
+        return resolution.selected_model, resolution.runtime
+    resolution.runtime.update({k: v for k, v in overrides.items() if v})
+    return model, resolution.runtime
 
 
 def _startup_system_prompt(cfg: dict, task_id: str) -> str:
@@ -2465,8 +2438,7 @@ def _make_agent(
         **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         with _sessions_lock:
-            context_session = _sessions.get(sid)
-        context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(context_session)
+            context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(_sessions.get(sid))
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
     return agent
 
@@ -2643,14 +2615,10 @@ def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY
     stale: list[tuple[str, dict]] = []
     with _sessions_lock:
         candidates = [
-            (old_sid, old)
-            for old_sid, old in list(_sessions.items())
-            if old_sid != keep_sid
-            and not old.get("_finalized")
+            (old_sid, old) for old_sid, old in list(_sessions.items())
+            if old_sid != keep_sid and not old.get("_finalized")
             and _session_lookup_key(old, fallback=old_sid) == session_key
-            and _live_profile_matches(old, profile_home)
-            and old.get("transport") is _detached_ws_transport
-        ]
+            and _live_profile_matches(old, profile_home) and old.get("transport") is _detached_ws_transport]
     for old_sid, _old in candidates:
         _cancel_ws_orphan_reap(old_sid)
         if (popped := _pop_session_by_id(old_sid)) is not None:
@@ -2720,10 +2688,8 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             if _sessions.get(sid) is not session:
                 return
             with session["history_lock"]:
-                session["history"] = history
-                session["display_history_prefix"] = prefix
-                session["resume_hydrating"] = False
-                session["resume_message_count"] = len(display_history)
+                session.update(history=history, display_history_prefix=prefix, resume_hydrating=False,
+                               resume_message_count=len(display_history))
             # Deferred resumes answered before the transcript existed; cache the derived todo
             # snapshot now so later payload attaches carry it.
             todo_state = _todo_state_from_history(history)
@@ -2739,9 +2705,7 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             if _sessions.get(sid) is not session:
                 return
             message = f"resume failed: {exc}"
-            session["resume_hydrating"] = False
-            session["resume_history_error"] = message
-            session["agent_error"] = message
+            session.update(resume_hydrating=False, resume_history_error=message, agent_error=message)
             session["resume_history_ready"].set()
             session["agent_ready"].set()
             _emit("session.resume_progress", sid, {"message": message, "phase": "history", "status": "failed"})
@@ -2902,10 +2866,8 @@ def _live_session_payload(
         if touch:
             session["last_active"] = time.time()
         in_memory_history = list(session.get("display_history_prefix") or []) + list(session.get("history") or [])
-        inflight = _inflight_snapshot(session)
-        queued = _queued_prompt_snapshot(session)
-        running = bool(session.get("running"))
-        turn_started_at = _turn_started_at(session)
+        inflight, queued = _inflight_snapshot(session), _queued_prompt_snapshot(session)
+        running, turn_started_at = bool(session.get("running")), _turn_started_at(session)
     # Persisted display lineage (candidate-inclusive) so this matches resume + REST; via the session's
     # profile-aware DB, not the launch ``_get_db()``. The DB has its own lock — read outside the
     # history lock. ``omit_messages`` skips the read entirely (fast path for counts/status).
@@ -2922,14 +2884,11 @@ def _live_session_payload(
         "started_at": float(session.get("created_at") or time.time()),
         "status": _session_live_status(sid, session),
     }
-    if inflight:
-        payload["inflight"] = inflight
-    if queued:
-        payload["queued"] = queued
-    if approval := _pending_approval_request_payload(str(session.get("session_key") or "")):
-        payload["pending_approval"] = approval
-    if clarify := _pending_clarify_request_payload(sid):
-        payload["pending_clarify"] = clarify
+    approval = _pending_approval_request_payload(str(session.get("session_key") or ""))
+    clarify = _pending_clarify_request_payload(sid)
+    for key, value in (("inflight", inflight), ("queued", queued), ("pending_approval", approval), ("pending_clarify", clarify)):
+        if value:
+            payload[key] = value
     return _attach_todo_state(payload, session)
 
 
@@ -3070,10 +3029,8 @@ def _pet_active_selection():
     from agent.pet import constants, store
     pet_cfg = _pet_cfg()
     enabled = is_truthy_value(pet_cfg.get("enabled"), default=False)
-    configured_slug = str(pet_cfg.get("slug", "") or "")
-    pet = store.resolve_active_pet(configured_slug) if enabled else None
-    scale = float(pet_cfg.get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
-    return enabled, pet, scale
+    pet = store.resolve_active_pet(str(pet_cfg.get("slug", "") or "")) if enabled else None
+    return enabled, pet, float(pet_cfg.get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
 
 
 def _pet_state_rows(spritesheet) -> list[str]:
@@ -3138,9 +3095,7 @@ def _pet_reference_images_from_data_url(ref_raw: str, stage) -> list:
     match = _re.match(r"^data:image/([a-zA-Z0-9.+-]+);base64,(.*)$", ref_raw, _re.DOTALL)
     if not match:
         raise ValueError("invalid reference image format")
-    mime = match.group(1).lower()
-    ext = _PET_REFERENCE_MIME_EXT.get(mime)
-    if ext is None:
+    if (ext := _PET_REFERENCE_MIME_EXT.get(match.group(1).lower())) is None:
         raise ValueError("unsupported reference image type")
     payload = "".join(match.group(2).split())
     if (len(payload) * 3) // 4 > _PET_REFERENCE_MAX_BYTES:
@@ -3281,8 +3236,7 @@ def _respond(rid, params, key, *, allow_expired=False):
             if question_id not in batch["qids"]:
                 return _err(rid, 4002, f"unknown question_id {question_id!r}")
             batch["answers"][question_id] = params.get(key, "")
-            remaining = [qid for qid in batch["qids"] if qid not in batch["answers"]]
-            if not remaining:
+            if not (remaining := [qid for qid in batch["qids"] if qid not in batch["answers"]]):
                 ev.set()
             return _ok(rid, {"status": "ok", "remaining": remaining})
         _answers[r] = params.get(key, "")
@@ -3329,9 +3283,7 @@ def _compute_mcp_rev() -> str:
     for revision-aware coalescing. "" = unknown (fail open)."""
     try:
         cfg = _load_cfg()
-        rev_src = json.dumps(
-            {"mcp": cfg.get("mcp"), "mcp_servers": cfg.get("mcp_servers"), "tools": cfg.get("tools")},
-            sort_keys=True, default=str)
+        rev_src = json.dumps({k: cfg.get(k) for k in ("mcp", "mcp_servers", "tools")}, sort_keys=True, default=str)
         return hashlib.sha1(rev_src.encode()).hexdigest()[:12]
     except Exception:
         return ""
@@ -3437,8 +3389,7 @@ def _cli_exec_blocked(argv: list[str]) -> str | None:
 def _resolve_name(name: str) -> str:
     try:
         from hermes_cli.commands import resolve_command
-        r = resolve_command(name)
-        return r.name if r else name
+        return r.name if (r := resolve_command(name)) else name
     except Exception:
         return name
 
