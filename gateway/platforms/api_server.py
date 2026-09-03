@@ -131,34 +131,19 @@ from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.base import (
-    MEDIA_TAG_CLEANUP_RE,
-    BasePlatformAdapter,
-    SendResult,
-    is_network_accessible,
-    validate_media_delivery_path)
+    MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter, SendResult, is_network_accessible, validate_media_delivery_path)
 # Re-exported here for existing imports and constructor monkeypatches.
 from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 from agent.redact import redact_sensitive_text
 from agent.interrupt_compat import request_hard_interrupt
 from gateway.readiness import collect_runtime_readiness
 from gateway.browser_control_artifacts import (
-    ArtifactError,
-    ArtifactRateLimiter,
-    ArtifactStore,
-    ArtifactTooLarge,
-    DEFAULT_ALLOWED_MIME_TYPES,
-    DEFAULT_MAX_ARTIFACT_BYTES,
-    DEFAULT_ARTIFACT_TTL_SECONDS)
+    ArtifactError, ArtifactRateLimiter, ArtifactStore, ArtifactTooLarge, DEFAULT_ALLOWED_MIME_TYPES,
+    DEFAULT_MAX_ARTIFACT_BYTES, DEFAULT_ARTIFACT_TTL_SECONDS)
 from gateway.browser_control_broker import (
-    BROWSER_CONTROL_ARTIFACT_CAPABILITIES,
-    BROWSER_CONTROL_CAPABILITIES,
-    BROWSER_CONTROL_DEVELOPER_CAPABILITIES,
-    ControllerScope,
-    ControllerTicketInvalid,
-    browser_control_developer_mode,
-    browser_control_protocol_supported,
-    filter_browser_control_capabilities,
-    get_browser_control_broker)
+    BROWSER_CONTROL_ARTIFACT_CAPABILITIES, BROWSER_CONTROL_CAPABILITIES, BROWSER_CONTROL_DEVELOPER_CAPABILITIES,
+    ControllerScope, ControllerTicketInvalid, browser_control_developer_mode,
+    browser_control_protocol_supported, filter_browser_control_capabilities, get_browser_control_broker)
 
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
@@ -281,18 +266,14 @@ def _coerce_request_bool(value: Any, default: bool = False) -> bool:
 _REQUEST_OPTION_MISSING = object()
 # Full internal ladder + "none" (what /reasoning and config.yaml accept); provider
 # vocabulary clamping happens downstream in agent.reasoning_effort.
-_REASONING_EFFORTS = frozenset(
-    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _RUNTIME_AGENT_OVERRIDE_KEYS = (
     "api_key", "base_url", "provider", "api_mode", "command", "args", "credential_pool", "max_tokens")
 
 
 def _clean_request_string(value: Any) -> Optional[str]:
     """Return a stripped request string, or None for absent/non-string values."""
-    if not isinstance(value, str):
-        return None
-    cleaned = value.strip()
-    return cleaned or None
+    return (value.strip() or None) if isinstance(value, str) else None
 
 
 def _request_reasoning_config(model_options: Any) -> Optional[Dict[str, Any]]:
@@ -1375,11 +1356,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _origin_allowed(self, origin: str) -> bool:
         """Allow non-browser clients and explicitly configured browser origins."""
-        if not origin:
-            return True
-        if not self._cors_origins:
-            return False
-        return "*" in self._cors_origins or origin in self._cors_origins
+        return not origin or "*" in self._cors_origins or origin in self._cors_origins
 
     @staticmethod
     def _clean_log_value(value: Any, *, max_len: int = 200) -> str:
@@ -1855,9 +1832,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _resolve_route(self, model_alias: Any) -> Optional[Dict[str, Any]]:
         """Return the model_routes entry for *model_alias*, or None."""
-        if not self._model_routes or not isinstance(model_alias, str):
-            return None
-        return self._model_routes.get(model_alias)
+        return self._model_routes.get(model_alias) if isinstance(model_alias, str) else None
 
     def _stored_session_model(self, session: Any) -> Optional[str]:
         """The model persisted on a session row, minus the virtual alias (replaying
@@ -3589,7 +3564,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def _handle_get_job(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs/{job_id} — get a single cron job."""
-        return await self._job_lookup_or_mutate(request, lambda job_id: _cron_get(job_id), notify=False)
+        return await self._job_lookup_or_mutate(request, _cron_get, notify=False)
 
     async def _handle_update_job(self, request: "web.Request") -> "web.Response":
         """PATCH /api/jobs/{job_id} — update a cron job."""
@@ -3631,11 +3606,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def _handle_pause_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/pause — pause a cron job."""
-        return await self._job_lookup_or_mutate(request, lambda job_id: _cron_pause(job_id), notify=True)
+        return await self._job_lookup_or_mutate(request, _cron_pause, notify=True)
 
     async def _handle_resume_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/resume — resume a paused cron job."""
-        return await self._job_lookup_or_mutate(request, lambda job_id: _cron_resume(job_id), notify=True)
+        return await self._job_lookup_or_mutate(request, _cron_resume, notify=True)
 
     async def _handle_run_job(self, request: "web.Request") -> "web.Response":
         """POST /api/jobs/{job_id}/run — trigger immediate execution."""
