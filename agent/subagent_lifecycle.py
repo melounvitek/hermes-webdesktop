@@ -146,13 +146,13 @@ class _Record:
     result: Optional[SubagentResult] = None
 
 
+@dataclasses.dataclass
 class _Registry:
     """Thread-safe terminal-retention registry; never returns live records."""
 
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.records: dict[str, _Record] = {}
-        self.correlations: dict[tuple[Optional[str], str], str] = {}
+    lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    records: dict[str, _Record] = dataclasses.field(default_factory=dict)
+    correlations: dict[tuple[Optional[str], str], str] = dataclasses.field(default_factory=dict)
 
 
 _REGISTRY = _Registry()
@@ -183,6 +183,10 @@ def get_active_subagent_parent() -> Any:
 
 def _opt_str(value: Any) -> bool:
     return value is None or isinstance(value, str)
+
+
+def _session_id_of(agent: Any) -> Optional[str]:
+    return str(getattr(agent, "session_id", "") or "") or None
 
 
 def _finite_number(value: Any) -> bool:
@@ -222,12 +226,9 @@ def _handle_is_well_formed(handle: Any) -> bool:
 
 
 class SubagentLifecycleService:
-    """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`.
-
-    Running children are in-process only. Completed results remain available
-    until process exit; ``reconnect`` reports that a serialized handle cannot
-    reconnect after a restart instead of launching work again.
-    """
+    """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`. Children run
+    in-process only; completed results stay until process exit, and ``reconnect`` reports that a
+    serialized handle cannot reconnect after a restart instead of launching work again."""
 
     def __init__(self, parent_agent_resolver: Callable[[], Any]) -> None:
         self._parent_agent_resolver = parent_agent_resolver
@@ -237,7 +238,7 @@ class SubagentLifecycleService:
         if parent is None:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
         self._validate_request(request, parent)
-        parent_session_id = str(getattr(parent, "session_id", "") or "") or None
+        parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
         correlation_key = (parent_session_id, request.correlation_id or "")
@@ -246,8 +247,7 @@ class SubagentLifecycleService:
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
 
-        # Delegate construction stays internal so plugin code never imports
-        # private delegation helpers or touches the active-child registry.
+        # Delegate construction stays internal: plugins never import private delegation helpers.
         from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
 
         child = _build_child_preserving_parent_tools(
@@ -317,29 +317,24 @@ class SubagentLifecycleService:
             agent = record.agent
             record.state = SubagentState.CANCEL_REQUESTED
             record.updated_at = time.time()
-        unsupported = SubagentCancelResult(False, unsupported=True, state=SubagentState.CANCEL_REQUESTED)
-        if agent is None:
-            return unsupported
-        try:
-            accepted = request_hard_interrupt(
-                agent,
-                f"Lifecycle cancellation requested: {reason[:500]}",
-                tool_reason="subagent cancellation requested",
-            )
-        except Exception:
-            accepted = False
-        if not accepted:
-            return unsupported
-        return SubagentCancelResult(True, state=SubagentState.CANCEL_REQUESTED)
+        accepted = False
+        if agent is not None:
+            try:
+                accepted = request_hard_interrupt(
+                    agent,
+                    f"Lifecycle cancellation requested: {reason[:500]}",
+                    tool_reason="subagent cancellation requested",
+                )
+            except Exception:
+                accepted = False
+        return SubagentCancelResult(bool(accepted), unsupported=not accepted, state=SubagentState.CANCEL_REQUESTED)
 
     def result(self, handle: SubagentHandle) -> SubagentResult:
         record = self._record(handle)
         if record is None:
             return SubagentResult(handle, SubagentState.UNKNOWN, False, error_classification="UNKNOWN_HANDLE")
         with _REGISTRY.lock:
-            if record.result is not None:
-                return record.result
-            return SubagentResult(record.handle, record.state, False, error_classification="NOT_READY")
+            return record.result or SubagentResult(record.handle, record.state, False, error_classification="NOT_READY")
 
     def reconnect(self, handle: SubagentHandle) -> SubagentReconnectResult:
         record = self._record(handle)
@@ -354,9 +349,7 @@ class SubagentLifecycleService:
         expected = self._capability(handle.subagent_id, handle.parent_session_id, handle.created_at)
         if not hmac.compare_digest(handle.capability, expected):
             return None
-        parent = self._parent_agent_resolver()
-        active_parent_id = str(getattr(parent, "session_id", "") or "") or None
-        if active_parent_id != handle.parent_session_id:
+        if _session_id_of(self._parent_agent_resolver()) != handle.parent_session_id:
             return None
         with _REGISTRY.lock:
             return _REGISTRY.records.get(handle.subagent_id)
@@ -366,18 +359,13 @@ class SubagentLifecycleService:
         """Retain terminal snapshots for a bounded period, never live work."""
         cutoff = time.time() - _TERMINAL_RETENTION_SECONDS
         expired = [
-            subagent_id
-            for subagent_id, record in _REGISTRY.records.items()
-            if record.result is not None
-            and record.completed_at is not None
-            and record.completed_at < cutoff
+            sid for sid, record in _REGISTRY.records.items()
+            if record.result is not None and record.completed_at is not None and record.completed_at < cutoff
         ]
         for subagent_id in expired:
-            record = _REGISTRY.records.pop(subagent_id)
-            if record.handle.correlation_id:
-                _REGISTRY.correlations.pop(
-                    (record.handle.parent_session_id, record.handle.correlation_id), None
-                )
+            handle = _REGISTRY.records.pop(subagent_id).handle
+            if handle.correlation_id:
+                _REGISTRY.correlations.pop((handle.parent_session_id, handle.correlation_id), None)
 
     def _run(self, record: _Record, goal: str, parent: Any) -> None:
         with _REGISTRY.lock:
@@ -390,8 +378,7 @@ class SubagentLifecycleService:
 
             raw = _run_child_lifecycle(0, goal, record.agent, parent)
             is_dict = isinstance(raw, dict)
-            if not is_dict:
-                raw = {}
+            raw = raw if is_dict else {}
             status = str(raw.get("status", "error"))
             if status == "interrupted":
                 cancelled = record.state == SubagentState.CANCEL_REQUESTED
@@ -431,16 +418,10 @@ class SubagentLifecycleService:
 
     @staticmethod
     def _validate_request(request: SubagentLaunchRequest, parent: Any) -> None:
-        if (
-            not isinstance(request, SubagentLaunchRequest)
-            or not isinstance(request.goal, str)
-            or not request.goal.strip()
-            or len(request.goal) > _MAX_GOAL_CHARS
-        ):
+        goal_ok = isinstance(request, SubagentLaunchRequest) and isinstance(request.goal, str)
+        if not goal_ok or not request.goal.strip() or len(request.goal) > _MAX_GOAL_CHARS:
             raise SubagentLifecycleError("goal must be a non-empty string of at most 16000 characters.")
-        if request.context is not None and (
-            not isinstance(request.context, str) or len(request.context) > _MAX_CONTEXT_CHARS
-        ):
+        if request.context is not None and (not isinstance(request.context, str) or len(request.context) > _MAX_CONTEXT_CHARS):
             raise SubagentLifecycleError("context must be a string of at most 32000 characters.")
         if request.role not in {"leaf", "orchestrator"}:
             raise SubagentLifecycleError("role must be 'leaf' or 'orchestrator'.")

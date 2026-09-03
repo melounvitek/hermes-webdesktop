@@ -35,18 +35,16 @@ def resolve_and_repair_transcript_batch(
 ) -> List[Dict[str, Any]]:
     """Partition a message batch within an active write transaction.
 
-    For assistant messages carrying an existing integer `_row_id`:
-    - Checks for an active target row or watermark compaction clone in SQLite.
-    - If blank, updates the row in-place with new content.
-    - If already non-blank (concurrent winner), adopts canonical content without overwrite.
-    - Returns the list of messages that must be inserted as fresh rows.
+    An assistant message carrying an existing integer ``_row_id`` targets its active SQLite row (or
+    the active clone a watermark compaction made of it): a blank row is updated in place; a
+    non-blank one (concurrent winner) has its canonical content adopted without overwrite.
+    Returns the messages that must be inserted as fresh rows.
     """
     inserted_rows: List[Dict[str, Any]] = []
     for msg in messages:
-        role = msg.get("role", "unknown") if isinstance(msg, dict) else "unknown"
-        existing_row_id = msg.get("_row_id") if isinstance(msg, dict) else None
         repaired = False
-        if role == "assistant" and isinstance(existing_row_id, int):
+        existing_row_id = msg.get("_row_id") if isinstance(msg, dict) else None
+        if isinstance(existing_row_id, int) and msg.get("role", "unknown") == "assistant":
             row = conn.execute(
                 "SELECT id, role, active, timestamp, content FROM messages "
                 "WHERE id = ? AND session_id = ?",
@@ -57,45 +55,33 @@ def resolve_and_repair_transcript_batch(
                 if int(row["active"] or 0) == 1:
                     target_row = row
                 else:
-                    # Watermark compaction soft-archived the concurrent tail
-                    # and cloned it. Find the active clone.
-                    clone = conn.execute(
+                    # Watermark compaction soft-archived the concurrent tail and cloned it.
+                    target_row = conn.execute(
                         "SELECT id, role, active, timestamp, content FROM messages "
                         "WHERE session_id = ? AND active = 1 AND role = 'assistant' "
                         "AND timestamp IS ? AND id != ? "
                         "ORDER BY id DESC LIMIT 1",
                         (session_id, row["timestamp"], row["id"]),
                     ).fetchone()
-                    if clone is not None:
-                        target_row = clone
             if target_row is not None:
                 target_id = int(target_row["id"])
-                raw_content = target_row["content"]
-                decoded = decode_content_fn(raw_content)
+                decoded = decode_content_fn(target_row["content"])
+                msg["_row_id"] = target_id
                 if is_content_blank(decoded):
-                    encoded = encode_content_fn(msg.get("content"))
                     conn.execute(
                         "UPDATE messages SET content = ? "
                         "WHERE id = ? AND session_id = ? AND active = 1",
-                        (encoded, target_id, session_id),
+                        (encode_content_fn(msg.get("content")), target_id, session_id),
                     )
-                    if isinstance(msg, dict):
-                        msg["_row_id"] = target_id
                 else:
-                    # Concurrent winner: adopt canonical content without overwrite
-                    if isinstance(msg, dict):
-                        msg["_row_id"] = target_id
-                        msg["_canonical_content"] = decoded
+                    msg["_canonical_content"] = decoded  # concurrent winner: adopt, don't overwrite
                 repaired = True
         if not repaired:
             inserted_rows.append(msg)
     return inserted_rows
 
 
-def sync_flushed_message_markers(
-    batch_msgs: List[Dict[str, Any]],
-    batch_rows: List[Dict[str, Any]],
-) -> None:
+def sync_flushed_message_markers(batch_msgs: List[Dict[str, Any]], batch_rows: List[Dict[str, Any]]) -> None:
     """Stamp _DB_PERSISTED_MARKER and sync canonical row ID / content onto live dicts after commit."""
     for written, row in zip(batch_msgs, batch_rows):
         written[_DB_PERSISTED_MARKER] = True
