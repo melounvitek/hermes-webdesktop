@@ -49,9 +49,8 @@ def _for_each_provider(providers: List[str], import_path: str, *args: Any) -> No
 def _prune_env_pool_entries(env_var: str) -> List[str]:
     """Drop ``credential_pool`` entries seeded from ``env:<env_var>``; return providers pruned.
 
-    Operates across ALL providers: the source names the env var unambiguously and shared vars like
-    GITHUB_TOKEN may seed more than one provider. Entries with any other source (OAuth,
-    device-code, manual, borrowed-CLI) and ``providers.<id>`` blocks are preserved verbatim.
+    Spans ALL providers (shared vars like GITHUB_TOKEN seed several). Entries with any other
+    source (OAuth, device-code, manual, borrowed-CLI) are preserved verbatim.
     """
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store
 
@@ -80,12 +79,11 @@ def _prune_env_pool_entries(env_var: str) -> List[str]:
 
 
 def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[str]:
-    """Reconcile config.yaml api_key mirrors holding ``old_value``; return the dotted paths touched.
+    """Reconcile config.yaml api_key mirrors holding ``old_value``; return dotted paths touched.
 
-    Value-matched on purpose: only an entry that provably holds the SAME credential that just
-    changed in ``.env`` is touched — an independent key for a different endpoint is left alone.
-    ``new_value=None`` removes the field; a string replaces it. Operates on the RAW user config so
-    the write doesn't bake defaults into the user's file. Paths only — never values.
+    Value-matched on purpose: only an entry holding the SAME credential that just changed in
+    ``.env`` is touched. ``new_value=None`` removes the field. Operates on the RAW user config
+    so defaults are never baked into the user's file.
     """
     if not old_value:
         return []
@@ -121,29 +119,23 @@ def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[st
                     section.pop(field, None)
                 touched.append(f"{key_path}.{field}")
 
+    def _items(value: Any, allow_list: bool):
+        if isinstance(value, dict):
+            return value.items()
+        return enumerate(value) if allow_list and isinstance(value, list) else ()
+
     _fix(user_config.get("model"), "model")
-
-    aux = user_config.get("auxiliary")
-    if isinstance(aux, dict):
-        for task, slot_cfg in aux.items():
-            _fix(slot_cfg, f"auxiliary.{task}")
-
-    custom = user_config.get("custom_providers")
-    if isinstance(custom, list):
-        for idx, entry in enumerate(custom):
-            _fix(entry, f"custom_providers.{idx}")
-    elif isinstance(custom, dict):
-        for name, entry in custom.items():
-            _fix(entry, f"custom_providers.{name}")
+    for task, slot_cfg in _items(user_config.get("auxiliary"), False):
+        _fix(slot_cfg, f"auxiliary.{task}")
+    for name, entry in _items(user_config.get("custom_providers"), True):
+        _fix(entry, f"custom_providers.{name}")
 
     # ``providers.<id>.api_key`` (v12+) is where dashboard/desktop write custom-endpoint
     # credentials. It is a real inline secret with higher precedence than the env var, so a stale
     # copy shadows a rotation (persistent 401 with a key the UI no longer shows) and survives a
     # removal that promised to clear EVERY store.
-    keyed_providers = user_config.get("providers")
-    if isinstance(keyed_providers, dict):
-        for provider_id, entry in keyed_providers.items():
-            _fix(entry, f"providers.{provider_id}", fields=("api_key",))
+    for provider_id, entry in _items(user_config.get("providers"), False):
+        _fix(entry, f"providers.{provider_id}", fields=("api_key",))
 
     if touched:
         require_readable_config_before_write(config_path)
@@ -173,12 +165,9 @@ def purge_env_credential_references(
 def save_provider_env_credential(env_var: str, value: str) -> Dict[str, Any]:
     """Save/update a credential in ``.env`` and reconcile every mirror.
 
-    Any config.yaml mirror that held the PREVIOUS value (``model.api_key`` etc.) is updated so a
-    stale higher-precedence copy cannot shadow the rotation. The save also forces an immediate
-    ``load_pool()`` for every provider registered against this env var so the env-seeded
-    ``credential_pool`` entry is materialized to ``auth.json`` now — the live runtime reads from
-    the pool, and a ``.env``-only write left env-backed providers 401'ing until the user ran
-    ``hermes auth add`` separately.
+    config.yaml mirrors of the PREVIOUS value are updated so a stale higher-precedence copy cannot
+    shadow the rotation, and ``load_pool()`` runs now so the env-seeded ``credential_pool`` entry
+    lands in ``auth.json`` (a ``.env``-only write left env-backed providers 401'ing).
     """
     from hermes_cli.config import load_env, save_env_value
 
@@ -201,12 +190,8 @@ def save_provider_env_credential(env_var: str, value: str) -> Dict[str, Any]:
 
 
 def remove_provider_env_credential(env_var: str) -> Dict[str, Any]:
-    """Remove a credential from EVERY store it lives in.
-
-    Clears the ``.env`` entry (and process env), prunes env-seeded ``credential_pool`` entries,
-    drops the affected providers' model-cache rows, and removes any config.yaml mirror holding the
-    same value. OAuth/device-code/manual credentials are preserved.
-    """
+    """Remove a credential from EVERY store: ``.env`` (and process env), env-seeded
+    ``credential_pool`` entries, model-cache rows, config.yaml mirrors of the same value."""
     from hermes_cli.config import load_env, remove_env_value
 
     old_value = load_env().get(env_var)

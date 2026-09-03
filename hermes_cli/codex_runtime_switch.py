@@ -116,11 +116,8 @@ def _migration_lines(config: dict) -> list[str]:
 
 def apply(
     config: dict, new_value: Optional[str], *, persist_callback=None) -> CodexRuntimeStatus:
-    """Top-level entry point used by both CLI and gateway handlers.
-
-    ``config`` is mutated in place when ``new_value`` is set (None means show current state only).
-    ``persist_callback`` receives the mutated dict to write it to disk; skipped when None (tests).
-    """
+    """Entry point for CLI and gateway. ``config`` is mutated in place when ``new_value`` is set
+    (None = show current state); ``persist_callback(config)`` writes it, skipped when None."""
     current = get_current_runtime(config)
 
     # Cached per apply() call: the enable path would otherwise spawn `codex --version` up to 3x.

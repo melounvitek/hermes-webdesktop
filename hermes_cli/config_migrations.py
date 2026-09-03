@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -79,11 +80,8 @@ def _rewrite_key(
     message: str,
     extra_guard: Callable[[Dict[str, Any]], bool] = lambda _m: True,
     create_section: bool = False) -> None:
-    """Rewrite ``<section>.<key>`` to *new* when ``match(current_value)`` holds.
-
-    ``new=None`` deletes the key. A missing/non-mapping section is skipped unless
-    *create_section* (then ``match(None)`` decides).
-    """
+    """Rewrite ``<section>.<key>`` to *new* (None = delete) when ``match(current)`` holds; a
+    missing section is skipped unless *create_section*."""
     config = read_raw_config()
     raw = config.get(section)
     if not isinstance(raw, dict):
@@ -100,11 +98,8 @@ def _rewrite_key(
 
 
 def _rewrite_stale_default(*, old: Any, **kw: Any) -> Callable[[Dict[str, Any], bool], None]:
-    """Step that rewrites a key only while it still equals the OLD default.
-
-    Never clobbers a value the user deliberately customized; unset keys inherit the new default at
-    read time.
-    """
+    """Step rewriting a key only while it still equals the OLD default — never clobbers a value
+    the user customized; unset keys inherit the new default at read time."""
     return functools.partial(_rewrite_key, match=lambda cur: cur == old, **kw)
 
 
@@ -132,9 +127,7 @@ def _migrate_to_12(results: Dict[str, Any], quiet: bool) -> None:
 
         # kebab-case key from the display name; fall back to the URL hostname.
         key = old_name.strip().lower().replace(" ", "-").replace("(", "").replace(")", "")
-        while "--" in key:
-            key = key.replace("--", "-")
-        key = key.strip("-")
+        key = re.sub(r"-{2,}", "-", key).strip("-")
         if not key:
             try:
                 key = (urlparse(old_url).hostname or "endpoint").replace(".", "-")

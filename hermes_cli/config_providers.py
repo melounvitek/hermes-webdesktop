@@ -70,11 +70,7 @@ def coerce_provider_id(value: Any) -> str:
 
 
 def stringify_provider_map(providers: Any) -> dict:
-    """Copy a ``providers:`` mapping so keys are strings.
-
-    An unquoted YAML key ``2070:`` loads as int, so picker code calling ``ep_name.lower()`` crashes
-    and CRUD lookups of ``"2070"`` miss.
-    """
+    """Copy a ``providers:`` mapping so keys are strings (unquoted YAML ``2070:`` loads as int)."""
     if not isinstance(providers, dict):
         return {}
     out: Dict[str, Any] = {}
@@ -126,9 +122,8 @@ _KNOWN_PROVIDER_KEYS = {
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
     """First usable URL among ``base_url``/``url``/``api``, or "".
 
-    URLs with unresolved placeholders — ``${ENV_VAR}`` env-refs and ``{region}`` templates — are
-    accepted without validation: they expand at runtime, and rejecting them here would silently
-    drop the provider.
+    URLs with unresolved ``${ENV_VAR}`` / ``{region}`` placeholders are accepted unvalidated: they
+    expand at runtime, and rejecting them here would silently drop the provider.
     """
     for url_key in ("base_url", "url", "api"):
         raw_url = entry.get(url_key)
@@ -150,9 +145,8 @@ def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
 def _normalize_provider_models(models: Any) -> Tuple[Dict[str, Any], bool]:
     """Normalize an entry's ``models`` to ``(models_dict, discovered_flag)``.
 
-    Older Hermes versions wrote an in-mapping ``__discovered_model_catalog__`` sentinel (accepted,
-    stripped so it never surfaces as a model id). Hand-edited configs may write a plain list of ids
-    or ``[{id: ...}]`` rows; both are converted so /model doesn't show the provider with (0) models.
+    The legacy in-mapping ``__discovered_model_catalog__`` sentinel is accepted and stripped; a
+    plain list of ids or ``[{id: ...}]`` rows is converted so /model doesn't show (0) models.
     """
     discovered = False
     if isinstance(models, dict) and models:
@@ -187,13 +181,11 @@ def _normalize_custom_provider_entry(
     """Return a runtime-compatible custom provider entry or ``None``."""
     if not isinstance(entry, dict):
         return None
-
     # Shallow-copy before alias normalization writes into the entry: callers pass live sub-dicts
     # from load_config_readonly()'s shared cache; mutating those violates its no-mutation contract
     # and leaks alias keys back into config.yaml on a later save_config(load_config()).
     entry = dict(entry)
     provider_key = coerce_provider_id(provider_key)
-
     # api_key_env is a documented snake_case alias for key_env (azure-foundry guide).
     if "api_key_env" in entry and "key_env" not in entry:
         entry["key_env"] = entry["api_key_env"]
@@ -213,15 +205,10 @@ def _normalize_custom_provider_entry(
             provider_key or "?", ", ".join(sorted(unknown)))
 
     base_url = _pick_provider_base_url(entry, provider_key)
-    if not base_url:
-        return None
-
     name = coerce_provider_id(entry.get("name")) or provider_key
-    if not name:
+    if not base_url or not name:
         return None
-
     normalized: Dict[str, Any] = {"name": name, "base_url": base_url}
-
     if provider_key:
         normalized["provider_key"] = provider_key
 
@@ -258,17 +245,13 @@ def _normalize_custom_provider_entry(
             key: value for key, value in capabilities.items()
             if isinstance(key, str) and isinstance(value, bool)})
 
-    context_length = entry.get("context_length")
-    if isinstance(context_length, int) and context_length > 0:
-        normalized["context_length"] = context_length
-
-    rate_limit_delay = entry.get("rate_limit_delay")
-    if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
-        normalized["rate_limit_delay"] = rate_limit_delay
-
-    if isinstance(entry.get("discover_models"), bool):
-        normalized["discover_models"] = entry["discover_models"]
-
+    for field, ok in (
+        ("context_length", lambda v: isinstance(v, int) and v > 0),
+        ("rate_limit_delay", lambda v: isinstance(v, (int, float)) and v >= 0),
+        ("discover_models", lambda v: isinstance(v, bool)),
+    ):
+        if ok(entry.get(field)):
+            normalized[field] = entry[field]
     if isinstance(entry.get("extra_body"), dict):
         normalized["extra_body"] = dict(entry["extra_body"])
 
@@ -322,10 +305,9 @@ def providers_dict_to_custom_providers(providers_dict: Any) -> List[Dict[str, An
 
 def get_compatible_custom_providers(
     config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """Deduplicated list-shaped view over legacy ``custom_providers`` and v12+ ``providers``.
+    """Deduplicated list view over legacy ``custom_providers`` and v12+ ``providers``.
 
-    Runtime and picker flows need one list; the compatibility layer is never materialised back
-    into config.yaml because it duplicates entries in UIs.
+    Never materialised back into config.yaml (it would duplicate entries in UIs).
     """
     from hermes_cli.config import load_config
     if config is None:
@@ -366,10 +348,9 @@ def _entries_for_route(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]],
     config: Optional[Dict[str, Any]]):
-    """Yield custom-provider entries whose normalized route identity equals *base_url*.
+    """Yield entries whose normalized route identity equals *base_url*.
 
-    Loads ``get_compatible_custom_providers(config)`` when *custom_providers* is None (failures →
-    no entries). Yields nothing for an empty *base_url* or non-list input.
+    None *custom_providers* → ``get_compatible_custom_providers(config)`` (failure → none).
     """
     from hermes_cli.config import get_compatible_custom_providers
     if custom_providers is None:
@@ -418,10 +399,7 @@ def _coerce_ssl_verify(value: Any) -> Optional[bool]:
         return value
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in _FALSE_WORDS:
-            return False
-        if lowered in _TRUE_WORDS:
-            return True
+        return False if lowered in _FALSE_WORDS else True if lowered in _TRUE_WORDS else None
     return None
 
 
@@ -470,10 +448,8 @@ def get_custom_provider_extra_headers(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """Return ``extra_headers`` of the first route-matching entry that declares any, else ``{}``.
-
-    SECURITY: values may carry credentials — callers must never log them.
-    """
+    """``extra_headers`` of the first route-matching entry declaring any, else ``{}``.
+    SECURITY: values may carry credentials — callers must never log them."""
     for entry in _entries_for_route(base_url, custom_providers, config):
         headers = normalize_extra_headers(entry.get("extra_headers"))
         if headers:
@@ -486,11 +462,8 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None) -> None:
-    """Merge per-provider ``extra_headers`` onto OpenAI client ``default_headers``.
-
-    Provider-specific headers win over SDK/provider defaults already in ``client_kwargs`` (they
-    are the most specific level). SECURITY: values may carry credentials -- never log them.
-    """
+    """Merge per-provider ``extra_headers`` onto OpenAI client ``default_headers`` (provider wins
+    over SDK defaults, most specific level). SECURITY: values may carry credentials; never log."""
     extra_headers = get_custom_provider_extra_headers(base_url, custom_providers, config)
     if not extra_headers:
         return
@@ -536,11 +509,8 @@ def get_custom_provider_model_capability(
     capability: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None) -> Optional[bool]:
-    """Explicit boolean capability for one custom-provider model, or ``None``.
-
-    Matching is scoped to the normalized route and exact runtime model id so aliases can declare
-    capabilities without changing the id sent upstream.
-    """
+    """Explicit boolean capability for one custom-provider model, or ``None``. Scoped to the
+    normalized route + exact runtime model id so aliases can declare capabilities."""
     from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
     if not model or not base_url or not capability:
         return None
@@ -562,11 +532,8 @@ def get_custom_provider_model_capability(
 
 
 def is_provider_enabled(provider_cfg: Optional[Dict[str, Any]]) -> bool:
-    """Whether a ``providers.<name>`` block is enabled (default True; only explicit false hides it).
-
-    An explicit ``enabled: false`` hides the provider from the model picker, ``/models``, the
-    runtime resolver and doctor/status output.
-    """
+    """Whether a ``providers.<name>`` block is enabled: default True; only an explicit
+    ``enabled: false`` hides it from the picker, ``/models``, runtime resolver and doctor."""
     if not isinstance(provider_cfg, dict):
         return True
     flag = provider_cfg.get("enabled", True)
