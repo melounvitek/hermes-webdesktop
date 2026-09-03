@@ -43,8 +43,7 @@ class ReconcileAction:
 
 
 def _slot_action(
-    profile: str, profile_dir: Path, prior_state: str | None, start: bool,
-) -> ReconcileAction:
+    profile: str, profile_dir: Path, prior_state: str | None, start: bool) -> ReconcileAction:
     return ReconcileAction(profile=profile, prior_state=prior_state,
                            action="started" if start else "registered",
                            prior_exit=_read_prior_exit_label(profile_dir))
@@ -52,8 +51,7 @@ def _slot_action(
 
 def reconcile_profile_gateways(
     *, hermes_home: Path, scandir: Path, dry_run: bool = False,
-    container_argv: Sequence[str] | None = None,
-) -> list[ReconcileAction]:
+    container_argv: Sequence[str] | None = None) -> list[ReconcileAction]:
     """Recreate s6 service registrations for every persistent profile.
 
     Always registers a ``gateway-default`` slot for the root profile (the implicit profile at
@@ -106,8 +104,7 @@ def reconcile_profile_gateways(
 
 
 def _maybe_migrate_legacy_gateway_run_state(
-    hermes_home: Path, *, container_argv: Sequence[str] | None, dry_run: bool
-) -> str | None:
+    hermes_home: Path, *, container_argv: Sequence[str] | None, dry_run: bool) -> str | None:
     """Seed root gateway_state for pre-s6 `gateway run` containers (the tini image let users run
     the gateway as the container command; post-s6 it would register down and never start)."""
     state_file = hermes_home / "gateway_state.json"
@@ -237,8 +234,7 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     import shutil
 
     from hermes_cli.service_manager import (
-        S6ServiceManager, _seed_supervise_skeleton, validate_profile_name,
-    )
+        S6ServiceManager, _seed_supervise_skeleton, validate_profile_name)
 
     validate_profile_name(profile)
     service_dir = scandir / f"gateway-{profile}"

@@ -23,13 +23,11 @@ logger = logging.getLogger(__name__)
 # Prepended to upload-bound content when redaction is enabled so paste reviewers know.
 _REDACTION_BANNER = (
     "[hermes debug share: log content redacted at upload time. "
-    "run with --no-redact to disable]\n"
-)
+    "run with --no-redact to disable]\n")
 _EMAIL_ADDRESS_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    r"(?![A-Za-z0-9._%+-])"
-)
+    r"(?![A-Za-z0-9._%+-])")
 _PASTE_RS_URL = "https://paste.rs/"  # primary; dpaste.com is the fallback
 _DPASTE_COM_URL = "https://dpaste.com/api/"
 _USER_AGENT = "hermes-agent/debug-share"
@@ -126,8 +124,7 @@ _GATEWAY_PRIVACY_NOTICE = (
     "(may contain conversation fragments) to a public paste service. "
     "Full logs are NOT included from the gateway — use `hermes debug share` "
     "from the CLI for full log uploads.\n"
-    "Pastes auto-delete after 6 hours."
-)
+    "Pastes auto-delete after 6 hours.")
 
 
 def _extract_paste_id(url: str) -> Optional[str]:
@@ -192,8 +189,7 @@ def upload_to_pastebin(content: str, expiry_days: int = 7) -> str:
     errors: list[str] = []
     for service, upload in (
         ("paste.rs", lambda: _upload_paste_rs(content)),
-        ("dpaste.com", lambda: _upload_dpaste_com(content, expiry_days=expiry_days)),
-    ):
+        ("dpaste.com", lambda: _upload_dpaste_com(content, expiry_days=expiry_days))):
         try:
             return upload()
         except Exception as exc:
@@ -222,9 +218,7 @@ _CLIENT_SIDE_LOGS = {
     "desktop": (
         "written by Hermes Desktop on the machine running the app, not by this "
         "backend. If the desktop connects to a remote/docker/SSH backend, collect "
-        "it on that client machine"
-    ),
-}
+        "it on that client machine")}
 
 
 def _missing_log_note(log_name: str) -> str:
@@ -258,8 +252,7 @@ def _redact_log_text(text: str) -> str:
 
 
 def _read_tail_bytes(
-    log_path: Path, size: int, max_bytes: int, tail_lines: int,
-) -> tuple[bytes, bool]:
+    log_path: Path, size: int, max_bytes: int, tail_lines: int) -> tuple[bytes, bool]:
     """Whole file, or (oversized) a backwards read holding ``max_bytes`` for the full upload AND
     enough newlines for the summary tail from the same snapshot → (raw, truncated)."""
     with open(log_path, "rb") as f:
@@ -331,13 +324,11 @@ def _tail_budget(name: str, log_lines: int) -> int:
 
 
 def _capture_default_log_snapshots(
-    log_lines: int, *, redact: bool = True,
-) -> dict[str, LogSnapshot]:
+    log_lines: int, *, redact: bool = True) -> dict[str, LogSnapshot]:
     """Capture all logs used by debug-share exactly once."""
     return {
         name: _capture_log_snapshot(name, tail_lines=_tail_budget(name, log_lines), redact=redact)
-        for name in _REPORT_LOGS
-    }
+        for name in _REPORT_LOGS}
 
 
 def _capture_dump() -> str:
@@ -351,8 +342,7 @@ def _capture_dump() -> str:
 
 def collect_debug_report(
     *, log_lines: int = 200, dump_text: str = "",
-    log_snapshots: Optional[dict[str, LogSnapshot]] = None,
-) -> str:
+    log_snapshots: Optional[dict[str, LogSnapshot]] = None) -> str:
     """Build the summary debug report (system dump + log tails) as upload-ready text.
 
     ``dump_text`` is pre-captured dump output; when empty, ``hermes dump`` is run internally.
@@ -420,8 +410,7 @@ class DebugShareResult:
 
 
 def build_debug_share(
-    *, log_lines: int = 200, expiry: int = 7, redact: bool = True,
-) -> DebugShareResult:
+    *, log_lines: int = 200, expiry: int = 7, redact: bool = True) -> DebugShareResult:
     """Collect the debug report + full logs, upload each, return the URLs.
 
     Shared by ``hermes debug share`` and the dashboard ``POST /api/ops/debug-share``. Blocking

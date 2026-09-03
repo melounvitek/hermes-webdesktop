@@ -15,8 +15,7 @@ from hermes_cli.colors import Colors, color
 # Re-exported: ``tools/terminal_tool.py`` imports it from here to hard-block the same
 # gateway-lifecycle commands at execution time when ``_HERMES_GATEWAY=1``.
 from cron.lifecycle_guard import (  # noqa: F401
-    contains_gateway_lifecycle_command as _contains_gateway_lifecycle_command,
-)
+    contains_gateway_lifecycle_command as _contains_gateway_lifecycle_command)
 
 
 def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
@@ -62,8 +61,7 @@ def _builtin_gateway_liveness() -> Optional[bool]:
             if is_gateway_runtime_lock_active():
                 return True
         from hermes_cli.gateway import (
-            find_gateway_pids, named_profile_served_by_running_multiplexer,
-        )
+            find_gateway_pids, named_profile_served_by_running_multiplexer)
         # Satellite profile: no local gateway.pid, but the default multiplexer ticks its store.
         return bool(find_gateway_pids()) or named_profile_served_by_running_multiplexer()
     except Exception:
@@ -196,8 +194,7 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
          if job.get("last_status") else ""),
         ("Dispatch", _dispatch_display(job.get("last_dispatch"))),
         ("Execution", f"{latest_execution.get('status', '?')}  {latest_execution.get('id', '?')}"
-         if latest_execution else ""),
-    ]
+         if latest_execution else "")]
     return [
         ("Name", job.get("name", "(unnamed)")),
         ("Schedule", job.get("schedule_display", job.get("schedule", {}).get("value", "?"))),
@@ -323,8 +320,7 @@ def _print_ticker_health(pids: list) -> None:
     """
     from cron.jobs import (
         get_ticker_heartbeat_age, get_ticker_last_error, get_ticker_success_age,
-        TICKER_INTERVAL_SECONDS,
-    )
+        TICKER_INTERVAL_SECONDS)
     from cron.scheduler import _is_fd_exhaustion_text as _cron_is_fd_exhaustion_text
     STALE_AFTER = TICKER_INTERVAL_SECONDS * 3 + 20  # ~3 missed iterations + slack (200s @ 60s)
     hb_age = get_ticker_heartbeat_age()
@@ -540,8 +536,7 @@ _JOB_DETAIL_LINES = (
     ("monitor_url", "  Monitor: {} (agent runs only on output change)"),
     ("no_agent", "  Mode: no-agent (script stdout delivered directly)"),
     ("continuity", "  Continuity: on (each run sees the previous run's output)"),
-    ("workdir", "  Workdir: {}"),
-)
+    ("workdir", "  Workdir: {}"))
 
 
 def _print_job_details(job_data: Dict[str, Any]) -> None:
@@ -558,8 +553,7 @@ def cron_create(args):
         action="create", schedule=args.schedule, prompt=args.prompt,
         skill=getattr(args, "skill", None),
         skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
-        no_agent=getattr(args, "no_agent", False) or None, **_job_api_kwargs(args),
-    )
+        no_agent=getattr(args, "no_agent", False) or None, **_job_api_kwargs(args))
     if not result.get("success"):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
@@ -739,8 +733,7 @@ _CRON_SUBCOMMANDS = {
     "pause": lambda a: _job_action("pause", a.job_id, "Paused"),
     "resume": lambda a: cron_resume(a),
     "run": lambda a: _job_action("run", a.job_id, "Triggered"),
-    "remove": lambda a: _job_action("remove", a.job_id, "Removed"),
-}
+    "remove": lambda a: _job_action("remove", a.job_id, "Removed")}
 _CRON_SUBCOMMANDS["history"] = _CRON_SUBCOMMANDS["runs"]
 _CRON_SUBCOMMANDS["add"] = _CRON_SUBCOMMANDS["create"]
 _CRON_SUBCOMMANDS["rm"] = _CRON_SUBCOMMANDS["delete"] = _CRON_SUBCOMMANDS["remove"]

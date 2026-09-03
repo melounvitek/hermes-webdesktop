@@ -15,8 +15,7 @@ from pathlib import Path
 _DASHBOARD_PATTERNS = tuple(
     f"{launcher} {cmd}"
     for cmd in ("dashboard", "serve")
-    for launcher in ("hermes", "hermes_cli.main", "hermes_cli/main.py")
-)
+    for launcher in ("hermes", "hermes_cli.main", "hermes_cli/main.py"))
 _PS_RUN_KWARGS = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -47,8 +46,7 @@ def _iter_process_table() -> list[tuple[int, str]]:
         from hermes_cli._subprocess_compat import bounded_probe_run
         result = bounded_probe_run(
             ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
-            timeout=10, errors="ignore",
-        )
+            timeout=10, errors="ignore")
         if result is None or result.returncode != 0 or result.stdout is None:
             return rows
         current_cmd = ""
@@ -344,8 +342,7 @@ def _kill_stale_dashboard_processes(
 
 def _restart_killed_backends(
     killed: list[int], pid_service: dict[int, str | None], pid_cgroup: dict[int, str | None],
-    pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None],
-) -> list[int]:
+    pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None]) -> list[int]:
     """Update path: restart systemd units, respawn manual argv (detached, headless, logged to
     logs/dashboard-restart.log; one per profile, no ``--port 0``). Returns PIDs not brought back."""
     unrecovered: list[int] = []
@@ -387,8 +384,7 @@ def _norm_exe(path) -> str:
 
 
 def _detect_concurrent_hermes_instances(
-    scripts_dir: Path, *, exclude_pid: int | None = None
-) -> list[tuple[int, str]]:
+    scripts_dir: Path, *, exclude_pid: int | None = None) -> list[tuple[int, str]]:
     """``(pid, name)`` of other live processes whose .exe is one of our entry-point shims.
 
     Windows blocks DELETE/REPLACE on a running .exe, so a Desktop-spawned ``hermes.EXE`` makes
@@ -485,8 +481,7 @@ def _valid_lockfile_payload(parsed: object, ownership_id: str) -> bool:
         or parsed.get("protocolVersion") != _PROTOCOL_VERSION
         or parsed.get("ownershipId") != ownership_id
         or not _is_hex(parsed.get("spawnNonce"), 16)
-        or not _is_hex(parsed.get("tokenFingerprint"), 32)
-    ):
+        or not _is_hex(parsed.get("tokenFingerprint"), 32)):
         return False
     pid, port = parsed.get("pid"), parsed.get("port")
     if not (isinstance(pid, int) and 0 < pid <= 4194304 and isinstance(port, int)
@@ -541,8 +536,7 @@ def _process_age_seconds(pid: int) -> float:
 
 def _reap_orphaned_desktop_local_serves(
     *, reason: str = "orphaned desktop-local hermes serve", signal_term=None, signal_kill=None,
-    sleep_fn=None, lock_owned_pids_fn=None, process_age_seconds_fn=None,
-) -> dict[str, list]:
+    sleep_fn=None, lock_owned_pids_fn=None, process_age_seconds_fn=None) -> dict[str, list]:
     """Kill leftover Desktop-local ``hermes serve`` backends with no parent. Never raises.
 
     When Electron dies uncleanly its ``serve --host 127.0.0.1 --port 0`` children are

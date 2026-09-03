@@ -42,8 +42,7 @@ def validate_copilot_token(token: str) -> tuple[bool, str]:
             "Copilot API. Use one of:\n"
             "  → `copilot login` or `hermes model` to authenticate via OAuth\n"
             "  → A fine-grained PAT (github_pat_*) with Copilot Requests permission\n"
-            "  → `gh auth login` with the default device code flow (produces gho_* tokens)"
-        )
+            "  → `gh auth login` with the default device code flow (produces gho_* tokens)")
     return True, "OK"
 
 
@@ -84,8 +83,7 @@ def _gh_cli_candidates() -> list[str]:
     candidates: list[str] = [c for c in (shutil.which("gh"),) if c]
     candidates += [
         c for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", str(Path.home() / ".local/bin/gh"))
-        if c not in candidates and os.path.isfile(c) and os.access(c, os.X_OK)
-    ]
+        if c not in candidates and os.path.isfile(c) and os.access(c, os.X_OK)]
     return candidates
 
 
@@ -146,15 +144,13 @@ def _post_form(url: str, fields: dict, timeout: float) -> dict:
     req = urllib.request.Request(
         url, data=urllib.parse.urlencode(fields).encode(),
         headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0",
-                 "Content-Type": "application/x-www-form-urlencoded"},
-    )
+                 "Content-Type": "application/x-www-form-urlencoded"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
 
 
 def copilot_device_code_login(
-    *, host: str = "github.com", timeout_seconds: float = 300,
-) -> Optional[str]:
+    *, host: str = "github.com", timeout_seconds: float = 300) -> Optional[str]:
     """Run the GitHub OAuth device code flow for Copilot."""
     domain = host.rstrip("/")
     try:
@@ -334,8 +330,7 @@ def _save_jwt_to_disk(fp: str, api_token: str, expires_at: float, base_url: Opti
         now = time.time()
         kept = {
             k: v for k, v in (store or {}).items()
-            if isinstance(v, dict) and float(v.get("expires_at", 0) or 0) > now
-        }
+            if isinstance(v, dict) and float(v.get("expires_at", 0) or 0) > now}
         kept[fp] = {"api_token": api_token, "expires_at": expires_at, "base_url": base_url}
         _write_jwt_store(path, kept)
 
@@ -417,8 +412,7 @@ def _cache_entry_fresh(cached) -> bool:
 
 
 def exchange_copilot_token(
-    raw_token: str, *, timeout: float = 10.0,
-) -> tuple[str, float, Optional[str]]:
+    raw_token: str, *, timeout: float = 10.0) -> tuple[str, float, Optional[str]]:
     """Exchange a raw GitHub token for a Copilot API token → (token, expires_at, base_url).
 
     The token is a semicolon-separated string (not a JWT) used as a Bearer token. ``base_url``
@@ -435,8 +429,7 @@ def exchange_copilot_token(
 
 
 def _exchange_copilot_token_locked(
-    raw_token: str, fp: str, *, timeout: float,
-) -> tuple[str, float, Optional[str]]:
+    raw_token: str, fp: str, *, timeout: float) -> tuple[str, float, Optional[str]]:
     # Re-check in-process under the lock (a queued-behind caller may have just exchanged), then
     # on-disk: a fresh process may hold a still-valid persisted JWT, avoiding a network
     # round-trip precisely when the network is most likely flaky.
@@ -453,8 +446,7 @@ def _exchange_copilot_token_locked(
     req = urllib.request.Request(
         _TOKEN_EXCHANGE_URL, method="GET",
         headers={"Authorization": f"token {raw_token}", "User-Agent": _EXCHANGE_USER_AGENT,
-                 "Accept": "application/json", "Editor-Version": _EDITOR_VERSION},
-    )
+                 "Accept": "application/json", "Editor-Version": _EDITOR_VERSION})
     data = _fetch_exchange_with_retry(req, timeout, fp)
     api_token = data.get("token", "")
     if not api_token:
@@ -496,8 +488,7 @@ def get_copilot_api_token(raw_token: str) -> tuple[str, Optional[str]]:
 
 
 def copilot_request_headers(
-    *, is_agent_turn: bool = True, is_vision: bool = False,
-) -> dict[str, str]:
+    *, is_agent_turn: bool = True, is_vision: bool = False) -> dict[str, str]:
     """Build the standard headers for Copilot API requests."""
     headers: dict[str, str] = {"Editor-Version": _EDITOR_VERSION, "User-Agent": "HermesAgent/1.0",
                                "Copilot-Integration-Id": "vscode-chat",

@@ -26,8 +26,7 @@ _NAME_ADJECTIVES = (
     "hidden", "jolly", "keen", "lively", "lucid", "lunar", "mellow", "merry",
     "mighty", "nimble", "noble", "polished", "quiet", "quirky", "rapid",
     "serene", "sharp", "shiny", "silent", "snappy", "solar", "spry", "stellar",
-    "sunny", "swift", "tidy", "vivid", "vibrant", "witty", "zesty",
-)
+    "sunny", "swift", "tidy", "vivid", "vibrant", "witty", "zesty")
 
 _NAME_NOUNS = (
     "albatross", "antelope", "badger", "beacon", "comet", "condor", "cypress",
@@ -35,8 +34,7 @@ _NAME_NOUNS = (
     "heron", "ibex", "jaguar", "kestrel", "lantern", "lynx", "meadow", "nebula",
     "ocelot", "orchid", "otter", "panther", "petrel", "quasar", "raven", "reef",
     "sparrow", "summit", "tundra", "vortex", "walrus", "willow", "yarrow",
-    "kepler", "tesla", "curie", "hopper", "turing", "lovelace",
-)
+    "kepler", "tesla", "curie", "hopper", "turing", "lovelace")
 
 
 def _generate_dashboard_name() -> str:
@@ -59,8 +57,7 @@ def _resolve_portal_base_url(override: Optional[str] = None) -> str:
 
 def _register_self_hosted_client(
     *, access_token: str, portal_base_url: str, name: Optional[str], custom_redirect_uri: Optional[str],
-    existing_client_id: Optional[str] = None, timeout: float = 15.0,
-) -> dict:
+    existing_client_id: Optional[str] = None, timeout: float = 15.0) -> dict:
     """POST to the portal's self-hosted-client endpoint and return the JSON body.
 
     ``existing_client_id`` makes the portal update that record in place (idempotent re-runs;
@@ -74,8 +71,7 @@ def _register_self_hosted_client(
         f"{portal_base_url.rstrip('/')}/api/oauth/self-hosted-client",
         data=json.dumps({k: v for k, v in fields if v}).encode("utf-8"), method="POST",
         headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json",
-                 "Accept": "application/json"},
-    )
+                 "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
@@ -102,8 +98,7 @@ def _register_self_hosted_client(
 
 def _print_post_register_hint(
     *, client_id: str, portal_base_url: str, custom_redirect_uri: Optional[str],
-    wrote_portal_url: bool, public_url: str = "",
-) -> None:
+    wrote_portal_url: bool, public_url: str = "") -> None:
     """Print the success summary + the gate-engagement caveat."""
     from hermes_cli.config import get_env_path
     print(f"\n  Wrote to {get_env_path()}:\n    HERMES_DASHBOARD_OAUTH_CLIENT_ID={client_id}")
@@ -114,8 +109,7 @@ def _print_post_register_hint(
     print(
         "\n  Heads up — Nous login only *engages* on a non-loopback bind. A plain\n"
         "  `hermes dashboard` (localhost) leaves the gate off and serves locally\n"
-        "  without auth, which is fine for your own machine.\n"
-    )
+        "  without auth, which is fine for your own machine.\n")
     if custom_redirect_uri:
         try:  # example host matches the one the user registered
             host = urlparse(custom_redirect_uri).hostname or "your-host"
@@ -124,18 +118,15 @@ def _print_post_register_hint(
         print(
             "  To require Nous login on your registered host, run the dashboard\n"
             f"  bound publicly (it must be reachable at https://{host}) and log in\n"
-            "  at its /login page."
-        )
+            "  at its /login page.")
     else:
         print(
             "  To require Nous login (e.g. exposing on your LAN or a public host):\n"
             "    hermes dashboard --host 0.0.0.0\n"
-            "  …then log in at the dashboard's /login page."
-        )
+            "  …then log in at the dashboard's /login page.")
     print(
         "\n  If the dashboard is already running, restart it to pick up the new env.\n"
-        f"  Manage or revoke this dashboard at {portal_base_url}/local-dashboards"
-    )
+        f"  Manage or revoke this dashboard at {portal_base_url}/local-dashboards")
 
 
 def _env_value(key: str) -> Optional[str]:
@@ -202,8 +193,7 @@ def cmd_dashboard_register(args) -> None:
     try:
         result = _register_self_hosted_client(
             access_token=access_token, portal_base_url=portal_base_url, name=name,
-            custom_redirect_uri=custom_redirect_uri, existing_client_id=existing_client_id,
-        )
+            custom_redirect_uri=custom_redirect_uri, existing_client_id=existing_client_id)
     except RuntimeError as exc:
         print(f"✗ Registration failed: {exc}")
         sys.exit(1)
@@ -224,17 +214,14 @@ def cmd_dashboard_register(args) -> None:
     should_write_portal = (
         existing_portal != portal_base_url
         if custom_portal_supplied
-        else not existing_portal and portal_base_url.rstrip("/") != _DEFAULT_PORTAL
-    )
+        else not existing_portal and portal_base_url.rstrip("/") != _DEFAULT_PORTAL)
     wrote_portal_url = should_write_portal and _save_env_quietly("HERMES_DASHBOARD_PORTAL_URL", portal_base_url)
     # Public URL from --redirect-uri: written when supplied and different; never localhost-only.
     public_url = _public_url_from_redirect(custom_redirect_uri)
     wrote_public_url = bool(
         public_url
         and _env_value("HERMES_DASHBOARD_PUBLIC_URL") != public_url
-        and _save_env_quietly("HERMES_DASHBOARD_PUBLIC_URL", public_url)
-    )
+        and _save_env_quietly("HERMES_DASHBOARD_PUBLIC_URL", public_url))
     _print_post_register_hint(
         client_id=client_id, portal_base_url=portal_base_url, custom_redirect_uri=custom_redirect_uri,
-        wrote_portal_url=wrote_portal_url, public_url=public_url if wrote_public_url else "",
-    )
+        wrote_portal_url=wrote_portal_url, public_url=public_url if wrote_public_url else "")
