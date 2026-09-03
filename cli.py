@@ -175,12 +175,7 @@ def format_token_count_compact(*args, **kwargs):
     for threshold, suffix in units:
         if abs_value >= threshold:
             scaled = abs_value / threshold
-            if scaled < 10:
-                text = f"{scaled:.2f}"
-            elif scaled < 100:
-                text = f"{scaled:.1f}"
-            else:
-                text = f"{scaled:.0f}"
+            text = f"{scaled:.{2 if scaled < 10 else 1 if scaled < 100 else 0}f}"
             if "." in text:
                 text = text.rstrip("0").rstrip(".")
             return f"{sign}{text}{suffix}"
@@ -209,13 +204,7 @@ _project_env = Path(__file__).parent / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
 
 
-_REASONING_TAGS = (
-    "REASONING_SCRATCHPAD",
-    "think",
-    "thinking",
-    "reasoning",
-    "thought",
-)
+_REASONING_TAGS = ("REASONING_SCRATCHPAD", "think", "thinking", "reasoning", "thought")
 _TOOL_CALL_TAGS = ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls")
 
 
@@ -237,17 +226,11 @@ def _strip_reasoning_tags(text: str) -> str:
         cleaned = re.sub(rf"<{tc_tag}\b[^>]*>.*?</{tc_tag}>\s*", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     # <function name="..."> — boundary + attribute gated to avoid prose false positives.
     cleaned = re.sub(
-        r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*'
-        r'<function\b[^>]*\bname\s*=[^>]*>'
-        r'(?:(?:(?!</function>).)*)</function>\s*',
-        '',
-        cleaned,
-        flags=re.DOTALL | re.IGNORECASE,
+        r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*<function\b[^>]*\bname\s*=[^>]*>(?:(?:(?!</function>).)*)</function>\s*',
+        '', cleaned, flags=re.DOTALL | re.IGNORECASE,
     )
     cleaned = re.sub(
-        r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*',
-        '',
-        cleaned,
+        r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*', '', cleaned,
         flags=re.IGNORECASE,
     )
     return cleaned.strip()
@@ -259,11 +242,7 @@ def _assistant_content_as_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
+        parts = [str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") == "text"]
         return "\n".join(p for p in parts if p)
     return str(content)
 
@@ -304,16 +283,12 @@ def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
 def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
     """Resolve the prefill file path: env, then top-level ``prefill_messages_file``,
     then the legacy ``agent.prefill_messages_file``."""
-    env_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "").strip()
-    if env_path:
-        return env_path
-    top_level = str(config.get("prefill_messages_file", "") or "").strip()
-    if top_level:
-        return top_level
     agent_cfg = config.get("agent", {})
-    if isinstance(agent_cfg, dict):
-        return str(agent_cfg.get("prefill_messages_file", "") or "").strip()
-    return ""
+    return (
+        os.getenv("HERMES_PREFILL_MESSAGES_FILE", "").strip()
+        or str(config.get("prefill_messages_file", "") or "").strip()
+        or (str(agent_cfg.get("prefill_messages_file", "") or "").strip() if isinstance(agent_cfg, dict) else "")
+    )
 
 
 def _parse_reasoning_config(effort) -> dict | None:
@@ -551,26 +526,21 @@ def _merge_file_config(defaults: Dict[str, Any], file_config: Dict[str, Any]) ->
                 defaults["model"]["default"] = file_config["model"]["model"]
 
     # Deep-merge dict sections, overwrite scalars; a None section keeps the defaults.
-    for key in defaults:
-        if key == "model" or key not in file_config:
+    for key, value in file_config.items():
+        if key == "model":
             continue
-        if isinstance(defaults[key], dict) and file_config[key] is None:
-            continue
-        if isinstance(defaults[key], dict) and isinstance(file_config[key], dict):
-            defaults[key].update(file_config[key])
+        if isinstance(defaults.get(key), dict):
+            if isinstance(value, dict):
+                defaults[key].update(value)
+            elif value is not None:
+                defaults[key] = value
         else:
-            defaults[key] = file_config[key]
-
-    # Carry over keys not in defaults (platform_toolsets, provider_routing, memory, ...)
-    for key in file_config:
-        if key not in defaults and key != "model":
-            defaults[key] = file_config[key]
+            defaults[key] = value  # incl. keys not in defaults (platform_toolsets, memory, ...)
 
     # Legacy root-level max_turns -> agent.max_turns whenever the nested key is missing.
     agent_file_config = file_config.get("agent")
     if "max_turns" in file_config and not (
-        isinstance(agent_file_config, dict)
-        and agent_file_config.get("max_turns") is not None
+        isinstance(agent_file_config, dict) and agent_file_config.get("max_turns") is not None
     ):
         defaults["agent"]["max_turns"] = file_config["max_turns"]
 
@@ -582,14 +552,9 @@ def load_cli_config() -> Dict[str, Any]:
     (``hermes chat --ignore-user-config``) skips the user config entirely — only
     defaults plus the project ``cli-config.yaml`` apply; ``.env`` credentials still load.
     """
-    user_config_path = _hermes_home / 'config.yaml'
-    project_config_path = Path(__file__).parent / 'cli-config.yaml'
-    ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
-
-    if user_config_path.exists() and not ignore_user_config:
-        config_path = user_config_path
-    else:
-        config_path = project_config_path
+    config_path = _hermes_home / 'config.yaml'
+    if not config_path.exists() or os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1":
+        config_path = Path(__file__).parent / 'cli-config.yaml'
 
     defaults = _cli_config_defaults()
 
@@ -791,15 +756,11 @@ def _prepare_deferred_agent_startup() -> None:
         logger.debug("MCP tool discovery failed at deferred CLI startup", exc_info=True)
     try:
         from agent.shell_hooks import register_from_config
+        from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
         from hermes_cli.config import load_config
 
         _hooks_cfg = load_config()
         register_from_config(_hooks_cfg, accept_hooks=_accept_hooks)
-
-        from agent.outbound_webhooks import (
-            register_from_config as register_outbound_webhooks,
-        )
-
         register_outbound_webhooks(_hooks_cfg)
     except Exception:
         logger.debug("shell-hook registration failed at deferred CLI startup", exc_info=True)
@@ -1284,27 +1245,27 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         from hermes_constants import get_hermes_home as _get_hermes_home
         _hermes_home_maint = _get_hermes_home()
 
-        # One-time prune of empty TUI ghost sessions.
-        try:
-            if not session_db.get_meta("ghost_session_prune_v1"):
-                pruned = session_db.prune_empty_ghost_sessions(
-                    sessions_dir=_hermes_home_maint / "sessions"
-                )
-                session_db.set_meta("ghost_session_prune_v1", "1")
-                if pruned:
-                    logger.info("Pruned %d empty TUI ghost sessions", pruned)
-        except Exception as _prune_exc:
-            logger.debug("Ghost session prune skipped: %s", _prune_exc)
-
-        # One-time finalize of orphaned compression continuations.
-        try:
-            if not session_db.get_meta("orphaned_compression_finalize_v1"):
-                finalized = session_db.finalize_orphaned_compression_sessions()
-                session_db.set_meta("orphaned_compression_finalize_v1", "1")
-                if finalized:
-                    logger.info("Finalized %d orphaned compression sessions", finalized)
-        except Exception as _finalize_exc:
-            logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
+        # One-time repairs, each latched in state_meta once it has run.
+        for meta_key, repair, done_msg, skip_msg in (
+            (
+                "ghost_session_prune_v1",
+                lambda: session_db.prune_empty_ghost_sessions(sessions_dir=_hermes_home_maint / "sessions"),
+                "Pruned %d empty TUI ghost sessions", "Ghost session prune skipped: %s",
+            ),
+            (
+                "orphaned_compression_finalize_v1",
+                session_db.finalize_orphaned_compression_sessions,
+                "Finalized %d orphaned compression sessions", "Orphan compression finalize skipped: %s",
+            ),
+        ):
+            try:
+                if not session_db.get_meta(meta_key):
+                    count = repair()
+                    session_db.set_meta(meta_key, "1")
+                    if count:
+                        logger.info(done_msg, count)
+            except Exception as _exc:
+                logger.debug(skip_msg, _exc)
 
         cfg = (_load_full_config().get("sessions") or {})
 
@@ -2052,9 +2013,7 @@ def _split_path_input(raw: str) -> tuple[str, str]:
                 pos += 2
                 continue
             if ch == quote:
-                token = raw[1:pos]
-                remainder = raw[pos + 1 :].strip()
-                return token, remainder
+                return raw[1:pos], raw[pos + 1 :].strip()
             pos += 1
         return raw[1:], ""
 
@@ -2068,9 +2027,7 @@ def _split_path_input(raw: str) -> tuple[str, str]:
         else:
             pos += 1
 
-    token = raw[:pos].replace('\\ ', ' ')
-    remainder = raw[pos:].strip()
-    return token, remainder
+    return raw[:pos].replace('\\ ', ' '), raw[pos:].strip()
 
 
 def _resolve_attachment_path(raw_path: str) -> Path | None:
@@ -2098,15 +2055,9 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
                 expanded = unquote(parsed.path or "")
                 if parsed.netloc and os.name == "nt":
                     expanded = f"//{parsed.netloc}{expanded}"
-                elif (
-                    os.name == "nt"
-                    and len(expanded) >= 3
-                    and expanded[0] == "/"
-                    and expanded[1].isalpha()
-                    and expanded[2] == ":"
-                ):
-                    # file:///C:/... parses to path "/C:/..." — drop the
-                    # leading slash so it resolves as a drive-letter path.
+                elif os.name == "nt" and len(expanded) >= 3 and expanded[0] == "/" and expanded[1].isalpha() and expanded[2] == ":":
+                    # file:///C:/... parses to path "/C:/..." — drop the leading slash
+                    # so it resolves as a drive-letter path.
                     expanded = expanded[1:]
         except Exception:
             expanded = token
@@ -2170,13 +2121,10 @@ def _detect_file_drop(user_input: str) -> "dict | None":
 
     first_token, remainder = _split_path_input(stripped)
     drop_path = _resolve_attachment_path(first_token)
-    if drop_path is None and " " in stripped and stripped[0] not in {"'", '"'}:
-        space_positions = [idx for idx, ch in enumerate(stripped) if ch == " "]
-        for pos in reversed(space_positions):
-            candidate = stripped[:pos].rstrip()
-            resolved = _resolve_attachment_path(candidate)
-            if resolved is not None:
-                drop_path = resolved
+    if drop_path is None and " " in stripped and not quoted:
+        for pos in reversed([idx for idx, ch in enumerate(stripped) if ch == " "]):
+            drop_path = _resolve_attachment_path(stripped[:pos].rstrip())
+            if drop_path is not None:
                 remainder = stripped[pos + 1 :].strip()
                 break
     if drop_path is None:
@@ -2219,20 +2167,8 @@ _strip_leaked_bracketed_paste_wrappers = _lazy_shim(
 
 
 def _hermes_call_output_screen_diff(
-    orig_osd,
-    app,
-    output,
-    screen,
-    current_pos,
-    color_depth,
-    previous_screen,
-    last_style,
-    is_done,
-    full_screen,
-    attrs_for_style_string,
-    style_string_has_style,
-    size,
-    previous_width,
+    orig_osd, app, output, screen, current_pos, color_depth, previous_screen, last_style, is_done, full_screen,
+    attrs_for_style_string, style_string_has_style, size, previous_width,
 ):
     """Call prompt_toolkit ``_output_screen_diff`` with Hermes resize guards.
 
@@ -2248,23 +2184,14 @@ def _hermes_call_output_screen_diff(
     except Exception:
         pass
 
+    common = (app, output, screen, current_pos, color_depth)
+    tail = (is_done, full_screen, attrs_for_style_string, style_string_has_style, size)
     try:
-        return orig_osd(
-            app, output, screen, current_pos, color_depth,
-            previous_screen, last_style, is_done, full_screen,
-            attrs_for_style_string, style_string_has_style,
-            size, previous_width,
-        )
+        return orig_osd(*common, previous_screen, last_style, *tail, previous_width)
     except (AttributeError, TypeError):
-        # Corrupt previous_screen / row cells after client reattach.
-        return orig_osd(
-            app, output, screen, current_pos, color_depth,
-            None,  # previous_screen → first-paint erase path
-            None,  # last_style
-            is_done, full_screen,
-            attrs_for_style_string, style_string_has_style,
-            size, 0,  # previous_width → treat as changed
-        )
+        # Corrupt previous_screen / row cells after client reattach: previous_screen=None
+        # takes the first-paint erase path, previous_width=0 treats the width as changed.
+        return orig_osd(*common, None, None, *tail, 0)
 
 
 def _apply_bracketed_paste_timeout_patch() -> None:
@@ -2294,9 +2221,7 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                 if end_mark in self_parser._paste_buffer:
                     end_index = self_parser._paste_buffer.index(end_mark)
                     paste_content = self_parser._paste_buffer[:end_index]
-                    self_parser.feed_key_callback(
-                        _PtKeyPress(_PtKeys.BracketedPaste, paste_content)
-                    )
+                    self_parser.feed_key_callback(_PtKeyPress(_PtKeys.BracketedPaste, paste_content))
                     self_parser._in_bracketed_paste = False
                     remaining = self_parser._paste_buffer[end_index + len(end_mark):]
                     self_parser._paste_buffer = ""
@@ -2314,15 +2239,12 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                         self_parser._paste_buffer = ""
                         self_parser._hermes_bp_start = None
                         if paste_content:
-                            self_parser.feed_key_callback(
-                                _PtKeyPress(_PtKeys.BracketedPaste, paste_content)
-                            )
+                            self_parser.feed_key_callback(_PtKeyPress(_PtKeys.BracketedPaste, paste_content))
                             logger.warning(
                                 "Bracketed-paste timeout (%.1fs) — flushed %d bytes "
                                 "without end mark. Terminal may have dropped ESC[201~ "
                                 "(see #16263).",
-                                now - bp_start,
-                                len(paste_content),
+                                now - bp_start, len(paste_content),
                             )
             else:
                 # Re-inline the normal feed path: calling the original would
@@ -2381,12 +2303,8 @@ def _is_ghostty_terminal(env: Optional[Mapping[str, str]] = None) -> bool:
     correct. Matches exactly the two conditions that admit Ghostty through
     ``_terminal_supports_extended_enter_keys``.
     """
-    if env is None:
-        env = os.environ
-    return (
-        (env.get("TERM_PROGRAM") or "").strip() == "ghostty"
-        or (env.get("TERM") or "").strip().lower() == "xterm-ghostty"
-    )
+    env = os.environ if env is None else env
+    return (env.get("TERM_PROGRAM") or "").strip() == "ghostty" or (env.get("TERM") or "").strip().lower() == "xterm-ghostty"
 
 
 def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -2398,19 +2316,16 @@ def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = No
     mode. Keep this allowlist aligned with the Ink TUI, which enables the same
     modes for these terminals.
     """
-    if env is None:
-        env = os.environ
+    env = os.environ if env is None else env
     term_program = (env.get("TERM_PROGRAM") or "").strip()
     term = (env.get("TERM") or "").strip().lower()
-    if env.get("WT_SESSION"):
-        return True
-    if term_program in {"iTerm.app", "WezTerm", "ghostty", "vscode"}:
-        return True
-    if env.get("KITTY_WINDOW_ID") or "kitty" in term:
-        return True
-    if term == "xterm-ghostty":
-        return True
-    return term.startswith("tmux") or term_program.lower() == "tmux"
+    return bool(
+        env.get("WT_SESSION")
+        or term_program in {"iTerm.app", "WezTerm", "ghostty", "vscode"}
+        or env.get("KITTY_WINDOW_ID") or "kitty" in term
+        or term == "xterm-ghostty"
+        or term.startswith("tmux") or term_program.lower() == "tmux"
+    )
 
 
 def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = None) -> bool:
@@ -2478,14 +2393,13 @@ def _preserve_ctrl_enter_newline() -> bool:
     display.cli_multiline_shortcuts is disabled, so that legacy opt-out survives.
     """
     env = os.environ
-    if sys.platform == "win32":
-        return True
-    if any(env.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "WT_SESSION",
-                                "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR")):
-        return True
-    if env.get("TERM", "").lower() == "xterm-ghostty" or env.get("TERM_PROGRAM", "").lower() == "ghostty":
-        return True
-    if "microsoft" in env.get("WSL_DISTRO_NAME", "").lower():
+    if (
+        sys.platform == "win32"
+        or any(env.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "WT_SESSION",
+                                    "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR"))
+        or env.get("TERM", "").lower() == "xterm-ghostty" or env.get("TERM_PROGRAM", "").lower() == "ghostty"
+        or "microsoft" in env.get("WSL_DISTRO_NAME", "").lower()
+    ):
         return True
     # WSL detection — env vars can be scrubbed under sudo, also peek /proc.
     for p in ("/proc/version", "/proc/sys/kernel/osrelease"):
@@ -2498,12 +2412,7 @@ def _preserve_ctrl_enter_newline() -> bool:
     return False
 
 
-def _bind_prompt_submit_keys(
-    kb,
-    handler,
-    *,
-    multiline_shortcuts_enabled: Optional[bool] = None,
-) -> None:
+def _bind_prompt_submit_keys(kb, handler, *, multiline_shortcuts_enabled: Optional[bool] = None) -> None:
     """Bind terminal Enter forms to the submit handler.
 
     Enter is always submit; c-j (Ctrl+J/LF) is left for the newline handler unless
@@ -2514,11 +2423,7 @@ def _bind_prompt_submit_keys(
     if multiline_shortcuts_enabled is None:
         multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled()
     kb.add("enter")(handler)
-    if (
-        sys.platform != "win32"
-        and not multiline_shortcuts_enabled
-        and not _preserve_ctrl_enter_newline()
-    ):
+    if sys.platform != "win32" and not multiline_shortcuts_enabled and not _preserve_ctrl_enter_newline():
         kb.add("c-j")(handler)
 
 
@@ -2575,9 +2480,7 @@ def _select_classic_cli_pt_output(stdout):
     is true, otherwise ``None`` so Application keeps prompt_toolkit's default
     output (Windows preserve-default path).
     """
-    if not _terminal_may_leak_cpr():
-        return None
-    return _build_cpr_disabled_output(stdout)
+    return _build_cpr_disabled_output(stdout) if _terminal_may_leak_cpr() else None
 
 
 def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
@@ -2611,11 +2514,7 @@ def _strip_leaked_terminal_responses(text: str) -> str:
 
 
 def _estimate_tui_input_height(
-    lines: list[str] | tuple[str, ...],
-    prompt_text: str,
-    terminal_columns: int,
-    *,
-    max_height: int = 8,
+    lines: list[str] | tuple[str, ...], prompt_text: str, terminal_columns: int, *, max_height: int = 8,
 ) -> int:
     """Estimate classic prompt_toolkit input rows using live terminal cells.
 
@@ -2628,12 +2527,7 @@ def _estimate_tui_input_height(
     except Exception:
         get_cwidth = lambda value: len(value or "")  # type: ignore[assignment]
 
-    try:
-        columns = int(terminal_columns or 0)
-    except (TypeError, ValueError):
-        columns = 0
-
-    columns = max(1, columns)
+    columns = max(1, _int_or(terminal_columns or 0, 0))
     prompt_width = max(0, get_cwidth(prompt_text or ""))
 
     visual_lines = 0
@@ -2693,12 +2587,7 @@ class ChatConsole:
     def __init__(self):
         from io import StringIO
         self._buffer = StringIO()
-        self._inner = Console(
-            file=self._buffer,
-            force_terminal=True,
-            color_system="truecolor",
-            highlight=False,
-        )
+        self._inner = Console(file=self._buffer, force_terminal=True, color_system="truecolor", highlight=False)
 
     def print(self, *args, **kwargs):
         self._buffer.seek(0)
@@ -2706,9 +2595,7 @@ class ChatConsole:
         # Read terminal width at render time so panels adapt to current size
         self._inner.width = shutil.get_terminal_size((80, 24)).columns
         self._inner.print(*args, **kwargs)
-        output = self._buffer.getvalue()
-        output = _OSC_ESCAPE_RE.sub("", output)
-        for line in output.rstrip("\n").split("\n"):
+        for line in _OSC_ESCAPE_RE.sub("", self._buffer.getvalue()).rstrip("\n").split("\n"):
             _cprint(line)
 
     @contextmanager
@@ -2733,18 +2620,18 @@ def _build_compact_banner() -> str:
     except Exception:
         _skin = None
 
-    skin_name = getattr(_skin, "name", "default") if _skin else "default"
-    border_color = _skin.get_color("banner_border", "#FFD700") if _skin else "#FFD700"
-    title_color = _skin.get_color("banner_title", "#FFBF00") if _skin else "#FFBF00"
-    dim_color = _skin.get_color("banner_dim", "#B8860B") if _skin else "#B8860B"
+    def _color(key, default):
+        return _skin.get_color(key, default) if _skin else default
 
-    if skin_name == "default":
-        line1 = "⚕ NOUS HERMES - AI Agent Framework"
+    border_color = _color("banner_border", "#FFD700")
+    title_color = _color("banner_title", "#FFBF00")
+    dim_color = _color("banner_dim", "#B8860B")
+
+    if (getattr(_skin, "name", "default") if _skin else "default") == "default":
         tiny_line = "⚕ NOUS HERMES"
     else:
-        agent_name = _skin.get_branding("agent_name", "Hermes Agent") if _skin else "Hermes Agent"
-        line1 = f"{agent_name} - AI Agent Framework"
-        tiny_line = agent_name
+        tiny_line = _skin.get_branding("agent_name", "Hermes Agent") if _skin else "Hermes Agent"
+    line1 = f"{tiny_line} - AI Agent Framework"
 
     if os.environ.get("HERMES_FAST_STARTUP_BANNER") == "1":
         from hermes_cli import __release_date__ as _release_date
@@ -2843,10 +2730,7 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     """Normalize a CLI skills flag into a deduplicated list of skill identifiers."""
     if not skills:
         return []
-    if isinstance(skills, (list, tuple)):
-        raw_values = [str(item) for item in skills if item is not None]
-    else:
-        raw_values = [str(skills)]
+    raw_values = [str(item) for item in skills if item is not None] if isinstance(skills, (list, tuple)) else [str(skills)]
     parts = (p.strip() for raw in raw_values for p in raw.split(","))
     return list(dict.fromkeys(p for p in parts if p))
 
@@ -2872,9 +2756,7 @@ def save_config_value(key_path: str, value: any) -> bool:
             pass
         # /model and the TUI persist through here rather than `hermes config set`;
         # surface the same fail-closed cron drift warning for every model switch.
-        from hermes_cli.config import (
-            warn_unpinned_cron_jobs_after_model_config_change,
-        )
+        from hermes_cli.config import warn_unpinned_cron_jobs_after_model_config_change
 
         warn_unpinned_cron_jobs_after_model_config_change(key_path, value)
         return True
@@ -2897,12 +2779,10 @@ def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[
     ``/moa`` command (``resolve_runtime_provider`` / ``agent_init`` key off
     ``provider == "moa"``); the raw string would be rejected by the real provider.
     """
-    if isinstance(model, str):
-        stripped = model.strip()
-        if stripped.lower().startswith("moa:"):
-            preset = stripped.split(":", 1)[1].strip()
-            if preset:
-                return "moa", preset
+    if isinstance(model, str) and model.strip().lower().startswith("moa:"):
+        preset = model.strip().split(":", 1)[1].strip()
+        if preset:
+            return "moa", preset
     return None, model
 
 _split_model_config_default = _lazy_shim("hermes_cli.config", "split_model_config_default", "_split_model_config_default")
@@ -2946,9 +2826,7 @@ def _should_seed_interactive(query, image, quiet: bool, oneshot: bool) -> bool:
     legacy answer-and-exit behavior is kept for every automation surface: ``--oneshot``,
     ``-Q/--quiet``, and any non-TTY stdin/stdout (kanban, cron, pipes, A2A).
     """
-    if not (query or image):
-        return False
-    if oneshot or quiet:
+    if not (query or image) or oneshot or quiet:
         return False
     try:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
@@ -2966,10 +2844,7 @@ def _panel_box_width(title: str, content_lines: list[str], min_width: int = 46, 
 
 def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "", *, keep_ws: bool = False) -> list[str]:
     """Wrap panel text; ``keep_ws`` preserves whitespace (command/detail previews)."""
-    if keep_ws:
-        kw = dict(replace_whitespace=False, drop_whitespace=False)
-    else:
-        kw = dict(break_long_words=False, break_on_hyphens=False)
+    kw = dict(replace_whitespace=False, drop_whitespace=False) if keep_ws else dict(break_long_words=False, break_on_hyphens=False)
     wrapped = textwrap.wrap(text, width=max(8, width), subsequent_indent=subsequent_indent, **kw)
     return wrapped or [""]
 
@@ -2978,10 +2853,7 @@ _wrap_panel_text_keep_ws = functools.partial(_wrap_panel_text, keep_ws=True)
 
 
 def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
-    inner_width = max(0, box_width - 2)
-    lines.append((border_style, "│ "))
-    lines.append((content_style, text.ljust(inner_width)))
-    lines.append((border_style, " │\n"))
+    lines.extend(((border_style, "│ "), (content_style, text.ljust(max(0, box_width - 2))), (border_style, " │\n")))
 
 
 def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
