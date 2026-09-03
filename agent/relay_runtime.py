@@ -224,23 +224,16 @@ class _ProcessRelayPluginConfiguration:
 
     def acquire(self, owner: Any, relay: Any) -> _RelayPluginConfigurationState:
         """Join the process configuration, initializing it for the first host."""
-        owner_id = id(owner)
         with self._lock:
-            if owner_id in self._owners:
-                return self._state
-            if self._owners:
-                self._owners.add(owner_id)
-                return self._state
-            state = self._preflight(relay)
-            if state is None:
-                state = self._activate(relay)
-            state = self._remember(owner_id, state)
-            if state is _RelayPluginConfigurationState.ACTIVE:
-                logger.info(
-                    "Relay plugins are active process-wide and apply to all profiles "
-                    "hosted by this Hermes process."
-                )
-            return state
+            if not self._owners:
+                # First host decides for the whole process; later hosts just join.
+                self._state = self._preflight(relay) or self._activate(relay)
+                if self._state is _RelayPluginConfigurationState.ACTIVE:
+                    logger.info(
+                        "Relay plugins are active process-wide and apply to all profiles hosted by this Hermes process."
+                    )
+            self._owners.add(id(owner))
+            return self._state
 
     def _activate(self, relay: Any) -> _RelayPluginConfigurationState:
         try:
@@ -258,8 +251,7 @@ class _ProcessRelayPluginConfiguration:
         """Return a terminal state when the process cannot take ownership; None to proceed."""
         if self._active and not self._clear_active():
             logger.warning(
-                "Hermes Relay plugin cleanup is still pending; refusing to "
-                "replace the process-global configuration"
+                "Hermes Relay plugin cleanup is still pending; refusing to replace the process-global configuration"
             )
             return _RelayPluginConfigurationState.FAILED
         try:
@@ -288,9 +280,8 @@ class _ProcessRelayPluginConfiguration:
         plugin_config, dynamic_plugins = configured_inputs
         if dynamic_plugins:
             try:
-                activation = _resolve_plugin_awaitable(
-                    relay.plugin.initialize_with_dynamic_plugins(plugin_config, dynamic_plugins)
-                )
+                initialize = relay.plugin.initialize_with_dynamic_plugins
+                activation = _resolve_plugin_awaitable(initialize(plugin_config, dynamic_plugins))
                 if activation is None:
                     raise RuntimeError("NeMo Relay dynamic plugin initialization returned no activation handle")
                 self._activation = activation
@@ -300,12 +291,6 @@ class _ProcessRelayPluginConfiguration:
             # Reached only after explicit opt-in; Relay owns any ambient layering.
             _resolve_plugin_awaitable(relay.plugin.initialize(plugin_config))
         return True
-
-    def _remember(self, owner_id: int, state: _RelayPluginConfigurationState) -> _RelayPluginConfigurationState:
-        """Retain one process decision for all concurrently hosted profiles."""
-        self._owners.add(owner_id)
-        self._state = state
-        return state
 
     def release(self, owner: Any) -> None:
         """Release one host and clear Relay after the final host exits."""
@@ -328,8 +313,7 @@ class _ProcessRelayPluginConfiguration:
                 self._state = _RelayPluginConfigurationState.UNINITIALIZED
 
     def _clear_active(self) -> bool:
-        relay = self._relay
-        activation = self._activation
+        relay, activation = self._relay, self._activation
         if not self._active or relay is None:
             return True
         try:
@@ -338,19 +322,16 @@ class _ProcessRelayPluginConfiguration:
             logger.warning("Hermes Relay plugin subscriber flush failed", exc_info=True)
             return False
         try:
-            if activation is not None:
-                close = getattr(activation, "close", None)
-                if not callable(close):
-                    raise RuntimeError("NeMo Relay dynamic plugin activation has no close method")
+            if activation is None:
+                _resolve_plugin_awaitable(relay.plugin.clear_async())
+            elif callable(close := getattr(activation, "close", None)):
                 _resolve_plugin_awaitable(close())
             else:
-                _resolve_plugin_awaitable(relay.plugin.clear_async())
+                raise RuntimeError("NeMo Relay dynamic plugin activation has no close method")
         except Exception:
             logger.warning("Hermes Relay plugin configuration cleanup failed", exc_info=True)
             return False
-        self._active = False
-        self._relay = None
-        self._activation = None
+        self._active, self._relay, self._activation = False, None, None
         return True
 
 
@@ -1105,8 +1086,7 @@ class RelaySessionCoordinator:
         disabled config are silent no-ops."""
         # Telemetry must never block compaction.
         _warn_on_error(
-            "compaction notification", self._notify_session_compacted_unguarded,
-            profile_key, session_id, old_session_id,
+            "compaction notification", self._notify_session_compacted_unguarded, profile_key, session_id, old_session_id
         )
 
     def _notify_session_compacted_unguarded(self, profile_key: str, session_id: str, old_session_id: str) -> None:
@@ -1316,8 +1296,7 @@ def _configured_plugin_inputs(relay: Any) -> tuple[dict[str, Any], list[Any]] | 
             config = tomllib.load(config_file)
         if "dynamic_plugins" in config:
             raise ValueError(
-                "Hermes [[dynamic_plugins]] records are unsupported; use Relay "
-                "[[plugins.dynamic]] records"
+                "Hermes [[dynamic_plugins]] records are unsupported; use Relay [[plugins.dynamic]] records"
             )
         dynamic_plugins: list[Any] = []
         if "plugins" in config:

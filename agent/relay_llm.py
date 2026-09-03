@@ -788,8 +788,7 @@ def _codex_codec_tools(body: dict[str, Any]) -> None:
     elif isinstance(body.get("tools"), list):
         body["tools"] = [
             {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
-            if isinstance(tool, dict) and tool.get("type") == "function" and "function" not in tool
-            else tool
+            if isinstance(tool, dict) and tool.get("type") == "function" and "function" not in tool else tool
             for tool in body["tools"]
         ]
 
@@ -799,8 +798,7 @@ def _chat_codec_tools(body: dict[str, Any]) -> None:
     if isinstance(tools, list):
         body["tools"] = [
             {"type": "function", **tool}
-            if isinstance(tool, dict) and "function" in tool and "type" not in tool else tool
-            for tool in tools
+            if isinstance(tool, dict) and "function" in tool and "type" not in tool else tool for tool in tools
         ]
 
 
@@ -865,11 +863,8 @@ def _provider_request_body(content: dict[str, Any], metadata: dict[str, Any] | N
     if not isinstance(tools, list):
         return body
     body["tools"] = [
-        {"type": "function", **dict(tool["function"])}
-        if isinstance(tool, dict)
-        and tool.get("type") == "function" and isinstance(tool.get("function"), dict)
-        else tool
-        for tool in tools
+        {"type": "function", **dict(tool["function"])} if isinstance(tool, dict)
+        and tool.get("type") == "function" and isinstance(tool.get("function"), dict) else tool for tool in tools
     ]
     return body
 
