@@ -91,10 +91,8 @@ def _safe_find_spec(module_name: str) -> bool:
         return module_name in globals() or module_name in os.sys.modules
 
 
-_HAS_FASTER_WHISPER = _safe_find_spec("faster_whisper")
-_HAS_OPENAI = _safe_find_spec("openai")
-_HAS_MISTRAL = _safe_find_spec("mistralai")
-_HAS_PILK = _safe_find_spec("pilk")
+_HAS_FASTER_WHISPER, _HAS_OPENAI, _HAS_MISTRAL, _HAS_PILK = map(
+    _safe_find_spec, ("faster_whisper", "openai", "mistralai", "pilk"))
 
 # Local model singleton; the lock guards check-then-load against concurrent voice messages.
 _local_model: Optional[object] = None
@@ -123,9 +121,8 @@ def _load_stt_config() -> dict:
 
 
 def is_stt_enabled(stt_config: Optional[dict] = None) -> bool:
-    if stt_config is None:
-        stt_config = _load_stt_config()
-    return is_truthy_value(stt_config.get("enabled", True), default=True)
+    cfg = _load_stt_config() if stt_config is None else stt_config
+    return is_truthy_value(cfg.get("enabled", True), default=True)
 
 
 def _resolve_stt_language(
@@ -143,10 +140,7 @@ def _resolve_stt_language(
     if isinstance(stt_config, dict):
         candidates.append(stt_config.get("language"))
     candidates.append(os.getenv(LOCAL_STT_LANGUAGE_ENV))
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    return None
+    return next((c.strip() for c in candidates if isinstance(c, str) and c.strip()), None)
 
 
 def _openai_audio_unavailable_reason() -> Optional[str]:
@@ -172,9 +166,8 @@ def _is_local_stt_provider(provider: str, stt_config: Dict[str, Any]) -> bool:
 def _has_key(env_var: str, provider: str, *, needs_openai: bool = False, needs_mistral: bool = False):
     """Availability probe factory: optional SDK flag AND a resolvable API key."""
     def probe() -> bool:
-        if (needs_openai and not _HAS_OPENAI) or (needs_mistral and not _HAS_MISTRAL):
-            return False
-        return bool(_resolve_provider_key(env_var, provider))
+        sdk_ok = (not needs_openai or _HAS_OPENAI) and (not needs_mistral or _HAS_MISTRAL)
+        return sdk_ok and bool(_resolve_provider_key(env_var, provider))
     return probe
 
 
@@ -201,18 +194,15 @@ def _detect_local_backend() -> Optional[str]:
     """faster-whisper > local whisper CLI > lazy-installed faster-whisper; None when nothing local works."""
     if _HAS_FASTER_WHISPER:
         return "local"
-    if _has_local_command():
-        return "local_command"
-    return "local" if _try_lazy_install_stt() else None
+    return "local_command" if _has_local_command() else ("local" if _try_lazy_install_stt() else None)
 
 
 def _resolve_explicit_local() -> str:
     backend = _detect_local_backend()
-    if backend:
-        return backend
-    logger.warning("STT provider 'local' configured but unavailable "
-                   "(install faster-whisper or set HERMES_LOCAL_STT_COMMAND)")
-    return "none"
+    if not backend:
+        logger.warning("STT provider 'local' configured but unavailable "
+                       "(install faster-whisper or set HERMES_LOCAL_STT_COMMAND)")
+    return backend or "none"
 
 
 def _resolve_explicit_local_command() -> str:
@@ -273,12 +263,9 @@ def _resolve_explicit_provider(provider: str) -> str:
     if resolver is not None:
         return resolver()
     spec = _CLOUD_PROVIDER_SPECS.get(provider)
-    if spec is None:
+    if spec is None or spec[0]():
         return provider
-    probe, _auto, warning, _log = spec
-    if probe():
-        return provider
-    logger.warning(warning)
+    logger.warning(spec[2])
     return "none"
 
 
@@ -339,9 +326,7 @@ def _start_idle_unload_watcher(timeout_seconds: int) -> None:
             return
 
         def _watch(initial_timeout=timeout_seconds):
-            while not _idle_unload_stop.is_set():
-                if _idle_unload_stop.wait(_IDLE_UNLOAD_CHECK_INTERVAL) or _local_model is None:
-                    break
+            while not _idle_unload_stop.wait(_IDLE_UNLOAD_CHECK_INTERVAL) and _local_model is not None:
                 try:
                     timeout = _get_idle_unload_seconds(_load_stt_config().get("local") or {})
                 except Exception:  # noqa: BLE001 - keep the seed value
@@ -375,10 +360,8 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
             if _local_model is None or _local_model_name != model_name:
                 logger.info("Loading faster-whisper model '%s' (first load downloads the model)...", model_name)
                 # stt.local.device / compute_type pin a configuration where ``auto`` mis-detects.
-                _local_model = _load_local_whisper_model(
-                    model_name, device=local_cfg.get("device", "auto"),
-                    compute_type=local_cfg.get("compute_type", "auto"),
-                )
+                _local_model = _load_local_whisper_model(model_name, device=local_cfg.get("device", "auto"),
+                                                         compute_type=local_cfg.get("compute_type", "auto"))
                 _local_model_name = model_name
             model = _local_model
     return model
@@ -390,8 +373,7 @@ def _replace_cached_model_on_cpu(model_name: str):
     from faster_whisper import WhisperModel
     model = WhisperModel(model_name, device="cpu", compute_type="int8")
     with _local_model_lock:
-        _local_model = model
-        _local_model_name = model_name
+        _local_model, _local_model_name = model, model_name
     return model
 
 
@@ -409,12 +391,9 @@ def _transcribe_local(
         model = _get_or_load_local_model(model_name, local_cfg)
         if model is None:  # defensive: load failed without raising
             return _error_result("Local whisper model failed to load")
-        transcribe_kwargs = build_local_transcribe_kwargs(stt_config)
         # pre_transcription hook overrides win over config-resolved values.
-        if language:
-            transcribe_kwargs["language"] = language
-        if prompt:
-            transcribe_kwargs["initial_prompt"] = prompt
+        transcribe_kwargs = build_local_transcribe_kwargs(stt_config)
+        transcribe_kwargs.update({k: v for k, v in (("language", language), ("initial_prompt", prompt)) if v})
         try:
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
         except Exception as exc:
@@ -470,11 +449,11 @@ def _transcribe_prepared_audio(
         error = _validate_audio_file_size(Path(file_path))
         if error:
             return error
-    # Convert CAF (iMessage voice notes) to WAV for cloud STT providers.
-    if Path(file_path).suffix.lower() == ".caf" and provider not in ("local", "local_command"):
-        file_path = _convert_caf_to_wav(file_path)
-        if not file_path:
-            return _error_result("CAF audio could not be converted to WAV.")
+        # Convert CAF (iMessage voice notes) to WAV for cloud STT providers.
+        if Path(file_path).suffix.lower() == ".caf":
+            file_path = _convert_caf_to_wav(file_path)
+            if not file_path:
+                return _error_result("CAF audio could not be converted to WAV.")
     # Best-effort pre-upload silence trim for built-in cloud providers.
     trim_cleanup_dir: Optional[str] = None
     if provider in CLOUD_STT_PROVIDERS:
@@ -520,8 +499,7 @@ def _dispatch_stt_provider(
     """Route *file_path* to the handler for *provider* (built-in > command > plugin)."""
     # Static ``stt.prompt`` is the base; hook results mutate on top (last hook to set a field wins).
     prompt = stt_config.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
-        prompt = None
+    prompt = prompt if isinstance(prompt, str) and prompt.strip() else None
     # Fires after provider resolution and BEFORE any backend; ``language`` stays None unless a hook sets it.
     model, language, prompt = _apply_pre_transcription_hook(
         file_path=file_path, provider=provider, model=model,
@@ -607,8 +585,7 @@ def transcribe_audio_local_fallback(file_path: str, model: Optional[str] = None)
     error = _validate_audio_file(file_path)
     if error:
         return error
-    local_cfg = _load_stt_config().get("local") or {}
-    local_model = model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+    local_model = model or (_load_stt_config().get("local") or {}).get("model", DEFAULT_LOCAL_MODEL)
     if _HAS_FASTER_WHISPER:
         return _transcribe_local(file_path, _normalize_local_model(local_model))
     if _has_local_command():
