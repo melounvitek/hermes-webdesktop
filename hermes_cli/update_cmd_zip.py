@@ -110,9 +110,7 @@ def _commit_staged_replacements(staged) -> None:
             _remove_path(backup, ignore_errors=True)
 
 
-def _zip_overlay_block_reason(
-    root: Path, *, ignore_staging_artifacts: bool = False
-) -> Optional[str]:
+def _zip_overlay_block_reason(root: Path, *, ignore_staging_artifacts: bool = False) -> Optional[str]:
     """Why overlaying a ZIP onto ``root`` would destroy work, or None if safe.
 
     The swap replaces every top-level entry (minus a tiny preserve set) and deletes backups, so uncommitted
@@ -183,10 +181,7 @@ def _abort_zip_update_if_dirty_tree() -> None:
     if reason is None:
         return
     print(f"✗ ZIP fallback refused: {reason}.")
-    print(
-        "  Overlaying the ZIP would overwrite uncommitted edits and permanently "
-        "delete untracked files."
-    )
+    print("  Overlaying the ZIP would overwrite uncommitted edits and permanently delete untracked files.")
     print("  Stash or commit your changes, then rerun `hermes update`.")
     print("  To inspect: git status --porcelain")
     _m().sys.exit(1)
@@ -285,9 +280,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
         try:
             # TOCTOU re-check right before the swap: download + extract + staging can take minutes and
             # work created meanwhile would be destroyed. Our own staging siblings are filtered out.
-            recheck_reason = _zip_overlay_block_reason(
-                _m().PROJECT_ROOT, ignore_staging_artifacts=True
-            )
+            recheck_reason = _zip_overlay_block_reason(_m().PROJECT_ROOT, ignore_staging_artifacts=True)
             if recheck_reason is not None:
                 _discard_staged(staged)
                 print(f"✗ ZIP fallback aborted before the swap: {recheck_reason}.")
@@ -363,11 +356,7 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
 
     install_prefix = [uv_bin, "pip"] if uv_bin else pip_cmd
     install_env = uv_env if uv_bin else None
-    _m()._restore_active_tool_dependencies(
-        active_tool_dependencies,
-        install_prefix,
-        env=install_env,
-    )
+    _m()._restore_active_tool_dependencies(active_tool_dependencies, install_prefix, env=install_env)
 
     # Parity with git-pull path: heal the active memory provider's bridge packages after the reinstall.
     _m()._refresh_active_memory_provider_dependencies()
@@ -400,7 +389,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # prevent. Refuse rather than lie.
     branch = _m()._resolve_update_branch(args)
     if branch != "main":
-        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback " "update path.")
+        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback update path.")
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "

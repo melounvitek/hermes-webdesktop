@@ -331,10 +331,7 @@ def _finish_dashboard_update_cleanup(
         return
 
     print()
-    print(
-        "⚠ A web dashboard/serve process was stopped during update and could "
-        "not be auto-restarted."
-    )
+    print("⚠ A web dashboard/serve process was stopped during update and could not be auto-restarted.")
     print("  Re-launch it when you want the web UI back:")
     print("    hermes dashboard --port <port>")
 
@@ -516,10 +513,7 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
             logger.debug("Post-update state.db integrity OK (%s): %s", label, ok.get("message"))
             return
         print()
-        print(
-            f"⚠ state.db is corrupted after update ({label}): "
-            + ok.get("message", "unknown error")
-        )
+        print(f"⚠ state.db is corrupted after update ({label}): " + ok.get("message", "unknown error"))
         snap_root = _quick_snapshot_root(home)
         if not snap_root.exists():
             print("  ⚠ No pre-update snapshot for this home")
@@ -936,9 +930,7 @@ def _refresh_cua_driver_after_update() -> None:
         refresh_cua_driver = bool(_load_updates_cfg().get("refresh_cua_driver", True))
 
     if (
-        refresh_cua_driver
-        and sys.platform in ("darwin", "win32", "linux")
-        and shutil.which("cua-driver")
+        refresh_cua_driver and sys.platform in ("darwin", "win32", "linux") and shutil.which("cua-driver")
     ):
         from hermes_cli.tools_config import install_cua_driver
 
@@ -947,11 +939,7 @@ def _refresh_cua_driver_after_update() -> None:
         # require_confirmed_update: install only when check-update positively reports a
         # newer release (update must stay fast; `computer-use install --upgrade` forces).
         # Windows defers even confirmed updates (installer may need console/UAC consent).
-        install_cua_driver(
-            upgrade=True,
-            require_confirmed_update=True,
-            show_installer_progress=False,
-        )
+        install_cua_driver(upgrade=True, require_confirmed_update=True, show_installer_progress=False)
 
 
 def _print_post_update_notices_and_self_heals() -> None:

@@ -321,12 +321,7 @@ def _is_hermes_gateway_unit(unit: str) -> bool:
     )
 
 
-def _for_each_systemd_gateway_unit(
-    list_units_stdout: str,
-    *,
-    process_unit,
-    on_unit_timeout,
-) -> None:
+def _for_each_systemd_gateway_unit(list_units_stdout: str, *, process_unit, on_unit_timeout) -> None:
     """Process each hermes-gateway*/hermes-serve* unit from ``systemctl list-units``.
 
     ``TimeoutExpired`` from ``process_unit`` is isolated per unit via ``on_unit_timeout``
@@ -387,9 +382,7 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
         print("    launchctl kickstart -k gui/$UID/<label>   # macOS (or user/$UID)")
 
 
-def _restart_launchd_gateway_after_update(
-    *, supervision_verify: bool = True
-) -> tuple[list, list]:
+def _restart_launchd_gateway_after_update(*, supervision_verify: bool = True) -> tuple[list, list]:
     """Restart the invoking profile's launchd gateway after an update.
 
     No ``launchctl list`` gating: a booted-out job (plist present, definition
@@ -502,9 +495,7 @@ def _restart_macos_launchd_gateways(
                     f"    Recover manually: launchctl kickstart -k {domain}/{label}"
                 )
                 continue
-            if _wait_for_launchd_service_pid(
-                label, old_pid=old_pid, timeout=15.0, domain=domain
-            ):
+            if _wait_for_launchd_service_pid(label, old_pid=old_pid, timeout=15.0, domain=domain):
                 restarted_services.append(label)
             else:
                 failed_or_stale_units.append(label)
@@ -514,10 +505,7 @@ def _restart_macos_launchd_gateways(
                 )
         except subprocess.TimeoutExpired:
             failed_or_stale_units.append(label)
-            print(
-                f"  ⚠ launchctl timed out restarting {label}; "
-                "continuing with remaining gateways"
-            )
+            print(f"  ⚠ launchctl timed out restarting {label}; continuing with remaining gateways")
 
 
 def _surviving_gateway_pids_after_failed_restart():
@@ -544,11 +532,7 @@ def _gateway_service_matches_profile(profile: str, service: object) -> bool:
     name = str(service).removesuffix(".service")
     if profile == "default":
         return name in {"hermes-gateway", "ai.hermes.gateway", "gateway", "gateway-default"}
-    return name in {
-        f"hermes-gateway-{profile}",
-        f"ai.hermes.gateway-{profile}",
-        f"gateway-{profile}",
-    }
+    return name in {f"hermes-gateway-{profile}", f"ai.hermes.gateway-{profile}", f"gateway-{profile}"}
 
 
 _MANUAL_GATEWAY_SKIP_REASON = (
@@ -628,11 +612,7 @@ def _warn_gateway_restart_phase_aborted(exc: BaseException, pids) -> None:
     print("    hermes gateway status")
 
 
-def _drain_or_signal_gateway_for_update(
-    pid: int,
-    drain_budget: float,
-    label: str,
-) -> bool:
+def _drain_or_signal_gateway_for_update(pid: int, drain_budget: float, label: str) -> bool:
     """Three-way triage (shared by systemd and bare-process paths) for handing a
     running gateway over to new code. Returns True when signalled/stopped.
 
@@ -858,9 +838,7 @@ def _restart_systemd_gateway_units(
                 on_unit_timeout=_on_unit_timeout,
             )
         finally:
-            restarted_scoped_units.update(
-                f"{scope}/{name}" for name in restarted_services[_scope_mark:]
-            )
+            restarted_scoped_units.update(f"{scope}/{name}" for name in restarted_services[_scope_mark:])
 
 
 @dataclass
@@ -1231,9 +1209,7 @@ def _verify_fleet_after_update(
     # Restart a managed dashboard via systemd or stop stale manual ones (raw-killing
     # a systemd-owned PID reads as clean stop and leaves the Cloudflare origin dead).
     # Failed Node refresh leaves it untouched; already-restarted units aren't redone.
-    _finish_dashboard_update_cleanup(
-        node_failures, already_restarted_units=set(restart.restarted_services)
-    )
+    _finish_dashboard_update_cleanup(node_failures, already_restarted_units=set(restart.restarted_services))
 
     # Success-path twin of the abort-recovery probe: the restart phase only touches
     # units, so a unit-less `hermes serve` keeps stale sys.modules. Runs AFTER
@@ -1368,11 +1344,7 @@ def _fleet_probe_expected_runtimes(
     return False
 
 
-def _wait_for_service_active(
-    scope_cmd_: list,
-    svc_name_: str,
-    timeout: float = 10.0,
-) -> bool:
+def _wait_for_service_active(scope_cmd_: list, svc_name_: str, timeout: float = 10.0) -> bool:
     """Poll ``systemctl is-active`` (0.5s) up to ``timeout``: the Stopped -> Started
     transition isn't instantaneous, so a one-shot check falsely reports down."""
     deadline = _time.monotonic() + max(timeout, 0.5)
@@ -1389,11 +1361,7 @@ def _wait_for_service_active(
 _RESTART_SEC_UNITS = (("ms", 0.001), ("us", 0.000001), ("min", 60.0), ("s", 1.0))
 
 
-def _service_restart_sec(
-    scope_cmd_: list,
-    svc_name_: str,
-    default: float = 0.0,
-) -> float:
+def _service_restart_sec(scope_cmd_: list, svc_name_: str, default: float = 0.0) -> float:
     """Read the unit's ``RestartUSec`` in seconds. ``is-active`` pollers must wait
     >= RestartSec + slack or they give up *during* the cooldown and misreport."""
     try:
