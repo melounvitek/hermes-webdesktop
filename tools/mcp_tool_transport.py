@@ -1,4 +1,6 @@
-"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID ledger), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth), protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py."""
+"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID
+ledger), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth),
+protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py."""
 
 import logging
 import asyncio
@@ -14,12 +16,8 @@ logger = logging.getLogger("tools.mcp_tool")
 
 # JSON-RPC ``initialize`` body used by the content-type preflight POST.
 _PROBE_INITIALIZE_BODY = (
-    '{"jsonrpc":"2.0","id":"_probe",'
-    '"method":"initialize",'
-    '"params":{"protocolVersion":"2025-03-26",'
-    '"capabilities":{},'
-    '"clientInfo":{"name":"hermes-probe",'
-    '"version":"0.1"}}}'
+    '{"jsonrpc":"2.0","id":"_probe","method":"initialize","params":{"protocolVersion":"2025-03-26",'
+    '"capabilities":{},"clientInfo":{"name":"hermes-probe","version":"0.1"}}}'
 )
 
 
@@ -133,13 +131,10 @@ class MCPServerTransportMixin:
                            "(valid: auto, stateless, legacy)", self.name, mode)
         # mcp 1.x has no server/discover client — nothing to fall back to.
         return await attempt(
-            initialize, discover,
-            lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
-            "MCP server '%s': legacy handshake rejected (%s) — "
-            "retrying via server/discover (2026-07-28 stateless server)")
+            initialize, discover, lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
+            "MCP server '%s': legacy handshake rejected (%s) — retrying via server/discover (2026-07-28 stateless server)")
 
-    async def _serve_session(self, session, connect_timeout: float,
-                             label: str = "", mark_lifecycle: bool = False) -> str:
+    async def _serve_session(self, session, connect_timeout: float, label: str = "", mark_lifecycle: bool = False) -> str:
         """Handshake, discover, publish readiness, then serve until a lifecycle event.
         Clears stale breaker state from a prior outage but leaves the session UNPROVEN: a
         completed handshake is not proof of health (flapping transports handshake fine and drop
@@ -187,12 +182,11 @@ class MCPServerTransportMixin:
             for _pid in new_pids:
                 _stdio_pids[_pid] = self.name
             _stdio_pgids.update(new_pgids)
-        # Machine spawn ledger so startup sweeps can reap orphans after an unclean parent
-        # exit. Best-effort — never break startup.
+        # Machine spawn ledger so startup sweeps can reap orphans after an unclean parent exit.
+        # Best-effort — never break startup.
         for _pid in new_pids:
             try:
                 from hermes_cli.process_identity import register_child
-
                 register_child(_pid, "mcp-helper")
             except Exception:
                 logger.debug("spawn-ledger register_child failed for MCP helper pid %s", _pid, exc_info=True)
@@ -225,44 +219,43 @@ class MCPServerTransportMixin:
                               "it is not installed. Run `hermes setup` to install MCP support, then retry.")
         command, args, safe_env = self._resolve_stdio_config(config)
         await _osv_malware_preflight(self.name, command, args)
-        # Parent-death watchdog: an ungraceful Hermes exit (kill -9, crash) can't leave the
-        # child and its descendants running. POSIX-only (process groups); no-op elsewhere.
-        # AFTER the OSV preflight so the check inspects the real package.
+        # Parent-death watchdog: an ungraceful Hermes exit (kill -9, crash) can't leave the child
+        # and its descendants running. POSIX-only (process groups); no-op elsewhere. AFTER the OSV
+        # preflight so the check inspects the real package.
         command, args = _wrap_command_with_watchdog(command, args)
         server_params = _core.StdioServerParameters(
             command=command, args=args, env=safe_env if safe_env else None, cwd=config.get("cwd"),
             # Windows pipes can split non-UTF-8 bytes at chunk boundaries; substitute U+FFFD
             # instead of raising UnicodeDecodeError.
-            encoding_error_handler="replace",
-        )
+            encoding_error_handler="replace")
         session_kwargs = self._session_kwargs()
-        # Reap orphans from prior failed attempts before spawning, else each reconnect retry
-        # piles up zombie pairs. Unscoped on purpose (also reaps orphans of servers that never
+        # Reap orphans from prior failed attempts before spawning, else each reconnect retry piles
+        # up zombie pairs. Unscoped on purpose (also reaps orphans of servers that never
         # reconnect). Worker thread: the reaper blocks up to 2s (SIGTERM → wait → SIGKILL).
         await asyncio.to_thread(_core._kill_orphaned_mcp_children)
         # Snapshot child PIDs before spawning so the new one can be identified.
         pids_before = _core._snapshot_child_pids()
         new_pids: set = set()
-        # Route subprocess stderr to ~/.hermes/logs/mcp-stderr.log so server banners don't
-        # land on the user's TTY and corrupt the TUI.
+        # Route subprocess stderr to ~/.hermes/logs/mcp-stderr.log so server banners don't land
+        # on the user's TTY and corrupt the TUI.
         _core._write_stderr_log_header(self.name)
         _errlog = _core._get_mcp_stderr_log()
         try:
             async with _core.stdio_client(server_params, errlog=_errlog) as (read_stream, write_stream):
                 # Capture the new PID for force-kill cleanup, filtering non-MCP children
-                # (slash_worker, LSP servers) that race into the snapshot window: they share
-                # the TUI parent's pgid, so leaking them into _stdio_pgids makes the shutdown
-                # killpg() kill the TUI itself.
+                # (slash_worker, LSP servers) that race into the snapshot window: they share the
+                # TUI parent's pgid, so leaking them into _stdio_pgids makes the shutdown killpg()
+                # kill the TUI itself.
                 new_pids = _filter_mcp_children(_core._snapshot_child_pids() - pids_before)
                 if new_pids:
                     self._track_spawned_children(new_pids)
                 # Tracked on the connection so in-flight calls fail fast when the subprocess dies.
                 self._stdio_child_pids = set(new_pids)
                 async with _core.ClientSession(read_stream, write_stream, **session_kwargs) as session:
-                    # Bound the handshake: ``connect_timeout`` only bounds the caller's
-                    # ``.result()`` wait, not this coroutine. A server that never answers
-                    # ``initialize`` would otherwise hang here forever, the ``finally`` below
-                    # would never run, and the child + pipes would leak on every retry until EMFILE.
+                    # Bound the handshake: ``connect_timeout`` only bounds the caller's ``.result()``
+                    # wait, not this coroutine. A server that never answers ``initialize`` would
+                    # otherwise hang here forever, the ``finally`` below would never run, and the
+                    # child + pipes would leak on every retry until EMFILE.
                     connect_timeout = float(config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT))
                     return await self._serve_session(session, connect_timeout, mark_lifecycle=True)
         finally:
@@ -302,11 +295,9 @@ class MCPServerTransportMixin:
                 ct = _content_type_base(resp)
                 if ct and ct not in self._MCP_CONTENT_TYPES and _is_2xx(resp):
                     post_resp = await client.post(
-                        url,
+                        url, content=_PROBE_INITIALIZE_BODY,
                         headers={**probe_headers, "Content-Type": "application/json",
-                                 "Accept": "application/json, text/event-stream"},
-                        content=_PROBE_INITIALIZE_BODY,
-                    )
+                                 "Accept": "application/json, text/event-stream"})
                     if _is_2xx(post_resp) and _content_type_base(post_resp) in self._MCP_CONTENT_TYPES:
                         resp = post_resp
         except _httpx.HTTPError:
@@ -323,8 +314,7 @@ class MCPServerTransportMixin:
             f"MCP server '{self.name}' at {url} returned Content-Type '{ct_base}', not an MCP "
             f"response (expected one of: {', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
             "points at a web page rather than an MCP endpoint — check it resolves to a Streamable "
-            "HTTP / SSE endpoint (e.g. https://host/mcp, not https://host/)."
-        )
+            "HTTP / SSE endpoint (e.g. https://host/mcp, not https://host/).")
 
     def _reconnect_or_reraise_group(self, eg: BaseExceptionGroup) -> str:
         """Map an SDK transport TaskGroup failure to a clean ``"reconnect"``. HTTP/SSE stream
@@ -422,8 +412,8 @@ class MCPServerTransportMixin:
                                ssl_verify, oauth_auth, strict_cfg_headers: bool):
         """Deprecated API (mcp < 1.24.0): the SDK owns the httpx client."""
         if strict_cfg_headers:
-            # Fail closed: without an owned client we cannot hook redirects, so the
-            # cross-origin header boundary cannot be enforced.
+            # Fail closed: without an owned client we cannot hook redirects, so the cross-origin
+            # header boundary cannot be enforced.
             raise ImportError(f"MCP server '{self.name}' requires mcp >= 1.24.0 to "
                               "enforce the portable redirect-header boundary "
                               "(strict_redirect_headers). Upgrade the mcp package.")
@@ -441,9 +431,9 @@ class MCPServerTransportMixin:
                               "Upgrade the mcp package to get HTTP support.")
         url = config["url"]
         headers = dict(config.get("headers") or {})
-        # Portable Agent Plugins v1 (strict_redirect_headers): configured headers MUST NOT
-        # follow a redirect to a different origin. Capture the configured names BEFORE
-        # client-generated headers are merged in.
+        # Portable Agent Plugins v1 (strict_redirect_headers): configured headers MUST NOT follow
+        # a redirect to a different origin. Capture the configured names BEFORE client-generated
+        # headers are merged in.
         strict_cfg_headers = bool(config.get("strict_redirect_headers"))
         configured_header_names = {key.lower() for key in headers}
         # Optional per-user identity header; explicit headers of the same name win.
@@ -458,7 +448,6 @@ class MCPServerTransportMixin:
         ssl_verify = config.get("ssl_verify", True)
         client_cert = _resolve_client_cert(self.name, config)
         oauth_auth = self._build_oauth_auth(url, config)
-
         if config.get("transport") == "sse":
             transport = self._sse_transport(url, headers, connect_timeout, ssl_verify, client_cert, oauth_auth, strict_cfg_headers)
             label = "SSE"
@@ -504,8 +493,8 @@ class MCPServerTransportMixin:
                 if _core._servers.get(self.name) is not self:
                     return
         self._registered_tool_names = _core._register_server_tools(self.name, self, self._config)
-        # A retained initial-failure server that just published tools has recovered: drop
-        # its stale connect error from status surfaces.
+        # A retained initial-failure server that just published tools has recovered: drop its
+        # stale connect error from status surfaces.
         with _core._lock:
             if _core._servers.get(self.name) is self:
                 _core._server_connect_errors.pop(self.name, None)

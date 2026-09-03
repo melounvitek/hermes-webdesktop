@@ -1,4 +1,6 @@
-"""MCP connection/transport error classification: URL validation, TLS client certs, identity headers, redirect header stripping, exception-group unwrapping, auth/session-expired/method-not-found detection and connect-error formatting. Split from tools/mcp_tool.py."""
+"""MCP connection/transport error classification: URL validation, TLS client certs, identity
+headers, redirect header stripping, exception-group unwrapping, auth/session-expired/
+method-not-found detection and connect-error formatting. Split from tools/mcp_tool.py."""
 
 import asyncio
 import errno
@@ -11,7 +13,6 @@ from urllib.parse import urlparse
 from tools.mcp_tool_common import _sanitize_error, _core
 
 logger = logging.getLogger("tools.mcp_tool")
-
 
 # Stateless (2026-07-28) servers reject a legacy ``initialize`` with
 # UnsupportedProtocolVersion (-32022) or plain method-not-found.
@@ -30,7 +31,7 @@ def _jsonrpc_matches(exc: BaseException, code, codes: tuple, markers: tuple) -> 
     if code in codes:
         return True
     msg = str(exc).lower()
-    return bool(msg) and any(marker in msg for marker in markers)
+    return any(marker in msg for marker in markers)
 
 
 def _handshake_rejected_as_modern(exc: BaseException) -> bool:
@@ -98,14 +99,9 @@ def _classify_mcp_failure(exc: BaseException) -> str:
         or isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError, FileNotFoundError))
         or (isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT)
         # 401/403 HTTPStatusError that _is_auth_error's type-gate missed (auth types not importable here).
-        or _response_status(root) in (401, 403)
+        or getattr(getattr(root, "response", None), "status_code", None) in (401, 403)
     )
     return "permanent" if permanent else "transient"
-
-
-def _response_status(exc: BaseException):
-    """``exc.response.status_code`` for httpx-shaped errors, else None."""
-    return getattr(getattr(exc, "response", None), "status_code", None)
 
 
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
@@ -252,7 +248,6 @@ def _exc_children(exc: BaseException) -> List[BaseException]:
 
 def _format_connect_error(exc: BaseException) -> str:
     """Render nested MCP connection errors into an actionable short message."""
-
     def _find_missing(current: BaseException) -> Optional[str]:
         if isinstance(current, FileNotFoundError):
             if getattr(current, "filename", None):
@@ -318,8 +313,7 @@ def _get_auth_error_types() -> tuple:
             _optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError")
             + _optional_types("mcp.client.auth", "UnauthorizedError")  # older SDKs
             + _optional_types("tools.mcp_oauth", "OAuthNonInteractiveError")
-            + list(_http_status_error_types())
-        )
+            + list(_http_status_error_types()))
     return _AUTH_ERROR_TYPES
 
 
@@ -352,16 +346,15 @@ _EXC_TRAVERSAL_MAX_NODES = 10_000
 def _is_session_expired_error(exc: BaseException) -> bool:
     """True if ``exc`` looks like an MCP transport session expiry. Streamable-HTTP servers GC
     session state (idle TTL, restart, pod rotation) while the OAuth token stays valid, so unlike
-    :func:`_is_auth_error` the fix is a transport reconnect (``_reconnect_event``), not an OAuth refresh."""
+    :func:`_is_auth_error` the fix is a transport reconnect (``_reconnect_event``), not an OAuth refresh.
+
+    Iterative walk over ``exceptions`` / ``__cause__`` / ``__context__`` with an identity-visited
+    set AND a node budget (graphs can be deep or cyclic). Every reachable node is inspected so an
+    InterruptedError anywhere overrides transport markers; the chain walk matters because SDK
+    wrappers often raise a generic RuntimeError *from* a message-less ClosedResourceError."""
     # AnyIO stream exceptions are often message-less (``str(ClosedResourceError()) == ""``),
     # so type checks are needed in addition to marker matching.
     transport_error_types = tuple(_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
-
-    # Iterative traversal over ``exceptions`` / ``__cause__`` / ``__context__`` with an
-    # identity-visited set AND a node budget (graphs can be deep or cyclic). Every reachable
-    # node is inspected so an InterruptedError anywhere overrides transport markers; the chain
-    # walk matters because SDK wrappers often raise a generic RuntimeError *from* the
-    # message-less ClosedResourceError.
     stack: "list[BaseException | None]" = [exc]
     seen: set[int] = set()
     transport_error_found = False
@@ -377,7 +370,7 @@ def _is_session_expired_error(exc: BaseException) -> bool:
         # Messages vary across SDK versions and servers: match a narrow allow-list of stable
         # substrings, not exception type, to avoid false positives.
         msg = str(current).lower()
-        if isinstance(current, transport_error_types) or (msg and any(marker in msg for marker in _SESSION_EXPIRED_MARKERS)):
+        if isinstance(current, transport_error_types) or any(marker in msg for marker in _SESSION_EXPIRED_MARKERS):
             transport_error_found = True
         stack.extend(getattr(current, "exceptions", ()))
         stack.extend((getattr(current, "__cause__", None), getattr(current, "__context__", None)))
