@@ -49,7 +49,7 @@ def _scope_to_profile(profile: Optional[str]):
 
 @router.post("/{provider}/oauth/start")
 async def start_memory_oauth(provider: str, profile: Optional[str] = None):
-    """Begin a provider's zero-CLI OAuth flow (browser + loopback listener). Returns immediately; poll status."""
+    """Begin a provider's zero-CLI OAuth flow (browser + loopback listener); returns immediately, poll status."""
     flow = _resolve_flow(provider)
     try:
         # The flow resolves its config path eagerly inside this scope; its worker thread outlives it.

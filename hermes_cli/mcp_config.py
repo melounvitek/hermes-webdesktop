@@ -28,19 +28,11 @@ _MCP_PRESETS: Dict[str, Dict[str, Any]] = {
     "codex": {"command": "codex", "args": ["mcp-server"]},
 }
 
-# ─── UI Helpers ───────────────────────────────────────────────────────────────
 
-def _info(text: str):
-    print(color(f"  {text}", Colors.DIM))
-
-def _success(text: str):
-    print(color(f"  ✓ {text}", Colors.GREEN))
-
-def _warning(text: str):
-    print(color(f"  ⚠ {text}", Colors.YELLOW))
-
-def _error(text: str):
-    print(color(f"  ✗ {text}", Colors.RED))
+def _info(text: str): print(color(f"  {text}", Colors.DIM))
+def _success(text: str): print(color(f"  ✓ {text}", Colors.GREEN))
+def _warning(text: str): print(color(f"  ⚠ {text}", Colors.YELLOW))
+def _error(text: str): print(color(f"  ✗ {text}", Colors.RED))
 
 
 def _confirm(question: str, default: bool = True) -> bool:
@@ -59,8 +51,6 @@ def _print_tools(tools: List[Tuple[str, str]], width: int, desc_max: int) -> Non
         print(f"    {color(tool_name, Colors.GREEN):{width}s} {short}")
 
 
-# ─── Config Helpers ───────────────────────────────────────────────────────────
-
 def _get_mcp_servers(config: Optional[dict] = None) -> Dict[str, dict]:
     """Return the ``mcp_servers`` dict from config, or empty dict."""
     if config is None:
@@ -77,8 +67,7 @@ def _tool_filters(cfg: dict) -> Tuple[Optional[list], Optional[list]]:
     include, exclude = tools_cfg.get("include"), tools_cfg.get("exclude")
     return (
         include if include and isinstance(include, list) else None,
-        exclude if exclude and isinstance(exclude, list) else None,
-    )
+        exclude if exclude and isinstance(exclude, list) else None)
 
 
 def _save_mcp_server(name: str, server_config: dict) -> bool:
@@ -215,8 +204,7 @@ def _apply_mcp_preset(
     url: Optional[str],
     command: Optional[str],
     cmd_args: List[str],
-    server_config: Dict[str, Any],
-) -> tuple[Optional[str], Optional[str], List[str], bool]:
+    server_config: Dict[str, Any]) -> tuple[Optional[str], Optional[str], List[str], bool]:
     """Apply a known MCP preset when transport details were omitted."""
     if not preset_name:
         return url, command, cmd_args, False
@@ -235,8 +223,6 @@ def _apply_mcp_preset(
         server_config["args"] = cmd_args
     return url, command, cmd_args, True
 
-
-# ─── Discovery (temporary connect) ───────────────────────────────────────────
 
 def _resolve_mcp_server_config(config: dict) -> dict:
     """Resolve ``${ENV}`` placeholders in a server config before connecting.
@@ -269,8 +255,7 @@ def _probe_single_server(
         raise ValueError("; ".join(issues))
 
     from tools.mcp_tool import (
-        _ensure_mcp_loop, _run_on_mcp_loop, _connect_server, _stop_mcp_loop_if_idle, _parse_boolish,
-    )
+        _ensure_mcp_loop, _run_on_mcp_loop, _connect_server, _stop_mcp_loop_if_idle, _parse_boolish)
 
     config = _resolve_mcp_server_config(config)
     if connect_timeout is None:
@@ -299,10 +284,8 @@ def _probe_single_server(
 
                     details["schema_chars"] = {
                         t.name: len(_json.dumps(
-                            _convert_mcp_schema(name, t), separators=(",", ":"), default=str,
-                        ))
-                        for t in server._tools
-                    }
+                            _convert_mcp_schema(name, t), separators=(",", ":"), default=str))
+                        for t in server._tools}
                 except Exception:  # pragma: no cover — display-only extra
                     pass
                 # Gate capability probes like runtime registration (_select_utility_schemas):
@@ -357,9 +340,9 @@ def _unwrap_exception_group(exc: BaseException) -> Exception:
     return exc if isinstance(exc, Exception) else RuntimeError(str(exc))
 
 
-# ─── hermes mcp add ──────────────────────────────────────────────────────────
-
-def _configure_http_auth(name: str, url: str, auth_type: Optional[str], server_config: Dict[str, Any]) -> bool:
+def _configure_http_auth(
+    name: str, url: str, auth_type: Optional[str], server_config: Dict[str, Any]
+) -> bool:
     """OAuth or Bearer-token setup for an HTTP server. False when the user cancelled."""
     print()
     if auth_type == "oauth":
@@ -383,7 +366,8 @@ def _configure_http_auth(name: str, url: str, auth_type: Optional[str], server_c
         return True
 
     _info(f"Connecting to {url}")
-    if _confirm("Does this server require authentication?", default=True) and (auth_type == "header" or not auth_type):
+    needs_auth = _confirm("Does this server require authentication?", default=True)
+    if needs_auth and (auth_type == "header" or not auth_type):
         env_key = _env_key_for_server(name)
         if get_env_value(env_key):
             _success(f"{env_key}: already configured")
@@ -405,7 +389,9 @@ def _choose_tools(name: str, tools: List[Tuple[str, str]], server_config: Dict[s
     _print_tools(tools, 40, 60)
     print()
     try:
-        choice = input(color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)).strip().lower()
+        choice = input(
+            color(f"  Enable all {len(tools)} tools? [Y/n/select]: ", Colors.YELLOW)
+        ).strip().lower()
     except (KeyboardInterrupt, EOFError):
         print()
         _info("Cancelled.")
@@ -417,7 +403,8 @@ def _choose_tools(name: str, tools: List[Tuple[str, str]], server_config: Dict[s
         return len(tools)
     from hermes_cli.curses_ui import curses_checklist
 
-    chosen = curses_checklist(f"Select tools for '{name}'", [f"{t[0]}  —  {t[1]}" for t in tools], set(range(len(tools))))
+    labels = [f"{t[0]}  —  {t[1]}" for t in tools]
+    chosen = curses_checklist(f"Select tools for '{name}'", labels, set(range(len(tools))))
     if not chosen:
         _info("No tools selected — server not saved.")
         return None
@@ -443,8 +430,7 @@ def cmd_mcp_add(args):
         explicit_env = _parse_env_assignments(getattr(args, "env", None))
         url, command, cmd_args, _preset_applied = _apply_mcp_preset(
             name, preset_name=getattr(args, "preset", None), url=url, command=command,
-            cmd_args=list(cmd_args), server_config=server_config,
-        )
+            cmd_args=list(cmd_args), server_config=server_config)
     except ValueError as exc:
         _error(str(exc))
         return
@@ -460,7 +446,9 @@ def cmd_mcp_add(args):
         _info('  hermes mcp add myserver --preset mypreset')
         return
 
-    if name in _get_mcp_servers() and not _confirm(f"Server '{name}' already exists. Overwrite?", default=False):
+    if name in _get_mcp_servers() and not _confirm(
+        f"Server '{name}' already exists. Overwrite?", default=False
+    ):
         _info("Cancelled.")
         return
 
@@ -505,11 +493,11 @@ def cmd_mcp_add(args):
     server_config["enabled"] = True
     if _save_mcp_server(name, server_config):
         print()
-        _success(f"Saved '{name}' to {display_hermes_home()}/config.yaml ({tool_count}/{len(tools)} tools enabled)")
+        _success(
+            f"Saved '{name}' to {display_hermes_home()}/config.yaml ({tool_count}/{len(tools)} tools enabled)"
+        )
         _info("Start a new session to use these tools.")
 
-
-# ─── hermes mcp remove ───────────────────────────────────────────────────────
 
 def cmd_mcp_remove(args):
     """Remove an MCP server from config."""
@@ -530,8 +518,6 @@ def cmd_mcp_remove(args):
     except Exception:
         pass
 
-
-# ─── hermes mcp list ──────────────────────────────────────────────────────────
 
 def cmd_mcp_list(args=None):
     """List all configured MCP servers."""
@@ -566,7 +552,12 @@ def cmd_mcp_list(args=None):
             transport = transport[:25] + "..."
 
         include, exclude = _tool_filters(cfg)
-        tools_str = f"{len(include)} selected" if include else f"-{len(exclude)} excluded" if exclude else "all"
+        if include:
+            tools_str = f"{len(include)} selected"
+        elif exclude:
+            tools_str = f"-{len(exclude)} excluded"
+        else:
+            tools_str = "all"
 
         enabled = cfg.get("enabled", True)
         if isinstance(enabled, str):
@@ -575,8 +566,6 @@ def cmd_mcp_list(args=None):
         print(f"  {name:<16} {transport:<30} {tools_str:<12} {status}")
     print()
 
-
-# ─── hermes mcp test ──────────────────────────────────────────────────────────
 
 def cmd_mcp_test(args):
     """Test connection to an MCP server."""
@@ -618,8 +607,6 @@ def cmd_mcp_test(args):
     print()
 
 
-# ─── hermes mcp login ────────────────────────────────────────────────────────
-
 def _reauth_oauth_server(name: str, server_config: dict) -> bool:
     """Force a fresh OAuth flow for one server. Returns True on success.
 
@@ -657,7 +644,9 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
         except (TypeError, ValueError):
             _login_connect_timeout = 0.0
         with force_interactive_oauth():
-            tools = _probe_single_server(name, server_config, connect_timeout=max(_login_connect_timeout, 315.0))
+            tools = _probe_single_server(
+                name, server_config, connect_timeout=max(_login_connect_timeout, 315.0)
+            )
         # A clean probe is NOT proof of authentication: some servers (e.g. Google Drive) serve
         # initialize + tools/list without auth, so the flow may have failed (e.g. DCR 400 for
         # providers without RFC 7591) while the probe still lists tools. Verify a token landed.
@@ -667,12 +656,12 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
             _info(
                 "Some providers (e.g. Google Drive, Atlassian) do not support "
                 "automatic client registration. For those you must create an "
-                "OAuth client yourself and add its credentials to config.yaml:"
-            )
+                "OAuth client yourself and add its credentials to config.yaml:")
             print()
             for line in (
                 "mcp_servers:", f"  {name}:", f"    url: {url}", "    auth: oauth", "    oauth:",
-                '      client_id: "<your-oauth-client-id>"', '      client_secret: "<your-oauth-client-secret>"',
+                '      client_id: "<your-oauth-client-id>"',
+                '      client_secret: "<your-oauth-client-secret>"',
             ):
                 print(color(f"    {line}", Colors.DIM))
             print()
@@ -732,9 +721,9 @@ def cmd_mcp_reauth(args):
         _reauth_oauth_server(name, cfg)
 
 
-# ─── hermes mcp configure ────────────────────────────────────────────────────
-
-def _rebuild_exclude_list(name: str, exclude: list, tool_names: List[str], chosen: set, matches_name_filter) -> List[str]:
+def _rebuild_exclude_list(
+    name: str, exclude: list, tool_names: List[str], chosen: set, matches_name_filter
+) -> List[str]:
     """New ``tools.exclude`` for an exclude-mode entry after a checklist edit.
 
     Stays in exclude mode rather than demoting the user's dynamic filter to a frozen include list:
@@ -747,11 +736,12 @@ def _rebuild_exclude_list(name: str, exclude: list, tool_names: List[str], chose
     unchecked = {tool_names[i] for i in range(len(tool_names)) if i not in chosen}
     checked = {tool_names[i] for i in chosen}
     new_literals = (literal_entries - checked) | {
-        tn for tn in unchecked if not matches_name_filter(tn, set(old_exclude))
-    }
+        tn for tn in unchecked if not matches_name_filter(tn, set(old_exclude))}
     # A re-checked tool still matched by a kept glob can't be enabled without dropping the glob —
     # surface that instead of silently ignoring the click or silently freezing the config.
-    glob_shadowed = sorted(tn for tn in checked if glob_entries and matches_name_filter(tn, set(glob_entries)))
+    glob_shadowed = sorted(
+        tn for tn in checked if glob_entries and matches_name_filter(tn, set(glob_entries))
+    )
     if glob_shadowed:
         _warning(
             f"{len(glob_shadowed)} re-enabled tool(s) still match glob "
@@ -759,8 +749,7 @@ def _rebuild_exclude_list(name: str, exclude: list, tool_names: List[str], chose
             f"{', '.join(glob_shadowed[:5])}"
             f"{' ...' if len(glob_shadowed) > 5 else ''}. Remove the "
             f"pattern from mcp_servers.{name}.tools.exclude in "
-            "config.yaml to enable them."
-        )
+            "config.yaml to enable them.")
     return glob_entries + sorted(new_literals)
 
 
@@ -797,12 +786,11 @@ def cmd_mcp_configure(args):
         def matches_name_filter(tool_name, patterns):
             return tool_name in patterns
 
-    if include:
-        include_set = {str(p) for p in include}
-        pre_selected = {i for i, tn in enumerate(tool_names) if matches_name_filter(tn, include_set)}
-    elif exclude:
-        exclude_set = {str(p) for p in exclude}
-        pre_selected = {i for i, tn in enumerate(tool_names) if not matches_name_filter(tn, exclude_set)}
+    patterns = {str(p) for p in (include or exclude or [])}
+    if patterns:
+        pre_selected = {
+            i for i, tn in enumerate(tool_names) if matches_name_filter(tn, patterns) == bool(include)
+        }
     else:
         pre_selected = set(range(total))
 
@@ -811,7 +799,8 @@ def cmd_mcp_configure(args):
 
     from hermes_cli.curses_ui import curses_checklist
 
-    chosen = curses_checklist(f"Select tools for '{name}'", [f"{t[0]}  —  {t[1]}" for t in all_tools], pre_selected)
+    labels = [f"{t[0]}  —  {t[1]}" for t in all_tools]
+    chosen = curses_checklist(f"Select tools for '{name}'", labels, pre_selected)
     if chosen == pre_selected:
         _info("No changes made.")
         return
@@ -841,8 +830,6 @@ def cmd_mcp_configure(args):
     _info("Start a new session for changes to take effect.")
 
 
-# ─── Dispatcher ───────────────────────────────────────────────────────────────
-
 _MCP_USAGE = (
     "hermes mcp                                    Open the catalog picker (default)",
     "hermes mcp catalog                            List Nous-approved MCPs",
@@ -867,21 +854,19 @@ def mcp_command(args):
         from mcp_serve import run_mcp_server
         run_mcp_server(verbose=getattr(args, "verbose", False))
         return
-    # Catalog subcommands live in mcp_picker / mcp_catalog; import lazily to keep this module cheap.
-    if action == "picker":
-        from hermes_cli.mcp_picker import run_picker
-        run_picker()
-        return
-    if action == "catalog":
-        from hermes_cli.mcp_picker import show_catalog
-        show_catalog()
-        return
-    if action == "install":
-        from hermes_cli.mcp_picker import install_by_name
-        import sys as _sys
-        rc = install_by_name(getattr(args, "identifier", "") or "")
-        if rc:
-            _sys.exit(rc)
+    if action in ("picker", "catalog", "install"):
+        # Catalog subcommands live in mcp_picker / mcp_catalog; import lazily to keep this module cheap.
+        from hermes_cli import mcp_picker
+
+        if action == "picker":
+            mcp_picker.run_picker()
+        elif action == "catalog":
+            mcp_picker.show_catalog()
+        else:
+            import sys as _sys
+            rc = mcp_picker.install_by_name(getattr(args, "identifier", "") or "")
+            if rc:
+                _sys.exit(rc)
         return
     handler = {
         "add": cmd_mcp_add, "remove": cmd_mcp_remove, "rm": cmd_mcp_remove, "list": cmd_mcp_list,

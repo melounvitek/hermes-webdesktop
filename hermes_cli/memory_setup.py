@@ -17,8 +17,7 @@ _IMPORT_NAMES = {
     "honcho-ai": "honcho",
     "mem0ai": "mem0",
     "hindsight-client": "hindsight_client",
-    "hindsight-all": "hindsight",
-}
+    "hindsight-all": "hindsight"}
 
 
 def _provider_pip_dependencies(provider_name: str, declared: list) -> list:
@@ -41,16 +40,8 @@ def _provider_pip_dependencies(provider_name: str, declared: list) -> list:
     return deps
 
 
-# ---------------------------------------------------------------------------
-# Curses-based interactive picker (same pattern as hermes tools)
-# ---------------------------------------------------------------------------
-
 def _curses_select(
-    title: str,
-    items: list[tuple[str, str]],
-    default: int = 0,
-    *,
-    cancel_returns: int | None = None,
+    title: str, items: list[tuple[str, str]], default: int = 0, *, cancel_returns: int | None = None
 ) -> int:
     """Interactive single-select with arrow keys."""
     from hermes_cli.curses_ui import curses_radiolist
@@ -86,10 +77,6 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
         val = sys.stdin.readline().strip()
     return val or (default or "")
 
-
-# ---------------------------------------------------------------------------
-# Provider discovery
-# ---------------------------------------------------------------------------
 
 def _install_dependencies(provider_name: str, *, force: bool = False) -> None:
     """Install pip dependencies declared in ``plugin.yaml``.
@@ -207,10 +194,6 @@ def _find_provider(providers: list, provider_name: str):
     return next((p for p in providers if p[0] == provider_name), None)
 
 
-# ---------------------------------------------------------------------------
-# Setup wizard
-# ---------------------------------------------------------------------------
-
 def _post_setup_hook(provider, config: dict) -> bool:
     """Normalize the ``memory`` block; True when the provider's ``post_setup`` took over (it owns
     config, connection test and activation), so the caller must stop."""
@@ -271,7 +254,9 @@ def _prompt_schema_fields(name: str, schema: list, provider_config: dict, env_wr
         if choices and not is_secret:
             current = provider_config.get(key, default)
             current_idx = choices.index(current) if current and current in choices else 0
-            sel = _curses_select(f"  {desc}", [(c, "") for c in choices], default=current_idx, cancel_returns=_CANCELLED)
+            sel = _curses_select(
+                f"  {desc}", [(c, "") for c in choices], default=current_idx, cancel_returns=_CANCELLED
+            )
             if sel == _CANCELLED:
                 _print_cancelled_setup()
                 return False
@@ -360,9 +345,7 @@ def cmd_setup(args) -> None:
 
 
 def _write_env_vars(
-    env_writes: dict,
-    hermes_home: str | os.PathLike[str] | None = None,
-) -> None:
+    env_writes: dict, hermes_home: str | os.PathLike[str] | None = None) -> None:
     """Persist memory-provider env vars through the canonical ``.env`` writer.
 
     ``save_env_value`` applies the shared gate (name regex, ``LD_PRELOAD``/``PYTHONPATH``/``HERMES_HOME``
@@ -384,10 +367,6 @@ def _write_env_vars(
         if token is not None:
             reset_hermes_home_override(token)
 
-
-# ---------------------------------------------------------------------------
-# Status
-# ---------------------------------------------------------------------------
 
 def _mark(enabled) -> str:
     return "enabled ✓" if enabled else "disabled ✗"
@@ -465,10 +444,6 @@ def cmd_status(args) -> None:
             print(f"    • {pname}  ({desc}){active}")
     print()
 
-
-# ---------------------------------------------------------------------------
-# Router
-# ---------------------------------------------------------------------------
 
 def memory_command(args) -> None:
     """Route memory subcommands."""

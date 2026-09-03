@@ -55,8 +55,7 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
                 return
             logger.warning(
                 "Background MCP discovery previously exited with no connected "
-                "servers; retrying discovery thread"
-            )
+                "servers; retrying discovery thread")
             _mcp_discovery_started = False
             _mcp_discovery_thread = None
 
@@ -201,8 +200,7 @@ def ensure_mcp_discovery_before_agent_build(
     logger,
     timeout: "float | None" = None,
     single_query: bool = False,
-    thread_name: str = "cli-mcp-discovery",
-) -> None:
+    thread_name: str = "cli-mcp-discovery") -> None:
     """Give configured MCP tools a bounded chance to register before AIAgent.
 
     Non-interactive first turns (``chat -q``, ``hermes -z``) can construct ``AIAgent`` before any

@@ -60,7 +60,9 @@ def _safe_copy(payload: Any) -> Any:
         return dict(payload) if isinstance(payload, dict) else payload
 
 
-def _apply_request_chain(kind: str, payload_key: str, trace: List[Dict[str, Any]], **kwargs: Any) -> Dict[str, Any]:
+def _apply_request_chain(
+    kind: str, payload_key: str, trace: List[Dict[str, Any]], **kwargs: Any
+) -> Dict[str, Any]:
     """Feed ``kwargs[payload_key]`` through every ``kind`` middleware; each may return ``{payload_key: {...}}``."""
     from hermes_cli.plugins import invoke_middleware
 
@@ -75,8 +77,7 @@ def _apply_request_chain(kind: str, payload_key: str, trace: List[Dict[str, Any]
         entry = {
             key: value
             for key in ("source", "reason", "name")
-            if isinstance(value := result.get(key), str) and value
-        }
+            if isinstance(value := result.get(key), str) and value}
         trace.append(entry or {"source": "plugin"})
     return current
 
@@ -92,14 +93,15 @@ def apply_llm_request_middleware(request: Dict[str, Any], **context: Any) -> Req
     trace: List[Dict[str, Any]] = []
     current_request = _apply_request_chain(
         LLM_REQUEST_MIDDLEWARE, "request", trace,
-        request=_safe_copy(original_request), original_request=original_request, **context,
-    )
+        request=_safe_copy(original_request), original_request=original_request, **context)
     return RequestMiddlewareResult(
         payload=current_request, original_payload=original_request, changed=bool(trace), trace=trace,
     )
 
 
-def apply_tool_request_middleware(tool_name: str, args: Dict[str, Any], **context: Any) -> RequestMiddlewareResult:
+def apply_tool_request_middleware(
+    tool_name: str, args: Dict[str, Any], **context: Any
+) -> RequestMiddlewareResult:
     """Apply registered tool request middleware; ``{"args": {...}}`` replaces the effective tool
     arguments before hooks, guardrails, approvals, and execution see them."""
     original_args = _safe_copy(args)
@@ -112,8 +114,7 @@ def apply_tool_request_middleware(tool_name: str, args: Dict[str, Any], **contex
         from agent import relay_runtime
 
         relay_args = relay_runtime.apply_tool_request_intercepts(
-            session_id=session_id, tool_name=tool_name, args=current_args,
-        )
+            session_id=session_id, tool_name=tool_name, args=current_args)
         if relay_args != current_args:
             current_args = _safe_copy(relay_args)
             trace.append({"source": "nemo_relay"})
@@ -122,25 +123,22 @@ def apply_tool_request_middleware(tool_name: str, args: Dict[str, Any], **contex
 
     if not has_middleware(TOOL_REQUEST_MIDDLEWARE):
         return RequestMiddlewareResult(
-            payload=args if not trace else current_args, original_payload=args, changed=bool(trace), trace=trace,
+            payload=args if not trace else current_args, original_payload=args,
+            changed=bool(trace), trace=trace,
         )
     current_args = _apply_request_chain(
         TOOL_REQUEST_MIDDLEWARE, "args", trace,
-        tool_name=tool_name, args=current_args, original_args=original_args, **context,
-    )
+        tool_name=tool_name, args=current_args, original_args=original_args, **context)
     return RequestMiddlewareResult(
-        payload=current_args, original_payload=original_args, changed=bool(trace), trace=trace,
-    )
+        payload=current_args, original_payload=original_args, changed=bool(trace), trace=trace)
 
 
 def run_llm_execution_middleware(
-    request: Dict[str, Any], next_call: Callable[[Dict[str, Any]], Any], **context: Any,
-) -> Any:
+    request: Dict[str, Any], next_call: Callable[[Dict[str, Any]], Any], **context: Any) -> Any:
     """Run provider execution through registered LLM execution middleware."""
     return _run_execution_chain(
         LLM_EXECUTION_MIDDLEWARE, next_call,
-        request=request, original_request=context.pop("original_request", request), **context,
-    )
+        request=request, original_request=context.pop("original_request", request), **context)
 
 
 def run_tool_execution_middleware(
@@ -149,8 +147,7 @@ def run_tool_execution_middleware(
     """Run tool execution through registered tool execution middleware."""
     return _run_execution_chain(
         TOOL_EXECUTION_MIDDLEWARE, next_call,
-        tool_name=tool_name, args=args, original_args=context.pop("original_args", args), **context,
-    )
+        tool_name=tool_name, args=args, original_args=context.pop("original_args", args), **context)
 
 
 class _DownstreamExecutionError(Exception):
@@ -187,8 +184,7 @@ def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwarg
                 raise RuntimeError(
                     f"Middleware '{kind}' callback "
                     f"{getattr(callback, '__name__', repr(callback))} called "
-                    "next_call() more than once; downstream execution is single-use"
-                )
+                    "next_call() more than once; downstream execution is single-use")
             next_called = True
             try:
                 next_result = call_at(index + 1, payload if next_payload is None else next_payload)
@@ -207,8 +203,7 @@ def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwarg
         except Exception as exc:
             logger.warning(
                 "Middleware '%s' callback %s raised: %s",
-                kind, getattr(callback, "__name__", repr(callback)), exc,
-            )
+                kind, getattr(callback, "__name__", repr(callback)), exc)
             if next_succeeded:
                 return next_result
             if next_called:

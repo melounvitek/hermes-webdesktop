@@ -79,8 +79,7 @@ def _enable_disable(name: str, *, enable: bool) -> None:
     print(color(
         f"  ✓ '{name}' {'enabled' if enable else 'disabled'}. "
         "Start a new Hermes session for changes to take effect.",
-        Colors.GREEN,
-    ))
+        Colors.GREEN))
 
 
 def _configure_tools(name: str) -> None:
@@ -119,8 +118,7 @@ def _uninstall(name: str) -> None:
         print(color(
             f"  ✓ Uninstalled '{name}'. "
             "Credentials in .env preserved — delete manually if no longer needed.",
-            Colors.GREEN,
-        ))
+            Colors.GREEN))
     else:
         print(color(f"  '{name}' was not installed", Colors.DIM))
 
@@ -146,8 +144,7 @@ def _handle_row(row: _Row) -> None:
             ("Configure tools (probe server + re-pick)", lambda: _configure_tools(row.name)),
             ("Enable" if not enabled else "Disable",
              lambda: _enable_disable(row.name, enable=not is_enabled(row.name))),
-            ("Remove from config", lambda: _remove_custom(row.name)),
-        ])
+            ("Remove from config", lambda: _remove_custom(row.name))])
         return
     # Catalog row, installed + enabled
     print()
@@ -158,8 +155,7 @@ def _handle_row(row: _Row) -> None:
          lambda: _enable_disable(row.name, enable=False)),
         ("Uninstall (remove config and any cloned files)", lambda: _uninstall(row.name)),
         ("Reinstall (re-clone, re-prompt for credentials)",
-         lambda: _install(row.entry, "reinstall")),
-    ])
+         lambda: _install(row.entry, "reinstall"))])
 
 
 def _print_rows_text(rows: List[_Row]) -> None:
@@ -186,8 +182,7 @@ def _print_rows_text(rows: List[_Row]) -> None:
             print(color(
                 f"  ⚠ '{name}' requires a newer Hermes — run `hermes update` "
                 "to install this entry.",
-                Colors.YELLOW,
-            ))
+                Colors.YELLOW))
         print()
     print()
 
@@ -206,7 +201,8 @@ def run_picker() -> None:
             _print_rows_text(rows)  # non-interactive: degrade to the text dump
             return
         idx = curses_single_select(
-            "MCP Catalog  —  ↑↓ navigate  ENTER act on entry  ESC/q quit", [_format_row(r) for r in rows],
+            "MCP Catalog  —  ↑↓ navigate  ENTER act on entry  ESC/q quit",
+            [_format_row(r) for r in rows],
         )
         if idx is None:
             return
@@ -222,7 +218,6 @@ def install_by_name(identifier: str) -> int:
         print(color(
             f"  ✗ '{identifier}' is not in the catalog. "
             "Run `hermes mcp catalog` to see available entries.",
-            Colors.RED,
-        ))
+            Colors.RED))
         return 1
     return 0 if _install(entry, "install") else 1

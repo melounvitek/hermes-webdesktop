@@ -27,9 +27,6 @@ _MANIFEST_VERSION = 1
 _INSTALL_DIR_VAR = "${INSTALL_DIR}"
 
 
-# ─── Data classes ────────────────────────────────────────────────────────────
-
-
 @dataclass
 class EnvVarSpec:
     name: str
@@ -43,8 +40,7 @@ class EnvVarSpec:
 class AuthSpec:
     type: str  # "api_key" | "oauth" | "none"
     env: List[EnvVarSpec] = field(default_factory=list)
-    # OAuth-specific (third-party provider like Google)
-    provider: Optional[str] = None
+    provider: Optional[str] = None  # OAuth-specific (third-party provider like Google)
     scopes: List[str] = field(default_factory=list)
     env_var: Optional[str] = None
 
@@ -56,8 +52,8 @@ class TransportSpec:
     args: List[str] = field(default_factory=list)
     url: Optional[str] = None
     version: Optional[str] = None  # informational, pinned
-    # Static env for the stdio subprocess (telemetry opt-outs, mode flags). NOT for secrets —
-    # credentials go through auth.env so they are prompted for and land in ~/.hermes/.env.
+    # Static env for the stdio subprocess (telemetry opt-outs, mode flags). NOT for secrets — those
+    # go through auth.env so they are prompted for and land in ~/.hermes/.env.
     env: Dict[str, str] = field(default_factory=dict)
 
 
@@ -72,15 +68,15 @@ class InstallSpec:
 
 @dataclass
 class ToolsSpec:
-    """Manifest-side tool-selection hints: pre-check state for the install checklist and the
-    fallback selection when the probe fails (see install_entry())."""
+    """Manifest-side tool-selection hints (see _apply_tool_selection()).
 
-    # Pre-checked (or applied directly on probe failure). None => all probed tools pre-checked
-    # (or no filter written on probe failure).
+    ``default_enabled``: pre-checked in the install checklist / applied directly on probe failure;
+    None => all pre-checked (no filter written on failure). ``default_excluded``: exclude-mode
+    counterpart written to ``tools.exclude`` — everything NOT matching stays enabled, including tools
+    the server adds later (for huge OpenAPI-derived surfaces). Mutually exclusive.
+    """
+
     default_enabled: Optional[List[str]] = None
-    # Exclude-mode counterpart written to ``tools.exclude``: everything NOT matching stays enabled,
-    # including tools the server adds later. For huge auto-generated surfaces (OpenAPI-derived
-    # MCPs). Mutually exclusive with ``default_enabled``.
     default_excluded: Optional[List[str]] = None
 
 
@@ -110,9 +106,6 @@ class CatalogEntry:
     manifest_path: Path = field(default_factory=Path)
 
 
-# ─── Manifest loader ─────────────────────────────────────────────────────────
-
-
 class CatalogError(Exception):
     """Manifest parse/validation failure or install error."""
 
@@ -130,8 +123,7 @@ def _parse_env_spec(raw: Any) -> EnvVarSpec:
         raise CatalogError(f"invalid env var name: {name!r}")
     return EnvVarSpec(
         name=name, prompt=raw.get("prompt") or name, required=bool(raw.get("required", True)),
-        secret=bool(raw.get("secret", True)), default=str(raw.get("default") or ""),
-    )
+        secret=bool(raw.get("secret", True)), default=str(raw.get("default") or ""))
 
 
 def _require_mapping(path: Path, key: str, raw: Any) -> dict:
@@ -160,12 +152,13 @@ def _parse_transport(path: Path, raw: Any) -> TransportSpec:
         raise CatalogError(f"{path}: transport.type must be 'stdio' or 'http'")
     args = _require_list(path, "transport.args", transport_raw.get("args") or [])
     env_raw = transport_raw.get("env") or {}
-    if not isinstance(env_raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env_raw.items()):
+    if not isinstance(env_raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in env_raw.items()
+    ):
         raise CatalogError(f"{path}: transport.env must be a mapping of string to string")
     transport = TransportSpec(
         type=t_type, command=transport_raw.get("command"), args=[str(a) for a in args],
-        url=transport_raw.get("url"), version=transport_raw.get("version"), env=dict(env_raw),
-    )
+        url=transport_raw.get("url"), version=transport_raw.get("version"), env=dict(env_raw))
     if t_type == "stdio" and not transport.command:
         raise CatalogError(f"{path}: stdio transport requires 'command'")
     if t_type == "http" and not transport.url:
@@ -189,12 +182,10 @@ def _parse_auth(path: Path, raw: Any, name: str, http: bool) -> AuthSpec:
         if all(spec.name != _required_key for spec in env_list):
             raise CatalogError(
                 f"{path}: http + api_key auth requires auth.env to declare "
-                f"'{_required_key}' (the key the Authorization header references)"
-            )
+                f"'{_required_key}' (the key the Authorization header references)")
     return AuthSpec(
         type=a_type, env=env_list, provider=auth_raw.get("provider"),
-        scopes=list(auth_raw.get("scopes") or []), env_var=auth_raw.get("env_var"),
-    )
+        scopes=list(auth_raw.get("scopes") or []), env_var=auth_raw.get("env_var"))
 
 
 def _parse_tools(path: Path, raw: Any) -> ToolsSpec:
@@ -222,8 +213,7 @@ def _parse_suggest(path: Path, suggest_raw: Any) -> Optional[SuggestSpec]:
     # Matching is case-insensitive whole-word / host-suffix: store lowercase so UIs needn't re-normalize.
     return SuggestSpec(
         keywords=[k.strip().lower() for k in kw_raw],
-        hosts=[h.strip().lower().lstrip(".") for h in hosts_raw],
-    )
+        hosts=[h.strip().lower().lstrip(".") for h in hosts_raw])
 
 
 def _parse_install(path: Path, install_raw: Any) -> Optional[InstallSpec]:
@@ -254,8 +244,7 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     if mv != _MANIFEST_VERSION:
         raise CatalogError(
             f"{path}: manifest_version {mv!r} unsupported "
-            f"(this Hermes understands version {_MANIFEST_VERSION})"
-        )
+            f"(this Hermes understands version {_MANIFEST_VERSION})")
     name = data.get("name") or ""
     if not name or not re.match(r"^[A-Za-z0-9_-]+$", name):
         raise CatalogError(f"{path}: invalid or missing 'name'")
@@ -279,8 +268,7 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         install=install,
         post_install=str(data.get("post_install") or ""),
         suggest=suggest,
-        manifest_path=path,
-    )
+        manifest_path=path)
 
 
 # Populated by list_catalog(); inspected by the picker / catalog UIs so the user gets actionable
@@ -325,9 +313,6 @@ def get_entry(name: str) -> Optional[CatalogEntry]:
     return next((e for e in list_catalog() if e.name == name), None)
 
 
-# ─── Status helpers ──────────────────────────────────────────────────────────
-
-
 def installed_servers() -> Dict[str, dict]:
     """Return current ``mcp_servers`` block from config.yaml."""
     servers = load_config().get("mcp_servers") or {}
@@ -364,9 +349,6 @@ def remove_server(name: str) -> bool:
         cfg["mcp_servers"] = servers
     save_config(cfg)
     return True
-
-
-# ─── Install ─────────────────────────────────────────────────────────────────
 
 
 def _say(msg: str, colour: str = Colors.GREEN) -> None:
@@ -533,8 +515,7 @@ def _apply_tool_selection(
     entry: CatalogEntry,
     *,
     prior_selection: Optional[List[str]],
-    prior_exclude: Optional[List[str]] = None,
-) -> None:
+    prior_exclude: Optional[List[str]] = None) -> None:
     """Probe the server and let the user pick which tools to enable.
 
     Probe-success: curses checklist; pre-check priority *prior_selection* (reinstall) > manifest
@@ -557,8 +538,7 @@ def _apply_tool_selection(
         _write_tools_filter(name, "exclude", entry.tools.default_excluded)
         _say(
             f"  Applied manifest exclude list ({len(entry.tools.default_excluded)} entries); "
-            f"everything else stays enabled. {edit_hint}"
-        )
+            f"everything else stays enabled. {edit_hint}")
         return
 
     _say(f"  Probing '{name}' for available tools...", Colors.CYAN)
@@ -573,8 +553,7 @@ def _apply_tool_selection(
             _write_tools_filter(name, "include", prior_selection)
             msg = (
                 f"  Couldn't probe server. Kept your previous tool selection "
-                f"({len(prior_selection)} tools). {refine_hint}"
-            )
+                f"({len(prior_selection)} tools). {refine_hint}")
         elif prior_exclude is not None:
             _write_tools_filter(name, "exclude", prior_exclude)
             msg = f"  Couldn't probe server. Kept your existing exclude list ({len(prior_exclude)} entries)."
@@ -582,14 +561,12 @@ def _apply_tool_selection(
             _write_tools_filter(name, "include", manifest_default)
             msg = (
                 f"  Couldn't probe server. Applied manifest default "
-                f"({len(manifest_default)} tools). {refine_hint}"
-            )
+                f"({len(manifest_default)} tools). {refine_hint}")
         else:
             _write_tools_filter(name, "include", None)
             msg = (
                 "  Couldn't probe server; installed with no tool filter (all tools enabled when "
-                f"reachable). Run {configure_hint} after first connect to prune."
-            )
+                f"reachable). Run {configure_hint} after first connect to prune.")
         _say(msg, Colors.YELLOW)
         return
 
@@ -604,7 +581,9 @@ def _apply_tool_selection(
     import sys as _sys
     if not _sys.stdin.isatty():
         preferred = prior_selection if prior_selection is not None else (entry.tools.default_enabled or None)
-        _write_tools_filter(name, "include", None if preferred is None else [n for n in preferred if n in tool_names])
+        _write_tools_filter(
+            name, "include", None if preferred is None else [n for n in preferred if n in tool_names]
+        )
         return
 
     pre_set = {n for n in (prior_selection or entry.tools.default_enabled or tool_names) if n in tool_names}
@@ -615,8 +594,7 @@ def _apply_tool_selection(
 
     labels = [f"{n}  —  {(d[:60] + '...') if len(d) > 60 else d}" for n, d in probed]
     chosen_indices = curses_checklist(
-        f"Select tools for '{name}' (SPACE toggle, ENTER confirm)", labels, pre_indices,
-    )
+        f"Select tools for '{name}' (SPACE toggle, ENTER confirm)", labels, pre_indices)
     if not chosen_indices:
         # Everything unchecked: write an empty include so the server is installed but contributes
         # nothing until reconfigured.
@@ -629,8 +607,7 @@ def _apply_tool_selection(
         _write_tools_filter(name, "include", None)
         _say(
             f"  ✓ All {len(probed)} tools enabled (no filter — new tools "
-            "the server adds later will be auto-enabled)."
-        )
+            "the server adds later will be auto-enabled).")
         return
     chosen_names = [tool_names[i] for i in sorted(chosen_indices)]
     _write_tools_filter(name, "include", chosen_names)
@@ -665,14 +642,12 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
             f"  This MCP uses {entry.auth.provider} OAuth. Run "
             f"`hermes auth {entry.auth.provider}` if you have not "
             "already authenticated.",
-            Colors.YELLOW,
-        )
+            Colors.YELLOW)
     elif entry.auth.type == "oauth":
         _say(
             "  This MCP uses native OAuth 2.1; tokens will be acquired "
             "on first connection (browser flow).",
-            Colors.DIM,
-        )
+            Colors.DIM)
 
     # Read prior user selection BEFORE overwriting the entry so a reinstall preserves it.
     prior_selection = _read_prior_tool_list(entry.name, "include")
@@ -692,8 +667,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     _say(
         f"  ✓ Installed '{entry.name}' "
         f"({'enabled' if enable else 'disabled'}). "
-        f"Start a new Hermes session to load its tools."
-    )
+        f"Start a new Hermes session to load its tools.")
     if entry.post_install:
         print()
         for line in entry.post_install.strip().splitlines():
@@ -702,7 +676,7 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
 
 
 def uninstall_entry(name: str, *, purge_install_dir: bool = True) -> bool:
-    """Remove a catalog-installed MCP from config and (optionally) its clone dir. True if anything was removed."""
+    """Remove a catalog-installed MCP from config and (optionally) its clone dir. True if anything removed."""
     removed = remove_server(name)
     if purge_install_dir:
         clone = _install_root() / name
