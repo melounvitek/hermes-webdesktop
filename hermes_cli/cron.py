@@ -1,5 +1,6 @@
 """Cron subcommand for hermes CLI."""
 
+import contextlib
 import json
 import re
 import sys
@@ -66,12 +67,10 @@ def _builtin_gateway_liveness() -> Optional[bool]:
         # gateway process it short-circuits to True so the in-gateway cron tool never
         # emits a false "gateway not running" (find_gateway_pids can transiently miss the
         # gateway just after a restart).
-        try:
+        with contextlib.suppress(Exception):  # a crashing probe is "unknown" — let the pid scan decide
             from gateway.status import is_gateway_runtime_lock_active
             if is_gateway_runtime_lock_active():
                 return True
-        except Exception:
-            pass  # a crashing lock probe is "unknown", not "dead" — let the pid scan decide
         from hermes_cli.gateway import (
             find_gateway_pids, named_profile_served_by_running_multiplexer,
         )
@@ -434,13 +433,11 @@ def cron_status():
             # The pid scan can transiently miss a live gateway (just after a restart) while
             # the runtime lock — held for exactly the gateway's lifetime — proves the ticker's
             # process is alive. Only declare "not running" when both agree.
-            try:
+            with contextlib.suppress(Exception):
                 from gateway.status import get_running_pid, is_gateway_runtime_lock_active
                 gateway_alive_via_lock = is_gateway_runtime_lock_active()
                 lock_pid = get_running_pid() if gateway_alive_via_lock else None
                 pids = [lock_pid] if lock_pid else pids
-            except Exception:
-                pass
         if pids or gateway_alive_via_lock:
             _print_ticker_health(pids)
         else:
@@ -701,11 +698,9 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         # stateless so ``async_delivery_supported()`` gates it off and the run executes
         # synchronously. Scoped to this call (token reset in ``finally``) so in-process
         # callers (tests, embedding apps) are not tainted.
-        try:
+        with contextlib.suppress(Exception):
             from gateway.session_context import _SESSION_ASYNC_DELIVERY
             _stateless_token = _SESSION_ASYNC_DELIVERY.set(False)
-        except Exception:
-            _stateless_token = None
     try:
         result = _cron_api(action=action, job_id=job_id)
     finally:
