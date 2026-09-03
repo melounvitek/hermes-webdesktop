@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -208,15 +209,10 @@ def _atexit_commit_sessions():
     if provider is None:
         return
     _last_active_provider = None
-    try:
+    with suppress(Exception):  # best-effort at shutdown time
         provider.on_session_end([])
-    except Exception:
-        pass  # best-effort at shutdown time
-    finally:
-        try:
-            provider._release_run_lock()
-        except Exception:
-            pass
+    with suppress(Exception):
+        provider._release_run_lock()
 
 
 atexit.register(_atexit_commit_sessions)
@@ -319,8 +315,7 @@ class _VikingClient:
         return self._request("get", path, kwargs)
 
     def post(self, path: str, payload: dict = None, **kwargs) -> dict:
-        kwargs["json"] = payload or {}
-        return self._request("post", path, kwargs)
+        return self._request("post", path, {**kwargs, "json": payload or {}})
 
     def delete(self, path: str, **kwargs) -> dict:
         return self._request("delete", path, kwargs)
@@ -732,10 +727,8 @@ def _discover_ovcli_profiles() -> list[_OvcliProfile]:
     seen_paths: set[str] = set()
 
     def add(path: Path, *, source: str, name: str) -> None:
-        if not path.exists() or not path.is_file():
-            return
         identity = _profile_identity(path)
-        if identity in seen_paths:
+        if not path.is_file() or identity in seen_paths:
             return
         profile = _load_profile(path, source=source, name=name)
         if profile is not None:
@@ -862,10 +855,8 @@ def _write_env_vars(env_path: Path, env_writes: dict, remove_keys: tuple[str, ..
         if key_match in remove_set:
             continue
         if key_match in env_writes:
-            new_lines.append(f"{key_match}={_env_line_safe(env_writes[key_match])}")
             updated_keys.add(key_match)
-        else:
-            new_lines.append(line)
+        new_lines.append(f"{key_match}={_env_line_safe(env_writes[key_match])}" if key_match in env_writes else line)
     new_lines += [f"{key}={_env_line_safe(val)}" for key, val in env_writes.items() if key not in updated_keys]
     _secure_secret_file(env_path, create=True)
     env_path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8", errors="surrogateescape")
@@ -1294,12 +1285,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def __init__(self):
         self._client: Optional[_VikingClient] = None
         self._endpoint = self._api_key = self._account = self._user = self._agent = ""
-        self._session_id = ""
-        self._turn_count = 0
+        self._session_id, self._turn_count, self._hermes_home = "", 0, ""
         # (conn snapshot, user): keyed on the snapshot so every client built from it
         # shares the resolved user and a /reload invalidates it.
         self._user_space_cache: Optional[tuple[Any, str]] = None
-        self._hermes_home = ""
         self._run_id = uuid.uuid4().hex
         self._run_lock_file: Optional[Any] = None
         self._run_lock_path: Optional[Path] = None
@@ -1318,12 +1307,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._committed_session_ids: Set[str] = set()
         self._committed_session_lock = threading.Lock()
         self._pending_marked_sids: Set[str] = set()
-        # Settings + _client are one published state; refreshes are serialized.
+        # Settings + _client are one published state; refreshes are serialized. The
+        # snapshot is the last identity that passed health, published as ONE tuple so
+        # lock-free background writers never see torn fields or a failed endpoint;
+        # _failed_refresh = (settings key, monotonic ts) of the last failure -> cooldown gate.
         self._client_refresh_lock = threading.Lock()
-        # Last identity that passed health, published as ONE tuple assignment so
-        # lock-free background writers never see torn fields or a failed endpoint.
         self._conn_snapshot: Optional[tuple] = None
-        # (settings key, monotonic ts) of the last failed refresh -> cooldown gate.
         self._failed_refresh: Optional[tuple] = None
         self._runtime_start_lock = threading.Lock()
         self._runtime_start_thread: Optional[threading.Thread] = None
@@ -1366,10 +1355,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not isinstance(memory_config, dict):
             memory_config = config["memory"] = {}
         provider_config = memory_config.get("openviking")
-        if not isinstance(provider_config, dict):
-            provider_config = {}
-        provider_config.update(normalized)
-        memory_config["openviking"] = provider_config
+        memory_config["openviking"] = {**(provider_config if isinstance(provider_config, dict) else {}), **normalized}
         save_config(config)
 
     def get_status_config(self, provider_config: dict) -> dict:
@@ -1688,15 +1674,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
         query_text = (query or "").strip()
         if len(query_text) < _RECALL_QUERY_MIN_CHARS:
             return ""
-        if client is None:
-            if self._env_refresh_enabled:
-                client = self._ensure_client()
-            elif self._client is not None:
-                try:  # legacy/hand-wired path: no env baseline yet
-                    client = self._new_client()
-                except Exception as e:
-                    logger.debug("OpenViking prefetch client build failed: %s", e)
-                    return ""
+        if client is None and self._env_refresh_enabled:
+            client = self._ensure_client()
+        elif client is None and self._client is not None:
+            try:  # legacy/hand-wired path: no env baseline yet
+                client = self._new_client()
+            except Exception as e:
+                logger.debug("OpenViking prefetch client build failed: %s", e)
+                return ""
         if client is None:
             return ""
 
@@ -2004,12 +1989,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("OpenViking session-start memory prefetch failed: %s", e)
             return ""
-        profile = raw_parts.get("profile")
-        if profile is None:
+        if raw_parts.get("profile") is None:
             return ""
         self._profile_prefetched_sessions.add(session_key)
         return self._build_session_start_memory_block(
-            profile=profile, preferences=raw_parts.get("preferences") or [], entities=raw_parts.get("entities") or [],
+            profile=raw_parts["profile"], preferences=raw_parts.get("preferences") or [], entities=raw_parts.get("entities") or [],
             token_budget=self._profile_token_budget(), uris=raw_parts["uris"],
         )
 
@@ -2116,14 +2100,15 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if not messages:
             return []
         last = len(messages) - 1
-        end_idx = _rfind_message(messages, "assistant", last, assistant_content) if _message_text(assistant_content).strip() else None
-        if end_idx is None:
-            end_idx = _rfind_message(messages, "assistant", last)
+
+        def locate(role: str, start: int, expected: Any) -> Optional[int]:
+            matched = _rfind_message(messages, role, start, expected) if _message_text(expected).strip() else None
+            return matched if matched is not None else _rfind_message(messages, role, start)
+
+        end_idx = locate("assistant", last, assistant_content)
         if end_idx is None:
             end_idx = last
-        start_idx = _rfind_message(messages, "user", end_idx, user_content) if _message_text(user_content).strip() else None
-        if start_idx is None:
-            start_idx = _rfind_message(messages, "user", end_idx)
+        start_idx = locate("user", end_idx, user_content)
         if start_idx is None:
             return []
         return [message for message in messages[start_idx : end_idx + 1] if isinstance(message, dict)]
@@ -2374,9 +2359,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 logger.debug("Could not %s OpenViking %s %s: %s", verb, label, path, e)
 
     def _acquire_run_lock(self) -> None:
-        if self._run_lock_path is not None:
-            return
-        path = self._run_lock_path_for(self._run_id)
+        path = None if self._run_lock_path is not None else self._run_lock_path_for(self._run_id)
         if path is None:
             return
         if fcntl is None:
@@ -2387,10 +2370,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._run_lock_path = path
         except Exception as e:
             self._run_lock_path = None
-            try:
+            with suppress(Exception):
                 path.unlink(missing_ok=True)
-            except Exception:
-                pass
             logger.debug("Could not acquire OpenViking run lock %s: %s", path, e)
 
     def _release_run_lock(self) -> None:
@@ -2678,15 +2659,13 @@ class OpenVikingMemoryProvider(MemoryProvider):
         # the autostart waiter (a daemon blocked on health probes would SIGABRT CPython at
         # Py_FinalizeEx); _shutting_down makes its wait loop bail so the join lands.
         self._shutting_down = True
-        with self._inflight_lock:
-            workers = [t for group in self._inflight_writers.values() for t in group]
-        with self._deferred_commit_lock:
-            workers += list(self._deferred_commit_threads)
-        with self._memory_write_lock:
-            workers += list(self._memory_write_threads)
-        with self._runtime_start_lock:
-            if self._runtime_start_thread is not None:
-                workers.append(self._runtime_start_thread)
+        workers: List[threading.Thread] = []
+        for lock, group in ((self._inflight_lock, lambda: [t for g in self._inflight_writers.values() for t in g]),
+                            (self._deferred_commit_lock, lambda: list(self._deferred_commit_threads)),
+                            (self._memory_write_lock, lambda: list(self._memory_write_threads)),
+                            (self._runtime_start_lock, lambda: [self._runtime_start_thread] if self._runtime_start_thread is not None else [])):
+            with lock:
+                workers += group()
         for t in workers:
             if t.is_alive():
                 t.join(timeout=5.0)
@@ -2735,15 +2714,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
         for ctx_type in ("memories", "resources", "skills"):
             for item in result.get(ctx_type, []):
                 raw_score = item.get("score")
-                entry = {
-                    "uri": item.get("uri", ""), "type": ctx_type.rstrip("s"),
-                    "score": round(raw_score, 3) if raw_score is not None else 0.0, "abstract": item.get("abstract", ""),
-                }
+                entry = {"uri": item.get("uri", ""), "type": ctx_type.rstrip("s"),
+                         "score": round(raw_score, 3) if raw_score is not None else 0.0, "abstract": item.get("abstract", "")}
                 if item.get("relations"):
                     entry["related"] = [r.get("uri") for r in item["relations"][:3]]
                 scored_entries.append((raw_score if raw_score is not None else 0.0, entry))
-        scored_entries.sort(key=lambda x: x[0], reverse=True)
-        formatted = [entry for _, entry in scored_entries]
+        formatted = [entry for _, entry in sorted(scored_entries, key=lambda x: x[0], reverse=True)]
         return json.dumps({"results": formatted, "total": result.get("total", len(formatted))}, ensure_ascii=False)
 
     def _read_uri_payload(self, uri: str, level: str, *, limit: Optional[int] = None) -> Dict[str, Any]:
@@ -2764,12 +2740,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             used_fallback = True
 
         result = self._unwrap_result(resp)
-        if isinstance(result, str):
-            content = result
-        elif isinstance(result, dict):
-            content = result.get("content", "") or result.get("text", "")
-        else:
-            content = ""
+        content = result if isinstance(result, str) else (result.get("content", "") or result.get("text", "")) if isinstance(result, dict) else ""
         max_len = _LEVEL_MAX_CHARS.get(level, 8000)
         if limit is not None:
             max_len = max(200, min(max_len, limit))
@@ -2795,11 +2766,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         else:
             return tool_error("uri or uris is required")
 
-        uris: List[str] = []
-        for raw_uri in raw_uris:
-            uri = raw_uri.strip() if isinstance(raw_uri, str) else ""
-            if uri and uri not in uris:
-                uris.append(uri)
+        uris = list(dict.fromkeys(u.strip() for u in raw_uris if isinstance(u, str) and u.strip()))
         if not uris:
             return tool_error("uri or uris is required")
 
@@ -2827,15 +2794,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
             if isinstance(result, dict):
                 raw_entries = result.get("entries") or result.get("items") or result.get("children") or []
             if isinstance(raw_entries, list):
-                entries = []
-                for e in raw_entries[:50]:
-                    uri = e.get("uri", "")
-                    entries.append({
-                        "name": e.get("rel_path") or e.get("name") or (uri.rsplit("/", 1)[-1] if uri else ""),
-                        "uri": uri,
-                        "type": "dir" if (e.get("isDir") or e.get("is_dir") or e.get("type") == "dir") else "file",
-                        "abstract": e.get("abstract", ""),
-                    })
+                entries = [{
+                    "name": e.get("rel_path") or e.get("name") or (e.get("uri", "").rsplit("/", 1)[-1] if e.get("uri", "") else ""),
+                    "uri": e.get("uri", ""),
+                    "type": "dir" if (e.get("isDir") or e.get("is_dir") or e.get("type") == "dir") else "file",
+                    "abstract": e.get("abstract", ""),
+                } for e in raw_entries[:50]]
                 return json.dumps({"path": path, "entries": entries}, ensure_ascii=False)
         return json.dumps(result, ensure_ascii=False)
 
