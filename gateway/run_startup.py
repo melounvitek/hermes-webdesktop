@@ -1019,18 +1019,8 @@ class GatewayStartupMixin:
                 continue
             # Under multiplexing the default profile needs the same whole-handler runtime scope as
             # a secondary profile: authorization and prompt rendering both run before the narrower
-            # agent-turn scope is installed. (Byte-identical wiring block in run_adapters.py.)
-            adapter.set_message_handler(self._primary_message_handler())
-            adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
-            adapter.set_session_store(self.session_store)
-            adapter.set_busy_session_handler(self._handle_active_session_busy_message)
-            _set_reaction = getattr(adapter, "set_reaction_handler", None)
-            if callable(_set_reaction):
-                _set_reaction(self._handle_reaction_event)
-            adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
-            adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
-            adapter.set_platform_event_handler(self._primary_platform_event_handler())
-            adapter._busy_text_mode = self._busy_text_mode
+            # agent-turn scope is installed.
+            self._wire_adapter_handlers(adapter)
             _pending_connects.append((platform, platform_config, adapter))
         return False, enabled_platform_count, _multiplex_skipped_platforms, _pending_connects
 
