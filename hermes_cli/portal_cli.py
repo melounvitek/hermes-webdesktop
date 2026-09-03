@@ -24,11 +24,15 @@ def _feature_state(feat, *, via_nous: str) -> str:
     """Routing column shared by `portal info` and `portal tools`."""
     if feat.managed_by_nous:
         return color(via_nous, Colors.GREEN)
-    if feat.active and feat.current_provider:
-        return feat.current_provider
     if feat.active:
-        return "active"
+        return feat.current_provider or "active"
     return color("not configured", Colors.DIM)
+
+
+def _heading(title: str) -> None:
+    print()
+    print(color(f"  {title}", Colors.MAGENTA))
+    print(color("  " + "─" * len(title), Colors.MAGENTA))
 
 
 def _cmd_status(args) -> int:
@@ -42,17 +46,12 @@ def _cmd_status(args) -> int:
     except Exception:
         auth = {}
     logged_in = bool(auth.get("logged_in"))
-
-    print()
-    print(color("  Nous Portal", Colors.MAGENTA))
-    print(color("  ───────────", Colors.MAGENTA))
+    _heading("Nous Portal")
     if logged_in:
-        portal = auth.get("portal_base_url") or DEFAULT_PORTAL_URL
         print(f"  Auth:    {color('✓ logged in', Colors.GREEN)}")
-        print(f"  Portal:  {portal}")
-        inference = auth.get("inference_base_url")
-        if inference:
-            print(f"  API:     {inference}")
+        print(f"  Portal:  {auth.get('portal_base_url') or DEFAULT_PORTAL_URL}")
+        if auth.get("inference_base_url"):
+            print(f"  API:     {auth['inference_base_url']}")
     else:
         print(f"  Auth:    {color('not logged in', Colors.YELLOW)}")
         print(f"  Sign up: {SUBSCRIPTION_URL}")
@@ -66,10 +65,7 @@ def _cmd_status(args) -> int:
     elif provider:
         print(f"  Model:   currently {provider} (switch with `hermes model`)")
 
-    # Tool Gateway routing
-    print()
-    print(color("  Tool Gateway", Colors.MAGENTA))
-    print(color("  ────────────", Colors.MAGENTA))
+    _heading("Tool Gateway")
     try:
         features = get_nous_subscription_features(config)
     except Exception:
@@ -110,10 +106,7 @@ def _cmd_tools(args) -> int:
         print("Could not resolve Tool Gateway state.", file=sys.stderr)
         return 1
 
-    print()
-    print(color("  Tool Gateway catalog", Colors.MAGENTA))
-    print(color("  ────────────────────", Colors.MAGENTA))
-
+    _heading("Tool Gateway catalog")
     if not features.nous_auth_present:
         print(color("  Not logged into Nous Portal — sign in with `hermes portal`.", Colors.YELLOW))
         print()
