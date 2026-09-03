@@ -15,12 +15,8 @@ novita = ProviderProfile(
     auth_type="api_key",
     default_aux_model="deepseek/deepseek-v3-0324",
     fallback_models=(
-        "moonshotai/kimi-k2.5",
-        "minimax/minimax-m2.7",
-        "zai-org/glm-5",
-        "deepseek/deepseek-v3-0324",
-        "deepseek/deepseek-r1-0528",
-        "qwen/qwen3-235b-a22b-fp8",
+        "moonshotai/kimi-k2.5", "minimax/minimax-m2.7", "zai-org/glm-5", "deepseek/deepseek-v3-0324",
+        "deepseek/deepseek-r1-0528", "qwen/qwen3-235b-a22b-fp8",
     ),
 )
 

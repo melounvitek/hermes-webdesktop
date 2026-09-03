@@ -10,12 +10,9 @@ class _DeepInfraProfile(ProviderProfile):
     resolution in ``agent/auxiliary_client.py`` stays provider-agnostic."""
 
     def default_vision_model(self):  # type: ignore[override]
-        """First vision-capable *chat* model from the live catalog, or None.
-
-        Key-gated so a box without DEEPINFRA_API_KEY never pays the round-trip.
-        Requires the ``chat`` surface tag so an image-gen model carrying a
-        ``vision`` tag can't be picked as a chat-completions vision backend.
-        """
+        """First vision-capable *chat* model from the live catalog, or None. Key-gated so a box
+        without DEEPINFRA_API_KEY never pays the round-trip; requires the ``chat`` surface tag so
+        an image-gen model carrying a ``vision`` tag can't be picked as a chat vision backend."""
         from agent.secret_scope import get_secret
 
         if not (get_secret("DEEPINFRA_API_KEY") or "").strip():
@@ -42,8 +39,7 @@ deepinfra = _DeepInfraProfile(
     env_vars=("DEEPINFRA_API_KEY", "DEEPINFRA_BASE_URL"),
     base_url="https://api.deepinfra.com/v1/openai",
     auth_type="api_key",
-    # No provider-wide cap: DeepInfra applies its documented per-model limit.
-    default_max_tokens=None,
+    default_max_tokens=None,  # DeepInfra applies its documented per-model limit
     # The only hardcoded DeepInfra model: aux resolution is synchronous, so it
     # can't wait on a catalog round-trip. Everything else is discovered live.
     default_aux_model="deepseek-ai/DeepSeek-V4-Flash",

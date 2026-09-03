@@ -27,14 +27,12 @@ def _model_supports_thinking(model: str | None) -> bool:
 
 def _has_token(model: str | None, tokens: tuple[str, ...]) -> bool:
     m = (model or "").strip().lower()
-    return bool(m) and any(token in m for token in tokens)
+    return any(token in m for token in tokens)
 
 
 def _glm_5_2_reasoning_effort(reasoning_config: dict | None, *, model: str | None = None) -> str | None:
-    """Map Hermes effort onto GLM's vocabulary (5.2: high/max; 5.3: low..max).
-
-    Below-floor efforts clamp to the floor; disabled/unset leaves the server default.
-    """
+    """Hermes effort -> GLM vocabulary (5.2: high/max; 5.3: low..max). Below-floor
+    efforts clamp to the floor; disabled/unset leaves the server default."""
     effort = re_.requested_effort(reasoning_config)
     if effort is None or effort == "none":
         return None
@@ -57,12 +55,10 @@ class ZaiProfile(ProviderProfile):
         is_5_2 = _has_token(model, _GLM_5_2_TOKENS)
         if not _model_supports_thinking(model) and not is_5_2:
             return extra_body, top_level
-
         # Only emit when the user expressed a preference (server default = enabled).
         if isinstance(reasoning_config, dict):
             enabled = reasoning_config.get("enabled") is not False
             extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
-
         if is_5_2:
             effort = _glm_5_2_reasoning_effort(reasoning_config, model=model)
             if effort is not None:

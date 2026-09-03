@@ -17,7 +17,7 @@ _HEADERS = {
 
 
 def _is_confirmed_kimi_coding_url(base_url: str) -> bool:
-    """Return True only for Kimi Code's canonical HTTPS API surfaces."""
+    """True only for Kimi Code's canonical HTTPS API surfaces."""
     try:
         p = urlparse(base_url)
         port = p.port
@@ -61,27 +61,17 @@ class KimiProfile(ProviderProfile):
         return {"thinking": {"type": "enabled"}}, {}
 
 
-kimi = KimiProfile(
-    name="kimi-coding",
-    aliases=("kimi", "moonshot", "kimi-for-coding"),
-    env_vars=("KIMI_API_KEY", "KIMI_CODING_API_KEY"),
-    base_url="https://api.moonshot.ai/v1",
-    fixed_temperature=OMIT_TEMPERATURE,
-    default_max_tokens=32000,
-    default_headers=dict(_HEADERS),
-    default_aux_model="kimi-k2-turbo-preview",
-)
+def _kimi(name: str, aliases: tuple, env_vars: tuple, base_url: str) -> KimiProfile:
+    return KimiProfile(
+        name=name, aliases=aliases, env_vars=env_vars, base_url=base_url,
+        fixed_temperature=OMIT_TEMPERATURE, default_max_tokens=32000,
+        default_headers=dict(_HEADERS), default_aux_model="kimi-k2-turbo-preview",
+    )
 
-kimi_cn = KimiProfile(
-    name="kimi-coding-cn",
-    aliases=("kimi-cn", "moonshot-cn"),
-    env_vars=("KIMI_CN_API_KEY",),
-    base_url="https://api.moonshot.cn/v1",
-    fixed_temperature=OMIT_TEMPERATURE,
-    default_max_tokens=32000,
-    default_headers=dict(_HEADERS),
-    default_aux_model="kimi-k2-turbo-preview",
-)
+
+kimi = _kimi("kimi-coding", ("kimi", "moonshot", "kimi-for-coding"), ("KIMI_API_KEY", "KIMI_CODING_API_KEY"),
+             "https://api.moonshot.ai/v1")
+kimi_cn = _kimi("kimi-coding-cn", ("kimi-cn", "moonshot-cn"), ("KIMI_CN_API_KEY",), "https://api.moonshot.cn/v1")
 
 register_provider(kimi)
 register_provider(kimi_cn)

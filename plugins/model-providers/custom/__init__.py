@@ -11,16 +11,13 @@ from providers.base import ProviderProfile
 
 def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
     """True only for explicit Ollama signatures (port 11434 or an ``ollama`` host label).
-
     ``think`` is Ollama-native; strict hosts (Mistral, Groq) 422 on it, and
-    arbitrary localhost may be llama.cpp / vLLM / LM Studio.
-    """
+    arbitrary localhost may be llama.cpp / vLLM / LM Studio."""
     raw = (base_url or "").strip()
     if not raw:
         return False
     parsed = urlparse(raw if "://" in raw else f"//{raw}")
-    # urlparse raises ValueError on malformed ports ("host:99999"); treat as not-Ollama.
-    try:
+    try:  # urlparse raises ValueError on malformed ports ("host:99999"); treat as not-Ollama.
         if parsed.port == 11434:
             return True
     except ValueError:
@@ -39,7 +36,6 @@ class CustomProfile(ProviderProfile):
         top_level: dict[str, Any] = {}
         if ollama_num_ctx:
             extra_body["options"] = {"num_ctx": ollama_num_ctx}
-
         # disabled -> top-level reasoning_effort="none" (Ollama's /v1 ignores
         # extra_body.think) plus think=False only on Ollama URLs; enabled+effort ->
         # top-level reasoning_effort clamped to the OpenAI-compat wire (GLM/ARK,

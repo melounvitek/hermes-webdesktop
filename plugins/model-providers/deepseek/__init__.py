@@ -24,12 +24,11 @@ class DeepSeekProfile(ProviderProfile):
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         m = (model or "").strip().lower()
-        # deepseek-v4-* and every later generation; v3 explicitly excluded.
-        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):
+        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):  # v4+ only; v3 excluded
             return {}, {}
         rc = reasoning_config if isinstance(reasoning_config, dict) else None
-        # Always set explicitly (default enabled, matching the API default) to
-        # avoid the reasoning_content echo trap on subsequent turns.
+        # Always set thinking explicitly (default enabled, matching the API default)
+        # to avoid the reasoning_content echo trap on subsequent turns.
         if rc is not None and rc.get("enabled") is False:
             return {"thinking": {"type": "disabled"}}, {}
         top_level: dict[str, Any] = {}

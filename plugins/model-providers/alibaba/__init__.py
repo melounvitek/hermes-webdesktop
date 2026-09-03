@@ -24,9 +24,6 @@ alibaba_cn = ProviderProfile(
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 
-register_provider(alibaba)
-register_provider(alibaba_cn)
-
 alibaba_token_plan = ProviderProfile(
     name="alibaba-token-plan",
     aliases=("dashscope-token-plan",),
@@ -49,5 +46,7 @@ alibaba_token_plan_cn = ProviderProfile(
     auth_type="api_key",
 )
 
+register_provider(alibaba)
+register_provider(alibaba_cn)
 register_provider(alibaba_token_plan)
 register_provider(alibaba_token_plan_cn)

@@ -2,11 +2,7 @@
 
 from typing import Any
 
-from agent.portal_tags import (
-    get_affinity_scope,
-    get_conversation_context,
-    nous_portal_tags,
-)
+from agent.portal_tags import get_affinity_scope, get_conversation_context, nous_portal_tags
 from agent.transports.codex import _cache_scope_from_session_id
 from providers import register_provider
 from providers.base import ProviderProfile
@@ -30,9 +26,7 @@ class NousProfile(ProviderProfile):
         # breakpoints stay warm on one upstream instance. Resolved like the
         # ``conversation=`` tag: declared scope, then the ambient lineage ROOT
         # (covers aux call sites that pass no session_id), then the explicit argument.
-        sticky_key = _cache_scope_from_session_id(
-            get_affinity_scope() or get_conversation_context() or session_id
-        )
+        sticky_key = _cache_scope_from_session_id(get_affinity_scope() or get_conversation_context() or session_id)
         if sticky_key:
             body["session_id"] = sticky_key
         provider_preferences = context.get("provider_preferences")
@@ -42,11 +36,8 @@ class NousProfile(ProviderProfile):
 
     @staticmethod
     def _cannot_disable_reasoning(model: str | None) -> bool:
-        """True when ``reasoning: {enabled: false}`` would 400 on *model*.
-
-        Cache-only catalog lookup; unknown/cold (warmer kicked) and
-        no-reasoning-parameter routes both answer True (omit rather than risk a 400).
-        """
+        """True when ``reasoning: {enabled: false}`` would 400 on *model*. Cache-only catalog
+        lookup; unknown/cold (warmer kicked) and no-reasoning routes both answer True (omit > 400)."""
         try:
             from hermes_cli.models import nous_model_reasoning_capabilities, warm_nous_reasoning_caps_async
 
@@ -59,12 +50,8 @@ class NousProfile(ProviderProfile):
         return not caps.get("supports_reasoning") or bool(caps.get("mandatory"))
 
     def build_api_kwargs_extras(
-        self,
-        *,
-        reasoning_config: dict | None = None,
-        supports_reasoning: bool = False,
-        model: str | None = None,
-        **context,
+        self, *, reasoning_config: dict | None = None, supports_reasoning: bool = False,
+        model: str | None = None, **context,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Pass the full reasoning_config, disable included (the Portal honors it;
         omitting it means the upstream default, thinking ON for V4-class models)."""

@@ -11,11 +11,7 @@ class NvidiaProviderProfile(ProviderProfile):
 
     @staticmethod
     def _needs_strip(msg: Any) -> bool:
-        return (
-            isinstance(msg, dict)
-            and msg.get("role") == "tool"
-            and ("name" in msg or "tool_name" in msg)
-        )
+        return isinstance(msg, dict) and msg.get("role") == "tool" and ("name" in msg or "tool_name" in msg)
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Copy-on-write: only tool messages that lose a field are copied

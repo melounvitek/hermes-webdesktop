@@ -11,9 +11,8 @@ from agent.reasoning_effort import EFFORT_LADDER, SOLAR_EFFORTS, clamp_effort
 from providers import register_provider
 from providers.base import ProviderProfile
 
-# Deny-list on purpose: new Solar models are assumed reasoning-capable; only
-# these known non-reasoning families ignore reasoning_effort. Substring match
-# so dated variants (``solar-mini-250127``) are covered.
+# Deny-list on purpose: new Solar models are assumed reasoning-capable; only these known
+# non-reasoning families ignore reasoning_effort. Substring match covers dated variants.
 _NON_REASONING_MODEL_MARKERS = ("solar-mini", "syn-pro")
 
 
@@ -26,12 +25,10 @@ class UpstageProfile(ProviderProfile):
         m = (model or "").strip().lower()
         if any(marker in m for marker in _NON_REASONING_MODEL_MARKERS):
             return {}, {}
-        # Unset -> default reasoning ON for agents.
         if not reasoning_config or not isinstance(reasoning_config, dict):
-            return {}, {"reasoning_effort": "medium"}
-        # Explicitly disabled -> omit so Solar applies its own default (minimal = off).
+            return {}, {"reasoning_effort": "medium"}  # unset -> reasoning ON for agents
         if reasoning_config.get("enabled") is False:
-            return {}, {}
+            return {}, {}  # explicitly disabled -> Solar's own default (minimal = off)
         effort = (reasoning_config.get("effort") or "").strip().lower()
         if not effort:
             return {}, {"reasoning_effort": "medium"}
@@ -39,9 +36,8 @@ class UpstageProfile(ProviderProfile):
             return {}, {}
         mapped = clamp_effort(effort, SOLAR_EFFORTS)
         if mapped not in SOLAR_EFFORTS:
-            # Bespoke level outside the ladder runs at full strength rather
-            # than quietly falling to the default; ladder levels that still
-            # don't map are omitted.
+            # Bespoke level outside the ladder runs at full strength rather than quietly
+            # falling to the default; ladder levels that still don't map are omitted.
             mapped = "high" if effort not in EFFORT_LADDER else None
         return {}, {"reasoning_effort": mapped} if mapped else {}
 

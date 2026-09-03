@@ -23,7 +23,7 @@ _ATTRIBUTION_HEADERS = {
 
 
 def _flat_model_name(model: str | None) -> str:
-    """Return the bare OpenCode model ID, tolerating aggregator prefixes."""
+    """Bare OpenCode model ID, tolerating aggregator prefixes."""
     return (model or "").strip().rsplit("/", 1)[-1].lower()
 
 
@@ -33,7 +33,7 @@ def _is_deepseek_thinking_model(model: str | None) -> bool:
 
 
 def _is_glm_5_2_model(model: str | None) -> bool:
-    """Detect GLM-5.2 across alias spellings (glm-5.2 / glm-5-2 / glm-5p2)."""
+    """GLM-5.2 across alias spellings (glm-5.2 / glm-5-2 / glm-5p2)."""
     m = _flat_model_name(model)
     return any(token in m for token in ("glm-5.2", "glm-5-2", "glm-5p2"))
 
@@ -62,9 +62,7 @@ class OpenCodeGoProfile(ProviderProfile):
 
     # The relay's default max_tokens (262144) exceeds what Xiaomi accepts for
     # mimo-v2.5-pro and 400s; keys are normalized via _flat_model_name().
-    _MODEL_MAX_TOKENS: dict[str, int] = {
-        "mimo-v2.5-pro": 131072,
-    }
+    _MODEL_MAX_TOKENS: dict[str, int] = {"mimo-v2.5-pro": 131072}
 
     def get_max_tokens(self, model: str | None) -> int | None:
         cap = self._MODEL_MAX_TOKENS.get(_flat_model_name(model))
@@ -85,9 +83,7 @@ class OpenCodeGoProfile(ProviderProfile):
                 return {}, {}
             return _thinking_toggle_extras(reasoning_config, re_.KIMI_K2_EFFORTS)
         if _is_deepseek_thinking_model(model):
-            return _thinking_toggle_extras(
-                reasoning_config, re_.DEEPSEEK_V4_EFFORTS, re_.DEEPSEEK_V4_OVERRIDES
-            )
+            return _thinking_toggle_extras(reasoning_config, re_.DEEPSEEK_V4_EFFORTS, re_.DEEPSEEK_V4_OVERRIDES)
         return {}, {}
 
 
@@ -98,12 +94,8 @@ def _build_ox_alpha_reasoning_extras(
     opencode-free profile (low/high/max only; anything else 400s)."""
     if _flat_model_name(model) != "x-preview-f-free":
         return {}, {}
-    clamped = re_.clamp_effort(
-        _requested_effort(reasoning_config), re_.OX_ALPHA_EFFORTS, re_.OX_ALPHA_OVERRIDES
-    )
-    if clamped not in re_.OX_ALPHA_EFFORTS:
-        return {}, {}
-    return {}, {"reasoning_effort": clamped}
+    clamped = re_.clamp_effort(_requested_effort(reasoning_config), re_.OX_ALPHA_EFFORTS, re_.OX_ALPHA_OVERRIDES)
+    return ({}, {"reasoning_effort": clamped}) if clamped in re_.OX_ALPHA_EFFORTS else ({}, {})
 
 
 class OpenCodeZenProfile(ProviderProfile):

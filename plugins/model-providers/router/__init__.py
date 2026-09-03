@@ -47,14 +47,11 @@ def _base_url() -> str:
 def _resolve_api_key() -> str:
     """Router key (documented var, then alias), preferring dotenv; plain os.environ
     is the fallback when the dotenv resolver is unavailable or raises."""
-    resolvers: list = [lambda var: os.environ.get(var, "")]
     try:
-        from hermes_cli.config import get_env_value_prefer_dotenv
-
-        resolvers.insert(0, get_env_value_prefer_dotenv)
+        from hermes_cli.config import get_env_value_prefer_dotenv as prefer_dotenv
     except Exception:
-        pass
-    for resolve in resolvers:
+        prefer_dotenv = None
+    for resolve in filter(None, (prefer_dotenv, os.environ.get)):
         for var in ("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY"):
             try:
                 value = str(resolve(var) or "").strip()
@@ -121,7 +118,7 @@ def _save_disk(efforts_by_id: dict[str, list[str]]) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(".tmp")  # write-then-rename keeps readers from seeing a torn file
         tmp.write_text(json.dumps({"ts": time.time(), "efforts": efforts_by_id}), encoding="utf-8")
         tmp.replace(path)
     except Exception as exc:

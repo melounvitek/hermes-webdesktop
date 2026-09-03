@@ -15,12 +15,8 @@ class CopilotProfile(ProviderProfile):
     """GitHub Copilot / GitHub Models — editor headers + reasoning."""
 
     def build_api_kwargs_extras(
-        self,
-        *,
-        model: str | None = None,
-        reasoning_config: dict | None = None,
-        supports_reasoning: bool = False,
-        **ctx,
+        self, *, model: str | None = None, reasoning_config: dict | None = None,
+        supports_reasoning: bool = False, **ctx,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if not (supports_reasoning and model):
             return {}, {}
@@ -33,10 +29,9 @@ class CopilotProfile(ProviderProfile):
             if not reasoning_config:
                 return {"reasoning": {"effort": "medium"}}, {}
             effort = reasoning_config.get("effort", "medium")
-            # Honor a level the live catalog lists; otherwise clamp to the nearest
-            # WEAKER supported level (never drop straight to medium, which inverted
-            # the ladder: ultra < high). Bespoke levels the ladder can't place fall
-            # to medium (or the first supported level).
+            # Honor a level the live catalog lists; otherwise clamp to the nearest WEAKER
+            # supported level (never drop straight to medium, which inverted the ladder:
+            # ultra < high). Bespoke levels the ladder can't place fall to medium (or [0]).
             if effort not in supported:
                 effort = clamp_reasoning_effort_to_supported(effort, list(supported))
                 if effort not in supported:
