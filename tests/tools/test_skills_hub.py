@@ -103,8 +103,8 @@ class TestSkillsShGroupings:
         resp.status_code = 200
         resp.json.return_value = contents
 
-        with patch.object(src, "_read_cache", return_value=None), \
-             patch.object(src, "_write_cache"), \
+        with patch("tools.skills_hub._read_index_cache", return_value=None), \
+             patch("tools.skills_hub._write_index_cache"), \
              patch.object(src, "_get_skillsh_groupings", return_value=groupings), \
              patch.object(src, "inspect", return_value=meta), \
              patch("tools.skills_hub.httpx.get", return_value=resp):

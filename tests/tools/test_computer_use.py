@@ -2051,8 +2051,8 @@ class TestStructuredElementsConsumption:
     `structuredContent.elements` part of every `get_window_state` MCP
     response. The wrapper used to parse the markdown AX tree with a
     regex — lossy because bounds always came back (0,0,0,0). The
-    structured path preserves real frames, so UIElement.center() works
-    against pixel coordinates instead of just an index lookup.
+    structured path preserves real frames, so UIElement.bounds carries
+    pixel coordinates instead of just an index lookup.
     """
 
     def test_structured_parser_reads_frames(self):
