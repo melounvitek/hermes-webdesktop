@@ -25,6 +25,7 @@ Handlers posting a follow-up into the same Telegram forum-topic should pass
 import asyncio
 import importlib.util
 import sys
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import yaml
@@ -33,6 +34,49 @@ from hermes_cli.config import get_hermes_home
 
 
 HOOKS_DIR = get_hermes_home() / "hooks"
+
+
+def _load_hook_dir(hook_dir: Path) -> Optional[tuple]:
+    """``(name, events, handle_fn, description)`` for a valid hook dir, else None (reason printed)."""
+    manifest_path = hook_dir / "HOOK.yaml"
+    handler_path = hook_dir / "handler.py"
+    if not manifest_path.exists() or not handler_path.exists():
+        return None
+
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    if not manifest or not isinstance(manifest, dict):
+        print(f"[hooks] Skipping {hook_dir.name}: invalid HOOK.yaml", flush=True)
+        return None
+
+    hook_name = manifest.get("name", hook_dir.name)
+    events = manifest.get("events", [])
+    if not events:
+        print(f"[hooks] Skipping {hook_name}: no events declared", flush=True)
+        return None
+
+    # Register in sys.modules BEFORE exec_module so Pydantic/dataclass forward
+    # references (from ``from __future__ import annotations``) resolve; otherwise
+    # a handler declaring a BaseModel fails at first dispatch with
+    # "TypeAdapter ... is not fully defined".
+    module_name = f"hermes_hook_{hook_name}"
+    spec = importlib.util.spec_from_file_location(module_name, handler_path)
+    if spec is None or spec.loader is None:
+        print(f"[hooks] Skipping {hook_name}: could not load handler.py", flush=True)
+        return None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+
+    handle_fn = getattr(module, "handle", None)
+    if handle_fn is None:
+        print(f"[hooks] Skipping {hook_name}: no 'handle' function found", flush=True)
+        return None
+    return hook_name, events, handle_fn, manifest.get("description", "")
 
 
 class HookRegistry:
@@ -60,62 +104,23 @@ class HookRegistry:
         for hook_dir in sorted(HOOKS_DIR.iterdir()):
             if not hook_dir.is_dir():
                 continue
-
-            manifest_path = hook_dir / "HOOK.yaml"
-            handler_path = hook_dir / "handler.py"
-
-            if not manifest_path.exists() or not handler_path.exists():
-                continue
-
             try:
-                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-                if not manifest or not isinstance(manifest, dict):
-                    print(f"[hooks] Skipping {hook_dir.name}: invalid HOOK.yaml", flush=True)
-                    continue
-
-                hook_name = manifest.get("name", hook_dir.name)
-                events = manifest.get("events", [])
-                if not events:
-                    print(f"[hooks] Skipping {hook_name}: no events declared", flush=True)
-                    continue
-
-                # Register in sys.modules BEFORE exec_module so Pydantic/dataclass
-                # forward references (from ``from __future__ import annotations``)
-                # resolve; otherwise a handler declaring a BaseModel fails at first
-                # dispatch with "TypeAdapter ... is not fully defined".
-                module_name = f"hermes_hook_{hook_name}"
-                spec = importlib.util.spec_from_file_location(module_name, handler_path)
-                if spec is None or spec.loader is None:
-                    print(f"[hooks] Skipping {hook_name}: could not load handler.py", flush=True)
-                    continue
-
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                try:
-                    spec.loader.exec_module(module)
-                except Exception:
-                    sys.modules.pop(module_name, None)
-                    raise
-
-                handle_fn = getattr(module, "handle", None)
-                if handle_fn is None:
-                    print(f"[hooks] Skipping {hook_name}: no 'handle' function found", flush=True)
-                    continue
-
-                for event in events:
-                    self._handlers.setdefault(event, []).append(handle_fn)
-
-                self._loaded_hooks.append({
-                    "name": hook_name,
-                    "description": manifest.get("description", ""),
-                    "events": events,
-                    "path": str(hook_dir),
-                })
-
-                print(f"[hooks] Loaded hook '{hook_name}' for events: {events}", flush=True)
-
+                loaded = _load_hook_dir(hook_dir)
             except Exception as e:
                 print(f"[hooks] Error loading hook {hook_dir.name}: {e}", flush=True)
+                continue
+            if loaded is None:
+                continue
+            hook_name, events, handle_fn, description = loaded
+            for event in events:
+                self._handlers.setdefault(event, []).append(handle_fn)
+            self._loaded_hooks.append({
+                "name": hook_name,
+                "description": description,
+                "events": events,
+                "path": str(hook_dir),
+            })
+            print(f"[hooks] Loaded hook '{hook_name}' for events: {events}", flush=True)
 
     def _resolve_handlers(self, event_type: str) -> List[Callable]:
         """Exact-match handlers first, then ``<base>:*`` wildcard handlers.

@@ -14,6 +14,7 @@ from hermes_constants import get_hermes_home
 
 
 _DISK_DEGRADED_PERCENT = 90.0
+_CONNECTED_STATES = {"connected", "running", "ok"}
 
 
 def _check(status: str, detail: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -48,34 +49,32 @@ def _probe_config(home: Path) -> dict[str, Any]:
         return _check("ok", "using defaults")
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if raw is not None and not isinstance(raw, dict):
-            return _check("degraded", "top level is not a mapping")
-        return _check("ok")
     except Exception as exc:
         return _check("degraded", f"invalid config ({type(exc).__name__})")
+    if raw is not None and not isinstance(raw, dict):
+        return _check("degraded", "top level is not a mapping")
+    return _check("ok")
 
 
 def _probe_disk(home: Path) -> dict[str, Any]:
     try:
         usage = shutil.disk_usage(home)
-        used_pct = round((usage.used / usage.total) * 100, 1) if usage.total else 0.0
-        status = "degraded" if used_pct >= _DISK_DEGRADED_PERCENT else "ok"
-        return _check(status, used_percent=used_pct, free_bytes=usage.free)
     except Exception as exc:
         return _check("degraded", type(exc).__name__)
+    used_pct = round((usage.used / usage.total) * 100, 1) if usage.total else 0.0
+    status = "degraded" if used_pct >= _DISK_DEGRADED_PERCENT else "ok"
+    return _check(status, used_percent=used_pct, free_bytes=usage.free)
 
 
 def _probe_gateway(runtime_status: dict[str, Any]) -> dict[str, Any]:
     state = str(runtime_status.get("gateway_state") or "unknown")
     platforms = runtime_status.get("platforms")
-    if not isinstance(platforms, dict):
-        platforms = {}
+    platforms = platforms if isinstance(platforms, dict) else {}
     connected = sum(
         1
         for value in platforms.values()
         if isinstance(value, dict)
-        and str(value.get("state") or value.get("status") or "").lower()
-        in {"connected", "running", "ok"}
+        and str(value.get("state") or value.get("status") or "").lower() in _CONNECTED_STATES
     )
     status = "ok" if state in {"running", "draining"} else "degraded"
     return _check(status, state=state, connected_platforms=connected, platforms=len(platforms))

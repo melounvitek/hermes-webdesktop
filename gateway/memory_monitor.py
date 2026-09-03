@@ -1,15 +1,15 @@
 """Periodic process memory usage logging for the gateway.
 
-Ported from cline/cline#10343 (src/standalone/memory-monitor.ts). Emits one
-grep-friendly ``[MEMORY] ...`` line every N seconds (default 300) from a daemon
-thread so slow leaks in the long-lived gateway show up as an RSS time series in
-``agent.log`` / ``gateway.log``. A baseline snapshot is logged on start and a
-final one on stop. Uses stdlib ``resource`` first, ``psutil`` as fallback
-(Windows); if neither works the monitor warns once and stays disabled.
+Emits one grep-friendly ``[MEMORY] ...`` line every N seconds (default 300)
+from a daemon thread so slow leaks show up as an RSS time series in the logs.
+A baseline snapshot is logged on start and a final one on stop.  Uses stdlib
+``resource`` first, ``psutil`` as fallback (Windows); if neither works the
+monitor warns once and stays disabled.
 """
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import logging
 import os
@@ -17,7 +17,6 @@ import sys
 import threading
 import time
 from typing import Optional
-import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -49,25 +48,16 @@ def _get_rss_mb() -> Optional[int]:
 
 
 def log_memory_usage(prefix: str = "") -> None:
-    """Log current memory usage as ``[MEMORY] [<prefix> ]rss=... gc=... threads=... uptime=...``.
-
-    Safe to call on-demand from any thread at lifecycle moments.
-    """
+    """Log ``[MEMORY] [<prefix> ]rss=... gc=... threads=... uptime=...``; safe from any thread."""
     rss = _get_rss_mb()
     uptime = int(time.monotonic() - _start_time) if _start_time else 0
-    try:
-        gc_counts = gc.get_count()  # (gen0, gen1, gen2)
-    except Exception:
-        gc_counts = (0, 0, 0)
-    try:
-        thread_count = threading.active_count()
-    except Exception:
-        thread_count = 0
-
-    tag = f"{prefix} " if prefix else ""
-    rss_text = "unavailable" if rss is None else f"{rss}MB"
     logger.info(
-        "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds", tag, rss_text, gc_counts, thread_count, uptime
+        "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds",
+        f"{prefix} " if prefix else "",
+        "unavailable" if rss is None else f"{rss}MB",
+        gc.get_count(),  # (gen0, gen1, gen2)
+        threading.active_count(),
+        uptime,
     )
 
 

@@ -33,17 +33,15 @@ def mirror_to_session(
 
     ``session_id``: pass it when the caller already holds the exact session
     (e.g. the cron in_channel seed that just created the row) to skip the
-    origin scan. ``_find_session_id`` refuses to guess on a populated chat
-    (flat session + N thread sessions sharing one chat_id) and would silently
-    drop the mirror.
+    origin scan, which refuses to guess on a populated chat (flat session + N
+    thread sessions sharing one chat_id) and would silently drop the mirror.
 
-    ``role`` defaults to ``"assistant"``, correct when the mirrored text is
-    the agent's own outgoing reply. Text that is NOT the agent speaking (e.g.
-    a cron brief) must pass ``role="user"``: ``mirror``/``mirror_source``
-    metadata is dropped at the SQLite boundary, so an assistant-role mirror
-    replays as a real assistant turn and produces assistant→assistant pairs
-    that break strict-alternation providers; a user-role mirror collapses
-    safely via ``repair_message_sequence``'s consecutive-user merge.
+    ``role`` defaults to ``"assistant"`` (the agent's own outgoing reply).  Text
+    that is NOT the agent speaking (e.g. a cron brief) must pass ``role="user"``:
+    ``mirror``/``mirror_source`` metadata is dropped at the SQLite boundary, so an
+    assistant-role mirror replays as a real assistant turn and produces
+    assistant→assistant pairs that break strict-alternation providers; a
+    user-role mirror collapses safely via the consecutive-user merge.
 
     Returns True if mirrored, False if no matching session or error. Never raises.
     """
@@ -118,11 +116,11 @@ def _find_session_id(
         if str(_key).startswith("_") or not isinstance(entry, dict):
             continue
         origin = entry.get("origin") or {}
-        if (origin.get("platform") or entry.get("platform", "")).lower() != platform_lower:
-            continue
-        if str(origin.get("chat_id", "")) != str(chat_id):
-            continue
-        if thread_id is not None and str(origin.get("thread_id") or "") != str(thread_id):
+        if (
+            (origin.get("platform") or entry.get("platform", "")).lower() != platform_lower
+            or str(origin.get("chat_id", "")) != str(chat_id)
+            or (thread_id is not None and str(origin.get("thread_id") or "") != str(thread_id))
+        ):
             continue
         candidates.append(entry)
 
@@ -144,13 +142,12 @@ def _find_session_id(
 
 def _append_to_sqlite(session_id: str, message: dict) -> None:
     """Append a message to the SQLite session database."""
-    db = None
     try:
         from hermes_state import get_shared_session_db, release_or_close
         db = get_shared_session_db()
-        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+        try:
+            db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+        finally:
+            release_or_close(db)
     except Exception as e:
         logger.debug("Mirror SQLite write failed: %s", e)
-    finally:
-        if db is not None:
-            release_or_close(db)

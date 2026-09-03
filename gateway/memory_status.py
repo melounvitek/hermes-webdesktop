@@ -1,17 +1,10 @@
 """Memory status rollup for ``/api/status``.
 
-Read side for memory-pressure signals the gateway already persists but only
-logs: the 30s ``state/gateway.heartbeat`` (RSS + MemAvailable/MemTotal + swap,
-from :func:`gateway.shutdown_watchdog.write_loop_heartbeat`) and the lifecycle
-sentinel's ``suspected_oom`` flag (:func:`gateway.lifecycle_ledger.record_startup`).
-Distills them into a compact block the dashboard SPA and the NAS availability
-sweep consume — no new sampling, no IPC, two small file reads.
-
-Public-safety: ``/api/status`` is unauthenticated (``PUBLIC_API_PATHS``), so this
-block carries only coarse numbers (MB granularity), enums, and booleans — the
-same disclosure class as ``active_agents`` / ``nous_session_valid``.
-
-Best-effort and read-only: a missing/corrupt file degrades to
+Read side for signals the gateway already persists: the 30s
+``state/gateway.heartbeat`` (RSS + MemAvailable/MemTotal + swap) and the
+lifecycle sentinel's ``suspected_oom`` flag.  Two small file reads, no IPC.
+``/api/status`` is unauthenticated, so the block carries only coarse numbers
+(MB), enums and booleans.  Best-effort: a missing/corrupt file degrades to
 ``pressure="unknown"`` rather than raising into the status endpoint.
 """
 
@@ -24,20 +17,17 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Thresholds on system MemAvailable.  ``critical`` mirrors the lifecycle ledger's
-# OOM-suspicion heuristics (_LOW_MEM_AVAILABLE_KIB / _LOW_MEM_AVAILABLE_FRACTION):
-# a level that would make a later unclean death "suspected OOM" should already
-# warn while the process is alive.
+# Thresholds on system MemAvailable.  ``critical`` doubles as the lifecycle
+# ledger's OOM-suspicion heuristic: a level that makes a later unclean death
+# "suspected OOM" already warns while the process is alive.
 _CRITICAL_AVAILABLE_KIB = 64 * 1024  # < 64 MiB available
 _CRITICAL_AVAILABLE_FRACTION = 0.05  # < 5% of MemTotal
 _ELEVATED_AVAILABLE_KIB = 128 * 1024  # < 128 MiB available
 _ELEVATED_AVAILABLE_FRACTION = 0.15  # < 15% of MemTotal
 
-# Writer cadence is 30s (DEFAULT_HEARTBEAT_INTERVAL_S); 150s tolerates a briefly
-# stalled loop without letting a long-dead gateway's last sample pose as current.
+# Writer cadence is 30s; 150s tolerates a briefly stalled loop without letting
+# a long-dead gateway's last sample pose as current.
 _HEARTBEAT_FRESH_TTL_S = 150.0
-
-_KIB_PER_MB = 1024
 
 
 def _nonneg_int(value: Any) -> Optional[int]:
@@ -49,7 +39,7 @@ def _nonneg_int(value: Any) -> Optional[int]:
 
 def _mb(kib: Any) -> Optional[int]:
     kib = _nonneg_int(kib)
-    return None if kib is None else kib // _KIB_PER_MB
+    return None if kib is None else kib // 1024
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -82,23 +72,15 @@ def classify_pressure(available_kib: Any, total_kib: Any) -> str:
     return "ok"
 
 
-def _read_heartbeat(home: Optional[Path]) -> Optional[Dict[str, Any]]:
-    try:
-        from gateway.lifecycle_ledger import _read_json
-        from gateway.shutdown_watchdog import get_loop_heartbeat_path
-
-        return _read_json(get_loop_heartbeat_path(home))
-    except Exception:
-        return None
-
-
-def _read_sentinel(home: Optional[Path]) -> Optional[Dict[str, Any]]:
+def _read_state_files(home: Optional[Path]) -> tuple:
+    """``(heartbeat, sentinel)`` dicts, each ``None`` when unreadable."""
     try:
         from gateway.lifecycle_ledger import _read_json, get_lifecycle_sentinel_path
+        from gateway.shutdown_watchdog import get_loop_heartbeat_path
 
-        return _read_json(get_lifecycle_sentinel_path(home))
+        return _read_json(get_loop_heartbeat_path(home)), _read_json(get_lifecycle_sentinel_path(home))
     except Exception:
-        return None
+        return None, None
 
 
 def collect_memory_status(
@@ -110,8 +92,8 @@ def collect_memory_status(
 
     ``home`` scopes the read to a profile's HERMES_HOME (``None`` = active
     profile); ``now`` is injectable for tests.  Always returns a dict and never
-    raises — a down/never-started gateway or corrupt files yield
-    ``{"pressure": "unknown", ...}`` plus whatever fields could be recovered.
+    raises — a down gateway or corrupt files yield ``{"pressure": "unknown", ...}``
+    plus whatever fields could be recovered.
     """
     moment = now or datetime.now(timezone.utc)
     status: Dict[str, Any] = {
@@ -123,13 +105,12 @@ def collect_memory_status(
         "sampled_at": None,
         "last_boot_unclean": False,
         "last_boot_suspected_oom": False,
-        # Identity of the CURRENT gateway life (sentinel started_at) — changes on
-        # every boot, so the dashboard can key banner dismissal on it and
-        # acknowledging one OOM restart does not mute the NEXT one.
+        # Identity of the CURRENT life (sentinel started_at): the dashboard keys
+        # banner dismissal on it so acknowledging one OOM restart does not mute the NEXT.
         "boot_id": None,
     }
 
-    heartbeat = _read_heartbeat(home)
+    heartbeat, sentinel = _read_state_files(home)
     if heartbeat:
         sampled_at = _parse_iso(heartbeat.get("updated_at"))
         mem = heartbeat.get("mem")
@@ -146,7 +127,6 @@ def collect_memory_status(
                 if 0 <= (moment - sampled_at).total_seconds() <= _HEARTBEAT_FRESH_TTL_S:
                     status["pressure"] = classify_pressure(mem.get("mem_available_kib"), mem.get("mem_total_kib"))
 
-    sentinel = _read_sentinel(home)
     if sentinel:
         status["last_boot_unclean"] = bool(sentinel.get("prior_unclean_exit"))
         status["last_boot_suspected_oom"] = bool(sentinel.get("prior_suspected_oom"))

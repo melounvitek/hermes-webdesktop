@@ -12,16 +12,18 @@ from datetime import datetime
 from typing import Any, Optional, Tuple
 
 
-# Current gateway format: [Tue 2026-04-28 13:40:53 CEST]
-_HUMAN_TIMESTAMP_RE = re.compile(
-    r"^\[(?P<dow>[A-Z][a-z]{2}) "
+# Leading timestamp prefix, either the current human format
+# ``[Tue 2026-04-28 13:40:53 CEST]`` or the older ISO one
+# ``[2026-04-13T17:02:06+0200]`` / ``[...+02:00]`` (human tried first).
+_TIMESTAMP_PREFIX_RE = re.compile(
+    r"^\[(?:"
+    r"(?P<dow>[A-Z][a-z]{2}) "
     r"(?P<date>\d{4}-\d{2}-\d{2}) "
     r"(?P<time>\d{2}:\d{2}:\d{2})"
-    r"(?: (?P<tz>[A-Za-z0-9_+\-/:]+))?\]\s*"
+    r"(?: (?P<tz>[A-Za-z0-9_+\-/:]+))?"
+    r"|(?P<iso>\d{4}-\d{2}-\d{2}T[^\]]+)"
+    r")\]\s*"
 )
-
-# Older gateway format: [2026-04-13T17:02:06+0200] or [+02:00]
-_ISO_TIMESTAMP_RE = re.compile(r"^\[(?P<iso>\d{4}-\d{2}-\d{2}T[^\]]+)\]\s*")
 
 
 def _localize(dt: datetime, tz) -> float:
@@ -44,17 +46,13 @@ def _parse_iso(text: str, tz=None) -> Optional[float]:
 
 
 def _parse_timestamp_match(match: re.Match, tz=None) -> Optional[float]:
-    if match.groupdict().get("iso"):
+    if match.group("iso"):
         return _parse_iso(match.group("iso"), tz)
     try:
         dt = datetime.strptime(f"{match.group('date')} {match.group('time')}", "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
     return _localize(dt, tz)
-
-
-def _match_timestamp_prefix(text: str) -> Optional[re.Match]:
-    return _HUMAN_TIMESTAMP_RE.match(text) or _ISO_TIMESTAMP_RE.match(text)
 
 
 def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
@@ -72,21 +70,20 @@ def coerce_message_timestamp(ts_value: Any, tz=None) -> Optional[float]:
             return float(ts_value.timestamp())
         except Exception:
             return None
-    if isinstance(ts_value, str):
-        text = ts_value.strip()
-        if not text:
-            return None
-        match = _match_timestamp_prefix(text)
-        if match is not None:
-            parsed = _parse_timestamp_match(match, tz=tz)
-            if parsed is not None:
-                return parsed
-        try:
-            return float(text)
-        except (TypeError, ValueError):
-            pass
+    if not isinstance(ts_value, str):
+        return None
+    text = ts_value.strip()
+    if not text:
+        return None
+    match = _TIMESTAMP_PREFIX_RE.match(text)
+    if match is not None:
+        parsed = _parse_timestamp_match(match, tz=tz)
+        if parsed is not None:
+            return parsed
+    try:
+        return float(text)
+    except (TypeError, ValueError):
         return _parse_iso(text, tz)
-    return None
 
 
 def format_message_timestamp(ts_value: Any, tz=None) -> str:
@@ -109,7 +106,7 @@ def strip_leading_message_timestamps(content: str, tz=None) -> Tuple[str, Option
         return content, None
     text = content
     embedded_epoch: Optional[float] = None
-    while (match := _match_timestamp_prefix(text)) is not None:
+    while (match := _TIMESTAMP_PREFIX_RE.match(text)) is not None:
         parsed = _parse_timestamp_match(match, tz=tz)
         if parsed is not None:
             embedded_epoch = parsed

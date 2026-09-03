@@ -1,19 +1,13 @@
 """Repair model-mangled ``computer_use`` screenshot paths in final responses.
 
-``computer_use`` persists a screenshot into the Hermes image cache and tells the
-model its absolute path. Some models rewrite a Windows path into a POSIX-looking
-one (``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) inside an explicit
-``MEDIA:`` directive, so delivery-path validation rejects it and drops the
-attachment.
-
-The repair is deliberately narrow: it only rewrites paths inside a response that
-*already* carries an explicit ``MEDIA:`` directive, and only when the directive's
-generated ``computer_use_<uuid>`` basename exactly matches a canonical screenshot
-path returned by ``computer_use`` in the current turn. It never auto-attaches
-captures; normal media path validation still runs afterwards.
-
-Own module (like ``gateway/media_policy.py``) so the gateway turn path, gateway
-background tasks and cron delivery share one implementation.
+``computer_use`` persists a screenshot into the image cache and tells the model
+its absolute path.  Some models rewrite a Windows path into a POSIX-looking one
+(``C:\\Users\\Alice\\...`` -> ``/Users/Alice/...``) inside an explicit ``MEDIA:``
+directive, so delivery-path validation rejects it and drops the attachment.
+Deliberately narrow: only rewrites paths inside a response that *already*
+carries a ``MEDIA:`` directive, and only when its ``computer_use_<uuid>``
+basename exactly matches a canonical path returned by ``computer_use`` this
+turn.  Never auto-attaches; normal media path validation still runs afterwards.
 """
 
 from __future__ import annotations
@@ -29,15 +23,12 @@ logger = logging.getLogger(__name__)
 # root, or UNC share. Shared string so the summary regex stays in sync.
 _ABS_PATH_PREFIX_PATTERN = r"(?:[A-Za-z]:[/\\]|/|\\\\)"
 _ABS_PATH_PREFIX_RE = re.compile(r"^" + _ABS_PATH_PREFIX_PATTERN)
+_CAPTURE_BASENAME_PATTERN = r"computer_use_[0-9a-f]{32}\.(?:png|jpe?g)"
 
-_COMPUTER_USE_CAPTURE_BASENAME_RE = re.compile(
-    r"^computer_use_[0-9a-f]{32}\.(?:png|jpe?g)$",
-    re.IGNORECASE,
-)
+_COMPUTER_USE_CAPTURE_BASENAME_RE = re.compile(r"^" + _CAPTURE_BASENAME_PATTERN + r"$", re.IGNORECASE)
 _COMPUTER_USE_CAPTURE_SUMMARY_RE = re.compile(
     r"\(shareable screenshot saved to "
-    r"(?P<path>" + _ABS_PATH_PREFIX_PATTERN + r"[^\r\n]*?"
-    r"computer_use_[0-9a-f]{32}\.(?:png|jpe?g))\)",
+    r"(?P<path>" + _ABS_PATH_PREFIX_PATTERN + r"[^\r\n]*?" + _CAPTURE_BASENAME_PATTERN + r")\)",
     re.IGNORECASE,
 )
 
@@ -86,29 +77,23 @@ def _iter_computer_use_capture_paths(content: Any) -> Iterator[str]:
             return
         for match in _COMPUTER_USE_CAPTURE_SUMMARY_RE.finditer(content):
             yield match.group("path").strip()
-        return
-
-    if isinstance(content, list):
+    elif isinstance(content, list):
         for part in content:
             yield from _iter_computer_use_capture_paths(part)
-        return
-
-    if not isinstance(content, dict):
-        return
-
-    screenshot_path = content.get("screenshot_path")
-    if isinstance(screenshot_path, str):
-        yield screenshot_path
-    meta = content.get("meta")
-    if isinstance(meta, dict) and isinstance(meta.get("screenshot_path"), str):
-        yield meta["screenshot_path"]
-    # Producer shapes (tools/computer_use/tool.py::_capture_response):
-    # content/text = multimodal parts; text_summary/summary = the line carrying
-    # "(shareable screenshot saved to ...)".
-    for field in ("content", "text", "text_summary", "summary"):
-        nested = content.get(field)
-        if isinstance(nested, (str, dict, list)):
-            yield from _iter_computer_use_capture_paths(nested)
+    elif isinstance(content, dict):
+        screenshot_path = content.get("screenshot_path")
+        if isinstance(screenshot_path, str):
+            yield screenshot_path
+        meta = content.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("screenshot_path"), str):
+            yield meta["screenshot_path"]
+        # Producer shapes (tools/computer_use/tool.py::_capture_response):
+        # content/text = multimodal parts; text_summary/summary = the line carrying
+        # "(shareable screenshot saved to ...)".
+        for field in ("content", "text", "text_summary", "summary"):
+            nested = content.get(field)
+            if isinstance(nested, (str, dict, list)):
+                yield from _iter_computer_use_capture_paths(nested)
 
 
 def _current_turn_messages(messages: List[Dict[str, Any]], history_offset: int) -> List[Dict[str, Any]]:
@@ -135,13 +120,11 @@ def repair_explicit_computer_use_media_paths(
 
     Repairs only an already-explicit ``MEDIA:`` directive whose generated
     basename case-insensitively matches a canonical screenshot path from this
-    turn. Fail-open: the repair is cosmetic, so any unexpected error returns
+    turn.  Fail-open: the repair is cosmetic, so any unexpected error returns
     the response unchanged rather than aborting delivery.
     """
     try:
-        return _repair_explicit_computer_use_media_paths_inner(
-            response, messages, history_offset
-        )
+        return _repair_explicit_computer_use_media_paths_inner(response, messages, history_offset)
     except Exception:
         logger.debug("computer_use media path repair failed", exc_info=True)
         return response
@@ -163,9 +146,7 @@ def _repair_explicit_computer_use_media_paths_inner(
         if msg.get("role") not in {"tool", "function"}:
             continue
         call_id = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        tool_name = str(
-            msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or ""
-        )
+        tool_name = str(msg.get("name") or msg.get("tool_name") or call_id_names.get(call_id) or "")
         if tool_name != "computer_use":
             continue
         for path in _iter_computer_use_capture_paths(msg.get("content")):

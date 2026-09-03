@@ -3,11 +3,9 @@
 Runs as ``ExecStopPost=`` after the gateway's main process has exited: the
 safety net for long-lived helpers the gateway doesn't track (``adb``, platform
 bridges) that would otherwise be orphaned in the cgroup and block
-``Restart=always``.
-
-Per-PID SIGKILLs over ``cgroup.procs`` are used deliberately instead of writing
-``1`` to ``cgroup.kill``: the kernel has returned ``EINVAL`` on the cgroup-wide
-kill while per-PID signal delivery still works.
+``Restart=always``.  Per-PID SIGKILLs over ``cgroup.procs`` are used instead of
+writing ``1`` to ``cgroup.kill``: the kernel has returned ``EINVAL`` on the
+cgroup-wide kill while per-PID signal delivery still works.
 """
 
 from __future__ import annotations

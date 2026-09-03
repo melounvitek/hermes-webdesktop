@@ -42,20 +42,18 @@ def _strip_edge_silence_punctuation(text: str) -> str:
     return text[start:end].strip()
 
 
-def _canonical_silence_candidates(text: str) -> tuple[str, ...]:
-    exact = _canonical_silence_candidate(text)
-    stripped = _strip_edge_silence_punctuation(text.strip())
-    if stripped == text.strip():
-        return (exact,)
-    return (exact, _canonical_silence_candidate(stripped))
-
-
-def _short_stripped(text: Any) -> str:
-    """Stripped text if it is a non-empty string within the marker cap, else ''."""
+def _canonical_silence_candidates(text: Any) -> tuple[str, ...]:
+    """Canonical forms of a short marker-sized response; ``()`` when not a candidate at all."""
     if not isinstance(text, str):
-        return ""
+        return ()
     stripped = text.strip()
-    return stripped if 0 < len(stripped) <= _MARKER_LENGTH_CAP else ""
+    if not 0 < len(stripped) <= _MARKER_LENGTH_CAP:
+        return ()
+    exact = _canonical_silence_candidate(stripped)
+    depunctuated = _strip_edge_silence_punctuation(stripped)
+    if depunctuated == stripped:
+        return (exact,)
+    return (exact, _canonical_silence_candidate(depunctuated))
 
 
 def is_intentional_silence_response(response: Any) -> bool:
@@ -64,10 +62,7 @@ def is_intentional_silence_response(response: Any) -> bool:
     Prose that merely mentions ``NO_REPLY`` must be delivered normally. A blank
     response is not silence either — that is the empty-response failure path.
     """
-    stripped = _short_stripped(response)
-    return bool(stripped) and any(
-        c in LIVE_GATEWAY_SILENT_MARKERS for c in _canonical_silence_candidates(stripped)
-    )
+    return any(c in LIVE_GATEWAY_SILENT_MARKERS for c in _canonical_silence_candidates(response))
 
 
 def is_autonomous_silence_response(response: Any) -> bool:
@@ -117,8 +112,7 @@ def is_partial_silence_marker(text: Any) -> bool:
     marker cap, returns False so normal streaming resumes. Shares the marker set
     and canonicalization with :func:`is_intentional_silence_response`.
     """
-    stripped = _short_stripped(text)
-    return bool(stripped) and any(
+    return any(
         c and any(marker.startswith(c) for marker in LIVE_GATEWAY_SILENT_MARKERS)
-        for c in _canonical_silence_candidates(stripped)
+        for c in _canonical_silence_candidates(text)
     )

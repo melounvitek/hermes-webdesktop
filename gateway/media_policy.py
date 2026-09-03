@@ -7,15 +7,12 @@ from environment variables:
   - ``HERMES_MEDIA_ALLOW_DIRS``         <- gateway.media_delivery_allow_dirs
   - ``HERMES_MEDIA_TRUST_RECENT_FILES`` <- gateway.trust_recent_files
 
-The translation used to run only in gateway startup, so standalone delivery
-paths (``hermes cron run``, ``hermes send``, a standalone cron tick) filtered
-MEDIA paths under a different policy and silently dropped attachments in
-strict/allowlisted deployments (text is unaffected -- only media goes through
-path validation). ``apply_media_policy_env()`` is the shared,
-idempotent helper every delivery entrypoint calls before filtering media paths.
-
-Precedence: an explicitly-set environment variable WINS over config.yaml, so a
-shell-exported override (and gateway startup's own earlier run) survives.
+Every delivery entrypoint (gateway startup, ``hermes cron run``, ``hermes send``)
+calls :func:`apply_media_policy_env` before filtering media paths, so standalone
+paths filter under the same policy as the gateway instead of silently dropping
+attachments in strict/allowlisted deployments.  An explicitly-set environment
+variable WINS over config.yaml, so a shell override (and gateway startup's own
+earlier run) survives.
 """
 
 from __future__ import annotations
