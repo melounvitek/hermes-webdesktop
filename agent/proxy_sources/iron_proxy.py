@@ -470,11 +470,16 @@ def _read_management_listen_from_config(config_path: Optional[Path] = None) -> O
     return _config_listen("management", "listen", config_path=config_path)
 
 
+def _read_http_listen_from_config() -> Optional[Tuple[str, int]]:
+    """Sandbox-facing listener: ``tunnel_listen`` (CONNECT/MITM), falling back to ``http_listen``
+    for configs written before the listener-role split."""
+    return _config_listen("proxy", "tunnel_listen", "http_listen")
+
+
 def _probe_target() -> Tuple[str, int]:
     """Configured bind host/port to probe — on Linux that's the docker bridge, where a loopback
-    connect would report a healthy daemon as down.  ``tunnel_listen`` (CONNECT/MITM) wins, falling
-    back to ``http_listen`` for configs written before the listener-role split."""
-    return _config_listen("proxy", "tunnel_listen", "http_listen") or ("127.0.0.1", _DEFAULT_TUNNEL_PORT)
+    connect would report a healthy daemon as down."""
+    return _read_http_listen_from_config() or ("127.0.0.1", _DEFAULT_TUNNEL_PORT)
 
 
 # Management-API error status -> operator message (422 = validation rejected, running ruleset
