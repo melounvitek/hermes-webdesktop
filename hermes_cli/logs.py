@@ -164,27 +164,13 @@ def tail_log(
         print("\n--- stopped ---")
 
 
-def _read_tail(
-    path: Path,
-    num_lines: int,
-    *,
-    has_filters: bool = False,
-    min_level: Optional[str] = None,
-    session_filter: Optional[str] = None,
-    since: Optional[datetime] = None,
-    component_prefixes: Optional[Sequence[str]] = None,
-) -> list:
-    """Read the last *num_lines* matching lines from a log file."""
+def _read_tail(path: Path, num_lines: int, *, has_filters: bool = False, **filters) -> list:
+    """Read the last *num_lines* matching lines; ``filters`` are ``_matches_filters`` kwargs."""
     if not has_filters:
         return _read_last_n_lines(path, num_lines)
     # Over-read so enough lines survive filtering.
     raw_lines = _read_last_n_lines(path, max(num_lines * 20, 2000))
-    filtered = [
-        l for l in raw_lines
-        if _matches_filters(l, min_level=min_level, session_filter=session_filter,
-                            since=since, component_prefixes=component_prefixes)
-    ]
-    return filtered[-num_lines:]
+    return [l for l in raw_lines if _matches_filters(l, **filters)][-num_lines:]
 
 
 def _read_all_lines(path: Path) -> list:
@@ -223,14 +209,7 @@ def _read_last_n_lines(path: Path, n: int) -> list:
         return _read_all_lines(path)[-n:]
 
 
-def _follow_log(
-    path: Path,
-    *,
-    min_level: Optional[str] = None,
-    session_filter: Optional[str] = None,
-    since: Optional[datetime] = None,
-    component_prefixes: Optional[Sequence[str]] = None,
-) -> None:
+def _follow_log(path: Path, **filters) -> None:
     """Poll a log file for new content and print matching lines."""
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         f.seek(0, 2)
@@ -238,8 +217,7 @@ def _follow_log(
             line = f.readline()
             if not line:
                 time.sleep(0.3)
-            elif _matches_filters(line, min_level=min_level, session_filter=session_filter,
-                                  since=since, component_prefixes=component_prefixes):
+            elif _matches_filters(line, **filters):
                 print(line, end="")
                 sys.stdout.flush()
 
