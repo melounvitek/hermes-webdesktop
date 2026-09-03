@@ -218,8 +218,7 @@ class _ProcessRelayPluginConfiguration:
         self._lock = threading.RLock()
         self._owners: set[int] = set()
         self._state = _RelayPluginConfigurationState.UNINITIALIZED
-        self._active = False
-        self._relay: Any = None
+        self._relay: Any = None  # set while a Hermes-owned configuration is active
         self._activation: Any = None
 
     def acquire(self, owner: Any, relay: Any) -> _RelayPluginConfigurationState:
@@ -243,13 +242,12 @@ class _ProcessRelayPluginConfiguration:
             self._activation = None
             logger.warning("Hermes Relay plugin initialization failed: %s", exc, exc_info=True)
             return _RelayPluginConfigurationState.FAILED
-        self._active = True
         self._relay = relay
         return _RelayPluginConfigurationState.ACTIVE
 
     def _preflight(self, relay: Any) -> _RelayPluginConfigurationState | None:
         """Return a terminal state when the process cannot take ownership; None to proceed."""
-        if self._active and not self._clear_active():
+        if self._relay is not None and not self._clear_active():
             logger.warning(
                 "Hermes Relay plugin cleanup is still pending; refusing to replace the process-global configuration"
             )
@@ -314,7 +312,7 @@ class _ProcessRelayPluginConfiguration:
 
     def _clear_active(self) -> bool:
         relay, activation = self._relay, self._activation
-        if not self._active or relay is None:
+        if relay is None:
             return True
         try:
             _resolve_plugin_awaitable(relay.subscribers.flush_async())
@@ -331,7 +329,7 @@ class _ProcessRelayPluginConfiguration:
         except Exception:
             logger.warning("Hermes Relay plugin configuration cleanup failed", exc_info=True)
             return False
-        self._active, self._relay, self._activation = False, None, None
+        self._relay = self._activation = None
         return True
 
 
@@ -505,10 +503,9 @@ class RelayRuntime:
     def unregister_subagent(self, event: dict[str, Any]) -> None:
         """Close a delegated session and forget its parent relationship."""
         child_session_id = str(event.get("child_session_id") or "")
-        if not child_session_id:
-            return
-        self.close_session({"session_id": child_session_id})
-        self._forget_subagent(child_session_id)
+        if child_session_id:
+            self.close_session({"session_id": child_session_id})
+            self._forget_subagent(child_session_id)
 
     def _forget_subagent(self, session_id: str) -> None:
         with self._sessions_lock:
@@ -633,10 +630,8 @@ class RelayRuntime:
 
     def apply_tool_request_intercepts(self, *, session_id: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Apply Relay request rewriting before Hermes authorizes a tool call."""
-        if not self.managed_execution_enabled():
-            return args
         request_intercepts = getattr(getattr(self.relay, "tools", None), "request_intercepts", None)
-        if not callable(request_intercepts):
+        if not self.managed_execution_enabled() or not callable(request_intercepts):
             return args
         session = self.ensure_session({"session_id": session_id})
         if session is None:
@@ -1293,9 +1288,7 @@ def _configured_plugin_inputs(relay: Any) -> tuple[dict[str, Any], list[Any]] | 
         dynamic_plugins: list[Any] = []
         if "plugins" in config:
             dynamic_plugins = relay.plugin.load_dynamic_plugin_activation_specs(config_path)
-        plugin_config = dict(config)
-        plugin_config.pop("plugins", None)
-        return plugin_config, dynamic_plugins
+        return {k: v for k, v in config.items() if k != "plugins"}, dynamic_plugins
     except Exception as exc:
         raise _RelayPluginConfigurationLoadError(
             "Hermes Relay plugin configuration could not be loaded from "
