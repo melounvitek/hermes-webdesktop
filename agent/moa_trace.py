@@ -1,12 +1,9 @@
 """Full MoA turn trace persistence (opt-in via config ``moa.save_traces``).
 
-When enabled, every Mixture-of-Agents turn that runs the reference fan-out (a
-cache MISS in ``MoAChatCompletions.create``) appends one JSON line to
-``<hermes_home>/moa-traces/<session_id>.jsonl``: the exact messages each
-reference received, each reference's full output, and the exact aggregator input
-plus its output when available — what every model saw, said, and cost.
-
-Side-channel only: never enters the ``messages`` table, history or replay
+Every MoA turn that runs the reference fan-out (a cache MISS in
+``MoAChatCompletions.create``) appends one JSON line to
+``<hermes_home>/moa-traces/<session_id>.jsonl``: what every model saw, said, and
+cost. Side-channel only: never enters the ``messages`` table, history or replay
 (references are advisory side-calls whose rows would corrupt role alternation).
 Off by default; when off the only overhead is the config read.
 """
@@ -32,7 +29,7 @@ def _traces_enabled_and_dir() -> Optional[Path]:
         from hermes_cli.config import load_config
 
         moa_cfg = (load_config() or {}).get("moa") or {}
-    except Exception:  # pragma: no cover - defensive: never break a turn over tracing
+    except Exception:  # pragma: no cover - never break a turn over tracing
         return None
     if not moa_cfg.get("save_traces"):
         return None
@@ -54,8 +51,8 @@ _COST_FIELDS = ("cost_usd", "cost_status", "cost_source")
 
 
 def _slot_trace(acct: Any, label: str) -> dict[str, Any]:
-    """Render one reference's _RefAccounting into a full trace dict, including
-    the FULL input messages and output (not the truncated display preview)."""
+    """One reference's _RefAccounting as a full trace dict, including the FULL
+    input messages and output (not the truncated display preview)."""
     usage = getattr(acct, "usage", None)
     return {
         "label": label,

@@ -1,9 +1,9 @@
 """Cross-session rate limit guard for Nous Portal.
 
-Writes rate limit state to a shared file so all sessions (CLI, gateway,
-cron, auxiliary) can check whether Nous Portal is currently rate-limited
-before making requests. Without it each 429 fans out into up to 9 calls per
-turn (3 SDK retries x 3 Hermes retries), all counted against RPH.
+Writes rate limit state to a shared file so all sessions (CLI, gateway, cron,
+auxiliary) can check whether Nous Portal is currently rate-limited before making
+requests. Without it each 429 fans out into up to 9 calls per turn (3 SDK
+retries x 3 Hermes retries), all counted against RPH.
 """
 
 from __future__ import annotations
@@ -12,10 +12,9 @@ import contextlib
 import json
 import logging
 import os
-import tempfile
 import time
 from typing import Any, Mapping, Optional
-from utils import atomic_replace
+from utils import atomic_write_text
 from agent.rate_limit_tracker import (
     _BUCKET_TAGS,
     _fmt_seconds,
@@ -35,7 +34,7 @@ format_remaining = _fmt_seconds
 
 
 def _state_path() -> str:
-    """Return the path to the Nous rate limit state file."""
+    """Path to the Nous rate limit state file."""
     try:
         from hermes_constants import get_hermes_home
         base = get_hermes_home()
@@ -47,11 +46,7 @@ def _state_path() -> str:
 def _parse_reset_seconds(headers: Optional[Mapping[str, str]]) -> Optional[float]:
     """Best reset estimate (seconds from now) from hourly, per-minute, then retry-after headers."""
     lowered = lower_headers(headers)
-    for key in (
-        "x-ratelimit-reset-requests-1h",
-        "x-ratelimit-reset-requests",
-        "retry-after",
-    ):
+    for key in ("x-ratelimit-reset-requests-1h", "x-ratelimit-reset-requests", "retry-after"):
         val = _safe_float(lowered.get(key), 0.0)
         if val > 0:
             return val
@@ -71,44 +66,20 @@ def record_nous_rate_limit(
     """
     now = time.time()
     reset_at = None
-
     header_seconds = _parse_reset_seconds(headers)
     if header_seconds is not None:
         reset_at = now + header_seconds
-
     if reset_at is None and isinstance(error_context, dict):
         ctx_reset = error_context.get("reset_at")
         if isinstance(ctx_reset, (int, float)) and ctx_reset > now:
             reset_at = float(ctx_reset)
-
     if reset_at is None:
         reset_at = now + default_cooldown
 
-    path = _state_path()
+    state = {"reset_at": reset_at, "recorded_at": now, "reset_seconds": reset_at - now}
     try:
-        state_dir = os.path.dirname(path)
-        os.makedirs(state_dir, exist_ok=True)
-
-        state = {
-            "reset_at": reset_at,
-            "recorded_at": now,
-            "reset_seconds": reset_at - now,
-        }
-
-        fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(state, f)
-            atomic_replace(tmp_path, path)
-        except Exception:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp_path)
-            raise
-
-        logger.info(
-            "Nous rate limit recorded: resets in %.0fs (at %.0f)",
-            reset_at - now, reset_at,
-        )
+        atomic_write_text(_state_path(), json.dumps(state))
+        logger.info("Nous rate limit recorded: resets in %.0fs (at %.0f)", reset_at - now, reset_at)
     except Exception as exc:
         logger.debug("Failed to write Nous rate limit state: %s", exc)
 
@@ -170,11 +141,10 @@ def is_genuine_nous_rate_limit(
 def _parse_buckets_from_headers(
     headers: Optional[Mapping[str, str]],
 ) -> dict[str, tuple[Optional[int], Optional[float]]]:
-    """Extract (remaining, reset_seconds) per bucket from x-ratelimit-* headers ({} if none)."""
+    """(remaining, reset_seconds) per bucket from x-ratelimit-* headers ({} if none)."""
     lowered = lower_headers(headers)
     if not has_rate_limit_headers(lowered):
         return {}
-
     result: dict[str, tuple[Optional[int], Optional[float]]] = {}
     for _attr, tag in _BUCKET_TAGS:
         remaining = _safe_int(lowered.get(f"x-ratelimit-remaining-{tag}"), None)

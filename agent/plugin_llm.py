@@ -1,39 +1,12 @@
-"""
-Plugin LLM facade — host-owned LLM access for trusted plugins.
-==============================================================
+"""Plugin LLM facade — host-owned LLM access for trusted plugins (``ctx.llm``).
 
-Plugins that need their own out-of-band model call (rewrite a tool error,
-translate inbound text, summarise a paste, score a scheduled job) get
-``ctx.llm`` on :class:`~hermes_cli.plugins.PluginContext`: ``complete`` /
-``complete_structured`` (text + image inputs, JSON schema validation) and their
-async siblings ``acomplete`` / ``acomplete_structured``.
-
-Provider/model/agent_id/profile are explicit keyword arguments mirroring the
-host config shape (``model.provider`` + ``model.model``) — no embedded slugs.
-The host owns routing, auth, timeouts, and fallback; the plugin never sees raw
-tokens or keys. Every override knob is gated by per-plugin trust flags::
-
-    plugins:
-      entries:
-        my-plugin:
-          llm:
-            allow_provider_override: true
-            allow_model_override: true
-            allowed_providers: [openrouter, anthropic]   # optional
-            allowed_models:    [openai/gpt-4o-mini]       # optional
-            allow_agent_id_override: false
-            allow_profile_override: false
-            allow_task_override: false   # borrow the host's built-in aux tasks
-
-The gate is fail-closed: a missing config block means "no overrides".
-
-``task=`` routes a call through a plugin-registered auxiliary model slot
-(``ctx.register_auxiliary_task``). A plugin may always name a slot it
-registered itself; ``allow_task_override`` additionally lets it use the host's
-*built-in* auxiliary tasks. A foreign or unknown key is rejected loudly
-(error + logged warning), never silently downgraded to the main model.
-
-Backed by :func:`agent.auxiliary_client.call_llm`.
+``complete`` / ``complete_structured`` (text + image inputs, JSON schema validation)
+and their async siblings. Provider/model/agent_id/profile are explicit keyword
+arguments mirroring the host config shape; the host owns routing, auth, timeouts
+and fallback, so the plugin never sees raw tokens or keys. Every override knob is
+gated by the per-plugin ``plugins.entries.<id>.llm.allow_*_override`` trust flags
+(fail-closed: a missing block means "no overrides"). Backed by
+:func:`agent.auxiliary_client.call_llm`.
 """
 
 from __future__ import annotations
@@ -48,9 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Uni
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Public dataclasses
-# ---------------------------------------------------------------------------
+# -- public dataclasses -------------------------------------------------------
 
 
 @dataclass
@@ -63,7 +34,7 @@ class PluginLlmTextInput:
 
 @dataclass
 class PluginLlmImageInput:
-    """Image block. Provide ``data`` (raw bytes) or ``url`` (http(s)/data: URL).
+    """Image block: ``data`` (raw bytes) or ``url`` (http(s)/data: URL).
     ``mime_type`` is required for non-PNG bytes to render across providers."""
 
     data: Optional[bytes] = None
@@ -74,16 +45,12 @@ class PluginLlmImageInput:
 
 
 PluginLlmInput = Union[PluginLlmTextInput, PluginLlmImageInput, Dict[str, Any]]
-"""A single structured input block: one of the dataclasses above or a plain dict
-of the same shape (``{"type": "text", "text": ...}`` /
-``{"type": "image", "data": <bytes>, "mime_type": ..., "file_name": ...}`` /
-``{"type": "image", "url": ...}``)."""
+"""One structured input block: a dataclass above or a plain dict of the same shape."""
 
 
 @dataclass
 class PluginLlmUsage:
-    """Token + cost usage. All fields optional — providers differ on what they
-    return. ``cost_usd`` is the host's best estimate."""
+    """Token + cost usage; every field optional. ``cost_usd`` is the host's best estimate."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -109,9 +76,8 @@ class PluginLlmCompleteResult:
 class PluginLlmStructuredResult:
     """Result of :meth:`PluginLlm.complete_structured`.
 
-    ``parsed`` is set only when JSON output was requested (``json_mode`` or
-    ``json_schema``) AND the response was valid JSON; ``content_type`` is then
-    ``"json"``, otherwise ``"text"``."""
+    ``parsed`` is set only when JSON output was requested AND the response was
+    valid JSON; ``content_type`` is then ``"json"``, otherwise ``"text"``."""
 
     text: str
     provider: str
@@ -123,9 +89,7 @@ class PluginLlmStructuredResult:
     audit: Dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# Trust gate
-# ---------------------------------------------------------------------------
+# -- trust gate ---------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -157,7 +121,6 @@ _OVERRIDE_FLAGS = (
 
 
 def _normalize_ref(raw: str) -> str:
-    """Lower-case + strip whitespace. Used for allowlist matching."""
     return (raw or "").strip().lower()
 
 
@@ -167,16 +130,12 @@ def _coerce_allowlist(raw: Any) -> tuple[Optional[frozenset], bool]:
     if not isinstance(raw, list):
         return None, False
     normalized = [_normalize_ref(item) for item in raw if isinstance(item, str)]
-    allow_any = "*" in normalized
-    cleaned = {item for item in normalized if item and item != "*"}
-    return frozenset(cleaned), allow_any
+    return frozenset(item for item in normalized if item and item != "*"), "*" in normalized
 
 
 def _resolve_trust_policy(plugin_id: str) -> _TrustPolicy:
-    """Read ``plugins.entries.<plugin_id>.llm`` from config.yaml.
-
-    Missing config → fully restrictive policy. Resolved per call (not cached)
-    so config edits take effect without restarting the agent."""
+    """Read ``plugins.entries.<plugin_id>.llm`` from config.yaml (missing → fully
+    restrictive). Resolved per call so config edits apply without a restart."""
     if not plugin_id:
         return _TrustPolicy(plugin_id="")
 
@@ -209,7 +168,6 @@ class PluginLlmTrustError(PermissionError):
 
 
 def _denied(plugin_id: str, what: str, flag: str) -> PluginLlmTrustError:
-    """Uniform "flag not set" trust error."""
     return PluginLlmTrustError(
         f"Plugin {plugin_id!r} cannot {what} "
         f"(set plugins.entries.{plugin_id}.llm.{flag} to true to allow)."
@@ -217,8 +175,7 @@ def _denied(plugin_id: str, what: str, flag: str) -> PluginLlmTrustError:
 
 
 def _gate_ref_override(policy: _TrustPolicy, kind: str, requested: str) -> str:
-    """Gate a ``provider`` / ``model`` override: trust flag, then optional
-    allowlist. Returns the stripped value or raises."""
+    """Gate a ``provider`` / ``model`` override: trust flag, then optional allowlist."""
     if not getattr(policy, f"allow_{kind}_override"):
         raise _denied(policy.plugin_id, f"override the {kind}", f"allow_{kind}_override")
     allowed = getattr(policy, f"allowed_{kind}s")
@@ -242,9 +199,8 @@ def _check_overrides(
     policy: _TrustPolicy, *, requested_provider: Optional[str], requested_model: Optional[str],
     requested_agent_id: Optional[str], requested_profile: Optional[str],
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Apply the trust gate; each override is gated independently, in the order
-    provider, model, agent_id, profile. Returns ``(provider, model, agent_id,
-    profile)`` (agent_id unstripped) or raises :class:`PluginLlmTrustError`."""
+    """Gate each override independently, in the order provider, model, agent_id,
+    profile. Returns ``(provider, model, agent_id, profile)`` (agent_id unstripped)."""
     final_provider = _gate_ref_override(policy, "provider", requested_provider) if requested_provider else None
     final_model = _gate_ref_override(policy, "model", requested_model) if requested_model else None
     for kind, requested in (("agent_id", requested_agent_id), ("profile", requested_profile)):
@@ -255,12 +211,12 @@ def _check_overrides(
 
 
 def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
-    """Return ``(owned_keys, builtin_keys)`` for the task trust gate.
+    """``(owned_keys, builtin_keys)`` for the task trust gate.
 
-    Imports are lazy (circular import at plugin discovery). An unreadable
-    registry yields empty sets, failing the gate closed. Ownership matches on
-    the canonical id ``ctx.llm`` is bound to (``manifest.key or manifest.name``),
-    which is what ``register_auxiliary_task`` stores as the entry's ``plugin``."""
+    Imports are lazy (circular import at plugin discovery); an unreadable registry
+    yields empty sets, failing the gate closed. Ownership matches on the canonical id
+    ``ctx.llm`` is bound to (``manifest.key or manifest.name``), which is what
+    ``register_auxiliary_task`` stores as the entry's ``plugin``."""
     owned: set = set()
     builtin: set = set()
     try:
@@ -289,15 +245,12 @@ def _check_task(
 ) -> Optional[str]:
     """Validate a plugin's requested auxiliary ``task`` key.
 
-    * unset / ``""`` / ``"auto"`` → ``None`` (main-model path).
-    * a key the plugin registered itself → allowed.
-    * a built-in key → allowed only with ``allow_task_override``.
-    * anything else → raises + logs a warning. Never silently downgraded to
-      ``auto``: that would mask the misconfiguration and could route to a main
-      model the user steered elsewhere on purpose."""
-    if not requested_task:
-        return None
-    task = requested_task.strip()
+    unset / ``""`` / ``"auto"`` → ``None`` (main-model path); a key the plugin
+    registered itself → allowed; a built-in key → only with ``allow_task_override``;
+    anything else raises + logs. Never silently downgraded to ``auto``: that would
+    mask the misconfiguration and could route to a main model the user steered
+    elsewhere on purpose."""
+    task = (requested_task or "").strip()
     if not task or task.lower() == "auto":
         return None
 
@@ -323,9 +276,7 @@ def _check_task(
     )
 
 
-# ---------------------------------------------------------------------------
-# Input normalization
-# ---------------------------------------------------------------------------
+# -- input normalization ------------------------------------------------------
 
 
 def _normalize_input_block(block: PluginLlmInput) -> Dict[str, Any]:
@@ -378,10 +329,9 @@ def _build_structured_messages(
     schema_name: Optional[str],
     system_prompt: Optional[str],
 ) -> List[Dict[str, Any]]:
-    """Build OpenAI-style messages for a structured call: optional system
-    message (prompt + JSON-only directive), then a user message whose first
-    text part is the instructions (+ schema name / JSON schema) followed by
-    the input blocks."""
+    """OpenAI-style messages for a structured call: optional system message (prompt +
+    JSON-only directive), then a user message whose first text part is the
+    instructions (+ schema name / JSON schema) followed by the input blocks."""
     messages: List[Dict[str, Any]] = []
     sys_parts: List[str] = [system_prompt.strip()] if system_prompt else []
     if json_mode or json_schema is not None:
@@ -402,7 +352,6 @@ def _build_structured_messages(
             schema_text = str(json_schema)
         header = f"{header}\n\nJSON schema:\n{schema_text}"
     user_parts: List[Dict[str, Any]] = [{"type": "text", "text": header}]
-
     for block in inputs:
         norm = _normalize_input_block(block)  # always "text" or "image"
         user_parts.append({"type": "text", "text": norm["text"]} if norm["type"] == "text" else _image_part(norm))
@@ -410,16 +359,14 @@ def _build_structured_messages(
     return messages
 
 
-# ---------------------------------------------------------------------------
-# JSON parsing
-# ---------------------------------------------------------------------------
+# -- JSON parsing / response extraction --------------------------------------
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_code_fences(text: str) -> str:
-    """Return the first fenced code block's body, or the stripped text when unfenced."""
+    """The first fenced code block's body, or the stripped text when unfenced."""
     match = _FENCE_RE.search(text)
     return match.group(1).strip() if match else text.strip()
 
@@ -427,10 +374,9 @@ def _strip_code_fences(text: str) -> str:
 def _parse_structured_text(
     *, text: str, json_mode: bool, json_schema: Optional[Any]
 ) -> tuple[Optional[Any], str]:
-    """Return ``(parsed, content_type)``: ``"json"`` when parsing (and schema
-    validation, if a schema was given) succeeded, ``"text"`` otherwise.
-    Schema violations raise ``ValueError``; a missing ``jsonschema`` package
-    skips validation with a debug log."""
+    """``(parsed, content_type)``: ``"json"`` when parsing (and schema validation, if
+    given) succeeded, ``"text"`` otherwise. Schema violations raise ``ValueError``;
+    a missing ``jsonschema`` package skips validation with a debug log."""
     if not (json_mode or json_schema is not None) or not text:
         return None, "text"
 
@@ -453,15 +399,10 @@ def _parse_structured_text(
     return parsed, "json"
 
 
-# ---------------------------------------------------------------------------
-# Response extraction
-# ---------------------------------------------------------------------------
-
-
 def _extract_usage(response: Any) -> PluginLlmUsage:
-    """Pull token usage out of an OpenAI-shaped response, tolerating provider
-    naming differences (Anthropic via the aux adapter: ``prompt_tokens`` /
-    ``completion_tokens``; direct OpenAI adds ``cache_read_input_tokens``)."""
+    """Token usage from an OpenAI-shaped response, tolerating provider naming
+    (``prompt_tokens``/``completion_tokens`` vs ``input_tokens``/``output_tokens``,
+    ``cache_read_input_tokens`` vs ``cache_read_tokens``)."""
     usage = PluginLlmUsage()
     raw = getattr(response, "usage", None)
     if raw is None:
@@ -485,7 +426,7 @@ def _extract_usage(response: Any) -> PluginLlmUsage:
 
 
 def _extract_text(response: Any) -> str:
-    """Pull the assistant text out of an OpenAI-shaped response object."""
+    """Assistant text of an OpenAI-shaped response (string or text-part list content)."""
     try:
         content = getattr(response.choices[0].message, "content", None)
         if isinstance(content, str):
@@ -518,12 +459,11 @@ def _resolve_attribution(
     response: Any,
     route_info: Optional[Dict[str, str]] = None,
 ) -> tuple[str, str]:
-    """Decide what to record as ``result.provider`` / ``result.model``.
+    """``(provider, model)`` to record on the result.
 
-    Provider: route selected by ``auxiliary_client`` > explicit override >
-    current main provider > ``"auto"``. Model: ``response.model`` (providers
-    return the canonical id that actually ran, e.g. ``gpt-4o-2024-08-06``) >
-    route > override > current main model > ``"default"``."""
+    Provider: route selected by ``auxiliary_client`` > explicit override > current
+    main provider > ``"auto"``. Model: ``response.model`` (the canonical id that
+    actually ran) > route > override > current main model > ``"default"``."""
     route_info = route_info or {}
     provider = route_info.get("provider") or provider_override or _main_config_value("_read_main_provider", "auto")
     response_model = getattr(response, "model", None)
@@ -532,14 +472,12 @@ def _resolve_attribution(
     return provider, route_info.get("model") or model_override or _main_config_value("_read_main_model", "default")
 
 
-# ---------------------------------------------------------------------------
-# PluginLlm facade
-# ---------------------------------------------------------------------------
+# -- PluginLlm facade ---------------------------------------------------------
 
 
 def _json_response_format(*, json_mode: bool, json_schema: Optional[Any]) -> Optional[Dict[str, Any]]:
-    """``extra_body.response_format`` for the request; falls back to
-    ``json_object`` without a schema so schema-blind providers still get a hint."""
+    """``extra_body.response_format``; falls back to ``json_object`` without a
+    schema so schema-blind providers still get a hint."""
     if json_schema is not None:
         schema = {"name": "plugin_structured_output", "schema": json_schema, "strict": False}
         return {"response_format": {"type": "json_schema", "json_schema": schema}}
@@ -552,8 +490,7 @@ def _structured_spec(
     name: str, instructions: str, input: Sequence[PluginLlmInput], system_prompt: Optional[str],
     json_mode: bool, json_schema: Optional[Any], schema_name: Optional[str],
 ) -> Dict[str, Any]:
-    """Argument check for the structured methods (runs before the trust gate);
-    returns the spec ``_gate`` / ``_finish`` consume."""
+    """Argument check for the structured methods (runs before the trust gate)."""
     if not instructions or not instructions.strip():
         raise ValueError(f"{name} requires non-empty instructions")
     if not input:
@@ -568,13 +505,10 @@ class PluginLlm:
     """Host-owned LLM access for one trusted plugin.
 
     Constructed by :class:`hermes_cli.plugins.PluginContext` and exposed as
-    ``ctx.llm``; the constructor binds plugin identity for trust enforcement,
-    so plugins should not instantiate it directly.
-
-    Every public method is ``_gate`` (trust checks → call kwargs) →
-    ``_invoke_*`` (host ``call_llm`` or injected caller) → ``_finish``
-    (result + audit log); the sync/async and plain/structured variants differ
-    only in which pieces they pass through."""
+    ``ctx.llm``; the constructor binds plugin identity for trust enforcement, so
+    plugins should not instantiate it directly. Every public method is ``_gate``
+    (trust checks → call kwargs) → ``_invoke_*`` (host ``call_llm`` or injected
+    caller) → ``_finish`` (result + audit log)."""
 
     def __init__(
         self,
@@ -589,7 +523,7 @@ class PluginLlm:
         self._sync_caller = sync_caller
         self._async_caller = async_caller
 
-    # -- public sync API ----------------------------------------------------
+    # -- public API -----------------------------------------------------------
 
     def complete(
         self,
@@ -607,10 +541,9 @@ class PluginLlm:
     ) -> PluginLlmCompleteResult:
         """Run a host-owned chat completion against the user's active model.
 
-        ``messages`` is the standard OpenAI shape. ``provider``/``model``/
-        ``agent_id``/``profile`` are each gated by
-        ``plugins.entries.<id>.llm.allow_*_override``. ``task`` routes through
-        a plugin-registered auxiliary slot (see :func:`_check_task`)."""
+        ``provider``/``model``/``agent_id``/``profile`` are each gated by
+        ``plugins.entries.<id>.llm.allow_*_override``. ``task`` routes through a
+        plugin-registered auxiliary slot (see :func:`_check_task`)."""
         agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout)
         return self._finish("complete", agent, kw, self._invoke_sync(kw), purpose)
 
@@ -637,13 +570,10 @@ class PluginLlm:
 
         ``input`` accepts text and image blocks. With ``json_mode=True`` or a
         ``json_schema`` the response is parsed (and validated when the optional
-        ``jsonschema`` package is installed) into ``result.parsed``.
-        ``task`` routes as in :meth:`complete`."""
+        ``jsonschema`` package is installed) into ``result.parsed``."""
         spec = _structured_spec("complete_structured", instructions, input, system_prompt, json_mode, json_schema, schema_name)
         agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec)
         return self._finish("complete_structured", agent, kw, self._invoke_sync(kw), purpose, spec)
-
-    # -- public async API ---------------------------------------------------
 
     async def acomplete(
         self,
@@ -687,7 +617,7 @@ class PluginLlm:
         agent, kw = self._gate(provider, model, agent_id, profile, task, None, temperature, max_tokens, timeout, spec)
         return self._finish("acomplete_structured", agent, kw, await self._invoke_async(kw), purpose, spec)
 
-    # -- shared core --------------------------------------------------------
+    # -- shared core ----------------------------------------------------------
 
     def _gate(
         self,
@@ -702,13 +632,11 @@ class PluginLlm:
         timeout: Optional[float],
         spec: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Dict[str, Any]]:
-        """Run the trust gate (task first, then overrides), then — for a
-        structured ``spec`` — build messages/response_format (input-shape errors
-        surface only after trust passes). Returns the effective agent id
-        (result-only) and the call kwargs handed to ``_invoke_*`` / an injected
-        caller, in the documented order: messages, provider_override,
-        model_override, profile_override, temperature, max_tokens, timeout,
-        extra_body, task."""
+        """Trust gate (task first, then overrides), then — for a structured ``spec`` —
+        build messages/response_format (input-shape errors surface only after trust
+        passes). Returns the effective agent id and the call kwargs, in the documented
+        order: messages, provider_override, model_override, profile_override,
+        temperature, max_tokens, timeout, extra_body, task."""
         policy = self._policy_loader(self._plugin_id)
         eff_task = _check_task(policy, plugin_id=self._plugin_id, requested_task=task)
         eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
@@ -761,13 +689,13 @@ class PluginLlm:
         logger.info(fmt + "tokens=%d", *log_args, usage.total_tokens)
         return cls(**fields, audit=audit)
 
-    # -- host invocation ---------------------------------------------------
+    # -- host invocation ------------------------------------------------------
 
     @staticmethod
     def _host_kwargs(kw: Dict[str, Any]) -> tuple[Dict[str, Any], Optional[Dict[str, str]]]:
-        """Translate call kwargs into ``call_llm`` kwargs. The auth profile
-        rides in ``extra_body.metadata.auth_profile``; ``route_info`` is only
-        requested when routing through a task slot."""
+        """Call kwargs → ``call_llm`` kwargs. The auth profile rides in
+        ``extra_body.metadata.auth_profile``; ``route_info`` is only requested when
+        routing through a task slot."""
         merged_extra = dict(kw["extra_body"] or {})
         if kw["profile_override"]:
             merged_extra.setdefault("metadata", {})["auth_profile"] = kw["profile_override"]
@@ -793,10 +721,9 @@ class PluginLlm:
         return provider, model, response
 
     def _invoke_sync(self, kw: Dict[str, Any]) -> tuple[str, str, Any]:
-        """Invoke the host's ``call_llm`` (lazy import: circular deps at plugin
-        discovery) and return ``(provider, model, response)``. ``task`` is
-        already trust-checked; ``None`` keeps the main model. An injected
-        ``sync_caller`` replaces the whole path and receives the call kwargs."""
+        """Host ``call_llm`` (lazy import: circular deps at plugin discovery) →
+        ``(provider, model, response)``. An injected ``sync_caller`` replaces the
+        whole path and receives the call kwargs."""
         if self._sync_caller is not None:
             return self._sync_caller(**kw)
         from agent.auxiliary_client import call_llm
@@ -812,11 +739,6 @@ class PluginLlm:
         return self._attributed(kw, await async_call_llm(**call_kw), route_info)
 
 
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-
 def make_plugin_llm_for_test(
     *,
     plugin_id: str,
@@ -824,8 +746,8 @@ def make_plugin_llm_for_test(
     sync_caller: Optional[Callable[..., Any]] = None,
     async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> PluginLlm:
-    """:class:`PluginLlm` with an injected policy and caller (no config.yaml,
-    no provider). Not part of the public plugin API."""
+    """:class:`PluginLlm` with an injected policy and caller (no config.yaml, no
+    provider). Not part of the public plugin API."""
     return PluginLlm(plugin_id=plugin_id, policy_loader=lambda _pid: policy, sync_caller=sync_caller, async_caller=async_caller)
 
 

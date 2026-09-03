@@ -1,14 +1,12 @@
 """Shared engine behind the ``agent.*_registry`` provider registries.
 
-Every pluggable-backend registry (browser, TTS, image/video gen, transcription,
-web search, terminal env) has the same shape: a global name->provider map plus
-per-profile *scoped* maps (multiplexed gateways), a lock, registration with
-re-registration logging, and the snapshot/restore pair that
-:mod:`hermes_cli.plugins` uses to unwind a plugin's registrations. Each
-``*_registry`` module instantiates one :class:`ProviderRegistry` and re-exports
-its bound methods under the historical module-level names via
-:meth:`ProviderRegistry.export`, so call sites, ``patch("agent.x_registry.get_provider")``
-targets, and the ``_providers`` / ``_scoped_providers`` / ``_lock`` test hooks are unchanged.
+Every pluggable-backend registry has the same shape: a global name->provider map
+plus per-profile *scoped* maps (multiplexed gateways), a lock, registration with
+re-registration logging, and the snapshot/restore pair :mod:`hermes_cli.plugins`
+uses to unwind a plugin. Each ``*_registry`` module instantiates one
+:class:`ProviderRegistry` and re-exports its bound methods under the historical
+module-level names via :meth:`ProviderRegistry.export`, so ``patch("agent.x_registry.get_provider")``
+targets and the ``_providers`` / ``_scoped_providers`` / ``_lock`` test hooks are unchanged.
 """
 
 from __future__ import annotations
@@ -33,14 +31,11 @@ def lower_key(name: str) -> str:
 class ProviderRegistry(Generic[P]):
     """Global + per-scope provider map with plugin snapshot/restore support.
 
-    Args:
-        label: Human label used in log/error strings (``"Browser"``, ``"TTS"``).
-        provider_cls: ABC every registered instance must satisfy (TypeError otherwise).
-        logger: The owning module's logger, so record names stay per-registry.
-        normalize: Key normalizer — ``strip_key`` or ``lower_key`` (case-insensitive
-            registries mirror how their dispatcher normalizes the configured name).
-        builtin_names: Reserved names owned by in-tree implementations; a collision
-            calls ``on_builtin_collision(key)`` and, if that returns, skips registration.
+    ``normalize`` is ``strip_key`` or ``lower_key`` (case-insensitive registries mirror
+    how their dispatcher normalizes the configured name). ``builtin_names`` are reserved
+    for in-tree implementations; a collision calls ``on_builtin_collision(key)`` and, if
+    that returns, skips registration. ``logger`` is the owning module's so record names
+    stay per-registry.
     """
 
     def __init__(
@@ -67,8 +62,6 @@ class ProviderRegistry(Generic[P]):
         # "TTS provider" but "Registered browser provider": acronyms keep their case.
         self._log_label = label if label.isupper() else label[0].lower() + label[1:]
 
-    # -- internal helpers (caller holds the lock) ---------------------------
-
     def _target(self, scope: Optional[str], *, create: bool) -> Dict[str, P]:
         if scope is None:
             return self._providers
@@ -81,8 +74,6 @@ class ProviderRegistry(Generic[P]):
             self._generation += 1
         else:
             self._scoped_generations[scope] = self._scoped_generations.get(scope, 0) + 1
-
-    # -- registration -------------------------------------------------------
 
     def register(self, provider: P, *, scope: Optional[str] = None) -> None:
         """Register a provider; same-name re-registration overwrites (hot reload)."""
@@ -107,16 +98,12 @@ class ProviderRegistry(Generic[P]):
             self._bump(scope)
         if existing is not None:
             self.logger.debug(
-                f"{self.label} provider '%s' re-registered (was %r)",
-                key, type(existing).__name__,
+                f"{self.label} provider '%s' re-registered (was %r)", key, type(existing).__name__,
             )
         else:
             self.logger.debug(
-                f"Registered {self._log_label} provider '%s' (%s)",
-                key, type(provider).__name__,
+                f"Registered {self._log_label} provider '%s' (%s)", key, type(provider).__name__,
             )
-
-    # -- lookup ---------------------------------------------------------------
 
     def merged(self, scope: Optional[str] = None) -> Dict[str, P]:
         """Global map overlaid with the active profile's scoped map (a copy)."""
@@ -145,8 +132,6 @@ class ProviderRegistry(Generic[P]):
         active_scope = scope or hermes_home_key()
         with self._lock:
             return self._generation, self._scoped_generations.get(active_scope, 0)
-
-    # -- plugin unload support (hermes_cli.plugins) -----------------------------
 
     def snapshot_registration(self, name: str, *, scope: Optional[str] = None) -> Optional[P]:
         """Exact-slot lookup (no global fallback) used to detect plugin ownership."""
@@ -180,14 +165,8 @@ class ProviderRegistry(Generic[P]):
             self._generation += 1
 
     def export(self, namespace: Dict[str, Any]) -> None:
-        """Bind the historical module-level API into a ``*_registry`` module.
-
-        Installs ``register_provider``/``list_providers``/``get_provider``/
-        ``snapshot_registration``/``restore_registration``/``registry_generation``/
-        ``_reset_for_tests`` plus the ``_providers``/``_scoped_providers``/``_lock``
-        test hooks, so ``patch("agent.x_registry.get_provider")`` and direct
-        ``_providers`` manipulation in tests keep working unchanged.
-        """
+        """Bind the historical module-level API (+ ``_providers``/``_scoped_providers``/
+        ``_lock`` test hooks) into a ``*_registry`` module namespace."""
         namespace.update(
             _providers=self._providers,
             _scoped_providers=self._scoped_providers,
@@ -227,10 +206,9 @@ def configured_provider_name(section: str, logger: logging.Logger) -> Optional[s
 
         cfg = load_config_readonly()
         block = cfg.get(section) if isinstance(cfg, dict) else None
-        if isinstance(block, dict):
-            raw = block.get("provider")
-            if isinstance(raw, str) and raw.strip():
-                configured = raw.strip()
+        raw = block.get("provider") if isinstance(block, dict) else None
+        if isinstance(raw, str) and raw.strip():
+            configured = raw.strip()
     except Exception as exc:
         logger.debug("Could not read %s.provider from config: %s", section, exc)
     if configured:
