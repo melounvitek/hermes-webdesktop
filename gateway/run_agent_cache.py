@@ -1,9 +1,6 @@
-"""Agent cache, session model overrides, turn leases, run generations and conversation-scope reset for GatewayRunner.
-
-Split out of ``gateway/run.py``; bound onto ``GatewayRunner`` via the MRO.
-``gateway.run`` internals are imported lazily inside method bodies (import cycle),
-so ``patch("gateway.run.X")`` keeps intercepting them at call time.
-"""
+"""Agent cache, session model overrides, turn leases, run generations and conversation-scope reset
+for GatewayRunner (MRO mixin). ``gateway.run`` internals are imported lazily inside method bodies
+(import cycle), so ``patch("gateway.run.X")`` keeps intercepting them at call time."""
 
 from __future__ import annotations
 
@@ -74,12 +71,9 @@ class GatewayAgentCacheMixin:
 
     @classmethod
     def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
-        """Pull values that must bust the cached agent, as a flat dict keyed by 'section.key'.
-
-        Missing keys / non-dict sections yield None, which still enters the signature ('absent' vs
-        'present-and-null' differ). Includes the live tool registry generation: MCP reloads mutate
-        the registry without touching config.yaml, and cached agents freeze their tool schemas.
-        """
+        """Values that must bust the cached agent, as a flat dict keyed by 'section.key'. Missing keys /
+        non-dict sections yield None (still enters the signature). Includes the live tool registry
+        generation: MCP reloads mutate the registry without touching config.yaml."""
         out: Dict[str, Any] = {}
         cfg = user_config if isinstance(user_config, dict) else {}
         for section, key in cls._CACHE_BUSTING_CONFIG_KEYS:
@@ -107,14 +101,9 @@ class GatewayAgentCacheMixin:
         cache_keys: dict | None = None, user_id: str | None = None, user_id_alt: str | None = None,
         skip_context_files: bool = False,
     ) -> str:
-        """Compute a stable string key from agent config values.
-
-        Signature change → cached AIAgent rebuilt; unchanged → reused (frozen prompt + schemas for
-        cache hits). Callers pass ``_extract_cache_busting_config(user_config)`` so config.yaml
-        edits apply on the next message. ``user_id`` / ``user_id_alt`` participate because Honcho
-        freezes them into ``HonchoSessionManager`` at init; omitting them in shared-thread keys
-        (``thread_sessions_per_user=False``) would attribute one user's messages to another's peer.
-        """
+        """Stable key from agent config: change → cached AIAgent rebuilt; unchanged → reused (frozen
+        prompt + schemas for cache hits). ``user_id`` / ``user_id_alt`` participate because Honcho
+        freezes them at init; omitting them in shared-thread keys would cross-attribute messages."""
         import hashlib, json as _j
         # Fingerprint the FULL credential, not a short prefix: OAuth/JWT-style tokens often share a
         # common prefix (e.g. "eyJhbGci"), so a prefix would give false cache hits across auth switches.
@@ -145,12 +134,9 @@ class GatewayAgentCacheMixin:
         return state.conversation.model_override if state else None
 
     def _rehydrate_session_model_override(self, session_key: str) -> None:
-        """Lazily restore a persisted /model override after a gateway restart.
-
-        ``_session_model_overrides`` is in-memory only. Non-secret parts (model/provider/base_url)
-        are written through on /model (cleared on /new) and read back here on first use; api_key
-        is never persisted and is re-resolved. No-op when an in-memory override or nothing exists.
-        """
+        """Lazily restore a persisted /model override after a gateway restart: non-secret parts
+        (model/provider/base_url) are written through on /model and read back on first use; api_key
+        is never persisted and is re-resolved. No-op when an in-memory override or nothing exists."""
         from gateway.run import _resolve_runtime_agent_kwargs_for_provider
         store = getattr(self, "session_store", None)
         if self._session_model_override(session_key) is not None or store is None:
@@ -188,11 +174,8 @@ class GatewayAgentCacheMixin:
         )
 
     def _apply_session_model_override(self, session_key: str, model: str, runtime_kwargs: dict) -> tuple:
-        """Apply /model session overrides if present, returning (model, runtime_kwargs).
-
-        Overrides take precedence over config.yaml defaults so the switched model is actually used;
-        ``None`` fields are skipped so partial overrides don't clobber valid defaults.
-        """
+        """Apply /model session overrides (precedence over config.yaml defaults; ``None`` fields skipped
+        so partial overrides don't clobber defaults), returning (model, runtime_kwargs)."""
         from gateway.run import _credential_pool_for_provider
         override = self._session_model_override(session_key)
         if not override:
@@ -219,10 +202,7 @@ class GatewayAgentCacheMixin:
     def _snapshot_session_model_override(self, session_key: str) -> dict:
         """Capture a gateway session override before a one-turn switch."""
         override = self._session_model_override(session_key)
-        return {
-            "had_override": override is not None,
-            "override": dict(override) if override is not None else None,
-        }
+        return {"had_override": override is not None, "override": dict(override) if override is not None else None}
 
     def _restore_session_model_override(self, session_key: str, snapshot: dict) -> None:
         """Restore the session override captured before a one-turn switch."""
@@ -242,13 +222,10 @@ class GatewayAgentCacheMixin:
     def _release_running_agent_state(
         self, session_key: str, *, run_generation: Optional[int] = None
     ) -> bool:
-        """Pop ALL per-running-agent state entries for ``session_key``; True when cleared.
-
-        Call at every site that ends a running turn, whatever the cause. State that PERSISTS
-        across turns (model overrides, voice mode, pending approvals, update prompt) is NOT
-        touched. With ``run_generation``, only clear if that generation is still current, so a
-        stale async unwind bumped by /stop or /new cannot clobber a newer run (returns False).
-        """
+        """Pop ALL per-running-agent state for ``session_key`` (call at every site that ends a running
+        turn); True when cleared. Persistent state (model overrides, voice mode, approvals) is NOT
+        touched. With ``run_generation``, only clear if still current — a stale async unwind bumped
+        by /stop or /new must not clobber a newer run (returns False)."""
         if not session_key or (
             run_generation is not None and not self._is_session_run_current(session_key, run_generation)
         ):
@@ -277,11 +254,9 @@ class GatewayAgentCacheMixin:
         return registry, state.turn
 
     def _release_turn_lease(self, session_key: str, run_generation: int) -> bool:
-        """Release the turn lease acquired by (``session_key``, ``run_generation``).
-
-        Token map is keyed by (routing key, run generation), so a stale unwind pops only ITS token
-        and the registry's identity check refuses it if a newer turn holds the lease. Idempotent.
-        """
+        """Release the turn lease acquired by (``session_key``, ``run_generation``). Keyed by (routing
+        key, run generation) so a stale unwind pops only ITS token; the registry's identity check
+        refuses it if a newer turn holds the lease. Idempotent."""
         held = self._held_turn_lease(session_key, run_generation)
         if held is None:
             return False
@@ -294,12 +269,9 @@ class GatewayAgentCacheMixin:
             return False
 
     def _rebind_turn_lease(self, session_key: str, run_generation: int, new_session_id: str) -> bool:
-        """Follow a mid-turn session_id rotation with the held turn lease.
-
-        Compression can rotate ``session_entry.session_id`` mid-turn; the flush targets the NEW id,
-        so the serialization boundary must follow or an alias key resolving the new id could start
-        a concurrent turn the lease never sees. Call at every mid-turn reassignment; no-op if no token.
-        """
+        """Follow a mid-turn session_id rotation (compression) with the held turn lease, or an alias
+        key resolving the new id could start a concurrent turn the lease never sees. Call at every
+        mid-turn reassignment; no-op if no token."""
         held = self._held_turn_lease(session_key, run_generation) if new_session_id else None
         if held is None:
             return False
@@ -356,15 +328,11 @@ class GatewayAgentCacheMixin:
                 logger.debug("Failed to clear %s state for session boundary %s: %s", what, session_key, e)
 
     def _begin_session_run_generation(self, session_key: str) -> int:
-        """Claim a fresh, monotonically increasing run generation token for ``session_key``.
-
-        If /stop or /new invalidates the token while the old worker is still unwinding, the late
-        result is recognized and dropped instead of bleeding into the fresh session.
-        """
+        """Claim a fresh, monotonically increasing run generation token (NEVER reset): a late result
+        from a worker /stop or /new invalidated is recognized and dropped."""
         if not session_key:
             return 0
         persistent = self._session_state(session_key).persistent
-        # Monotonic by design (#28686): incremented here, NEVER reset.
         persistent.run_generation = int(persistent.run_generation) + 1
         return persistent.run_generation
 
@@ -444,14 +412,10 @@ class GatewayAgentCacheMixin:
             self._evict_cached_agent(session_key)
 
     async def _refresh_agent_cache_message_count(self, session_key: str, session_id: Optional[str]) -> None:
-        """Re-baseline a cached agent's stored message_count after THIS turn.
-
-        The coherence guard compares on-disk ``message_count`` against the BUILD-time snapshot and
-        rebuilds on mismatch; without re-baselining after our own rows flush, every turn would
-        rebuild and destroy prompt caching. Only the count is refreshed (``_sig`` untouched), only
-        if the same agent is still cached, never when the entry records a different ``session_id``
-        (another conversation's baseline). DB errors leave the snapshot as-is (one spare rebuild).
-        """
+        """Re-baseline a cached agent's stored message_count after THIS turn — the coherence guard
+        rebuilds on mismatch, so without this every turn would rebuild and destroy prompt caching.
+        Only the count is refreshed, only if the same agent is still cached. DB errors leave the
+        snapshot as-is (one spare rebuild)."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         _cache_lock = getattr(self, "_agent_cache_lock", None)
         _cache = getattr(self, "_agent_cache", None)
@@ -491,10 +455,8 @@ class GatewayAgentCacheMixin:
         return list(staged) if isinstance(staged, list) else []
 
     def _voice_channel_sidecar_note(self, event, source: SessionSource, session_key: str) -> Optional[str]:
-        """Return a ``[Voice channel now: ...]`` note when VC state changed.
-
-        Unchanged state returns ``None`` so per-turn member/speaking churn can't touch the prompt.
-        """
+        """``[Voice channel now: ...]`` note when VC state changed; ``None`` when unchanged so per-turn
+        member/speaking churn can't touch the prompt."""
         if source.platform != Platform.DISCORD:
             return None
         adapter = self.adapters.get(Platform.DISCORD)
@@ -515,11 +477,8 @@ class GatewayAgentCacheMixin:
         return f"[Voice channel now: {vc_now or 'not connected to a voice channel'}]"
 
     def _pinned_session_context_prompt(self, context, redact_pii: bool, session_key: Optional[str]) -> str:
-        """Return the session-context prompt, pinned per session.
-
-        Key hit → pinned bytes reused VERBATIM (immune to renderer nondeterminism); key miss →
-        re-render ``build_session_context_prompt`` and re-pin (rename, topic edit, /sethome, ...).
-        """
+        """Session-context prompt pinned per session: key hit → pinned bytes reused VERBATIM (immune
+        to renderer nondeterminism); key miss → re-render and re-pin (rename, topic edit, /sethome)."""
         _eph_key = self._ephemeral_change_key(context, redact_pii)
         _pin_state = self._peek_session_state(session_key) if session_key else None
         _eph_pin = _pin_state.conversation.ephemeral_pin if _pin_state else None
@@ -532,11 +491,9 @@ class GatewayAgentCacheMixin:
 
     @staticmethod
     def _ephemeral_change_key(context, redact_pii: bool) -> str:
-        """Hash the exact inputs ``build_session_context_prompt`` renders.
-
-        Invariant (tests/gateway/test_prompt_tail_freeze.py): any input whose change alters the
-        rendered bytes MUST appear here — omission means a stale pinned prompt; extras only re-render.
-        """
+        """Hash the exact inputs ``build_session_context_prompt`` renders. Invariant
+        (test_prompt_tail_freeze.py): any input whose change alters the rendered bytes MUST appear
+        here — omission means a stale pinned prompt; extras only re-render."""
         import hashlib
         src = context.source
 
@@ -581,15 +538,11 @@ class GatewayAgentCacheMixin:
         return hashlib.sha256(repr(key_tuple).encode("utf-8")).hexdigest()
 
     def _evict_cached_agent(self, session_key: str) -> None:
-        """Remove a cached agent for a session (called on /new, /model, etc).
-
-        Also soft-releases the evicted agent's LLM client pool (``release_clients()``): AIAgent
-        holds reference cycles that delay collection, so without it gateway RSS grows across /new.
-        Soft = frees clients and per-turn child subagents but PRESERVES the session's terminal
-        sandbox, browser daemon and bg processes (keyed on task_id) since the session may resume.
-        True boundaries (/new) call ``_cleanup_agent_resources`` first (release is idempotent).
-        Cleanup runs on a daemon thread so ``_agent_cache_lock`` never spans slow socket teardown.
-        """
+        """Remove a cached agent (/new, /model, ...) and soft-release its LLM client pool (AIAgent
+        holds reference cycles; without it RSS grows across /new). Soft = frees clients and child
+        subagents but PRESERVES terminal sandbox / browser / bg processes since the session may
+        resume; true boundaries call ``_cleanup_agent_resources`` first. Cleanup runs on a daemon
+        thread so ``_agent_cache_lock`` never spans slow socket teardown."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         # Prompt-stability state rides the agent-cache lifecycle: a fresh agent must re-render its
         # session-context bytes (the pin) and re-see the current voice-channel state once.
@@ -621,11 +574,8 @@ class GatewayAgentCacheMixin:
                     target(*args)
 
     def _finalizable_unexpired_session_entry(self, key: str):
-        """Return the session-store entry for ``key`` when the expiry watcher will still finalize it.
-
-        None when the store/entry is missing, the session is not finalizable (``mode == "none"``
-        never finalizes) or it has already expired (the watcher tears those down itself).
-        """
+        """Session-store entry for ``key`` when the expiry watcher will still finalize it; None when
+        missing, not finalizable (``mode == "none"``) or already expired (the watcher handles those)."""
         _store = getattr(self, "session_store", None)
         if _store is None:
             return None
@@ -638,14 +588,10 @@ class GatewayAgentCacheMixin:
         return entry if ok else None
 
     def _commit_memory_before_soft_evict(self, agent: Any, key: str) -> None:
-        """Fire on_session_end extraction before soft-evicting a live agent.
-
-        Soft eviction keeps the session resumable and does NOT fire ``on_session_end`` — that is
-        ``_session_expiry_watcher``'s job at true expiry. But the watcher tears down whatever it
-        finds in ``_agent_cache``; if the LRU cap soft-evicts first, memory providers never see the
-        transcript. So commit extraction here via ``commit_memory_session`` (no teardown). Only for
-        finalizable, not-yet-expired sessions. Best-effort: failures swallowed.
-        """
+        """Fire on_session_end extraction before soft-evicting a live agent: the expiry watcher only
+        finalizes what it finds in ``_agent_cache``, so an LRU soft-evict first would hide the
+        transcript from memory providers. Commit via ``commit_memory_session`` (no teardown), only for
+        finalizable, not-yet-expired sessions. Best-effort."""
         # No external memory provider (``_memory_manager`` None) — nothing to commit.
         if agent is None or not hasattr(agent, "commit_memory_session") or getattr(agent, "_memory_manager", None) is None:
             return
@@ -662,20 +608,14 @@ class GatewayAgentCacheMixin:
             logger.debug("Pre-evict memory commit failed for %s: %s", key, _e)
 
     def _commit_then_release_soft(self, agent: Any, key: str) -> None:
-        """Commit end-of-session memory (if warranted), then soft-release.
-
-        Runs on the daemon eviction thread so neither blocks the caller's held cache lock. Order
-        matters: commit needs the live memory manager before ``release_clients`` drops the buffer.
-        """
+        """Commit end-of-session memory (if warranted), then soft-release — on the daemon eviction
+        thread. Order matters: commit needs the live memory manager before ``release_clients``."""
         self._commit_memory_before_soft_evict(agent, key)
         self._release_evicted_agent_soft(agent)
 
     def _release_evicted_agent_soft(self, agent: Any) -> None:
-        """Soft cleanup for cache-evicted agents — preserves session tool state.
-
-        Unlike _cleanup_agent_resources (full teardown), an evicted session may resume, so its
-        terminal sandbox, browser daemon and bg processes must outlive the AIAgent instance.
-        """
+        """Soft cleanup for cache-evicted agents: unlike _cleanup_agent_resources, the session may
+        resume, so terminal sandbox, browser daemon and bg processes outlive the AIAgent instance."""
         if agent is None:
             return
         with suppress(Exception):
@@ -790,13 +730,9 @@ class GatewayAgentCacheMixin:
         return evicted_count
 
     def _release_pressure_batch(self, plan: List[tuple]) -> None:
-        """Release a pressure-evicted batch, then return the heap to the OS.
-
-        Sequential on one daemon thread (the batch is capped; the goal is reclaiming memory, not
-        racing teardowns). The trailing ``malloc_trim`` makes RSS actually fall — glibc otherwise
-        keeps freed arenas. The plan is drained (``pop`` + ``del``), not iterated, so no local
-        reference pins evicted agents during ``gc.collect`` + trim (else the valve over-evicts).
-        """
+        """Release a pressure-evicted batch sequentially on one daemon thread, then ``malloc_trim`` so
+        RSS actually falls. The plan is drained (``pop`` + ``del``), not iterated, so no local
+        reference pins evicted agents during ``gc.collect`` + trim (else the valve over-evicts)."""
         while plan:
             key, agent = plan.pop(0)  # FIFO — evict LRU-first order preserved
             try:
@@ -809,12 +745,9 @@ class GatewayAgentCacheMixin:
             trim_memory(force=True, reason="agent_cache_pressure")
 
     def _enforce_agent_cache_cap(self) -> None:
-        """Evict oldest cached agents when cache exceeds the LRU cap. Requires _agent_cache_lock.
-
-        Resource cleanup runs on a daemon thread so the lock is not held over slow teardown.
-        Agents in _running_agents are SKIPPED (their clients/sandboxes/subagents are in use); if
-        every LRU candidate is active the cache stays over cap until the next insert.
-        """
+        """Evict oldest cached agents past the LRU cap (requires _agent_cache_lock); cleanup on a
+        daemon thread. Mid-turn agents are SKIPPED, so the cache may stay over cap until the next
+        insert."""
         _cache = getattr(self, "_agent_cache", None)
         # OrderedDict.popitem(last=False) pops oldest; plain dict lacks the arg so skip enforcement
         # if a test fixture swapped the cache type.
@@ -843,16 +776,11 @@ class GatewayAgentCacheMixin:
             if agent is not None:
                 # Commit end-of-session memory, then soft-release, both on the daemon thread so the
                 # (possibly network-bound) provider call never blocks the held cache lock.
-                self._spawn_release_thread(
-                    self._commit_then_release_soft, (agent, key), f"agent-cache-evict-{key[:24]}", inline_fallback=False,
-                )
+                self._spawn_release_thread(self._commit_then_release_soft, (agent, key), f"agent-cache-evict-{key[:24]}", inline_fallback=False)
 
     def _sweep_idle_cached_agents(self) -> int:
-        """Evict cached agents idle past the idle TTL; returns the number evicted.
-
-        Acquires the cache lock internally (safe from the expiry watcher); cleanup on daemon
-        threads. Agents in _running_agents are SKIPPED — tearing down an active turn crashes it.
-        """
+        """Evict cached agents idle past the idle TTL (lock acquired internally; cleanup on daemon
+        threads; mid-turn agents SKIPPED); returns the number evicted."""
         _cache = getattr(self, "_agent_cache", None)
         _lock = getattr(self, "_agent_cache_lock", None)
         if _cache is None or _lock is None:
@@ -869,24 +797,17 @@ class GatewayAgentCacheMixin:
                 last_activity = getattr(agent, "_last_activity_ts", None)
                 if last_activity is None or (now - last_activity) <= idle_ttl:
                     continue
-                # If the session hasn't actually expired in the store (e.g. daily-reset fires hours
-                # after the last message), keep the agent cached so the expiry watcher can still find
-                # it and call on_session_end() with the live transcript. BUT only defer when the
-                # watcher will EVER finalize it: for mode == "none" deferring pins the agent for the
-                # gateway's lifetime — the leak this sweep relieves. Those fall through to soft
-                # eviction WITHOUT on_session_end, correctly (never a session-end boundary). Finite
-                # sessions evicted under LRU-cap pressure are covered by _commit_memory_before_soft_evict.
+                # Not yet expired in the store (daily-reset fires hours after the last message): keep
+                # the agent so the expiry watcher can call on_session_end() with the live transcript.
+                # Only defer when the watcher will EVER finalize it — for mode == "none" deferring pins
+                # the agent for the gateway's lifetime (the leak this sweep relieves); those soft-evict
+                # WITHOUT on_session_end, correctly.
                 if self._finalizable_unexpired_session_entry(key) is not None:
-                    continue  # keep agent — finite session hasn't expired
+                    continue
                 to_evict.append((key, agent))
             for key, _ in to_evict:
                 _cache.pop(key, None)
         for key, agent in to_evict:
-            logger.info(
-                "Agent cache idle-TTL evict: session=%s (idle=%.0fs)",
-                key, now - getattr(agent, "_last_activity_ts", now),
-            )
-            self._spawn_release_thread(
-                self._release_evicted_agent_soft, (agent,), f"agent-cache-idle-{key[:24]}", inline_fallback=False,
-            )
+            logger.info("Agent cache idle-TTL evict: session=%s (idle=%.0fs)", key, now - getattr(agent, "_last_activity_ts", now))
+            self._spawn_release_thread(self._release_evicted_agent_soft, (agent,), f"agent-cache-idle-{key[:24]}", inline_fallback=False)
         return len(to_evict)
