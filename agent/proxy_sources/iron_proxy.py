@@ -24,6 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 # Pinned upstream version.  Never auto-resolve "latest": the YAML schema may change between
 # releases and updates must be deliberate.
 _IRON_PROXY_VERSION = "0.39.0"
-
 _IRON_PROXY_RELEASE_BASE = f"https://github.com/ironsh/iron-proxy/releases/download/v{_IRON_PROXY_VERSION}"
 _IRON_PROXY_CHECKSUM_NAME = "checksums.txt"
 # Detached signature + signing key for optional GPG verification of checksums.txt (SHA-256
@@ -49,8 +49,7 @@ _STARTUP_GRACE_SECONDS = 5
 # ruleset.  Bearer key minted at setup, stored 0600 at <proxy>/management.token, injected into
 # the daemon env under this name; v0.39 refuses to start if the named var is empty.
 _MGMT_API_KEY_ENV = "HERMES_IRON_PROXY_MGMT_KEY"
-# tunnel_port is CONNECT/MITM, +1 is plain-HTTP forward, +2 is management.
-_MGMT_PORT_OFFSET = 2
+_MGMT_PORT_OFFSET = 2  # tunnel_port is CONNECT/MITM, +1 is plain-HTTP forward, +2 is management
 _MGMT_RELOAD_TIMEOUT = 15
 
 # HTTPS_PROXY semantics use a single CONNECT tunnel, so only the tunnel listener is exposed.
@@ -79,19 +78,15 @@ _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
 # case-insensitive).  ``aliases`` are interchangeable env names for the SAME credential and
 # MUST collapse into one mapping: every rule is ``require: true`` and two require-rules on one
 # host would reject each other's requests.  The sandbox gets the token under every name.
+# Authorization is also matched for Anthropic/Azure so an SDK sending the token as Bearer still
+# swaps; Gemini's ``?key=<token>`` SDK style is covered by match_query.
 _HEADER_AUTH_PROVIDERS: Dict[str, Dict[str, Tuple[str, ...]]] = {
-    # Authorization also matched so an SDK sending the token as Bearer still swaps.
-    "ANTHROPIC_API_KEY": {
-        "hosts": ("api.anthropic.com",),
-        "match_headers": ("x-api-key", "Authorization"),
-        "aliases": (),
-    },
+    "ANTHROPIC_API_KEY": {"hosts": ("api.anthropic.com",), "match_headers": ("x-api-key", "Authorization"), "aliases": ()},
     "AZURE_OPENAI_API_KEY": {
         "hosts": ("*.openai.azure.com", "*.cognitiveservices.azure.com", "*.services.ai.azure.com"),
         "match_headers": ("api-key", "Authorization"),
         "aliases": (),
     },
-    # ``?key=<token>`` SDK style is covered by match_query.
     "GEMINI_API_KEY": {
         "hosts": ("generativelanguage.googleapis.com",),
         "match_headers": ("x-goog-api-key",),
@@ -108,14 +103,9 @@ _NON_BEARER_PROVIDERS: Tuple[str, ...] = (
 # Default SSRF deny list for outbound traffic (docs promise: cloud metadata IPs refused
 # regardless of allowlist).  Callers may pass [] to disable (hermetic tests only).
 _DEFAULT_UPSTREAM_DENY_CIDRS: Tuple[str, ...] = (
-    "127.0.0.0/8",        # IPv4 loopback
-    "::1/128",            # IPv6 loopback
-    "169.254.0.0/16",     # IPv4 link-local incl. AWS/GCP/Azure IMDS
-    "fe80::/10",          # IPv6 link-local
-    "10.0.0.0/8",         # RFC1918
-    "172.16.0.0/12",      # RFC1918
-    "192.168.0.0/16",     # RFC1918
-    "fc00::/7",           # IPv6 ULA
+    "127.0.0.0/8", "::1/128",                                       # loopback v4 / v6
+    "169.254.0.0/16", "fe80::/10",                                  # link-local incl. AWS/GCP/Azure IMDS
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",    # RFC1918 + IPv6 ULA
     "::ffff:0:0/96",      # IPv4-mapped IPv6 — else ::ffff:169.254.169.254 bypasses IMDS deny
     "100.64.0.0/10",      # RFC6598 CGNAT (AWS VPC shared services, k8s pod nets)
     "198.18.0.0/15",      # RFC2544 benchmark range
@@ -184,14 +174,12 @@ class TokenMapping:
 
 def _hermes_bin_dir() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "bin"
 
 
 def _proxy_state_dir_ro() -> Path:
     """Proxy state dir without creating it (status probes, pidfile reads)."""
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "proxy"
 
 
@@ -200,10 +188,8 @@ def _proxy_state_dir() -> Path:
     so a pre-existing dir with a slack umask gets tightened."""
     d = _proxy_state_dir_ro()
     d.mkdir(parents=True, exist_ok=True)
-    try:
+    with suppress(OSError):  # Windows no-op / shared fs we don't own; files still get explicit perms
         d.chmod(0o700)
-    except OSError:
-        pass  # Windows no-op / shared fs we don't own; files still get explicit perms
     return d
 
 
@@ -286,23 +272,19 @@ def install_iron_proxy(*, force: bool = False) -> Path:
 
     # A freshly-installed binary must re-probe --version on the next get_status().
     _VERSION_CACHE.pop(str(target), None)
-
     logger.info("Installed iron-proxy %s at %s", _IRON_PROXY_VERSION, target)
     return target
 
 
-def _http_download(url: str, dest: Path) -> None:
+def _release_asset(name: str, dest: Path) -> None:
+    """Download one pinned-release asset to ``dest``; RuntimeError on any URL error."""
+    url = f"{_IRON_PROXY_RELEASE_BASE}/{name}"
     req = urllib.request.Request(url, headers={"User-Agent": "hermes-agent"})
     try:
-        with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp:  # noqa: S310
-            with open(dest, "wb") as f:
-                shutil.copyfileobj(resp, f)
+        with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp, open(dest, "wb") as f:  # noqa: S310
+            shutil.copyfileobj(resp, f)
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Failed to download {url}: {exc}") from exc
-
-
-def _release_asset(name: str, dest: Path) -> None:
-    _http_download(f"{_IRON_PROXY_RELEASE_BASE}/{name}", dest)
 
 
 def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
@@ -351,8 +333,7 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
 
 def _expected_sha256(checksum_file: Path, asset_name: str) -> str:
     """Parse ``sha256sum`` output (``<hex>  <filename>``)."""
-    text = checksum_file.read_text(encoding="utf-8", errors="replace")
-    for line in text.splitlines():
+    for line in checksum_file.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.strip().split()
         if len(parts) >= 2 and parts[-1] == asset_name:
             return parts[0]
@@ -415,10 +396,8 @@ def _write_private_file(path: Path, data: bytes) -> None:
     defends against a planted symlink; fchmod tightens a pre-existing file."""
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o600)
     try:
-        try:
+        with suppress(OSError, AttributeError):
             os.fchmod(fd, 0o600)
-        except (OSError, AttributeError):
-            pass
         os.write(fd, data)
     finally:
         os.close(fd)
@@ -441,20 +420,16 @@ def ensure_ca_cert(*, force: bool = False) -> Tuple[Path, Path]:
         return ca_crt, ca_key
     if shutil.which("openssl") is None:
         raise RuntimeError(
-            "openssl not found on PATH. Install OpenSSL (apt: `openssl`, "
-            "brew: `openssl`) to generate the iron-proxy CA cert."
+            "openssl not found on PATH. Install OpenSSL (apt: `openssl`, brew: `openssl`) to generate the iron-proxy CA cert."
         )
 
     with tempfile.TemporaryDirectory(prefix="hermes-proxy-ca-") as tmpdir:
         tmp_key, tmp_crt = Path(tmpdir) / "ca.key", Path(tmpdir) / "ca.crt"
         _run(["openssl", "genrsa", "-out", str(tmp_key), "4096"], timeout=60, check=True)
         _run([
-            "openssl", "req", "-x509", "-new", "-nodes",
-            "-key", str(tmp_key),
-            "-sha256", "-days", "3650",
-            "-subj", "/CN=hermes iron-proxy CA",
-            "-addext", "basicConstraints=critical,CA:TRUE",
-            "-addext", "keyUsage=critical,keyCertSign",
+            "openssl", "req", "-x509", "-new", "-nodes", "-key", str(tmp_key),
+            "-sha256", "-days", "3650", "-subj", "/CN=hermes iron-proxy CA",
+            "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign",
             "-out", str(tmp_crt),
         ], timeout=60, check=True)
 
@@ -495,10 +470,6 @@ def ensure_management_token(*, force: bool = False) -> str:
     return token
 
 
-def _read_management_token() -> Optional[str]:
-    return _read_text_or_none(_proxy_state_dir_ro() / "management.token")
-
-
 def _load_proxy_yaml(cfg: Path):
     """Parsed proxy.yaml, or ``{}`` when missing/unreadable/PyYAML absent."""
     try:
@@ -523,34 +494,29 @@ def _parse_listen(listen) -> Optional[Tuple[str, int]]:
     return (host or "127.0.0.1", port)
 
 
+def _config_listen(section: str, *keys: str, config_path: Optional[Path] = None) -> Optional[Tuple[str, int]]:
+    """``(host, port)`` from the first truthy ``proxy.yaml[section][key]``, or None."""
+    block = _load_proxy_yaml(config_path or (_proxy_state_dir_ro() / "proxy.yaml")).get(section) or {}
+    return _parse_listen(next((block[k] for k in keys if block.get(k)), ""))
+
+
 def _read_management_listen_from_config(config_path: Optional[Path] = None) -> Optional[Tuple[str, int]]:
-    """``(host, port)`` of the management listener, if configured."""
-    data = _load_proxy_yaml(config_path or (_proxy_state_dir_ro() / "proxy.yaml"))
-    return _parse_listen((data.get("management") or {}).get("listen") or "")
-
-
-def _read_http_listen_from_config() -> Optional[Tuple[str, int]]:
-    """``(host, port)`` of the sandbox-facing listener: ``tunnel_listen`` (CONNECT/MITM), falling
-    back to ``http_listen`` for configs written before the listener-role split."""
-    proxy_block = _load_proxy_yaml(_proxy_state_dir_ro() / "proxy.yaml").get("proxy") or {}
-    return _parse_listen(proxy_block.get("tunnel_listen") or proxy_block.get("http_listen") or "")
+    return _config_listen("management", "listen", config_path=config_path)
 
 
 def _probe_target() -> Tuple[str, int]:
     """Configured bind host/port to probe — on Linux that's the docker bridge, where a loopback
-    connect would report a healthy daemon as down."""
-    return _read_http_listen_from_config() or ("127.0.0.1", _DEFAULT_TUNNEL_PORT)
+    connect would report a healthy daemon as down.  ``tunnel_listen`` (CONNECT/MITM) wins, falling
+    back to ``http_listen`` for configs written before the listener-role split."""
+    return _config_listen("proxy", "tunnel_listen", "http_listen") or ("127.0.0.1", _DEFAULT_TUNNEL_PORT)
 
 
 # Management-API error status -> operator message (422 = validation rejected, running ruleset
 # unchanged; 401 = daemon started with a different management.token).
 _RELOAD_HTTP_ERRORS = {
     422: "iron-proxy rejected the new config (validation failed; the running ruleset is unchanged): {body}",
-    401: (
-        "management API rejected our key (401).  The running "
-        "daemon was started with a different management.token — "
-        "run `hermes egress restart`."
-    ),
+    401: "management API rejected our key (401).  The running daemon was started with a different management.token — "
+         "run `hermes egress restart`.",
 }
 
 
@@ -563,23 +529,16 @@ def reload_proxy() -> bool:
     mgmt = _read_management_listen_from_config()
     if mgmt is None:
         raise RuntimeError(
-            "The generated proxy.yaml has no management listener (written "
-            "before reload support).  Re-run `hermes egress setup` and use "
-            "`hermes egress restart` this one time."
+            "The generated proxy.yaml has no management listener (written before reload support).  "
+            "Re-run `hermes egress setup` and use `hermes egress restart` this one time."
         )
-    token = _read_management_token()
+    token = _read_text_or_none(_proxy_state_dir_ro() / "management.token")
     if not token:
-        raise RuntimeError(
-            "management.token is missing — re-run `hermes egress setup`, "
-            "then `hermes egress restart`."
-        )
+        raise RuntimeError("management.token is missing — re-run `hermes egress setup`, then `hermes egress restart`.")
 
     host, port = mgmt
     req = urllib.request.Request(
-        f"http://{host}:{port}/v1/reload",
-        method="POST",
-        headers={"Authorization": f"Bearer {token}"},
-        data=b"",
+        f"http://{host}:{port}/v1/reload", method="POST", headers={"Authorization": f"Bearer {token}"}, data=b"",
     )
     try:
         with urllib.request.urlopen(req, timeout=_MGMT_RELOAD_TIMEOUT) as resp:
@@ -597,8 +556,7 @@ def reload_proxy() -> bool:
         # A daemon started from a pre-management config is alive but has no listener.
         raise RuntimeError(
             f"could not reach the management API at {host}:{port} ({exc}).  "
-            "If the daemon was started before reload support, run "
-            "`hermes egress restart` once."
+            "If the daemon was started before reload support, run `hermes egress restart` once."
         ) from exc
 
 
@@ -612,9 +570,8 @@ def _default_http_listen(tunnel_port: int) -> List[str]:
         if bridge_ip and bridge_ip != "127.0.0.1":
             return [f"{bridge_ip}:{tunnel_port}"]
         logger.warning(
-            "No docker bridge (docker0) detected — binding iron-proxy to "
-            "loopback only.  Docker sandboxes will NOT be able to reach "
-            "the proxy until it is restarted with docker running."
+            "No docker bridge (docker0) detected — binding iron-proxy to loopback only.  "
+            "Docker sandboxes will NOT be able to reach the proxy until it is restarted with docker running."
         )
     return [f"127.0.0.1:{tunnel_port}"]
 
@@ -629,43 +586,28 @@ def _detect_docker_bridge_ip() -> Optional[str]:
         return None
     if res.returncode != 0:
         return None
-    # Expected: "<n>: docker0  inet 172.17.0.1/16 ..." — first inet token wins.
+    # Expected: "<n>: docker0  inet 172.17.0.1/16 ..." — first inet token (per line) wins.
     candidate = None
-    for line in res.stdout.splitlines():
-        parts = line.split()
-        hits = [parts[i + 1] for i, tok in enumerate(parts[:-1]) if tok == "inet"]
-        if hits:
-            candidate = hits[0].split("/")[0]
+    for parts in (line.split() for line in res.stdout.splitlines()):
+        if "inet" in parts[:-1]:
+            candidate = parts[parts.index("inet") + 1].split("/")[0]
             break
     if not candidate:
         return None
-
     try:
         addr = ipaddress.IPv4Address(candidate)
     except (ipaddress.AddressValueError, ValueError):
         return None
-    if (
-        addr.is_unspecified or addr.is_loopback or addr.is_multicast
-        or addr.is_reserved or addr.is_link_local or addr.is_global
-    ):
-        logger.warning(
-            "Refusing suspicious docker bridge IP %s reported by `ip`; "
-            "skipping bridge bind.", candidate,
-        )
+    if addr.is_unspecified or addr.is_loopback or addr.is_multicast or addr.is_reserved or addr.is_link_local or addr.is_global:
+        logger.warning("Refusing suspicious docker bridge IP %s reported by `ip`; skipping bridge bind.", candidate)
         return None
     return str(addr)
 
 
 def build_proxy_config(
-    *,
-    mappings: List[TokenMapping],
-    ca_cert: Path,
-    ca_key: Path,
-    tunnel_port: int = _DEFAULT_TUNNEL_PORT,
-    audit_log: Optional[Path] = None,
-    allowed_hosts: Optional[List[str]] = None,
-    upstream_deny_cidrs: Optional[List[str]] = None,
-    http_listen: Optional[List[str]] = None,
+    *, mappings: List[TokenMapping], ca_cert: Path, ca_key: Path, tunnel_port: int = _DEFAULT_TUNNEL_PORT,
+    audit_log: Optional[Path] = None, allowed_hosts: Optional[List[str]] = None,
+    upstream_deny_cidrs: Optional[List[str]] = None, http_listen: Optional[List[str]] = None,
 ) -> Dict:
     """Build the iron-proxy YAML config dict (schema as of v0.39.0).  Real secrets are read from
     iron-proxy's OWN env (``source: {type: env}``); the sandbox never sees them.
@@ -685,11 +627,8 @@ def build_proxy_config(
         {
             "source": {"type": "env", "var": m.real_env_name},
             "replace": {
-                "proxy_value": m.proxy_token,
-                "match_headers": list(m.match_headers or ("Authorization",)),
-                "match_query": True,
-                "match_body": False,
-                "require": True,
+                "proxy_value": m.proxy_token, "match_headers": list(m.match_headers or ("Authorization",)),
+                "match_query": True, "match_body": False, "require": True,
             },
             "rules": [{"host": h} for h in m.upstream_hosts],
         }
@@ -710,8 +649,7 @@ def build_proxy_config(
             # Both bind the docker bridge on Linux / loopback on Docker Desktop — NEVER 0.0.0.0.
             "tunnel_listen": primary_listen,
             "http_listen": f"{bind_host}:{tunnel_port + 1}",
-            # Direct-TLS listener is not exposed.
-            "https_listen": "127.0.0.1:0",
+            "https_listen": "127.0.0.1:0",  # direct-TLS listener is not exposed
             "max_request_body_bytes": 16 * 1024 * 1024,
             "max_response_body_bytes": 0,
             "upstream_response_header_timeout": "120s",
@@ -787,11 +725,8 @@ def write_mappings(mappings: List[TokenMapping]) -> Path:
         "version": 1,
         "tokens": [
             {
-                "proxy_token": m.proxy_token,
-                "env_name": m.real_env_name,
-                "upstream_hosts": list(m.upstream_hosts),
-                "match_headers": list(m.match_headers),
-                "alias_env_names": list(m.alias_env_names),
+                "proxy_token": m.proxy_token, "env_name": m.real_env_name, "upstream_hosts": list(m.upstream_hosts),
+                "match_headers": list(m.match_headers), "alias_env_names": list(m.alias_env_names),
             }
             for m in mappings
         ],
@@ -842,13 +777,7 @@ def discover_provider_mappings(*, available_env_names: Optional[List[str]] = Non
         for n, s in _HEADER_AUTH_PROVIDERS.items()
     ]
     return [
-        TokenMapping(
-            proxy_token=mint_proxy_token(prefix=env_name.lower().replace("_api_key", "")),
-            real_env_name=env_name,
-            upstream_hosts=hosts,
-            match_headers=headers,
-            alias_env_names=aliases,
-        )
+        TokenMapping(mint_proxy_token(prefix=env_name.lower().replace("_api_key", "")), env_name, hosts, headers, aliases)
         for env_name, hosts, headers, aliases in specs
         if env_name in names or any(a in names for a in aliases)
     ]
@@ -860,9 +789,7 @@ def discover_uncovered_providers(*, available_env_names: Optional[List[str]] = N
     return [n for n in _NON_BEARER_PROVIDERS if n in names]
 
 
-def merge_mappings(
-    *, existing: List[TokenMapping], discovered: List[TokenMapping], rotate: bool = False,
-) -> List[TokenMapping]:
+def merge_mappings(*, existing: List[TokenMapping], discovered: List[TokenMapping], rotate: bool = False) -> List[TokenMapping]:
     """Combine existing and freshly discovered mappings.  Tokens already in ``existing`` are
     preserved (containers baked with them keep working) while hosts/headers/aliases are refreshed
     from ``discovered``; ``rotate=True`` re-mints everything; undiscovered providers are dropped."""
@@ -939,41 +866,26 @@ def _pid_alive(pid: int) -> bool:
     # Strong proof: nonce from this process's start_proxy and/or the on-disk sibling file.
     nonce_candidates = [n for n in dict.fromkeys((_proxy_nonce, _read_persisted_nonce())) if n]
     if nonce_candidates:
-        try:
+        with suppress(OSError):
             env_bytes = Path(f"/proc/{pid}/environ").read_bytes()
             if any(f"{_HERMES_IRON_PROXY_NONCE_ENV}={n}".encode() in env_bytes for n in nonce_candidates):
                 return True
-        except OSError:
-            pass
-
-    try:
+    with suppress(OSError):
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         if cmdline_path.exists():
             argv0 = cmdline_path.read_bytes().split(b"\x00")[0].decode("utf-8", errors="ignore")
             return os.path.basename(argv0).startswith("iron-proxy")
-    except OSError:
-        pass
-
-    # macOS / non-Linux fallback.
-    try:
+    with suppress(OSError, subprocess.TimeoutExpired):  # macOS / non-Linux fallback
         res = _run(["ps", "-p", str(pid), "-o", "comm="], timeout=2, text=True)
         if res.returncode == 0:
             return os.path.basename((res.stdout or "").strip()).startswith("iron-proxy")
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
     # Exotic platforms: if the OS says alive, believe it.
     return True
 
 
 def start_proxy(
-    *,
-    binary: Optional[Path] = None,
-    config_path: Optional[Path] = None,
-    extra_env: Optional[Dict[str, str]] = None,
-    install_if_missing: bool = True,
-    refresh_secrets_from_bitwarden: bool = False,
-    bitwarden_config: Optional[Dict] = None,
+    *, binary: Optional[Path] = None, config_path: Optional[Path] = None, extra_env: Optional[Dict[str, str]] = None,
+    install_if_missing: bool = True, refresh_secrets_from_bitwarden: bool = False, bitwarden_config: Optional[Dict] = None,
 ) -> ProxyStatus:
     """Spawn iron-proxy as a managed background subprocess (idempotent if already running).
     ``refresh_secrets_from_bitwarden=True`` re-fetches upstream secrets from BWS at startup —
@@ -992,9 +904,7 @@ def start_proxy(
 
     # Minimal env: os.environ.copy() would expose every operator secret via /proc/<pid>/environ.
     env = _build_proxy_subprocess_env(
-        extra_env=extra_env,
-        refresh_from_bitwarden=refresh_secrets_from_bitwarden,
-        bitwarden_config=bitwarden_config,
+        extra_env=extra_env, refresh_from_bitwarden=refresh_secrets_from_bitwarden, bitwarden_config=bitwarden_config,
     )
     # v0.39 validates api_key_env is non-empty when management.listen is set.
     if _read_management_listen_from_config(cfg) is not None:
@@ -1049,12 +959,10 @@ def start_proxy(
     # Process may have died right at deadline.
     if proc.poll() is not None:
         raise _exited_error()
-
     # Alive-but-not-listening is a failure: an orphan holding the port breaks every restart.
     if not listening:
         raise _abort(
-            f"iron-proxy did not bind {probe_host}:{tunnel_port} within "
-            f"{_STARTUP_GRACE_SECONDS}s.  Process was killed.  ",
+            f"iron-proxy did not bind {probe_host}:{tunnel_port} within {_STARTUP_GRACE_SECONDS}s.  Process was killed.  ",
             kill=True,
         )
 
@@ -1069,9 +977,7 @@ def _spawn_daemon(bin_path: Path, cfg: Path, env: Dict[str, str], log_path: Path
     try:
         log_fd = _open_private_append(log_path, strict_chmod=False)
     except OSError as exc:
-        raise RuntimeError(
-            f"Refusing to write iron-proxy log {log_path}: {exc}.  Remove that path manually and retry."
-        ) from exc
+        raise RuntimeError(f"Refusing to write iron-proxy log {log_path}: {exc}.  Remove that path manually and retry.") from exc
     if not _fd_owned_by_us(log_fd):
         st = os.fstat(log_fd)
         os.close(log_fd)
@@ -1086,10 +992,8 @@ def _spawn_daemon(bin_path: Path, cfg: Path, env: Dict[str, str], log_path: Path
     except OSError as exc:
         raise RuntimeError(f"failed to spawn iron-proxy: {exc}") from exc
     finally:
-        try:
+        with suppress(OSError):
             os.close(log_fd)
-        except OSError:
-            pass
 
 
 def _await_listening(proc: "subprocess.Popen", host: str, port: int, *, on_exit) -> bool:
@@ -1117,17 +1021,14 @@ def _write_pidfile_safely(pidfile: Path, pid: int) -> None:
         existing_pid = _read_pid()
         if existing_pid and _pid_alive(existing_pid):
             raise RuntimeError(
-                f"Another iron-proxy start appears to be in progress "
-                f"(pidfile {pidfile} -> pid {existing_pid}).  "
+                f"Another iron-proxy start appears to be in progress (pidfile {pidfile} -> pid {existing_pid}).  "
                 f"Run `hermes egress stop` if that proxy is stuck."
             )
         pidfile.unlink(missing_ok=True)
         fd = os.open(str(pidfile), open_flags, 0o600)
     except OSError as exc:
         # ELOOP from a planted symlink at the pidfile path.
-        raise RuntimeError(
-            f"Refusing to write pidfile {pidfile}: {exc}.  Remove that path manually and retry."
-        ) from exc
+        raise RuntimeError(f"Refusing to write pidfile {pidfile}: {exc}.  Remove that path manually and retry.") from exc
 
     try:
         if not _fd_owned_by_us(fd):
@@ -1138,10 +1039,8 @@ def _write_pidfile_safely(pidfile: Path, pid: int) -> None:
 
     # Best-effort nonce sibling (0o600); without it stop falls back to argv0 matching.
     if _proxy_nonce:
-        try:
+        with suppress(OSError):
             _write_private_file(pidfile.with_suffix(".nonce"), _proxy_nonce.encode("utf-8"))
-        except OSError:
-            pass
 
 
 def _kill_and_wait(proc: "subprocess.Popen", *, grace_seconds: int = 2) -> None:
@@ -1153,21 +1052,14 @@ def _kill_and_wait(proc: "subprocess.Popen", *, grace_seconds: int = 2) -> None:
     try:
         proc.wait(timeout=grace_seconds)
     except subprocess.TimeoutExpired:
-        try:
+        with suppress(OSError):
             proc.kill()
-        except OSError:
-            pass
-        try:
+        with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=grace_seconds)
-        except subprocess.TimeoutExpired:
-            pass
 
 
 def _build_proxy_subprocess_env(
-    *,
-    extra_env: Optional[Dict[str, str]] = None,
-    refresh_from_bitwarden: bool = False,
-    bitwarden_config: Optional[Dict] = None,
+    *, extra_env: Optional[Dict[str, str]] = None, refresh_from_bitwarden: bool = False, bitwarden_config: Optional[Dict] = None,
 ) -> Dict[str, str]:
     """Minimal env for the daemon: allowlisted infra vars + the secrets named in mappings.  With
     ``refresh_from_bitwarden`` and a populated ``bitwarden_config``, secrets are fetched from BWS
@@ -1191,16 +1083,13 @@ def _build_proxy_subprocess_env(
                     break
 
     if refresh_from_bitwarden and bitwarden_config:
-        _refresh_secrets_from_bitwarden(
-            env, needed, bitwarden_config, bool(bitwarden_config.get("allow_env_fallback")),
-        )
+        _refresh_secrets_from_bitwarden(env, needed, bitwarden_config, bool(bitwarden_config.get("allow_env_fallback")))
 
     # Caller overrides win (wizard test secrets), then strip proxy-recursion vars regardless.
     if extra_env:
         env.update(extra_env)
     for name in _PROXY_SUBPROCESS_ENV_STRIP:
         env.pop(name, None)
-
     env.setdefault("NO_COLOR", "1")
     return env
 
@@ -1213,9 +1102,7 @@ def _bitwarden_shortfall(allow_env_fallback: bool, error: str, warning: str, *ar
     logger.warning(warning, *args)
 
 
-def _refresh_secrets_from_bitwarden(
-    env: Dict[str, str], needed: set, bitwarden_config: Dict, allow_env_fallback: bool,
-) -> None:
+def _refresh_secrets_from_bitwarden(env: Dict[str, str], needed: set, bitwarden_config: Dict, allow_env_fallback: bool) -> None:
     """Overwrite ``env[needed]`` with fresh BWS values (uncached fetch).  Only mapped names are
     injected so unrelated BWS secrets never leak into the daemon env."""
     try:
@@ -1227,36 +1114,26 @@ def _refresh_secrets_from_bitwarden(
             # Don't interpolate access_token_name — CodeQL treats config values as tainted.
             _bitwarden_shortfall(
                 allow_env_fallback,
-                "credential_source=bitwarden but the access-token "
-                "env or project_id is empty.  Either set both, "
-                "switch to credential_source: env, or set "
-                "`proxy.allow_env_fallback: true` to opt into "
+                "credential_source=bitwarden but the access-token env or project_id is empty.  Either set both, "
+                "switch to credential_source: env, or set `proxy.allow_env_fallback: true` to opt into "
                 "the legacy fallback behaviour.",
-                "credential_source=bitwarden but access-token env or "
-                "project_id is empty — proxy will fall back to parent env "
-                "(allow_env_fallback=true).",
+                "credential_source=bitwarden but access-token env or project_id is empty — "
+                "proxy will fall back to parent env (allow_env_fallback=true).",
             )
             return
         secrets, warnings = bw.fetch_bitwarden_secrets(
-            access_token=access_token,
-            project_id=project_id,
-            cache_ttl_seconds=0,
-            use_cache=False,
+            access_token=access_token, project_id=project_id, cache_ttl_seconds=0, use_cache=False,
         )
     except ImportError as exc:
         # A dependency vanishing between setup and restart must not silently degrade.
         if not allow_env_fallback:
             raise RuntimeError(
-                "Bitwarden refresh module unavailable at proxy start "
-                "(credential_source=bitwarden with "
-                "proxy.allow_env_fallback: false).  Either fix the "
-                "import, switch to credential_source: env, or set "
-                "`proxy.allow_env_fallback: true` to opt into the "
-                "legacy fallback behaviour."
+                "Bitwarden refresh module unavailable at proxy start (credential_source=bitwarden with "
+                "proxy.allow_env_fallback: false).  Either fix the import, switch to credential_source: env, or set "
+                "`proxy.allow_env_fallback: true` to opt into the legacy fallback behaviour."
             ) from exc
         logger.warning(
-            "Bitwarden refresh module unavailable at proxy start, "
-            "falling back to parent env (allow_env_fallback=true): %s",
+            "Bitwarden refresh module unavailable at proxy start, falling back to parent env (allow_env_fallback=true): %s",
             exc,
         )
         return
@@ -1268,23 +1145,17 @@ def _refresh_secrets_from_bitwarden(
     if missing:
         _bitwarden_shortfall(
             allow_env_fallback,
-            f"Bitwarden refresh did not return secrets for "
-            f"{missing}.  Either add the secrets to your BWS "
-            f"project, switch to credential_source: env via "
-            f"`hermes egress setup --no-bitwarden`, or set "
-            f"`proxy.allow_env_fallback: true` in config.yaml "
-            f"to opt into the legacy host-env fallback.",
-            "Bitwarden refresh did not return secrets for %s — "
-            "falling back to host env for those names "
+            f"Bitwarden refresh did not return secrets for {missing}.  Either add the secrets to your BWS "
+            f"project, switch to credential_source: env via `hermes egress setup --no-bitwarden`, or set "
+            f"`proxy.allow_env_fallback: true` in config.yaml to opt into the legacy host-env fallback.",
+            "Bitwarden refresh did not return secrets for %s — falling back to host env for those names "
             "(allow_env_fallback=true).",
             missing,
         )
     # Log only the count: the taint analyzer can't tell bws status text is non-secret.
     if warnings:
         logger.warning(
-            "Bitwarden refresh produced %d warning(s); "
-            "run `hermes secrets bitwarden status` for detail.",
-            len(warnings),
+            "Bitwarden refresh produced %d warning(s); run `hermes secrets bitwarden status` for detail.", len(warnings),
         )
 
 
@@ -1292,10 +1163,8 @@ def _forget_daemon() -> None:
     """Best-effort removal of pidfile + persisted nonce, and drop the in-process nonce."""
     global _proxy_nonce
     _pidfile().unlink(missing_ok=True)
-    try:
+    with suppress(OSError):
         _persisted_nonce_path().unlink()
-    except OSError:
-        pass
     _proxy_nonce = None
 
 
@@ -1308,7 +1177,6 @@ def stop_proxy() -> bool:
 
     # Capture starttime BEFORE signalling: if the pid is recycled mid-wait, abort the SIGKILL.
     starttime_before = _pid_proc_starttime(pid)
-
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1329,10 +1197,8 @@ def stop_proxy() -> bool:
         if recycled:
             logger.warning("iron-proxy pid=%s appears recycled before SIGKILL; not killing.", pid)
         else:
-            try:
+            with suppress(ProcessLookupError):
                 os.kill(pid, _KILL_SIGNAL)
-            except ProcessLookupError:
-                pass
 
     _forget_daemon()
     logger.info("Stopped iron-proxy pid=%s", pid)
@@ -1343,29 +1209,24 @@ def get_status() -> ProxyStatus:
     """Snapshot the proxy state without side effects (called per Docker container create)."""
     status = ProxyStatus()
     probe_host, status.tunnel_port = _probe_target()
-
     binary = find_iron_proxy(install_if_missing=False)
     if binary:
         status.binary_path = binary
         status.binary_version = iron_proxy_version(binary)
-
     state = _proxy_state_dir_ro()
     cfg, ca = state / "proxy.yaml", state / "ca.crt"
     status.config_path = cfg if cfg.exists() else None
     status.ca_cert_path = ca if ca.exists() else None
-
     pid = _read_pid()
     if pid and _pid_alive(pid):
         status.pid = pid
         status.listening = _port_listening(probe_host, status.tunnel_port)
-
     return status
 
 
 def _port_listening(host: str, port: int) -> bool:
     """Cheap TCP connect probe — True iff something accepts on host:port."""
     import socket
-
     try:
         with socket.create_connection((host, port), timeout=0.5):
             return True
@@ -1391,24 +1252,9 @@ def _reset_for_tests() -> None:
 
 
 __all__ = [
-    "ProxyStatus",
-    "TokenMapping",
-    "build_proxy_config",
-    "discover_provider_mappings",
-    "discover_uncovered_providers",
-    "ensure_audit_log",
-    "ensure_ca_cert",
-    "ensure_management_token",
-    "find_iron_proxy",
-    "get_status",
-    "install_iron_proxy",
-    "iron_proxy_version",
-    "load_mappings",
-    "merge_mappings",
-    "mint_proxy_token",
-    "reload_proxy",
-    "start_proxy",
-    "stop_proxy",
-    "write_mappings",
-    "write_proxy_config",
+    "ProxyStatus", "TokenMapping", "build_proxy_config", "discover_provider_mappings",
+    "discover_uncovered_providers", "ensure_audit_log", "ensure_ca_cert", "ensure_management_token",
+    "find_iron_proxy", "get_status", "install_iron_proxy", "iron_proxy_version", "load_mappings",
+    "merge_mappings", "mint_proxy_token", "reload_proxy", "start_proxy", "stop_proxy",
+    "write_mappings", "write_proxy_config",
 ]
