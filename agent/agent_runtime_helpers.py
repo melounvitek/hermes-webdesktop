@@ -236,11 +236,9 @@ def sanitize_tool_call_arguments(
                 continue
             if not isinstance(arguments, str):
                 continue
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 json.loads(arguments)
                 continue
-            except json.JSONDecodeError:
-                pass
             # Canonical ``call_id || id`` precedence so scan and stub share the id the pipeline
             # uses; bare ``id`` misses Codex call_id results and orphans a stub.
             tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None

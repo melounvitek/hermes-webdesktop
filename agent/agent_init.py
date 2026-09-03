@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
+from agent.agent_runtime_helpers import _ra
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
 from agent.session_activity import ActivityProvenance
@@ -69,12 +70,6 @@ def _warn_memory_provider_unavailable(name: str, reason: str = "") -> None:
         name,
         f" {reason}" if reason else "",
     )
-
-
-def _ra():
-    """Lazy ``run_agent`` so ``patch("run_agent.OpenAI")`` & co. reach this code path."""
-    import run_agent
-    return run_agent
 
 
 # Canonicalize an endpoint URL for model-route identity comparisons.
@@ -240,12 +235,10 @@ def _codex_gpt55_autoraise_notice_seen(autoraise: Dict[str, Any]) -> bool:
 
 def _record_codex_gpt55_autoraise_notice(autoraise: Dict[str, Any]) -> None:
     """Persist that the notice was shown. Best-effort: a failure only re-shows it later."""
-    try:
+    with suppress(OSError, KeyError, TypeError, ValueError):
         marker = _codex_gpt55_autoraise_notice_marker()
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(_codex_gpt55_autoraise_notice_state(autoraise), encoding="utf-8")
-    except (OSError, KeyError, TypeError, ValueError):
-        pass
 
 
 def _normalized_custom_base_url(value: Any) -> str:
