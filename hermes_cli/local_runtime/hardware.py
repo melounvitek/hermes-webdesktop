@@ -2,10 +2,8 @@
 
 Budget-source rule: discrete cards may trust the device query (measured honest within rounding);
 unified-memory devices must budget from OS free physical memory minus headroom — their device
-queries have been observed off by 3x in both directions.
-
-Every probe here must work under a stripped PATH — gateway and service sessions don't inherit the
-interactive environment.
+queries have been observed off by 3x in both directions. Every probe here must work under a
+stripped PATH — gateway and service sessions don't inherit the interactive environment.
 """
 
 from __future__ import annotations

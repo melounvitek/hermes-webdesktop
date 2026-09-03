@@ -1,10 +1,8 @@
 """Bootstrap for the managed runtime: config -> installed binaries -> running supervised server.
 
 One public call, ``ensure_local_runtime(config)``, safe at any session start: disabled or
-already-running -> no-op; enabled -> install binaries if missing (idempotent), spawn supervisor.
-
-Kept import-light: callers gate on config before importing this module so sessions with
-local_runtime disabled never pay the import.
+already-running -> no-op; enabled -> serve the installed build under a supervisor. Kept
+import-light: callers gate on config before importing so disabled sessions never pay the import.
 """
 
 from __future__ import annotations

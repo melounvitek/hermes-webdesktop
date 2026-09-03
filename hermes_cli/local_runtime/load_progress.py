@@ -1,10 +1,9 @@
 """Live model-load progress from the managed llama-server router.
 
-llama-server's children emit per-tensor load progress ({stages, current, value}, throttled upstream
-to ~200ms) which the router relays ONLY over its /models/sse stream — GET /models carries just the
-coarse status string. The watcher starts on first call, reconnects with backoff (the router bounces
-on model download/eject), and never raises into callers — no router, no state file, or no SSE
-support (older engines) all read as "nothing loading".
+Children emit per-tensor progress ({stages, current, value}) which the router relays ONLY over its
+/models/sse stream — GET /models carries just the coarse status. The watcher starts on first call,
+reconnects with backoff (the router bounces on download/eject), and never raises into callers: no
+router, no state file, or no SSE support (older engines) all read as "nothing loading".
 """
 
 from __future__ import annotations

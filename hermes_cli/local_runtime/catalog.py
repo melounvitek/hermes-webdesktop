@@ -1,9 +1,7 @@
 """Curated starter catalog for the managed local runtime.
 
-Small and honest: every entry carries the estimator inputs (measured on real GGUFs) so the picker
-can price a model BEFORE the user downloads gigabytes. Once a file is on disk, profile_from_gguf()
-is the authority; the catalog numbers only drive the download decision.
-
+Every entry carries the estimator inputs (measured on real GGUFs) so the picker can price a model
+BEFORE the user downloads gigabytes; once a file is on disk, profile_from_gguf() is the authority.
 Builds proven end-to-end on real hardware are marked validated; day-0 entries ship without the flag
 — ensure_model_ready's touch generation still gates every first load at runtime.
 """

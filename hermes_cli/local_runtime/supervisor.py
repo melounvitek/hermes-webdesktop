@@ -1,12 +1,10 @@
 """Supervision of one llama-server in router mode.
 
 The router process is ours (restart with backoff on crash); router children are its problem — child
-failures surface via GET /models exit_code, never auto-retried here.
-
-Readiness rules (each learned the hard way on real hardware): health-200 is NOT readiness; every
-readiness claim requires a touch generation (temp-0, expected token, generous budget,
-reasoning_content scanned). Always dial 127.0.0.1 — resolving localhost adds ~2s per request on
-Windows via IPv6 fallback.
+failures surface via GET /models exit_code, never auto-retried here. Learned on real hardware:
+health-200 is NOT readiness — every readiness claim requires a touch generation (temp-0, expected
+token, generous budget, reasoning_content scanned); always dial 127.0.0.1 — resolving localhost adds
+~2s per request on Windows via IPv6 fallback.
 """
 
 from __future__ import annotations
