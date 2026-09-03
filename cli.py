@@ -6550,45 +6550,25 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
     _DESTRUCTIVE_SKIP_TOKENS = frozenset({"now", "--yes", "-y"})
 
     def chat(self, message, images: list = None, voice_input: bool = False) -> Optional[str]:
-        """
-        Send a message to the agent and get a response.
-        
-        Handles streaming output, interrupt detection (user typing while agent
-        is working), and re-queueing of interrupted messages.
-        
-        Uses a dedicated _interrupt_queue (separate from _pending_input) to avoid
-        race conditions between the process_loop and interrupt monitoring. Messages
-        typed while the agent is running go to _interrupt_queue; messages typed while
-        idle go to _pending_input.
-        
-        Args:
-            message: The user's message (str or multimodal content list)
-            images: Optional list of Path objects for attached images
-            voice_input: True when the message came from voice transcription
-                (gates the concise voice-response prefix, #65827)
-            
-        Returns:
-            The agent's response, or None on error
-        """
-        # Single-query and direct chat callers do not go through run(), so
-        # register secure secret capture here as well.
-        set_secret_capture_callback(self._secret_capture_callback)
+        """Run one user turn; returns the agent's response, or None on error.
 
-        # Reset the per-turn interrupt flag. Any subsequent path that
-        # discovers an interrupt (below, after run_conversation) will flip
-        # this to True. Early returns (credential refresh failure, etc.)
-        # leave it False, which is correct — those aren't user interrupts.
+        Input typed while the agent runs goes to ``_interrupt_queue`` (separate
+        from ``_pending_input`` so process_loop and the interrupt monitor never
+        compete); an interrupting message is re-queued as the next turn.
+        ``voice_input`` gates the concise voice-response prefix (#65827).
+        """
+        # Single-query and direct chat callers do not go through run().
+        set_secret_capture_callback(self._secret_capture_callback)
+        # Reset per turn; only a real interrupt (after run_conversation) flips it,
+        # so early returns (credential refresh failure, ...) correctly leave it False.
         self._last_turn_interrupted = False
 
-        # Refresh provider credentials if needed (handles key rotation transparently)
         if not self._ensure_runtime_credentials():
             return None
 
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
             self.agent = None
-
-        # Initialize agent if needed
         if self.agent is None:
             _cprint(f"{_DIM}Initializing agent...{_RST}")
         if not self._init_agent(
@@ -6601,104 +6581,166 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         if agent is None:
             return None
 
-        # Route image attachments based on the active model's vision capability.
-        # "native" → pass pixels as OpenAI-style content parts (adapters
-        #            translate for Anthropic/Gemini/Bedrock).
-        # "text"   → pre-analyze each image with vision_analyze and prepend the
-        #            description as text — works with non-vision models.
-        # See agent/image_routing.py for the decision table.
-        if images:
-            try:
-                from agent.image_routing import (
-                    build_native_content_parts,
-                    decide_image_input_mode,
-                )
-                from hermes_cli.config import load_config
+        message = self._chat_route_images(message, images)
 
-                _img_model, _img_provider = "", ""
-                if isinstance(self.model, dict):
-                    _img_model, _ = _split_model_config_default(self.model)
-                else:
-                    _img_model = str(self.model or "")
-                if isinstance(self.provider, dict):
-                    _, _img_provider = _split_model_config_default(self.provider)
-                else:
-                    _img_provider = str(self.provider or "")
-                _img_mode = decide_image_input_mode(
-                    _img_provider.strip(),
-                    _img_model.strip(),
-                    load_config(),
-                    requested_provider=(self.requested_provider or "").strip(),
-                )
-            except Exception as _img_exc:
-                logging.debug("image_routing decision failed, defaulting to text: %s", _img_exc)
-                _img_mode = "text"
-
-            if _img_mode == "native":
-                try:
-                    _text_for_parts = message if isinstance(message, str) else ""
-                    _img_str_paths = [str(p) for p in images]
-                    _parts, _skipped = build_native_content_parts(
-                        _text_for_parts,
-                        _img_str_paths,
-                    )
-                    if _skipped:
-                        _cprint(
-                            f"  {_DIM}⚠ skipped {len(_skipped)} unreadable image path(s){_RST}"
-                        )
-                    if any(p.get("type") == "image_url" for p in _parts):
-                        _img_names = ", ".join(Path(p).name for p in _img_str_paths)
-                        _cprint(
-                            f"  {_DIM}📎 attaching {len(images)} image(s) natively "
-                            f"(model supports vision): {_img_names}{_RST}"
-                        )
-                        message = _parts
-                    else:
-                        # All images unreadable — fall back to text enrichment.
-                        message = self._preprocess_images_with_vision(
-                            message if isinstance(message, str) else "", images
-                        )
-                except Exception as _img_exc:
-                    logging.warning("native image attach failed, falling back to text: %s", _img_exc)
-                    message = self._preprocess_images_with_vision(
-                        message if isinstance(message, str) else "", images
-                    )
-            else:
-                message = self._preprocess_images_with_vision(
-                    message if isinstance(message, str) else "", images
-                )
-
-        # Expand @ context references (e.g. @file:main.py, @diff, @folder:src/)
-        if isinstance(message, str) and "@" in message:
-            try:
-                from agent.context_references import preprocess_context_references
-                from agent.model_metadata import get_model_context_length
-                _ctx_len = get_model_context_length(
-                    self.model, base_url=self.base_url or "", api_key=self.api_key or "",
-                    provider=self.provider or "",
-                    config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None)
-                _ctx_result = preprocess_context_references(
-                    message, cwd=os.getcwd(), context_length=_ctx_len)
-                if _ctx_result.expanded or _ctx_result.blocked:
-                    if _ctx_result.references:
-                        _cprint(
-                            f"  {_DIM}[@ context: {len(_ctx_result.references)} ref(s), "
-                            f"{_ctx_result.injected_tokens} tokens]{_RST}")
-                    for w in _ctx_result.warnings:
-                        _cprint(f"  {_DIM}⚠ {w}{_RST}")
-                    if _ctx_result.blocked:
-                        return "\n".join(_ctx_result.warnings) or "Context injection refused."
-                    message = _ctx_result.message
-            except Exception as e:
-                logging.debug("@ context reference expansion failed: %s", e)
-
-        # Sanitize surrogate characters that can arrive via clipboard paste from
-        # rich-text editors (Google Docs, Word, etc.).  Lone surrogates are invalid
-        # UTF-8 and crash JSON serialization in the OpenAI SDK.
         if isinstance(message, str):
+            message, blocked = self._chat_expand_context_references(message)
+            if blocked is not None:
+                return blocked
+            # Lone surrogates (clipboard paste from rich-text editors) are invalid
+            # UTF-8 and crash JSON serialization in the OpenAI SDK.
             from run_agent import _sanitize_surrogates
             message = _sanitize_surrogates(message)
 
+        self._chat_stage_user_message(agent, message)
+
+        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
+        print(flush=True)
+
+        turn = _ChatTurn()
+        try:
+            self._reset_stream_state()
+            # Not part of _reset_stream_state: must persist across intermediate
+            # turn boundaries (tool-calling loops), reset once per user turn.
+            self._reasoning_shown_this_turn = False
+
+            self._chat_setup_turn_audio(turn, message, voice_input)
+
+            # Per-prompt elapsed timer — frozen when the agent thread finishes.
+            self._prompt_start_time = time.time()
+            self._prompt_duration = 0.0
+            # Daemon: closing the terminal tab (SIGHUP) must not be kept alive by it.
+            agent_thread = threading.Thread(
+                target=self._chat_run_agent, args=(turn, message), daemon=True
+            )
+            agent_thread.start()
+            interrupt_msg = self._chat_monitor_agent_thread(turn, agent_thread)
+            self._chat_settle_turn(turn)
+            return self._chat_render_turn(turn, agent_thread, interrupt_msg)
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+        finally:
+            self._chat_release_turn_audio(turn)
+            if turn.tts_thread is not None and turn.tts_thread.is_alive():
+                turn.tts_thread.join(timeout=5)
+
+    def _chat_release_turn_audio(self, turn):
+        """Every exit path: stop the thinking sound, send the TTS sentinel, cut TTS only on abnormal exit, join the worker."""
+        # Stop the ambient thinking sound the moment the turn ends —
+        # every exit path (normal, error, interrupt) lands here.
+        if turn.thinking_started:
+            try:
+                from tools.voice_mode import stop_thinking_sound
+                stop_thinking_sound()
+            except Exception:
+                pass
+        # Ensure streaming TTS resources are cleaned up even on error.
+        # Normal path sends the sentinel at line ~3568; this is a safety
+        # net for exception paths that skip it.  Duplicate sentinels are
+        # harmless — stream_tts_to_speaker exits on the first None.
+        #
+        # Only set stop_event on the exception path.  On normal exit
+        # (_tts_normal_exit is True) the pipeline has already drained —
+        # setting stop_event here would race the playback worker and
+        # could cut the final sentence mid-audio.
+        if turn.text_queue is not None:
+            try:
+                turn.text_queue.put_nowait(None)
+            except Exception:
+                pass
+        if turn.stop_event is not None and not turn.tts_normal_exit:
+            logger.info("TTS CUT: exception finally block setting stop_event")
+            turn.stop_event.set()
+
+    def _chat_expand_context_references(self, message: str):
+        """Expand ``@file:``/``@diff``/``@folder:`` references.
+
+        Returns ``(message, blocked)``; ``blocked`` is the refusal text the turn must
+        return instead of running when injection was refused, else None.
+        """
+        if "@" not in message:
+            return message, None
+        try:
+            from agent.context_references import preprocess_context_references
+            from agent.model_metadata import get_model_context_length
+            _ctx_len = get_model_context_length(
+                self.model, base_url=self.base_url or "", api_key=self.api_key or "",
+                provider=self.provider or "",
+                config_context_length=getattr(self.agent, "_config_context_length", None) if self.agent else None)
+            _ctx_result = preprocess_context_references(
+                message, cwd=os.getcwd(), context_length=_ctx_len)
+            if _ctx_result.expanded or _ctx_result.blocked:
+                if _ctx_result.references:
+                    _cprint(
+                        f"  {_DIM}[@ context: {len(_ctx_result.references)} ref(s), "
+                        f"{_ctx_result.injected_tokens} tokens]{_RST}")
+                for w in _ctx_result.warnings:
+                    _cprint(f"  {_DIM}⚠ {w}{_RST}")
+                if _ctx_result.blocked:
+                    return message, ("\n".join(_ctx_result.warnings) or "Context injection refused.")
+                message = _ctx_result.message
+        except Exception as e:
+            logging.debug("@ context reference expansion failed: %s", e)
+        return message, None
+
+    def _chat_route_images(self, message, images):
+        """Attach images natively (vision model) or pre-describe them as text; returns the message to send.
+
+        "native" → OpenAI-style content parts (adapters translate for Anthropic/Gemini/Bedrock).
+        "text"   → vision_analyze each image and prepend the description — works with
+        non-vision models. Decision table: agent/image_routing.py.
+        """
+        if not images:
+            return message
+        text = message if isinstance(message, str) else ""
+        try:
+            from agent.image_routing import (
+                build_native_content_parts,
+                decide_image_input_mode,
+            )
+            from hermes_cli.config import load_config
+
+            _img_model = (
+                _split_model_config_default(self.model)[0]
+                if isinstance(self.model, dict) else str(self.model or "")
+            )
+            _img_provider = (
+                _split_model_config_default(self.provider)[1]
+                if isinstance(self.provider, dict) else str(self.provider or "")
+            )
+            _img_mode = decide_image_input_mode(
+                _img_provider.strip(),
+                _img_model.strip(),
+                load_config(),
+                requested_provider=(self.requested_provider or "").strip(),
+            )
+        except Exception as _img_exc:
+            logging.debug("image_routing decision failed, defaulting to text: %s", _img_exc)
+            _img_mode = "text"
+
+        if _img_mode == "native":
+            try:
+                _img_str_paths = [str(p) for p in images]
+                _parts, _skipped = build_native_content_parts(text, _img_str_paths)
+                if _skipped:
+                    _cprint(
+                        f"  {_DIM}⚠ skipped {len(_skipped)} unreadable image path(s){_RST}"
+                    )
+                if any(p.get("type") == "image_url" for p in _parts):
+                    _img_names = ", ".join(Path(p).name for p in _img_str_paths)
+                    _cprint(
+                        f"  {_DIM}📎 attaching {len(images)} image(s) natively "
+                        f"(model supports vision): {_img_names}{_RST}"
+                    )
+                    return _parts
+                # All images unreadable — fall back to text enrichment.
+            except Exception as _img_exc:
+                logging.warning("native image attach failed, falling back to text: %s", _img_exc)
+        return self._preprocess_images_with_vision(text, images)
+
+    def _chat_stage_user_message(self, agent, message):
+        """Append the staged user dict to the transcript under the agent's persist lock (see #63766)."""
         # Keep the exact CLI input dict available until turn-start persistence.
         # Copy the completed agent transcript before appending: otherwise this
         # UI-only staging step mutates ``agent._session_messages`` and exposes a
@@ -6709,89 +6751,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # before exposing the next staged input to close persistence; otherwise
         # a shutdown before the worker prologue can write old API-local text as
         # this new user message (#63766).
-        persist_lock = getattr(agent, "_session_persist_lock", None)
+        import contextlib
+        from agent.message_metadata import stamp_message_timestamp
 
-        def _stage_user_message() -> None:
+        persist_lock = getattr(agent, "_session_persist_lock", None)
+        with persist_lock if persist_lock is not None else contextlib.nullcontext():
             agent._persist_user_message_idx = None
             agent._persist_user_message_override = None
             agent._persist_user_message_timestamp = None
-            from agent.message_metadata import stamp_message_timestamp
-
             staged_user_message = stamp_message_timestamp(
                 {"role": "user", "content": message}
             )
             agent._pending_cli_user_message = staged_user_message
             self.conversation_history.append(staged_user_message)
-
-        if persist_lock is None:
-            _stage_user_message()
-        else:
-            with persist_lock:
-                _stage_user_message()
-
-        ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-        print(flush=True)
-        
-        turn = _ChatTurn()
-        try:
-            # Reset streaming display state for this turn
-            self._reset_stream_state()
-            # Separate from _reset_stream_state because this must persist
-            # across intermediate turn boundaries (tool-calling loops) — only
-            # reset at the start of each user turn.
-            self._reasoning_shown_this_turn = False
-
-            self._chat_setup_turn_audio(turn, message, voice_input)
-
-            # Start agent in background thread (daemon so it cannot keep the
-            # process alive when the user closes the terminal tab — SIGHUP
-            # exits the main thread and daemon threads are reaped automatically).
-            # Start per-prompt elapsed timer — frozen after the agent thread
-            # finishes; reset on the next turn.
-            self._prompt_start_time = time.time()
-            self._prompt_duration = 0.0
-            agent_thread = threading.Thread(
-                target=self._chat_run_agent, args=(turn, message), daemon=True
-            )
-            agent_thread.start()
-
-            interrupt_msg = self._chat_monitor_agent_thread(turn, agent_thread)
-
-            self._chat_settle_turn(turn)
-
-            return self._chat_render_turn(turn, agent_thread, interrupt_msg)
-
-        except Exception as e:
-            print(f"Error: {e}")
-            return None
-        finally:
-            # Stop the ambient thinking sound the moment the turn ends —
-            # every exit path (normal, error, interrupt) lands here.
-            if turn.thinking_started:
-                try:
-                    from tools.voice_mode import stop_thinking_sound
-                    stop_thinking_sound()
-                except Exception:
-                    pass
-            # Ensure streaming TTS resources are cleaned up even on error.
-            # Normal path sends the sentinel at line ~3568; this is a safety
-            # net for exception paths that skip it.  Duplicate sentinels are
-            # harmless — stream_tts_to_speaker exits on the first None.
-            #
-            # Only set stop_event on the exception path.  On normal exit
-            # (_tts_normal_exit is True) the pipeline has already drained —
-            # setting stop_event here would race the playback worker and
-            # could cut the final sentence mid-audio.
-            if turn.text_queue is not None:
-                try:
-                    turn.text_queue.put_nowait(None)
-                except Exception:
-                    pass
-            if turn.stop_event is not None and not turn.tts_normal_exit:
-                logger.info("TTS CUT: exception finally block setting stop_event")
-                turn.stop_event.set()
-            if turn.tts_thread is not None and turn.tts_thread.is_alive():
-                turn.tts_thread.join(timeout=5)
 
     def _chat_setup_turn_audio(self, turn, message, voice_input):
         """Arm the full-duplex listener and the streaming-TTS pipeline for this turn (voice mode only)."""
