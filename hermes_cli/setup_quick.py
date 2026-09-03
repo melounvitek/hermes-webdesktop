@@ -12,9 +12,16 @@ logger = logging.getLogger("hermes_cli.setup")
 # (env-var name substring, platform label, emoji) — order matters: first match wins.
 _MESSAGING_PLATFORMS = (("TELEGRAM", "Telegram", "📱"), ("DISCORD", "Discord", "💬"), ("SLACK", "Slack", "💼"))
 
-_BLANK_SLATE_DONE_LINES = (
-    "  Seed skills:         hermes skills opt-in --sync", "  Add MCP servers:     hermes mcp add",
-)
+
+
+def _blank_slate_done(config: dict, hermes_home, tools_line: str, *extra: str, intro: str | None = None) -> None:
+    """Shared Blank Slate epilogue: success banner, the "enable later" hints, then the summary."""
+    from hermes_cli.setup import _info, _print_setup_summary, print_success
+    print()
+    print_success("Blank Slate setup complete — minimal agent ready.")
+    _info(*([intro] if intro else []), tools_line, "  Seed skills:         hermes skills opt-in --sync",
+          "  Add MCP servers:     hermes mcp add", *extra, "  Tune agent settings: hermes setup agent", None)
+    _print_setup_summary(config, hermes_home)
 
 
 def _reload_config_into(config: dict, *, dict_only: bool = False) -> None:
@@ -213,8 +220,8 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     opting capabilities back in. Nothing is enabled that the user did not explicitly choose."""
     from hermes_cli.setup import (
         _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough, _info,
-        print_header, print_info, _print_setup_summary, print_success, prompt_choice, save_config,
-        setup_model_provider, setup_terminal_backend,
+        print_header, print_info, print_success, prompt_choice, save_config, setup_model_provider,
+        setup_terminal_backend,
     )
     print_header("Blank Slate Setup", gap=True)
     _info("Everything starts OFF. First we force-enable only what's required",
@@ -259,18 +266,14 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     # Blank Slate means no bundled skills; record the opt-out so future `hermes update` runs
     # don't re-inject them.
     _set_bundled_skills_opt_out(True, "skill opt-out")
-    print()
-    print_success("Blank Slate setup complete — minimal agent ready.")
-    _info("Enable anything later, on demand:", "  Enable tools:        hermes tools", *_BLANK_SLATE_DONE_LINES,
-          "  Enable plugins:      hermes plugins", "  Tune agent settings: hermes setup agent", None)
-    _print_setup_summary(config, hermes_home)
+    _blank_slate_done(config, hermes_home, "  Enable tools:        hermes tools", "  Enable plugins:      hermes plugins",
+                      intro="Enable anything later, on demand:")
 
 
 def _blank_slate_walkthrough(config: dict, hermes_home):
     """Opt-in walkthrough for Blank Slate: skills, tools, plugins, MCP, gateway."""
     from hermes_cli.setup import (
-        _info, print_header, print_info, _print_setup_summary, print_success, print_warning, prompt_yes_no,
-        save_config, setup_gateway,
+        _info, print_header, print_info, print_success, print_warning, prompt_yes_no, save_config, setup_gateway,
     )
     # Bundled skills — default to NONE, offer to seed all
     print_header("Bundled Skills", gap=True)
@@ -326,13 +329,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
         setup_gateway(config)
 
     save_config(config)
-
-    print()
-    print_success("Blank Slate setup complete — minimal agent ready.")
-    _info("  Enable more tools:   hermes tools", *_BLANK_SLATE_DONE_LINES,
-          "  Tune agent settings: hermes setup agent", None)
-
-    _print_setup_summary(config, hermes_home)
+    _blank_slate_done(config, hermes_home, "  Enable more tools:   hermes tools")
 
 
 def _run_quick_setup(config: dict, hermes_home):

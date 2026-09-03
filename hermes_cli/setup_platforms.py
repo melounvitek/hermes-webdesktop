@@ -70,6 +70,17 @@ def _save_allowlist(env_var: str, users: str, success_msg: str) -> None:
     print_success(success_msg)
 
 
+def _prompt_allowlist(env_var: str, question: str, success_msg: str, open_msg: str, preset: str | None = None) -> str:
+    """Persist ``preset`` (or the prompted answer) as an allowlist, warning when it stays open."""
+    from hermes_cli.setup import print_info, prompt
+    users = prompt(question) if preset is None else preset
+    if users:
+        _save_allowlist(env_var, users, success_msg)
+    else:
+        print_info(open_msg)
+    return users.replace(" ", "")
+
+
 def _save_port(env_var: str, value: str, default: str) -> None:
     """Persist ``value`` as an int port; warn (keeping ``default``) when it isn't one."""
     from hermes_cli.setup import print_success, print_warning, save_env_value
@@ -159,14 +170,10 @@ def _setup_telegram():
         if prompt_yes_no("Allow this Telegram account to use the bot?", True):
             extra = prompt("Additional allowed user IDs (comma-separated, optional)")
             allowed_users = ",".join(dict.fromkeys([detected_id, *filter(None, extra.replace(" ", "").split(","))]))
-    if allowed_users is None:
-        allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
-
-    if allowed_users:
-        allowed_users = allowed_users.replace(" ", "")
-        _save_allowlist("TELEGRAM_ALLOWED_USERS", allowed_users, "Telegram allowlist configured - only listed users can use the bot")
-    else:
-        print_info("⚠️  No allowlist set - anyone who finds your bot can use it!")
+    allowed_users = _prompt_allowlist(
+        "TELEGRAM_ALLOWED_USERS", "Allowed user IDs (comma-separated, leave empty for open access)",
+        "Telegram allowlist configured - only listed users can use the bot",
+        "⚠️  No allowlist set - anyone who finds your bot can use it!", preset=allowed_users)
 
     _info(None, "📬 Home Channel: where Hermes delivers cron job results,",
           "   cross-platform messages, and notifications.",
@@ -185,7 +192,7 @@ def _setup_telegram():
 
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
-    from hermes_cli.setup import _info, print_header, print_info, print_success, prompt, prompt_yes_no
+    from hermes_cli.setup import _info, print_header, print_success, prompt, prompt_yes_no
     print_header("BlueBubbles (iMessage)")
     if _declines_reconfigure("BLUEBUBBLES_SERVER_URL", "BlueBubbles", "Reconfigure BlueBubbles?"):
         return
@@ -208,11 +215,8 @@ def _setup_bluebubbles():
 
     _info(None, "🔒 Security: Restrict who can message your bot",
           "   Use iMessage addresses: email (user@icloud.com) or phone (+15551234567)", None)
-    allowed_users = prompt("Allowed iMessage addresses (comma-separated, leave empty for open access)")
-    if allowed_users:
-        _save_allowlist("BLUEBUBBLES_ALLOWED_USERS", allowed_users, "BlueBubbles allowlist configured")
-    else:
-        print_info("⚠️  No allowlist set — anyone who can iMessage you can use the bot!")
+    _prompt_allowlist("BLUEBUBBLES_ALLOWED_USERS", "Allowed iMessage addresses (comma-separated, leave empty for open access)",
+                      "BlueBubbles allowlist configured", "⚠️  No allowlist set — anyone who can iMessage you can use the bot!")
 
     _info(None, "📬 Home Channel: phone or email for cron job delivery and notifications.",
           "   You can also set this later with /set-home in your iMessage chat.")
