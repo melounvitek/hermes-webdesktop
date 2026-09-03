@@ -1,12 +1,10 @@
 """Shared spurious stdin-EOF recovery for the TUI gateway entry point and slash worker.
 
-When a child inherits fd 0 and sets ``O_NONBLOCK``, the flag lands on the
-**shared open file description**, not just the child's descriptor.  The next
-``read()`` returns ``EAGAIN``, which CPython's buffered ``TextIOWrapper``
-converts to ``b''`` (apparent EOF), killing the gateway.
-
-Recovery is **POSIX-only** (``fcntl``); on Windows the guard just reports a
-genuine EOF and lets the caller exit.
+When a child inherits fd 0 and sets ``O_NONBLOCK``, the flag lands on the SHARED open
+file description, not just the child's descriptor. The next ``read()`` returns
+``EAGAIN``, which CPython's buffered ``TextIOWrapper`` converts to ``b''`` (apparent
+EOF), killing the gateway. Recovery is POSIX-only (``fcntl``); on Windows the guard
+just reports a genuine EOF and lets the caller exit.
 """
 
 from __future__ import annotations
@@ -21,10 +19,8 @@ try:
 except ImportError:  # Windows
     fcntl = None  # type: ignore[assignment]
 
-
-# At most this many recoveries per 60s window.  A child aggressively flipping
-# the flag would otherwise create a tight busy-loop; exceeding the cap exits so
-# the parent respawns us with fresh state.
+# Recoveries per 60s window. A child aggressively flipping the flag would otherwise
+# create a tight busy-loop; exceeding the cap exits so the parent respawns us fresh.
 MAX_RECOVERIES_PER_MINUTE = 10
 
 
@@ -55,9 +51,8 @@ def _stdin_sockopt(getter):
 def diagnose_stdin_state() -> str:
     """Diagnostic string (``O_NONBLOCK`` / ``SO_RCVTIMEO``) for crash-log forensics.
 
-    ``SO_RCVTIMEO`` is a socket option equally shared on the open file
-    description; a child's ``setsockopt`` launders into the same spurious-EOF
-    path with ``O_NONBLOCK`` clear, so it is reported alongside the flag.
+    ``SO_RCVTIMEO`` is equally shared on the open file description; a child's
+    ``setsockopt`` launders into the same spurious-EOF path with ``O_NONBLOCK`` clear.
     """
     parts: list[str] = []
     if fcntl is None:
@@ -77,16 +72,15 @@ def diagnose_stdin_state() -> str:
 def handle_spurious_eof(recovery_times: list[float], log_fn: object) -> bool:
     """Check whether an empty ``readline()`` is spurious; recover if so.
 
-    Returns True if the caller should ``continue`` the read loop (recovered),
-    False if it should ``break`` (genuine peer-close or rate limit exceeded).
-    ``log_fn`` receives a diagnostic string.
+    Returns True if the caller should ``continue`` the read loop (recovered), False if it
+    should ``break`` (genuine peer-close or rate limit exceeded). ``log_fn`` receives a
+    diagnostic string.
     """
-    # Without fcntl (Windows) we can't check the flag, and the issue is
-    # POSIX-specific anyway; a clear flag means a genuine peer-close.
+    # Without fcntl (Windows) we can't check the flag and the issue is POSIX-specific
+    # anyway; a clear flag means a genuine peer-close.
     if fcntl is None or not _stdin_nonblock():
         log_fn("stdin EOF (peer closed)")  # type: ignore[operator]
         return False
-
     now = time.time()
     recovery_times.append(now)
     recovery_times[:] = [t for t in recovery_times if t > now - 60]
@@ -96,16 +90,12 @@ def handle_spurious_eof(recovery_times: list[float], log_fn: object) -> bool:
             f"({len(recovery_times)}/min, cap {MAX_RECOVERIES_PER_MINUTE})"
         )
         return False
-
     log_fn(f"stdin spurious EOF (subprocess O_NONBLOCK flip), recovering: {diagnose_stdin_state()}")  # type: ignore[operator]
-
-    # Restore blocking mode on the shared description, and clear SO_RCVTIMEO too:
-    # a non-zero timeout would make the next readline() return '' again, looping
-    # until the rate limiter fires.
+    # Restore blocking mode on the shared description, and clear SO_RCVTIMEO too: a
+    # non-zero timeout would make the next readline() return '' again until the limiter fires.
     os.set_blocking(0, True)
     # "ll" = struct timeval {tv_sec, tv_usec}; zero timeval disables the timeout.
     _stdin_sockopt(lambda s: s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO, struct.pack("ll", 0, 0)))
-
-    # TextIOWrapper.readline returns '' on EAGAIN but does NOT stick EOF; the
-    # next call blocks until data arrives or the peer truly closes.
+    # TextIOWrapper.readline returns '' on EAGAIN but does NOT stick EOF; the next call
+    # blocks until data arrives or the peer truly closes.
     return True
