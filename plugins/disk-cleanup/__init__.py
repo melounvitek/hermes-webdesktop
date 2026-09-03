@@ -82,13 +82,11 @@ def _on_session_end(
         _recent_test_tracks.clear()
     if not had_tracks:
         return
-
     try:
         summary = dg.quick()
     except Exception as exc:
         logger.debug("disk-cleanup quick cleanup failed: %s", exc)
         return
-
     if summary["deleted"] or summary["empty_dirs"]:
         dg._log(f"AUTO_QUICK (session_end): deleted={summary['deleted']} "
                 f"dirs={summary['empty_dirs']} freed={dg.fmt_size(summary['freed'])}")

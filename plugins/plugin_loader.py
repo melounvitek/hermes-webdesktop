@@ -92,24 +92,20 @@ def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: Tuple[str
     init_file = plugin_dir / "__init__.py"
     if not init_file.exists():
         return None
-
     # A synthetic package shell has no __file__; only reuse modules loaded from disk.
     cached = sys.modules.get(module_name)
     if cached is not None and getattr(cached, "__file__", None):
         return cached
-
     for parent in parents:
         parent_path = _PLUGINS_ROOT.joinpath(*parent.split(".")[1:])
         if parent not in sys.modules and (parent_path / "__init__.py").exists():
             _exec(_new_module(parent, parent_path / "__init__.py", [str(parent_path)]))
     if synthetic_namespace:
         register_synthetic_package(synthetic_namespace, [])
-
     # Reserve the name before siblings exec so their relative imports resolve.
     mod = _new_module(module_name, init_file, [str(plugin_dir)])
     if mod is None:
         return None
-
     loaded_submodules = []
     for sub_file in plugin_dir.glob("*.py"):
         full_sub_name = f"{module_name}.{sub_file.stem}"
@@ -118,11 +114,9 @@ def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: Tuple[str
         sub_mod = _new_module(full_sub_name, sub_file)
         if _exec(sub_mod, logger):
             loaded_submodules.append((sub_file.stem, sub_mod))
-
     if not _exec(mod, logger):
         sys.modules.pop(module_name, None)
         return None
-
     parent_name, child_name = module_name.rsplit(".", 1)
     parent_mod = sys.modules.get(parent_name)
     if parent_mod is not None:
@@ -153,7 +147,6 @@ def instance_from_module(mod: Any, *, collector: Any, collected_attr: str, base_
                 return instance
         except Exception as e:
             logger.debug("register() failed for %s: %s", name, e)
-
     for attr_name in dir(mod):
         attr = getattr(mod, attr_name, None)
         if isinstance(attr, type) and issubclass(attr, base_cls) and attr is not base_cls:

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import platform
 import shutil
@@ -30,44 +31,39 @@ def _auth_state_path() -> Path:
     return Path(get_hermes_home()) / "workspace" / "meetings" / "auth.json"
 
 
+# ``hermes meet <sub>`` in help order.
+_SUBCOMMAND_HELP = (
+    ("setup", "Preflight: playwright, chromium, auth"),
+    ("install", "Install prerequisites (pip deps, Chromium, platform audio tools)"),
+    ("auth", "Sign in to Google and save session state"),
+    ("join", "Join a Meet URL"),
+    ("status", "Print current Meet bot state"),
+    ("transcript", "Print the scraped transcript"),
+    ("say", "Speak text in an active realtime meeting"),
+    ("stop", "Leave the current meeting"),
+    ("node", "Manage remote meet node hosts (run/list/approve/remove/status/ping)"))
+
+
 def register_cli(subparser: argparse.ArgumentParser) -> None:
     """Build the ``hermes meet`` argparse tree (called at plugin load time)."""
     subs = subparser.add_subparsers(dest="meet_command")
-
-    subs.add_parser("setup", help="Preflight: playwright, chromium, auth")
-
-    inst_p = subs.add_parser(
-        "install", help="Install prerequisites (pip deps, Chromium, platform audio tools)")
-    inst_p.add_argument("--realtime", action="store_true",
-                        help="Also install realtime audio tools (pulseaudio-utils on Linux, BlackHole+ffmpeg on macOS). Uses sudo/brew, prompts before invoking either.")
-    inst_p.add_argument("--yes", "-y", action="store_true",
-                        help="Answer yes to all prompts (use with care; will run sudo apt-get or brew without asking).")
-
-    subs.add_parser("auth", help="Sign in to Google and save session state")
-
-    join_p = subs.add_parser("join", help="Join a Meet URL")
-    join_p.add_argument("url", help="https://meet.google.com/...")
-    join_p.add_argument("--guest-name", default="Hermes Agent")
-    join_p.add_argument("--duration", default=None, help="e.g. 30m, 2h, 90s")
-    join_p.add_argument("--headed", action="store_true", help="show browser")
-    join_p.add_argument("--mode", choices=("transcribe", "realtime"), default="transcribe",
-                        help="transcribe (default, listen-only) or realtime (speak via OpenAI Realtime)")
-    join_p.add_argument("--node", default=None,
-                        help="remote node name, or 'auto' to use the sole registered node")
-
-    subs.add_parser("status", help="Print current Meet bot state")
-
-    tr_p = subs.add_parser("transcript", help="Print the scraped transcript")
-    tr_p.add_argument("--last", type=int, default=None)
-
-    say_p = subs.add_parser("say", help="Speak text in an active realtime meeting")
-    say_p.add_argument("text", help="what to say")
-    say_p.add_argument("--node", default=None)
-
-    subs.add_parser("stop", help="Leave the current meeting")
-
-    _register_node_cli(subs.add_parser(
-        "node", help="Manage remote meet node hosts (run/list/approve/remove/status/ping)"))
+    p = {name: subs.add_parser(name, help=help_) for name, help_ in _SUBCOMMAND_HELP}
+    p["install"].add_argument("--realtime", action="store_true",
+                              help="Also install realtime audio tools (pulseaudio-utils on Linux, BlackHole+ffmpeg on macOS). Uses sudo/brew, prompts before invoking either.")
+    p["install"].add_argument("--yes", "-y", action="store_true",
+                              help="Answer yes to all prompts (use with care; will run sudo apt-get or brew without asking).")
+    p["join"].add_argument("url", help="https://meet.google.com/...")
+    p["join"].add_argument("--guest-name", default="Hermes Agent")
+    p["join"].add_argument("--duration", default=None, help="e.g. 30m, 2h, 90s")
+    p["join"].add_argument("--headed", action="store_true", help="show browser")
+    p["join"].add_argument("--mode", choices=("transcribe", "realtime"), default="transcribe",
+                           help="transcribe (default, listen-only) or realtime (speak via OpenAI Realtime)")
+    p["join"].add_argument("--node", default=None,
+                           help="remote node name, or 'auto' to use the sole registered node")
+    p["transcript"].add_argument("--last", type=int, default=None)
+    p["say"].add_argument("text", help="what to say")
+    p["say"].add_argument("--node", default=None)
+    _register_node_cli(p["node"])
     subparser.set_defaults(func=meet_command)
 
 
@@ -99,19 +95,12 @@ def meet_command(args: argparse.Namespace) -> int:
 
 def _cmd_setup() -> int:
     print("google_meet preflight\n---------------------")
-
     system = platform.system()
     system_ok = system in {"Linux", "Darwin"}
     print(f"  platform       : {system}  [{'ok' if system_ok else 'unsupported'}]")
-
-    try:
-        import playwright  # noqa: F401
-        pw_ok = True
-        print("  playwright     : installed")
-    except ImportError:
-        pw_ok = False
-        print("  playwright     : NOT installed — run: pip install playwright")
-
+    pw_ok = importlib.util.find_spec("playwright") is not None
+    print("  playwright     : installed" if pw_ok
+          else "  playwright     : NOT installed — run: pip install playwright")
     chromium_ok = False
     chromium_msg = "unknown"
     if pw_ok:
@@ -127,11 +116,9 @@ def _cmd_setup() -> int:
         except Exception as e:
             chromium_msg = f"probe failed: {e}"
     print(f"  chromium       : {chromium_msg}")
-
     auth_path = _auth_state_path()
     print("  google auth    : "
           + (f"ok ({auth_path})" if auth_path.is_file() else "not saved — run: hermes meet auth"))
-
     print()
     all_ok = system_ok and pw_ok and chromium_ok
     print("ready. Join a meeting:  hermes meet join https://meet.google.com/abc-defg-hij" if all_ok
@@ -162,19 +149,16 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
             print(fail_msg)
 
     print("google_meet install\n-------------------")
-
     pip_pkgs = ["playwright", "websockets"]
     print(f"\n[1/3] pip install: {' '.join(pip_pkgs)}")
     try:
         from hermes_cli.tools_config import _pip_install
-
         if _pip_install(["--upgrade", *pip_pkgs], capture_output=False).returncode != 0:
             print("  pip install failed")
             return 1
     except Exception as e:
         print(f"  pip install failed: {e}")
         return 1
-
     print("\n[2/3] python -m playwright install chromium")
     try:
         res = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False,
@@ -184,7 +168,6 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
     except Exception as e:
         print(f"  playwright install failed: {e}")
         return 1
-
     if not realtime:
         print("\n[3/3] skipped (pass --realtime to install audio tooling too)")
     else:
@@ -216,7 +199,6 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
                   "    System Settings → Sound → Input\n"
                   "  and select 'BlackHole 2ch' before starting a realtime meeting.\n"
                   "  hermes will not switch your default input for you.")
-
     print("\ndone. verify with: hermes meet setup")
     return 0
 
@@ -229,7 +211,6 @@ def _cmd_auth() -> int:
         print("playwright is not installed. run:\n"
               "  pip install playwright && python -m playwright install chromium")
         return 1
-
     path = _auth_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     print(f"opening Chromium — sign in to Google, then return here and press Enter.\nsaving storage state to: {path}")

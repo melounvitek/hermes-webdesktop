@@ -144,7 +144,6 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
     if category not in ALLOWED_CATEGORIES:
         _log(f"WARN: unknown category '{category}', using 'other'")
         category = "other"
-
     path = Path(path_str).resolve()
     if not path.exists():
         _log(f"SKIP: {path} (does not exist)")
@@ -152,12 +151,10 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
     if not is_safe_path(path):
         _log(f"REJECT: {path} (outside HERMES_HOME)")
         return False
-
     size = path.stat().st_size if path.is_file() else 0
     tracked = load_tracked()
     if any(item["path"] == str(path) for item in tracked):
         return False
-
     tracked.append({"path": str(path), "timestamp": datetime.now(timezone.utc).isoformat(),
                     "category": category, "size": size})
     save_tracked(tracked)
@@ -244,7 +241,6 @@ def quick() -> Dict[str, Any]:
     deleted = freed = 0
     new_tracked: List[Dict] = []
     errors: List[str] = []
-
     for item, p, age in _live_items(load_tracked(), datetime.now(timezone.utc), log_stale=True):
         cat = item["category"]
         if cat in _STALE_SKIP_NOTE and (re_cat := guess_category(p)) != cat:
@@ -265,7 +261,6 @@ def quick() -> Dict[str, Any]:
         else:
             errors.append(err)
             new_tracked.append(item)
-
     empty_removed = _sweep_empty_dirs(get_hermes_home())
     save_tracked(new_tracked)
     _log(f"QUICK_SUMMARY: {deleted} files, {empty_removed} dirs, {fmt_size(freed)}")
@@ -310,7 +305,6 @@ def status() -> Dict[str, Any]:
         c = cats.setdefault(item["category"], {"count": 0, "size": 0})
         c["count"] += 1
         c["size"] += item["size"]
-
     existing = sorted(((i["path"], i["size"], i["category"]) for i in tracked
                        if Path(i["path"]).exists()), key=lambda x: x[1], reverse=True)
     return {"categories": cats, "top10": existing[:10], "total_tracked": len(tracked)}
@@ -324,7 +318,6 @@ def format_status(s: Dict[str, Any]) -> str:
         lines.append(f"{cat:<20} {d['count']:>6}  {fmt_size(d['size']):>10}")
     if not cats:
         lines.append("(nothing tracked yet)")
-
     lines += ["", "Top 10 largest tracked files:"]
     if not s["top10"]:
         lines.append("  (none)")
@@ -341,7 +334,6 @@ def guess_category(path: Path) -> Optional[str]:
     """Category label for *path*, or None if we shouldn't track it (``post_tool_call`` hook)."""
     if not is_safe_path(path):
         return None
-
     try:
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
@@ -355,6 +347,5 @@ def guess_category(path: Path) -> Optional[str]:
             return "temp"
     except ValueError:
         pass  # not under HERMES_HOME (e.g. /tmp/hermes-*) — fall through to name rules
-
     name = path.name
     return "test" if name.startswith(_TEST_PATTERNS) or name.endswith(_TEST_SUFFIXES) else None
