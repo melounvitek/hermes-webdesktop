@@ -103,14 +103,13 @@ def run_cli_lost_and_found_recover(
             dump.kill()
             load.kill()
             raise LostAndFoundError(f"sqlite3 .recover timed out after {timeout:.0f}s")
-        attempt = {
+        attempts.append({
             "command": command, "dump_returncode": dump.returncode, "load_returncode": load.returncode,
             "dump_stderr_tail": dump_err.decode("utf-8", "replace")[-2000:],
             "load_stderr_tail": load_err.decode("utf-8", "replace")[-2000:],
-        }
-        attempts.append(attempt)
-        attempt["usable"] = _lost_and_found_db_usable(lf_path)
-        if attempt["usable"]:
+            "usable": _lost_and_found_db_usable(lf_path),
+        })
+        if attempts[-1]["usable"]:
             return {"binary": sqlite3_bin, "attempts": attempts}
     details = "; ".join(
         f"[{a['command']}] dump rc={a['dump_returncode']} load rc={a['load_returncode']} "
@@ -257,10 +256,8 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                 defaults.pop(index, None)
             targets[kind_name] = (_table_columns(dest, kind_name), defaults)
         lf_tables = [
-            str(row[0])
-            for row in lf_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'"
-            )
+            str(row[0]) for row in
+            lf_conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'")
         ]
         report["lost_and_found_tables"] = lf_tables
         for lf_table in lf_tables:
