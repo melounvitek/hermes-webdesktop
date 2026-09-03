@@ -21,15 +21,8 @@ logger = logging.getLogger("tools.skills_sync_client")
 
 WIRE_VERSION = "1"
 DEFAULT_MAX_OBJECT_BYTES = 26214400  # 25 MiB, mirrors capabilities default
-
-KIND_BLOB = "blob"
-KIND_TREE = "tree"
-KIND_COMMIT = "commit"
-
-MODE_FILE = "file"
-MODE_EXEC = "exec"
-MODE_DIR = "dir"
-
+KIND_BLOB, KIND_TREE, KIND_COMMIT = "blob", "tree", "commit"
+MODE_FILE, MODE_EXEC, MODE_DIR = "file", "exec", "dir"
 ARTIFACT_TYPE_SKILL = "skill"
 _EXEC_BITS = _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
 
@@ -37,8 +30,7 @@ _EXEC_BITS = _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
 # a root-level blob in the tree at refs/user/<owner>/HEAD recording {name, enabled}. The plane
 # manifest is authoritative; the local `.usage.json` `sync` flag is only the editable intent
 # (reconciled FROM it on pull, TO it on push). Shape MUST match gateway-gateway src/sync/manifest.ts.
-SYNC_MANIFEST_ENTRY_NAME = "sync-manifest"
-SYNC_MANIFEST_TYPE = "sync-manifest"
+SYNC_MANIFEST_ENTRY_NAME = SYNC_MANIFEST_TYPE = "sync-manifest"
 SYNC_MANIFEST_VERSION = 1
 
 

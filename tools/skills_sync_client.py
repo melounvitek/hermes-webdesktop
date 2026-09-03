@@ -44,8 +44,7 @@ def resolve_identity() -> Dict[str, Any]:
         creds = resolve_nous_runtime_credentials() or {}
     except Exception as e:
         raise SyncInertError(f"no Nous credentials: {e}") from e
-    api_key = creds.get("api_key")
-    if not api_key:
+    if not (api_key := creds.get("api_key")):
         raise SyncInertError("no bearer token available")
     try:
         import jwt  # PyJWT, a core dependency
@@ -63,8 +62,7 @@ def resolve_identity() -> Dict[str, Any]:
 # the inference URL; enabled; default_opt_in; org_auto_propose).
 DEFAULT_SYNC_BASE_URL = "https://gateway-gateway.nousresearch.com"
 
-_TRUE = {"1", "true", "yes", "on"}
-_FALSE = {"0", "false", "no", "off", ""}
+_TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off", ""}
 
 
 def _sync_config(key: str) -> Any:
@@ -99,10 +97,9 @@ def _parse_bool(value: Any) -> Optional[bool]:
 
 def _sync_config_bool(env_var: str, config_key: str, *, default: bool) -> bool:
     """``env_var`` -> ``sync.<config_key>`` -> default."""
-    if (env_val := _parse_bool(os.getenv(env_var))) is not None:
-        return env_val
-    cfg_val = _parse_bool(_sync_config(config_key))
-    return default if cfg_val is None else cfg_val
+    if (val := _parse_bool(os.getenv(env_var))) is not None:
+        return val
+    return default if (val := _parse_bool(_sync_config(config_key))) is None else val
 
 
 def sync_feature_enabled() -> bool:
@@ -167,10 +164,8 @@ def list_synced_skill_names() -> List[str]:
     from tools.skill_usage import load_usage
     flags = {n: rec.get("sync") for n, rec in (load_usage() or {}).items() if isinstance(rec, dict)}
     if sync_default_opt_in():
-        names = [n for n in _all_local_skill_names() if flags.get(n) is not False and is_sync_eligible(n)]
-    else:
-        names = [n for n, f in flags.items() if f is True and is_sync_eligible(n)]
-    return sorted(set(names))
+        return sorted({n for n in _all_local_skill_names() if flags.get(n) is not False and is_sync_eligible(n)})
+    return sorted({n for n, f in flags.items() if f is True and is_sync_eligible(n)})
 
 
 def _all_local_skill_names() -> List[str]:
@@ -251,8 +246,7 @@ def _write_device_id(val: str) -> None:
 
 def set_device_name(name: str) -> str:
     """Overwrite the device label with the trimmed *name*; returns it. ValueError on empty."""
-    cleaned = (name or "").strip()
-    if not cleaned:
+    if not (cleaned := (name or "").strip()):
         raise ValueError("device name must be a non-empty string")
     _write_device_id(cleaned)
     return cleaned
@@ -435,8 +429,7 @@ def _next_conflict_index(client: SyncClient, owner: str) -> int:
         refs = client.get_refs(f"refs/user/{owner}/conflict/")
     except SyncError:
         return 1
-    used = [int(t) for t in (r.get("name", "").rsplit("/", 1)[-1] for r in refs) if t.isdigit()]
-    return (max(used) + 1) if used else 1
+    return 1 + max((int(t) for t in (r.get("name", "").rsplit("/", 1)[-1] for r in refs) if t.isdigit()), default=0)
 
 
 def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None,
