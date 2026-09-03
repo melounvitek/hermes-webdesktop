@@ -161,6 +161,34 @@ def _notif_loop_status(sid: str, text: str) -> None:
     _emit("status.update", sid, {"kind": "loop", "text": text})
 
 
+def _notif_slash_loop_tick(rid: str, sid: str, session: dict, mgr, wakeup: str) -> None:
+    """Slash-command /loop wakeup: route through the slash pipeline, not the model. No model reply to
+    evaluate, so the tick completes immediately — unless the command resolves to a prompt (skill command
+    etc.), which runs as a normal turn whose post-turn hook completes the tick."""
+    _notif_release_turn(session)
+    try:
+        parts = wakeup.lstrip()[1:].split(None, 1)
+        resp = _methods["command.dispatch"](
+            rid, {"name": parts[0] if parts else "", "arg": parts[1] if len(parts) > 1 else "", "session_id": sid}
+        )
+        payload = (resp or {}).get("result") or {}
+        out = str(payload.get("output") or "").strip()
+        if out:
+            _notif_loop_status(sid, out)
+        if payload.get("type") == "send" and payload.get("message"):
+            if not _notif_claim_turn(session):
+                mgr.abandon_tick()
+                return
+            _emit("message.start", sid)
+            _run_prompt_submit(rid, sid, session, payload["message"])
+            return
+    except Exception:
+        pass
+    decision = mgr.complete_tick("")
+    if decision.get("message"):
+        _notif_loop_status(sid, decision["message"])
+
+
 def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
     """Fire a due /loop wakeup for an idle TUI/Desktop/dashboard session (per-session poller, coarse
     cadence). Claims the session (running=True) before dispatching so a racing user prompt wins
@@ -182,36 +210,11 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
     rid = f"__loop__{int(time.time() * 1000)}"
     try:
         _notif_loop_status(sid, f"↻ /loop wakeup #{mgr.state.ticks_fired if mgr.state else '?'} firing…")
-        if not wakeup.lstrip().startswith("/"):
+        if wakeup.lstrip().startswith("/"):
+            _notif_slash_loop_tick(rid, sid, session, mgr, wakeup)
+        else:
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, wakeup)
-            return
-        # Slash-command loop: route through the slash pipeline, not the model. No model reply to
-        # evaluate — complete immediately.
-        _notif_release_turn(session)
-        try:
-            parts = wakeup.lstrip()[1:].split(None, 1)
-            resp = _methods["command.dispatch"](
-                rid, {"name": parts[0] if parts else "", "arg": parts[1] if len(parts) > 1 else "", "session_id": sid}
-            )
-            payload = (resp or {}).get("result") or {}
-            out = str(payload.get("output") or "").strip()
-            if out:
-                _notif_loop_status(sid, out)
-            if payload.get("type") == "send" and payload.get("message"):
-                # Command resolves to a prompt (skill command etc.) — run it as a normal turn; the
-                # post-turn hook completes the tick.
-                if not _notif_claim_turn(session):
-                    mgr.abandon_tick()
-                    return
-                _emit("message.start", sid)
-                _run_prompt_submit(rid, sid, session, payload["message"])
-                return
-        except Exception:
-            pass
-        decision = mgr.complete_tick("")
-        if decision.get("message"):
-            _notif_loop_status(sid, decision["message"])
     except Exception as exc:
         _notif_log_failure("loop wakeup dispatch failed", exc)
         _notif_release_turn(session)
