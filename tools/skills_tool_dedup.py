@@ -50,11 +50,8 @@ def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
     with _skill_view_tracker_lock:
         cache = _skill_view_tracker.setdefault(str(task_id), {})
         cache[key] = fp
-        while len(cache) > _SKILL_VIEW_DEDUP_CAP:
-            try:
-                cache.pop(next(iter(cache)))
-            except (StopIteration, KeyError):
-                break
+        while len(cache) > _SKILL_VIEW_DEDUP_CAP:  # FIFO eviction
+            del cache[next(iter(cache))]
 
 
 def _check_skill_view_dedup(task_id, name, file_path) -> str | None:

@@ -43,9 +43,7 @@ def _is_remote_env_backend(backend: str) -> bool:
 def _normalize_prerequisite_values(value: Any) -> List[str]:
     if not value:
         return []
-    if isinstance(value, str):
-        value = [value]
-    return [str(item) for item in value if str(item).strip()]
+    return [str(item) for item in ([value] if isinstance(value, str) else value) if str(item).strip()]
 
 
 def _collect_prerequisite_values(frontmatter: Dict[str, Any]) -> Tuple[List[str], List[str]]:
@@ -169,8 +167,8 @@ def _capture_required_environment_variables(
         except Exception:
             logger.warning(f"Secret capture callback failed for {entry['name']}", exc_info=True)
             callback_result = {"success": False, "stored_as": entry["name"], "validated": False, "skipped": True}
-        ok = isinstance(callback_result, dict)
-        if ok and callback_result.get("success") and not callback_result.get("skipped"):
+        ok = isinstance(callback_result, dict) and callback_result.get("success")
+        if ok and not callback_result.get("skipped"):
             continue
         setup_skipped = True
         remaining_names.append(entry["name"])
@@ -189,11 +187,10 @@ def _get_terminal_backend_name() -> str:
 
 
 def _env_snapshot_or_load(env_snapshot):
-    if env_snapshot is None:
-        from tools import skills_tool as _st
-
-        return _st.load_env()
-    return env_snapshot
+    if env_snapshot is not None:
+        return env_snapshot
+    from tools import skills_tool as _st
+    return _st.load_env()
 
 
 def _is_env_var_persisted(var_name: str, env_snapshot: Dict[str, str] | None = None) -> bool:
