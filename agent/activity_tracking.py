@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import suppress
 from typing import Optional
 
 from agent.session_activity import ActivityProvenance
@@ -64,16 +65,14 @@ class ActivityTrackingMixin:
             # itself at the final mutation edge.
             self._turn_liveness_abort_claim = None
         if os.environ.get("HERMES_KANBAN_TASK"):
-            try:
+            # Never let the bridge break the loop; this guard covers import-time failures.
+            with suppress(Exception):
                 from tools.kanban_tools import (
                     heartbeat_current_worker_from_env, inject_new_comments_from_env
                 )
                 heartbeat_current_worker_from_env()
                 # Fold new operator notes into the running turn (OUT-OF-BAND steer).
                 inject_new_comments_from_env(self)
-            except Exception:
-                # Never let the bridge break the loop; this guard covers import-time failures.
-                pass
         if force_persist:
             reset_session_activity_persist_window(self)
         self._persist_session_activity_if_due()
@@ -128,7 +127,5 @@ class ActivityTrackingMixin:
         clear = getattr(session_db, "clear_session_activity_labels", None)
         if not callable(clear):
             return
-        try:
+        with suppress(Exception):  # never let durable cleanup I/O break turn teardown
             clear(session_id)
-        except Exception:
-            pass  # Never let durable cleanup I/O break turn teardown.

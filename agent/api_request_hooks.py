@@ -6,6 +6,7 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import json
 import os
 import time
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
@@ -99,24 +100,18 @@ class ApiRequestHooksMixin:
             if len(seq) > max_sequence:
                 out.append({"_truncated_items": len(seq) - max_sequence})
             return out
-        try:
+        with suppress(Exception):
             if hasattr(value, "model_dump"):
                 return recurse(_model_dump(value))
-        except Exception:
-            pass
-        try:
+        with suppress(Exception):
             from dataclasses import asdict, is_dataclass
             if is_dataclass(value):
                 return recurse(asdict(value))
-        except Exception:
-            pass
         if isinstance(value, SimpleNamespace):
             return recurse(vars(value))
         if hasattr(value, "__dict__"):
-            try:
+            with suppress(Exception):
                 return recurse({k: v for k, v in vars(value).items() if not str(k).startswith("_")})
-            except Exception:
-                pass
         return str(value)[:max_string]
 
     @classmethod
@@ -171,9 +166,8 @@ class ApiRequestHooksMixin:
         reason: Optional[str] = None,
     ) -> None:
         # Lazy module import (not from-import) so tests can replace lifecycle dispatch at this call site.
-        try:
+        with suppress(Exception):
             from hermes_cli import lifecycle as _lifecycle
-
             if not _lifecycle.has_hook("api_request_error"):
                 return
             ended_at = time.time()
@@ -200,5 +194,3 @@ class ApiRequestHooksMixin:
                 error={"type": error_type, "message": error_message},
                 request=self._api_request_payload_for_hook(api_kwargs),
             )
-        except Exception:
-            pass
