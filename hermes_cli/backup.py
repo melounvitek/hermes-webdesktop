@@ -723,26 +723,18 @@ def _run_backup_locked(args, hermes_root: Path) -> None:
         "backup phase=archive status=complete duration_ms=%.1f files=%d errors=%d bytes=%d",
         elapsed * 1000, file_count, len(errors), zip_size)
 
-    print()
-    print(f"Backup {'incomplete' if errors else 'complete'}: {out_path}")
-    print(f"  Files:       {file_count}")
-    print(f"  Original:    {_format_size(total_bytes)}")
-    print(f"  Compressed:  {_format_size(zip_size)}")
-    print(f"  Time:        {elapsed:.1f}s")
-
+    print(f"\nBackup {'incomplete' if errors else 'complete'}: {out_path}\n"
+          f"  Files:       {file_count}\n"
+          f"  Original:    {_format_size(total_bytes)}\n"
+          f"  Compressed:  {_format_size(zip_size)}\n"
+          f"  Time:        {elapsed:.1f}s")
     if external_to_add:
         print(f"\n  Included {len(external_to_add)} memory-provider file(s) stored outside {display_hermes_home()}.")
-
     if skipped_external:
-        print(
-            f"\n  Skipped {len(skipped_external)} memory-provider path(s) "
-            f"outside your home directory (not portable):")
-        print("\n".join(f"    {p}" for p in sorted(skipped_external)[:10]))
-
+        print(f"\n  Skipped {len(skipped_external)} memory-provider path(s) outside your home directory "
+              "(not portable):\n" + "\n".join(f"    {p}" for p in sorted(skipped_external)[:10]))
     if skipped_dirs:
-        print("\n  Excluded directories:")
-        print("\n".join(f"    {d}/" for d in sorted(skipped_dirs)))
-
+        print("\n  Excluded directories:\n" + "\n".join(f"    {d}/" for d in sorted(skipped_dirs)))
     if errors:
         _print_capped(f"\n  Warnings ({len(errors)} files skipped):", errors, "  ")
     else:
@@ -860,9 +852,8 @@ def _import_members(
 ) -> tuple[int, int, list[str], list[str]]:
     """Publish every member; return ``(restored, restored_external, errors, skipped_runtime)``."""
     errors: list[str] = []
-    restored = 0
-    restored_external = 0
     skipped_runtime: list[str] = []
+    restored = restored_external = 0
     home_dir = Path.home().resolve()
     # Resolved once: every member is published via a temp file, and mkstemp would otherwise
     # create newly restored files as 0600.
@@ -942,9 +933,7 @@ def run_import(args) -> None:
         members = [n for n in zf.namelist() if not n.endswith("/")]
         file_count = len(members)
 
-        print(f"Backup contains {file_count} files")
-        print(f"Target: {display_hermes_home()}")
-
+        print(f"Backup contains {file_count} files\nTarget: {display_hermes_home()}")
         if prefix:
             print(f"Detected archive prefix: {prefix!r} (will be stripped)")
 
@@ -958,10 +947,7 @@ def run_import(args) -> None:
             zf, members, prefix, hermes_root, file_count)
         elapsed = time.monotonic() - t0
 
-        print()
-        print(f"Import complete: {restored} files restored in {elapsed:.1f}s")
-        print(f"  Target: {display_hermes_home()}")
-
+        print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
         if restored_external:
             print(
                 f"\n  Restored {restored_external} memory-provider file(s) to "
@@ -1044,11 +1030,9 @@ def _revive_gateway_after_import(hermes_root: Path) -> None:
     native_default = _get_platform_default_hermes_home()
     default_has_install = any((native_default / marker).exists() for marker in ("config.yaml", ".env", "state.db"))
     if hermes_root != native_default and default_has_install:
-        print(
-            "\nRestored into a non-default home; leaving the gateway service "
-            "alone to avoid clashing with the install at "
-            f"{native_default}.")
-        print("To start a gateway for this home, run:  hermes gateway install")
+        print("\nRestored into a non-default home; leaving the gateway service alone to avoid clashing "
+              f"with the install at {native_default}.\n"
+              "To start a gateway for this home, run:  hermes gateway install")
         return
     try:
         from hermes_cli.gateway import ensure_gateway_service, _is_service_running
@@ -1147,7 +1131,6 @@ def _copy_quick_snapshot_files(
     manifest: Dict[str, int] = {}
     failed_dbs: list[str] = []
     oversized_skipped: list[str] = []
-
     for src, rel, in_dir in _quick_snapshot_candidates(home):
         if max_file_size is not None:
             try:
@@ -1614,10 +1597,9 @@ def run_quick_backup(args) -> None:
     label = getattr(args, "label", None)
     snap_id = create_quick_snapshot(label=label)
     if snap_id:
-        print(f"State snapshot created: {snap_id}")
-        snaps = list_quick_snapshots()
-        print(f"  {len(snaps)} snapshot(s) stored in {display_hermes_home()}/state-snapshots/")
-        print(f"  Restore with: /snapshot restore {snap_id}")
+        print(f"State snapshot created: {snap_id}\n"
+              f"  {len(list_quick_snapshots())} snapshot(s) stored in {display_hermes_home()}/state-snapshots/\n"
+              f"  Restore with: /snapshot restore {snap_id}")
     else:
         print("No state files found to snapshot.")
 
