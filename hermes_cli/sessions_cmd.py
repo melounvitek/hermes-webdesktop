@@ -950,9 +950,11 @@ def cmd_sessions(args, sessions_parser=None):
     except Exception as e:
         print(f"Error: Could not open session database: {e}")
         return 1
-    with db:
+    try:
         handler = _DB_HANDLERS.get(action)
         if handler is None:
             sessions_parser.print_help()
             return
         return handler(db, args)
+    finally:
+        db.close()
