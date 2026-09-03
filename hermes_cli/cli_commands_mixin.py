@@ -1109,9 +1109,10 @@ class CLICommandsMixin:
         Returns False only on ``completed`` (caller exits like /quit); True keeps the session."""
         platform_name = _command_arg(cmd_original).lower()
         if not platform_name:
-            return self._handoff_keep("  Usage: /handoff <platform>",
-                                      "  Hands the current session off to that platform's home channel.",
-                                      "  The CLI session ends here; resume it later with /resume.")
+            return self._handoff_keep(
+                "  Usage: /handoff <platform>",
+                "  Hands the current session off to that platform's home channel.",
+                "  The CLI session ends here; resume it later with /resume.")
         home = self._handoff_validate_target(platform_name)
         if home is None:
             return True
@@ -1188,8 +1189,7 @@ class CLICommandsMixin:
         retry (a claim racing this instant wins). RUNNING (claimed): the gateway replays the
         transcript via a synthetic turn (routinely >60s) — wait 15 min with heartbeats and on
         timeout do NOT touch the row; failing it here was the split-brain bug."""
-        import time as _time
-        pending_deadline = _time.time() + self._HANDOFF_PENDING_TIMEOUT
+        pending_deadline = time.time() + self._HANDOFF_PENDING_TIMEOUT
         running_deadline = None
         next_heartbeat = None
         last_state = "pending"
@@ -1202,8 +1202,8 @@ class CLICommandsMixin:
             if current != last_state:
                 if current == "running":
                     _cp("  Gateway picked it up; transferring...")
-                    running_deadline = _time.time() + self._HANDOFF_RUNNING_TIMEOUT
-                    next_heartbeat = _time.time() + self._HANDOFF_HEARTBEAT_EVERY
+                    running_deadline = time.time() + self._HANDOFF_RUNNING_TIMEOUT
+                    next_heartbeat = time.time() + self._HANDOFF_HEARTBEAT_EVERY
                 last_state = current
             if current == "completed":
                 _cp("", f"  ↻ Handoff complete. The session is now active on {platform_name}.",
@@ -1216,9 +1216,10 @@ class CLICommandsMixin:
                 return False
             if current == "failed":
                 err = (state_row or {}).get("error") or "unknown error"
-                return self._handoff_keep(f"  Handoff failed: {err}",
-                                          "  Your CLI session is intact. Try /handoff again, or /resume on the platform manually.")
-            now = _time.time()
+                return self._handoff_keep(
+                    f"  Handoff failed: {err}",
+                    "  Your CLI session is intact. Try /handoff again, or /resume on the platform manually.")
+            now = time.time()
             if current == "pending":
                 if now >= pending_deadline:
                     break
@@ -1233,7 +1234,7 @@ class CLICommandsMixin:
                         f"  Check {platform_name} — the session may still arrive there.",
                         "  This CLI is no longer waiting. Avoid continuing this session here;",
                         "  if nothing arrives, retry /handoff once the state settles.")
-            _time.sleep(0.5)
+            time.sleep(0.5)
         try:  # pending timed out: CAS-clear so the user can retry
             self._session_db.fail_handoff(
                 self.session_id, "timed out waiting for gateway", only_states=("pending",))
