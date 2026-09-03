@@ -218,13 +218,13 @@ def _validate_member_target(value: Any, *, profile: str, known_profiles: set[str
         return {"kind": "local", "profile": profile}
     if target_profile != profile:
         raise DiscussionValidationError(f"member {index} peer target profile does not match member profile")
-    capability_digest = target["capability_digest"]
-    if not isinstance(capability_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", capability_digest):
+    digest = target["capability_digest"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise DiscussionValidationError(f"member {index} capability_digest must be a sha256 digest")
     return {
         "kind": "peer", "peer_id": _identifier(target["peer_id"], label=f"member {index} peer_id"),
         "installation_id": _identifier(target["installation_id"], label=f"member {index} installation_id"),
-        "profile": target_profile, "capability_digest": capability_digest}
+        "profile": target_profile, "capability_digest": digest}
 
 
 def _validate_member(raw: Any, index: int, known_profiles: set[str]) -> DiscussionMember:
@@ -240,8 +240,7 @@ def _validate_member(raw: Any, index: int, known_profiles: set[str]) -> Discussi
         _identifier(member[field], label=f"member {index} {label}")
         for field, label in (("member_id", "id"), ("profile", "profile"), ("handle", "handle")))
     target = _validate_member_target(member.get("target"), profile=profile, known_profiles=known_profiles, index=index)
-    display_name = member.get("display_name", "")
-    if not isinstance(display_name, str):
+    if not isinstance(display_name := member.get("display_name", ""), str):
         raise DiscussionValidationError(f"member {index} display_name must be a string")
     if len(display_name := display_name.strip()) > hosted_rooms.MAX_ACTOR_LABEL_CHARS:
         raise DiscussionValidationError(f"member {index} display_name is too long")
@@ -281,8 +280,7 @@ def validate_room(value: Any, *, local_profiles: Iterable[str]) -> DiscussionRoo
     if value.get("disbanded_at") is not None:
         raise DiscussionValidationError("room is disbanded")
     room_id = _identifier(value.get("room_id"), label="room_id")
-    name = value.get("name")
-    if not isinstance(name, str) or not name.strip():
+    if not isinstance(name := value.get("name"), str) or not name.strip():
         raise DiscussionValidationError("room name must be a non-empty string")
     if len(name := name.strip()) > hosted_rooms.MAX_ROOM_NAME_CHARS:
         raise DiscussionValidationError("room name is too long")
@@ -369,8 +367,7 @@ def _validate_user_event(kind: str, payload: Payload, actor: Payload, room: Disc
 def _validate_member_message(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     _exact_fields(payload, label="message.member payload", required=_MEMBER_MESSAGE_FIELDS)
     _validate_turn_coordinates(payload, room)
-    text = payload.get("text")
-    if not isinstance(text, str) or not text.strip() or is_pass_text(text):
+    if not isinstance(text := payload.get("text"), str) or not text.strip() or is_pass_text(text):
         raise DiscussionValidationError("message.member text must be a non-pass string")
     member = _member_by_id(room, payload.get("member_id"))
     expected = {**_member_actor(member, display_name=False), "connection_id": _peer_id(member)}
@@ -535,20 +532,16 @@ def _build_prompt(
     fixed_bytes = len("\n".join([*opening, *rules]).encode("utf-8"))
     available = max(0, driver.MAX_PROMPT_BYTES - fixed_bytes - 1)
     selected: list[str] = []
-    omitted = False
     for event in reversed(delta):
         line = f"  {_format_message(event, room)}"
-        if (line_bytes := len(line.encode("utf-8")) + 1) <= available:
-            selected.append(line)
-            available -= line_bytes
-            continue
-        if not selected and available > 32:
-            selected.append(_truncate_utf8_text(line, max_bytes=available))
-        omitted = True
-        break
+        if (line_bytes := len(line.encode("utf-8")) + 1) > available:
+            if not selected and available > 32:
+                selected.append(_truncate_utf8_text(line, max_bytes=available))
+            selected.append("  [Earlier content omitted to fit this turn.]")
+            break
+        selected.append(line)
+        available -= line_bytes
     selected.reverse()
-    if omitted:
-        selected.insert(0, "  [Earlier content omitted to fit this turn.]")
     if len((prompt := "\n".join([*opening, *selected, *rules])).encode("utf-8")) > driver.MAX_PROMPT_BYTES:
         raise DiscussionValidationError("Discussion prompt exceeds the driver limit")
     return prompt
@@ -696,8 +689,7 @@ def reconstruct_task_plan(
         if m.profile == profile and (target_member_id is None or m.member_id == target_member_id)), None)
     if member is None or _member_digest(member) != match.group("member"):
         raise DiscussionReconstructionError("task target member does not match turn_id")
-    prompt = payload.get("prompt")
-    if not isinstance(prompt, str) or not prompt.strip():
+    if not isinstance(prompt := payload.get("prompt"), str) or not prompt.strip():
         raise DiscussionReconstructionError("task prompt is missing")
     if len(prompt.encode("utf-8")) > driver.MAX_PROMPT_BYTES:
         raise DiscussionReconstructionError("task prompt exceeds the driver limit")
@@ -779,19 +771,17 @@ def plan_publication(
     """
     room = validate_room(room_value, local_profiles=local_profiles)
     validated = _validated_events(events, room=room)
-    if task.identity.room_id != room.room_id:
-        raise DiscussionValidationError("task belongs to a different room")
-    if task.member not in room.members:
-        raise DiscussionValidationError("task member is not in the frozen roster")
-    if status not in _TERMINAL_EFFECTS:
-        raise DiscussionValidationError("invalid terminal publication status")
+    for failed, message in (
+        (task.identity.room_id != room.room_id, "task belongs to a different room"),
+        (task.member not in room.members, "task member is not in the frozen roster"),
+        (status not in _TERMINAL_EFFECTS, "invalid terminal publication status")):
+        if failed:
+            raise DiscussionValidationError(message)
     if status == "deferred":
         _bounded_int(execution_generation, message="deferred publication requires an execution generation", low=1)
     newer_same_thread = any(
-        event.kind == "message.user"
-        and event.seq > task.seen_through_seq
-        and event.payload.get("thread_id") == task.identity.thread_id
-        for event in validated)
+        event.kind == "message.user" and event.seq > task.seen_through_seq
+        and event.payload.get("thread_id") == task.identity.thread_id for event in validated)
     effective_status: TerminalKind = ("cancelled" if newer_same_thread and status != "deferred" else status)
     digest = task.identity.task_id.removeprefix("dtask:")
     terminal_event_id = (
