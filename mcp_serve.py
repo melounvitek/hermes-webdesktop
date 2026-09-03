@@ -50,10 +50,9 @@ def _get_sessions_dir() -> Path:
 
 
 def _read_state_db_mtime() -> float:
-    db_file = _hermes_home() / "state.db"
     try:
-        return db_file.stat().st_mtime if db_file.exists() else 0.0
-    except OSError:
+        return (_hermes_home() / "state.db").stat().st_mtime
+    except OSError:  # missing file included
         return 0.0
 
 
@@ -172,9 +171,7 @@ def _load_sessions_index_from_json() -> dict:
     which needs GatewayConfig). Keys starting with "_" are metadata sentinels
     (e.g. "_README"), not session entries."""
     data = _read_json(_get_sessions_dir() / "sessions.json")
-    if isinstance(data, dict):
-        return {k: v for k, v in data.items() if not str(k).startswith("_")}
-    return {}
+    return {k: v for k, v in data.items() if not str(k).startswith("_")} if isinstance(data, dict) else {}
 
 
 def _load_channel_directory() -> dict:
@@ -195,10 +192,7 @@ def _extract_message_content(msg: dict) -> str:
     """Extract text content from a message, handling multi-part content."""
     content = msg.get("content", "")
     if isinstance(content, list):
-        return "\n".join(
-            p.get("text", "") for p in content
-            if isinstance(p, dict) and p.get("type") == "text"
-        )
+        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text")
     return str(content) if content else ""
 
 
@@ -206,7 +200,6 @@ def _extract_attachments(msg: dict) -> List[dict]:
     """Non-text attachments: image/file content blocks plus MEDIA: tags in the text."""
     attachments = []
     content = msg.get("content", "")
-
     for part in content if isinstance(content, list) else ():
         if not isinstance(part, dict):
             continue
@@ -221,12 +214,8 @@ def _extract_attachments(msg: dict) -> List[dict]:
             continue
         if url:
             attachments.append({"type": "image", "url": url})
-
-    text = _extract_message_content(msg)
-    if text:
-        for match in re.finditer(r'MEDIA:\s*(\S+)', text):
-            attachments.append({"type": "media", "path": match.group(1)})
-
+    for match in re.finditer(r'MEDIA:\s*(\S+)', _extract_message_content(msg)):
+        attachments.append({"type": "media", "path": match.group(1)})
     return attachments
 
 
@@ -308,10 +297,8 @@ class EventBridge:
 
     def _matching(self, after_cursor: int, session_key: Optional[str], limit: int) -> List[dict]:
         with self._lock:
-            return [
-                e.as_dict() for e in self._queue
-                if e.cursor > after_cursor and (not session_key or e.session_key == session_key)
-            ][:limit]
+            return [e.as_dict() for e in self._queue
+                    if e.cursor > after_cursor and (not session_key or e.session_key == session_key)][:limit]
 
     def poll_events(self, after_cursor: int = 0, session_key: Optional[str] = None, limit: int = 20) -> dict:
         """Return events since after_cursor, optionally filtered by session_key."""
@@ -343,10 +330,8 @@ class EventBridge:
             approval = self._pending_approvals.pop(approval_id, None)
         if not approval:
             return {"error": f"Approval not found: {approval_id}"}
-        self._enqueue(QueueEvent(  # cursor is assigned by _enqueue
-            0, "approval_resolved", approval.get("session_key", ""),
-            {"approval_id": approval_id, "decision": decision},
-        ))
+        self._enqueue(QueueEvent(0, "approval_resolved", approval.get("session_key", ""),  # cursor set by _enqueue
+                                 {"approval_id": approval_id, "decision": decision}))
         return {"resolved": True, "approval_id": approval_id, "decision": decision}
 
     def _enqueue(self, event: QueueEvent) -> None:
@@ -360,32 +345,30 @@ class EventBridge:
         self._new_event.set()
 
     def _establish_baseline(self) -> None:
-        db = _get_session_db()
-        if db:
-            try:
-                self._establish_baseline_with_db(db)
-            finally:
-                _close_quietly(db, "baseline")
-
-    def _establish_baseline_with_db(self, db) -> None:
         """Record per-session latest timestamps and the state.db mtime WITHOUT
         emitting events. Only sessions existing now are baselined; later ones
         default to last_seen=0.0 in _poll_once, so their first message is delivered."""
-        self._state_db_mtime = _read_state_db_mtime()
+        db = _get_session_db()
+        if not db:
+            return
         try:
-            self._cached_sessions_index = _load_sessions_index()
-        except Exception:
-            self._cached_sessions_index = {}
-        for session_key, entry in self._cached_sessions_index.items():
-            session_id = entry.get("session_id", "")
-            if not session_id:
-                continue
+            self._state_db_mtime = _read_state_db_mtime()
             try:
-                latest = _latest_ts(db.get_messages(session_id))
+                self._cached_sessions_index = _load_sessions_index()
             except Exception:
-                continue
-            if latest > 0.0:
-                self._last_poll_timestamps[session_key] = latest
+                self._cached_sessions_index = {}
+            for session_key, entry in self._cached_sessions_index.items():
+                session_id = entry.get("session_id", "")
+                if not session_id:
+                    continue
+                try:
+                    latest = _latest_ts(db.get_messages(session_id))
+                except Exception:
+                    continue
+                if latest > 0.0:
+                    self._last_poll_timestamps[session_key] = latest
+        finally:
+            _close_quietly(db, "baseline")
 
     def _poll_loop(self):
         """Background loop: poll SessionDB for new messages."""
@@ -429,11 +412,8 @@ class EventBridge:
                 continue
             if not messages:
                 continue
-
             for msg in messages:
-                if msg.get("role", "") not in {"user", "assistant"}:
-                    continue
-                if _ts_float(msg.get("timestamp", 0)) <= last_seen:
+                if msg.get("role", "") not in {"user", "assistant"} or _ts_float(msg.get("timestamp", 0)) <= last_seen:
                     continue
                 content = _extract_message_content(msg)
                 if not content:
@@ -442,7 +422,6 @@ class EventBridge:
                     "role": msg.get("role", ""), "content": content[:500],
                     "timestamp": str(msg.get("timestamp", "")), "message_id": str(msg.get("id", "")),
                 }))
-
             latest = _latest_ts(messages)
             if latest > last_seen:
                 self._last_poll_timestamps[session_key] = latest
@@ -507,8 +486,7 @@ class _ToolHandlers:
                 "user_name": origin.get("user_name", ""), "updated_at": entry.get("updated_at", ""),
             })
 
-        conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-        conversations = conversations[:limit]
+        conversations = sorted(conversations, key=lambda c: c.get("updated_at", ""), reverse=True)[:limit]
         return json.dumps({"count": len(conversations), "conversations": conversations}, indent=2)
 
     def conversation_get(self, session_key: str) -> str:
@@ -522,8 +500,7 @@ class _ToolHandlers:
             return json.dumps({"error": f"Conversation not found: {session_key}"})
         origin = entry.get("origin", {})
         return json.dumps({
-            "session_key": session_key,
-            "session_id": entry.get("session_id", ""),
+            "session_key": session_key, "session_id": entry.get("session_id", ""),
             "platform": entry.get("platform") or origin.get("platform", ""),
             "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
             "display_name": entry.get("display_name", ""),
@@ -553,15 +530,11 @@ class _ToolHandlers:
             role = msg.get("role", "")
             content = _extract_message_content(msg) if role in {"user", "assistant"} else ""
             if content:
-                filtered.append({
-                    "id": str(msg.get("id", "")), "role": role,
-                    "content": content[:2000], "timestamp": msg.get("timestamp", ""),
-                })
+                filtered.append({"id": str(msg.get("id", "")), "role": role,
+                                 "content": content[:2000], "timestamp": msg.get("timestamp", "")})
         messages = filtered[-limit:]
-        return json.dumps({
-            "session_key": session_key, "count": len(messages),
-            "total_in_session": len(filtered), "messages": messages,
-        }, indent=2)
+        return json.dumps({"session_key": session_key, "count": len(messages),
+                           "total_in_session": len(filtered), "messages": messages}, indent=2)
 
     def attachments_fetch(self, session_key: str, message_id: str) -> str:
         """List non-text attachments for a message in a conversation.
@@ -614,9 +587,7 @@ class _ToolHandlers:
         after_cursor = _coerce_int(after_cursor, default=0, minimum=0, maximum=10**18)
         timeout_ms = _coerce_int(timeout_ms, default=30000, minimum=0, maximum=300000)  # cap 5 min
         event = self.bridge.wait_for_event(after_cursor=after_cursor, session_key=session_key, timeout_ms=timeout_ms)
-        if event:
-            return json.dumps({"event": event}, indent=2)
-        return json.dumps({"event": None, "reason": "timeout"}, indent=2)
+        return json.dumps({"event": event} if event else {"event": None, "reason": "timeout"}, indent=2)
 
     def messages_send(self, target: str, message: str) -> str:
         """Send a message to a platform conversation.
@@ -656,25 +627,19 @@ class _ToolHandlers:
         directory = _load_channel_directory()
         if not directory:
             # No cached directory: derive send targets from the routing index.
-            targets = []
-            seen = set()
+            targets, seen = [], set()
             for key, entry in _load_sessions_index().items():
                 origin = entry.get("origin", {})
                 p = entry.get("platform") or origin.get("platform", "")
                 chat_id = origin.get("chat_id", "")
-                if not p or not chat_id or not _platform_matches(platform, p):
-                    continue
                 target_str = f"{p}:{chat_id}"
-                if target_str in seen:
+                if not p or not chat_id or not _platform_matches(platform, p) or target_str in seen:
                     continue
                 seen.add(target_str)
-                targets.append({
-                    "target": target_str, "platform": p,
-                    "name": entry.get("display_name") or origin.get("chat_name", ""),
-                    "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-                })
+                targets.append({"target": target_str, "platform": p,
+                                "name": entry.get("display_name") or origin.get("chat_name", ""),
+                                "chat_type": entry.get("chat_type", origin.get("chat_type", ""))})
             return json.dumps({"count": len(targets), "channels": targets}, indent=2)
-
         channels = []
         for plat, entries_list in directory.get("platforms", {}).items():
             if not _platform_matches(platform, plat) or not isinstance(entries_list, list):
@@ -682,10 +647,8 @@ class _ToolHandlers:
             for ch in entries_list:
                 if isinstance(ch, dict):
                     chat_id = ch.get("id", ch.get("chat_id", ""))
-                    channels.append({
-                        "target": f"{plat}:{chat_id}" if chat_id else plat, "platform": plat,
-                        "name": ch.get("name", ch.get("display_name", "")), "chat_type": ch.get("type", ""),
-                    })
+                    channels.append({"target": f"{plat}:{chat_id}" if chat_id else plat, "platform": plat,
+                                     "name": ch.get("name", ch.get("display_name", "")), "chat_type": ch.get("type", "")})
         return json.dumps({"count": len(channels), "channels": channels}, indent=2)
 
     def permissions_list_open(self) -> str:
@@ -706,10 +669,7 @@ class _ToolHandlers:
             decision: One of "allow-once", "allow-always", or "deny"
         """
         if decision not in {"allow-once", "allow-always", "deny"}:
-            return json.dumps({
-                "error": f"Invalid decision: {decision}. "
-                         f"Must be allow-once, allow-always, or deny"
-            })
+            return json.dumps({"error": f"Invalid decision: {decision}. Must be allow-once, allow-always, or deny"})
         return json.dumps(self.bridge.respond_to_approval(id, decision), indent=2)
 
 
@@ -724,10 +684,7 @@ _TOOL_NAMES = (
 def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "MCPServer":
     """Create and return the Hermes MCP server with all tools registered."""
     if not _MCP_SERVER_AVAILABLE:
-        raise ImportError(
-            "MCP server requires the 'mcp' package. "
-            f"Install with: {sys.executable} -m pip install 'mcp'"
-        )
+        raise ImportError(f"MCP server requires the 'mcp' package. Install with: {sys.executable} -m pip install 'mcp'")
     mcp = MCPServer("hermes", instructions=(
         "Hermes Agent messaging bridge. Use these tools to interact with "
         "conversations across Telegram, Discord, Slack, WhatsApp, Signal, "
@@ -742,19 +699,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "MCPServer"
 def run_mcp_server(verbose: bool = False) -> None:
     """Start the Hermes MCP server on stdio."""
     if not _MCP_SERVER_AVAILABLE:
-        print(
-            "Error: MCP server requires the 'mcp' package.\n"
-            f"Install with: {sys.executable} -m pip install 'mcp'",
-            file=sys.stderr,
-        )
+        print("Error: MCP server requires the 'mcp' package.\n"
+              f"Install with: {sys.executable} -m pip install 'mcp'", file=sys.stderr)
         sys.exit(1)
-
     logging.basicConfig(level=logging.DEBUG if verbose else logging.WARNING, stream=sys.stderr)
-
     bridge = EventBridge()
     bridge.start()
     server = create_mcp_server(event_bridge=bridge)
-
     import asyncio
 
     async def _run():

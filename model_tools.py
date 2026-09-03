@@ -18,30 +18,17 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import (
-    CHECK_FN_CACHE_BYPASS,
-    check_fn_cache_scope,
-    discover_builtin_tools,
-    registry,
-    tool_error,
-)
+from tools.registry import CHECK_FN_CACHE_BYPASS, check_fn_cache_scope, discover_builtin_tools, registry, tool_error
+from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 from toolsets import resolve_toolset, validate_toolset
 from tools.arg_coercion import (  # noqa: F401  # re-exported: tests and tools/ import these from model_tools
-    _coerce_boolean,
-    _coerce_json,
-    _coerce_number,
-    _coerce_value,
-    _normalize_json_strings_for_schema,
-    _schema_accepts_kind,
-    _schema_allows_null,
-    coerce_tool_args,
+    _coerce_boolean, _coerce_json, _coerce_number, _coerce_value, _normalize_json_strings_for_schema,
+    _schema_accepts_kind, _schema_allows_null, coerce_tool_args,
 )
 
 logger = logging.getLogger(__name__)
 
-_post_tool_call_hook_suppressed: ContextVar[bool] = ContextVar(
-    "post_tool_call_hook_suppressed", default=False
-)
+_post_tool_call_hook_suppressed: ContextVar[bool] = ContextVar("post_tool_call_hook_suppressed", default=False)
 
 
 @contextmanager
@@ -188,10 +175,8 @@ _LEGACY_TOOLSET_MAP = {
     "vision_tools": ["vision_analyze"],
     "image_tools": ["image_generate"],
     "skills_tools": ["skills_list", "skill_view", "skill_manage"],
-    "browser_tools": [
-        "browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_scroll",
-        "browser_back", "browser_press", "browser_get_images", "browser_vision", "browser_console",
-    ],
+    "browser_tools": ["browser_navigate", "browser_snapshot", "browser_click", "browser_type", "browser_scroll",
+                      "browser_back", "browser_press", "browser_get_images", "browser_vision", "browser_console"],
     "cronjob_tools": ["cronjob_manage"],
     "file_tools": ["read_file", "write_file", "patch", "search_files"],
     "tts_tools": ["text_to_speech"],
@@ -216,12 +201,8 @@ def _clear_tool_defs_cache() -> None:
         _tool_defs_cache.clear()
 
 
-def get_tool_definitions(
-    enabled_toolsets: Optional[List[str]] = None,
-    disabled_toolsets: Optional[List[str]] = None,
-    quiet_mode: bool = False,
-    skip_tool_search_assembly: bool = False,
-) -> List[Dict[str, Any]]:
+def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_toolsets: Optional[List[str]] = None,
+                         quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> List[Dict[str, Any]]:
     """Tool definitions for model API calls, filtered by toolset.
 
     enabled_toolsets None = all; disabled_toolsets are subtracted after enabling.
@@ -232,10 +213,8 @@ def get_tool_definitions(
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
-
     if not quiet_mode:
         return compute()
-
     cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
     with _tool_defs_cache_lock:
         cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
@@ -276,10 +255,8 @@ def _tool_defs_cache_key(
     except (FileNotFoundError, OSError, ImportError):
         cfg_fp = None
     return (
-        registry.current_scope_key(),
-        frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
-        frozenset(disabled_toolsets) if disabled_toolsets else None,
-        registry._generation, cfg_fp,
+        registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
         bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
     )
@@ -318,23 +295,15 @@ def _apply_toolset_selection(tools: set, names: List[str], quiet_mode: bool, *, 
             print(f"{icon} {label} '{name}': {', '.join(resolved) if resolved else 'no tools'}")
 
 
-def _select_tool_names(
-    enabled_toolsets: Optional[List[str]],
-    disabled_toolsets: Optional[List[str]],
-    quiet_mode: bool,
-) -> set:
+def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]], quiet_mode: bool) -> set:
     """Tool names requested by the toolset selection (before check_fn filtering)."""
     tools: set = set()
     if enabled_toolsets is not None:
         enabled = list(enabled_toolsets)
         # Dispatcher-spawned kanban workers always get the lifecycle handoff
         # tools, even when the assignee profile restricts its chat toolsets.
-        if (
-            os.environ.get("HERMES_KANBAN_TASK")
-            and not _is_delegated_child_context()
-            and _is_dispatcher_owned_worker()
-            and "kanban" not in enabled
-        ):
+        if (os.environ.get("HERMES_KANBAN_TASK") and not _is_delegated_child_context()
+                and _is_dispatcher_owned_worker() and "kanban" not in enabled):
             enabled.append("kanban")
         _apply_toolset_selection(tools, enabled, quiet_mode, disable=False)
     else:
@@ -453,12 +422,8 @@ _TOOL_SEARCH_LISTING_FORMS = {
 }
 
 
-def _compute_tool_definitions(
-    enabled_toolsets: Optional[List[str]] = None,
-    disabled_toolsets: Optional[List[str]] = None,
-    quiet_mode: bool = False,
-    skip_tool_search_assembly: bool = False,
-) -> List[Dict[str, Any]]:
+def _compute_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_toolsets: Optional[List[str]] = None,
+                              quiet_mode: bool = False, skip_tool_search_assembly: bool = False) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     tools_to_include = _select_tool_names(enabled_toolsets, disabled_toolsets, quiet_mode)
     # Registry returns only tools whose check_fn passes.
@@ -467,11 +432,8 @@ def _compute_tool_definitions(
     _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
     if not quiet_mode:
-        if filtered_tools:
-            print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(_last_resolved_tool_names)}")
-        else:
-            print("🛠️  No tools selected (all filtered out or unavailable)")
-
+        print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(_last_resolved_tool_names)}"
+              if filtered_tools else "🛠️  No tools selected (all filtered out or unavailable)")
     # Normalize schema shapes llama.cpp's grammar converter rejects (bare
     # "type": "object", string-valued nodes from malformed MCP servers).
     try:
@@ -490,12 +452,10 @@ def _compute_tool_definitions(
         if not skip_tool_search_assembly and ts_cfg.enabled != "off":
             assembly = assemble_tool_defs(filtered_tools, context_length=_resolve_active_context_length(), config=ts_cfg)
             if assembly.activated and not quiet_mode:
-                print(
-                    f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
-                    f"MCP/plugin tools deferred (~{assembly.deferred_tokens} tokens) behind "
-                    f"tool_search/describe/call — "
-                    f"{_TOOL_SEARCH_LISTING_FORMS.get(assembly.listing_form, assembly.listing_form)}."
-                )
+                print(f"🔎 Tool Search (tier {assembly.tier}): {assembly.deferred_count} "
+                      f"MCP/plugin tools deferred (~{assembly.deferred_tokens} tokens) behind "
+                      f"tool_search/describe/call — "
+                      f"{_TOOL_SEARCH_LISTING_FORMS.get(assembly.listing_form, assembly.listing_form)}.")
             filtered_tools = assembly.tool_defs
     except Exception as e:  # pragma: no cover — never break tool loading
         logger.warning("Tool search assembly skipped: %s", e)
@@ -551,10 +511,8 @@ def _resolve_active_context_length() -> int:
                     return cached_ctx
             except Exception:
                 pass
-        return int(get_model_context_length(
-            model_id, base_url=base_url, api_key=api_key,
-            config_context_length=config_ctx, provider=provider,
-        ) or 0)
+        return int(get_model_context_length(model_id, base_url=base_url, api_key=api_key,
+                                            config_context_length=config_ctx, provider=provider) or 0)
     except Exception as e:
         logger.debug("Could not resolve active context length: %s", e)
         return 0
@@ -586,7 +544,6 @@ _TOOL_ERROR_STRIP_RES = (
     re.compile(r'\s*```\s*$', re.MULTILINE),
     re.compile(r'<!\[CDATA\[.*?\]\]>', re.DOTALL),
 )
-from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 
 
 def _sanitize_tool_error(error_msg: str) -> str:
@@ -636,9 +593,8 @@ def _tool_result_observer_fields(tool_name: str, result: Any) -> tuple[str, Opti
 def _emit_post_tool_call_hook(
     *, function_name: str, function_args: Dict[str, Any], result: Any,
     task_id: Optional[str] = None, session_id: Optional[str] = None, tool_call_id: Optional[str] = None,
-    turn_id: Optional[str] = None, api_request_id: Optional[str] = None,
-    duration_ms: int = 0, status: Optional[str] = None,
-    error_type: Optional[str] = None, error_message: Optional[str] = None,
+    turn_id: Optional[str] = None, api_request_id: Optional[str] = None, duration_ms: int = 0,
+    status: Optional[str] = None, error_type: Optional[str] = None, error_message: Optional[str] = None,
     middleware_trace: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Emit the ``post_tool_call`` observer hook; gated on has_hook, and ok/error
@@ -661,10 +617,8 @@ def _emit_post_tool_call_hook(
         logger.debug("post_tool_call hook error: %s", _hook_err)
 
 
-def _dispatch_bridge_tool(
-    function_name: str, function_args: Dict[str, Any],
-    enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]],
-):
+def _dispatch_bridge_tool(function_name: str, function_args: Dict[str, Any],
+                          enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]]):
     """Handle a Tool Search bridge call (tool_search / tool_describe / tool_call).
 
     None when *function_name* is not a bridge tool; ``(result, None)`` for a
@@ -680,10 +634,8 @@ def _dispatch_bridge_tool(
     # Un-collapsed catalog scoped to the session's toolsets, so a restricted
     # session (subagent, kanban worker) can't reach the whole registry via the bridge.
     try:
-        current_defs = get_tool_definitions(
-            enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
-            quiet_mode=True, skip_tool_search_assembly=True,
-        ) or []
+        current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+                                            quiet_mode=True, skip_tool_search_assembly=True) or []
     except Exception:
         current_defs = []
     args = function_args or {}
@@ -697,10 +649,8 @@ def _dispatch_bridge_tool(
     # Defense in depth: resolve_underlying_call only checks the global
     # registry; also require membership in the session-scoped catalog.
     if underlying_name not in ts.scoped_deferrable_names(current_defs):
-        return tool_error(
-            f"'{underlying_name}' is not available in this session. "
-            "Use tool_search to find tools you can call."
-        ), None
+        return tool_error(f"'{underlying_name}' is not available in this session. "
+                          "Use tool_search to find tools you can call."), None
     # Validate against the deferred tool's concrete schema — the generic
     # ``arguments: object`` bridge schema can't enforce it.
     probe_err = ts.validate_deferred_call_args(underlying_name, underlying_args)
@@ -722,10 +672,9 @@ def _apply_request_middleware(
         return function_args, dict(function_args), trace
 
 
-def _pre_dispatch_guards(
-    function_name: str, function_args: Dict[str, Any], skip_pre_tool_call_hook: bool,
-    ids: _CallIds, middleware_trace: List[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], Optional[Tuple[Any, str, Optional[str]]]]:
+def _pre_dispatch_guards(function_name: str, function_args: Dict[str, Any], skip_pre_tool_call_hook: bool,
+                         ids: _CallIds, middleware_trace: List[Dict[str, Any]],
+                         ) -> Tuple[Dict[str, Any], Optional[Tuple[Any, str, Optional[str]]]]:
     """Plugin pre_tool_call hook, then ACP edit approval.
 
     ``(args, None)`` to proceed (args possibly plugin-modified), or
@@ -766,9 +715,8 @@ def _approval_observability(ids: _CallIds):
     """Bind the approval observability context (turn/tool_call/session ids) for the block."""
     try:
         from tools.approval import reset_current_observability_context, set_current_observability_context
-        tokens = set_current_observability_context(
-            turn_id=ids.turn_id or "", tool_call_id=ids.tool_call_id or "", session_id=ids.session_id or "",
-        )
+        tokens = set_current_observability_context(turn_id=ids.turn_id or "", tool_call_id=ids.tool_call_id or "",
+                                                   session_id=ids.session_id or "")
     except Exception:
         yield
         return
@@ -781,10 +729,8 @@ def _approval_observability(ids: _CallIds):
             pass
 
 
-def _execute_tool(
-    function_name: str, function_args: Dict[str, Any], original_args: Dict[str, Any], ids: _CallIds,
-    *, user_task: Optional[str], enabled_tools: Optional[List[str]], skip_tool_execution_middleware: bool,
-) -> Any:
+def _execute_tool(function_name: str, function_args: Dict[str, Any], original_args: Dict[str, Any], ids: _CallIds,
+                  *, user_task: Optional[str], enabled_tools: Optional[List[str]], skip_tool_execution_middleware: bool) -> Any:
     """Run the registry handler (through tool-execution middleware unless skipped)
     with the approval observability context bound for the duration."""
     dispatch_kwargs: Dict[str, Any] = {"task_id": ids.task_id, "session_id": ids.session_id}
@@ -802,14 +748,12 @@ def _execute_tool(
         if skip_tool_execution_middleware:
             return _dispatch(function_args)
         from hermes_cli.middleware import run_tool_execution_middleware
-        return run_tool_execution_middleware(
-            function_name, function_args, _dispatch, original_args=original_args, **ids.hook_kwargs(),
-        )
+        return run_tool_execution_middleware(function_name, function_args, _dispatch, original_args=original_args,
+                                             **ids.hook_kwargs())
 
 
-def _apply_transform_tool_result_hook(
-    function_name: str, function_args: Dict[str, Any], result: Any, duration_ms: int, ids: _CallIds,
-) -> Any:
+def _apply_transform_tool_result_hook(function_name: str, function_args: Dict[str, Any], result: Any, duration_ms: int,
+                                      ids: _CallIds) -> Any:
     """transform_tool_result: plugins may replace the final result string.
 
     Runs after post_tool_call and before the result enters context. Fail-open;
@@ -819,14 +763,10 @@ def _apply_transform_tool_result_hook(
         from hermes_cli.lifecycle import has_hook, invoke_hook
         if has_hook("transform_tool_result"):
             status, error_type, error_message = _tool_result_observer_fields(function_name, result)
-            hook_results = invoke_hook(
-                "transform_tool_result", tool_name=function_name, args=function_args, result=result,
-                **ids.hook_kwargs(), duration_ms=duration_ms,
-                status=status, error_type=error_type, error_message=error_message,
-            )
-            for hook_result in hook_results:
-                if isinstance(hook_result, str):
-                    return hook_result
+            hook_results = invoke_hook("transform_tool_result", tool_name=function_name, args=function_args,
+                                       result=result, **ids.hook_kwargs(), duration_ms=duration_ms,
+                                       status=status, error_type=error_type, error_message=error_message)
+            return next((r for r in hook_results if isinstance(r, str)), result)
     except Exception as _hook_err:
         logger.debug("transform_tool_result hook error: %s", _hook_err)
     return result
@@ -837,21 +777,12 @@ def _elapsed_ms(start: float) -> int:
 
 
 def handle_function_call(
-    function_name: str,
-    function_args: Dict[str, Any],
-    task_id: Optional[str] = None,
-    tool_call_id: Optional[str] = None,
-    session_id: Optional[str] = None,
-    turn_id: Optional[str] = None,
-    api_request_id: Optional[str] = None,
-    user_task: Optional[str] = None,
-    enabled_tools: Optional[List[str]] = None,
-    skip_pre_tool_call_hook: bool = False,
-    skip_tool_request_middleware: bool = False,
-    skip_tool_execution_middleware: bool = False,
-    tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
-    enabled_toolsets: Optional[List[str]] = None,
-    disabled_toolsets: Optional[List[str]] = None,
+    function_name: str, function_args: Dict[str, Any], task_id: Optional[str] = None,
+    tool_call_id: Optional[str] = None, session_id: Optional[str] = None, turn_id: Optional[str] = None,
+    api_request_id: Optional[str] = None, user_task: Optional[str] = None, enabled_tools: Optional[List[str]] = None,
+    skip_pre_tool_call_hook: bool = False, skip_tool_request_middleware: bool = False,
+    skip_tool_execution_middleware: bool = False, tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
+    enabled_toolsets: Optional[List[str]] = None, disabled_toolsets: Optional[List[str]] = None,
 ) -> str:
     """Route a tool call through hooks/middleware to the registry; returns a JSON string.
 
@@ -884,12 +815,9 @@ def handle_function_call(
         if underlying is None:
             return _emit(result, duration_ms=_elapsed_ms(start))
         return handle_function_call(
-            *underlying, task_id=task_id, tool_call_id=tool_call_id, session_id=session_id,
-            turn_id=turn_id, api_request_id=api_request_id, user_task=user_task,
-            enabled_tools=enabled_tools, skip_pre_tool_call_hook=skip_pre_tool_call_hook,
-            skip_tool_request_middleware=skip_tool_request_middleware,
-            skip_tool_execution_middleware=skip_tool_execution_middleware,
-            tool_request_middleware_trace=list(trace),
+            *underlying, **asdict(ids), user_task=user_task, enabled_tools=enabled_tools,
+            skip_pre_tool_call_hook=skip_pre_tool_call_hook, skip_tool_request_middleware=skip_tool_request_middleware,
+            skip_tool_execution_middleware=skip_tool_execution_middleware, tool_request_middleware_trace=list(trace),
             enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
         )
 
@@ -916,11 +844,8 @@ def handle_function_call(
 
         # duration_ms (monotonic) is exposed to post_tool_call / transform_tool_result.
         start = time.monotonic()
-        result = _execute_tool(
-            function_name, function_args, original_args, ids,
-            user_task=user_task, enabled_tools=enabled_tools,
-            skip_tool_execution_middleware=skip_tool_execution_middleware,
-        )
+        result = _execute_tool(function_name, function_args, original_args, ids, user_task=user_task,
+                               enabled_tools=enabled_tools, skip_tool_execution_middleware=skip_tool_execution_middleware)
         duration_ms = _elapsed_ms(start)
         _emit(result, duration_ms=duration_ms)
         return _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)

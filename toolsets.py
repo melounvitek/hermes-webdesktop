@@ -79,10 +79,7 @@ TOOLSETS = {
         ["x_search"],
     ),
     "vision": _ts("Image analysis and vision tools", ["vision_analyze"]),
-    "video": _ts(
-        "Video analysis and understanding tools (opt-in, not in default toolset)",
-        ["video_analyze"],
-    ),
+    "video": _ts("Video analysis and understanding tools (opt-in, not in default toolset)", ["video_analyze"]),
     "image_gen": _ts("Creative generation tools (images)", ["image_generate"]),
     "video_gen": _ts(
         "Video generation tools. Single ``video_generate`` tool covers text-to-video "
@@ -97,10 +94,7 @@ TOOLSETS = {
         "or keyboard focus. Works with any tool-capable model.",
         ["computer_use"],
     ),
-    "terminal": _ts(
-        "Terminal/command execution and process management tools",
-        ["terminal", "process_manage"],
-    ),
+    "terminal": _ts("Terminal/command execution and process management tools", ["terminal", "process_manage"]),
     "skills": _ts(
         "Access, create, edit, and manage skill documents with specialized "
         "instructions and knowledge",
@@ -121,18 +115,12 @@ TOOLSETS = {
         "search (content + files)",
         ["read_file", "write_file", "patch", "search_files"],
     ),
-    "tts": _ts(
-        "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",
-        ["text_to_speech"],
-    ),
+    "tts": _ts("Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI", ["text_to_speech"]),
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
     "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
-    "project": _ts(
-        "Desktop Projects — create/switch named workspaces (GUI sessions only)",
-        ["desktop_project"],
-    ),
+    "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),
     "bot_room": _ts("Verified text-only Group Chat turn capabilities"),
 
     # GUI-renderer affordances, enabled per desktop-sourced SESSION by the GUI
@@ -141,17 +129,12 @@ TOOLSETS = {
     "desktop_ui": _ts(
         "Desktop GUI affordances — in-app terminal/browser panes, pane focus, "
         "reactions (GUI sessions only)",
-        [
-            "read_terminal", "close_terminal", "desktop_preview", "drive_preview",
-            "annotate_preview", "read_window_below", "focus_pane", "react_to_message",
-            "setup_mcp", "gui_tour", "show_tip",
-        ],
+        ["read_terminal", "close_terminal", "desktop_preview", "drive_preview",
+         "annotate_preview", "read_window_below", "focus_pane", "react_to_message",
+         "setup_mcp", "gui_tour", "show_tip"],
     ),
     "clarify": _ts("Ask the user clarifying questions (multiple-choice or open-ended)", ["clarify"]),
-    "code_execution": _ts(
-        "Run Python scripts that call tools programmatically (reduces LLM round trips)",
-        ["execute_code"],
-    ),
+    "code_execution": _ts("Run Python scripts that call tools programmatically (reduces LLM round trips)", ["execute_code"]),
     "delegation": _ts("Spawn subagents with isolated context for complex subtasks", ["delegate_task"]),
     "homeassistant": _ts("Home Assistant smart home control and monitoring", _HA_TOOLS),
     "kanban": _ts(
@@ -164,31 +147,19 @@ TOOLSETS = {
         "files, and (for orchestrators) list, unblock, and fan out tasks.",
         [t for t in _HERMES_CORE_TOOLS if t.startswith("kanban_")],
     ),
-    "discord": _ts(
-        "Discord read and participate tools (fetch messages, search members, create threads)",
-        ["discord"],
-    ),
-    "discord_admin": _ts(
-        "Discord server management (list channels/roles, pin messages, assign roles)",
-        ["discord_admin"],
-    ),
+    "discord": _ts("Discord read and participate tools (fetch messages, search members, create threads)", ["discord"]),
+    "discord_admin": _ts("Discord server management (list channels/roles, pin messages, assign roles)", ["discord_admin"]),
     "yuanbao": _ts("Yuanbao platform tools - group info, member queries, DM, stickers", _YUANBAO_TOOLS),
     "feishu_doc": _ts("Read Feishu/Lark document content", ["feishu_doc_read"]),
     "feishu_drive": _ts("Feishu/Lark document comment operations (list, reply, add)", _FEISHU_TOOLS[1:]),
     "spotify": _ts(
         "Native Spotify playback, search, playlist, album, and library tools",
-        [
-            "spotify_playback", "spotify_devices", "spotify_queue", "spotify_search",
-            "spotify_playlists", "spotify_albums", "spotify_library",
-        ],
+        ["spotify_playback", "spotify_devices", "spotify_queue", "spotify_search",
+         "spotify_playlists", "spotify_albums", "spotify_library"],
     ),
 
     # Scenario-specific toolsets
-    "debugging": _ts(
-        "Debugging and troubleshooting toolkit",
-        ["terminal", "process_manage"],
-        includes=["web", "file"],
-    ),
+    "debugging": _ts("Debugging and troubleshooting toolkit", ["terminal", "process_manage"], includes=["web", "file"]),
     "safe": _ts("Safe toolkit without terminal access", [], includes=["web", "vision", "image_gen"]),
 
     # Coding posture, auto-selected in a code workspace (agent/coding_context.py).
@@ -220,22 +191,16 @@ TOOLSETS = {
     # Mirrors hermes-cli; `hermes tools` platform config filters it down and
     # _get_platform_tools() drops _DEFAULT_OFF_TOOLSETS unless user-enabled.
     "hermes-cron": _bundle("Default cron toolset - same core tools as hermes-cli; gated by `hermes tools`"),
-    "hermes-telegram": _bundle(
-        "Telegram bot toolset - full access for personal use (terminal has safety checks)"
-    ),
+    "hermes-telegram": _bundle("Telegram bot toolset - full access for personal use (terminal has safety checks)"),
     "hermes-discord": _bundle(
         "Discord bot toolset - full access (terminal has safety checks via dangerous "
         "command approval)",
         ["discord", "discord_admin"],
     ),
-    "hermes-whatsapp": _bundle(
-        "WhatsApp bot toolset - similar to Telegram (personal messaging, more trusted)"
-    ),
+    "hermes-whatsapp": _bundle("WhatsApp bot toolset - similar to Telegram (personal messaging, more trusted)"),
     "hermes-slack": _bundle("Slack bot toolset - full access for workspace use (terminal has safety checks)"),
     "hermes-signal": _bundle("Signal bot toolset - encrypted messaging platform (full access)"),
-    "hermes-bluebubbles": _bundle(
-        "BlueBubbles iMessage bot toolset - Apple iMessage via local BlueBubbles server"
-    ),
+    "hermes-bluebubbles": _bundle("BlueBubbles iMessage bot toolset - Apple iMessage via local BlueBubbles server"),
     "hermes-homeassistant": _bundle("Home Assistant bot toolset - smart home event monitoring and control"),
     "hermes-email": _bundle("Email bot toolset - interact with Hermes via email (IMAP/SMTP)"),
     "hermes-mattermost": _bundle("Mattermost bot toolset - self-hosted team messaging (full access)"),
@@ -245,9 +210,7 @@ TOOLSETS = {
     "hermes-weixin": _bundle("Weixin bot toolset - personal WeChat messaging via iLink (full access)"),
     "hermes-qqbot": _bundle("QQBot toolset - QQ messaging via Official Bot API v2 (full access)"),
     "hermes-wecom": _bundle("WeCom bot toolset - enterprise WeChat messaging (full access)"),
-    "hermes-wecom-callback": _bundle(
-        "WeCom callback toolset - enterprise self-built app messaging (full access)"
-    ),
+    "hermes-wecom-callback": _bundle("WeCom callback toolset - enterprise self-built app messaging (full access)"),
     "hermes-yuanbao": {
         "description": "Yuanbao Bot 元宝消息平台工具集 - 群信息、成员查询、私聊、贴纸表情",
         "tools": _HERMES_CORE_TOOLS + _YUANBAO_TOOLS,
@@ -255,10 +218,7 @@ TOOLSETS = {
         "includes": [],
     },
     "hermes-sms": _bundle("SMS bot toolset - interact with Hermes via SMS (Twilio)"),
-    "hermes-webhook": _ts(
-        "Webhook toolset - receive and process external webhook events",
-        _HERMES_WEBHOOK_SAFE_TOOLS,
-    ),
+    "hermes-webhook": _ts("Webhook toolset - receive and process external webhook events", _HERMES_WEBHOOK_SAFE_TOOLS),
     "hermes-gateway": _ts(
         "Gateway toolset - union of all messaging platform tools",
         [],
@@ -284,12 +244,9 @@ def _registry():
 
 def _registry_call(method: str, default):
     """registry.<method>() or *default* when the registry is unavailable or the call fails."""
-    registry = _registry()
-    if registry is None:
-        return default
     try:
-        return getattr(registry, method)()
-    except Exception:
+        return getattr(_registry(), method)()
+    except Exception:  # registry None (AttributeError) or the call failed
         return default
 
 
@@ -328,12 +285,7 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
         if not registry_toolset:
             return None
         description = f"MCP server '{name}' tools"
-
-    return {
-        "description": description,
-        "tools": registry.get_tool_names_for_toolset(registry_toolset),
-        "includes": [],
-    }
+    return {"description": description, "tools": registry.get_tool_names_for_toolset(registry_toolset), "includes": []}
 
 
 def bundle_non_core_tools(toolset_name: str) -> Set[str]:
@@ -348,8 +300,7 @@ def bundle_non_core_tools(toolset_name: str) -> Set[str]:
     if not (ts_def and "tools" in ts_def):
         return set(resolve_toolset(toolset_name)) - core
     to_remove = set(ts_def["tools"])
-    for inc in ts_def.get("includes", []):
-        inc_def = get_toolset(inc)
+    for inc_def in map(get_toolset, ts_def.get("includes", [])):
         if inc_def and "tools" in inc_def:
             to_remove.update(inc_def["tools"])
     return to_remove - core
@@ -443,9 +394,7 @@ def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
     """All toolset definitions: static plus plugin-registered."""
     result = dict(TOOLSETS)
     for display_name in _plugin_display_names():
-        if display_name in result:
-            continue
-        toolset = get_toolset(display_name)
+        toolset = None if display_name in result else get_toolset(display_name)
         if toolset:
             result[display_name] = toolset
     return result
