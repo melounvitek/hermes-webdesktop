@@ -4493,6 +4493,8 @@ class ContextCompressor(ContextEngine):
         rearm mark (prune commit, compaction, session reset/rebind, model
         recalibration) so a later lockout warns again.
         """
+        # The explicit None check is redundant with the predicate; it narrows
+        # ``current_tokens`` for the type checker on the format below.
         if current_tokens is None or not self._billed_basis_over_threshold(
             current_tokens
         ):
