@@ -65,21 +65,18 @@ def _text_block(text: Any, redact: bool) -> Dict[str, Any]:
 def _part_to_block(part: Any, redact: bool) -> Dict[str, Any]:
     if not isinstance(part, dict):
         return _text_block(str(part), redact)
-    ptype = part.get("type")
-    if ptype == "text":
+    if part.get("type") == "text":
         return _text_block(part.get("text", ""), redact)
-    if ptype in ("image_url", "image"):
+    if part.get("type") in ("image_url", "image"):
         return {"type": "text", "text": "[image omitted]"}  # the viewer renders text turns; no base64
     return _text_block(json.dumps(part), redact)
 
 
 def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
     """Normalize a message ``content`` field into Anthropic content blocks."""
-    if content is None:
-        return []
     if isinstance(content, list):
         return [_part_to_block(part, redact) for part in content]
-    return [_text_block(content if isinstance(content, str) else json.dumps(content), redact)]
+    return [] if content is None else [_text_block(content if isinstance(content, str) else json.dumps(content), redact)]
 
 
 def _parse_tool_args(raw_args: Any) -> Dict[str, Any]:
@@ -105,12 +102,8 @@ def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]
             except (json.JSONDecodeError, ValueError):
                 logger.warning("Trace upload redacted tool arguments are not valid JSON; refusing upload")
                 raise TraceRedactionError(_REDACTION_BLOCKED_MESSAGE)
-        blocks.append({
-            "type": "tool_use",
-            "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:16]}",
-            "name": fn.get("name") or tc.get("name") or "tool",
-            "input": parsed,
-        })
+        blocks.append({"type": "tool_use", "id": tc.get("id") or f"toolu_{uuid.uuid4().hex[:16]}",
+                       "name": fn.get("name") or tc.get("name") or "tool", "input": parsed})
     return blocks
 
 
@@ -119,10 +112,8 @@ def _git_branch(cwd: str) -> str:
         return ""
     try:
         import subprocess
-        r = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd,
-        )
+        r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd)
     except Exception:
         return ""
     return r.stdout.strip() if r.returncode == 0 else ""
@@ -135,14 +126,10 @@ def _assistant_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[st
 
 def _tool_result_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
     content = msg.get("content")
-    return {
-        "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": msg.get("tool_call_id") or msg.get("tool_name") or "tool",
-            "content": _redact(content if isinstance(content, str) else json.dumps(content), redact),
-        }],
-    }
+    return {"role": "user", "content": [{
+        "type": "tool_result", "tool_use_id": msg.get("tool_call_id") or msg.get("tool_name") or "tool",
+        "content": _redact(content if isinstance(content, str) else json.dumps(content), redact),
+    }]}
 
 
 def _user_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
@@ -151,10 +138,7 @@ def _user_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, An
 
 
 # role -> (Claude Code line type, message builder). Unknown roles render as user.
-_ROLE_RENDERERS: Dict[Any, Tuple[str, Any]] = {
-    "assistant": ("assistant", _assistant_message),
-    "tool": ("user", _tool_result_message),
-}
+_ROLE_RENDERERS: Dict[Any, Tuple[str, Any]] = {"assistant": ("assistant", _assistant_message), "tool": ("user", _tool_result_message)}
 
 
 def build_trace_jsonl(messages: List[Dict[str, Any]], *, session_id: str, model: str = "", cwd: str = "", redact: bool = True) -> str:
@@ -170,18 +154,10 @@ def build_trace_jsonl(messages: List[Dict[str, Any]], *, session_id: str, model:
             continue
         turn_uuid = str(uuid.uuid4())
         line_type, render = _ROLE_RENDERERS.get(role, ("user", _user_message))
-        entry = {
-            "parentUuid": parent,
-            "isSidechain": False,
-            "userType": "external",
-            "cwd": cwd or os.getcwd(),
-            "sessionId": session_id,
-            "version": _HERMES_VERSION,
-            "gitBranch": git_branch,
-            "uuid": turn_uuid,
-            "timestamp": base_ts,
-            "type": line_type,
-            "message": render(msg, model, redact),
+        entry = {  # key order is the wire order
+            "parentUuid": parent, "isSidechain": False, "userType": "external", "cwd": cwd or os.getcwd(),
+            "sessionId": session_id, "version": _HERMES_VERSION, "gitBranch": git_branch, "uuid": turn_uuid,
+            "timestamp": base_ts, "type": line_type, "message": render(msg, model, redact),
         }
         lines.append(json.dumps(entry, ensure_ascii=False))
         parent = turn_uuid
@@ -207,10 +183,10 @@ def _do_upload(jsonl: str, *, token: str, session_id: str, dataset_name: str = D
     api = HfApi(token=token)
     try:
         who = api.whoami()
-        user = who.get("name") if isinstance(who, dict) else None
     except Exception as e:
         logger.warning("HF whoami failed: %s", e)
         return "Your Hugging Face token was rejected (whoami failed). Make sure it has WRITE access and isn't expired."
+    user = who.get("name") if isinstance(who, dict) else None
     if not user:
         return "Could not resolve your Hugging Face username from the token."
     repo_id = f"{user}/{dataset_name}"
@@ -221,10 +197,8 @@ def _do_upload(jsonl: str, *, token: str, session_id: str, dataset_name: str = D
         return f"Could not create/access dataset {repo_id}: {e}"
     path_in_repo = f"sessions/{session_id}.jsonl"
     try:
-        api.upload_file(
-            path_or_fileobj=jsonl.encode("utf-8"), path_in_repo=path_in_repo, repo_id=repo_id, repo_type="dataset",
-            commit_message=f"add session trace {session_id}",
-        )
+        api.upload_file(path_or_fileobj=jsonl.encode("utf-8"), path_in_repo=path_in_repo, repo_id=repo_id,
+                        repo_type="dataset", commit_message=f"add session trace {session_id}")
     except Exception as e:
         logger.warning("HF upload_file failed for %s: %s", repo_id, e)
         return f"Upload to Hugging Face failed: {e}"
@@ -249,15 +223,8 @@ def load_session_messages(session_id: str, db_path=None) -> Tuple[List[Dict[str,
 
 
 def upload_session_trace(
-    session_id: str,
-    *,
-    model: str = "",
-    cwd: str = "",
-    redact: bool = True,
-    private: bool = True,
-    dataset_name: str = DEFAULT_DATASET_NAME,
-    db_path=None,
-    token: Optional[str] = None,
+    session_id: str, *, model: str = "", cwd: str = "", redact: bool = True, private: bool = True,
+    dataset_name: str = DEFAULT_DATASET_NAME, db_path=None, token: Optional[str] = None,
 ) -> str:
     """CLI/gateway entry point: load, convert, upload to ``{user}/hermes-traces``. Status string, never raises."""
     if not session_id:

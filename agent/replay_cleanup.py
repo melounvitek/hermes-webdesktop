@@ -31,9 +31,7 @@ def is_interrupted_tool_result(content: Any) -> bool:
     if not isinstance(content, str):
         return False
     lowered = content.lower()
-    if "[command interrupted]" in lowered:
-        return True
-    return "exit_code" in lowered and ("130" in lowered or "-1" in lowered) and "interrupt" in lowered
+    return "[command interrupted]" in lowered or ("exit_code" in lowered and ("130" in lowered or "-1" in lowered) and "interrupt" in lowered)
 
 
 def _call_name(call: Dict[str, Any]) -> str:
@@ -62,8 +60,7 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
     if not agent_history:
         return agent_history
     cleaned: List[Dict[str, Any]] = []
-    i = 0
-    n = len(agent_history)
+    i, n = 0, len(agent_history)
     while i < n:
         msg = agent_history[i]
         if msg.get("role") == "assistant" and "tool_calls" in msg:
@@ -71,24 +68,20 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
             while j < n and agent_history[j].get("role") == "tool":
                 j += 1
             tool_results = agent_history[i + 1:j]
-            if tool_results and any(is_interrupted_tool_result(m.get("content", "")) for m in tool_results):
+            if any(is_interrupted_tool_result(m.get("content", "")) for m in tool_results):
                 calls = msg.get("tool_calls") or []
                 if _any_side_effecting(calls):
                     call_names = {_call_id(call): _call_name(call) for call in calls}
                     cleaned.append(msg)
                     for tool_result in tool_results:
-                        if not is_interrupted_tool_result(tool_result.get("content", "")):
-                            cleaned.append(tool_result)
-                            continue
-                        recovered = dict(tool_result)
-                        name = call_names.get(str(tool_result.get("tool_call_id") or ""), "")
-                        recovered["effect_disposition"], recovered["content"] = _orphan_recovery(name, _INTERRUPTED_NOTICES)
-                        cleaned.append(recovered)
+                        if is_interrupted_tool_result(tool_result.get("content", "")):
+                            name = call_names.get(str(tool_result.get("tool_call_id") or ""), "")
+                            disposition, content = _orphan_recovery(name, _INTERRUPTED_NOTICES)
+                            tool_result = {**tool_result, "effect_disposition": disposition, "content": content}
+                        cleaned.append(tool_result)
                 else:
-                    logger.debug(
-                        "Stripping interrupted read-only assistant→tool replay block (indices %d–%d, tool_results=%d)",
-                        i, j - 1, len(tool_results),
-                    )
+                    logger.debug("Stripping interrupted read-only assistant→tool replay block (indices %d–%d, tool_results=%d)",
+                                 i, j - 1, len(tool_results))
                 i = j
                 continue
         if msg.get("role") == "tool" and is_interrupted_tool_result(msg.get("content", "")):
@@ -151,10 +144,7 @@ _EXPIRED_CONFIRMATION_SENTINEL = (
 
 def is_dangerous_confirmation(content: Any) -> bool:
     """True if user-message text contains a known dangerous confirmation phrase."""
-    if not isinstance(content, str):
-        return False
-    text = content.strip().lower()
-    return any(pattern in text for pattern in _DANGEROUS_CONFIRMATION_PATTERNS)
+    return isinstance(content, str) and any(pattern in content.strip().lower() for pattern in _DANGEROUS_CONFIRMATION_PATTERNS)
 
 
 def strip_stale_dangerous_confirmations(

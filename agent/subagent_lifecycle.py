@@ -13,6 +13,7 @@ import math
 import secrets
 import threading
 import time
+import contextlib
 from contextlib import contextmanager
 from concurrent.futures import Future, TimeoutError
 from typing import Any, Callable, Mapping, Optional
@@ -182,10 +183,6 @@ def _session_id_of(agent: Any) -> Optional[str]:
     return str(getattr(agent, "session_id", "") or "") or None
 
 
-def _finite_number(value: Any) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
-
-
 def _clip(value: Any) -> Optional[str]:
     return str(value)[:_MAX_RESULT_CHARS] if value is not None else None
 
@@ -196,7 +193,7 @@ _HANDLE_FIELD_CHECKS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("subagent_id", lambda v: isinstance(v, str) and bool(v)),
     ("parent_session_id", _opt_str),
     ("correlation_id", _opt_str),
-    ("created_at", _finite_number),
+    ("created_at", lambda v: not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)),
     ("provider", _opt_str),
     ("model", _opt_str),
     ("role", lambda v: isinstance(v, str)),
@@ -280,13 +277,13 @@ class SubagentLifecycleService:
         record = self._record(handle)
         if record is None:
             return SubagentTerminalState(handle, SubagentState.UNKNOWN, True, diagnostic="UNKNOWN_HANDLE")
-        if record.future is not None:
-            try:
+        try:
+            if record.future is not None:
                 record.future.result(timeout=timeout_seconds)
-            except TimeoutError:
-                return SubagentTerminalState(record.handle, record.state, False, True)
-            except Exception:
-                pass
+        except TimeoutError:
+            return SubagentTerminalState(record.handle, record.state, False, True)
+        except Exception:
+            pass
         with _REGISTRY.lock:
             return SubagentTerminalState(record.handle, record.state, record.result is not None)
 
@@ -302,12 +299,10 @@ class SubagentLifecycleService:
             record.updated_at = time.time()
         accepted = False
         if agent is not None:
-            try:
+            with contextlib.suppress(Exception):
                 accepted = request_hard_interrupt(
                     agent, f"Lifecycle cancellation requested: {reason[:500]}", tool_reason="subagent cancellation requested",
                 )
-            except Exception:
-                accepted = False
         return SubagentCancelResult(bool(accepted), unsupported=not accepted, state=SubagentState.CANCEL_REQUESTED)
 
     def result(self, handle: SubagentHandle) -> SubagentResult:
@@ -365,9 +360,8 @@ class SubagentLifecycleService:
             else:
                 state = SubagentState.SUCCEEDED if status == "completed" else SubagentState.FAILED
             fields: dict[str, Any] = dict(
-                summary=_clip(raw.get("summary")),
+                summary=_clip(raw.get("summary")), error_message=_clip(raw.get("error") or None),
                 error_classification=None if state == SubagentState.SUCCEEDED else status.upper(),
-                error_message=_clip(raw.get("error") or None),
                 usage_metadata={"api_calls": raw.get("api_calls", 0)} if is_dict else {},
                 tool_execution_summary={"duration_seconds": raw.get("duration_seconds", 0)} if is_dict else {},
             )
@@ -377,14 +371,10 @@ class SubagentLifecycleService:
         result = SubagentResult(record.handle, state, True, started_at=record.started_at, completed_at=time.time(), **fields)
         payload = dataclasses.asdict(result)
         payload.pop("result_hash", None)
-        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-        result = dataclasses.replace(result, result_hash=digest)
+        result = dataclasses.replace(result, result_hash=hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest())
         with _REGISTRY.lock:
-            record.agent = None
-            record.result = result
-            record.state = result.terminal_state
-            record.completed_at = result.completed_at
-            record.updated_at = result.completed_at or time.time()
+            record.agent, record.result, record.state = None, result, result.terminal_state
+            record.completed_at = record.updated_at = result.completed_at
 
     @staticmethod
     def _capability(subagent_id: str, parent_session_id: Optional[str], created_at: float) -> str:
@@ -402,11 +392,12 @@ class SubagentLifecycleService:
             raise SubagentLifecycleError("metadata must be JSON-serializable.") from exc
         if metadata_bytes > _MAX_METADATA_BYTES:
             raise SubagentLifecycleError("metadata exceeds 8192 bytes.")
-        if request.allowed_toolsets:
-            from toolsets import TOOLSETS
-            unknown = set(request.allowed_toolsets) - set(TOOLSETS)
-            if unknown:
-                raise SubagentLifecycleError(f"Unknown toolsets: {', '.join(sorted(unknown))}.")
-            enabled = getattr(parent, "enabled_toolsets", None)
-            if enabled is not None and not set(request.allowed_toolsets).issubset(set(enabled)):
-                raise SubagentLifecycleError("Requested toolsets would broaden parent permissions.")
+        if not request.allowed_toolsets:
+            return
+        from toolsets import TOOLSETS
+        unknown = set(request.allowed_toolsets) - set(TOOLSETS)
+        if unknown:
+            raise SubagentLifecycleError(f"Unknown toolsets: {', '.join(sorted(unknown))}.")
+        enabled = getattr(parent, "enabled_toolsets", None)
+        if enabled is not None and not set(request.allowed_toolsets).issubset(set(enabled)):
+            raise SubagentLifecycleError("Requested toolsets would broaden parent permissions.")

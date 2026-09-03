@@ -103,14 +103,6 @@ def _durable_content(content: Any) -> Any:
     return "\n".join(txt) if txt else None
 
 
-def _tool_calls_data(msg: Dict) -> Any:
-    if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-        return [{"name": tc.function.name, "arguments": tc.function.arguments} for tc in msg.tool_calls]
-    if isinstance(msg.get("tool_calls"), list):
-        return msg["tool_calls"]
-    return None
-
-
 def _persist_lock(agent):
     """Close and turn-start persistence can run on separate CLI threads: one critical section."""
     return getattr(agent, "_session_persist_lock", None) or nullcontext()
@@ -122,9 +114,8 @@ def _db_flush_seed_ids(agent) -> set:
     """One-shot ``_flushed_db_message_ids`` seed (same session, after a non-empty flush); the scan translates
     it to markers and the flush clears it."""
     current_session_id = getattr(agent, "session_id", None)
-    seed_ids = None
-    if getattr(agent, "_flushed_db_message_session_id", None) == current_session_id and agent._last_flushed_db_idx != 0:
-        seed_ids = getattr(agent, "_flushed_db_message_ids", None)
+    same_session = getattr(agent, "_flushed_db_message_session_id", None) == current_session_id
+    seed_ids = getattr(agent, "_flushed_db_message_ids", None) if same_session and agent._last_flushed_db_idx != 0 else None
     agent._flushed_db_message_session_id = current_session_id
     return seed_ids if isinstance(seed_ids, set) else set()
 
@@ -146,7 +137,7 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
     # api_content sidecar: exact bytes sent to the API when they differ from clean content (replay parity).
     api_content = msg.get("api_content") if isinstance(msg.get("api_content"), str) else None
     timestamp = msg.get("timestamp")
-    if is_current_turn_user and msg.get("role") == "user":
+    if is_current_turn_user and role == "user":
         override = getattr(agent, "_persist_user_message_override", None)
         if _override_replaces_content(msg, content, override):
             # Live content is what the wire sent, the override is the clean transcript; keep the sent bytes.
@@ -154,8 +145,7 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
                 api_content = content
             content = override
         ov_timestamp = getattr(agent, "_persist_user_message_timestamp", None)
-        if ov_timestamp is not None:
-            timestamp = ov_timestamp
+        timestamp = timestamp if ov_timestamp is None else ov_timestamp
     if api_content == content:
         api_content = None
     # get_messages_as_conversation replays rows through sanitize_context().strip(); capture the sent bytes
@@ -167,20 +157,14 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
         api_content = content
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
-        "role": role,
-        "content": _durable_content(content),
-        "tool_name": msg.get("tool_name"),
-        "tool_calls": _tool_calls_data(msg),
-        "tool_call_id": msg.get("tool_call_id"),
-        "finish_reason": msg.get("finish_reason"),
+        "role": role, "content": _durable_content(content), "tool_name": msg.get("tool_name"),
+        "tool_calls": msg["tool_calls"] if isinstance(msg.get("tool_calls"), list) else None,
+        "tool_call_id": msg.get("tool_call_id"), "finish_reason": msg.get("finish_reason"),
         **{k: msg.get(k) for k in _ROW_REASONING_KEYS},
         "_compressed_summary": bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)),
-        "timestamp": timestamp,
-        "api_content": api_content,
-        "display_kind": _summary_display_kind(msg),
-        "display_metadata": msg.get("display_metadata"),
-        # Load-bearing for restart drain-window recovery dedup.
-        "platform_message_id": msg.get("platform_message_id"),
+        "timestamp": timestamp, "api_content": api_content,
+        "display_kind": _summary_display_kind(msg), "display_metadata": msg.get("display_metadata"),
+        "platform_message_id": msg.get("platform_message_id"),  # load-bearing for restart drain-window recovery dedup
     }
     if isinstance(msg.get("_row_id"), int):
         row["_row_id"] = msg["_row_id"]
@@ -217,8 +201,7 @@ def _db_flush_write(agent, batch_rows: List[Dict[str, Any]], batch_msgs: List[Di
     if not batch_rows:
         return
     agent._session_db.append_messages_batch(
-        session_id=agent.session_id,
-        messages=batch_rows,
+        session_id=agent.session_id, messages=batch_rows,
         compression_lock_holder=getattr(agent, "_active_compression_lock_holder", None),
         turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
         turn_lease_ttl_seconds=getattr(agent, "_active_session_turn_lease_ttl_seconds", 300.0) or 300.0,
@@ -244,9 +227,7 @@ def _db_flush_adopt_compression_tip(agent) -> bool:
     if tip_row is None or tip_row.get("ended_at") is not None:
         return False
     logger.warning("Adopted live compression tip %s for closed session %s; retrying flush once", tip, old_id)
-    agent.session_id = tip
-    agent._flushed_db_message_ids = set()
-    agent._last_flushed_db_idx = 0
+    agent.session_id, agent._flushed_db_message_ids, agent._last_flushed_db_idx = tip, set(), 0
     agent._compression_adoption_failed = False
     return True
 
@@ -257,23 +238,17 @@ def _db_flush_failed(agent, e: Exception, batch_rows: List[Dict[str, Any]], adop
     # The only place the SQLite error is visible before it becomes a bare False — classify it so the turn-end
     # explanation can distinguish lock contention from disk-full/read-only.
     from hermes_state import (
-        CompressionSessionClosedError,
-        StateDbCorruptError,
-        StateDbReplacedError,
-        classify_persistence_error,
+        CompressionSessionClosedError, StateDbCorruptError, StateDbReplacedError, classify_persistence_error,
         divert_session_transcript_jsonl,
     )
-
     agent._last_persistence_error_cause = classify_persistence_error(e)
     if isinstance(e, (StateDbReplacedError, StateDbCorruptError)):
         # A replaced/quarantined handle will not take this batch again — keep it on disk.
         try:
             divert_session_transcript_jsonl(getattr(agent, "session_id", "") or "", batch_rows)
         except Exception:
-            logger.warning(
-                "JSONL divert failed after state.db %s for %s",
-                agent._last_persistence_error_cause, getattr(agent, "session_id", None), exc_info=True,
-            )
+            logger.warning("JSONL divert failed after state.db %s for %s",
+                           agent._last_persistence_error_cause, getattr(agent, "session_id", None), exc_info=True)
     if isinstance(e, CompressionSessionClosedError):
         # Compression race: another path rotated this session mid-write. Retry exactly once on the live tip; a
         # second closed-parent write fails closed.
@@ -329,8 +304,7 @@ class SessionPersistenceMixin:
             msg["content"] = override
         if timestamp is not None:
             msg["timestamp"] = timestamp
-        # Load-bearing for restart drain-window recovery dedup (has_platform_message_id).
-        if platform_id is not None:
+        if platform_id is not None:  # load-bearing for restart drain-window recovery dedup (has_platform_message_id)
             msg["platform_message_id"] = platform_id
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
@@ -429,10 +403,8 @@ class SessionPersistenceMixin:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
         if not content:
             return content
-        content = convert_scratchpad_to_think(content)
-        content = re.sub(r'\n+(<think>)', r'\n\1', content)
-        content = re.sub(r'(</think>)\n+', r'\1\n', content)
-        return content.strip()
+        content = re.sub(r'\n+(<think>)', r'\n\1', convert_scratchpad_to_think(content))
+        return re.sub(r'(</think>)\n+', r'\1\n', content).strip()
 
     @staticmethod
     def _redact_message_content(content):
@@ -441,11 +413,8 @@ class SessionPersistenceMixin:
             return redact_sensitive_text(content)
         if not isinstance(content, list):
             return content
-        return [
-            {**p, **{k: redact_sensitive_text(p[k]) for k in ("text", "content") if isinstance(p.get(k), str)}}
-            if isinstance(p, dict) else p
-            for p in content
-        ]
+        return [{**p, **{k: redact_sensitive_text(p[k]) for k in ("text", "content") if isinstance(p.get(k), str)}}
+                if isinstance(p, dict) else p for p in content]
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
         """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False) for external
@@ -465,16 +434,10 @@ class SessionPersistenceMixin:
             if _existing_log_is_larger(log_file, len(cleaned)):
                 return
             entry = {
-                "session_id": self.session_id,
-                "model": self.model,
-                "base_url": self.base_url,
-                "platform": self.platform,
-                "session_start": self.session_start.isoformat(),
-                "last_updated": datetime.now().isoformat(),
-                "system_prompt": redact_sensitive_text(self._cached_system_prompt or ""),
-                "tools": self.tools or [],
-                "message_count": len(cleaned),
-                "messages": cleaned,
+                "session_id": self.session_id, "model": self.model, "base_url": self.base_url, "platform": self.platform,
+                "session_start": self.session_start.isoformat(), "last_updated": datetime.now().isoformat(),
+                "system_prompt": redact_sensitive_text(self._cached_system_prompt or ""), "tools": self.tools or [],
+                "message_count": len(cleaned), "messages": cleaned,
             }
             atomic_json_write(log_file, entry, indent=2, default=str)
         except Exception as e:
