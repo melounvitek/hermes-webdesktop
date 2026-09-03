@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from functools import partial
 from typing import Any, Iterator
 
@@ -57,12 +57,8 @@ def _replica_transaction(db_path: DbPath) -> Iterator[sqlite3.Connection]:
 
     The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
     """
-    conn = _connect(db_path)
-    try:
-        with conn:
-            _initialize_replica_schema(conn)
-    finally:
-        conn.close()
+    with closing(_connect(db_path)) as conn, conn:
+        _initialize_replica_schema(conn)
     with _transaction(db_path, immediate=True) as conn:
         _initialize_replica_schema(conn)
         yield conn
@@ -225,10 +221,8 @@ def promote_replica(
             raise RoomConflictError("room_id already exists in the local authoritative store")
         if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
             raise RoomConflictError("room_id belongs to a disbanded room")
-        previous_gateway = str(replica["authority_gateway_id"])
-        previous_epoch = int(replica["authority_epoch"])
-        target_epoch = previous_epoch + 1
-        claim_seq = int(replica["last_seq"]) + 1
+        previous_gateway, previous_epoch = str(replica["authority_gateway_id"]), int(replica["authority_epoch"])
+        target_epoch, claim_seq = previous_epoch + 1, int(replica["last_seq"]) + 1
         claim = _control_event("claimed", target_epoch, {
             "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
             "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason})
@@ -272,8 +266,7 @@ def demote_room(
                  FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             raise ReplicaError("room not found in the local authoritative store")
-        current_gateway = str(row["authority_gateway_id"])
-        current_epoch = int(row["authority_epoch"])
+        current_gateway, current_epoch = str(row["authority_gateway_id"]), int(row["authority_epoch"])
         if current_gateway == observed_gateway_id and current_epoch == observed_epoch:
             return {
                 "room_id": room_id, "authority_gateway_id": current_gateway, "authority_epoch": current_epoch,

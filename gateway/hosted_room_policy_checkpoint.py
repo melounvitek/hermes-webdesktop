@@ -146,17 +146,15 @@ class HostedRoomPolicyCheckpoint:
         """Migrate bounded committed thread history from the durable room log."""
         if through_seq <= 0:
             return
-        settled_seq_by_message: dict[str, int] = {}
-        for row in conn.execute("""SELECT seq, payload_json FROM hosted_room_events
-               WHERE room_id=? AND seq<=? AND kind='turn.settled' ORDER BY seq""", (room_id, through_seq)):
-            message_event_id = _text(json.loads(row["payload_json"]), "message_event_id")
-            if message_event_id:
-                settled_seq_by_message[message_event_id] = int(row["seq"])
-        rows = conn.execute(
+        settled_seq_by_message = {
+            message_event_id: int(row["seq"])
+            for row in conn.execute("""SELECT seq, payload_json FROM hosted_room_events
+               WHERE room_id=? AND seq<=? AND kind='turn.settled' ORDER BY seq""", (room_id, through_seq))
+            if (message_event_id := _text(json.loads(row["payload_json"]), "message_event_id"))}
+        for row in conn.execute(
             f"""SELECT {_ROOM_EVENT_COLUMNS} FROM hosted_room_events
                WHERE room_id=? AND seq<=? AND kind IN ('message.user', 'message.member')
-               ORDER BY seq""", (room_id, through_seq))
-        for row in rows:
+               ORDER BY seq""", (room_id, through_seq)):
             if row["kind"] == "message.member" and row["event_id"] not in settled_seq_by_message:
                 continue
             event = _event_from_room_row(row)
@@ -178,8 +176,7 @@ class HostedRoomPolicyCheckpoint:
         rows = conn.execute(_TRANSCRIPT_EVENTS_SQL, (room_id, thread_id, room_id, thread_id, room_id)).fetchall()
         events_by_seq = {
             int(event["seq"]): event
-            for event in (
-                *(_event_from_room_row(row) for row in rows), *(json.loads(row["event_json"]) for row in active_rows))}
+            for event in (*map(_event_from_room_row, rows), *(json.loads(row["event_json"]) for row in active_rows))}
         return [events_by_seq[seq] for seq in sorted(events_by_seq)]
 
     # -- per-kind projection handlers (dispatched by _apply_event) -----------
