@@ -130,12 +130,10 @@ def _read_pyproject_version() -> str | None:
     except OSError:
         return None
     in_project = False
-    for raw in text.splitlines():
-        line = raw.strip()
+    for line in map(str.strip, text.splitlines()):
         if line.startswith("[") and line.endswith("]"):
             in_project = line == "[project]"
-            continue
-        if in_project and line.startswith("version") and "=" in line:
+        elif in_project and line.startswith("version") and "=" in line:
             return line.split("=", 1)[1].split("#", 1)[0].strip().strip("\"'") or None
     return None
 
@@ -374,8 +372,7 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
 @doctor_check()
 def _check_python_environment(should_fix: bool, f: Finding) -> None:
     """Interpreter, linked SQLite, venv, macOS TCC anchors/FDA/grants, version-file drift."""
-    v = sys.version_info
-    label = f"Python {v.major}.{v.minor}.{v.micro}"
+    v, label = sys.version_info, f"Python {'.'.join(map(str, sys.version_info[:3]))}"
     if v >= (3, 10):
         check_ok(label)
         if v < (3, 11):

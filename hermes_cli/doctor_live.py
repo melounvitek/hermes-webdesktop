@@ -106,9 +106,7 @@ def _classify_http(name: str, resp, key_hint: str) -> ProbeResult:
     code = getattr(resp, "status_code", None)
     if code is not None and 200 <= code < 300:
         return ProbeResult(name, "pass", f"(HTTP {code})")
-    if code in (401, 403):
-        return ProbeResult(name, "fail", f"(HTTP {code} — check {key_hint})")
-    return ProbeResult(name, "fail", f"(HTTP {code})")
+    return ProbeResult(name, "fail", f"(HTTP {code} — check {key_hint})" if code in (401, 403) else f"(HTTP {code})")
 
 
 def _keyed_probe(name: str, url: str, env_var: str, scheme: str, timeout: float) -> ProbeResult:
@@ -133,10 +131,9 @@ def _probe_audio(kind: str, config: dict, timeout: float) -> ProbeResult:
     provider = (((config.get(kind) or {}).get("provider")) or "").strip().lower()
     if provider in _LOCAL_AUDIO_PROVIDERS:
         return ProbeResult(name, "skip", f"(provider '{provider or 'local'}' — no remote backend to probe)")
-    entry = _AUDIO_PROBES.get(provider)
-    if entry is None:
+    if provider not in _AUDIO_PROBES:
         return ProbeResult(name, "skip", f"(provider '{provider}' — no live probe implemented)")
-    url, env_var, scheme = entry
+    url, env_var, scheme = _AUDIO_PROBES[provider]
     key = os.getenv(env_var, "").strip()
     if not key:
         return ProbeResult(name, "warn", f"(provider '{provider}' configured but {env_var} is not set)")
@@ -192,8 +189,7 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
     servers = config.get("mcp_servers") or {}
     if isinstance(servers, dict) and servers:
         for name in sorted(servers):
-            entry = servers[name]
-            def _probe(n=name, e=entry) -> ProbeResult:
+            def _probe(n=name, e=servers[name]) -> ProbeResult:
                 if not isinstance(e, dict):
                     return ProbeResult(f"MCP: {n}", "skip", "(malformed config entry)")
                 return ProbeResult(f"MCP: {n}", "pass", f"({len(_probe_mcp_server(n, e, timeout))} tool(s))")

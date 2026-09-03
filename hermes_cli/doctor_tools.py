@@ -31,9 +31,9 @@ def _run_ok(cmd: list[str], timeout: int, **kw) -> bool:
 
 
 def _termux_browser_setup_steps(node_installed: bool) -> list[str]:
-    steps = [] if node_installed else ["1) pkg install nodejs"]
-    n = len(steps) + 1
-    return steps + [f"{n}) npm install -g agent-browser", f"{n + 1}) agent-browser install"]
+    steps = [] if node_installed else ["pkg install nodejs"]
+    steps += ["npm install -g agent-browser", "agent-browser install"]
+    return [f"{i}) {step}" for i, step in enumerate(steps, 1)]
 
 
 _TERMUX_INSTALL_ALL_FALLBACK_NOTES = (
@@ -46,10 +46,9 @@ _TERMUX_INSTALL_ALL_FALLBACK_NOTES = (
 
 def _is_kanban_worker_env_gate(item: dict) -> bool:
     """Return True when Kanban is unavailable only because this is not a worker process."""
-    if item.get("name") != "kanban" or os.environ.get("HERMES_KANBAN_TASK"):
-        return False
     tools = item.get("tools") or []
-    return bool(tools) and all(str(tool).startswith("kanban_") for tool in tools)
+    return (item.get("name") == "kanban" and not os.environ.get("HERMES_KANBAN_TASK")
+            and bool(tools) and all(str(tool).startswith("kanban_") for tool in tools))
 
 
 def _doctor_tool_availability_detail(toolset: str) -> str:
@@ -119,9 +118,7 @@ def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]
     from hermes_cli.doctor import _enabled_cli_toolsets_for_doctor
     api_key_unavailable = [item for item in unavailable if item.get("missing_vars") or item.get("env_vars")]
     enabled_toolsets = _enabled_cli_toolsets_for_doctor()
-    if enabled_toolsets is None:
-        return api_key_unavailable
-    return [item for item in api_key_unavailable if str(item.get("name") or "") in enabled_toolsets]
+    return api_key_unavailable if enabled_toolsets is None else [i for i in api_key_unavailable if str(i.get("name") or "") in enabled_toolsets]
 
 
 @doctor_check()

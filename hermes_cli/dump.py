@@ -83,9 +83,7 @@ def _gateway_status() -> str:
 def _count_skills(hermes_home: Path) -> int:
     """Count installed skills."""
     skills_dir = hermes_home / "skills"
-    if not skills_dir.is_dir():
-        return 0
-    return sum(1 for item in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(item))
+    return sum(1 for item in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(item)) if skills_dir.is_dir() else 0
 
 
 def _cron_summary(hermes_home: Path) -> str:
@@ -117,8 +115,7 @@ def _get_model_and_provider(config: dict) -> tuple[str, str]:
     """Extract model and provider from config."""
     model_cfg = config.get("model", "")
     if isinstance(model_cfg, dict):
-        model = model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "(not set)"
-        return model, model_cfg.get("provider") or "(auto)"
+        return (model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "(not set)", model_cfg.get("provider") or "(auto)")
     return (model_cfg if isinstance(model_cfg, str) else "") or "(not set)", "(auto)"
 
 
