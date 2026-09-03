@@ -301,8 +301,8 @@ def _(rid, params: dict) -> dict:
     parent_session_id = _str_param(params, "parent_session_id") or None
     # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback is "No workspace".
     explicit_cwd = False
+    raw_cwd = _str_param(params, "cwd")  # unguarded, as on BASE: only the path check is best-effort
     with contextlib.suppress(Exception):
-        raw_cwd = _str_param(params, "cwd")
         explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
     _enable_gateway_prompts()
     # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.

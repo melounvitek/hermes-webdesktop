@@ -295,11 +295,14 @@ async def _tick_socket_handler(reader: asyncio.StreamReader, writer: asyncio.Str
     """Answer a liveness ping with one byte; never raises. Runs on the gateway loop, so a reply
     witnesses loop schedulability; the write is a socket-buffer copy (no fsync), immune to the
     stalls that age the heartbeat."""
-    with contextlib.suppress(Exception):
+    try:
         writer.write(b"1")
         await writer.drain()
-    with contextlib.suppress(Exception):
-        writer.close()
+    except Exception:
+        pass
+    finally:  # close even on CancelledError (BaseException), as on BASE
+        with contextlib.suppress(Exception):
+            writer.close()
 
 
 def _sweep_stale_tick_sockets(own_path: Path) -> None:

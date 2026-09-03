@@ -137,25 +137,31 @@ def _read_hub_installed_names() -> Set[str]:
     """Hub-installed names (``.hub/lock.json``) plus the frontmatter name of each in-tree ``install_path``."""
     skills_dir = _skills_dir()
     lock_path = skills_dir / ".hub" / "lock.json"
+    if not lock_path.exists():
+        return set()
+    # The whole walk sits under one handler (BASE semantics): an OSError anywhere — including the
+    # per-skill SKILL.md read — logs and yields an empty set rather than a partial one.
     try:
         # errors="replace": hub descriptions can carry Windows-1252 high bytes; a strict read raises
         # UnicodeDecodeError (a ValueError, not caught below) and would 500 the whole /api/skills endpoint.
-        data = json.loads(lock_path.read_text(encoding="utf-8", errors="replace")) if lock_path.exists() else {}
-    except (OSError, json.JSONDecodeError) as e:
-        logger.debug("Failed to read hub lock file: %s", e)
-        return set()
-    installed = (data.get("installed") or {}) if isinstance(data, dict) else None
-    if not isinstance(installed, dict):
-        return set()
-    names = {str(k) for k in installed}
-    paths = (e.get("install_path") for e in installed.values() if isinstance(e, dict))
-    for install_path in (p for p in paths if isinstance(p, str) and p.strip()):
-        with suppress(OSError, ValueError):  # ValueError: install_path escapes the skills dir
-            resolved = (skills_dir / install_path).resolve()
-            resolved.relative_to(skills_dir.resolve())
+        data = json.loads(lock_path.read_text(encoding="utf-8", errors="replace"))
+        installed = (data.get("installed") or {}) if isinstance(data, dict) else None
+        if not isinstance(installed, dict):
+            return set()
+        names = {str(k) for k in installed}
+        paths = (e.get("install_path") for e in installed.values() if isinstance(e, dict))
+        for install_path in (p for p in paths if isinstance(p, str) and p.strip()):
+            try:  # ValueError: install_path escapes the skills dir
+                resolved = (skills_dir / install_path).resolve()
+                resolved.relative_to(skills_dir.resolve())
+            except (OSError, ValueError):
+                continue
             if (resolved / "SKILL.md").exists():
                 names.add(_read_skill_name(resolved / "SKILL.md", fallback=resolved.name))
-    return names
+        return names
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug("Failed to read hub lock file: %s", e)
+    return set()
 
 
 def _prune_builtins_enabled() -> bool:
