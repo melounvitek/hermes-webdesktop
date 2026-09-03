@@ -405,8 +405,8 @@ class GatewaySlashCommandsMixin(
         source has no platform/chat to route back to."""
         source = event.source
 
-        def _field(name: str) -> str:
-            return str(getattr(source, name, "") or "")
+        def _field(name: str) -> Optional[str]:
+            return str(getattr(source, name, "") or "") or None
         platform = getattr(source, "platform", None)
         platform_str = (platform.value if hasattr(platform, "value") else str(platform or "")).lower()
         chat_id, chat_type = _field("chat_id"), _field("chat_type")
@@ -421,19 +421,15 @@ class GatewaySlashCommandsMixin(
             conn = _kb.connect(board=requested_board)
             try:
                 _kb.add_notify_sub(
-                    conn, task_id=task_id,
-                    platform=platform_str, chat_id=chat_id,
-                    chat_type=chat_type or None,
-                    thread_id=_field("thread_id") or None,
-                    user_id=_field("user_id") or None,
+                    conn, task_id=task_id, platform=platform_str, chat_id=chat_id, chat_type=chat_type,
+                    thread_id=_field("thread_id"), user_id=_field("user_id"),
                     # Also persist the stable alt id (Signal UUID, Feishu union_id): build_session_key
                     # keys the participant on ``user_id_alt or user_id``, so a replayed wake rebuilds
                     # the same session key only when the alt id survives the round-trip.
-                    user_id_alt=_field("user_id_alt") or None,
+                    user_id_alt=_field("user_id_alt"),
                     notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
                     # Subscribing from chat: deliver the passive message and wake the destination agent.
-                    delivery_mode="notify+wake",
-                    delivery_metadata=delivery_metadata,
+                    delivery_mode="notify+wake", delivery_metadata=delivery_metadata,
                 )
             finally:
                 conn.close()
@@ -565,11 +561,9 @@ class GatewaySlashCommandsMixin(
 
         def _notify_payload() -> dict:
             data = _restart_notify_payload(event)
+            mid = str(event.message_id) if event.message_id is not None else event.source.message_id
             try:
-                self._restart_command_source = dataclasses.replace(
-                    event.source,
-                    message_id=str(event.message_id) if event.message_id is not None else event.source.message_id,
-                )
+                self._restart_command_source = dataclasses.replace(event.source, message_id=mid)
             except Exception:
                 self._restart_command_source = event.source
             return data
@@ -629,8 +623,7 @@ class GatewaySlashCommandsMixin(
                          error="Relay does not authenticate this logical home target")
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
-            platform=source.platform, chat_id=str(chat_id), name=chat_name,
-            thread_id=str(thread_id) if thread_id else None,
+            platform=source.platform, chat_id=str(chat_id), name=chat_name, thread_id=thread_id,
             user_id=str(source.user_id) if getattr(source, "user_id", None) else None,
             scope_id=str(source.scope_id) if getattr(source, "scope_id", None) else None,
         )
@@ -684,9 +677,7 @@ class GatewaySlashCommandsMixin(
             label = t(f"gateway.voice.label_{mode}") if mode in ("off", "voice_only", "all") else mode
             lines = [t("gateway.voice.status_mode", label=label)]
             guild_id = self._get_guild_id(event)  # append voice channel info if connected
-            info = None
-            if guild_id and hasattr(adapter, "get_voice_channel_info"):
-                info = adapter.get_voice_channel_info(guild_id)
+            info = adapter.get_voice_channel_info(guild_id) if guild_id and hasattr(adapter, "get_voice_channel_info") else None
             if info:
                 lines += [t("gateway.voice.status_channel", channel=info['channel_name']),
                           t("gateway.voice.status_participants", count=info['member_count'])]
@@ -696,12 +687,9 @@ class GatewaySlashCommandsMixin(
             return "\n".join(lines)
 
         # Toggle: off → on, on/all → off
-        if self._voice_mode.get(voice_key, "off") == "off":
-            _set_mode("voice_only")
-            toggle_line = t("gateway.voice.enabled_short")
-        else:
-            _set_mode("off")
-            toggle_line = t("gateway.voice.disabled_short")
+        turning_on = self._voice_mode.get(voice_key, "off") == "off"
+        _set_mode("voice_only" if turning_on else "off")
+        toggle_line = t("gateway.voice.enabled_short" if turning_on else "gateway.voice.disabled_short")
         # Bare /voice still toggles, but append an explainer so users discover the on/off/tts/status
         # subcommands (and, on Discord, live voice-channel join/leave). Toggle result shows first.
         supports_voice_channels = adapter is not None and hasattr(adapter, "join_voice_channel")
@@ -1174,10 +1162,8 @@ class GatewaySlashCommandsMixin(
         for info in bundles:
             skills = info.get("skills", [])
             desc = info.get("description") or f"Load {len(skills)} skills"
-            lines.append(f"• `/{info['slug']}` — {desc} _({len(skills)} skills)_")
-            lines += [f"    · {s}" for s in skills]
-        lines += ["", "Invoke a bundle with `/<slug>` to load all its skills."]
-        return "\n".join(lines)
+            lines += [f"• `/{info['slug']}` — {desc} _({len(skills)} skills)_"] + [f"    · {s}" for s in skills]
+        return "\n".join(lines + ["", "Invoke a bundle with `/<slug>` to load all its skills."])
 
     def _blocking_approval_or_stale(self, event: MessageEvent, stale_key: str, none_key: str):
         """``(session_key, None)`` when an agent thread is blocked on approval, else the reply to send.
@@ -1208,8 +1194,7 @@ class GatewaySlashCommandsMixin(
         count = resolve_gateway_approval(session_key, choice, resolve_all="all" in args)
         if not count:
             return t("gateway.approve.no_pending")
-        plural = "plural" if count > 1 else "singular"
-        confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
+        confirmation_text = t(f"gateway.approve.{choice}_{'plural' if count > 1 else 'singular'}", count=count)
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         return await self._deliver_approval_confirmation(event, confirmation_text, "approve")
 
