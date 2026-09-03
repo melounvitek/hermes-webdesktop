@@ -838,29 +838,10 @@ class SessionSchemaMixin:
     def _run_data_migrations(self, cursor: sqlite3.Cursor, current_version: int, fts5_available: bool) -> None:
         """Version-gated chain for DATA migrations only (row backfills, version-specific
         index changes); column additions never belong here. Advances schema_version at
-        the end unless FTS work could not complete."""
+        the end unless FTS5 is unavailable."""
         # Renew the lease: the chain can rewrite whole tables on large DBs.
         report_startup_progress(600.0, phase="state_db_data_migrations")
-        fts_migrations_complete = True
-        if current_version < 10 and SCHEMA_VERSION == 10:
-            # v10: one-time trigram backfill. Only when v10 itself is the target: v11+
-            # drops and rebuilds both FTS tables, so the backfill would only burn startup
-            # time and WAL space.
-            if fts5_available:
-                _fts_trigram_exists = self._fts_table_probe(cursor, "messages_fts_trigram")
-                if _fts_trigram_exists is False:
-                    if self._ensure_fts_schema(cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL):
-                        cursor.execute(
-                            "INSERT INTO messages_fts_trigram(rowid, content) "
-                            "SELECT id, content FROM messages WHERE content IS NOT NULL"
-                        )
-                    else:
-                        fts_migrations_complete = False
-                elif _fts_trigram_exists is None:
-                    fts_migrations_complete = False
-            else:
-                fts_migrations_complete = False
-        # (v11 inline FTS re-index was superseded by v23 and removed.)
+        # (v10 trigram backfill and v11 inline FTS re-index were superseded by v23 and removed.)
         if current_version < 16:
             # v16: tag delegate subagent rows so pickers stay clean after parent deletes
             # orphan them. The shared predicate excludes user-visible reset children.
@@ -936,7 +917,7 @@ class SessionSchemaMixin:
         # Advance schema_version — deliberately NOT gated on the FTS opt-in (that would
         # block every future migration for a user who never optimizes). FTS5 unavailable
         # is the one skip: claiming current would lie.
-        if current_version < SCHEMA_VERSION and fts_migrations_complete and fts5_available:
+        if current_version < SCHEMA_VERSION and fts5_available:
             cursor.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
     def _migrate_v22_session_model_usage(self, cursor: sqlite3.Cursor) -> None:

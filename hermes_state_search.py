@@ -132,6 +132,20 @@ def _positive_int(name: str, value: Any) -> None:
         raise ValueError(f"{name} must be greater than zero")
 
 
+def _search_select_sql(snippet_sql: str, from_sql: str, where: List[str], order_by: str, limit_sql: str) -> str:
+    """Result-row SELECT shared by the FTS and LIKE routes (SQL text is pinned)."""
+    return f"""
+            SELECT m.id, m.session_id, m.role,
+                   {snippet_sql},
+                   {_SEARCH_SELECT_TAIL}
+            FROM {from_sql}
+            JOIN sessions s ON s.id = m.session_id
+            WHERE {' AND '.join(where)}
+            {order_by}
+            {limit_sql}
+        """
+
+
 def _search_filter_clauses(
     where: List[str], params: list, *, include_inactive: bool, source_filter: Optional[List[str]],
     exclude_sources: Optional[List[str]], role_filter: Optional[List[str]],
@@ -918,17 +932,10 @@ class SessionSearchMixin:
             exclude_sources=exclude_sources, role_filter=role_filter,
         )
         params.extend([limit, offset])
-        sql = f"""
-            SELECT m.id, m.session_id, m.role,
-                   snippet({table}, -1, '>>>', '<<<', '...', 40) AS snippet,
-                   {_SEARCH_SELECT_TAIL}
-            FROM {table}
-            JOIN messages m ON m.id = {table}.rowid
-            JOIN sessions s ON s.id = m.session_id
-            WHERE {' AND '.join(where)}
-            {order_by_sql}
-            LIMIT ? OFFSET ?
-        """
+        sql = _search_select_sql(
+            f"snippet({table}, -1, '>>>', '<<<', '...', 40) AS snippet",
+            f"{table}\n            JOIN messages m ON m.id = {table}.rowid", where, order_by_sql, "LIMIT ? OFFSET ?",
+        )
         return sql, params
 
     def _match_rows(
@@ -959,16 +966,7 @@ class SessionSearchMixin:
 
     def _like_rows(self, where: List[str], params: list, *, order_by: str, limit_sql: str) -> List[Dict[str, Any]]:
         """Canonical-table LIKE scan; ``params[0]`` is the snippet anchor term."""
-        sql = f"""
-            SELECT m.id, m.session_id, m.role,
-                   {_LIKE_SNIPPET_SQL},
-                   {_SEARCH_SELECT_TAIL}
-            FROM messages m
-            JOIN sessions s ON s.id = m.session_id
-            WHERE {' AND '.join(where)}
-            {order_by}
-            {limit_sql}
-        """
+        sql = _search_select_sql(_LIKE_SNIPPET_SQL, "messages m", where, order_by, limit_sql)
         return [dict(row) for row in self._read_all(sql, params)]
 
     @staticmethod
