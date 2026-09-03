@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 from utils import safe_json_loads
@@ -56,6 +56,7 @@ PROGRESS_RESET_TOOL_NAMES = frozenset({
     "send_message", "cronjob", "cronjob_manage", "todo", "todo_list", "memory", "skill_manage",
 })
 
+_BOOL_FIELDS = ("warnings_enabled", "hard_stop_enabled", "non_interactive_hard_stop_enabled")
 # Threshold field -> (nested section, nested key). The flat legacy key is the field name itself.
 _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
     "exact_failure_warn_after": ("warn_after", "exact_failure"),
@@ -105,10 +106,7 @@ class LoopCapConfig:
         """Build config from the ``tool_loop_guardrails.loop_caps`` section."""
         if not isinstance(data, Mapping):
             return cls()
-        return cls(
-            max_web_searches=_int_at_least(data.get("max_web_searches"), _DEFAULT_MAX_WEB_SEARCHES_PER_TURN, 0),
-            max_subagents=_int_at_least(data.get("max_subagents"), _DEFAULT_MAX_SUBAGENTS_PER_TURN, 0),
-        )
+        return cls(**{f.name: _int_at_least(data.get(f.name), f.default, 0) for f in fields(cls)})
 
 
 @dataclass(frozen=True)
@@ -144,12 +142,9 @@ class ToolCallGuardrailConfig:
         if not isinstance(data, Mapping):
             data = {}
         d = cls()
-        hard_stop_enabled = _as_bool(data.get("hard_stop_enabled"), d.hard_stop_enabled)
-        non_interactive = _as_bool(
-            data.get("non_interactive_hard_stop_enabled"), d.non_interactive_hard_stop_enabled,
-        )
-        if non_interactive and _is_non_interactive_platform(platform):
-            hard_stop_enabled = True
+        flags = {name: _as_bool(data.get(name), getattr(d, name)) for name in _BOOL_FIELDS}
+        if flags["non_interactive_hard_stop_enabled"] and _is_non_interactive_platform(platform):
+            flags["hard_stop_enabled"] = True
 
         thresholds: dict[str, int] = {}
         for field_name, (section_name, key) in _THRESHOLD_SOURCES.items():
@@ -159,14 +154,7 @@ class ToolCallGuardrailConfig:
             thresholds[field_name] = _int_at_least(
                 section.get(key, data.get(field_name)), getattr(d, field_name), 1,
             )
-
-        return cls(
-            warnings_enabled=_as_bool(data.get("warnings_enabled"), d.warnings_enabled),
-            hard_stop_enabled=hard_stop_enabled,
-            non_interactive_hard_stop_enabled=non_interactive,
-            loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")),
-            **thresholds,
-        )
+        return cls(loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")), **flags, **thresholds)
 
 
 @dataclass(frozen=True)
@@ -190,7 +178,7 @@ class ToolCallSignature:
 
     def to_metadata(self) -> dict[str, str]:
         """Return public metadata without raw argument values."""
-        return {"tool_name": self.tool_name, "args_hash": self.args_hash}
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -252,7 +240,6 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
     lower = result[:500].lower()
     if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
         return True, " [error]"
-
     return False, ""
 
 
