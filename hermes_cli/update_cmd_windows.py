@@ -45,9 +45,12 @@ def _write_update_planned_stop_marker(profile_path: Path, pid: int) -> bool:
     try:
         from gateway.status import _get_process_start_time
         from utils import atomic_json_write
-        record = {"target_pid": pid, "target_start_time": _get_process_start_time(pid),
-                  "stopper_pid": os.getpid(), "written_at": datetime.now(timezone.utc).isoformat()}
-        atomic_json_write(Path(profile_path) / ".gateway-planned-stop.json", record, indent=None, separators=(",", ":"))
+        atomic_json_write(
+            Path(profile_path) / ".gateway-planned-stop.json",
+            {"target_pid": pid, "target_start_time": _get_process_start_time(pid), "stopper_pid": os.getpid(),
+             "written_at": datetime.now(timezone.utc).isoformat()},
+            indent=None, separators=(",", ":"),
+        )
         return True
     except (OSError, PermissionError):
         return False
@@ -160,26 +163,28 @@ def _detect_venv_python_processes(*, exclude_pids: set[int] | None = None) -> li
         except (OSError, ValueError):
             exe_norm = str(exe).lower()
         # Primary match: exe lives under this venv (desktop backend / gateway case).
-        is_holder = exe_norm.startswith(venv_prefix)
+        in_venv = exe_norm.startswith(venv_prefix)
         name = str(info.get("name") or Path(exe).name)
         name_low = name.lower()
-        if not is_holder and not (name_low.startswith(("python", "pypy")) or name_low in {"uv.exe", "uvx.exe", "hermes.exe"}):
+        if not (in_venv or name_low.startswith(("python", "pypy")) or name_low in {"uv.exe", "uvx.exe", "hermes.exe"}):
             continue
         cmdline_raw = _cmdline_or_empty(proc)
         cmdline_low = cmdline_raw.lower()
         # Fallback: uv/base-interpreter trampolines have an exe OUTSIDE the venv yet hold
         # its .pyd files — match cmdline (venv path, or `-m hermes_cli.main` + root/cwd).
-        if not is_holder:
-            is_holder = venv_prefix in cmdline_low
-        if not is_holder and "hermes_cli.main" in cmdline_low:
-            try:
-                cwd_low = str(proc.cwd() or "").lower().rstrip(os.sep) + os.sep
-            except Exception:
-                cwd_low = os.sep
-            is_holder = root_prefix in cmdline_low or cwd_low.startswith(root_prefix)
-        if is_holder:
+        if in_venv or venv_prefix in cmdline_low or (
+            "hermes_cli.main" in cmdline_low and (root_prefix in cmdline_low or _cwd_prefix(proc).startswith(root_prefix))
+        ):
             matches.append((int(pid), name, cmdline_raw))
     return matches
+
+
+def _cwd_prefix(proc) -> str:
+    """Lower-cased cwd of *proc* with one trailing separator; bare ``os.sep`` when unreadable."""
+    try:
+        return str(proc.cwd() or "").lower().rstrip(os.sep) + os.sep
+    except Exception:
+        return os.sep
 
 
 _HOLDER_VALUE_FLAGS_FALLBACK = frozenset({
@@ -222,9 +227,8 @@ def _hermes_holder_subcommand(cmdline: str) -> str | None:
 
     def _is_entry(i: int, token: str) -> bool:
         low = token.lower().strip('"')
-        if low.endswith("hermes_cli.main") and i > 0 and tokens[i - 1] == "-m":
-            return True
-        return low.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] in ("hermes", "hermes.exe")
+        return (low.endswith("hermes_cli.main") and i > 0 and tokens[i - 1] == "-m") or (
+            low.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] in ("hermes", "hermes.exe"))
 
     entry_idx = next((i for i, token in enumerate(tokens) if _is_entry(i, token)), None)
     if entry_idx is None:
@@ -463,10 +467,8 @@ def _orphaned_desktop_backend_pids(matches: list[tuple[int, str, str]]) -> list[
     # (dies with the tree reap); anything else keeps the refusal.
     root_set = {pid for pid, _start_time in roots}
     for pid in remaining:
-        if not root_set:
-            return None
         try:
-            if not root_set & {int(a.pid) for a in psutil.Process(pid).parents()}:
+            if not root_set or not root_set & {int(a.pid) for a in psutil.Process(pid).parents()}:
                 return None
         except psutil.NoSuchProcess:
             continue  # exited already
@@ -621,8 +623,7 @@ def _verify_service_identities(psutil, name: str, service, expected_service_iden
     """Refuse to stop *name* unless SCM state, service/gateway process identities and ancestry all still match."""
     if expected_service_identity is not None:
         try:
-            current_status = str(service.status())
-            current_service_pid = int(service.pid() or 0)
+            current_status, current_service_pid = str(service.status()), int(service.pid() or 0)
         except Exception as exc:
             raise RuntimeError(f"Windows service {name} SCM identity is unavailable before stop") from exc
         if current_status != "running":
@@ -642,11 +643,8 @@ def _verify_service_identities(psutil, name: str, service, expected_service_iden
 
 
 def _stop_windows_gateway_service(
-    name: str, *,
-    expected_processes: tuple[tuple[int, float], ...] = (),
-    expected_service_identity: tuple[int, float] | None = None,
-    expected_gateway_identity: tuple[int, float] | None = None,
-    timeout: float = 30.0,
+    name: str, *, expected_processes: tuple[tuple[int, float], ...] = (), expected_service_identity: tuple[int, float] | None = None,
+    expected_gateway_identity: tuple[int, float] | None = None, timeout: float = 30.0,
 ) -> None:
     """Stop one verified Windows service and wait until SCM reports it down.
 
@@ -658,11 +656,12 @@ def _stop_windows_gateway_service(
     def _alive() -> list[int]:
         return [pid for pid, create_time in expected_processes if _original_process_is_alive(psutil, pid, create_time)]
 
-    if not _poll_until(lambda: service.status() == "stopped" and not _alive(), timeout):
-        if service.status() != "stopped":
-            raise RuntimeError(f"Windows service {name} did not stop within {timeout:.0f}s; venv mutation unsafe.")
-        if alive_after_stop := _alive():
-            raise RuntimeError(f"Windows service {name} stopped but its process tree is still alive: {alive_after_stop}")
+    if _poll_until(lambda: service.status() == "stopped" and not _alive(), timeout):
+        return
+    if service.status() != "stopped":
+        raise RuntimeError(f"Windows service {name} did not stop within {timeout:.0f}s; venv mutation unsafe.")
+    if alive_after_stop := _alive():
+        raise RuntimeError(f"Windows service {name} stopped but its process tree is still alive: {alive_after_stop}")
 
 
 def _start_windows_gateway_service(name: str, *, timeout: float = 30.0) -> None:
@@ -719,8 +718,7 @@ def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dic
         for service in service_gateways:
             current_service_name = str(service.name)
             _stop_windows_gateway_service(
-                current_service_name,
-                expected_processes=tuple(getattr(service, "descendant_identities", ())),
+                current_service_name, expected_processes=tuple(getattr(service, "descendant_identities", ())),
                 expected_service_identity=(int(service.service_pid), float(service.service_create_time)),
                 expected_gateway_identity=(int(service.gateway_pid), float(service.gateway_create_time)),
             )
@@ -1077,12 +1075,9 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
     with suppress(Exception):
         from hermes_cli.update_receipt import record_gateway_restart
         record_gateway_restart(
-            restarted_services=outcome.restarted_services,
-            relaunched_profiles=outcome.relaunched_profiles,
-            externally_supervised_profiles=outcome.externally_supervised_profiles,
-            killed_pids=sorted(outcome.killed_pids),
-            failed_units=outcome.failed_or_stale_units,
-            incomplete=outcome.incomplete or bool(outcome.failed_or_stale_units),
+            restarted_services=outcome.restarted_services, relaunched_profiles=outcome.relaunched_profiles,
+            externally_supervised_profiles=outcome.externally_supervised_profiles, killed_pids=sorted(outcome.killed_pids),
+            failed_units=outcome.failed_or_stale_units, incomplete=outcome.incomplete or bool(outcome.failed_or_stale_units),
             phase_error="; ".join(outcome.phase_errors) or None,
         )
 
