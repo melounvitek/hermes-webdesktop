@@ -37,8 +37,7 @@ def _model_options() -> list[dict[str, Any]]:
         canonical_order=True,
         pricing=True,
         capabilities=True,
-        max_models=200,
-    )
+        max_models=200)
     providers = payload.get("providers") or []
     return [p for p in providers if p.get("slug") and str(p.get("slug")).strip().lower() != "moa" and p.get("models")]
 
@@ -142,8 +141,7 @@ _SUBCOMMANDS = {
     "ls": _cmd_list,
     "config": _cmd_configure,
     "configure": _cmd_configure,
-    "delete": _cmd_delete,
-}
+    "delete": _cmd_delete}
 
 
 def cmd_moa(args) -> None:

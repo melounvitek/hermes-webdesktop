@@ -13,13 +13,10 @@ DEFAULT_MOA_PRESET_NAME = "default"
 
 DEFAULT_MOA_REFERENCE_MODELS: list[dict[str, str]] = [
     {"provider": "openai-codex", "model": "gpt-5.5"},
-    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"},
-]
+    {"provider": "openrouter", "model": "deepseek/deepseek-v4-pro"}]
 
 DEFAULT_MOA_AGGREGATOR: dict[str, str] = {
-    "provider": "openrouter",
-    "model": "anthropic/claude-opus-4.8",
-}
+    "provider": "openrouter", "model": "anthropic/claude-opus-4.8"}
 
 DEFAULT_MOA_REFERENCE_TIMEOUT: float | None = None
 
@@ -61,19 +58,17 @@ def _coerce_reference_timeout(value: Any) -> float | None:
 
 
 def _coerce_fanout(value: Any) -> str:
-    """Normalize the fan-out cadence; unknown values fall back to default.
+    """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2).
 
-    Canonical values are ``per_iteration``, ``user_turn``, and ``every_n:<N>`` (N >= 2); the
-    mapping form ``{mode: every_n, n: N}`` from hand-edited YAML is normalized to the string so the
-    rest of the pipeline sees one shape. ``every_n:1`` collapses to ``per_iteration``; anything
-    unparseable falls back to ``user_turn`` (the cheapest cadence).
+    The mapping form ``{mode: every_n, n: N}`` from hand-edited YAML is normalized to the string;
+    ``every_n:1`` collapses to ``per_iteration``; anything unparseable falls back to ``user_turn``
+    (the cheapest cadence).
     """
     def _every_n(n: int) -> str:
         return f"every_n:{n}" if n >= 2 else ("per_iteration" if n == 1 else "user_turn")
 
     if isinstance(value, dict):
-        # Mapping form: {mode: every_n, n: 3}. Non-every_n mapping modes fall
-        # through to the string path below (e.g. {mode: user_turn}).
+        # Non-every_n mapping modes fall through to the string path (e.g. {mode: user_turn}).
         mode = str(value.get("mode") or "").strip().lower()
         if mode == "every_n":
             return _every_n(_coerce_number(value.get("n"), int, 0))
@@ -88,12 +83,11 @@ def _coerce_fanout(value: Any) -> str:
 
 
 def coerce_privacy_filter(value: Any) -> str:
-    """Normalize ``moa.privacy_filter`` to '' (off), 'display', or 'full'.
+    """Normalize ``moa.privacy_filter`` to '' (off, the default), 'display', or 'full'.
 
-    - ``''`` (empty string): filter off — the default. ``false``/``None``/ unknown values land here
-    so a hand-edited config degrades to prior behavior (tolerant-read contract). - ``'display'``:
-    redact user-visible surfaces only — the reference blocks shown in the UI and the saved MoA trace
-    records.
+    ``false``/``None``/unknown values land on '' so a hand-edited config degrades to prior
+    behavior. 'display' redacts user-visible surfaces only (reference blocks in the UI and saved
+    MoA trace records).
     """
     if value is True:
         return "full"
@@ -104,7 +98,7 @@ def coerce_privacy_filter(value: Any) -> str:
 
 
 def _clean_reasoning_effort(value: Any) -> str | None:
-    """Return a canonical per-slot reasoning effort, or None when unset/invalid."""
+    """Canonical per-slot reasoning effort, or None when unset/invalid."""
     from hermes_constants import parse_reasoning_effort
 
     parsed = None if value is None or value is True else parse_reasoning_effort(value)
@@ -125,11 +119,10 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
 
 
 def _slot_problem(slot: Any) -> str | None:
-    """Return a human-readable problem for a slot ``_clean_slot`` would drop.
+    """Human-readable problem for a slot ``_clean_slot`` would drop; None when complete and valid.
 
-    None means the slot is complete and valid. Mirrors ``_clean_slot`` exactly so the write-boundary
-    validator (``validate_moa_payload``) and the tolerant runtime normalizer can never disagree
-    about what is acceptable.
+    Mirrors ``_clean_slot`` exactly so the write-boundary validator (``validate_moa_payload``) and
+    the tolerant runtime normalizer can never disagree about what is acceptable.
     """
     if not isinstance(slot, dict):
         return "must be an object with 'provider' and 'model'"
@@ -141,29 +134,23 @@ def _slot_problem(slot: Any) -> str | None:
         return "provider is required"
     if not model:
         return f"model is required (provider '{provider}' has no model selected)"
-    # MoA is a virtual provider whose presets are themselves MoA runs. Allowing
-    # one as a reference or aggregator slot would create a recursive MoA tree
-    # (the runtime guards in moa_loop.py skip references / raise on aggregators,
-    # but that surfaces only mid-turn). Reject it here so it can never be saved.
+    # MoA is a virtual provider whose presets are themselves MoA runs; allowing one as a slot
+    # would create a recursive MoA tree that the runtime guards only catch mid-turn.
     if provider.lower() == "moa":
         return "the Mixture of Agents provider cannot be used inside a preset (recursive MoA)"
     return None
 
 
 def _clean_slot(slot: Any, *, include_enabled: bool = False) -> dict[str, Any] | None:
-    # Any slot ``_slot_problem`` rejects (non-dict, missing provider/model, recursive
-    # ``moa`` provider) is dropped, falling back to the preset's defaults.
+    # Any slot ``_slot_problem`` rejects is dropped, falling back to the preset's defaults.
     if _slot_problem(slot) is not None:
         return None
     clean: dict[str, Any] = {"provider": str(slot["provider"]).strip(), "model": str(slot["model"]).strip()}
     effort = _clean_reasoning_effort(slot.get("reasoning_effort"))
     if effort:
         clean["reasoning_effort"] = effort
-    # Optional per-slot max_tokens: overrides the preset-level
-    # reference_max_tokens for this specific reference model. None (the
-    # default) = no cap, so existing slots are unaffected. Allows tuning
-    # each advisor's output length independently — useful when one model
-    # is verbose and another is terse.
+    # Optional per-slot max_tokens overrides the preset-level reference_max_tokens for this
+    # advisor; None (default) = no cap.
     slot_mt = _coerce_number(slot.get("max_tokens"), int, positive=True)
     if slot_mt is not None:
         clean["max_tokens"] = slot_mt
@@ -172,6 +159,18 @@ def _clean_slot(slot: Any, *, include_enabled: bool = False) -> dict[str, Any] |
     return clean
 
 
+def _reference_slots(raw_refs: Any) -> list:
+    """``reference_models`` as a list: a JSON string (hand-edited config.yaml) is decoded, a single
+    mapping is wrapped, and any other scalar / bad type degrades to ``[]`` instead of crashing."""
+    if isinstance(raw_refs, str):
+        try:
+            raw_refs = json.loads(raw_refs)
+        except (json.JSONDecodeError, ValueError):
+            raw_refs = []
+    if not isinstance(raw_refs, list):
+        raw_refs = [raw_refs] if isinstance(raw_refs, dict) else []
+    return raw_refs
+
 
 def validate_moa_payload(raw: Any) -> list[str]:
     """Return the problems ``normalize_moa_config`` would silently paper over.
@@ -179,9 +178,7 @@ def validate_moa_payload(raw: Any) -> list[str]:
     ``normalize_moa_config`` is deliberately tolerant: at *read* time a hand-edited config must
     degrade to defaults rather than crash the agent. That same tolerance at *write* time is a
     corruption engine — a client that sends a half-filled slot gets its whole preset silently
-    replaced with the hardcoded defaults (#64156).
-
-    Returns a list of human-readable problems; empty means safe to save.
+    replaced with the hardcoded defaults. Empty list means safe to save.
     """
     if not isinstance(raw, dict):
         return ["MoA config must be an object"]
@@ -216,19 +213,8 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
 
-    raw_refs = raw.get("reference_models")
-    # reference_models may be a JSON string (hand-edited config.yaml) or a list.
-    if isinstance(raw_refs, str):
-        try:
-            raw_refs = json.loads(raw_refs)
-        except (json.JSONDecodeError, ValueError):
-            raw_refs = []
-    if not isinstance(raw_refs, list):
-        # A hand-edited scalar / single mapping (or a bad type) must degrade to
-        # defaults instead of crashing the iteration, mirroring the tolerance
-        # for the scalar fields below (reference_temperature / max_tokens).
-        raw_refs = [raw_refs] if isinstance(raw_refs, dict) else []
-    refs = [item for item in (_clean_slot(item, include_enabled=True) for item in raw_refs) if item is not None]
+    refs = [item for item in (_clean_slot(item, include_enabled=True) for item in _reference_slots(raw.get("reference_models"))) if item is not None]
+    policy = str(raw.get("degraded_reference_policy") or "loud").strip().lower()
 
     return {
         "enabled": _coerce_bool(raw.get("enabled"), True),
@@ -239,38 +225,25 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         "aggregator_temperature": _coerce_number(raw.get("aggregator_temperature"), float),
         "reference_timeout": _coerce_reference_timeout(raw.get("reference_timeout")),
         # Failed-advisor disclosure policy; unknown values fail loud.
-        "degraded_reference_policy": policy if (policy := str(raw.get("degraded_reference_policy") or "loud").strip().lower()) in {"loud", "silent"} else "loud",
+        "degraded_reference_policy": policy if policy in {"loud", "silent"} else "loud",
         "max_tokens": _coerce_number(raw.get("max_tokens"), int, 4096),
-        # Optional cap on how much each reference ADVISOR may generate per turn.
-        # None (default) = uncapped: advisors write full-length advice, matching
-        # prior behavior so existing presets are unchanged. Set a value (e.g.
-        # 600) to make advisors give concise advice — the dominant MoA latency
-        # is advisor generation (turn latency correlates ~0.88 with output
-        # tokens), and the aggregator only needs the gist of each advisor's
-        # judgement, so capping roughly halves per-turn wall time. Does NOT cap
-        # the acting aggregator (its output is the user-visible answer).
+        # Cap on each reference ADVISOR's output per turn. None (default) = uncapped. Advisor
+        # generation dominates MoA latency (~0.88 correlation with output tokens) and the
+        # aggregator only needs the gist, so e.g. 600 roughly halves wall time. Never caps the
+        # acting aggregator (its output is the user-visible answer).
         "reference_max_tokens": _coerce_number(raw.get("reference_max_tokens"), int, positive=True),
-        # When the reference fan-out runs. "user_turn" (default) runs the
-        # advisors ONCE per user turn (the original MoA shape, and the
-        # cheapest cadence — #67199): the aggregator gets their upfront
-        # plan-level advice, then acts alone for the rest of the tool loop.
-        # "per_iteration" re-runs the advisors whenever the advisory view
-        # changes — i.e. every tool iteration, so advice tracks live task
-        # state at the cost of multiplying advisor spend by tool-loop depth.
-        # "every_n:<N>" (N >= 2) is the middle ground: advisors run on the
-        # first iteration of each user turn and every Nth tool iteration
-        # after it; in-between iterations reuse the cached guidance from the
-        # last advisor run. Also accepts the mapping form
-        # {mode: every_n, n: N}, normalized to the canonical string.
-        "fanout": _coerce_fanout(raw.get("fanout")),
-    }
+        # When the reference fan-out runs: "user_turn" (default, cheapest) runs advisors ONCE per
+        # user turn, then the aggregator acts alone; "per_iteration" re-runs them every tool
+        # iteration (advice tracks live state, spend multiplied by loop depth); "every_n:<N>"
+        # runs on the first iteration of each turn and every Nth after, reusing cached guidance
+        # in between.
+        "fanout": _coerce_fanout(raw.get("fanout"))}
 
 
 _FLAT_PRESET_KEYS = (
     "reference_models", "aggregator", "reference_temperature", "aggregator_temperature",
     "reference_timeout", "degraded_reference_policy", "max_tokens", "reference_max_tokens",
-    "fanout", "enabled",
-)
+    "fanout", "enabled")
 
 
 def normalize_moa_config(raw: Any) -> dict[str, Any]:
@@ -302,11 +275,8 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
         "presets": presets,
         # Compatibility/flattened view for existing dashboard/desktop callers.
         **{key: deepcopy(presets[default_name][key]) for key in _FLAT_PRESET_KEYS},
-        # MoA-level (not per-preset) toggles ride at the top level alongside
-        # save_traces. privacy_filter: '' (off, default) | 'display' | 'full'
-        # — see coerce_privacy_filter for the semantics of each mode.
-        "privacy_filter": coerce_privacy_filter(raw.get("privacy_filter")),
-    }
+        # MoA-level (not per-preset) toggle; see coerce_privacy_filter for the modes.
+        "privacy_filter": coerce_privacy_filter(raw.get("privacy_filter"))}
 
 
 def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
@@ -319,17 +289,16 @@ def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
         available = ", ".join(cfg["presets"]) or "(none)"
         raise MoAPresetNotFoundError(
             f"MoA preset '{preset_name}' was not found. Available presets: "
-            f"{available}. Run `hermes moa list`."
-        )
+            f"{available}. Run `hermes moa list`.")
     return deepcopy(preset)
 
 
 def exact_moa_preset_name(config: Any, text: str) -> str | None:
     """Return the preset name iff ``text`` exactly matches an *enabled* preset.
 
-    Used by the no-explicit-provider switch path to recognize a bare ``/model <preset>``. Because
-    the match is implicit it honors the per-preset ``enabled`` opt-out: a plain model switch that
-    collides with a disabled preset's name must not silently pivot onto the MoA provider. Explicit
+    Used by the no-explicit-provider switch path for a bare ``/model <preset>``. Because the match
+    is implicit it honors the per-preset ``enabled`` opt-out: a plain model switch that collides
+    with a disabled preset's name must not silently pivot onto the MoA provider. Explicit
     ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable.
     """
     wanted = str(text or "").strip()
