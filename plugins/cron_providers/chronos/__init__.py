@@ -68,7 +68,7 @@ class ChronosCronScheduler(CronScheduler):
             logger.warning("Chronos start() reconcile failed: %s", e)
 
     def stop(self) -> None:
-        return None
+        pass
 
     def on_jobs_changed(self) -> None:
         try:

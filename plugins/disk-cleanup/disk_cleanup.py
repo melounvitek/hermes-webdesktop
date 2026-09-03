@@ -285,8 +285,7 @@ def _sweep_empty_dirs(hermes_home: Path) -> int:
     Iterative post-order so parents emptied by child removal are caught."""
     removed = 0
     stack: List[Tuple[Path, bool]] = [
-        (top, False) for top in _subdirs(hermes_home, _EMPTY_DIR_PROTECTED_TOP_LEVEL | _EMPTY_DIR_SWEEP_PRUNE_DIRS)
-    ]
+        (top, False) for top in _subdirs(hermes_home, _EMPTY_DIR_PROTECTED_TOP_LEVEL | _EMPTY_DIR_SWEEP_PRUNE_DIRS)]
     while stack:
         dirpath, visited = stack.pop()
         if visited:
