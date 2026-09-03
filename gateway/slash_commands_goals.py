@@ -19,6 +19,14 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'s' if n != 1 else ''}"
 
 
+def _mgr_call(prefix: str, fn, *args, errors=(RuntimeError, ValueError)):
+    """``(result, None)`` from ``fn(*args)``, or ``(None, "<prefix>: <exc>")`` on a manager error."""
+    try:
+        return fn(*args), None
+    except errors as exc:
+        return None, f"{prefix}: {exc}"
+
+
 class GatewayGoalCommandsMixin:
     """Autonomy-loop gateway commands: /goal, /subgoal, /heartbeat, /loop, /refine, /review."""
 
@@ -113,10 +121,9 @@ class GatewayGoalCommandsMixin:
         except ValueError:
             return "/goal wait: <pid> must be an integer process id."
         reason = wtokens[1].strip() if len(wtokens) > 1 else ""
-        try:
-            mgr.wait_on(pid, reason=reason)
-        except (RuntimeError, ValueError) as exc:
-            return f"/goal wait: {exc}"
+        _, err = _mgr_call("/goal wait", lambda: mgr.wait_on(pid, reason=reason))
+        if err:
+            return err
         rtxt = f" ({reason})" if reason else ""
         return f"⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits."
 
@@ -139,27 +146,23 @@ class GatewayGoalCommandsMixin:
                     "gateway admin (allow_admin_from for DMs, "
                     "group_allow_admin_from for groups)."
                 )
-            try:
-                gate = mgr.add_gate(gate_arg[len("add"):].strip())
-            except (RuntimeError, ValueError) as exc:
-                return f"/goal gate add: {exc}"
+            gate, err = _mgr_call("/goal gate add", mgr.add_gate, gate_arg[len("add"):].strip())
+            if err:
+                return err
             return (
                 f"⚿ Gate added: $ {gate.command} "
                 f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
                 f"It must pass before the goal can complete."
             )
         if gate_lower.startswith(("remove ", "rm ")):
-            try:
-                removed = mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip()))
-            except (RuntimeError, ValueError, IndexError) as exc:
-                return f"/goal gate remove: {exc}"
-            return f"✓ Gate removed: $ {removed}"
+            removed, err = _mgr_call(
+                "/goal gate remove", lambda: mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip())),
+                errors=(RuntimeError, ValueError, IndexError),
+            )
+            return err or f"✓ Gate removed: $ {removed}"
         if gate_lower == "clear":
-            try:
-                prev = mgr.clear_gates()
-            except RuntimeError as exc:
-                return f"/goal gate clear: {exc}"
-            return f"✓ Cleared {_plural(prev, 'gate')}."
+            prev, err = _mgr_call("/goal gate clear", mgr.clear_gates, errors=(RuntimeError,))
+            return err or f"✓ Cleared {_plural(prev, 'gate')}."
         return "Usage: /goal gate [list | add <command> | remove <N> | clear]"
 
     async def _goal_set(self, mgr, args: str, lower: str, event: MessageEvent) -> str:
@@ -376,23 +379,18 @@ class GatewayGoalCommandsMixin:
                 idx = int(rest.split()[0])
             except ValueError:
                 return "/subgoal remove: <n> must be an integer (1-based index)."
-            try:
-                removed = mgr.remove_subgoal(idx)
-            except (IndexError, RuntimeError) as exc:
-                return f"/subgoal remove: {exc}"
-            return f"✓ Removed subgoal {idx}: {removed}"
+            removed, err = _mgr_call("/subgoal remove", mgr.remove_subgoal, idx, errors=(IndexError, RuntimeError))
+            return err or f"✓ Removed subgoal {idx}: {removed}"
 
         if verb == "clear":
-            try:
-                prev = mgr.clear_subgoals()
-            except RuntimeError as exc:
-                return f"/subgoal clear: {exc}"
+            prev, err = _mgr_call("/subgoal clear", mgr.clear_subgoals, errors=(RuntimeError,))
+            if err:
+                return err
             return f"✓ Cleared {_plural(prev, 'subgoal')}." if prev else "No subgoals to clear."
 
-        try:
-            text = mgr.add_subgoal(args)
-        except (ValueError, RuntimeError) as exc:
-            return f"/subgoal: {exc}"
+        text, err = _mgr_call("/subgoal", mgr.add_subgoal, args)
+        if err:
+            return err
         idx = len(mgr.state.subgoals) if mgr.state else 0
         return f"✓ Added subgoal {idx}: {text}"
 
