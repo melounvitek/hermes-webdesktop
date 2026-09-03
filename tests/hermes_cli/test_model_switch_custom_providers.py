@@ -1577,7 +1577,7 @@ def test_model_flow_named_custom_persists_discovered_models(monkeypatch):
         ),
     )
 
-    from hermes_cli.model_setup_flows import _model_flow_named_custom
+    from hermes_cli.model_setup_flows_custom import _model_flow_named_custom
 
     _model_flow_named_custom(
         {},

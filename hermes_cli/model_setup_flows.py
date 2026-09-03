@@ -1,9 +1,9 @@
 """Per-provider model-selection wizard flows for ``hermes setup`` / ``hermes model``.
 
-main.py re-imports every ``_model_flow_*`` (tests patch ``hermes_cli.main._model_flow_*``). main /
-config / auth / models helpers are imported lazily inside bodies: avoids the main.py import cycle
-and lets tests patch ``hermes_cli.config.load_config`` etc. at call time. The shared skeleton is
-:mod:`hermes_cli.model_setup_flows_common`, re-exported here.
+main / config / auth / models helpers are imported lazily inside bodies: avoids the main.py import
+cycle and lets tests patch ``hermes_cli.config.load_config`` etc. at call time. The shared skeleton
+lives in :mod:`hermes_cli.model_setup_flows_common`; the custom / Azure / Bedrock flows live in their
+own ``model_setup_flows_*`` modules.
 """
 
 from __future__ import annotations
@@ -13,17 +13,15 @@ import argparse
 import os
 
 from hermes_cli.config import clear_model_endpoint_credentials
-from hermes_cli.model_setup_flows_common import (  # noqa: F401
-    _HTTP, _activate_provider_model, _ask, _begin_model_config, _commit_model_config, _curses_choice,
-    _ensure_dict_section, _ensure_flow_api_key, _existing_api_key_for_model_flow, _finish_model,
+from hermes_cli.model_setup_flows_common import (
+    _HTTP, _activate_provider_model, _ask, _commit_model_config, _curses_choice,
+    _ensure_dict_section, _ensure_flow_api_key, _finish_model,
     _load_config_model_section, _models_dev_merged, _oauth_gate, _persist_model, _pick_model_or_prompt,
-    _print_numbered, _prompt_auth_credentials_choice, _prune_replaced_custom_model_config_credentials,
+    _print_numbered, _prompt_auth_credentials_choice,
     _run_login, _say, _show_curated)
-from hermes_cli.model_setup_flows_custom import _model_flow_custom, _model_flow_named_custom  # noqa: F401
-from hermes_cli.model_setup_flows_azure import _model_flow_azure_foundry  # noqa: F401
-from hermes_cli.model_setup_flows_bedrock import (  # noqa: F401
-    BEDROCK_GEO_PREFIXES, bedrock_region_geo_prefix, bedrock_model_routable_from_region,
-    _model_flow_bedrock_api_key, _model_flow_bedrock)
+from hermes_cli.model_setup_flows_custom import _model_flow_custom, _model_flow_named_custom
+from hermes_cli.model_setup_flows_azure import _model_flow_azure_foundry
+from hermes_cli.model_setup_flows_bedrock import _model_flow_bedrock
 
 
 def _env_base_url(base_url_env: str) -> str:
@@ -64,7 +62,8 @@ def _model_flow_openrouter(config, current_model=""):
     if abort:
         return
 
-    from hermes_cli.models import model_ids, get_pricing_for_provider
+    from hermes_cli.models import model_ids
+    from hermes_cli.models_pricing import get_pricing_for_provider
     openrouter_models = model_ids(force_refresh=True)
     # Live pricing is non-blocking — empty dict on failure.
     pricing = get_pricing_for_provider("openrouter", force_refresh=True)
@@ -90,7 +89,8 @@ def _model_flow_ai_gateway(config, current_model=""):
     if abort:
         return
 
-    from hermes_cli.models import ai_gateway_model_ids, get_pricing_for_provider
+    from hermes_cli.models import ai_gateway_model_ids
+    from hermes_cli.models_pricing import get_pricing_for_provider
     models_list = ai_gateway_model_ids(force_refresh=True)
     pricing = get_pricing_for_provider("ai-gateway", force_refresh=True)
     selected = _prompt_model_selection(models_list, current_model=current_model, pricing=pricing)
@@ -168,9 +168,12 @@ def _nous_login_args(args) -> argparse.Namespace:
 def _nous_model_catalog(free_tier: bool, portal_url: str, model_ids: list, pricing: dict):
     """Free/paid-tier catalog for the Nous picker: ``(model_ids, pricing, unavailable_models,
     unavailable_message, policy_narrowed)`` or None (message already printed) when nothing is selectable."""
+    from hermes_cli.models_pricing import nous_policy_allowed_ids, restrict_to_nous_policy
     from hermes_cli.models import (
-        nous_policy_allowed_ids, partition_nous_models_by_tier, restrict_to_nous_policy,
-        union_with_portal_free_recommendations, union_with_portal_paid_recommendations)
+        partition_nous_models_by_tier,
+        union_with_portal_free_recommendations,
+        union_with_portal_paid_recommendations,
+    )
 
     # Free users: union with the Portal's freeRecommendedModels (newly launched free models appear
     # before the curated list catches up), then partition selectable/unavailable by Portal pricing.
@@ -283,7 +286,8 @@ def _model_flow_nous(config, current_model="", args=None):
 
     # Already logged in — the curated list (agentic models users know from OpenRouter)
     # instead of the hundreds returned by the live /models endpoint.
-    from hermes_cli.models import check_nous_free_tier, get_curated_nous_model_ids, get_pricing_for_provider
+    from hermes_cli.models import check_nous_free_tier, get_curated_nous_model_ids
+    from hermes_cli.models_pricing import get_pricing_for_provider
     model_ids = get_curated_nous_model_ids()
     if not model_ids:
         print("No curated models available for Nous Portal.")
@@ -814,7 +818,7 @@ def _gemini_tier_ok(existing_key: str, pconfig, base_url_env: str) -> bool:
 def _lmstudio_models(pconfig, curated, api_key, base_url):
     """LM Studio: live /api/v1/models probe only."""
     from hermes_cli.auth import AuthError
-    from hermes_cli.models import fetch_lmstudio_models
+    from hermes_cli.models_local import fetch_lmstudio_models
     try:
         model_list = fetch_lmstudio_models(api_key=api_key, base_url=base_url)
     except AuthError as exc:
@@ -948,7 +952,7 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     pricing: dict = {}
     if model_list:
         try:
-            from hermes_cli.models import get_pricing_for_provider
+            from hermes_cli.models_pricing import get_pricing_for_provider
             pricing = get_pricing_for_provider(provider_id) or {}
         except Exception:
             pricing = {}
