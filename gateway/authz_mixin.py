@@ -22,6 +22,7 @@ from gateway.whatsapp_identity import (
 )
 
 _GROUP_CHAT_TYPES = frozenset({"group", "forum", "channel"})
+_GROUP_FORUM_TYPES = frozenset({"group", "forum"})
 _TRUTHY = frozenset({"true", "1", "yes"})
 
 # Platform -> ``<PLATFORM>_ALLOWED_USERS`` / ``<PLATFORM>_ALLOW_ALL_USERS``.
@@ -70,6 +71,10 @@ def _platform_gate_env(name: str, default: str = "") -> str:
 _auth_env = _platform_gate_env
 
 
+def _env_truthy(name: str) -> bool:
+    return _auth_env(name).lower() in _TRUTHY
+
+
 def _registry_entry(platform):
     """Platform-registry entry for a (plugin) platform, or None."""
     if platform is None:
@@ -80,18 +85,6 @@ def _registry_entry(platform):
         return platform_registry.get(platform.value)
     except Exception:
         return None
-
-
-def _platform_declares_allowed_users_env(platform) -> bool:
-    """Whether a plugin platform's registry entry declares ``allowed_users_env``.
-
-    Such platforms (Buzz, DingTalk, ...) document ``PlatformConfig.extra
-    .allowed_users`` as the config-file spelling of that env allowlist, so the
-    live adapter's extra is a valid authorization source when the env var is
-    absent. Built-in platforms and unknown entries return False.
-    """
-    entry = _registry_entry(platform)
-    return bool(entry and entry.allowed_users_env)
 
 
 def _coerce_allow_set(raw) -> set[str]:
@@ -105,6 +98,10 @@ def _coerce_allow_set(raw) -> set[str]:
 
 def _allows(allowed: set[str], candidate: Optional[str]) -> bool:
     return "*" in allowed or candidate in allowed
+
+
+def _adapter_config_extra(adapter) -> dict:
+    return getattr(getattr(adapter, "config", None), "extra", None) or {}
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +183,9 @@ class GatewayAuthorizationMixin:
     # ``getattr(self, ...)`` throughout: test helpers build bare runners via
     # ``object.__new__`` without ``adapters`` / ``config`` (pitfalls.md #17).
 
+    def _primary_adapters(self) -> dict:
+        return getattr(self, "adapters", None) or {}
+
     def _authorization_adapter(
         self,
         platform: Optional[Platform],
@@ -218,12 +218,12 @@ class GatewayAuthorizationMixin:
                     except Exception:
                         primary_profile = None
             if profile_name == primary_profile:
-                return (getattr(self, "adapters", None) or {}).get(platform)
+                return self._primary_adapters().get(platform)
             # Fail closed: a stamped secondary profile with no registry entry
             # (adapter failed to connect) must NOT fall back to the default
             # profile's adapter -- that sends replies out the wrong bot.
             return None
-        return (getattr(self, "adapters", None) or {}).get(platform)
+        return self._primary_adapters().get(platform)
 
     def _adapter_for_source(self, source: Optional[SessionSource]):
         """Resolve the live adapter for an inbound ``SessionSource``."""
@@ -238,7 +238,7 @@ class GatewayAuthorizationMixin:
         # not register their own, so a profile-aware lookup would silently
         # disable streaming/typing/tool progress.
         if getattr(source, "delivered_via_upstream_relay", False) is True:
-            return (getattr(self, "adapters", None) or {}).get(Platform.RELAY)
+            return self._primary_adapters().get(Platform.RELAY)
         # ``getattr``: test fixtures build bare SimpleNamespace sources without ``profile``.
         return self._authorization_adapter(
             getattr(source, "platform", None),
@@ -247,7 +247,7 @@ class GatewayAuthorizationMixin:
 
     def _owning_profile(self, adapter, platform):
         """Return (registered, profile) for a live adapter: profile is None for primary."""
-        if adapter is (getattr(self, "adapters", None) or {}).get(platform):
+        if adapter is self._primary_adapters().get(platform):
             return True, None
         for profile, profile_adapters in (getattr(self, "_profile_adapters", None) or {}).items():
             if adapter is profile_adapters.get(platform):
@@ -341,6 +341,11 @@ class GatewayAuthorizationMixin:
             value = self._config_extra(platform).get(extra_key)
         return value
 
+    def _adapter_policy(self, platform, attr: str, extra_key: str, profile) -> str:
+        if not platform:
+            return ""
+        return str(self._adapter_setting(platform, attr, extra_key, profile) or "").strip().lower()
+
     def _adapter_dm_policy(
         self,
         platform: Optional[Platform],
@@ -353,10 +358,7 @@ class GatewayAuthorizationMixin:
         ``allowlist`` case; ``open`` forwards everyone and ``pairing`` forwards
         unpaired DMs for the handshake.
         """
-        if not platform:
-            return ""
-        policy = self._adapter_setting(platform, "_dm_policy", "dm_policy", profile)
-        return str(policy or "").strip().lower()
+        return self._adapter_policy(platform, "_dm_policy", "dm_policy", profile)
 
     def _adapter_group_policy(
         self,
@@ -365,10 +367,7 @@ class GatewayAuthorizationMixin:
         profile: Optional[str] = None,
     ) -> str:
         """Lowercased effective ``group_policy`` (open/allowlist/disabled), ``""`` if unknown."""
-        if not platform:
-            return ""
-        policy = self._adapter_setting(platform, "_group_policy", "group_policy", profile)
-        return str(policy or "").strip().lower()
+        return self._adapter_policy(platform, "_group_policy", "group_policy", profile)
 
     def _adapter_group_has_sender_allowlist(
         self,
@@ -393,12 +392,10 @@ class GatewayAuthorizationMixin:
         group_cfg = groups.get(chat_id_str)
         if not isinstance(group_cfg, dict):
             lowered = chat_id_str.lower()
-            for key, value in groups.items():
-                if isinstance(key, str) and key.lower() == lowered and isinstance(value, dict):
-                    group_cfg = value
-                    break
-        if not isinstance(group_cfg, dict):
-            group_cfg = groups.get("*")
+            group_cfg = next(
+                (v for k, v in groups.items() if isinstance(k, str) and k.lower() == lowered and isinstance(v, dict)),
+                groups.get("*"),
+            )
         if not isinstance(group_cfg, dict):
             return False
 
@@ -418,10 +415,62 @@ class GatewayAuthorizationMixin:
         return getattr(self, "pairing_store", None)
 
     def _adapter_extra_for_source(self, source) -> dict:
+        return _adapter_config_extra(self._adapter_for_source(source))
+
+    def _own_policy_authorizes(self, source, user_id, is_group, adapter_profile) -> Optional[bool]:
+        """Own-policy adapter verdict when no env allowlist exists; None = no verdict.
+
+        Trusted only when the effective policy for THIS chat type is ``allowlist``:
+        ``open`` forwards EVERY sender (the fail-open SECURITY.md §2.6 forbids),
+        ``disabled`` never forwards, ``pairing`` forwards unpaired DMs for the
+        handshake (already denied by the pairing-store check). Anything else falls
+        through to default-deny; GATEWAY_ALLOW_ALL_USERS, the per-platform
+        ALLOW_ALL flag and pairing stay the explicit opt-ins.
+        """
+        if is_group:
+            if self._adapter_group_has_sender_allowlist(source.platform, source.chat_id, profile=adapter_profile):
+                return True
+            effective_policy = self._adapter_group_policy(source.platform, profile=adapter_profile)
+        else:
+            effective_policy = self._adapter_dm_policy(source.platform, profile=adapter_profile)
+        if effective_policy != "allowlist":
+            return None
+        # Re-check DMs against the live adapter when it exposes ``_is_dm_allowed``:
+        # pairing revoke can clear WHATSAPP_ALLOWED_USERS while a construction-time
+        # ``_allow_from`` snapshot would keep authorizing until restart. Adapters
+        # without the helper keep the historical "reached the gateway under
+        # allowlist policy" rubber-stamp.
+        if not is_group:
+            adapter = self._authorization_adapter(source.platform, profile=adapter_profile)
+            dm_check = getattr(adapter, "_is_dm_allowed", None) if adapter is not None else None
+            if callable(dm_check):
+                return bool(dm_check(user_id))
+        return True
+
+    def _adapter_extra_allowlist_authorizes(self, source, user_id, is_group) -> bool:
+        """Adapters (e.g. Telegram) that gate via config.extra.allow_from / group_allow_from
+        without setting enforces_own_access_policy."""
         adapter = self._adapter_for_source(source)
         if adapter is None:
-            return {}
-        return getattr(getattr(adapter, "config", None), "extra", None) or {}
+            return False
+        extra = _adapter_config_extra(adapter)
+        adapter_allow = extra.get("group_allow_from" if is_group else "allow_from")
+        if not adapter_allow:
+            # Plugin platforms (Buzz, DingTalk, ...) document ``extra.allowed_users`` as
+            # the config-file spelling of their env allowlist. Under multiplex the
+            # YAML->env bridge is first-writer-wins, so only the default profile's list
+            # reaches the env read; consult the live profile-routed adapter instead.
+            entry = _registry_entry(source.platform)
+            if entry and entry.allowed_users_env:
+                adapter_allow = extra.get("allowed_users")
+        if not adapter_allow:
+            return False
+        allowed = _coerce_allow_set(adapter_allow)
+        normalize = getattr(adapter, "normalize_user_id", None)
+        if callable(normalize):
+            # Ids and entries may spell the same principal differently (Buzz hex vs npub).
+            allowed = {normalize(entry) or entry for entry in allowed}
+        return _allows(allowed, user_id)
 
     def _is_user_authorized(
         self,
@@ -444,6 +493,7 @@ class GatewayAuthorizationMixin:
 
         adapter_profile = self._adapter_profile_for_source(source)
         is_group = source.chat_type in _GROUP_CHAT_TYPES
+        is_group_or_forum = source.chat_type in _GROUP_FORUM_TYPES
 
         # Trusted-upstream delegation (relay): the Team Gateway connector
         # authenticates this gateway's WS and resolves owner-only author
@@ -478,12 +528,8 @@ class GatewayAuthorizationMixin:
             # observe-unmentioned mode strips user_id from triggered group
             # messages, so the env-only check above misses config allowlists.
             try:
-                adapter_group_allowed = self._adapter_extra_for_source(source).get(
-                    "group_allowed_chats"
-                )
-                if adapter_group_allowed and _allows(
-                    _coerce_allow_set(adapter_group_allowed), source.chat_id
-                ):
+                adapter_group_allowed = self._adapter_extra_for_source(source).get("group_allowed_chats")
+                if adapter_group_allowed and _allows(_coerce_allow_set(adapter_group_allowed), source.chat_id):
                     return True
             except Exception:
                 pass
@@ -499,21 +545,17 @@ class GatewayAuthorizationMixin:
         if not user_id:
             return False
 
-        platform_env_map = dict(_ALLOWED_USERS_ENV)
-        platform_allow_all_map = dict(_ALLOW_ALL_ENV)
-        if source.platform not in platform_env_map:
+        platform_allow_env = _ALLOWED_USERS_ENV.get(source.platform, "")
+        platform_allow_all_var = _ALLOW_ALL_ENV.get(source.platform, "")
+        if source.platform not in _ALLOWED_USERS_ENV:
+            entry = _registry_entry(source.platform)
             try:
-                entry = _registry_entry(source.platform)
-                if entry:
-                    if entry.allowed_users_env:
-                        platform_env_map[source.platform] = entry.allowed_users_env
-                    if entry.allow_all_env:
-                        platform_allow_all_map[source.platform] = entry.allow_all_env
+                platform_allow_env = getattr(entry, "allowed_users_env", "") or platform_allow_env
+                platform_allow_all_var = getattr(entry, "allow_all_env", "") or platform_allow_all_var
             except Exception:
                 pass
 
-        platform_allow_all_var = platform_allow_all_map.get(source.platform, "")
-        if platform_allow_all_var and _auth_env(platform_allow_all_var).lower() in _TRUTHY:
+        if platform_allow_all_var and _env_truthy(platform_allow_all_var):
             return True
 
         # Adapter-verified role auth (Discord confirmed DISCORD_ALLOWED_ROLES
@@ -530,86 +572,38 @@ class GatewayAuthorizationMixin:
         if pairing_store is not None and pairing_store.is_approved(platform_name, user_id):
             return True
 
-        platform_allowlist = _auth_env(platform_env_map.get(source.platform, ""))
+        platform_allowlist = _auth_env(platform_allow_env)
         group_user_allowlist = ""
         group_chat_allowlist = ""
-        if source.chat_type in {"group", "forum"}:
+        if is_group_or_forum:
             group_user_allowlist = _auth_env(_GROUP_USER_ENV.get(source.platform, ""))
             group_chat_allowlist = _auth_env(_GROUP_CHAT_ENV.get(source.platform, ""))
         global_allowlist = _auth_env("GATEWAY_ALLOWED_USERS")
 
-        if not platform_allowlist and not group_user_allowlist and not group_chat_allowlist and not global_allowlist:
-            # No env allowlist. Own-policy adapters gate at intake, but their
-            # decision is only trusted when the effective policy for THIS chat
-            # type is ``allowlist``: ``open`` forwards EVERY sender (trusting it
-            # is the fail-open SECURITY.md §2.6 forbids), ``disabled`` never
-            # forwards, ``pairing`` forwards unpaired DMs for the handshake
-            # (already denied by the pairing-store check above). Anything else
-            # falls through to default-deny; GATEWAY_ALLOW_ALL_USERS, the
-            # per-platform ALLOW_ALL flag and pairing stay the explicit opt-ins.
+        if not (platform_allowlist or group_user_allowlist or group_chat_allowlist or global_allowlist):
+            # No env allowlist: own-policy adapters gate at intake (see _own_policy_authorizes).
             if allow_adapter_delegation and self._adapter_enforces_own_access_policy(
                 source.platform, profile=adapter_profile
             ):
-                if is_group:
-                    effective_policy = self._adapter_group_policy(source.platform, profile=adapter_profile)
-                    if self._adapter_group_has_sender_allowlist(
-                        source.platform, source.chat_id, profile=adapter_profile
-                    ):
-                        return True
-                else:
-                    effective_policy = self._adapter_dm_policy(source.platform, profile=adapter_profile)
-                if effective_policy == "allowlist":
-                    # Re-check DMs against the live adapter when it exposes
-                    # ``_is_dm_allowed``: pairing revoke can clear
-                    # WHATSAPP_ALLOWED_USERS while a construction-time
-                    # ``_allow_from`` snapshot would keep authorizing until
-                    # restart. Adapters without the helper keep the historical
-                    # "reached the gateway under allowlist policy" rubber-stamp.
-                    if not is_group:
-                        adapter = self._authorization_adapter(source.platform, profile=adapter_profile)
-                        dm_check = getattr(adapter, "_is_dm_allowed", None) if adapter is not None else None
-                        if callable(dm_check):
-                            return bool(dm_check(user_id))
-                    return True
-            # Adapters (e.g. Telegram) that gate via config.extra.allow_from /
-            # group_allow_from without setting enforces_own_access_policy.
-            adapter = self._adapter_for_source(source)
-            if adapter is not None:
-                extra = getattr(getattr(adapter, "config", None), "extra", None) or {}
-                adapter_allow = extra.get("group_allow_from" if is_group else "allow_from")
-                if not adapter_allow and _platform_declares_allowed_users_env(source.platform):
-                    # Plugin platforms (Buzz) carry the env allowlist as
-                    # ``extra.allowed_users``. Under multiplex the YAML->env
-                    # bridge is first-writer-wins, so only the default profile's
-                    # list reaches the env read above; consult the live
-                    # profile-routed adapter's config instead.
-                    adapter_allow = extra.get("allowed_users")
-                if adapter_allow:
-                    allowed = _coerce_allow_set(adapter_allow)
-                    normalize = getattr(adapter, "normalize_user_id", None)
-                    if callable(normalize):
-                        # Ids and entries may spell the same principal
-                        # differently (Buzz hex vs npub).
-                        allowed = {normalize(entry) or entry for entry in allowed}
-                    if _allows(allowed, user_id):
-                        return True
-            return _auth_env("GATEWAY_ALLOW_ALL_USERS").lower() in _TRUTHY
+                verdict = self._own_policy_authorizes(source, user_id, is_group, adapter_profile)
+                if verdict is not None:
+                    return verdict
+            if self._adapter_extra_allowlist_authorizes(source, user_id, is_group):
+                return True
+            return _env_truthy("GATEWAY_ALLOW_ALL_USERS")
 
         # Telegram group traffic authorized by chat ID (separate from
         # TELEGRAM_GROUP_ALLOWED_USERS, which gates the sender).
-        if group_chat_allowlist and source.chat_type in {"group", "forum"} and source.chat_id:
-            if _allows(_coerce_allow_set(group_chat_allowlist), source.chat_id):
-                return True
+        if (
+            group_chat_allowlist and is_group_or_forum and source.chat_id
+            and _allows(_coerce_allow_set(group_chat_allowlist), source.chat_id)
+        ):
+            return True
 
         # Backward-compat: TELEGRAM_GROUP_ALLOWED_USERS was once (mis)used as a
         # chat-ID allowlist. "-"-prefixed values are chat IDs, so honor them as
         # such and warn once; the correct var is TELEGRAM_GROUP_ALLOWED_CHATS.
-        if (
-            source.platform == Platform.TELEGRAM
-            and group_user_allowlist
-            and source.chat_type in {"group", "forum"}
-            and source.chat_id
-        ):
+        if source.platform == Platform.TELEGRAM and group_user_allowlist and is_group_or_forum and source.chat_id:
             legacy_chat_ids = {
                 v.strip() for v in group_user_allowlist.split(",") if v.strip().startswith("-")
             }
@@ -722,16 +716,17 @@ class GatewayAuthorizationMixin:
         """
         config = getattr(self, "config", None)
 
-        if config and hasattr(config, "get_unauthorized_dm_behavior") and platform:
-            if "unauthorized_dm_behavior" in self._config_extra(platform):
-                return config.get_unauthorized_dm_behavior(platform)
+        if (
+            config and hasattr(config, "get_unauthorized_dm_behavior") and platform
+            and "unauthorized_dm_behavior" in self._config_extra(platform)
+        ):
+            return config.get_unauthorized_dm_behavior(platform)
 
         if platform == Platform.EMAIL:
             return "ignore"
 
-        if config and hasattr(config, "unauthorized_dm_behavior"):
-            if config.unauthorized_dm_behavior != "pair":
-                return config.unauthorized_dm_behavior
+        if config and hasattr(config, "unauthorized_dm_behavior") and config.unauthorized_dm_behavior != "pair":
+            return config.unauthorized_dm_behavior
 
         if platform:
             dm_policy = self._adapter_dm_policy(platform, profile=profile)
