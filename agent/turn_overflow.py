@@ -272,10 +272,8 @@ def _clamp_output_cap(st: _Recovery, _retry: TurnRetryState, available_out: int,
         safe_out = max(1, available_out - 64)
     agent._ephemeral_max_output_tokens = safe_out
     agent._buffer_vprint(
-        f"⚠️  Output cap too large for current prompt — "
-        f"retrying with max_tokens={safe_out:,} "
-        f"(provider_available={available_out:,}, "
-        f"estimated_request_tokens={request_input_estimate:,}; "
+        f"⚠️  Output cap too large for current prompt — retrying with max_tokens={safe_out:,} "
+        f"(provider_available={available_out:,}, estimated_request_tokens={request_input_estimate:,}; "
         f"context_length unchanged at {old_ctx:,})"
     )
     # Still count against compression_attempts so a recurring error can't loop forever.

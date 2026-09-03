@@ -226,8 +226,7 @@ def nous_rate_limit_guard(
             _nous_remaining = nous_rate_limit_remaining()
             if _nous_remaining is not None and _nous_remaining > 0:
                 _nous_msg = (
-                    f"Nous Portal rate limit active — "
-                    f"resets in {_fmt_nous_remaining(_nous_remaining)}."
+                    f"Nous Portal rate limit active — resets in {_fmt_nous_remaining(_nous_remaining)}."
                 )
                 agent._buffer_vprint(f"⏳ {_nous_msg} Trying fallback...")
                 agent._buffer_status(f"⏳ {_nous_msg}")

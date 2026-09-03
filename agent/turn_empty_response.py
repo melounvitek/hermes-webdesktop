@@ -72,9 +72,7 @@ def _retry_empty(
         if budget < _empty_guard.DEFAULT_EMPTY_RETRY_BUDGET else ""
     )
     agent._buffer_status(
-        f"⚠️ Empty response from model — retrying "
-        f"({n}/{budget}) "
-        f"in {wait_time:.0f}s{_budget_note}"
+        f"⚠️ Empty response from model — retrying ({n}/{budget}) in {wait_time:.0f}s{_budget_note}"
     )
     _interrupted = interruptible_backoff_sleep(
         agent, wait_time, None,
@@ -83,8 +81,7 @@ def _retry_empty(
         api_call_count=api_call_count,
         abort_message="Interrupt detected during empty-response retry wait, aborting.",
         interrupt_text=(
-            f"Operation interrupted: retrying empty response from model "
-            f"(retry {n}/{budget})."
+            f"Operation interrupted: retrying empty response from model (retry {n}/{budget})."
         ),
         activity_label=f"empty response retry backoff ({n}/{budget})",
     )
@@ -100,8 +97,7 @@ def _terminal_empty(agent: Any, assistant_message: Any, finish_reason: str, mess
     _streak_cost = _empty_guard.streak_cost_usd(agent)
     if _streak_cost is not None:
         agent._buffer_status(
-            f"ℹ️ Estimated cost of these empty attempts: "
-            f"~${_streak_cost:.2f} (input tokens are billed "
+            f"ℹ️ Estimated cost of these empty attempts: ~${_streak_cost:.2f} (input tokens are billed "
             f"per attempt even when no answer is produced)"
         )
     agent._flush_status_buffer()
@@ -235,8 +231,7 @@ def recover_empty_response(
             agent._thinking_prefill_retries,
         )
         agent._buffer_status(
-            f"↻ Thinking-only response — prefilling to continue "
-            f"({agent._thinking_prefill_retries}/2)"
+            f"↻ Thinking-only response — prefilling to continue ({agent._thinking_prefill_retries}/2)"
         )
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         interim_msg["_thinking_prefill"] = True

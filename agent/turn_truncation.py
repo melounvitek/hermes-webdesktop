@@ -164,8 +164,7 @@ def _content_filter_fallback(st: _Trunc, _retry: TurnRetryState) -> Optional[Tru
     ):
         return None
     agent._vprint(
-        f"{agent.log_prefix}🛡️  Content filter terminated "
-        f"stream — activating fallback provider...",
+        f"{agent.log_prefix}🛡️  Content filter terminated stream — activating fallback provider...",
         force=True,
     )
     agent._emit_status("Content filter terminated stream; switching to fallback...")
@@ -187,8 +186,7 @@ def _content_filter_fallback(st: _Trunc, _retry: TurnRetryState) -> Optional[Tru
         _retry.restart_with_rebuilt_messages = True
         return st.done("break")
     agent._vprint(
-        f"{agent.log_prefix}⚠️  No fallback provider "
-        f"configured — retrying with same provider "
+        f"{agent.log_prefix}⚠️  No fallback provider configured — retrying with same provider "
         f"(may re-hit filter)...",
         force=True,
     )
@@ -221,9 +219,7 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
         if st.is_stub and _dropped_tools:
             agent._vprint(
                 f"{agent.log_prefix}↻ Stream interrupted mid "
-                f"tool-call ({', '.join(_dropped_tools[:3])}) — requesting "
-                f"chunked retry "
-                f"({n}/4)..."
+                f"tool-call ({', '.join(_dropped_tools[:3])}) — requesting chunked retry ({n}/4)..."
             )
         elif st.is_stub:
             agent._vprint(f"{agent.log_prefix}↻ Stream interrupted — requesting continuation ({n}/4)...")
@@ -241,8 +237,7 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
     # The one-shot reasoning-off override must not leak into the next turn.
     agent._ephemeral_reasoning_off = False
     agent._vprint(
-        f"{agent.log_prefix}⚠️  Response still truncated "
-        f"after {n} continuation attempts — "
+        f"{agent.log_prefix}⚠️  Response still truncated after {n} continuation attempts — "
         + ("keeping the partial response received so far." if partial_response
            else "no visible text was produced."),
         force=True,
