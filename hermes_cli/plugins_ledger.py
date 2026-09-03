@@ -59,18 +59,16 @@ class PluginLedgerMixin:
         self, manifest: PluginManifest, kind: str, key: str, release: Callable[[], None], *,
         persistent: bool = False,
     ) -> PluginRegistration:
-        """Record one registration under its canonical plugin key.
-
-        ``persistent`` ones (process-global host infrastructure) stay in the ownership ledger for
-        attribution but NOT in ``_registration_order``, so a routine unload cannot dispose them;
-        the handle still releases on explicit ``dispose()``.
-        """
-        plugin_key = manifest_key(manifest)
+        """Record one registration under its canonical plugin key. ``persistent`` ones
+        (process-global host infrastructure) stay in the ownership ledger for attribution but NOT in
+        ``_registration_order``, so a routine unload cannot dispose them; the handle still releases
+        on explicit ``dispose()``."""
         registration = PluginRegistration(
-            kind=kind, key=key, release=release, plugin_key=plugin_key, persistent=persistent,
+            kind=kind, key=key, release=release, plugin_key=manifest_key(manifest),
+            persistent=persistent,
         )
         registration._on_dispose = lambda disposed: self._forget_registrations([disposed])
-        self._ownership_ledger.setdefault(plugin_key, []).append(registration)
+        self._ownership_ledger.setdefault(registration.plugin_key, []).append(registration)
         if not persistent:
             self._registration_order.append(registration)
         return registration
@@ -79,11 +77,9 @@ class PluginLedgerMixin:
         self, manifest: PluginManifest, kind: str, name: str, registry: Any, current: Any,
         previous: Any, *, finalize: Optional[Callable[[], None]] = None,
     ) -> PluginRegistration:
-        """Lease one ``(kind, scope, name)`` slot of a scope-keyed process-global registry.
-
-        Unload calls ``registry.restore_registration(name, current, replacement, scope=...)`` —
-        identity-conditional, so a later generation is never removed by an earlier owner.
-        """
+        """Lease one ``(kind, scope, name)`` slot of a scope-keyed process-global registry. Unload
+        calls ``registry.restore_registration(name, current, replacement, scope=...)`` —
+        identity-conditional, so a later generation is never removed by an earlier owner."""
         scope = self.scope_key
         lease = replacement_coordinator.acquire(
             (kind, scope, name), current=current, previous=previous,
@@ -93,22 +89,22 @@ class PluginLedgerMixin:
         )
         return self._track_registration(manifest, kind, name, lease.dispose)
 
+    def _active_persistent(self) -> List[PluginRegistration]:
+        """Live persistent registrations across every plugin in the ownership ledger."""
+        return [
+            registration for owned in self._ownership_ledger.values()
+            for registration in owned if registration.persistent and registration.active
+        ]
+
     def _evict_stale_persistent_registrations(self) -> None:
         """After re-discovery, dispose parked persistent handles whose plugin did not re-register
         the same ``(kind, key)``. Re-registered ones are dropped WITHOUT disposing — the same object
         re-registered would pass the identity check and evict the live entry."""
         if not self._persistent_carryover:
             return
-        parked = self._persistent_carryover
-        self._persistent_carryover = []
-        current = {
-            (registration.kind, registration.key) for owned in self._ownership_ledger.values()
-            for registration in owned if registration.persistent and registration.active
-        }
-        stale = [
-            registration for registration in parked if registration.active
-            and (registration.kind, registration.key) not in current
-        ]
+        parked, self._persistent_carryover = self._persistent_carryover, []
+        current = {(r.kind, r.key) for r in self._active_persistent()}
+        stale = [r for r in parked if r.active and (r.kind, r.key) not in current]
         for registration in stale:
             logger.info(
                 "Evicting persistent registration %s/%s: plugin '%s' no "
@@ -158,8 +154,7 @@ class PluginLedgerMixin:
     def _remove_name_if_unowned(self, kind: str, names: Set[str], name: str) -> None:
         """Drop *name* from the manager-local name set once no active ledger entry owns it."""
         if not any(
-            registration.active and registration.kind == kind and registration.key == name
-            for registration in self._registration_order
+            r.active and r.kind == kind and r.key == name for r in self._registration_order
         ):
             names.discard(name)
 
@@ -172,15 +167,10 @@ class PluginLedgerMixin:
     def _forget_registrations(self, registrations: List[PluginRegistration]) -> None:
         if not registrations:
             return
-        registration_ids = {id(registration) for registration in registrations}
-        self._registration_order = [
-            registration for registration in self._registration_order
-            if id(registration) not in registration_ids
-        ]
+        ids = {id(r) for r in registrations}
+        self._registration_order = [r for r in self._registration_order if id(r) not in ids]
         for plugin_key, owned in list(self._ownership_ledger.items()):
-            remaining = [
-                registration for registration in owned if id(registration) not in registration_ids
-            ]
+            remaining = [r for r in owned if id(r) not in ids]
             if remaining:
                 self._ownership_ledger[plugin_key] = remaining
             else:
@@ -204,7 +194,7 @@ class PluginLedgerMixin:
         if isinstance(plugin, LoadedPlugin):
             return manifest_key(plugin.manifest)
         if isinstance(plugin, PluginManifest):
-            return plugin.key or plugin.name
+            return manifest_key(plugin)
         return str(plugin)
 
     def unload(self, plugin: Union[str, PluginManifest, LoadedPlugin, None] = None) -> bool:
@@ -213,41 +203,32 @@ class PluginLedgerMixin:
             return self._unload_scoped(plugin)
 
     def _unload_scoped(self, plugin: Union[str, PluginManifest, LoadedPlugin, None] = None) -> bool:
-        """Unload one plugin (or all when ``plugin=None``, as force rediscovery does).
-
-        Every ledger registration — including on_unload callbacks and supervised tasks — is disposed
-        in reverse acquisition order with identity-conditional inverses. Returns ``True`` when
-        anything was found.
-        """
+        """Unload one plugin (or all when ``plugin=None``, as force rediscovery does). Every ledger
+        registration — including on_unload callbacks and supervised tasks — is disposed in reverse
+        acquisition order with identity-conditional inverses. Returns ``True`` when anything was
+        found."""
         unload_all = plugin is None
         if unload_all:
             target_keys = set(self._ownership_ledger) | set(self._plugins)
             registrations = list(self._registration_order)
         else:
             target_keys = self._unload_target_keys(self._resolve_plugin_key(plugin))
-            registrations = [
-                registration for registration in self._registration_order
-                if registration.plugin_key in target_keys
-            ]
+            registrations = [r for r in self._registration_order if r.plugin_key in target_keys]
             # Persistent registrations are absent from _registration_order (unload-all keeps them),
             # but a *targeted* unload is the disable/uninstall path: a disabled auth plugin's
             # provider must NOT stay live process-wide.
             registrations.extend(
-                registration for key in target_keys
-                for registration in self._ownership_ledger.get(key, [])
-                if registration.persistent and registration.active
+                r for key in target_keys for r in self._ownership_ledger.get(key, [])
+                if r.persistent and r.active
             )
-
         found = bool(target_keys or registrations)
         self._dispose_registrations(registrations)
         self._forget_registrations(registrations)
-
         if unload_all:
             self._reset_after_unload_all(registrations)
         else:
             for key in target_keys:
                 self._plugins.pop(key, None)
-
         return found
 
     def _unload_target_keys(self, requested: str) -> Set[str]:
@@ -266,12 +247,8 @@ class PluginLedgerMixin:
             platform_registry.unregister(platform_name)
         # Ledger-owned tool names are excluded: their handles already restored the previous entry,
         # and blanket deregistration would remove what the ledger just restored.
-        ledger_tool_names = {
-            registration.key for registration in registrations if registration.kind == "tool"
-        }
-        preledger_tools = tuple(
-            name for name in self._plugin_tool_names if name not in ledger_tool_names
-        )
+        ledger_tool_names = {r.key for r in registrations if r.kind == "tool"}
+        preledger_tools = tuple(n for n in self._plugin_tool_names if n not in ledger_tool_names)
         if preledger_tools:
             try:
                 from tools.registry import registry as tool_registry
@@ -285,11 +262,9 @@ class PluginLedgerMixin:
                         logger.debug("unload: tool deregister %s failed: %s", tool_name, exc)
         # Persistent registrations survive unload-all but must not be orphaned by the ledger clear:
         # carry them over so force re-discovery can evict the ones whose plugin does not come back.
-        carryover_ids = {id(registration) for registration in self._persistent_carryover}
+        carryover_ids = {id(r) for r in self._persistent_carryover}
         self._persistent_carryover.extend(
-            registration for owned in self._ownership_ledger.values() for registration in owned
-            if registration.persistent and registration.active
-            and id(registration) not in carryover_ids
+            r for r in self._active_persistent() if id(r) not in carryover_ids
         )
         for container in (
             self._ownership_ledger, self._plugins, self._hooks, self._middleware,
