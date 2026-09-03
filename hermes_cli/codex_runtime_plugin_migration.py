@@ -298,8 +298,7 @@ def _query_codex_plugins(
     marketplaces = resp.get("marketplaces") or []
     if not isinstance(marketplaces, list):
         return [], "plugin/list response missing 'marketplaces'"
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    out: dict[tuple[str, str], dict] = {}  # (name, marketplace) -> entry; first wins
     for marketplace in marketplaces:
         if not isinstance(marketplace, dict):
             continue
@@ -314,12 +313,11 @@ def _query_codex_plugins(
                              availability)
                 continue
             name = str(plugin.get("name") or "")
-            if not name or (name, market_name) in seen:
-                continue
-            seen.add((name, market_name))
-            out.append({"name": name, "marketplace": market_name,
-                        "enabled": bool(plugin.get("enabled", True))})
-    return out, None
+            if name:
+                out.setdefault((name, market_name), {
+                    "name": name, "marketplace": market_name,
+                    "enabled": bool(plugin.get("enabled", True))})
+    return list(out.values()), None
 
 
 # pytest tempdir shapes: ``pytest-of-<user>/pytest-<n>/``, macOS ``/private/var/folders/…/T``.

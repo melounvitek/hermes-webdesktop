@@ -21,6 +21,15 @@ def _preview(payload: str) -> str:
     return f"{payload[:80]}{'...' if len(payload) > 80 else ''}"
 
 
+def _print_decision_message(decision: dict) -> bool:
+    """Print a manager decision's ``message`` (if any) via _cprint; True when one was printed."""
+    from cli import _cprint
+    msg = decision.get("message") or ""
+    if msg:
+        _cprint(f"  {msg}")
+    return bool(msg)
+
+
 class CLILoopsMixin:
     """Simple slash-command wrappers plus goal/heartbeat/loop manager hooks for the interactive CLI"""
 
@@ -246,10 +255,10 @@ class CLILoopsMixin:
             print(f"User plugins ({len(user_entries)}):")
             for name, version, _desc, source, _dir, key in sorted(user_entries):
                 state = _plugin_status(name, enabled, disabled, key=key)
-                glyph = {"enabled": "✓", "disabled": "✗"}.get(state, "○")
-                ver = f" v{version}" if version else ""
                 info = loaded.get(name) or {}
                 bits = [f"{info[k]} {k}" for k in ("tools", "hooks", "commands") if info.get(k)]
+                glyph = {"enabled": "✓", "disabled": "✗"}.get(state, "○")
+                ver = f" v{version}" if version else ""
                 detail = f" ({', '.join(bits)})" if bits else ""
                 label = "" if state == "enabled" else f" [{state}]"
                 error = f" — {info['error']}" if info.get("error") else ""
@@ -432,10 +441,7 @@ class CLILoopsMixin:
         # judge; complete them immediately (caps and scheduling still apply).
         if wakeup.lstrip().startswith("/"):
             try:
-                decision = mgr.complete_tick("")
-                msg = decision.get("message") or ""
-                if msg:
-                    _cprint(f"  {msg}")
+                _print_decision_message(mgr.complete_tick(""))
             except Exception:
                 pass
 
@@ -483,10 +489,8 @@ class CLILoopsMixin:
                 f"Use /loop resume to continue, or /loop stop to end it.{_RST}")
             return
         decision = mgr.complete_tick(self._last_assistant_response_text())
-        msg = decision.get("message") or ""
-        if msg:
-            _cprint(f"  {msg}")
-        elif decision.get("status") == "active" and mgr.state is not None:
+        if (not _print_decision_message(decision) and decision.get("status") == "active"
+                and mgr.state is not None):
             _cprint(f"  {_DIM}↻ Loop: {mgr.state.remaining_label()}.{_RST}")
 
     def _maybe_continue_goal_after_turn(self) -> None:
@@ -508,15 +512,10 @@ class CLILoopsMixin:
         try:
             pending = getattr(self, "_pending_input", None)
             if pending is not None and not pending.empty():
-                has_real_message = False
                 try:
-                    for entry in list(pending.queue):
-                        if isinstance(entry, tuple) and entry:
-                            entry = entry[0]
-                        if isinstance(entry, str) and _looks_like_slash_command(entry):
-                            continue
-                        has_real_message = True
-                        break
+                    entries = [e[0] if isinstance(e, tuple) and e else e for e in list(pending.queue)]
+                    has_real_message = any(
+                        not (isinstance(e, str) and _looks_like_slash_command(e)) for e in entries)
                 except Exception:
                     has_real_message = True  # can't introspect — defer to be safe
                 if has_real_message:
@@ -545,9 +544,7 @@ class CLILoopsMixin:
             _bg_procs = None
         decision = mgr.evaluate_after_turn(
             last_response, user_initiated=True, background_processes=_bg_procs)
-        msg = decision.get("message") or ""
-        if msg:
-            _cprint(f"  {msg}")
+        _print_decision_message(decision)
         if decision.get("should_continue"):
             prompt = decision.get("continuation_prompt")
             if prompt:

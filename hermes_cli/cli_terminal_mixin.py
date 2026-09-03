@@ -310,21 +310,18 @@ class CLITerminalMixin:
         reports a hardcoded 80 columns, which would make the first real signal look like a
         width change. ``app.output`` is what the running resize handler measures.
         """
-        try:
-            width = app.output.get_size().columns
-        except Exception:
-            width = None
-        if not width or width <= 0:
+        width = None
+        for probe in (lambda: app.output.get_size().columns,
+                      lambda: shutil.get_terminal_size((80, 24)).columns):
             try:
-                width = shutil.get_terminal_size((80, 24)).columns
+                width = probe()
             except Exception:
                 width = None
+            if width and width > 0:
+                break
         self._last_resize_width = width
         original_on_resize = app._on_resize
-
-        def _resize_clear_ghosts():
-            self._schedule_resize_recovery(app, original_on_resize)
-        app._on_resize = _resize_clear_ghosts
+        app._on_resize = lambda: self._schedule_resize_recovery(app, original_on_resize)
 
     def _try_attach_clipboard_image(self) -> bool:
         """Save a clipboard image to ~/.hermes/images/ and attach it; True if attached."""

@@ -417,12 +417,13 @@ class CLIAgentSetupMixin:
             else:
                 ChatConsole().print(rich)
         if not session_meta:
+            hint = "Use a session ID from a previous CLI run (hermes sessions list)."
             if _quiet_mode:
                 print(f"Session not found: {self.session_id}", file=sys.stderr)
-                print("Use a session ID from a previous CLI run (hermes sessions list).", file=sys.stderr)
+                print(hint, file=sys.stderr)
             else:
                 _cprint(f"\033[1;31mSession not found: {self.session_id}{_RST}")
-                _cprint(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}")
+                _cprint(f"{_DIM}{hint}{_RST}")
             return False
         session_meta = self._follow_compression_chain(
             session_meta,
