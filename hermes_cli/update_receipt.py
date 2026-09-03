@@ -29,6 +29,15 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _code_identity(refresh: bool = False) -> dict[str, Any]:
+    """Running-code identity, or ``{}`` when the probe fails."""
+    with suppress(Exception):
+        from hermes_cli.build_info import get_code_identity
+
+        return get_code_identity(refresh=refresh) or {}
+    return {}
+
+
 def _str_records(entries: Any, keys: tuple[str, ...], *, pid: bool = False) -> list[dict[str, Any]]:
     """Dict entries reduced to stringified ``keys`` (plus an int ``pid`` first when requested)."""
     records = []
@@ -49,13 +58,9 @@ class UpdateReceipt:
             "schema": 1, "started_at": _utc_now_iso(), "finished_at": None,
             "argv": list(sys.argv), "pid": os.getpid(),
             "outcome": "running",  # running | success | partial | failed
-            "pre_update": {}, "post_update": {},
+            "pre_update": _code_identity(), "post_update": {},
             "steps": [], "skips": [], "gateway_restart": {}, "fleet": [],
         }
-        with suppress(Exception):
-            from hermes_cli.build_info import get_code_identity
-
-            self.data["pre_update"] = get_code_identity()
 
     def step(self, name: str, ok: bool, detail: str = "") -> None:
         self.data["steps"].append({"name": name, "ok": bool(ok), "detail": detail, "at": _utc_now_iso()})
@@ -107,10 +112,7 @@ class UpdateReceipt:
     def finalize(self, outcome: str) -> None:
         self.data["outcome"] = outcome
         self.data["finished_at"] = _utc_now_iso()
-        with suppress(Exception):
-            from hermes_cli.build_info import get_code_identity
-
-            self.data["post_update"] = get_code_identity(refresh=True)
+        self.data["post_update"] = _code_identity(refresh=True)
 
 
 def _receipt_dir() -> Path:
@@ -175,8 +177,7 @@ def finalize_update_receipt(outcome: str, fleet: list | None = None, stop_reason
         path = directory / f"update_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.json"
         body = json.dumps(receipt.data, indent=2, default=str)
         path.write_text(body, encoding="utf-8")
-        # Stable pointer for the dashboard/desktop: latest receipt.
-        with suppress(OSError):
+        with suppress(OSError):  # stable pointer for the dashboard/desktop
             (directory / "latest.json").write_text(body, encoding="utf-8")
         _prune_old_receipts(directory)
         return path
@@ -265,6 +266,10 @@ def _fleet_row(
     }
 
 
+# Runtime-status states that do not describe a gateway that should be running now — no down row.
+_NOT_EXPECTED_STATES = {"stopped", "startup_failed"}
+
+
 def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> list[dict[str, Any]]:
     """Snapshot every profile's gateway code identity vs. the current tree.
 
@@ -272,15 +277,9 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
     long-dead gateway (machine reboot, manual kill weeks ago) must NOT fail every future update.
     Without a pre-restart snapshot (``None``/empty) dead PIDs are skipped (historical behavior).
     """
-    # Runtime-status states that do not describe a gateway that should be running now — no down row.
-    _NOT_EXPECTED_STATES = {"stopped", "startup_failed"}
     _pre_restart = {int(p) for p in (pre_restart_pids or []) if isinstance(p, int)}
     results: list[dict[str, Any]] = []
-    expected_sha = None
-    with suppress(Exception):
-        from hermes_cli.build_info import get_code_identity
-
-        expected_sha = (get_code_identity(refresh=True) or {}).get("sha")
+    expected_sha = _code_identity(refresh=True).get("sha")
     try:
         from gateway.status import read_runtime_status, runtime_status_pid_is_live
 
@@ -318,6 +317,14 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
     return results
 
 
+_FLEET_ROW_LINES = {
+    "current": "  ✓ {profile} (pid {pid}) @ {short} — up to date",
+    "stale": "  ✗ {profile} (pid {pid}) @ {short} — STALE (pre-update code)",
+    "down": "  ✗ {profile} — DOWN (gateway was running before the update; pid {pid} is gone and nothing replaced it)",
+}
+_FLEET_ROW_UNKNOWN = "  ? {profile} (pid {pid}) — version unknown (gateway predates version stamping; restart to enable)"
+
+
 def print_fleet_version_matrix(fleet: list[dict[str, Any]]) -> bool:
     """Print the post-update fleet version matrix.
 
@@ -329,29 +336,16 @@ def print_fleet_version_matrix(fleet: list[dict[str, Any]]) -> bool:
     """
     if not fleet:
         return False
-    any_stale = any_down = False
     print()
     print("Fleet version check:")
+    states = set()
     for entry in fleet:
         sha = entry.get("code_sha")
-        short = sha[:8] if isinstance(sha, str) and sha else "?"
-        state, profile, pid = entry.get("state"), entry.get("profile"), entry.get("pid")
-        if state == "current":
-            print(f"  ✓ {profile} (pid {pid}) @ {short} — up to date")
-        elif state == "stale":
-            any_stale = True
-            print(f"  ✗ {profile} (pid {pid}) @ {short} — STALE (pre-update code)")
-        elif state == "down":
-            any_down = True
-            print(
-                f"  ✗ {profile} — DOWN (gateway was running before the "
-                f"update; pid {pid} is gone and nothing replaced it)"
-            )
-        else:
-            print(
-                f"  ? {profile} (pid {pid}) — version unknown "
-                "(gateway predates version stamping; restart to enable)"
-            )
+        states.add(entry.get("state"))
+        print(_FLEET_ROW_LINES.get(entry.get("state"), _FLEET_ROW_UNKNOWN).format(
+            profile=entry.get("profile"), pid=entry.get("pid"), short=sha[:8] if isinstance(sha, str) and sha else "?",
+        ))
+    any_stale, any_down = "stale" in states, "down" in states
     if any_stale or any_down:
         print()
         if any_stale:
