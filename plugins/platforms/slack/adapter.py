@@ -254,13 +254,11 @@ def check_slack_requirements() -> bool:
         from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
         from slack_sdk.web.async_client import AsyncWebClient
         import aiohttp
-
         return {
             "AsyncApp": AsyncApp, "AsyncSocketModeHandler": AsyncSocketModeHandler,
             "AsyncWebClient": AsyncWebClient, "aiohttp": aiohttp, "SLACK_AVAILABLE": True}
 
     from tools.lazy_deps import ensure_and_bind
-
     return ensure_and_bind("platform.slack", _import, globals(), prompt=False)
 
 
@@ -306,7 +304,6 @@ def _rewrite_known_bang_command(text: str) -> str:
         return text
     try:
         from hermes_cli.commands import is_gateway_known_command
-
         first_token = text[1:].split(maxsplit=1)[0]
         cmd_name = first_token.split("@", 1)[0].lower()
         if cmd_name and "/" not in cmd_name and is_gateway_known_command(cmd_name):
@@ -754,8 +751,7 @@ _SLACK_HTTP_STATUS_TEMPLATES = {
          "authorized for this file.",
     403: "Slack attachment access failed for {file_label} with HTTP 403. The bot likely lacks "
          "permission or scope to read this file.",
-    404: "Slack attachment {file_label} returned HTTP 404 and is no longer reachable.",
-}
+    404: "Slack attachment {file_label} returned HTTP 404 and is no longer reachable."}
 # (error codes, user-facing template) for ``_describe_slack_api_error``; first match wins.
 _SLACK_API_ERROR_TEMPLATES = (
     ({"not_authed", "invalid_auth", "account_inactive", "token_revoked"},
@@ -765,8 +761,7 @@ _SLACK_API_ERROR_TEMPLATES = (
      "Slack attachment {file_label} is no longer available ({error})."),
     (_SLACK_PERMISSION_ERRORS,
      "Slack attachment access failed for {file_label} because the bot does not have permission "
-     "({error}). Check workspace permissions/scopes and reinstall if needed."),
-)
+     "({error}). Check workspace permissions/scopes and reinstall if needed."))
 
 
 def _attachment_label(file_obj: Optional[Dict[str, Any]]) -> str:
@@ -1412,7 +1407,6 @@ class SlackAdapter(BasePlatformAdapter):
         # ALSO be declared in the app manifest (`hermes slack manifest`): Socket Mode won't
         # deliver undeclared commands at all.
         from hermes_cli.commands import slack_native_slashes
-
         _slash_names = [name for name, _d, _h in slack_native_slashes()]
         if _slash_names:
             _slash_pattern = re.compile(
@@ -1446,7 +1440,6 @@ class SlackAdapter(BasePlatformAdapter):
         exception is logged and slack_bolt still sees a clean ack."""
         try:
             from hermes_cli.plugins import get_plugin_manager
-
             _plugin_handlers = get_plugin_manager().get_slack_action_handlers()
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[Slack] Could not load plugin action handlers: %s", e)
@@ -2985,7 +2978,6 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
         from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
-
         if not is_safe_url(image_url):
             logger.warning("[Slack] Blocked unsafe image URL (SSRF protection)")
             return await super().send_image(
@@ -2995,7 +2987,6 @@ class SlackAdapter(BasePlatformAdapter):
             async def _ssrf_redirect_guard(response):
                 """Re-check redirect targets so public URLs cannot bounce into private IPs."""
                 from tools.url_safety import redirect_target_from_response
-
                 redirect_url = redirect_target_from_response(response)
                 if redirect_url and not is_safe_url(redirect_url):
                     raise ValueError("Blocked redirect to private/internal address")
@@ -3863,7 +3854,6 @@ class SlackAdapter(BasePlatformAdapter):
         """Channel prompt with the bot's Slack identity prepended (ephemeral, never persisted,
         so prompt caching holds) so it won't read a human's mention as a self-mention."""
         from gateway.platforms.base import resolve_channel_prompt
-
         channel_prompt = resolve_channel_prompt(self.config.extra, channel_id, None)
         identity_prompt = self._build_identity_prompt(team_id)
         if identity_prompt:
@@ -4140,7 +4130,6 @@ class SlackAdapter(BasePlatformAdapter):
             # authorize them. Same predicate as the drop gate (api_human_users stay human).
             is_bot=self._event_declares_bot_sender(event))
         from gateway.platforms.base import resolve_channel_skills
-
         # Remaining ``<@UID>`` are OTHER participants (own mention stripped
         # above); render as ``@DisplayName`` so the agent knows who is addressed.
         text = await self._humanize_user_mentions(text, chat_id=channel_id, team_id=team_id)
@@ -4276,7 +4265,7 @@ class SlackAdapter(BasePlatformAdapter):
     ) -> Tuple[List[str], List[str], str]:
         """Download/cache ``event["files"]`` → ``(media_urls, media_types, text)``; root images
         lead. Small text-like docs are injected into ``text`` (gated on ext/MIME, not blind UTF-8
-        decode — PDF/zip headers decode). Failures are prepended as ``[Slack attachment notice]``."""
+        decode — PDF/zip headers decode). Failures are prepended as an attachment notice."""
         media_urls = list(thread_root_media_urls)
         media_types = list(thread_root_media_types)
         notices: List[str] = []
@@ -4489,7 +4478,6 @@ class SlackAdapter(BasePlatformAdapter):
         if callable(auth_fn):
             try:
                 from gateway.session import SessionSource
-
                 source = SessionSource(
                     platform=Platform.SLACK, chat_id=str(channel_id or normalized_user_id),
                     chat_type=chat_type, user_id=normalized_user_id,
@@ -4503,7 +4491,6 @@ class SlackAdapter(BasePlatformAdapter):
         # Env-only fallback. Per-profile accessor: under multiplex a scoped miss
         # returns "" rather than leaking the DEFAULT profile's os.environ allowlist.
         from gateway.authz_mixin import _platform_gate_env as _env
-
         if _env("SLACK_ALLOW_ALL_USERS").lower() in {"true", "1", "yes"}:
             return True
         allowed_ids = {
@@ -4600,7 +4587,6 @@ class SlackAdapter(BasePlatformAdapter):
             "Confirmation prompt", "slash-confirm", team_id or None)
         try:
             from tools import slash_confirm as _slash_confirm_mod
-
             result_text = await _slash_confirm_mod.resolve(session_key, confirm_id, choice)
             if result_text:
                 post_kwargs: Dict[str, Any] = {"channel": channel_id, "text": result_text}
@@ -4645,7 +4631,6 @@ class SlackAdapter(BasePlatformAdapter):
         # timeout (count == 0) shows "expired", not "approved".
         try:
             from tools.approval import resolve_gateway_approval
-
             count = resolve_gateway_approval(session_key, choice)
             logger.info(
                 "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)", count,
@@ -4684,7 +4669,6 @@ class SlackAdapter(BasePlatformAdapter):
             return
         original_text = self._section_text(message, limit=None)
         from tools import clarify_gateway as _clarify_mod
-
         # "Other" → text-capture mode: mark_awaiting_text flips the entry and the
         # gateway's text-intercept resolves it from the user's next message.
         expired_text = f"⏳ This prompt expired — please send a new request. (by {user_name})"
@@ -4919,7 +4903,6 @@ class SlackAdapter(BasePlatformAdapter):
         embedded newline could forge a "## SYSTEM" heading — so both collapse to one inert line."""
         # Local import: don't force gateway.session at module load.
         from gateway.session import neutralize_untrusted_inline_text
-
         is_bot = self._event_declares_bot_sender(msg)
         msg_user = msg.get("user", "")
         msg_team = msg.get("team") or team_id  # our own bot for this message's workspace
@@ -5067,7 +5050,6 @@ class SlackAdapter(BasePlatformAdapter):
             return f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
         legacy_text = raw_text.strip()
         from hermes_cli.commands import slack_subcommand_map
-
         subcommand_map = slack_subcommand_map()
         subcommand_map["compact"] = "/compress"
         first_word = legacy_text.split()[0] if legacy_text.split() else ""
@@ -5123,7 +5105,6 @@ class SlackAdapter(BasePlatformAdapter):
             return None
         try:
             from gateway.session import build_session_key
-
             source = self._thread_session_source(channel_id, thread_ts, user_id, team_id, chat_type)
             store_cfg = getattr(session_store, "config", None)
             return build_session_key(
@@ -5137,7 +5118,6 @@ class SlackAdapter(BasePlatformAdapter):
     def _thread_session_source(
         channel_id: str, thread_ts: str, user_id: str, team_id: str, chat_type: str) -> Any:
         from gateway.session import SessionSource
-
         return SessionSource(
             platform=Platform.SLACK, chat_id=channel_id, chat_type=chat_type, user_id=user_id,
             thread_id=thread_ts, scope_id=team_id or None)
@@ -5233,7 +5213,6 @@ class SlackAdapter(BasePlatformAdapter):
     def _is_slack_cdn_url(cls, url: str) -> bool:
         """Return True when *url* is an https URL on a Slack CDN host."""
         from urllib.parse import urlparse
-
         try:
             parsed = urlparse(url)
         except ValueError:
@@ -5262,7 +5241,6 @@ class SlackAdapter(BasePlatformAdapter):
         re-validated; an HTML body (sign-in page) is rejected so bogus bytes are never cached."""
         import httpx
         from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
-
         if not is_safe_url(url):
             raise ValueError(
                 f"Blocked unsafe Slack file URL (SSRF protection): {safe_url_for_log(url)}")
@@ -5299,7 +5277,6 @@ class SlackAdapter(BasePlatformAdapter):
         self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
         """Download a Slack image/audio file and cache it; returns the cached path."""
         from gateway.platforms.base import cache_audio_from_bytes, cache_image_from_bytes
-
         data = await self._download_slack_file_bytes(url, team_id=team_id, html_label="media")
         return (cache_audio_from_bytes if audio else cache_image_from_bytes)(data, ext)
 
@@ -5389,7 +5366,6 @@ class SlackAdapter(BasePlatformAdapter):
             if raw:
                 try:
                     import json as _json
-
                     patterns = _json.loads(raw)
                 except Exception:
                     patterns = [p.strip() for p in raw.replace("\n", ",").split(",") if p.strip()]
@@ -5446,7 +5422,6 @@ def _load_slack_bot_tokens(raw_token: str, *, quiet: bool) -> List[str]:
     tokens = [t.strip() for t in raw_token.split(",") if t.strip()]
     try:
         from hermes_constants import get_hermes_home
-
         tokens_file = get_hermes_home() / "slack_tokens.json"
         present = tokens_file.exists()
     except Exception:
@@ -5459,7 +5434,6 @@ def _load_slack_bot_tokens(raw_token: str, *, quiet: bool) -> List[str]:
         if not quiet:
             # File holds plaintext bot tokens; warn if group/world-readable.
             from utils import warn_if_credential_file_broadly_readable
-
             warn_if_credential_file_broadly_readable(tokens_file, label="[Slack]", log=logger)
         saved = json.loads(tokens_file.read_text(encoding="utf-8"))
         for team_id, entry in saved.items():
@@ -5479,7 +5453,6 @@ def _load_slack_bot_tokens(raw_token: str, *, quiet: bool) -> List[str]:
 def _standalone_proxy_kwargs() -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``(session_kwargs, request_kwargs)`` for aiohttp honoring the configured proxy."""
     from gateway.platforms.base import proxy_kwargs_for_aiohttp
-
     return proxy_kwargs_for_aiohttp(resolve_proxy_url())
 
 
@@ -5735,11 +5708,9 @@ _SETUP_HOME_CHANNEL_HELP = (
 def _write_slack_manifest_and_instruct() -> None:
     """Write the manifest under HERMES_HOME and print paste instructions; non-fatal."""
     from hermes_cli.cli_output import print_info, print_success, print_warning
-
     try:
         from hermes_cli.slack_cli import _build_full_manifest
         from hermes_constants import get_hermes_home
-
         manifest = _build_full_manifest(
             bot_name="Hermes", bot_description="Your Hermes agent on Slack")
         target = _Path(get_hermes_home()) / "slack-manifest.json"
@@ -5850,7 +5821,6 @@ def _is_connected(config) -> bool:
     """Connected when SLACK_BOT_TOKEN is set. Resolved through ``gateway_mod`` at call
     time (not a bound import) so tests patching ``get_env_value`` take effect."""
     import hermes_cli.gateway as gateway_mod
-
     return bool((gateway_mod.get_env_value("SLACK_BOT_TOKEN") or "").strip())
 
 
