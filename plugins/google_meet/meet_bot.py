@@ -18,8 +18,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from plugins.google_meet._jsonfile import write_json_atomic
@@ -70,22 +70,15 @@ class _BotState:
     """Single-process mutable state, flushed to ``status.json`` on each change."""
 
     def __init__(self, out_dir: Path, meeting_id: str, url: str):
-        for _, attr, default in _STATUS_FIELDS:
-            if attr:
-                setattr(self, attr, default)
-        self.out_dir = out_dir
-        self.meeting_id = meeting_id
-        self.url = url
-        self._seen: set = set()  # "speaker|text" keys already written
+        self.__dict__.update({attr: default for _, attr, default in _STATUS_FIELDS if attr})
+        self.__dict__.update(out_dir=out_dir, meeting_id=meeting_id, url=url, _seen=set(),  # seen "speaker|text"
+                             transcript_path=out_dir / "transcript.txt", status_path=out_dir / "status.json")
         out_dir.mkdir(parents=True, exist_ok=True)
-        self.transcript_path = out_dir / "transcript.txt"
-        self.status_path = out_dir / "status.json"
         self._flush()
 
     def record_caption(self, speaker: str, text: str) -> None:
         """Append a caption line unless this exact (speaker, text) was already seen."""
-        speaker = (speaker or "").strip() or "Unknown"
-        text = (text or "").strip()
+        speaker, text = (speaker or "").strip() or "Unknown", (text or "").strip()
         key = f"{speaker}|{text}"
         if not text or key in self._seen:
             return
@@ -197,39 +190,31 @@ _DENIED_PROBE_JS = r"""
 
 def _probe(page, js: str) -> bool:
     """Evaluate a boolean JS probe; conservative — False on any error."""
-    try:
-        return bool(page.evaluate(js))
-    except Exception:
-        return False
+    return bool(_quiet(page.evaluate, js))
 
 
 def _visible(locator):
     """``locator.first`` if it exists and is visible, else None (swallows Playwright errors)."""
-    try:
-        first = locator.first
-        return first if first.count() and first.is_visible() else None
-    except Exception:
-        return None
+    return _quiet(lambda: locator.first if locator.first.count() and locator.first.is_visible() else None)
 
 
 def _start_pcm_pump(rt: dict, bridge_info: dict, pcm_path: Path, state: "_BotState") -> None:
     """Stream the growing ``speaker.pcm`` (24kHz s16le mono) into the device Chrome's fake mic reads."""
     bridge_info = bridge_info or {}
     platform_tag = bridge_info.get("platform")
+    target = bridge_info.get("write_target")
     if platform_tag == "linux":
-        sink = bridge_info.get("write_target") or "hermes_meet_sink"
         cmd = ["paplay", "--raw", "--rate=24000", "--format=s16le", "--channels=1",
-               f"--device={sink}", str(pcm_path)]
+               f"--device={target or 'hermes_meet_sink'}", str(pcm_path)]
         missing = "paplay not found — install pulseaudio-utils for realtime on Linux"
     elif platform_tag == "darwin":
         # User must have BlackHole as default input; ffmpeg targets it by audiotoolbox index.
         if not shutil.which("ffmpeg"):
             state.set(error=_FFMPEG_MISSING)
             return
-        device_name = bridge_info.get("write_target") or "BlackHole 2ch"
         cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re",
-               "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", str(pcm_path),
-               "-f", "audiotoolbox", "-audio_device_index", _mac_audio_device_index(device_name), "-"]
+               "-f", "s16le", "-ar", "24000", "-ac", "1", "-i", str(pcm_path), "-f", "audiotoolbox",
+               "-audio_device_index", _mac_audio_device_index(target or "BlackHole 2ch"), "-"]
         missing = _FFMPEG_MISSING
     else:
         return
@@ -246,26 +231,23 @@ def _start_pcm_pump(rt: dict, bridge_info: dict, pcm_path: Path, state: "_BotSta
 
 def _start_realtime_speaker(rt: dict, cfg: "_BotConfig", stop_flag: dict, state: "_BotState") -> None:
     """Wire up the OpenAI Realtime session, the say-queue speaker thread and the PCM pump."""
-    try:
-        from plugins.google_meet.realtime.openai_client import RealtimeSession, RealtimeSpeaker
-    except Exception as e:
-        state.set(error=f"realtime import failed: {e}")
-        return
-    pcm_path = cfg.out_dir / "speaker.pcm"
-    queue_path = cfg.out_dir / "say_queue.jsonl"
+    pcm_path, queue_path = cfg.out_dir / "speaker.pcm", cfg.out_dir / "say_queue.jsonl"
     pcm_path.write_bytes(b"")  # clean sink file per session
     queue_path.touch()  # so the speaker poller doesn't error on first iteration
+    phase = "import"
     try:
+        from plugins.google_meet.realtime.openai_client import RealtimeSession, RealtimeSpeaker
+        phase = "connect"
         session = RealtimeSession(
             api_key=cfg.realtime_api_key, model=cfg.realtime_model, voice=cfg.realtime_voice,
             instructions=cfg.realtime_instructions, audio_sink_path=pcm_path, sample_rate=24000)
         session.connect()
     except Exception as e:
-        state.set(error=f"realtime connect failed: {e}")
+        state.set(error=f"realtime {phase} failed: {e}")
         return
     rt["session"] = session
-    speaker = RealtimeSpeaker(
-        session=session, queue_path=queue_path, processed_path=cfg.out_dir / "say_processed.jsonl")
+    speaker = RealtimeSpeaker(session=session, queue_path=queue_path,
+                              processed_path=cfg.out_dir / "say_processed.jsonl")
 
     def _speaker_loop():
         try:
@@ -282,14 +264,10 @@ def _start_realtime_speaker(rt: dict, cfg: "_BotConfig", stop_flag: dict, state:
 def _mac_audio_device_index(device_name: str) -> str:
     """ffmpeg ``-audio_device_index`` for *device_name* (case-insensitive; ``"0"`` if not found).
     ffmpeg prints the avfoundation device table on stderr as ``[N] Name``."""
-    try:
-        out = subprocess.run(
-            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
-    except Exception:
-        return "0"
+    out = _quiet(subprocess.run, ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
     needle = device_name.strip().lower()
-    for line in (out.stderr or "").splitlines():
+    for line in (out.stderr if out else "").splitlines():
         m = re.search(r"\[(\d+)\]\s+(.+)$", line)
         if m and m.group(2).strip().lower() == needle:
             return m.group(1)
@@ -304,9 +282,8 @@ def _setup_realtime(rt: dict, api_key: str, state: _BotState) -> None:
         return
     try:
         from plugins.google_meet.audio_bridge import AudioBridge
-        bridge = AudioBridge()
-        rt["bridge_info"] = bridge.setup()
-        rt["bridge"] = bridge
+        rt["bridge"] = AudioBridge()
+        rt["bridge_info"] = rt["bridge"].setup()
         state.set(realtime=True, realtime_device=rt["bridge_info"].get("device_name"))
     except Exception as e:
         state.set(error=f"audio bridge setup failed: {e} — falling back to transcribe")
@@ -317,29 +294,13 @@ def _teardown_realtime(rt: dict) -> None:
     if rt.get("pcm_pump"):
         _quiet(rt["pcm_pump"].terminate)
         _quiet(rt["pcm_pump"].wait, timeout=3)
-    if rt["speaker_thread"] is not None:
-        _quiet(rt["speaker_thread"].join, timeout=5.0)
-    for key, method in (("session", "close"), ("bridge", "teardown")):
-        if rt[key]:
-            _quiet(getattr(rt[key], method))
+    for key, method, kw in (("speaker_thread", "join", {"timeout": 5.0}), ("session", "close", {}),
+                            ("bridge", "teardown", {})):
+        if rt[key] is not None:
+            _quiet(getattr(rt[key], method), **kw)
 
 
-@dataclass
-class _BotConfig:
-    """Everything the bot reads from ``HERMES_MEET_*`` env vars."""
-
-    url: str
-    out_dir: Optional[Path]
-    headed: bool
-    auth_state: str
-    guest_name: str
-    duration_s: Optional[float]
-    realtime: bool
-    realtime_api_key: str
-    realtime_model: str
-    realtime_voice: str
-    realtime_instructions: str
-    lobby_timeout: float
+_BotConfig = SimpleNamespace  # everything the bot reads from ``HERMES_MEET_*`` env vars
 
 
 def _config_from_env() -> _BotConfig:
@@ -369,15 +330,10 @@ def _join(page, cfg: _BotConfig, state: _BotState) -> None:
         _quiet(name_box.fill, cfg.guest_name, timeout=2_000)
     for label in ("Join now", "Ask to join"):
         btn = _visible(page.get_by_role("button", name=label, exact=False))
-        if btn is None:
-            continue
-        try:
-            btn.click(timeout=3_000)
-        except Exception:
-            continue
-        if label == "Ask to join":
-            state.set(lobby_waiting=True)
-        break
+        if btn is not None and _quiet(lambda: (btn.click(timeout=3_000), True)):
+            if label == "Ask to join":
+                state.set(lobby_waiting=True)
+            break
 
 
 def _drain_loop(page, cfg: _BotConfig, state: _BotState, rt: dict, stop_flag: dict) -> None:
@@ -405,9 +361,7 @@ def _drain_loop(page, cfg: _BotConfig, state: _BotState, rt: dict, stop_flag: di
                 return
         try:
             queued = page.evaluate("window.__hermesMeetDrain && window.__hermesMeetDrain()")
-            for entry in queued if isinstance(queued, list) else ():
-                if not isinstance(entry, dict):
-                    continue
+            for entry in (e for e in (queued if isinstance(queued, list) else ()) if isinstance(e, dict)):
                 speaker = str(entry.get("speaker", ""))
                 state.record_caption(speaker=speaker, text=str(entry.get("text", "")))
                 # Barge-in: a real human spoke while we may be generating audio.
@@ -422,6 +376,13 @@ def _drain_loop(page, cfg: _BotConfig, state: _BotState, rt: dict, stop_flag: di
             state.set(audio_bytes_out=rt["session"].audio_bytes_out,
                       last_audio_out_at=rt["session"].last_audio_out_at)
         time.sleep(1.0)
+
+
+_CONTEXT_ARGS = {
+    "viewport": {"width": 1280, "height": 800},
+    "user_agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+    "permissions": ["microphone", "camera"]}
 
 
 def run_bot() -> int:
@@ -440,8 +401,7 @@ def run_bot() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda _sig, _frame: stop_flag.__setitem__("stop", True))
     # Realtime resources in one dict so teardown works however we exit.
-    rt = {"enabled": cfg.realtime, "bridge": None, "bridge_info": None, "session": None,
-          "speaker_thread": None}
+    rt = dict(enabled=cfg.realtime, bridge=None, bridge_info=None, session=None, speaker_thread=None)
     if rt["enabled"]:
         _setup_realtime(rt, cfg.realtime_api_key, state)
     try:
@@ -459,16 +419,12 @@ def run_bot() -> int:
     elif rt["bridge_info"] and rt["bridge_info"].get("platform") == "linux":
         # Playwright's launch() takes no env: set PULSE_SOURCE on ourselves so Chrome inherits it.
         os.environ["PULSE_SOURCE"] = rt["bridge_info"].get("device_name", "")
+    context_args = dict(_CONTEXT_ARGS)
+    if cfg.auth_state and Path(cfg.auth_state).is_file():
+        context_args["storage_state"] = cfg.auth_state
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=not cfg.headed, args=chrome_args)
-            context_args = {
-                "viewport": {"width": 1280, "height": 800},
-                "user_agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
-                "permissions": ["microphone", "camera"]}
-            if cfg.auth_state and Path(cfg.auth_state).is_file():
-                context_args["storage_state"] = cfg.auth_state
             context = browser.new_context(**context_args)
             page = context.new_page()
             try:

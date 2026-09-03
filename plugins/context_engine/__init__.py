@@ -52,7 +52,6 @@ class _EngineCollector(_loader.NoopPluginContext):
     def __init__(self, engine_name: str = ""):
         self.engine = None
         self._engine_name = engine_name or "context_engine"
-        self._registered_commands: list[str] = []
 
     def register_context_engine(self, engine):
         self.engine = engine
@@ -80,7 +79,6 @@ class _EngineCollector(_loader.NoopPluginContext):
             manager._plugin_commands[clean] = {
                 "handler": handler, "description": description or "Context engine command",
                 "plugin": f"context-engine:{self._engine_name}", "args_hint": (args_hint or "").strip()}
-            self._registered_commands.append(clean)
             logger.debug("Context engine '%s' registered command: /%s", self._engine_name, clean)
         except Exception as exc:
             logger.debug("Context engine '%s' could not register /%s: %s", self._engine_name, clean, exc)

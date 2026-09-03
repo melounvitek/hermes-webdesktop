@@ -64,9 +64,7 @@ def _on_post_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = Non
             p = Path(path_str).expanduser()
         except Exception:
             continue
-        if not p.exists():
-            continue
-        category = dg.guess_category(p)
+        category = dg.guess_category(p) if p.exists() else None
         if category is not None and dg.track(str(p), category, silent=True) and category == "test":
             with _lock:
                 _recent_test_tracks.setdefault(task_id or session_id or "default", set()).add(str(p))

@@ -45,12 +45,9 @@ def iter_plugin_dirs(root: Path) -> List[Path]:
 
 def read_plugin_description(plugin_dir: Path) -> str:
     """Return ``description`` from ``plugin.yaml`` (empty string if absent/unreadable)."""
-    yaml_file = plugin_dir / "plugin.yaml"
-    if not yaml_file.exists():
-        return ""
     try:
         import yaml
-        with open(yaml_file, encoding="utf-8-sig") as f:
+        with open(plugin_dir / "plugin.yaml", encoding="utf-8-sig") as f:
             meta = yaml.safe_load(f) or {}
         return meta.get("description", "")
     except Exception:
@@ -69,8 +66,8 @@ def _new_module(name: str, file: Path, search_locations: Optional[List[str]] = N
 
 
 def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
-    """Execute a module made by ``_new_module`` (None -> False); False (and debug-log) if it raised.
-    The sys.modules entry stays on failure; callers needing a clean retry pop it themselves."""
+    """Exec a ``_new_module`` module (None -> False); False + debug-log if it raised. The sys.modules
+    entry stays on failure; callers needing a clean retry pop it themselves."""
     if mod is None:
         return False
     try:
@@ -85,11 +82,9 @@ def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
 def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: Tuple[str, ...],
                        logger: logging.Logger, synthetic_namespace: Optional[str] = None) -> Optional[Any]:
     """Import ``plugin_dir/__init__.py`` as *module_name* (reusing sys.modules when loaded).
-
     Order matters: parents first (relative imports need them), then siblings as ``module_name.<stem>``
     (so ``from ._x import Y`` resolves), then the module. Finally child is bound onto parent and
-    siblings onto module — the shape normal imports produce, which monkeypatch relies on.
-    """
+    siblings onto module — the shape normal imports produce, which monkeypatch relies on."""
     init_file = plugin_dir / "__init__.py"
     if not init_file.exists():
         return None
@@ -128,8 +123,7 @@ def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: Tuple[str
 
 
 class NoopPluginContext:
-    """Base for fake ``register(ctx)`` contexts: every registration is a no-op except the one the
-    subclass overrides to capture its provider."""
+    """Base for fake ``register(ctx)`` contexts: no-op registrations except the one a subclass overrides."""
 
     def _noop(self, *args, **kwargs):
         pass
@@ -173,8 +167,6 @@ def probe_availability(load: Callable[[], Optional[Any]]) -> bool:
     """True iff *load()* returns an instance whose ``is_available()`` (if any) is truthy."""
     try:
         instance = load()
-        if instance is None:
-            return False
-        return instance.is_available() if hasattr(instance, "is_available") else True
+        return instance is not None and (instance.is_available() if hasattr(instance, "is_available") else True)
     except Exception:
         return False
