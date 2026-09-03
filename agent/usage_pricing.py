@@ -43,13 +43,8 @@ def format_cost_label(amount: Decimal) -> str:
 
 CostStatus = Literal["actual", "estimated", "included", "unknown"]
 CostSource = Literal[
-    "provider_cost_api",
-    "provider_generation_api",
-    "provider_models_api",
-    "official_docs_snapshot",
-    "user_override",
-    "custom_contract",
-    "none",
+    "provider_cost_api", "provider_generation_api", "provider_models_api", "official_docs_snapshot",
+    "user_override", "custom_contract", "none",
 ]
 
 
@@ -272,54 +267,30 @@ del _provider, _alias, _canonical
 
 
 def _to_decimal(value: Any) -> Optional[Decimal]:
-    if value is None:
-        return None
     try:
-        return Decimal(str(value))
+        return None if value is None else Decimal(str(value))
     except Exception:
         return None
 
 
-def _to_int(value: Any) -> int:
+def _usage_field(obj: Any, *path: str) -> int:
+    """Non-negative int at ``obj.path[0].path[1]...``; 0 if any hop is falsy or
+    non-numeric. Hops read dicts and attribute objects alike (the Responses API
+    returns either); negative counters from providers are clamped so they cannot
+    corrupt session accounting."""
+    for hop in path:
+        if not obj:
+            return 0
+        obj = obj.get(hop, 0) if isinstance(obj, dict) else getattr(obj, hop, 0)
     try:
-        return int(value or 0)
+        return max(0, int(obj or 0))
     except Exception:
         return 0
 
 
-def _usage_get(obj: Any, name: str, default: Any = 0) -> Any:
-    """Read a usage field from either a dict or an attribute object.
-
-    The Responses API returns usage as a typed SDK object OR a plain dict;
-    ``getattr`` on a dict silently yields the default and zeroes every count.
-    """
-    if isinstance(obj, dict):
-        return obj.get(name, default)
-    return getattr(obj, name, default)
-
-
-def _usage_count(value: Any) -> int:
-    """Coerce a usage counter to a non-negative int (providers occasionally
-    emit negative counters; clamp so they cannot corrupt session accounting)."""
-    return max(0, _to_int(value))
-
-
-def _usage_field(obj: Any, name: str, *path: str) -> int:
-    """``_usage_count`` of ``obj.name[.path...]``; 0 if any hop is falsy."""
-    for hop in (name, *path):
-        if not obj:
-            return 0
-        obj = _usage_get(obj, hop, 0)
-    return _usage_count(obj)
-
-
 def _first_nonzero(obj: Any, *paths: tuple[str, ...]) -> int:
     """First non-zero ``_usage_field`` across candidate paths, else 0."""
-    for path in paths:
-        value = _usage_field(obj, *path)
-        if value:
-            return value
-    return 0
+    return next((v for v in (_usage_field(obj, *path) for path in paths) if v), 0)
 
 
 # Picker slugs → snapshot provider key ("openai-api" is the slug for direct
@@ -528,8 +499,7 @@ def normalize_usage(
     # (OpenAI, OpenRouter, DeepSeek, ...): completion_tokens_details.reasoning_tokens.
     # Hidden thinking dominates output spend on reasoning models, so read both.
     reasoning_tokens = _first_nonzero(
-        u, ("output_tokens_details", "reasoning_tokens"),
-        ("completion_tokens_details", "reasoning_tokens"),
+        u, ("output_tokens_details", "reasoning_tokens"), ("completion_tokens_details", "reasoning_tokens")
     )
 
     # On MiniMax-M3's Anthropic wire, cache_read_input_tokens carries a constant
@@ -619,9 +589,6 @@ def has_known_pricing(
     api_key: Optional[str] = None,
 ) -> bool:
     """True if pricing data exists for this model+route (direct lookup, no dummy usage)."""
-    route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
-    if route.billing_mode == "subscription_included":
-        return True
     return get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key) is not None
 
 
