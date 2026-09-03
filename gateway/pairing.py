@@ -297,41 +297,27 @@ def _save_json_file(path: Path, data: dict) -> None:
     _secure_write(path, json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def _merge_pairing_dir(active_dir: Path, alternate_dir: Path) -> None:
+def _migrate_split_pairing_dirs(*, home: Optional[Path] = None, active: Optional[Path] = None) -> None:
     """Merge split legacy (``pairing``) / new (``platforms/pairing``) data into the active dir.
 
-    If both exist, approved users in the inactive location must not be
-    silently ignored (they would be asked for a fresh code).
+    If both exist, approved users in the inactive location must not be silently
+    ignored (they would be asked for a fresh code). Active data wins on key conflict.
     """
-    if not alternate_dir.exists() or active_dir.resolve() == alternate_dir.resolve():
-        return
-    active_dir.mkdir(parents=True, exist_ok=True)
-    for src in alternate_dir.glob("*.json"):
-        if not src.is_file():
-            continue
-        dest = active_dir / src.name
-        merged = _load_json_file(src)
-        if not merged:
-            continue
-        current = _load_json_file(dest)
-        before = dict(current)
-        # Active data wins on key conflict; otherwise union the inactive data.
-        merged.update(current)
-        if merged != before:
-            _save_json_file(dest, merged)
-
-
-def _migrate_split_pairing_dirs(
-    *,
-    home: Optional[Path] = None,
-    active: Optional[Path] = None,
-) -> None:
     home = home or get_hermes_home()
     old_dir = home / "pairing"
-    new_dir = home / "platforms" / "pairing"
     active = active if active is not None else _default_pairing_dir()
-    alternate = new_dir if active.resolve() == old_dir.resolve() else old_dir
-    _merge_pairing_dir(active, alternate)
+    alternate = home / "platforms" / "pairing" if active.resolve() == old_dir.resolve() else old_dir
+    if not alternate.exists() or active.resolve() == alternate.resolve():
+        return
+    active.mkdir(parents=True, exist_ok=True)
+    for src in alternate.glob("*.json"):
+        merged = _load_json_file(src) if src.is_file() else {}
+        if not merged:
+            continue
+        current = _load_json_file(active / src.name)
+        merged.update(current)
+        if merged != current:
+            _save_json_file(active / src.name, merged)
 
 
 def _secure_write(path: Path, data: str) -> None:

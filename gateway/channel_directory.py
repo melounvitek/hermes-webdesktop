@@ -506,22 +506,17 @@ def format_directory_for_display(platforms: Optional[Dict[str, Any]] = None) -> 
                 f"{plat_name}:<chat_id>, or bare '{plat_name}' for the home channel)"
             )
         elif plat_name == "discord":
-            # Group Discord channels by guild; DMs last.
+            # Group Discord channels by guild (sorted by name); DMs last, in discovery order.
             guilds: Dict[str, List] = {}
             dms: List = []
             for ch in channels:
-                guild = ch.get("guild")
-                (guilds.setdefault(guild, []) if guild else dms).append(ch)
-
-            for guild_name, guild_channels in sorted(guilds.items()):
-                lines.append(f"Discord ({guild_name}):")
-                lines.extend(
-                    f"  discord:{_channel_target_name(plat_name, ch)}"
-                    for ch in sorted(guild_channels, key=lambda c: c["name"])
-                )
+                (guilds.setdefault(ch["guild"], []) if ch.get("guild") else dms).append(ch)
+            groups = [(f"Discord ({g}):", sorted(chs, key=lambda c: c["name"])) for g, chs in sorted(guilds.items())]
             if dms:
-                lines.append("Discord (DMs):")
-                lines.extend(f"  discord:{_channel_target_name(plat_name, ch)}" for ch in dms)
+                groups.append(("Discord (DMs):", dms))
+            for header, group in groups:
+                lines.append(header)
+                lines.extend(f"  discord:{_channel_target_name(plat_name, ch)}" for ch in group)
         else:
             lines.append(f"{plat_name.title()}:")
             lines.extend(f"  {plat_name}:{_channel_target_name(plat_name, ch)}" for ch in channels)

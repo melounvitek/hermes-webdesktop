@@ -158,9 +158,7 @@ def coerce_systemd_watchdog_seconds(
     if parsed is None:
         logger.warning("Ignoring invalid %s (expected a positive integer)", key)
         return 0
-    if parsed == 0:
-        return 0
-    if not 0 < parsed <= _SYSTEMD_WATCHDOG_MAX_SECONDS:
+    if parsed and not 0 < parsed <= _SYSTEMD_WATCHDOG_MAX_SECONDS:
         logger.warning("Ignoring invalid %s (expected an integer from 1 to %d)", key, _SYSTEMD_WATCHDOG_MAX_SECONDS)
         return 0
     return parsed
@@ -562,6 +560,13 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 }
 
 
+# Top-level bool-ish keys read verbatim (no nested ``gateway.`` fallback) with their defaults.
+_TOPLEVEL_BOOL_DEFAULTS = {
+    "write_sessions_json": True, "always_log_local": True, "filter_silence_narration": True,
+    "group_sessions_per_user": True, "thread_sessions_per_user": False,
+}
+
+
 @dataclass
 class GatewayConfig:
     """Main gateway configuration: platform connections, session policies, delivery settings."""
@@ -772,13 +777,9 @@ class GatewayConfig:
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=_coerce_dict(data.get("quick_commands", {})),
             sessions_dir=Path(data["sessions_dir"]) if "sessions_dir" in data else get_hermes_home() / "sessions",
-            write_sessions_json=_coerce_bool(data.get("write_sessions_json"), True),
-            always_log_local=_coerce_bool(data.get("always_log_local"), True),
-            filter_silence_narration=_coerce_bool(data.get("filter_silence_narration"), True),
+            **{name: _coerce_bool(data.get(name), default) for name, default in _TOPLEVEL_BOOL_DEFAULTS.items()},
             stt_enabled=_coerce_bool(stt_setting("stt_enabled", "enabled"), True),
             stt_echo_transcripts=_coerce_bool(stt_setting("stt_echo_transcripts", "echo_transcripts"), True),
-            group_sessions_per_user=_coerce_bool(data.get("group_sessions_per_user"), True),
-            thread_sessions_per_user=_coerce_bool(data.get("thread_sessions_per_user"), False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             multiplex_profile_allowlist=pick("multiplex_profile_allowlist"),
             room_link_url=room_link_url if isinstance(room_link_url, str) else None,
