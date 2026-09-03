@@ -31,64 +31,45 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 from hermes_constants import secure_parent_dir
 from tools.mcp_dashboard_oauth import contextvar_set as _contextvar_set, get_dashboard_oauth_flow
 
+if TYPE_CHECKING:  # annotations only; the SDK is imported lazily at runtime
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthMetadata, OAuthToken
+
 logger = logging.getLogger(__name__)
 
-# Lazy SDK imports: availability is detected WITHOUT importing mcp (~170 ms). Module-level
-# names stay None placeholders so tests can patch.object them; _ensure_sdk_loaded() binds the
-# real classes on first use and _SDK_CLASSES caches them so a test that patches a name and
-# restores it to None afterwards doesn't strand the module in a broken state.
+# SDK availability is detected WITHOUT importing mcp (~170 ms); the classes bind lazily on
+# first use via _sdk_class().
 _OAUTH_AVAILABLE = _importlib_util.find_spec("mcp") is not None
 if not _OAUTH_AVAILABLE:
     logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
 
-OAuthClientProvider: Any = None
-OAuthClientInformationFull: Any = None
-OAuthClientMetadata: Any = None
-OAuthMetadata: Any = None
-OAuthToken: Any = None
-
+_SDK_CLASS_NAMES = ("OAuthClientProvider", "OAuthClientInformationFull", "OAuthClientMetadata", "OAuthMetadata", "OAuthToken")
 _SDK_CLASSES: dict[str, Any] = {}
-_SDK_LOAD_FAILED = False
 
 
-def _ensure_sdk_loaded() -> bool:
-    """Bind the SDK OAuth classes into module globals; True when available. Only names
-    currently ``None`` are (re)bound, so test patches stay intact."""
-    global _SDK_LOAD_FAILED, _OAUTH_AVAILABLE
-    if _SDK_LOAD_FAILED:
-        return False
+def _sdk_class(name: str) -> Any:
+    """Return the SDK OAuth class *name*, importing the SDK on first call; None when unavailable
+    (the failure is remembered so a broken SDK is probed once)."""
+    global _OAUTH_AVAILABLE
     if not _SDK_CLASSES:
         try:
             from mcp.client import auth as _client_auth
             from mcp.shared import auth as _shared_auth
 
             _SDK_CLASSES["OAuthClientProvider"] = _client_auth.OAuthClientProvider
-            for _name in ("OAuthClientInformationFull", "OAuthClientMetadata", "OAuthMetadata", "OAuthToken"):
+            for _name in _SDK_CLASS_NAMES[1:]:
                 _SDK_CLASSES[_name] = getattr(_shared_auth, _name)
         except (ImportError, AttributeError):
-            _SDK_CLASSES.clear()
-            _SDK_LOAD_FAILED = True
+            _SDK_CLASSES.update(dict.fromkeys(_SDK_CLASS_NAMES))
             _OAUTH_AVAILABLE = False
             logger.debug("MCP OAuth types not available -- OAuth MCP auth disabled")
-            return False
-    g = globals()
-    for _name, _cls in _SDK_CLASSES.items():
-        if g.get(_name) is None:
-            g[_name] = _cls
-    return True
-
-
-def _sdk_class(name: str) -> Any:
-    """Return the (possibly test-patched) SDK class bound under *name*, or None."""
-    if globals().get(name) is None and not _ensure_sdk_loaded():
-        return None
-    return globals().get(name)
+    return _SDK_CLASSES.get(name)
 
 
 try:
@@ -144,22 +125,11 @@ _reserved_sockets: "dict[int, socket.socket]" = {}
 _MAX_RESERVED_SOCKETS = 8
 
 
-def _park_reserved_socket(port: int, sock: socket.socket) -> None:
-    """Hold *sock* bound to *port* until the callback waiter adopts it. Pinned CIMD sockets
-    are never evicted: the published document only declares the pinned ports, so losing one
-    mid-flow would reopen the race the parking prevents. The FIFO cap applies to ephemeral
-    ports only."""
-    while len(_reserved_sockets) >= _MAX_RESERVED_SOCKETS:
-        stale_port = next((p for p in _reserved_sockets if p not in _CIMD_PORTS), None)
-        if stale_port is None:
-            break  # only pinned sockets remain — never evict those
-        with contextlib.suppress(OSError):
-            _reserved_sockets.pop(stale_port).close()
-    _reserved_sockets[port] = sock
-
-
 def _bind_reserved(port: int) -> int | None:
-    """Bind ``127.0.0.1:port`` (0 = ephemeral) and park it; None if taken."""
+    """Bind ``127.0.0.1:port`` (0 = ephemeral) and park it until the waiter adopts it; None if
+    taken. Pinned CIMD sockets are never evicted: the published document only declares the
+    pinned ports, so losing one mid-flow would reopen the race the parking prevents. The FIFO
+    cap applies to ephemeral ports only."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.bind(("127.0.0.1", port))
@@ -169,7 +139,13 @@ def _bind_reserved(port: int) -> int | None:
             return None
         raise
     bound = sock.getsockname()[1]
-    _park_reserved_socket(bound, sock)
+    while len(_reserved_sockets) >= _MAX_RESERVED_SOCKETS:
+        stale_port = next((p for p in _reserved_sockets if p not in _CIMD_PORTS), None)
+        if stale_port is None:
+            break  # only pinned sockets remain — never evict those
+        with contextlib.suppress(OSError):
+            _reserved_sockets.pop(stale_port).close()
+    _reserved_sockets[bound] = sock
     return bound
 
 
@@ -187,31 +163,21 @@ def _cached_client_info(storage: "HermesTokenStorage | None") -> dict | None:
         return None
 
 
-def _cached_redirect_uris(storage: "HermesTokenStorage | None"):
-    """Yield ``(raw_uri, parsed)`` for each redirect URI in the cached registration."""
-    for uri in (_cached_client_info(storage) or {}).get("redirect_uris") or []:
+def _cached_redirect(storage: "HermesTokenStorage | None") -> "tuple[str | None, int | None]":
+    """``(https proxy URI, loopback callback port)`` from the cached client registration (each
+    None when absent). Providers bind a dynamically-registered ``client_id`` to the exact
+    redirect URI registered with it; a new random port under the stored ``client_id`` gets
+    ``redirect_uri does not match any registered URIs``."""
+    uri = port = None
+    for raw in (_cached_client_info(storage) or {}).get("redirect_uris") or []:
         with contextlib.suppress(TypeError, ValueError):
-            yield str(uri), urlparse(str(uri))
-
-
-def _cached_redirect_port(storage: "HermesTokenStorage | None") -> int | None:
-    """Loopback callback port from the cached client registration. Providers bind a
-    dynamically-registered ``client_id`` to the exact redirect URI registered with it; a new
-    random port under the stored ``client_id`` gets ``redirect_uri does not match any
-    registered URIs``."""
-    for _uri, parsed in _cached_redirect_uris(storage):
-        is_loopback_callback = parsed.scheme == "http" and parsed.path == "/callback" and parsed.hostname in {"127.0.0.1", "localhost"}
-        if is_loopback_callback and parsed.port is not None:
-            return int(parsed.port)
-    return None
-
-
-def _cached_redirect_uri(storage: "HermesTokenStorage | None") -> str | None:
-    """A cached non-loopback (https) redirect URI, if one was registered."""
-    for uri, parsed in _cached_redirect_uris(storage):
-        if parsed.scheme == "https" and parsed.netloc:
-            return uri
-    return None
+            parsed = urlparse(str(raw))
+            if uri is None and parsed.scheme == "https" and parsed.netloc:
+                uri = str(raw)
+            is_loopback_callback = parsed.scheme == "http" and parsed.path == "/callback" and parsed.hostname in {"127.0.0.1", "localhost"}
+            if port is None and is_loopback_callback and parsed.port is not None:
+                port = int(parsed.port)
+    return uri, port
 
 
 # -- Interactivity -----------------------------------------------------------
@@ -677,17 +643,6 @@ def _start_callback_server(port: int, handler_cls: type) -> HTTPServer:
     return server
 
 
-async def _poll_callback_result(server: HTTPServer, result: dict, timeout: float) -> None:
-    """Poll *result* until filled or *timeout* elapses; always closes the listener."""
-    elapsed = 0.0
-    try:
-        while elapsed < timeout and not _result_taken(result):
-            await asyncio.sleep(0.5)
-            elapsed += 0.5
-    finally:
-        server.server_close()
-
-
 def _callback_outcome(result: dict, cimd_url: str | None):
     """Turn a filled/empty result dict into the SDK's callback value, or raise."""
     if result["error"] == _USER_SKIPPED_SENTINEL:
@@ -739,7 +694,13 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
                 file=sys.stderr, flush=True,
             )
             threading.Thread(target=_paste_callback_reader, args=(result,), daemon=True).start()
-        await _poll_callback_result(server, result, timeout)
+        elapsed = 0.0
+        try:
+            while elapsed < timeout and not _result_taken(result):
+                await asyncio.sleep(0.5)
+                elapsed += 0.5
+        finally:
+            server.server_close()
         return _callback_outcome(result, cimd_url)
 
     return _wait
@@ -752,10 +713,11 @@ HermesOAuthClientProvider: Any = None
 def _get_hermes_oauth_provider_class() -> type | None:
     """Build (once) and cache ``HermesOAuthClientProvider``; None without the SDK."""
     global HermesOAuthClientProvider
-    if HermesOAuthClientProvider is None and _ensure_sdk_loaded():
+    base = _sdk_class("OAuthClientProvider")
+    if HermesOAuthClientProvider is None and base is not None:
         from tools.mcp_oauth_provider import HermesProviderMixin
 
-        HermesOAuthClientProvider = type("HermesOAuthClientProvider", (HermesProviderMixin, OAuthClientProvider), {
+        HermesOAuthClientProvider = type("HermesOAuthClientProvider", (HermesProviderMixin, base), {
             "__doc__": "SDK provider plus Hermes' token-endpoint fixes (see ``HermesProviderMixin``).",
             "__module__": __name__,
             "_hermes_logger": logger,
@@ -906,16 +868,16 @@ def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = N
         cfg["_resolved_port"] = 0
         cfg["redirect_uri"] = cfg.get("redirect_uri") or dashboard_flow.redirect_uri
         return 0
-    cached_redirect_uri = None if cfg.get("redirect_uri") else _cached_redirect_uri(storage)
-    if cached_redirect_uri:
-        cfg["redirect_uri"] = cached_redirect_uri
+    cached_uri, cached_port = _cached_redirect(storage)
+    if cached_uri and not cfg.get("redirect_uri"):
+        cfg["redirect_uri"] = cached_uri
         cfg["_resolved_port"] = 0
         return 0
     cimd = _maybe_use_cimd(cfg, storage)
     if cimd is not None:
         cfg["_cimd_url"], port = cimd
     else:
-        port = int(cfg.get("redirect_port", 0)) or _cached_redirect_port(storage) or _reserve_callback_port()
+        port = int(cfg.get("redirect_port", 0)) or cached_port or _reserve_callback_port()
         # A cached port may be a pinned CIMD port left by an earlier CIMD login; claim it so a
         # sibling's _pick_cimd_port doesn't reuse it.
         if port in _CIMD_PORTS and port not in _assigned_cimd_ports:
@@ -1094,7 +1056,7 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
     new code should use :func:`tools.mcp_oauth_manager.get_manager` so OAuth state is shared
     across config-time, runtime, and reconnect paths. Returns None if the MCP SDK lacks OAuth
     support."""
-    if not _OAUTH_AVAILABLE or (OAuthClientProvider is None and not _ensure_sdk_loaded()):
+    if not _OAUTH_AVAILABLE or _sdk_class("OAuthClientProvider") is None:
         logger.warning(
             "MCP OAuth requested for '%s' but SDK auth types are not available. Install with: pip install 'mcp>=1.26.0'",
             server_name,

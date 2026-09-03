@@ -1,27 +1,12 @@
 """Lazy dependency installer for opt-in Hermes backends.
 
-Backends call :func:`ensure(feature)` on first import; missing packages are
-pip-installed into the active venv (or the durable target) unless the user set
-``security.allow_lazy_installs: false``, in which case :class:`FeatureUnavailable`
-carries a remediation hint. Eager ``[all]`` extras were both fragile (one yanked
-transitive broke every extra) and bloated; lazy installs fix both.
-
-Security model:
-* Venv-scoped: installs target ``sys.executable``'s venv, never system Python.
-* Durable-target mode (sealed images): ``HERMES_LAZY_INSTALL_TARGET`` redirects
-  installs to a writable volume that is APPENDED to ``sys.path`` — never
-  prepended, never via PYTHONPATH — so core site-packages wins every collision.
-  A lazily installed package can only add modules, never shadow or break core;
-  that guarantee is what made sealing the venv safe. An ABI stamp on the target
-  wipes stale compiled wheels across interpreter rebuilds.
-* PyPI by name only: no ``--index-url``, ``git+``, or file specs (``_spec_is_safe``).
-* Allowlist: only specs in :data:`LAZY_DEPS` flow into pip via ``ensure``.
-* Opt-out ``security.allow_lazy_installs: false`` disables installs in both modes.
-* Install failures surface pip's stderr as FeatureUnavailable — no retries, no cache.
-
-Adding a backend: add a :data:`LAZY_DEPS` entry, then call ``ensure("ns.name")``
-at the top of the backend's import path, converting FeatureUnavailable to a
-useful runtime error.
+Backends call :func:`ensure(feature)` on first import; missing packages are installed into the
+active venv (or the durable target) unless ``security.allow_lazy_installs: false``, in which
+case :class:`FeatureUnavailable` carries a remediation hint. Security model: venv-scoped
+(never system Python); durable-target mode (``HERMES_LAZY_INSTALL_TARGET``, sealed images)
+APPENDS the target to ``sys.path`` so core site-packages wins every collision and a lazy
+package can only add modules, never shadow core; PyPI-by-name specs only (``_spec_is_safe``);
+``ensure`` accepts only the :data:`LAZY_DEPS` allowlist; failures surface pip's stderr, no retry.
 """
 
 from __future__ import annotations
@@ -43,12 +28,11 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 logger = logging.getLogger(__name__)
 
 
-# Allowlist: "namespace.backend" -> pip specs matching the pyproject extra.
-# Pins are exact (no ranges, security posture); bump here AND in pyproject.
-# Shared patched floors, spelled out as literals in every feature because
-# tests/test_packaging_metadata.py checks them by AST: aiohttp==3.14.3 (prior
-# CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7) and
-# starlette==1.3.1 (CVE-2026-48710 BadHost) — keep in sync with pyproject.
+# Allowlist: "namespace.backend" -> pip specs matching the pyproject extra. Pins are exact
+# (security posture); bump here AND in pyproject. Shared patched floors are spelled out as
+# literals in every feature because tests/test_packaging_metadata.py checks them by AST:
+# aiohttp==3.14.3 (GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7) and
+# starlette==1.3.1 (CVE-2026-48710 BadHost).
 
 LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Inference providers ───────────────────────────────────────────────
@@ -229,12 +213,9 @@ class FeatureUnavailable(RuntimeError):
         self.feature = feature
         self.missing = missing
         self.reason = reason
-        super().__init__(self._format())
-
-    def _format(self) -> str:
-        spec_list = " ".join(repr(s) for s in self.missing)
-        return (
-            f"Feature {self.feature!r} unavailable: {self.reason}. "
+        spec_list = " ".join(repr(s) for s in missing)
+        super().__init__(
+            f"Feature {feature!r} unavailable: {reason}. "
             f"To enable manually: uv pip install {spec_list}  "
             f"(or: pip install {spec_list})."
         )
@@ -256,16 +237,13 @@ _LAZY_TARGET_ENV = "HERMES_LAZY_INSTALL_TARGET"
 # after an image rebuild wipes the store so stale .so files are never imported.
 _TARGET_STAMP_NAME = ".python-abi"
 
-_SUBPROCESS_KW = dict(capture_output=True, text=True, encoding="utf-8", errors="replace",
-                      stdin=subprocess.DEVNULL)
+_SUBPROCESS_KW = dict(capture_output=True, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
 
 
 def _python_abi_tag() -> str:
     """X.Y version + EXT_SUFFIX (ABI tag + platform); interpreters that can
     share compiled wheels produce the same token."""
-    ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-    ext = sysconfig.get_config_var("EXT_SUFFIX") or ""
-    return f"{ver}:{ext}"
+    return f"{sys.version_info.major}.{sys.version_info.minor}:{sysconfig.get_config_var('EXT_SUFFIX') or ''}"
 
 
 def _lazy_install_target() -> Optional[Path]:
@@ -289,8 +267,7 @@ def _ensure_target_ready(target: Path) -> Optional[str]:
                 have = ""
             if have and have != want:
                 logger.info(
-                    "Lazy install target %s was built for ABI %r but running "
-                    "ABI is %r; wiping stale packages.",
+                    "Lazy install target %s was built for ABI %r but running ABI is %r; wiping stale packages.",
                     target, have, want,
                 )
                 for child in target.iterdir():
@@ -360,11 +337,8 @@ def _allow_lazy_installs() -> bool:
         cfg = load_config()
     except Exception:
         cfg = None
-    if cfg is not None:
-        sec = cfg.get("security") or {}
-        if not bool(sec.get("allow_lazy_installs", True)):
-            return False
-
+    if cfg is not None and not bool((cfg.get("security") or {}).get("allow_lazy_installs", True)):
+        return False
     if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1":
         return _lazy_install_target() is not None
     return True
@@ -384,13 +358,12 @@ def _unsupported_feature_reason(feature: str) -> Optional[str]:
 
 def _spec_is_safe(spec: str) -> bool:
     """Reject pip specs that contain URLs, paths, or shell metacharacters."""
-    if not spec or len(spec) > 200:
-        return False
-    if any(ch in spec for ch in (";", "|", "&", "`", "$", "\n", "\r", "\t", "\\")):
-        return False
-    if spec.startswith(("-", "/", ".")) or "://" in spec or "@" in spec:
-        return False
-    return bool(_SAFE_SPEC.match(spec))
+    return bool(
+        spec and len(spec) <= 200
+        and not any(ch in spec for ch in (";", "|", "&", "`", "$", "\n", "\r", "\t", "\\"))
+        and not spec.startswith(("-", "/", ".")) and "://" not in spec and "@" not in spec
+        and _SAFE_SPEC.match(spec)
+    )
 
 
 def _pkg_name_from_spec(spec: str) -> str:
@@ -451,20 +424,16 @@ def _core_constraints_file() -> Optional[Path]:
         import tempfile
         from importlib.metadata import distributions
 
-        lines = []
-        seen = set()
+        pins: dict[str, str] = {}
         for dist in distributions():
             name = dist.metadata["Name"] if dist.metadata else None
-            ver = dist.version
-            if not name or not ver or name.lower() in seen:
-                continue
-            seen.add(name.lower())
-            lines.append(f"{name}=={ver}")
-        if not lines:
+            if name and dist.version and name.lower() not in pins:
+                pins[name.lower()] = f"{name}=={dist.version}"
+        if not pins:
             return None
         fd, path = tempfile.mkstemp(prefix="hermes-core-constraints-", suffix=".txt")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(sorted(lines)) + "\n")
+            f.write("\n".join(sorted(pins.values())) + "\n")
         return Path(path)
     except Exception as e:
         logger.debug("Could not build core constraints file: %s", e)
@@ -475,26 +444,20 @@ def _installed_dist_roots(spec: str, target: Optional[Path]) -> set[Path]:
     """Package directories a freshly installed *spec* owns, from the dist's own
     file list (``python-telegram-bot`` ships ``telegram``; some ship several)."""
     name = _pkg_name_from_spec(spec)
+    roots: set[Path] = set()
     try:
         import importlib.metadata as _md
 
         if target is not None:
-            dists = list(_md.distributions(name=name, path=[str(target)]))
-            dist = dists[0] if dists else None
+            dist = next(iter(_md.distributions(name=name, path=[str(target)])), None)
         else:
             dist = _md.distribution(name)
-    except Exception:
-        return set()
-    if dist is None:
-        return set()
-
-    roots: set[Path] = set()
-    try:
+        if dist is None:
+            return roots
         for entry in dist.files or ():
             parts = entry.parts
-            if not parts or parts[0].startswith(".") or parts[0] == "__pycache__":
-                continue
-            if parts[0].endswith((".dist-info", ".egg-info")):  # no importable code
+            # Skip hidden entries, __pycache__ and metadata dirs (no importable code).
+            if not parts or parts[0].startswith(".") or parts[0] == "__pycache__" or parts[0].endswith((".dist-info", ".egg-info")):
                 continue
             root = Path(dist.locate_file(parts[0]))
             if root.is_dir():
@@ -516,7 +479,6 @@ def _warm_installed_bytecode(specs: tuple[str, ...], target: Optional[Path]) -> 
         import compileall
     except Exception:  # pragma: no cover — stdlib, but never break an install
         return
-
     for spec in specs:
         try:
             roots = _installed_dist_roots(spec, target)
@@ -530,6 +492,23 @@ def _warm_installed_bytecode(specs: tuple[str, ...], target: Optional[Path]) -> 
                 logger.debug("Bytecode warm skipped for %s: %s", root, exc)
 
 
+def _run_installer(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    # _SUBPROCESS_KW carries stdin=DEVNULL  # noqa: subprocess-stdin
+    return subprocess.run(cmd, **_SUBPROCESS_KW, creationflags=windows_hide_flags(), **kw)
+
+
+def _uv_binary() -> Optional[str]:
+    """Managed uv first ($HERMES_HOME/bin is never on PATH), then PATH. A lookup, not
+    ensure_uv(): downloading uv mid-turn is far more than the caller asked for; the pip tier
+    covers the no-uv case."""
+    try:
+        from hermes_cli.managed_uv import resolve_uv
+
+        return resolve_uv() or shutil.which("uv")
+    except Exception:
+        return shutil.which("uv")
+
+
 def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _InstallResult:
     """Install ``specs`` via the uv -> pip -> ensurepip ladder, venv-scoped by
     default or into the durable ``--target`` (constrained to core versions, see
@@ -541,21 +520,15 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
 
     target = _lazy_install_target()
     constraints: Optional[Path] = None
+    extra_args: list[str] = []
     if target is not None:
         err = _ensure_target_ready(target)
         if err:
             return _InstallResult(False, "", err)
         constraints = _core_constraints_file()
-
-    extra_args: list[str] = []
-    if target is not None:
         extra_args += ["--target", str(target)]
-    if constraints is not None:
-        extra_args += ["--constraint", str(constraints)]
-
-    def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-        # _SUBPROCESS_KW carries stdin=DEVNULL  # noqa: subprocess-stdin
-        return subprocess.run(cmd, **_SUBPROCESS_KW, creationflags=windows_hide_flags(), **kw)
+        if constraints is not None:
+            extra_args += ["--constraint", str(constraints)]
 
     def _finish(r: subprocess.CompletedProcess) -> _InstallResult:
         if r.returncode == 0:
@@ -569,23 +542,15 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         uv_env = hermes_subprocess_env(inherit_credentials=False)
         uv_env["VIRTUAL_ENV"] = str(Path(sys.executable).parent.parent)
 
-        # Tier 1: uv. Managed uv first ($HERMES_HOME/bin is never on PATH). A
-        # lookup, not ensure_uv(): downloading uv mid-turn is far more than the
-        # caller asked for; the pip tier covers the no-uv case.
-        try:
-            from hermes_cli.managed_uv import resolve_uv
-
-            uv_bin = resolve_uv() or shutil.which("uv")
-        except Exception:
-            uv_bin = shutil.which("uv")
+        # Tier 1: uv.
+        uv_bin = _uv_binary()
         if uv_bin:
             try:
                 # --compile-bytecode: uv writes no __pycache__ by default, so the
                 # first import would recompile the backend AND its transitives.
                 # Covers the whole install; _warm_installed_bytecode is the
                 # belt-and-braces pass for the spec's own roots on any tier.
-                r = _run([uv_bin, "pip", "install", "--compile-bytecode", *extra_args, *specs],
-                         timeout=timeout, env=uv_env)
+                r = _run_installer([uv_bin, "pip", "install", "--compile-bytecode", *extra_args, *specs], timeout=timeout, env=uv_env)
                 if r.returncode != 0:
                     logger.debug("uv pip install failed: %s", r.stderr)
                 # A uv resolver failure is authoritative: falling through to pip
@@ -603,18 +568,16 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         # Tier 2: python -m pip (ensurepip bootstrap if needed)
         pip_cmd = [sys.executable, "-m", "pip"]
         try:
-            if _run(pip_cmd + ["--version"], timeout=15).returncode != 0:
+            if _run_installer(pip_cmd + ["--version"], timeout=15).returncode != 0:
                 raise FileNotFoundError("pip not in venv")
         except (subprocess.TimeoutExpired, FileNotFoundError):
             try:
-                _run([sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                     timeout=120, check=True)
+                _run_installer([sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"], timeout=120, check=True)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                return _InstallResult(False, "",
-                                      f"pip not available and ensurepip failed: {e}")
+                return _InstallResult(False, "", f"pip not available and ensurepip failed: {e}")
 
         try:
-            return _finish(_run(pip_cmd + ["install", *extra_args, *specs], timeout=timeout))
+            return _finish(_run_installer(pip_cmd + ["install", *extra_args, *specs], timeout=timeout))
         except subprocess.TimeoutExpired as e:
             return _InstallResult(False, "", f"pip install timed out: {e}")
         except Exception as e:
@@ -630,16 +593,11 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
 # ---- Public API ---------------------------------------------------------------
 
 
-def feature_specs(feature: str) -> tuple[str, ...]:
-    """Return the registered specs for a feature, or raise KeyError."""
-    if feature not in LAZY_DEPS:
-        raise KeyError(f"Unknown lazy feature: {feature!r}")
-    return LAZY_DEPS[feature]
-
-
 def feature_missing(feature: str) -> tuple[str, ...]:
     """Return the subset of specs for ``feature`` not currently installed."""
-    return tuple(s for s in feature_specs(feature) if not _is_satisfied(s))
+    if feature not in LAZY_DEPS:
+        raise KeyError(f"Unknown lazy feature: {feature!r}")
+    return tuple(s for s in LAZY_DEPS[feature] if not _is_satisfied(s))
 
 
 def _prompt_toolkit_active() -> bool:
@@ -662,9 +620,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     ``prompt``: confirm on a TTY first; non-interactive callers pass False and
     rely on the config flag as the gate."""
     if feature not in LAZY_DEPS:
-        raise FeatureUnavailable(
-            feature, (), f"feature {feature!r} not in LAZY_DEPS allowlist"
-        )
+        raise FeatureUnavailable(feature, (), f"feature {feature!r} not in LAZY_DEPS allowlist")
 
     missing = feature_missing(feature)
     if not missing:
@@ -696,16 +652,10 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
 
     for spec in missing:  # belt and braces on top of the allowlist
         if not _spec_is_safe(spec):
-            raise FeatureUnavailable(
-                feature, missing,
-                f"refusing to install unsafe spec {spec!r}"
-            )
+            raise FeatureUnavailable(feature, missing, f"refusing to install unsafe spec {spec!r}")
 
     if not _allow_lazy_installs():
-        raise FeatureUnavailable(
-            feature, missing,
-            "lazy installs disabled (security.allow_lazy_installs=false)"
-        )
+        raise FeatureUnavailable(feature, missing, "lazy installs disabled (security.allow_lazy_installs=false)")
 
     if prompt and not _prompt_toolkit_active() and sys.stdin.isatty() and sys.stdout.isatty():
         spec_list = ", ".join(missing)
@@ -717,9 +667,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         if answer and answer not in {"y", "yes"}:
-            raise FeatureUnavailable(
-                feature, missing, "user declined install at prompt"
-            )
+            raise FeatureUnavailable(feature, missing, "user declined install at prompt")
 
     logger.info("Lazy-installing %s for feature %r", " ".join(missing), feature)
     result = _venv_pip_install(missing)
@@ -727,18 +675,14 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
         # Surface pip's own error (quarantine 404, network) — tail-clipped,
         # since pip can dump pages of resolution traces.
         snippet = (result.stderr or result.stdout or "").strip()[-2000:]
-        raise FeatureUnavailable(
-            feature, missing,
-            f"pip install failed: {snippet or 'no error output'}"
-        )
+        raise FeatureUnavailable(feature, missing, f"pip install failed: {snippet or 'no error output'}")
 
     _invalidate_import_caches()
     still_missing = feature_missing(feature)
     if still_missing:
         raise FeatureUnavailable(
             feature, still_missing,
-            "install reported success but packages still not importable "
-            "(may require Python restart)"
+            "install reported success but packages still not importable (may require Python restart)"
         )
 
     logger.info("Lazy install complete for feature %r", feature)
@@ -746,9 +690,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
 
 def is_available(feature: str) -> bool:
     """Return True if the feature's deps are already satisfied."""
-    if feature not in LAZY_DEPS:
-        return False
-    return not feature_missing(feature)
+    return feature in LAZY_DEPS and not feature_missing(feature)
 
 
 def feature_install_command(feature: str, *, venv_pip: bool = False) -> Optional[str]:
@@ -765,14 +707,10 @@ def feature_install_command(feature: str, *, venv_pip: bool = False) -> Optional
 
 @dataclass
 class InstallSpecsResult:
-    """Outcome of :func:`install_specs` for one batch of pip specs.
-
-    ``ok``       — install succeeded (or nothing was missing).
-    ``blocked``  — installs are gated off (config kill switch, sealed venv
-                   without a durable target) or a spec failed validation;
-                   nothing was executed. ``reason`` explains why.
-    ``command``  — human-readable description of what ran (for UIs/logs).
-    """
+    """Outcome of :func:`install_specs` for one batch of pip specs. ``blocked`` means installs
+    are gated off (config kill switch, sealed venv without a durable target) or a spec failed
+    validation — nothing was executed, ``reason`` says why. ``command`` is the human-readable
+    description of what ran (for UIs/logs)."""
     ok: bool
     blocked: bool = False
     reason: str = ""
@@ -793,13 +731,10 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
 
     for spec in cleaned:
         if not _spec_is_safe(spec):
-            return InstallSpecsResult(
-                ok=False, blocked=True,
-                reason=f"refusing to install unsafe spec {spec!r}",
-            )
+            return InstallSpecsResult(ok=False, blocked=True, reason=f"refusing to install unsafe spec {spec!r}")
 
+    target = _lazy_install_target()
     if not _allow_lazy_installs():
-        target = _lazy_install_target()
         if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1" and target is None:
             reason = (
                 "runtime installs are disabled on this deployment: the agent "
@@ -810,27 +745,17 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
             reason = "runtime installs disabled (security.allow_lazy_installs=false)"
         return InstallSpecsResult(ok=False, blocked=True, reason=reason)
 
-    target = _lazy_install_target()
-    display = "uv pip install " + (
-        f"--target {target} " if target is not None else ""
-    ) + " ".join(cleaned)
+    display = "uv pip install " + (f"--target {target} " if target is not None else "") + " ".join(cleaned)
 
     logger.info("Installing pip specs %s (target=%s)", " ".join(cleaned), target or "venv")
     try:
         result = _venv_pip_install(cleaned, timeout=timeout)
     except Exception as exc:
         logger.warning("install_specs failed unexpectedly: %s", exc)
-        return InstallSpecsResult(
-            ok=False, command=display, stderr=f"install failed: {exc}"
-        )
+        return InstallSpecsResult(ok=False, command=display, stderr=f"install failed: {exc}")
 
     _invalidate_import_caches()  # dashboard rechecks availability inline
-    return InstallSpecsResult(
-        ok=result.success,
-        command=display,
-        stdout=result.stdout,
-        stderr=result.stderr,
-    )
+    return InstallSpecsResult(ok=result.success, command=display, stdout=result.stdout, stderr=result.stderr)
 
 
 def active_features() -> list[str]:
@@ -853,34 +778,25 @@ def restore_features(features: list[str]) -> dict[str, str]:
     return _refresh_features(features, prompt=False, restoring=True)
 
 
-def _refresh_features(
-    features: list[str], *, prompt: bool, restoring: bool
-) -> dict[str, str]:
+def _refresh_features(features: list[str], *, prompt: bool, restoring: bool) -> dict[str, str]:
     """Refresh or restore a known set of allowlisted lazy features."""
     results: dict[str, str] = {}
     for feature in features:
         if feature not in LAZY_DEPS:
             continue
-        missing = feature_missing(feature)
-        if not missing:
+        if not feature_missing(feature):
             results[feature] = "current"
             continue
-
         unsupported = _unsupported_feature_reason(feature)
         if unsupported:
             results[feature] = f"skipped: {unsupported}"
             continue
-
         try:
             ensure(feature, prompt=False if restoring else prompt)
             results[feature] = "restored" if restoring else "refreshed"
         except FeatureUnavailable as e:
             # Opt-outs and platform-incompatible features are skips, not failures.
-            if (
-                "lazy installs disabled" in str(e)
-                or "declined" in str(e)
-                or e.reason.startswith("unsupported ")
-            ):
+            if "lazy installs disabled" in str(e) or "declined" in str(e) or e.reason.startswith("unsupported "):
                 results[feature] = f"skipped: {e.reason}"
             else:
                 results[feature] = f"failed: {e.reason}"
@@ -889,13 +805,7 @@ def _refresh_features(
     return results
 
 
-def ensure_and_bind(
-    feature: str,
-    importer: Callable[[], dict[str, Any]],
-    target_globals: dict,
-    *,
-    prompt: bool = False,
-) -> bool:
+def ensure_and_bind(feature: str, importer: Callable[[], dict[str, Any]], target_globals: dict, *, prompt: bool = False) -> bool:
     """:func:`ensure` the feature, then ``target_globals.update(importer())`` so
     module-level names are rebound after a lazy install without hand-listing
     them. ``importer`` runs only after ensure succeeds. Returns False (and
@@ -916,12 +826,10 @@ def ensure_and_bind(
     except Exception as exc:
         logger.warning("Failed to ensure feature %r: %s", feature, exc)
         return False
-
     try:
         bindings = importer()
     except ImportError as exc:
         logger.warning("Failed to import feature %r after install: %s", feature, exc)
         return False
-
     target_globals.update(bindings)
     return True
