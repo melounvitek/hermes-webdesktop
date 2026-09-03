@@ -182,7 +182,8 @@ def _parse_auth(path: Path, raw: Any, name: str, http: bool) -> AuthSpec:
         if all(spec.name != _required_key for spec in env_list):
             raise CatalogError(
                 f"{path}: http + api_key auth requires auth.env to declare "
-                f"'{_required_key}' (the key the Authorization header references)")
+                f"'{_required_key}' (the key the Authorization header references)"
+            )
     return AuthSpec(
         type=a_type, env=env_list, provider=auth_raw.get("provider"),
         scopes=list(auth_raw.get("scopes") or []), env_var=auth_raw.get("env_var"))
@@ -244,7 +245,8 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     if mv != _MANIFEST_VERSION:
         raise CatalogError(
             f"{path}: manifest_version {mv!r} unsupported "
-            f"(this Hermes understands version {_MANIFEST_VERSION})")
+            f"(this Hermes understands version {_MANIFEST_VERSION})"
+        )
     name = data.get("name") or ""
     if not name or not re.match(r"^[A-Za-z0-9_-]+$", name):
         raise CatalogError(f"{path}: invalid or missing 'name'")
@@ -601,7 +603,8 @@ def _apply_tool_selection(
         _write_tools_filter(name, "include", None)
         _say(
             f"  ✓ All {len(probed)} tools enabled (no filter — new tools "
-            "the server adds later will be auto-enabled).")
+            "the server adds later will be auto-enabled)."
+        )
         return
     chosen_names = [tool_names[i] for i in sorted(chosen_indices)]
     _write_tools_filter(name, "include", chosen_names)
@@ -661,7 +664,8 @@ def install_entry(entry: CatalogEntry, *, enable: bool = True) -> None:
     _say(
         f"  ✓ Installed '{entry.name}' "
         f"({'enabled' if enable else 'disabled'}). "
-        f"Start a new Hermes session to load its tools.")
+        f"Start a new Hermes session to load its tools."
+    )
     if entry.post_install:
         print()
         for line in entry.post_install.strip().splitlines():

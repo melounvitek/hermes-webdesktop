@@ -77,9 +77,12 @@ def _apply_request_chain(
         entry = {
             key: value
             for key in ("source", "reason", "name")
-            if isinstance(value := result.get(key), str) and value}
+            if isinstance(value := result.get(key), str) and value
+        }
         trace.append(entry or {"source": "plugin"})
-    return RequestMiddlewareResult(payload=current, original_payload=original, changed=bool(trace), trace=trace)
+    return RequestMiddlewareResult(
+        payload=current, original_payload=original, changed=bool(trace), trace=trace,
+    )
 
 
 def apply_llm_request_middleware(request: Dict[str, Any], **context: Any) -> RequestMiddlewareResult:
@@ -180,7 +183,8 @@ def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwarg
                 raise RuntimeError(
                     f"Middleware '{kind}' callback "
                     f"{getattr(callback, '__name__', repr(callback))} called "
-                    "next_call() more than once; downstream execution is single-use")
+                    "next_call() more than once; downstream execution is single-use"
+                )
             next_called = True
             try:
                 next_result = call_at(index + 1, payload if next_payload is None else next_payload)

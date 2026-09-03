@@ -103,7 +103,8 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
             # One IOC is enough to refuse; don't leak the full match list.
             issues.append(
                 f"MCP server '{name}' contains a known hermes-0day "
-                f"indicator-of-compromise ('{ioc}')")
+                f"indicator-of-compromise ('{ioc}')"
+            )
             return issues
 
     command = entry.get("command")
@@ -116,7 +117,8 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
     if _EGRESS_PATTERN.search(script):
         issue = (
             f"MCP server '{name}' uses shell interpreter '{command}' with "
-            f"network egress in args")
+            f"network egress in args"
+        )
         if _EXFIL_HINT_PATTERN.search(script):
             issue += " and exfiltration-shaped arguments"
         issues.append(issue)
@@ -125,5 +127,6 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
             f"MCP server '{name}' uses shell interpreter '{command}' to write "
             f"to an OS persistence surface (SSH keys / PAM / sudoers / cron / "
             f"shell rc) — this is the hermes-0day backdoor shape, not a real "
-            f"MCP server")
+            f"MCP server"
+        )
     return issues

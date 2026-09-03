@@ -658,7 +658,8 @@ def _reauth_oauth_server(name: str, server_config: dict) -> bool:
             _info(
                 "Some providers (e.g. Google Drive, Atlassian) do not support "
                 "automatic client registration. For those you must create an "
-                "OAuth client yourself and add its credentials to config.yaml:")
+                "OAuth client yourself and add its credentials to config.yaml:"
+            )
             print()
             for line in (
                 "mcp_servers:", f"  {name}:", f"    url: {url}", "    auth: oauth", "    oauth:",
@@ -751,7 +752,8 @@ def _rebuild_exclude_list(
             f"{', '.join(glob_shadowed[:5])}"
             f"{' ...' if len(glob_shadowed) > 5 else ''}. Remove the "
             f"pattern from mcp_servers.{name}.tools.exclude in "
-            "config.yaml to enable them.")
+            "config.yaml to enable them."
+        )
     return glob_entries + sorted(new_literals)
 
 

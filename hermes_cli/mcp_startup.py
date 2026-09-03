@@ -55,7 +55,8 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
                 return
             logger.warning(
                 "Background MCP discovery previously exited with no connected "
-                "servers; retrying discovery thread")
+                "servers; retrying discovery thread"
+            )
             _mcp_discovery_started = False
             _mcp_discovery_thread = None
 
