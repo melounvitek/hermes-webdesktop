@@ -84,19 +84,16 @@ _DEFAULT_SECTIONS = ("web", "tts", "stt", "browser")
 
 
 def _uses_gateway(section: object) -> bool:
-    """Return True when a config section explicitly opts into the gateway."""
+    """True when a config section explicitly opts into the gateway (legacy ``use_gateway: true``)."""
     return isinstance(section, dict) and is_truthy_value(section.get("use_gateway"), default=False)
 
 
 def _selected_provider(section: object, name_key: str = "provider") -> Optional[str]:
-    """Stored provider string for a config section dict, mirroring ``read_selection`` semantics.
-
-    ``"nous"`` for the managed selection (stored ``nous`` or legacy ``use_gateway: true``), a vendor
-    name for BYOK picks, ``None`` when nothing is stored.
-    """
+    """Stored provider for a section (``read_selection`` semantics): ``"nous"`` for the managed
+    selection (stored ``nous`` or legacy ``use_gateway: true``), a vendor name for BYOK, else None."""
     if not isinstance(section, dict):
         return None
-    if is_truthy_value(section.get("use_gateway"), default=False):
+    if _uses_gateway(section):
         return "nous"
     value = section.get(name_key)
     return None if value is None else (str(value).strip().lower() or None)
@@ -124,8 +121,7 @@ class NousSubscriptionFeatures:
     features: Dict[str, NousFeatureState]
     account_info: Optional[NousPortalAccountInfo] = None
 
-    def __getattr__(self, name: str) -> NousFeatureState:
-        # ``features.web`` / ``features.tts`` … resolve to the per-key state.
+    def __getattr__(self, name: str) -> NousFeatureState:  # ``features.web`` -> per-key state
         if name in _FEATURE_ORDER:
             return self.features[name]
         raise AttributeError(name)
@@ -144,8 +140,7 @@ def _ensure_section(config: Dict[str, object], key: str) -> Dict[str, object]:
     """Return ``config[key]`` as a dict, creating/replacing it in ``config`` when missing."""
     value = config.get(key)
     if not isinstance(value, dict):
-        value = {}
-        config[key] = value
+        value = config[key] = {}
     return value
 
 
@@ -162,8 +157,7 @@ def _norm(value: object, default: str = "") -> str:
 
 
 def _provider_is_nous(config: Dict[str, object]) -> bool:
-    model_cfg = config.get("model")
-    return isinstance(model_cfg, dict) and _norm(model_cfg.get("provider")) == "nous"
+    return _norm(_section(config, "model").get("provider")) == "nous"
 
 
 def _toolset_enabled(config: Dict[str, object], toolset_key: str) -> bool:
@@ -204,22 +198,19 @@ def _has_agent_browser() -> bool:
     try:
         from tools.browser_tool import _find_agent_browser, _requires_real_termux_browser_install
     except Exception:
-        # Runtime probe unavailable: fall back to binary presence rather than crashing. Validate
-        # the resolved binary actually runs — a dangling symlink is reported by ``which`` but
-        # fails at exec. Rungs: PATH; Hermes-managed Node dirs ($HERMES_HOME/node, prepended to
-        # PATH at runtime but usually absent from the *probe* process's PATH); local
-        # node_modules/.bin (PATHEXT-aware ``shutil.which`` so Windows picks the ``.cmd`` shim).
+        # Runtime probe unavailable: fall back to binary presence rather than crashing. Rungs: PATH;
+        # Hermes-managed Node dirs ($HERMES_HOME/node, prepended to PATH at runtime but usually absent
+        # from the *probe* process's PATH); local node_modules/.bin (PATHEXT-aware ``shutil.which`` so
+        # Windows picks the ``.cmd`` shim). The hit must also run: a dangling symlink is reported by
+        # ``which`` but fails at exec.
         from hermes_constants import with_hermes_node_path
 
         local_bin_dir = Path(__file__).parent.parent / "node_modules" / ".bin"
         search_paths = [None, with_hermes_node_path().get("PATH", ""), str(local_bin_dir) if local_bin_dir.is_dir() else ""]
-        for path in search_paths:
-            if path == "":
-                continue
-            hit = shutil.which("agent-browser") if path is None else shutil.which("agent-browser", path=path)
-            if hit and agent_browser_runnable(hit):
-                return True
-        return False
+        return any(
+            (hit := shutil.which("agent-browser", **({} if path is None else {"path": path}))) and agent_browser_runnable(hit)
+            for path in search_paths if path != ""
+        )
 
     try:
         browser_cmd = _find_agent_browser(validate=False)
@@ -230,19 +221,15 @@ def _has_agent_browser() -> bool:
 
 
 def _local_browser_runnable() -> bool:
-    """True when the *local* browser backend would actually start.
-
-    The CLI being present is necessary but not sufficient: agent-browser also needs a Chromium
-    build on disk (without one it hangs until the command timeout), unless the Lightpanda engine
-    is selected. Mirrors the local-mode tail of tools.browser_tool.check_browser_requirements.
-    """
+    """True when the *local* browser backend would actually start: the CLI must be present AND a
+    Chromium build on disk (else agent-browser hangs until the command timeout) unless the Lightpanda
+    engine is selected. Mirrors the local-mode tail of tools.browser_tool.check_browser_requirements."""
     if not _has_agent_browser():
         return False
     try:
         from tools.browser_tool import _chromium_installed, _using_lightpanda_engine
     except Exception:
-        # Runtime probe unavailable: fall back to binary presence rather than crashing.
-        return True
+        return True  # runtime probe unavailable: fall back to binary presence rather than crashing
     return _using_lightpanda_engine() or _chromium_installed()
 
 
@@ -296,16 +283,12 @@ def _account_info_or_none(**kwargs) -> Optional[NousPortalAccountInfo]:
 def _state(key: str, **fields) -> NousFeatureState:
     spec = _FEATURES[key]
     fields.setdefault("direct_override", fields["active"] and not fields["managed_by_nous"])
-    return NousFeatureState(key=key, label=spec.label, included_by_default=spec.included_by_default, **fields)
+    return NousFeatureState(key, spec.label, spec.included_by_default, **fields)
 
 
-def _web_feature(
-    web_cfg: Dict[str, object], tool_enabled: bool, managed: bool, web_gw: bool, direct_firecrawl: bool
-) -> NousFeatureState:
+def _web_feature(web_cfg: Dict[str, object], tool_enabled: bool, managed: bool, web_gw: bool, direct_firecrawl: bool) -> NousFeatureState:
     # Per-capability overrides decide the active search/extract backend independently of web.backend.
-    backend, search_backend, extract_backend = (
-        _norm(web_cfg.get(k)) for k in ("backend", "search_backend", "extract_backend")
-    )
+    backend, search_backend, extract_backend = (_norm(web_cfg.get(k)) for k in ("backend", "search_backend", "extract_backend"))
     # The "nous" selection is serviced by Firecrawl — normalize so downstream vendor checks hold.
     if backend == "nous" or web_gw:
         backend = "firecrawl"
@@ -352,71 +335,61 @@ def _audio_features(
     managed: Dict[str, bool], selected: Dict[str, Optional[str]], use_gateway: Dict[str, bool],
 ) -> tuple[NousFeatureState, NousFeatureState]:
     tts_gw, stt_gw = use_gateway["tts"], use_gateway["stt"]
-    # STT default is "local" (faster-whisper, needs a pip install); Nous subscribers are routed
-    # to the managed audio gateway by apply_nous_managed_defaults. The "nous" selection is
-    # serviced by OpenAI — normalize so downstream vendor checks hold.
+    # STT default is "local" (faster-whisper, needs a pip install); Nous subscribers are routed to the
+    # managed audio gateway by apply_nous_managed_defaults. The "nous" selection is serviced by OpenAI
+    # — normalize so downstream vendor checks hold.
     tts_current = _audio_provider(tts_cfg, "edge", tts_gw)
     stt_current = _audio_provider(stt_cfg, "local", stt_gw)
     # Whisper reuses the TTS audio key (VOICE_TOOLS_OPENAI_KEY, falling back to OPENAI_API_KEY).
     audio_key = bool(resolve_openai_audio_api_key())
-    direct_openai_tts = audio_key and not tts_gw
-    direct_openai_stt = audio_key and not stt_gw
-    tts_managed = tts_tool_enabled and tts_current == "openai" and managed["tts"] and not direct_openai_tts
+    direct_openai_tts, direct_openai_stt = audio_key and not tts_gw, audio_key and not stt_gw
     tts_available = bool({
         "edge": True, "neutts": True, "openai": managed["tts"] or direct_openai_tts,
         "elevenlabs": _any_env("ELEVENLABS_API_KEY") and not tts_gw, "mistral": _any_env("MISTRAL_API_KEY"),
     }.get(tts_current, False))
     tts = _state(
         "tts", available=tts_available, active=bool(tts_tool_enabled and tts_available),
-        managed_by_nous=tts_managed, toolset_enabled=tts_tool_enabled, current_provider=_provider_label("tts", tts_current),
+        managed_by_nous=tts_tool_enabled and tts_current == "openai" and managed["tts"] and not direct_openai_tts,
+        toolset_enabled=tts_tool_enabled, current_provider=_provider_label("tts", tts_current),
         # Mirrors the stored selection so status/picker markers stay in lockstep with dispatch.
         explicit_configured=selected["tts"] is not None and selected["tts"] != "edge",
     )
-
-    # STT isn't a model-callable tool — the gateway voice middleware calls it on every inbound
-    # voice message — so it is "enabled" whenever a usable provider is configured, and
-    # toolset_enabled is reported True so status never flags it "tool disabled".
+    # STT isn't a model-callable tool (the gateway voice middleware calls it on every inbound voice
+    # message): "enabled" whenever a usable provider is configured, toolset_enabled reported True so
+    # status never flags it "tool disabled".
     stt_available = bool({
         "local": _local_stt_backend_available() and not stt_gw, "openai": managed["stt"] or direct_openai_stt,
         "groq": _any_env("GROQ_API_KEY") and not stt_gw, "mistral": _any_env("MISTRAL_API_KEY") and not stt_gw,
     }.get(stt_current, False))
     stt = _state(
-        "stt", available=stt_available, active=stt_available,
+        "stt", available=stt_available, active=stt_available, toolset_enabled=True,
         managed_by_nous=stt_current == "openai" and managed["stt"] and not direct_openai_stt,
-        toolset_enabled=True, current_provider=_provider_label("stt", stt_current),
-        explicit_configured=selected["stt"] is not None,
+        current_provider=_provider_label("stt", stt_current), explicit_configured=selected["stt"] is not None,
     )
     return tts, stt
 
 
 def _browser_feature(
-    browser_cfg: Dict[str, object], tool_enabled: bool, managed: bool,
-    selected: Optional[str], browser_gw: bool, direct_firecrawl: bool,
+    browser_cfg: Dict[str, object], tool_enabled: bool, managed: bool, selected: Optional[str], browser_gw: bool, direct_firecrawl: bool,
 ) -> NousFeatureState:
     """Resolve browser availability using the same precedence as runtime."""
     explicit = "cloud_provider" in browser_cfg
     provider = normalize_browser_cloud_provider(browser_cfg.get("cloud_provider") if explicit else None)
     if provider == "nous" or browser_gw:
         provider = "browser-use"
-    # CAMOFOX_URL is the server address, not a selection: an explicit different browser choice
-    # wins over the env var.
+    # CAMOFOX_URL is the server address, not a selection: an explicit different choice wins over it.
     direct_camofox = _any_env("CAMOFOX_URL") and (selected is None or selected == "camofox")
-    direct_browserbase = (
-        bool(get_env_value("BROWSERBASE_API_KEY") and get_env_value("BROWSERBASE_PROJECT_ID")) and not browser_gw
-    )
+    direct_browserbase = bool(get_env_value("BROWSERBASE_API_KEY") and get_env_value("BROWSERBASE_PROJECT_ID")) and not browser_gw
     direct_browser_use = _any_env("BROWSER_USE_API_KEY") and not browser_gw
-    # "local_available" = the agent-browser CLI is present — the only local requirement for cloud
-    # providers, which host their own Chromium.
+    # local_available = the agent-browser CLI is present, the only local requirement for cloud providers.
     local_available = _has_agent_browser()
     local_runnable = _local_browser_runnable()
     browser_use_managed = bool(tool_enabled and local_available and managed and not direct_browser_use)
 
     if explicit:
         cloud_available = {
-            "camofox": direct_camofox,
-            "browserbase": local_available and direct_browserbase,
-            "browser-use": local_available and (managed or direct_browser_use),
-            "firecrawl": local_available and direct_firecrawl,
+            "camofox": direct_camofox, "browserbase": local_available and direct_browserbase,
+            "browser-use": local_available and (managed or direct_browser_use), "firecrawl": local_available and direct_firecrawl,
         }
         current = provider if provider in cloud_available else "local"
         available = bool(cloud_available.get(current, local_runnable))
@@ -436,15 +409,11 @@ def _browser_feature(
     )
 
 
-def _modal_feature(
-    terminal_cfg: Dict[str, object], tool_enabled: bool, managed: bool, managed_tools_flag: bool
-) -> NousFeatureState:
+def _modal_feature(terminal_cfg: Dict[str, object], tool_enabled: bool, managed: bool, managed_tools_flag: bool) -> NousFeatureState:
     terminal_backend = _norm(terminal_cfg.get("backend"), "local")
     modal_mode = normalize_modal_mode(terminal_cfg.get("modal_mode"))
     direct_modal = has_direct_modal_credentials()
-    modal_state = resolve_modal_backend_state(
-        modal_mode, has_direct=direct_modal, managed_ready=managed, managed_enabled=managed_tools_flag
-    )
+    modal_state = resolve_modal_backend_state(modal_mode, has_direct=direct_modal, managed_ready=managed, managed_enabled=managed_tools_flag)
     is_modal = terminal_backend == "modal"
     # A non-modal terminal backend, or a resolved managed/direct selection, is always "available";
     # otherwise report what the mode could use.
@@ -463,9 +432,7 @@ def _modal_feature(
     )
 
 
-def get_nous_subscription_features(
-    config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False
-) -> NousSubscriptionFeatures:
+def get_nous_subscription_features(config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False) -> NousSubscriptionFeatures:
     if config is None:
         config = load_config() or {}
     provider_is_nous = _provider_is_nous(config)
@@ -487,17 +454,15 @@ def get_nous_subscription_features(
     # credentials — managed availability must not light it up (the runtime errors, not reroutes).
     managed = {
         key: (
-            managed_tools_flag and nous_auth_present and is_managed_tool_gateway_ready(spec.gateway)
-            and bool(account_info and account_info.tool_gateway_entitled_for(spec.coverage))
-            and (selected.get(key) is None or use_gateway[key])
+            managed_tools_flag and is_managed_tool_gateway_ready(spec.gateway)
+            and account_info.tool_gateway_entitled_for(spec.coverage) and (selected[key] is None or use_gateway[key])
         )
         for key, spec in _FEATURES.items()
     }
     direct_firecrawl = _any_env("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL") and not use_gateway["web"]
     fal_configured = fal_key_is_configured()
-    tts, stt = _audio_features(
-        _section(config, "tts"), _section(config, "stt"), enabled["tts"], managed, selected, use_gateway
-    )
+    tts, stt = _audio_features(_section(config, "tts"), _section(config, "stt"), enabled["tts"], managed, selected, use_gateway)
+
     def _fal(key: str) -> NousFeatureState:
         return _fal_feature(key, enabled[key], fal_configured and not use_gateway[key], managed[key], selected[key])
 
@@ -508,8 +473,7 @@ def get_nous_subscription_features(
         "tts": tts,
         "stt": stt,
         "browser": _browser_feature(
-            _section(config, "browser"), enabled["browser"], managed["browser"], selected["browser"],
-            use_gateway["browser"], direct_firecrawl,
+            _section(config, "browser"), enabled["browser"], managed["browser"], selected["browser"], use_gateway["browser"], direct_firecrawl,
         ),
         "modal": _modal_feature(_section(config, "terminal"), enabled["terminal"], managed["modal"], managed_tools_flag),
     }
@@ -523,9 +487,7 @@ def _has_managed_default_direct(key: str) -> bool:
     return bool(key in ("tts", "stt") and resolve_openai_audio_api_key()) or _any_env(*_FEATURES[key].default_direct_env)
 
 
-def apply_nous_managed_defaults(
-    config: Dict[str, object], *, enabled_toolsets: Optional[Iterable[str]] = None, force_fresh: bool = False
-) -> set[str]:
+def apply_nous_managed_defaults(config: Dict[str, object], *, enabled_toolsets: Optional[Iterable[str]] = None, force_fresh: bool = False) -> set[str]:
     features = get_nous_subscription_features(config, force_fresh=force_fresh)
     account_info = features.account_info
     if not (account_info and account_info.logged_in and account_info.tool_gateway_entitled and features.provider_is_nous):
@@ -539,9 +501,9 @@ def apply_nous_managed_defaults(
         if features.features[key].explicit_configured or _has_managed_default_direct(key):
             continue
         if key == "stt":
-            # STT is not toolset-gated. Skip when the user has a working local backend (strong
-            # signal "local" was a choice, not the DEFAULT_CONFIG seed) or isn't entitled to the
-            # managed "openai-audio" category (flipping would silently break transcription).
+            # STT is not toolset-gated. Skip when the user has a working local backend (strong signal
+            # "local" was a choice, not the DEFAULT_CONFIG seed) or isn't entitled to the managed
+            # "openai-audio" category (flipping would silently break transcription).
             if _local_stt_backend_available() or not account_info.tool_gateway_entitled_for("openai-audio"):
                 continue
         elif key not in selected_toolsets:
@@ -550,9 +512,7 @@ def apply_nous_managed_defaults(
         changed.add(key)
     # Video gen is not funded by the free tool pool: only wire managed video for entitled (paid) users.
     for key, category in (("image_gen", None), ("video_gen", "fal-video")):
-        if key in selected_toolsets and not fal_key_is_configured() and (
-            category is None or account_info.tool_gateway_entitled_for(category)
-        ):
+        if key in selected_toolsets and not fal_key_is_configured() and (category is None or account_info.tool_gateway_entitled_for(category)):
             _select_nous(config, key)
             changed.add(key)
     return changed
@@ -562,12 +522,9 @@ def apply_nous_managed_defaults(
 
 
 def _get_gateway_direct_credentials() -> Dict[str, bool]:
-    """Return a dict of tool_key -> has_direct_credentials.
-
-    Env-configured keyless local backends count as configured: a reachable self-hosted SearXNG or
-    CAMOFOX_URL is a working setup even with no stored selection, so it must not be classified
-    "unconfigured" and pre-checked. OpenAI Whisper shares the audio key with TTS.
-    """
+    """tool_key -> has_direct_credentials. Env-configured keyless local backends (SearXNG, CAMOFOX_URL)
+    count as configured so they are never classified "unconfigured" and pre-checked; Whisper shares
+    the audio key with TTS."""
     fal_direct = fal_key_is_configured()
     audio_direct = bool(resolve_openai_audio_api_key())
     return {
@@ -583,16 +540,10 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
     }
 
 
-def get_gateway_eligible_tools(
-    config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False
-) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Return (unconfigured, has_direct, explicit_configured, already_managed) tool key lists.
-
-    unconfigured: no direct credentials and no explicit non-nous selection (safe to pre-check);
-    has_direct: the user has their own API keys; explicit_configured: an explicit non-nous
-    selection stored (e.g. a keyless SearXNG/Camofox) even with no credentials to detect;
-    already_managed: ``use_gateway`` explicitly set.
-    """
+def get_gateway_eligible_tools(config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False) -> tuple[list[str], list[str], list[str], list[str]]:
+    """(unconfigured, has_direct, explicit_configured, already_managed) tool key lists: no credentials
+    and no explicit non-nous selection (safe to pre-check) / own API keys / explicit non-nous selection
+    stored (e.g. keyless SearXNG) even with nothing to detect / ``use_gateway`` explicitly set."""
     # Entitlement gates the offer (paid OR live free pool) and says which categories are covered.
     account_info = _account_info_or_none(force_fresh=force_fresh)
     if not (account_info and account_info.logged_in and account_info.tool_gateway_entitled):
@@ -632,10 +583,8 @@ def apply_gateway_defaults(config: Dict[str, object], tool_keys: list[str]) -> s
 
 def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool = True) -> set[str]:
     """If eligible tools exist, show a per-tool checklist to route them through the Tool Gateway.
-
-    Triggered by a live free tool pool or paid access. explicit_configured tools (e.g. an explicit
-    ``web.backend: searxng``) are configured on purpose and never offered, like already_managed.
-    """
+    Triggered by a live free pool or paid access; explicit_configured tools (e.g. ``web.backend:
+    searxng``) are configured on purpose and never offered, like already_managed."""
     unconfigured, has_direct, _explicit, _managed = get_gateway_eligible_tools(config, force_fresh=force_fresh)
     if not unconfigured and not has_direct:
         return set()
@@ -646,15 +595,13 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     # Frame the offer by entitlement: a $0 free-tool-pool user is not on a paid plan.
     account_info = _account_info_or_none(force_fresh=False)
     pool_only = bool(
-        account_info and account_info.paid_service_access is not True
-        and account_info.tool_access is not None and account_info.tool_access.enabled
+        account_info and account_info.paid_service_access is not True and account_info.tool_access is not None and account_info.tool_access.enabled
     )
     source_label = "free tool pool" if pool_only else "Nous subscription"
 
     # Unconfigured tools first (pre-checked for new users), then tools with the user's own key
-    # (unchecked). Decline persistence: tools previously offered and left unchecked are recorded
-    # in ``tool_gateway_declined_tools`` and never pre-checked again, so the identical checklist
-    # doesn't re-fire on every Nous model swap.
+    # (unchecked). Tools previously offered and left unchecked are recorded in
+    # ``tool_gateway_declined_tools`` and never pre-checked again (no re-fire on every model swap).
     declined_raw = config.get("tool_gateway_declined_tools")
     declined: set[str] = {str(k) for k in declined_raw} if isinstance(declined_raw, list) else set()
     offer_keys: list[str] = list(unconfigured) + list(has_direct)
@@ -663,8 +610,7 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     ]
     pre_selected = [i for i, k in enumerate(unconfigured) if k not in declined]
     title = (
-        "Your free Nous tool pool — pick the tools to enable:"
-        if pool_only
+        "Your free Nous tool pool — pick the tools to enable:" if pool_only
         else "Your Nous subscription includes the Tool Gateway — pick the tools to enable:"
     )
     try:
@@ -701,14 +647,10 @@ def ensure_nous_portal_access(*, capability: str = "the Nous Tool Gateway", cove
     def _entitled(account) -> bool:
         if account is None:
             return False
-        if coverage_category is not None:
-            return account.tool_gateway_entitled_for(coverage_category)
-        return account.tool_gateway_entitled
+        return account.tool_gateway_entitled_for(coverage_category) if coverage_category is not None else account.tool_gateway_entitled
 
     info = _account_info_or_none(force_fresh=True)
-    if _entitled(info):
-        return True
-    if info is None or not info.logged_in:
+    if not _entitled(info) and (info is None or not info.logged_in):
         if not _run_nous_portal_login_only(capability=capability):
             return False
         info = _account_info_or_none(force_fresh=True)
@@ -721,12 +663,17 @@ def ensure_nous_portal_access(*, capability: str = "the Nous Tool Gateway", cove
     return False
 
 
-def _run_nous_portal_login_only(*, capability: str) -> bool:
-    """Run the Nous Portal device-code OAuth and persist credentials only.
+def _confirm(prompt: str) -> Optional[bool]:
+    """Y/n prompt: True on yes/blank, False on anything else, ``None`` on EOF/Ctrl-C."""
+    try:
+        return input(prompt).strip().lower() in {"", "y", "yes"}
+    except (EOFError, KeyboardInterrupt):
+        return None
 
-    No model selection, no provider switch, no Tool Gateway bulk prompt. ``True`` on a successful
-    login, ``False`` if the user declined or the flow failed.
-    """
+
+def _run_nous_portal_login_only(*, capability: str) -> bool:
+    """Run the Nous Portal device-code OAuth and persist credentials only (no model selection, no
+    provider switch, no Tool Gateway bulk prompt). ``False`` if the user declined or the flow failed."""
     try:
         import hermes_cli.auth as auth
     except Exception as exc:  # pragma: no cover - defensive
@@ -734,12 +681,11 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
         return False
     print()
     print(f"  {capability} requires a Nous Portal login.")
-    try:
-        proceed = input("  Log in to Nous Portal now? [Y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    proceed = _confirm("  Log in to Nous Portal now? [Y/n]: ")
+    if proceed is None:
         print()
         return False
-    if proceed not in {"", "y", "yes"}:
+    if not proceed:
         print("  Skipped Nous Portal login.")
         return False
     try:
@@ -747,13 +693,9 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
         with auth._auth_store_lock():
             prior_active_provider = auth._load_auth_store().get("active_provider")
         auth_state = None
-        if auth._read_shared_nous_state():
-            try:
-                do_import = input("  Found existing Nous OAuth credentials. Import them? [Y/n]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                do_import = "y"
-            if do_import in {"", "y", "yes"}:
-                auth_state = auth._try_import_shared_nous_state(timeout_seconds=15.0)
+        # Interrupting the import question defaults to importing.
+        if auth._read_shared_nous_state() and _confirm("  Found existing Nous OAuth credentials. Import them? [Y/n]: ") is not False:
+            auth_state = auth._try_import_shared_nous_state(timeout_seconds=15.0)
         if auth_state is None:
             auth_state = auth._nous_device_code_login()
         with auth._auth_store_lock():
