@@ -187,13 +187,9 @@ def is_titleable_user_message(user_message: str) -> bool:
 def derive_title(user_message: str) -> Optional[str]:
     """Instant title: first meaningful line trimmed to a word boundary. No model, never fails;
     its job is to beat the model to the screen, not on quality."""
-    text = _summarize_user_message(user_message)
-    if not text:
-        return None
-    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = " ".join(_first_line(_summarize_user_message(user_message)).split())
     if not line:
         return None
-    line = " ".join(line.split())
     if len(line) > MAX_DERIVED_TITLE_CHARS:
         cut = line[:MAX_DERIVED_TITLE_CHARS]
         space = cut.rfind(" ")
@@ -205,6 +201,10 @@ def derive_title(user_message: str) -> Optional[str]:
 
 def _strip_title_prefix(text: str) -> str:
     return text[6:].strip() if text.lower().startswith("title:") else text
+
+
+def _first_line(text: str) -> str:
+    return next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
 
 
 def _extract_title_text(content: str) -> str:
@@ -235,8 +235,7 @@ def _extract_title_text(content: str) -> str:
         raw = strip_think_blocks(None, raw).strip()
     except Exception:
         logger.debug("strip_think_blocks unavailable for title output", exc_info=True)
-    raw = next((ln.strip() for ln in raw.splitlines() if ln.strip()), "")
-    return _strip_title_prefix(raw).strip("\"'").strip()
+    return _strip_title_prefix(_first_line(raw)).strip("\"'").strip()
 
 
 def _clean_title(text: str) -> Optional[str]:
@@ -324,6 +323,17 @@ def generate_title(
         return None
 
 
+def _has_upgraded_title(session_db, session_id: str) -> bool:
+    """True when the session already carries an ``llm``/``user`` title (or the check fails)."""
+    try:
+        source_fn = getattr(session_db, "get_session_title_source", None)
+        if source_fn is not None:
+            return source_fn(session_id) not in (None, "derived")
+        return bool(session_db.get_session_title(session_id))
+    except Exception:
+        return True
+
+
 def _persist_session_title(session_db, session_id, title, *, source, dedupe=True):
     """Persist a title at *source* authority via ``set_auto_title`` (precedence check + write in
     one transaction, so a manual ``/title`` is never overwritten).
@@ -408,17 +418,8 @@ def auto_title_session(
     NEW source against OLD cached modules until the process restarts.
     """
     try:
-        if not session_db or not session_id:
-            return
         # A derived title is expected here — upgrading it is the point.
-        try:
-            source_fn = getattr(session_db, "get_session_title_source", None)
-            if source_fn is not None:
-                if source_fn(session_id) not in (None, "derived"):
-                    return
-            elif session_db.get_session_title(session_id):
-                return
-        except Exception:
+        if not session_db or not session_id or _has_upgraded_title(session_db, session_id):
             return
 
         # This daemon thread starts AFTER the turn's ambient conversation context was reset;
@@ -443,8 +444,7 @@ def auto_title_session(
         if not title:
             # The inline attempt declines collisions rather than scan the lineage on the critical
             # path; off that path the scan is affordable.
-            title = derive_title(user_message)
-            source = "derived"
+            title, source = derive_title(user_message), "derived"
             if not title:
                 return
 
