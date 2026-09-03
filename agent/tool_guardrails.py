@@ -259,6 +259,13 @@ _DECISION_MESSAGES: dict[str, str] = {
     ),
 }
 
+_IDENTICAL_CALL_NOTICE = (
+    "[hermes note: this is the {ordinal} consecutive identical call to "
+    "{tool_name} with identical arguments returning the same result. "
+    "Do not repeat it — change arguments, use a different tool, or "
+    "proceed with what you have.]"
+)
+
 # tool -> (LoopCapConfig field, controller counter attribute, decision code)
 _LOOP_CAPS: dict[str, tuple[str, str, str]] = {
     "web_search": ("max_web_searches", "_turn_web_search_count", "loop_web_search_cap"),
@@ -409,21 +416,11 @@ class ToolCallGuardrailController:
 
         notice = None
         if not is_stall_guard_repeatable(tool_name) and count >= STALL_GUARD_IDENTICAL_CALL_THRESHOLD:
-            ordinal = f"{count}{'th' if 11 <= count % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(count % 10, 'th')}"
-            notice = (
-                f"[hermes note: this is the {ordinal} consecutive identical call to "
-                f"{tool_name} with identical arguments returning the same result. "
-                "Do not repeat it — change arguments, use a different tool, or "
-                "proceed with what you have.]"
-            )
+            notice = _IDENTICAL_CALL_NOTICE.format(ordinal=_ordinal(count), tool_name=tool_name)
             # The no-progress BLOCK in before_call only covers idempotent_tools; this streak
             # is tool-agnostic, so with hard stops on, halt at the same threshold (a model
             # replaying a successful `terminal` call otherwise runs to the budget).
-            if (
-                self.config.hard_stop_enabled
-                and count >= self.config.no_progress_block_after
-                and self._halt_decision is None
-            ):
+            if self.config.hard_stop_enabled and count >= self.config.no_progress_block_after and self._halt_decision is None:
                 self._decide("halt", "identical_call_streak_halt", tool_name, count, signature)
 
         stub = None
@@ -450,10 +447,7 @@ class ToolCallGuardrailController:
         )
         spill_path = self._persisted_result_paths.get(first_id) if first_id else None
         if spill_path:
-            stub += (
-                f"\n[The referenced result was persisted to: {spill_path} — "
-                "page through it with read_file if you need the full content.]"
-            )
+            stub += f"\n[The referenced result was persisted to: {spill_path} — page through it with read_file if you need the full content.]"
         return stub
 
     def _check_loop_cap(
@@ -465,12 +459,9 @@ class ToolCallGuardrailController:
         if spec is None:
             return None
         cap_field, count_attr, code = spec
-        cap = getattr(self.config.loop_caps, cap_field)
-        count = getattr(self, count_attr)
+        cap, count = getattr(self.config.loop_caps, cap_field), getattr(self, count_attr)
         increment = 1 if tool_name == "web_search" else (_subagent_spawn_count(args) if cap else 0)
-        if increment == 0:
-            return None
-        if cap and count >= cap:
+        if increment and cap and count >= cap:
             return self._decide("block", code, tool_name, count, signature, cap=cap)
         setattr(self, count_attr, count + increment)
         return None
@@ -507,6 +498,10 @@ def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
         "or a different tool that can make progress. If the blocker is external, report "
         "the blocker after one diagnostic attempt instead of repeating the same failing path."
     )
+
+
+def _ordinal(count: int) -> str:
+    return f"{count}{'th' if 11 <= count % 100 <= 13 else {1: 'st', 2: 'nd', 3: 'rd'}.get(count % 10, 'th')}"
 
 
 def _coerce_args(args: Mapping[str, Any] | None) -> Mapping[str, Any]:
