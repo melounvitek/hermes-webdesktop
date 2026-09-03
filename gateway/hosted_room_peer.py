@@ -16,7 +16,6 @@ import math
 import os
 import re
 import stat
-import time
 import urllib.parse
 from dataclasses import asdict, dataclass
 from functools import lru_cache, partial
@@ -24,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping
 
 from gateway.hosted_room_execution_policy import RoomExecutionPolicy, execution_policy_mapping
-from gateway.hosted_rooms_common import exact_fields, identifier, positive_int
+from gateway.hosted_rooms_common import bounded_int, clock, compact_json, exact_fields, identifier, text
 
 
 # v2 adds authority/member lineage to scoped grants and is deliberately not
@@ -137,7 +136,9 @@ def _identifier(value: Any, *, field: str) -> str:
 
 
 def _positive_int(value: Any, *, field: str) -> int:
-    return positive_int(value, error=HostedRoomPeerError, message=f"{field} must be a positive integer")
+    return bounded_int(
+        value, error=HostedRoomPeerError, message=f"{field} must be a positive integer", low=1
+    )
 
 
 def _digest(value: Any, *, field: str) -> str:
@@ -153,7 +154,7 @@ _exact_fields = partial(
 
 
 def _canonical_json(value: Mapping[str, Any]) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return compact_json(value).encode("ascii")
 
 
 def _b64encode(value: bytes) -> str:
@@ -445,8 +446,7 @@ class HostedMemberDispatch:
         prompt = value["prompt"]
         if not isinstance(prompt, str) or not prompt.strip():
             raise HostedRoomPeerError("prompt must be a non-empty string")
-        if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-            raise HostedRoomPeerError("prompt is too large")
+        text(prompt, error=HostedRoomPeerError, label="prompt", max_bytes=MAX_PROMPT_BYTES, strip=False)
         expected_prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         prompt_digest = _digest(value["prompt_digest"], field="prompt_digest")
         if not hmac.compare_digest(expected_prompt_digest, prompt_digest):
@@ -483,7 +483,7 @@ def issue_room_grant(
     """Issue a target-verifiable bearer grant scoped to one room member."""
     if len(secret) < 32:
         raise HostedRoomGrantError("room grant secret must be at least 32 bytes")
-    now = time.time() if issued_at is None else float(issued_at)
+    now = clock(issued_at)
     bounded_status_expiry = (
         now + float(ttl_seconds if status_ttl_seconds is None else status_ttl_seconds)
         if status_expires_at is None
@@ -554,7 +554,7 @@ def decode_room_grant(
         raise HostedRoomGrantError("room grant payload is invalid") from exc
     if not isinstance(payload, dict) or frozenset(payload) not in {_GRANT_FIELDS, _GRANT_REFRESH_FIELDS}:
         raise HostedRoomGrantError("room grant fields are invalid")
-    checked_now = time.time() if now is None else float(now)
+    checked_now = clock(now)
     if not math.isfinite(checked_now):
         raise HostedRoomGrantError("room grant clock is invalid")
     try:
@@ -586,7 +586,7 @@ def room_grant_needs_dispatch_refresh(
     try:
         payload = json.loads(_b64decode(_split_token(token)[0]).decode("ascii"))
         expires_at = float(payload["expires_at"])
-        checked_now = time.time() if now is None else float(now)
+        checked_now = clock(now)
         return checked_now + max(0.0, float(leeway_seconds)) >= expires_at
     except Exception:
         return True

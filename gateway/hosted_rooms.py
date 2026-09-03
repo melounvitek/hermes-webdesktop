@@ -15,19 +15,13 @@ import hashlib
 import json
 import re
 import sqlite3
-import time
+from functools import partial
 from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
 from gateway.hosted_rooms_common import (
-    canonical_json,
-    identifier,
-    non_negative_int,
-    open_sqlite,
-    positive_int,
-    table_columns,
-    table_exists,
-    transaction,
+    bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite,
+    table_columns, table_exists, transaction,
 )
 
 PROTOCOL_VERSION = 2
@@ -266,22 +260,12 @@ class AuthoritySupersededError(AuthorityConflictError):
 # --- validation ---------------------------------------------------------------
 
 
-def _canonical_json(value: Any, *, label: str, max_bytes: int) -> str:
-    return canonical_json(
-        value, error=HostedRoomError, label=label, max_bytes=max_bytes, ensure_ascii=False
-    )
-
-
-def _validate_identifier(value: Any, *, label: str, max_chars: int) -> str:
-    return identifier(value, label=label, error=HostedRoomError, max_chars=max_chars)
-
-
-def _room_id(value: Any) -> str:
-    return _validate_identifier(value, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
-
-
-def _event_id(value: Any, *, label: str = "event_id") -> str:
-    return _validate_identifier(value, label=label, max_chars=MAX_EVENT_ID_CHARS)
+_canonical_json = partial(canonical_json, error=HostedRoomError, ensure_ascii=False)
+_validate_identifier = partial(identifier, error=HostedRoomError)
+_room_id = partial(_validate_identifier, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
+_event_id = partial(_validate_identifier, label="event_id", max_chars=MAX_EVENT_ID_CHARS)
+_actor_json = partial(_canonical_json, label="actor", max_bytes=4 * 1024)
+_payload_json = partial(_canonical_json, label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
 
 
 def _actor_id(value: Any, label: str) -> str:
@@ -289,31 +273,22 @@ def _actor_id(value: Any, label: str) -> str:
 
 
 def _require_positive_int(value: Any, label: str) -> int:
-    return positive_int(value, error=HostedRoomError, message=f"{label} must be a positive integer")
-
-
-def _bounded_limit(value: Any, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
-        raise HostedRoomError(f"limit must be between 1 and {maximum}")
-    return value
-
-
-def _non_negative(value: Any, label: str) -> int:
-    return non_negative_int(
-        value, error=HostedRoomError, message=f"{label} must be a non-negative integer"
+    return bounded_int(
+        value, error=HostedRoomError, message=f"{label} must be a positive integer", low=1
     )
 
 
-def _now(now: float | None) -> float:
-    return time.time() if now is None else float(now)
+def _bounded_limit(value: Any, maximum: int) -> int:
+    message = f"limit must be between 1 and {maximum}"
+    return bounded_int(value, error=HostedRoomError, message=message, low=1, high=maximum)
+
+
+def _non_negative(value: Any, label: str) -> int:
+    return bounded_int(value, error=HostedRoomError, message=f"{label} must be a non-negative integer")
 
 
 def _system_actor_json(actor_id: str) -> str:
-    return _canonical_json({"kind": "system", "id": actor_id}, label="actor", max_bytes=4 * 1024)
-
-
-def _payload_json(payload: Any) -> str:
-    return _canonical_json(payload, label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
+    return _actor_json({"kind": "system", "id": actor_id})
 
 
 def _claim_payload_json(previous_gateway_id: str, new_gateway_id: str, epoch: int) -> str:
@@ -330,13 +305,10 @@ def user_event_id(client_event_id: Any) -> str:
     return f"user:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
 
 
-def _validate_room_name(value: Any) -> str:
-    if not isinstance(value, str):
-        raise HostedRoomError("name must be a string")
-    value = value.strip()
-    if not value or len(value) > MAX_ROOM_NAME_CHARS:
-        raise HostedRoomError("invalid room name")
-    return value
+_validate_room_name = partial(
+    _validate_identifier, label="name", max_chars=MAX_ROOM_NAME_CHARS, pattern=None,
+    invalid="invalid room name",
+)
 
 
 def _validate_members(value: Any) -> tuple[list[dict[str, Any]], str]:
@@ -373,11 +345,10 @@ def _legacy_members_match(existing_json: str, proposed: list[dict[str, Any]]) ->
     return True
 
 
-def _validate_event_kind(value: Any) -> str:
-    return identifier(
-        value, label="kind", error=HostedRoomError, max_chars=MAX_EVENT_KIND_CHARS,
-        pattern=_EVENT_KIND_RE, invalid="invalid event kind",
-    )
+_validate_event_kind = partial(
+    _validate_identifier, label="kind", max_chars=MAX_EVENT_KIND_CHARS, pattern=_EVENT_KIND_RE,
+    invalid="invalid event kind",
+)
 
 
 def _optional_actor_field(actor: dict[str, Any], field: str, max_chars: int) -> str:
@@ -412,7 +383,7 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
         field_value = _optional_actor_field(value, field, max_chars)
         if field_value:
             actor[field] = field_value
-    return actor, _canonical_json(actor, label="actor", max_bytes=4 * 1024)
+    return actor, _actor_json(actor)
 
 
 # --- schema / connections -------------------------------------------------------
@@ -563,39 +534,10 @@ def local_authority_gateway_id() -> str:
 
 
 def _connect(db_path: Path | str) -> sqlite3.Connection:
-    from hermes_state import apply_wal_with_fallback
-
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10)
-    conn.row_factory = sqlite3.Row
-    try:
-        for attempt in range(_JOURNAL_MODE_LOCK_RETRIES):
-            try:
-                apply_wal_with_fallback(conn, db_label="state.db (hosted_rooms)")
-                break
-            except sqlite3.OperationalError as exc:
-                last = attempt + 1 == _JOURNAL_MODE_LOCK_RETRIES
-                if str(exc).lower() != "database is locked" or last:
-                    raise
-                # SQLite's journal-mode pragma may not honor the connection's
-                # busy timeout while another first opener initializes the DB,
-                # especially on Windows. Retry only that transient lock class.
-                time.sleep(0.01 * (2**attempt))
-        conn.execute("PRAGMA foreign_keys=ON")
-        if _schema_is_current(conn):
-            return conn
-        # Multiple profile gateways share this root database. Serialize every
-        # draft-schema transition in SQLite itself so a crash rolls back the
-        # whole DDL/data migration and another process can safely retry it.
-        conn.execute("BEGIN IMMEDIATE")
-        _initialize_schema(conn)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    return conn
+    return connect(
+        db_path, db_label="state.db (hosted_rooms)", ready=_schema_is_current,
+        initialize=lambda conn: _initialize_schema(conn), lock_retries=_JOURNAL_MODE_LOCK_RETRIES,
+    )
 
 
 def _read_connection(db_path: Path | str) -> sqlite3.Connection:
@@ -681,8 +623,25 @@ def _load_event(conn: sqlite3.Connection, room_id: str, event_id: str) -> sqlite
     return conn.execute(_SELECT_EVENT, (room_id, event_id)).fetchone()
 
 
+def _event_content(row: sqlite3.Row) -> tuple[Any, Any, Any, Any]:
+    """The immutable (kind, actor_json, authority_epoch, payload_json) an event id is bound to."""
+    return row["kind"], row["actor_json"], row["authority_epoch"], row["payload_json"]
+
+
 def _gateway_event_bytes(conn: sqlite3.Connection) -> int:
     return int(conn.execute(_SUM_EVENT_BYTES).fetchone()[0])
+
+
+def _insert_event(
+    conn: sqlite3.Connection, room: sqlite3.Row, room_id: str, seq: int, event_id: str, kind: str,
+    actor_json: str, epoch: int, payload_json: str, now: float, *, allow_control: bool = False,
+) -> int:
+    """Capacity-check then INSERT one event at ``seq``; returns its accounted bytes."""
+    event_bytes = _prepare_event(
+        conn, room, event_id, kind, actor_json, payload_json, allow_control=allow_control
+    )
+    conn.execute(_INSERT_EVENT, (room_id, seq, event_id, kind, actor_json, epoch, payload_json, now))
+    return event_bytes
 
 
 def _prepare_event(
@@ -727,25 +686,27 @@ _DEPENDENT_TABLES = (
 )
 
 
+def _room_ids(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[str]:
+    return [str(row["room_id"]) for row in conn.execute(sql, params).fetchall()]
+
+
 def _prune_disbanded_rooms_locked(
     conn: sqlite3.Connection, *, now: float | None, max_gateway_event_bytes: int | None = None
 ) -> int:
     candidates: set[str] = set()
     if now is not None:
-        candidates.update(
-            str(row["room_id"]) for row in conn.execute(
-                """SELECT room_id FROM hosted_rooms
+        candidates.update(_room_ids(
+            conn,
+            """SELECT room_id FROM hosted_rooms
                      WHERE disbanded_at IS NOT NULL AND disbanded_at<=?""",
-                (now - DISBANDED_ROOM_RETENTION_SECONDS,),
-            ).fetchall()
-        )
-    candidates.update(
-        str(row["room_id"]) for row in conn.execute(
-            """SELECT room_id FROM hosted_rooms WHERE disbanded_at IS NOT NULL
+            (now - DISBANDED_ROOM_RETENTION_SECONDS,),
+        ))
+    candidates.update(_room_ids(
+        conn,
+        """SELECT room_id FROM hosted_rooms WHERE disbanded_at IS NOT NULL
                 ORDER BY disbanded_at DESC, room_id ASC LIMIT -1 OFFSET ?""",
-            (MAX_DISBANDED_ROOM_TOMBSTONES,),
-        ).fetchall()
-    )
+        (MAX_DISBANDED_ROOM_TOMBSTONES,),
+    ))
     if max_gateway_event_bytes is not None:
         retained_bytes = _gateway_event_bytes(conn)
         if retained_bytes > max_gateway_event_bytes:
@@ -864,9 +825,7 @@ def _room_grant_scope_key(claims: Mapping[str, Any]) -> str:
     }
     if not all(fields.values()):
         raise HostedRoomError("room grant scope is incomplete")
-    return hashlib.sha256(
-        json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(compact_json(fields).encode("utf-8")).hexdigest()
 
 
 def revoke_room_grant_scope(
@@ -1099,16 +1058,9 @@ def _adopt_legacy_room(
     seq = int(existing["next_seq"])
     actor_json = _system_actor_json("authority-control")
     payload_json = _claim_payload_json("legacy", authority_gateway_id, target_epoch)
-    claim_bytes = _prepare_event(
-        conn, existing, "system:authority-adopted", "authority.claimed", actor_json,
-        payload_json, allow_control=True,
-    )
-    conn.execute(
-        _INSERT_EVENT,
-        (
-            room_id, seq, "system:authority-adopted", "authority.claimed", actor_json,
-            target_epoch, payload_json, now,
-        ),
+    claim_bytes = _insert_event(
+        conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed", actor_json,
+        target_epoch, payload_json, now, allow_control=True,
     )
     adopted = conn.execute(
         """UPDATE hosted_rooms
@@ -1287,12 +1239,7 @@ def append_event(
     with _transaction(db_path, immediate=True) as conn:
         existing = _load_event(conn, room_id, event_id)
         if existing is not None:
-            if (
-                existing["kind"] != kind
-                or existing["actor_json"] != actor_json
-                or existing["authority_epoch"] != authority_epoch
-                or existing["payload_json"] != payload_json
-            ):
+            if _event_content(existing) != (kind, actor_json, authority_epoch, payload_json):
                 raise EventConflictError("event_id already exists with different content")
             return _event_from_row(existing, idempotent=True)
         room = conn.execute(
@@ -1308,13 +1255,9 @@ def append_event(
         ):
             raise AuthorityConflictError("stale hosted room authority")
         seq = int(room["next_seq"])
-        event_bytes = _prepare_event(
-            conn, room, event_id, kind, actor_json, payload_json,
+        event_bytes = _insert_event(
+            conn, room, room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, now,
             allow_control=kind in _CONTROL_EVENT_KINDS,
-        )
-        conn.execute(
-            _INSERT_EVENT,
-            (room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, now),
         )
         advanced = conn.execute(
             """UPDATE hosted_rooms SET next_seq=?, event_bytes=event_bytes+?, updated_at=?
@@ -1374,11 +1317,8 @@ def probe_peer_room_reservation(
     """Check a peer reservation without creating or migrating shared state."""
     checked_room_id = _room_id(room_id)
     checked_profile = _actor_id(target_profile, "target_profile")
-    path = Path(db_path)
-    if not path.is_file():
-        return False
     return _probe(
-        path, "hosted_room_peer_reservations", _SELECT_LIVE_RESERVATION,
+        Path(db_path), "hosted_room_peer_reservations", _SELECT_LIVE_RESERVATION,
         (checked_room_id, checked_profile, _now(now)),
         "peer room ownership is temporarily unavailable",
     )
@@ -1403,7 +1343,6 @@ def room_state(
             (room_id, int(row["authority_epoch"])),
         ).fetchone()
     state = _room_from_row(row)
-    state["latest_seq"] = int(row["next_seq"]) - 1
     if claim_row is not None:
         state["authority_claim"] = _event_from_row(claim_row)
     return state
@@ -1414,7 +1353,7 @@ def request_room_stop(
     expected_epoch: Any,
 ) -> dict[str, Any]:
     """Append an idempotent fence that supersedes earlier user turns."""
-    cancel_id = _event_id(cancel_id, label="cancel_id")
+    cancel_id = _validate_identifier(cancel_id, label="cancel_id", max_chars=MAX_EVENT_ID_CHARS)
     digest = hashlib.sha256(cancel_id.encode()).hexdigest()[:32]
     return append_event(
         db_path, room_id=room_id, event_id=f"room-stop:{digest}", kind="room.stop_requested",
@@ -1429,13 +1368,9 @@ def _append_authority_claim(
     actor_json: str, payload_json: str, now: float,
 ) -> sqlite3.Row | None:
     """Insert the claim event and CAS the room's authority; returns the stored claim event."""
-    seq = int(row["next_seq"])
-    claim_bytes = _prepare_event(
-        conn, row, event_id, "authority.claimed", actor_json, payload_json, allow_control=True
-    )
-    conn.execute(
-        _INSERT_EVENT,
-        (room_id, seq, event_id, "authority.claimed", actor_json, target_epoch, payload_json, now),
+    claim_bytes = _insert_event(
+        conn, row, room_id, int(row["next_seq"]), event_id, "authority.claimed", actor_json,
+        target_epoch, payload_json, now, allow_control=True,
     )
     updated = conn.execute(
         """UPDATE hosted_rooms SET authority_gateway_id=?,
@@ -1482,11 +1417,8 @@ def claim_authority(
         existing_event = _load_event(conn, room_id, event_id)
         idempotent = existing_event is not None
         if idempotent:
-            if (
-                existing_event["kind"] != "authority.claimed"
-                or existing_event["actor_json"] != claim_actor_json
-                or existing_event["authority_epoch"] != target_epoch
-                or existing_event["payload_json"] != claim_payload_json
+            if _event_content(existing_event) != (
+                "authority.claimed", claim_actor_json, target_epoch, claim_payload_json
             ):
                 raise EventConflictError("event_id already exists with different content")
             if current_gateway != new_gateway_id or current_epoch != target_epoch:
@@ -1508,7 +1440,6 @@ def claim_authority(
             "claimed room could not be reloaded",
         )
     state = _room_from_row(state_row, idempotent=idempotent)
-    state["latest_seq"] = int(state_row["next_seq"]) - 1
     if existing_event is None:  # pragma: no cover - both claim paths set it
         raise RuntimeError("authority claim event could not be reloaded")
     state["claim_event"] = _event_from_row(existing_event, idempotent=idempotent)
@@ -1563,19 +1494,10 @@ def disband_room(
             or int(room["authority_epoch"]) != expected_epoch
         ):
             raise AuthorityConflictError("stale hosted room authority")
-        seq = int(room["next_seq"])
-        actor_json = _system_actor_json("room-control")
-        payload_json = _payload_json({"room_id": room_id})
-        disband_bytes = _prepare_event(
-            conn, room, "system:room-disbanded", "room.disbanded", actor_json, payload_json,
-            allow_control=True,
-        )
-        conn.execute(
-            _INSERT_EVENT,
-            (
-                room_id, seq, "system:room-disbanded", "room.disbanded", actor_json,
-                int(room["authority_epoch"]), payload_json, now,
-            ),
+        disband_bytes = _insert_event(
+            conn, room, room_id, int(room["next_seq"]), "system:room-disbanded", "room.disbanded",
+            _system_actor_json("room-control"), int(room["authority_epoch"]),
+            _payload_json({"room_id": room_id}), now, allow_control=True,
         )
         updated = conn.execute(
             """UPDATE hosted_rooms

@@ -79,13 +79,7 @@ class PolicySnapshot:
     watermarks: Mapping[tuple[str, str], int]
 
 
-def _event_from_room_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "room_id": str(row["room_id"]), "seq": int(row["seq"]), "event_id": str(row["event_id"]),
-        "kind": str(row["kind"]), "actor": json.loads(row["actor_json"]),
-        "authority_epoch": row["authority_epoch"], "payload": json.loads(row["payload_json"]),
-        "created_at": float(row["created_at"]), "idempotent": False,
-    }
+_event_from_room_row = hosted_rooms._event_from_row
 
 
 def _require_room(conn: sqlite3.Connection, room_id: str) -> None:

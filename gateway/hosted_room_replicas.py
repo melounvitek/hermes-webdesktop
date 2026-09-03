@@ -16,26 +16,26 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
 
 from gateway.hosted_rooms import (
     MAX_ACTOR_ID_CHARS,
-    MAX_EVENT_JSON_BYTES,
-    MAX_ROOM_ID_CHARS,
     HostedRoomError,
     RoomConflictError,
-    _canonical_json,
+    _actor_json,
     _connect,
+    _payload_json,
+    _room_id,
     _transaction,
     _validate_identifier,
     _validate_members,
     _validate_room_name,
     local_authority_gateway_id,
 )
-from gateway.hosted_rooms_common import positive_int, utf8_len
+from gateway.hosted_rooms_common import bounded_int, clock, utf8_len
 
 MAX_REPLICA_ROOMS = 256
 MAX_REPLICA_EVENT_BYTES = 256 * 1024 * 1024
@@ -97,20 +97,12 @@ def _replica_transaction(db_path: Path | str) -> Iterator[sqlite3.Connection]:
         yield conn
 
 
-def _room_id(value: Any) -> str:
-    return _validate_identifier(value, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
-
-
-def _positive_int(value: Any, message: str) -> int:
-    return positive_int(value, error=ReplicaError, message=message)
+_positive_int = partial(bounded_int, error=ReplicaError, low=1)
 
 
 def _control_event_json(payload: dict[str, Any]) -> tuple[str, str]:
     """Canonical (actor_json, payload_json) for a system authority-control event."""
-    return (
-        _canonical_json(_SYSTEM_ACTOR, label="actor", max_bytes=4 * 1024),
-        _canonical_json(payload, label="payload", max_bytes=MAX_EVENT_JSON_BYTES),
-    )
+    return _actor_json(_SYSTEM_ACTOR), _payload_json(payload)
 
 
 def _event_bytes(event: dict[str, Any]) -> int:
@@ -133,12 +125,12 @@ def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     gateway_id = _validate_identifier(
         authority.get("gateway_id"), label="page.authority.gateway_id", max_chars=MAX_ACTOR_ID_CHARS
     )
-    epoch = _positive_int(authority.get("epoch"), "page.authority.epoch must be a positive integer")
+    epoch = _positive_int(authority.get("epoch"), message="page.authority.epoch must be a positive integer")
     previous_seq: int | None = None
     for event in events:
         if not isinstance(event, dict):
             raise ReplicaError("page events must be objects")
-        seq = _positive_int(event.get("seq"), "event.seq must be a positive integer")
+        seq = _positive_int(event.get("seq"), message="event.seq must be a positive integer")
         if previous_seq is not None and seq != previous_seq + 1:
             raise ReplicaGapError("page events must be contiguous")
         previous_seq = seq
@@ -201,7 +193,7 @@ def ingest_page(
     room_name = _validate_room_name(room_name)
     _, members_json = _validate_members(members)
     events, authority = _validate_page(page)
-    now = time.time() if now is None else float(now)
+    now = clock(now)
 
     with _replica_transaction(db_path) as conn:
         row, stored_epoch, last_seq, stored_bytes = _replica_row_state(conn, room_id)
@@ -216,8 +208,8 @@ def ingest_page(
             size = _event_bytes(event)
             if stored_bytes + added_bytes + size > MAX_REPLICA_EVENT_BYTES:
                 raise ReplicaError("replica event storage exhausted")
-            actor_json = _canonical_json(event["actor"], label="actor", max_bytes=4 * 1024)
-            payload_json = _canonical_json(event["payload"], label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
+            actor_json = _actor_json(event["actor"])
+            payload_json = _payload_json(event["payload"])
             conn.execute(
                 _INSERT_REPLICA_EVENT,
                 (
@@ -276,7 +268,7 @@ def promote_replica(
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
         raise ReplicaError("reason must be a non-empty string of at most 200 chars")
-    now = time.time() if now is None else float(now)
+    now = clock(now)
     local_gateway = local_authority_gateway_id()
 
     with _replica_transaction(db_path) as conn:
@@ -354,8 +346,8 @@ def demote_room(
     observed_gateway_id = _validate_identifier(
         observed_gateway_id, label="observed_gateway_id", max_chars=MAX_ACTOR_ID_CHARS
     )
-    observed_epoch = _positive_int(observed_epoch, "observed_epoch must be a positive integer")
-    now = time.time() if now is None else float(now)
+    observed_epoch = _positive_int(observed_epoch, message="observed_epoch must be a positive integer")
+    now = clock(now)
     local_gateway = local_authority_gateway_id()
 
     with _transaction(db_path, immediate=True) as conn:

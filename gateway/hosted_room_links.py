@@ -12,6 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -22,6 +23,7 @@ from gateway.hosted_room_peer import (
     TransportSecurity,
     validate_room_link_url,
 )
+from gateway.hosted_rooms_common import compact_json, exact_fields
 
 
 MAX_LINKS = 512
@@ -56,8 +58,7 @@ class StoredRoomLink:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "StoredRoomLink":
-        if set(value) - _LEGACY_FIELDS - _OPTIONAL_FIELDS or not _LEGACY_FIELDS.issubset(value):
-            raise HostedRoomPeerError("stored room link fields are invalid")
+        _link_fields(value)
         room_id = _short_string(value["room_id"], "room_id")
         member_id = _short_string(value["member_id"], "member_id")
         target_profile = _short_string(value["target_profile"], "target_profile")
@@ -101,8 +102,15 @@ class StoredRoomLink:
 
     def as_record(self) -> dict[str, Any]:
         record = {name: getattr(self, name) for name in _RECORD_FIELDS}
-        record["catalog_json"] = json.dumps(self.catalog_mapping(), sort_keys=True, separators=(",", ":"))
+        record["catalog_json"] = compact_json(self.catalog_mapping(), ensure_ascii=False)
         return record
+
+
+_link_fields = partial(
+    exact_fields, label="stored room link", required=_LEGACY_FIELDS, optional=_OPTIONAL_FIELDS,
+    error=HostedRoomPeerError, not_object="stored room link fields are invalid",
+    missing_fmt="stored room link fields are invalid", unknown_fmt="stored room link fields are invalid",
+)
 
 
 def _short_string(value: Any, field: str) -> str:

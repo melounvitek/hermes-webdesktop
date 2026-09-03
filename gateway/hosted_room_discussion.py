@@ -14,7 +14,6 @@ terminal driver rows into publication plans before asking for the next task.
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -24,6 +23,7 @@ from typing import Any, Literal
 from gateway import hosted_room_driver as driver
 from gateway import hosted_rooms
 from gateway import hosted_rooms_common as common
+from gateway.hosted_rooms_common import compact_json
 
 
 MAX_DISCUSSION_MEMBERS = 6
@@ -182,18 +182,18 @@ _identifier = partial(
     common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS
 )
 _exact_fields = partial(common.exact_fields, error=DiscussionValidationError)
+_bounded_int = partial(common.bounded_int, error=DiscussionValidationError)
 
 
 def _positive_int(value: Any, *, label: str) -> int:
-    return common.positive_int(
-        value, error=DiscussionValidationError, message=f"{label} must be a positive integer"
-    )
+    return _bounded_int(value, message=f"{label} must be a positive integer", low=1)
 
 
 def _zero_based_int(value: Any, *, label: str, maximum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
-        raise DiscussionValidationError(f"{label} must be an integer between 0 and {maximum}")
-    return value
+    message = f"{label} must be an integer between 0 and {maximum}"
+    return _bounded_int(value, message=message, high=maximum)
+
+_text = partial(common.text, error=DiscussionValidationError)
 
 
 def _peer_target(member: DiscussionMember) -> Mapping[str, Any] | None:
@@ -204,14 +204,7 @@ def _peer_target(member: DiscussionMember) -> Mapping[str, Any] | None:
 def validate_user_payload(value: Any) -> dict[str, Any]:
     """Validate and normalize the exact ``message.user`` Discussion payload."""
     payload = _exact_fields(value, label="user payload", required=_USER_PAYLOAD_FIELDS)
-    text = payload["text"]
-    if not isinstance(text, str):
-        raise DiscussionValidationError("user payload text must be a string")
-    text = text.strip()
-    if not text:
-        raise DiscussionValidationError("user payload text must not be empty")
-    if len(text.encode("utf-8")) > MAX_USER_TEXT_BYTES:
-        raise DiscussionValidationError("user payload text is too large")
+    text = _text(payload["text"], label="user payload text", max_bytes=MAX_USER_TEXT_BYTES)
     return {"text": text, "thread_id": _identifier(payload["thread_id"], label="thread_id")}
 
 
@@ -298,7 +291,7 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
         if len(display_name) > hosted_rooms.MAX_ACTOR_LABEL_CHARS:
             raise DiscussionValidationError(f"member {index} display_name is too long")
 
-        target_key = json.dumps(target, sort_keys=True, separators=(",", ":")).casefold()
+        target_key = compact_json(target, ensure_ascii=False).casefold()
         target_message = (
             "member profiles must be unique" if target.get("kind") == "local"
             else "member targets must be unique"
@@ -586,10 +579,7 @@ def _derive_member_watermarks(events: Sequence[_ValidatedEvent]) -> dict[tuple[s
 
 
 def _member_digest(member: DiscussionMember) -> str:
-    target = json.dumps(
-        member.target or {"kind": "local", "profile": member.profile},
-        sort_keys=True, separators=(",", ":"),
-    )
+    target = compact_json(member.target or {"kind": "local", "profile": member.profile}, ensure_ascii=False)
     seed = f"{member.member_id}\0{member.profile}\0{member.handle}\0{target}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
 
@@ -680,20 +670,17 @@ def _make_task_plan(
         f"d{discussion_event.seq}.r{round_index}.p{member_index}."
         f"s{seen_through_seq}.m{_member_digest(member)}"
     )
-    seed = json.dumps(
-        {
-            "discussion_event_id": discussion_event.event_id,
-            "member_id": member.member_id,
-            "member_index": member_index,
-            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "room_id": room.room_id,
-            "round_index": round_index,
-            "seen_through_seq": seen_through_seq,
-            "source_event_seq": discussion_event.seq,
-            "thread_id": discussion_event.payload["thread_id"],
-        },
-        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
-    )
+    seed = compact_json({
+        "discussion_event_id": discussion_event.event_id,
+        "member_id": member.member_id,
+        "member_index": member_index,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "room_id": room.room_id,
+        "round_index": round_index,
+        "seen_through_seq": seen_through_seq,
+        "source_event_seq": discussion_event.seq,
+        "thread_id": discussion_event.payload["thread_id"],
+    })
     task_id = f"dtask:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:48]}"
     identity = driver.TaskIdentity(
         room_id=room.room_id, task_id=task_id,
@@ -1020,7 +1007,7 @@ def plan_publication(
         raise DiscussionValidationError("invalid terminal publication status")
     if status == "deferred":
         message = "deferred publication requires an execution generation"
-        common.positive_int(execution_generation, error=DiscussionValidationError, message=message)
+        _bounded_int(execution_generation, message=message, low=1)
 
     newer_same_thread = any(
         event.kind == "message.user"

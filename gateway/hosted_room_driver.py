@@ -14,11 +14,12 @@ import json
 import math
 import sqlite3
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Literal, get_args
 
 from gateway.hosted_rooms_common import (
-    canonical_json, identifier, non_negative_int, positive_int, table_columns, transaction,
+    bounded_int, canonical_json, compact_json, connect, identifier, table_columns, text, transaction,
 )
 
 Clock = Callable[[], float]
@@ -149,8 +150,12 @@ class InvalidTaskTransitionError(DriverStateError):
     """Raised when a requested task transition is not allowed."""
 
 
-def _identifier(value: Any, *, label: str) -> str:
-    return identifier(value, label=label, error=DriverValidationError, max_chars=MAX_IDENTIFIER_CHARS)
+_identifier = partial(identifier, error=DriverValidationError, max_chars=MAX_IDENTIFIER_CHARS)
+_bounded_int = partial(bounded_int, error=DriverValidationError)
+_canonical_json = partial(
+    canonical_json, error=DriverValidationError, label="result", max_bytes=MAX_RESULT_JSON_BYTES,
+    ensure_ascii=True,
+)
 
 
 def _finite(compute: Callable[[], Any], message: str, *, positive: bool = False) -> float:
@@ -180,12 +185,6 @@ def _expiry(now: float, ttl: float) -> float:
     return expires_at
 
 
-def _canonical_json(value: Any) -> str:
-    return canonical_json(
-        value, error=DriverValidationError, label="result", max_bytes=MAX_RESULT_JSON_BYTES, ensure_ascii=True
-    )
-
-
 def _task_payload(value: Any) -> tuple[dict[str, Any], str, str]:
     if not isinstance(value, dict):
         raise DriverValidationError("payload must be an object")
@@ -196,21 +195,17 @@ def _task_payload(value: Any) -> tuple[dict[str, Any], str, str]:
     if missing:
         raise DriverValidationError(f"missing payload fields: {', '.join(sorted(missing))}")
     target_profile = _identifier(value["target_profile"], label="target_profile")
-    prompt = value["prompt"]
-    if not isinstance(prompt, str):
-        raise DriverValidationError("prompt must be a string")
-    if not prompt.strip():
-        raise DriverValidationError("prompt must not be empty")
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-        raise DriverValidationError("prompt is too large")
-    source_event_seq = positive_int(
-        value["source_event_seq"], error=DriverValidationError,
-        message="source_event_seq must be a positive integer",
+    prompt = text(
+        value["prompt"], error=DriverValidationError, label="prompt", max_bytes=MAX_PROMPT_BYTES,
+        strip=False,
+    )
+    source_event_seq = _bounded_int(
+        value["source_event_seq"], message="source_event_seq must be a positive integer", low=1
     )
     normalized = {"target_profile": target_profile, "prompt": prompt, "source_event_seq": source_event_seq}
     if "target_member_id" in value:
         normalized["target_member_id"] = _identifier(value["target_member_id"], label="target_member_id")
-    encoded = json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    encoded = compact_json(normalized)
     return normalized, encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -334,32 +329,27 @@ def _migrate_task_status_constraint(conn: sqlite3.Connection) -> None:
 
 
 def _connect(db_path: Path | str) -> sqlite3.Connection:
-    from hermes_state import apply_wal_with_fallback
+    """Open the store; existing tables are validated (after the status-constraint migration when needed).
 
-    path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10)
-    conn.row_factory = sqlite3.Row
-    try:
-        apply_wal_with_fallback(conn, db_label="state.db (hosted_room_driver)")
-        conn.execute("PRAGMA foreign_keys=ON")
-        if _schema_objects_exist(conn):
-            if not _task_schema_supports_current_statuses(conn):
-                conn.execute("BEGIN IMMEDIATE")
-                _migrate_task_status_constraint(conn)
-                conn.commit()
+    The driver schema never shipped, so an incompatible draft fails closed in
+    ``_validate_schema`` instead of attempting a partial in-place migration.
+    """
+    existing: list[bool] = []
+
+    def ready(conn: sqlite3.Connection) -> bool:
+        existing.append(_schema_objects_exist(conn))
+        return existing[0] and _task_schema_supports_current_statuses(conn)
+
+    def initialize(conn: sqlite3.Connection) -> None:
+        (_migrate_task_status_constraint if existing[0] else _initialize_schema)(conn)
+
+    conn = connect(db_path, db_label="state.db (hosted_room_driver)", ready=ready, initialize=initialize)
+    if existing[0]:
+        try:
             _validate_schema(conn)
-            return conn
-        # Schema creation is one database-wide transaction. The driver schema
-        # has never shipped, so an incompatible draft schema fails closed
-        # instead of attempting a partial in-place migration.
-        conn.execute("BEGIN IMMEDIATE")
-        _initialize_schema(conn)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
+        except Exception:
+            conn.close()
+            raise
     return conn
 
 
@@ -617,8 +607,8 @@ def acquire_lease(
     """Acquire an empty or expired room lease with a monotonic generation."""
     room_id = _identifier(room_id, label="room_id")
     gateway_id = _identifier(gateway_id, label="gateway_id")
-    authority_epoch = positive_int(
-        authority_epoch, error=DriverValidationError, message="authority_epoch must be a positive integer"
+    authority_epoch = _bounded_int(
+        authority_epoch, message="authority_epoch must be a positive integer", low=1
     )
     process_generation = _identifier(process_generation, label="process_generation")
     ttl_seconds = _ttl(ttl_seconds)
@@ -1033,7 +1023,7 @@ def prune_published_terminal_tasks(
     now = _timestamp(clock)
     if retention_seconds <= 0:
         raise DriverValidationError("retention_seconds must be positive")
-    non_negative_int(retain, error=DriverValidationError, message="retain must be a non-negative integer")
+    _bounded_int(retain, message="retain must be a non-negative integer")
 
     with _transaction(db_path) as conn:
         publications = conn.execute(
