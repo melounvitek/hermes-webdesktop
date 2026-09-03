@@ -1417,11 +1417,31 @@ def main(
     enabled_toolsets: str = None, disabled_toolsets: str = None, list_tools: bool = False,
     save_trajectories: bool = False, save_sample: bool = False, verbose: bool = False, log_prefix_chars: int = 20,
 ):
-    """Run the agent directly (``python run_agent.py`` via fire).
+    """
+    Main function for running the agent directly.
 
-    ``enabled_toolsets`` / ``disabled_toolsets`` are comma-separated names ("web,vision"); ``api_key`` falls
-    back to OPENROUTER_API_KEY; ``save_trajectories`` appends to trajectory_samples.jsonl /
-    failed_trajectories.jsonl; ``save_sample`` writes one UUID-named JSON sample.
+    Args:
+        query (str): Natural language query for the agent. Defaults to Python 3.13 example.
+        model (str): Model name to use (OpenRouter format: provider/model). Defaults to anthropic/claude-
+        sonnet-4.6.
+        api_key (str): API key for authentication. Uses OPENROUTER_API_KEY env var if not provided.
+        base_url (str): Base URL for the model API. Defaults to https://openrouter.ai/api/v1
+        max_turns (int): Maximum number of API call iterations. Defaults to 10.
+        enabled_toolsets (str): Comma-separated list of toolsets to enable. Supports predefined
+                              toolsets (e.g., "research", "development", "safe").
+                              Multiple toolsets can be combined: "web,vision"
+        disabled_toolsets (str): Comma-separated list of toolsets to disable (e.g., "terminal")
+        list_tools (bool): Just list available tools and exit
+        save_trajectories (bool): Save conversation trajectories to JSONL files (appends to
+        trajectory_samples.jsonl). Defaults to False.
+        save_sample (bool): Save a single trajectory sample to a UUID-named JSONL file for inspection.
+        Defaults to False.
+        verbose (bool): Enable verbose logging for debugging. Defaults to False.
+        log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses.
+        Defaults to 20.
+
+    Toolset Examples:
+        - "research": Web search, extract, crawl + vision tools
     """
     print("🤖 AI Agent with Tool Calling")
     print("=" * 50)
