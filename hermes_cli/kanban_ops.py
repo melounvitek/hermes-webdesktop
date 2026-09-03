@@ -65,7 +65,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
         max_in_progress_per_profile = kb._positive_int(_kanban_cfg.get("max_in_progress_per_profile"), None)
         # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kb.resolve_max_in_progress(kb._positive_int(_kanban_cfg.get("max_in_progress"), None))
+        max_in_progress = kb.resolve_max_in_progress(
+            kb._positive_int(_kanban_cfg.get("max_in_progress"), None)
+        )
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
         max_spawn = cli_max if cli_max is not None else kb._positive_int(_kanban_cfg.get("max_spawn"), None)
@@ -84,16 +86,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     if getattr(args, "json", False):
         _print_json({
-            "reclaimed": res.reclaimed,
-            "crashed": res.crashed,
-            "timed_out": res.timed_out,
-            "stale": res.stale,
-            "auto_blocked": res.auto_blocked,
-            "promoted": res.promoted,
-            "spawned": [
-                {"task_id": tid, "assignee": who, "workspace": ws}
-                for (tid, who, ws) in res.spawned
-            ],
+            **{k: getattr(res, k)
+               for k in ("reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted")},
+            "spawned": [{"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "skipped_per_profile_capped": [
