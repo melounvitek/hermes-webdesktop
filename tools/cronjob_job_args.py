@@ -1,5 +1,5 @@
-"""Cron job argument normalization, validation and result shaping
-(extracted from tools/cronjob_tools.py; re-exported there)."""
+"""Cron job argument normalization, validation and result shaping (re-exported by
+tools/cronjob_tools.py)."""
 
 import logging
 from typing import Any, Dict, List, Optional, Union
@@ -17,48 +17,37 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
     if not (origin_platform and origin_chat_id):
         return None
     thread_id = get_session_env("HERMES_SESSION_THREAD_ID") or None
-    # Slack stamps every TOP-LEVEL message's own id as the session thread (a
-    # per-message session KEY, not a conversation location). Persisting it
-    # would pin all future deliveries inside an ephemeral thread, so a thread
-    # id equal to the creating message's id is synthetic and dropped; a real
-    # in-thread creation (thread == parent's id != this message) keeps it.
+    # Slack stamps every TOP-LEVEL message's own id as the session thread (a per-message
+    # KEY, not a location); persisting it would pin all future deliveries inside an
+    # ephemeral thread, so thread == creating message id is synthetic and dropped.
     if thread_id and origin_platform == "slack":
         message_id = get_session_env("HERMES_SESSION_MESSAGE_ID") or None
         if message_id and str(thread_id) == str(message_id):
             logger.debug(
                 "Cron origin: dropping synthetic per-message Slack "
-                "thread_id=%s (== creation message id)", thread_id,
-            )
+                "thread_id=%s (== creation message id)", thread_id)
             thread_id = None
     if thread_id:
         logger.debug(
             "Cron origin captured thread_id=%s for %s:%s",
-            thread_id, origin_platform, origin_chat_id,
-        )
+            thread_id, origin_platform, origin_chat_id)
     return {
         "platform": origin_platform,
         "chat_id": origin_chat_id,
         "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
         "thread_id": thread_id,
-        # Lets an opt-in delivery mirror resolve the exact participant's
-        # session in per-user-isolated group chats (parity with send_message).
-        "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,  # harmless for DMs
-        # Workspace/server scope (Slack team, Discord guild...). Slack session
-        # keys embed it, so a continuable cron seed built without it would
-        # create a row no scoped reply ever resolves to.
+        # Lets a delivery mirror resolve the participant's session in per-user-isolated groups.
+        "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,
+        # Workspace/server scope (Slack team, Discord guild...): Slack session keys embed it,
+        # so a continuable cron seed built without it would never resolve a scoped reply.
         "scope_id": get_session_env("HERMES_SESSION_SCOPE_ID") or None,
     }
 
 
 def _local_delivery_notice(job: Dict[str, Any], user_deliver: Optional[str]) -> Optional[str]:
-    """Notice when a created job won't deliver anywhere.
-
-    CLI/TUI sessions have no capturable origin, so deliver='origin' (or an
-    omitted deliver) yields a job whose output is saved but never delivered.
-    Surface that at create time rather than silently dropping the user's
-    "tell me when it runs" intent. None when the user explicitly asked for
-    ``local`` or the job resolves to a real target.
-    """
+    """Notice when a created job won't deliver anywhere: CLI/TUI sessions have no capturable
+    origin, so deliver='origin' (or omitted) saves output but never delivers it. None when the
+    user explicitly asked for ``local`` or the job resolves to a real target."""
     if (user_deliver or "").strip().lower() == "local":
         return None
     try:
@@ -66,8 +55,7 @@ def _local_delivery_notice(job: Dict[str, Any], user_deliver: Optional[str]) -> 
 
         if _resolve_delivery_targets(job):
             return None
-    except Exception:
-        # Resolution unavailable — fall back to the origin signal.
+    except Exception:  # resolution unavailable — fall back to the origin signal
         if job.get("origin"):
             return None
     return (
@@ -75,13 +63,12 @@ def _local_delivery_notice(job: Dict[str, Any], user_deliver: Optional[str]) -> 
         "cronjob(action='list')) but will NOT be delivered back into this "
         "session — CLI/TUI sessions have no live-delivery channel. To be "
         "notified when it runs, recreate or update the job with deliver set to "
-        "a gateway-connected platform, e.g. deliver='telegram' or deliver='all'."
-    )
+        "a gateway-connected platform, e.g. deliver='telegram' or deliver='all'.")
 
 
 def _mode_guidance_notes(job: Dict[str, Any], user_deliver: Optional[str]) -> List[str]:
-    """Mode-specific guidance echoed once in the create/update response
-    (instead of in the schema, which is paid for on every API call)."""
+    """Mode guidance echoed once in the create/update response (not in the schema, which is
+    paid for on every API call)."""
     notes: List[str] = []
     if job.get("monitor_script") or job.get("monitor_url"):
         notes.append(
@@ -90,28 +77,22 @@ def _mode_guidance_notes(job: Dict[str, Any], user_deliver: Optional[str]) -> Li
             "(silent no_change tick), changed output injects a MONITOR CHANGE "
             "DETECTED diff into the prompt. The first tick always runs as "
             "baseline. The source must emit STABLE output (no timestamps, no "
-            "random ordering) or every tick will look changed."
-        )
+            "random ordering) or every tick will look changed.")
     if job.get("no_agent"):
         notes.append(
             "no_agent mode: stdout is delivered verbatim; EMPTY stdout sends "
             "nothing at all (watchdog pattern — script should stay quiet when "
             "there is nothing to report). Non-zero exit or timeout sends an "
-            "error alert. prompt/skills are ignored."
-        )
+            "error alert. prompt/skills are ignored.")
     _deliver = (user_deliver or "").strip().lower()
     if _deliver:
         if "all" in _deliver.split(","):
             notes.append(
                 "deliver='all' resolves at fire time and never includes "
                 "bot-chat targets — channels connected later are picked up "
-                "automatically."
-            )
+                "automatically.")
         if _deliver.startswith("bot-chat:"):
-            notes.append(
-                "Targeting another profile's Bot Chat costs that bot an agent "
-                "turn per run."
-            )
+            notes.append("Targeting another profile's Bot Chat costs that bot an agent turn per run.")
         # platform:chat_id with no thread segment loses topic targeting.
         for target in _deliver.split(","):
             parts = target.strip().split(":")
@@ -119,13 +100,11 @@ def _mode_guidance_notes(job: Dict[str, Any], user_deliver: Optional[str]) -> Li
                 len(parts) == 2
                 and parts[0] not in ("bot-chat", "sms")
                 and parts[1]
-                and not parts[1].startswith("#")
-            ):
+                and not parts[1].startswith("#")):
                 notes.append(
                     f"deliver target '{target.strip()}' has no :thread_id "
                     "segment — on thread/topic platforms the delivery lands in "
-                    "the main chat, not a topic."
-                )
+                    "the main chat, not a topic.")
                 break
     return notes
 
@@ -133,18 +112,12 @@ def _mode_guidance_notes(job: Dict[str, Any], user_deliver: Optional[str]) -> Li
 def _split_monitor_arg(
     monitor: Optional[str],
     monitor_script: Optional[str],
-    monitor_url: Optional[str],
-) -> tuple:
-    """Resolve the single model-facing ``monitor`` field into the stored
-    ``(monitor_script, monitor_url)`` pair.
-
-    Shape decides transport: http(s):// is a URL, anything else a script path
-    (a legal script path can never start with a URL scheme). Storage keeps the
-    two fields separate — interface merge, not a storage migration.
-    Update semantics: None = unchanged, '' = clear; setting one source clears
-    the other so switching transports never trips mutual exclusion. An
-    explicit ``monitor`` wins over the legacy alias fields.
-    """
+    monitor_url: Optional[str]) -> tuple:
+    """Resolve the model-facing ``monitor`` field into the stored ``(monitor_script,
+    monitor_url)`` pair. http(s):// is a URL, anything else a script path (a legal script path
+    never starts with a URL scheme). None = unchanged, '' = clear; setting one source clears
+    the other so switching transports never trips mutual exclusion; an explicit ``monitor``
+    wins over the legacy alias fields."""
     if monitor is None:
         return monitor_script, monitor_url
     value = monitor.strip()
@@ -193,12 +166,8 @@ def _normalize_optional_job_value(value: Optional[Any], *, strip_trailing_slash:
 
 
 def _normalize_deliver_param(value: Any) -> Optional[str]:
-    """Canonical string form of ``deliver``; None for None/empty.
-
-    MCP clients / scripts may pass a list (``["telegram"]``); stored as-is the
-    scheduler's ``str(deliver).split(",")`` would yield the literal
-    ``"['telegram']"``. Flatten at the API boundary.
-    """
+    """Canonical string form of ``deliver``; None for None/empty. MCP clients may pass a list
+    (``["telegram"]``) which the scheduler's ``str(deliver).split(",")`` would mangle."""
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
@@ -207,13 +176,9 @@ def _normalize_deliver_param(value: Any) -> Optional[str]:
 
 
 def _validate_bot_chat_deliver(deliver: Optional[str]) -> Optional[str]:
-    """Validate ``bot-chat[:<profile>]`` deliver elements at create time.
-
-    Bot Chat delivery is machine-local: the profile must exist where the
-    scheduler fires (Desktop multi-gateway rosters may show same-named profiles
-    from other machines). Fail loudly here rather than as a per-run delivery error.
-    Returns an error string or None.
-    """
+    """Validate ``bot-chat[:<profile>]`` deliver elements at create time: Bot Chat delivery is
+    machine-local, so the profile must exist where the scheduler fires (Desktop rosters may
+    show same-named profiles from other machines). Returns an error string or None."""
     if not deliver:
         return None
     try:
@@ -234,21 +199,16 @@ def _validate_bot_chat_deliver(deliver: Optional[str]) -> Optional[str]:
                 f"bot-chat delivery profile '{profile_arg}' not found on this "
                 "gateway's machine. Bot Chat delivery is machine-local — use a "
                 "profile that exists here (hermes profile list), or omit the "
-                "name (deliver='bot-chat') for the job's own profile."
-            )
+                "name (deliver='bot-chat') for the job's own profile.")
     return None
 
 
 def _resolve_cron_context_deliver(deliver: Optional[str]) -> Optional[str]:
-    """Resolve ``origin`` to a concrete target for creates made FROM a cron run.
-
-    The creating session is ephemeral, so by fire time there is no origin to
-    resolve. Non-cron sessions: returned unchanged. Cron sessions: ``origin``
-    (or an omitted value) becomes the creating run's ``platform:chat_id[:thread]``
-    from the HERMES_CRON_AUTO_DELIVER_* contextvars, or ``local`` when the
-    creating run has no concrete target; other elements pass through verbatim.
-    Without this the scheduler would fall back to guessing a home channel.
-    """
+    """Resolve ``origin`` to a concrete target for creates made FROM a cron run (the creating
+    session is ephemeral, so by fire time there is no origin). Non-cron sessions: unchanged.
+    Cron sessions: ``origin`` (or omitted) becomes the creating run's ``platform:chat_id[:thread]``
+    from HERMES_CRON_AUTO_DELIVER_*, or ``local`` when it has no concrete target; other
+    elements pass through. Otherwise the scheduler would guess a home channel."""
     from gateway.session_context import get_session_env
     from utils import is_truthy_value
 
@@ -271,45 +231,33 @@ def _resolve_cron_context_deliver(deliver: Optional[str]) -> Optional[str]:
 
 
 def _validate_cron_base_url(
-    provider: Optional[Any], base_url: Optional[Any]
-) -> Optional[str]:
-    """Reject pairing a named provider's stored credential with an off-host base_url.
-
-    A prompt-injected job could name a real provider plus an attacker
-    base_url; at fire time the provider's stored key would be sent there
-    (credential exfil). Allowed: no override; bare 'custom' (pure BYOK, key
-    derived from the base_url itself); an override whose host matches the
-    named provider's own endpoint. Everything else fails closed.
-    Returns an error string if blocked, else None.
-    """
+    provider: Optional[Any], base_url: Optional[Any]) -> Optional[str]:
+    """Reject pairing a named provider's stored credential with an off-host base_url (a
+    prompt-injected job could exfil the key). Allowed: no override; bare 'custom' (pure BYOK,
+    key derived from the base_url); an override whose host matches the named provider's own
+    endpoint. Everything else fails closed. Returns an error string if blocked, else None."""
     bu = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
     if not bu:
         return None
     prov = _normalize_optional_job_value(provider)
-    if not prov:
-        # No provider inherits the default provider's stored key — same primitive.
+    if not prov:  # no provider inherits the default provider's stored key — same primitive
         return (
             "base_url override requires an explicit provider. Set provider to a "
-            "configured custom provider to use a custom endpoint."
-        )
+            "configured custom provider to use a custom endpoint.")
     try:
         from hermes_cli.runtime_provider import (
             has_named_custom_provider,
             resolve_requested_provider,
-            _get_named_custom_provider,
-        )
+            _get_named_custom_provider)
         from hermes_cli.auth import PROVIDER_REGISTRY
         from utils import base_url_host_matches, base_url_hostname
     except Exception:
         return f"Unable to validate base_url override for provider {prov!r}; refused."
 
-    if prov.lower() == "custom":
-        # Pure BYOK: key comes from a pool keyed by THIS base_url or host-gated
-        # env vars, never an arbitrary stored secret.
+    if prov.lower() == "custom":  # pure BYOK: key keyed by THIS base_url, never a stored secret
         return None
     if has_named_custom_provider(prov):
-        # A NAMED custom provider carries a STORED key that the runtime still
-        # sends to an override base_url — require the configured host.
+        # A NAMED custom provider's STORED key is still sent to an override base_url.
         try:
             cp = _get_named_custom_provider(prov)
         except Exception:
@@ -320,8 +268,7 @@ def _validate_cron_base_url(
         return (
             f"base_url {bu!r} is not allowed for provider {prov!r}. A named "
             f"custom provider's stored credential may only be sent to its own "
-            f"configured endpoint ({cfg_host or 'unknown'})."
-        )
+            f"configured endpoint ({cfg_host or 'unknown'}).")
     try:
         resolved = resolve_requested_provider(prov)
     except Exception:
@@ -330,19 +277,16 @@ def _validate_cron_base_url(
     known_host = base_url_hostname(getattr(pconfig, "inference_base_url", "") if pconfig else "")
     if known_host and base_url_host_matches(bu, known_host):
         return None
-    # Fail closed: covers named providers with stored credentials AND
-    # aliases/unknown names we cannot host-match.
+    # Fail closed: named providers with stored credentials AND unknown names we cannot host-match.
     return (
         f"base_url {bu!r} is not allowed for provider {prov!r}. A named "
         f"provider's stored credential may only be sent to its own endpoint; "
-        f'use a configured custom provider (provider="custom") for a custom base_url.'
-    )
+        f'use a configured custom provider (provider="custom") for a custom base_url.')
 
 
 def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
-    """Scripts must be relative paths resolving within HERMES_HOME/scripts/
-    (absolute / ~ / drive-letter paths rejected — prompt-injection guard).
-    Returns an error string if blocked, else None; empty = clearing, OK."""
+    """Scripts must be relative paths within HERMES_HOME/scripts/ (absolute / ~ / drive-letter
+    rejected — prompt-injection guard). Error string if blocked, else None; empty = clear."""
     if not script or not script.strip():
         return None
 
@@ -353,8 +297,7 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
         return (
             f"Script path must be relative to ~/.hermes/scripts/. "
             f"Got absolute or home-relative path: {raw!r}. "
-            f"Place scripts in ~/.hermes/scripts/ and use just the filename."
-        )
+            f"Place scripts in ~/.hermes/scripts/ and use just the filename.")
 
     from tools.path_security import validate_within_dir
 
@@ -367,10 +310,8 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
 
 def _apply_continuity(
     context_from: Optional[Union[str, List[str]]],
-    continuity: bool,
-) -> Optional[List[str]]:
-    """continuity=True ensures "self" is in context_from; False removes any
-    "self" entry. Other entries are preserved untouched."""
+    continuity: bool) -> Optional[List[str]]:
+    """continuity=True ensures "self" is in context_from; False removes it; others untouched."""
     refs = _clean_str_list(context_from)
     has_self = any(r.lower() == "self" for r in refs)
     if continuity and not has_self:
@@ -381,9 +322,8 @@ def _apply_continuity(
 
 
 def _validate_context_from_refs(refs: List[Any]) -> Optional[str]:
-    """Error string if any non-"self" ref names a job that doesn't exist.
-    ("self" resolves to the job's own id at run time, so it can't be checked
-    against the store — the job doesn't exist yet at create time.)"""
+    """Error string if any non-"self" ref names a missing job ("self" resolves to the job's
+    own id at run time, so it can't be checked — the job doesn't exist yet at create)."""
     from cron.jobs import get_job as _get_job
     for ref_id in refs:
         if isinstance(ref_id, str) and ref_id.strip().lower() == "self":
@@ -391,17 +331,14 @@ def _validate_context_from_refs(refs: List[Any]) -> Optional[str]:
         if not _get_job(ref_id):
             return (
                 f"context_from job '{ref_id}' not found. "
-                "Use cronjob(action='list') to see available jobs."
-            )
+                "Use cronjob(action='list') to see available jobs.")
     return None
 
 
-# Optional fields echoed by _format_job only when truthy on the job record
-# (order matters: it is the JSON key order).
+# Optional fields echoed by _format_job only when truthy (order = JSON key order).
 _FORMAT_JOB_OPTIONAL_KEYS = (
     "script", "reasoning_effort", "monitor_script", "monitor_url",
-    "monitor_state", "no_agent", "enabled_toolsets", "workdir",
-)
+    "monitor_state", "no_agent", "enabled_toolsets", "workdir")
 
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -451,9 +388,8 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _gateway_liveness_notice(plural: bool = False) -> dict:
-    """``gateway_running``/``warning`` payload via the shared CLI helper so the
-    CLI and this tool agree on what "scheduler active" means. False -> warning
-    (builtin ticker has no gateway process), None -> probe failed."""
+    """``gateway_running``/``warning`` payload via the shared CLI helper so CLI and tool agree
+    on "scheduler active". False -> warning (no gateway process), None -> probe failed."""
     try:
         from hermes_cli.cron import _builtin_gateway_liveness
 
@@ -468,7 +404,6 @@ def _gateway_liveness_notice(plural: bool = False) -> dict:
                 f"The Hermes gateway is not running — {subject} "
                 "but will NOT fire until the gateway is started "
                 "(hermes gateway install / hermes gateway start). "
-                "Tell the user the task is scheduled but not active yet."
-            ),
+                "Tell the user the task is scheduled but not active yet."),
         }
     return {"gateway_running": None if _gw is None else True}
