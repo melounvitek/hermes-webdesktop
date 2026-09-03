@@ -149,11 +149,7 @@ class GatewayStartupMixin:
             for task in pending:
                 task.add_done_callback(late)
                 if track:
-                    bg = getattr(self, "_background_tasks", None)
-                    if bg is None:
-                        bg = self._background_tasks = set()
-                    bg.add(task)
-                    task.add_done_callback(bg.discard)
+                    self._retain_background_task(task)
         return done
 
     async def _finish_startup_restore(self) -> None:
@@ -521,11 +517,9 @@ class GatewayStartupMixin:
             # Empty-text internal event: the _is_resume_pending branch in _handle_message_with_agent
             # prepends the reason-aware system note before the turn runs.
             event = MessageEvent(text="", message_type=MessageType.TEXT, source=source, internal=True)
-            task = asyncio.create_task(
-                self._run_startup_resume_event(adapter, event, entry.session_key)
+            task = self._retain_background_task(
+                asyncio.create_task(self._run_startup_resume_event(adapter, event, entry.session_key))
             )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
             if getattr(self, "_startup_restore_in_progress", False):
                 tasks = getattr(self, "_startup_restore_tasks", None)
                 if tasks is None:
@@ -548,13 +542,8 @@ class GatewayStartupMixin:
         await self._safe_adapter_disconnect(adapter, platform)
 
     def _startup_retry_entry(self, platform, adapter, platform_config, *, queued: bool = True) -> dict:
-        """Build a ``_failed_platforms`` entry for a platform that failed at startup."""
-        return {
-            "config": platform_config, "attempts": 1, "next_retry": time.monotonic() + 30,
-            **({"queued_at": time.monotonic()} if queued else {}),
-            "credential_claim": self._adapter_credential_claim(platform, adapter),
-            "listener_claim": self._adapter_listener_claim(platform, adapter),
-        }
+        """``_failed_platforms`` entry for a platform that failed at startup (first retry in 30s)."""
+        return self._reconnect_queue_entry(platform, adapter, platform_config, attempts=1, delay=30, queued=queued)
 
     async def _abort_startup_if_shutdown_requested(
         self, adapter: Optional[BasePlatformAdapter] = None, platform: Optional[Platform] = None
@@ -698,8 +687,7 @@ class GatewayStartupMixin:
             task._hermes_supervised_watcher = True  # type: ignore[attr-defined]
             _bg = getattr(self, "_background_tasks", None)
             if _bg is not None:
-                _bg.add(task)
-                task.add_done_callback(_bg.discard)
+                self._track_task_in(_bg, task)
         except Exception:
             logger.debug("Failed to start gateway loop heartbeat", exc_info=True)
 
@@ -917,18 +905,25 @@ class GatewayStartupMixin:
         except Exception:
             logger.warning("relay adapter registration failed at gateway startup", exc_info=True)
 
-        # Declarative shell hooks from cli-config.yaml. Gateway has no TTY, so consent must come
-        # from --accept-hooks, HERMES_ACCEPT_HOOKS, or hooks_auto_accept: true; pass
-        # accept_hooks=False and let register_from_config resolve env + config.
+        GatewayStartupMixin._register_config_hooks("shell-hook registration failed at gateway startup")
+
+    @staticmethod
+    def _register_config_hooks(fail_fmt: str, *fail_args, level: int = logging.DEBUG) -> None:
+        """Register declarative shell hooks + outbound webhooks from the CURRENT scope's config.
+
+        Gateway has no TTY, so consent must come from --accept-hooks, HERMES_ACCEPT_HOOKS, or
+        hooks_auto_accept: true; ``accept_hooks=False`` lets register_from_config resolve env + config.
+        Never raises (logged at ``level``).
+        """
         try:
             from hermes_cli.config import load_config
             from agent.shell_hooks import register_from_config
+            from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
             _hooks_cfg = load_config()
             register_from_config(_hooks_cfg, accept_hooks=False)
-            from agent.outbound_webhooks import register_from_config as register_outbound_webhooks
             register_outbound_webhooks(_hooks_cfg)
         except Exception:
-            logger.debug("shell-hook registration failed at gateway startup", exc_info=True)
+            logger.log(level, fail_fmt, *fail_args, exc_info=True)
 
     async def _start_recover_previous_run(self) -> None:
         """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
@@ -1135,9 +1130,7 @@ class GatewayStartupMixin:
             # blip — ``_acquire_platform_lock`` emits it retryable only so a MID-RUN reconnect can
             # recover. At startup route it non-retryable: with nothing connected the gateway exits
             # 78 instead of sitting alive and deaf in the retry queue.
-            _retryable = adapter.fatal_error_retryable and not (
-                is_global_startup_conflict(adapter.fatal_error_code)
-            )
+            _retryable = adapter.fatal_error_retryable and not is_global_startup_conflict(adapter.fatal_error_code)
             self._update_platform_runtime_status(
                 platform.value, platform_state="retrying" if _retryable else "fatal",
                 error_code=adapter.fatal_error_code, error_message=adapter.fatal_error_message,
