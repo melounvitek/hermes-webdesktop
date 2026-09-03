@@ -148,6 +148,15 @@ def _provider_card(d, description: str, url, *, is_password: bool, advanced: boo
     }
 
 
+_AUTH_TYPE_ENV_VARS = {
+    "aws_sdk": (
+        ("AWS_REGION", lambda d, var: f"{d.label} ({var})"),
+        ("AWS_PROFILE", lambda d, var: f"{d.label} ({var})"),
+    ),
+    "vertex": (("VERTEX_CREDENTIALS_PATH", lambda d, var: f"{d.label} — service account JSON path (or use ADC)"),),
+}
+
+
 def _catalog_provider_env_metadata() -> dict:
     """Map provider env vars -> desktop card metadata, derived from the catalog.
 
@@ -195,19 +204,11 @@ def _catalog_provider_env_metadata() -> dict:
         # the Keys tab: AWS-SDK providers (Bedrock) authenticate via the AWS
         # credential chain, Vertex via OAuth2 (service-account JSON path or
         # ADC — a path, not a secret). Tag their env vars to the card.
-        if d.auth_type == "aws_sdk":
-            for aws_var in ("AWS_REGION", "AWS_PROFILE"):
-                existing = meta.get(aws_var, {})
-                meta[aws_var] = _provider_card(
-                    d, existing.get("description") or f"{d.label} ({aws_var})", existing.get("url"),
-                    is_password=False, advanced=existing.get("advanced", True),
-                )
-        if d.auth_type == "vertex":
-            existing = meta.get("VERTEX_CREDENTIALS_PATH", {})
-            meta["VERTEX_CREDENTIALS_PATH"] = _provider_card(
-                d,
-                existing.get("description") or f"{d.label} — service account JSON path (or use ADC)",
-                existing.get("url"), is_password=False, advanced=existing.get("advanced", True),
+        for var, describe in _AUTH_TYPE_ENV_VARS.get(d.auth_type, ()):
+            existing = meta.get(var, {})
+            meta[var] = _provider_card(
+                d, existing.get("description") or describe(d, var), existing.get("url"),
+                is_password=False, advanced=existing.get("advanced", True),
             )
     return meta
 
