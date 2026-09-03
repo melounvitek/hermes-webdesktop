@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""
-Hermes Agent CLI - Interactive Terminal Interface
+"""Hermes Agent CLI — interactive terminal interface (``python cli.py --help`` for usage)."""
 
-Usage:
-    python cli.py                          # Start interactive mode with all tools
-    python cli.py --toolsets web,terminal  # Start with specific toolsets
-    python cli.py --skills hermes-agent-dev,github-auth
-    python cli.py --list-tools             # List available tools and exit
-"""
-
-# hermes_bootstrap must be the very first import — UTF-8 stdio on Windows (no-op on
-# POSIX). Missing only during a partial ``hermes update`` (git reset landed, pip
-# install didn't); then Windows UTF-8 setup is skipped.
+# Must be the very first import (UTF-8 stdio on Windows). Missing only mid-``hermes update``.
 try:
     import hermes_bootstrap  # noqa: F401
 except ModuleNotFoundError:
@@ -40,8 +30,7 @@ from typing import List, Dict, Any, Optional, Mapping
 
 logger = logging.getLogger(__name__)
 
-# Suppress startup messages for clean CLI experience
-os.environ["HERMES_QUIET"] = "1"  # Our own modules
+os.environ["HERMES_QUIET"] = "1"  # suppress our modules' startup chatter
 
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
@@ -60,14 +49,13 @@ from hermes_cli.cli_tui_mixin import CLITuiMixin
 from agent.interrupt_compat import request_hard_interrupt
 from agent.pet import render as pet_render
 
-# prompt_toolkit for fixed input area TUI
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.application import Application
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 try:
     from prompt_toolkit.cursor_shapes import CursorShape
-    _STEADY_CURSOR = CursorShape.BLOCK  # Non-blinking block cursor
+    _STEADY_CURSOR = CursorShape.BLOCK
 except (ImportError, AttributeError):
     _STEADY_CURSOR = None
 
@@ -88,11 +76,7 @@ import queue
 
 
 def _lazy_shim(module: str, name: str, alias: str | None = None):
-    """Module-level function that imports ``module.name`` on first call and delegates to it.
-
-    Keeps heavy imports (agent, tools, toolsets) off the bare-startup path while the
-    symbol stays importable/patchable as ``cli.<alias or name>``.
-    """
+    """Import ``module.name`` on first call; keeps heavy imports off startup while ``cli.<name>`` stays patchable."""
     import importlib
 
     def shim(*args, **kwargs):
@@ -121,17 +105,12 @@ def format_duration_compact(*args, **kwargs):
     return f"{days:.1f}d"
 
 
-# Reverse map of config.yaml ``model_aliases:`` so the TUI can show friendly names
-# instead of long catalog IDs. Process-lifetime cache (config is read once per session).
+# model id -> shortest configured alias (process-lifetime cache; config is read once).
 _REVERSE_ALIAS_CACHE: dict[str, str] | None = None
 
 
 def _reverse_alias_for_display(model_name: str) -> str:
-    """Return the shortest configured alias for ``model_name``, or ``model_name``.
-
-    Looks up both ``model_aliases:`` (dict entries) and ``model.aliases:`` (strings,
-    set via ``hermes config set``); the shortest alias wins.
-    """
+    """Shortest alias for ``model_name`` from ``model_aliases:`` or ``model.aliases:``, else ``model_name``."""
     global _REVERSE_ALIAS_CACHE
     if not model_name:
         return model_name
@@ -186,15 +165,12 @@ def format_token_count_compact(*args, **kwargs):
 is_table_divider = _lazy_shim("agent.markdown_tables", "is_table_divider")
 looks_like_table_row = _lazy_shim("agent.markdown_tables", "looks_like_table_row")
 realign_markdown_tables = _lazy_shim("agent.markdown_tables", "realign_markdown_tables")
-# `agent.account_usage` is deliberately NOT imported at module top — it pulls the
-# OpenAI SDK chain (~230 ms cold) and is only needed by `/limits`.
 from hermes_cli.banner import format_banner_version_label
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
-# Load .env from ~/.hermes/.env first, then project root as dev fallback.
-# User-managed env files should override stale shell exports on restart.
+# ~/.hermes/.env first, project .env as dev fallback; user env files override stale shell exports.
 from hermes_constants import get_hermes_home, display_hermes_home  # noqa: F401  (mixins import via cli)
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, base_url_hostname, fast_safe_load
@@ -209,13 +185,9 @@ _TOOL_CALL_TAGS = ("tool_call", "tool_calls", "tool_result", "function_call", "f
 
 
 def _strip_reasoning_tags(text: str) -> str:
-    """Remove reasoning/thinking blocks from displayed text.
+    """Strip reasoning blocks (closed, unterminated, orphan-close) and leaked tool-call XML from display text.
 
-    Handles closed pairs, unterminated open tags (truncated generations), and stray
-    orphan close tags, case-insensitively. Must stay in sync with
-    ``run_agent.py::_strip_think_blocks`` and the stream consumer's
-    ``_OPEN_THINK_TAGS`` / ``_CLOSE_THINK_TAGS``. Also strips tool-call XML some open
-    models leak into visible content (``<tool_call>``, Gemma-style ``<function name=…>``).
+    Keep in sync with ``run_agent._strip_think_blocks`` and the stream consumer's think-tag sets.
     """
     cleaned = text
     for tag in _REASONING_TAGS:
@@ -251,15 +223,8 @@ def _assistant_copy_text(content: Any) -> str:
     return _strip_reasoning_tags(_assistant_content_as_text(content))
 
 
-# =============================================================================
-# Configuration Loading
-# =============================================================================
-
 def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
-    """Load ephemeral prefill messages (JSON array of {role, content}) from a file.
-
-    Relative paths resolve from ~/.hermes/. Empty path or missing file -> [].
-    """
+    """Load prefill messages (JSON array) from *file_path*; relative to ~/.hermes/; missing/empty -> []."""
     if not file_path:
         return []
     path = Path(file_path).expanduser()
@@ -281,8 +246,7 @@ def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
 
 
 def _resolve_prefill_messages_file(config: Dict[str, Any]) -> str:
-    """Resolve the prefill file path: env, then top-level ``prefill_messages_file``,
-    then the legacy ``agent.prefill_messages_file``."""
+    """Prefill file path: env, then top-level ``prefill_messages_file``, then legacy ``agent.*``."""
     agent_cfg = config.get("agent", {})
     return (
         os.getenv("HERMES_PREFILL_MESSAGES_FILE", "").strip()
@@ -350,14 +314,12 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
     """Project config.yaml values into the env vars the tool modules read (terminal/browser/auxiliary/security/sessions). Env always wins when already set."""
     terminal_config = defaults.get("terminal", {})
 
-    # "backend" (hermes_cli/config.py + docs) and legacy "env_type" (cli-config.yaml)
-    # are both accepted; "backend" wins.
+    # "backend" (documented) and legacy "env_type" are both accepted; "backend" wins.
     if "backend" in terminal_config:
         terminal_config["env_type"] = terminal_config["backend"]
 
-    # CWD: local backend is always os.getcwd() (`cd /dir && hermes` controls it);
-    # non-local with a placeholder pops it so terminal_tool uses its per-backend
-    # default; non-local with an explicit path keeps it.
+    # Local backend: cwd is always os.getcwd(). Non-local: a placeholder is popped so
+    # terminal_tool uses its per-backend default; an explicit path is kept.
     effective_backend = terminal_config.get("env_type", "local")
     if effective_backend == "local":
         terminal_config["cwd"] = os.getcwd()
@@ -365,8 +327,8 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
 
-    # TERMINAL_CWD is force-exported (overrides stale .env/inherited values) UNLESS
-    # inside a gateway process, where gateway/run.py's config bridge already set it.
+    # TERMINAL_CWD is force-exported (beats stale .env) except inside a gateway process,
+    # whose config bridge already set it.
     _is_gateway = os.environ.get("_HERMES_GATEWAY") == "1"
     for config_key, env_var in _TERMINAL_ENV_MAPPINGS.items():
         if config_key not in terminal_config:
@@ -382,8 +344,7 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
     if "inactivity_timeout" in browser_config:
         os.environ["BROWSER_INACTIVITY_TIMEOUT"] = str(browser_config["inactivity_timeout"])
 
-    # Auxiliary overrides: only non-empty / non-"auto" values so auto-detection still
-    # works. (Compression config is read directly from config.yaml — no bridging.)
+    # Only non-empty / non-"auto" auxiliary values are bridged so auto-detection still works.
     auxiliary_config = defaults.get("auxiliary", {})
     for task_key, env_map in _AUXILIARY_TASK_ENV.items():
         task_cfg = auxiliary_config.get(task_key, {})
@@ -419,7 +380,7 @@ def _cli_config_defaults():
         },
         "terminal": {
             "env_type": "local",
-            "cwd": ".",  # "." is resolved to os.getcwd() at runtime
+            "cwd": ".",  # resolved to os.getcwd() at runtime
             "home_mode": "auto",
             "lifetime_seconds": 300,
             "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
@@ -427,67 +388,60 @@ def _cli_config_defaults():
             "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
             "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
             "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
-            "docker_volumes": [],  # host:container volume mounts for Docker backend
-            "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
+            "docker_volumes": [],
+            "docker_mount_cwd_to_workspace": False,  # opt-in only: sandbox isolation
             "docker_shared_container_key": "",
         },
         "browser": {
-            "inactivity_timeout": 120,  # Auto-cleanup inactive browser sessions after 2 min
-            "record_sessions": False,  # Auto-record browser sessions as WebM videos
-            "engine": "auto",  # Browser engine: auto (Chrome), lightpanda, chrome
+            "inactivity_timeout": 120,
+            "record_sessions": False,
+            "engine": "auto",  # auto (Chrome) | lightpanda | chrome
             "camofox": {
                 "rewrite_loopback_urls": False,
                 "loopback_host_alias": "host.docker.internal",
             },
         },
         "compression": {
-            "enabled": True,      # Auto-compress when approaching context limit
-            "threshold": 0.50,    # Compress at 50% of model's context limit
-            "min_tail_user_messages": 1,  # Real user messages guaranteed in the tail
+            "enabled": True,
+            "threshold": 0.50,  # fraction of the model's context limit
+            "min_tail_user_messages": 1,  # real user messages guaranteed in the tail
         },
         "agent": {
-            "max_turns": 500,  # Default max tool-calling iterations (shared with subagents)
+            "max_turns": 500,  # shared with subagents
             "verbose": False,
             "system_prompt": "",
             "prefill_messages_file": "",
             "reasoning_effort": "",
             "service_tier": "",
-            # Built-in personalities live in hermes_cli.personality (BUILTIN_PERSONALITIES);
-            # entries here are user additions/overrides merged on top by name.
-            "personalities": {},
+            "personalities": {},  # user overrides merged by name over hermes_cli.personality builtins
         },
 
         "display": {
             "compact": False,
             "resume_display": "full",
-            # Recap tuning for /resume — see hermes_cli/config.py DEFAULT_CONFIG.
-            "resume_exchanges": 10,
+            "resume_exchanges": 10,  # /resume recap tuning (see hermes_cli/config.py DEFAULT_CONFIG)
             "resume_max_user_chars": 300,
             "resume_max_assistant_chars": 200,
             "resume_max_assistant_lines": 3,
             "resume_skip_tool_only": True,
-            # Keep in sync with hermes_cli/config.py DEFAULT_CONFIG (display.show_reasoning).
-            "show_reasoning": True,
+            "show_reasoning": True,  # keep in sync with hermes_cli/config.py DEFAULT_CONFIG
             "reasoning_full": False,
             "streaming": True,
             "busy_input_mode": "interrupt",
             "persistent_output": True,
             "persistent_output_max_lines": 200,
-            # Clear scrollback as well as the viewport on full redraw/resize recovery.
-            # Off by default (users prefer history); enable when a terminal/tmux stack
-            # stamps stale prompt chrome into scrollback during resizes.
+            # Also clear scrollback on redraw/resize recovery; off because users prefer history.
             "cli_rebuild_scrollback_on_redraw": False,
-            # One-line summary of resolved modal prompts (approval / clarify) into scrollback.
-            "persist_prompts": True,
+            "persist_prompts": True,  # one-line summary of resolved modal prompts into scrollback
 
             "skin": "default",
         },
         "clarify": {
-            "timeout": 120,  # Seconds to wait for a clarify answer before auto-proceeding
+            "timeout": 120,  # seconds before a clarify prompt auto-proceeds
         },
         "code_execution": {
-            "timeout": 300,    # Max seconds a sandbox script can run before being killed (5 min)
-            "max_tool_calls": 50,  # Max RPC tool calls per execution
+            "timeout": 300,
+            "max_tool_calls": 50,
         },
         "auxiliary": {
             "vision": {
@@ -498,15 +452,14 @@ def _cli_config_defaults():
             },
         },
         "delegation": {
-            "max_iterations": 45,  # Max tool-calling turns per child agent
-            "model": "",       # Subagent model override (empty = inherit parent model)
-            "provider": "",    # Subagent provider override (empty = inherit parent provider)
-            "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
-            "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
+            "max_iterations": 45,
+            "model": "",  # empty = inherit parent
+            "provider": "",  # empty = inherit parent
+            "base_url": "",
+            "api_key": "",  # for delegation.base_url (falls back to OPENAI_API_KEY)
         },
         "onboarding": {
-            # First-touch hint flags (see agent/onboarding.py), latched once shown.
-            "seen": {},
+            "seen": {},  # first-touch hint flags (agent/onboarding.py), latched once shown
         },
     }
 
@@ -519,13 +472,12 @@ def _merge_file_config(defaults: Dict[str, Any], file_config: Dict[str, Any]) ->
             defaults["model"]["default"] = file_config["model"]
         elif isinstance(file_config["model"], dict):
             defaults["model"].update(file_config["model"])
-            # Promote model.model to model.default when only the former is set, so a
-            # profile config that sets "model:" isn't shadowed by the hardcoded default
-            # (HermesCLI.__init__ checks "default" first).
+            # Promote model.model -> model.default (HermesCLI checks "default" first).
             if "model" in file_config["model"] and "default" not in file_config["model"]:
                 defaults["model"]["default"] = file_config["model"]["model"]
 
-    # Deep-merge dict sections, overwrite scalars; a None section keeps the defaults.
+    # Deep-merge dict sections, overwrite scalars; a None section keeps the defaults;
+    # unknown keys (platform_toolsets, memory, ...) are carried over.
     for key, value in file_config.items():
         if key == "model":
             continue
@@ -535,7 +487,7 @@ def _merge_file_config(defaults: Dict[str, Any], file_config: Dict[str, Any]) ->
             elif value is not None:
                 defaults[key] = value
         else:
-            defaults[key] = value  # incl. keys not in defaults (platform_toolsets, memory, ...)
+            defaults[key] = value
 
     # Legacy root-level max_turns -> agent.max_turns whenever the nested key is missing.
     agent_file_config = file_config.get("agent")
@@ -546,11 +498,9 @@ def _merge_file_config(defaults: Dict[str, Any], file_config: Dict[str, Any]) ->
 
 
 def load_cli_config() -> Dict[str, Any]:
-    """Load CLI configuration: ~/.hermes/config.yaml, else ./cli-config.yaml, over built-in defaults.
+    """~/.hermes/config.yaml (else ./cli-config.yaml) over built-in defaults; env vars win.
 
-    Env vars take precedence over file values. ``HERMES_IGNORE_USER_CONFIG=1``
-    (``hermes chat --ignore-user-config``) skips the user config entirely — only
-    defaults plus the project ``cli-config.yaml`` apply; ``.env`` credentials still load.
+    ``HERMES_IGNORE_USER_CONFIG=1`` skips the user config entirely (``.env`` still loads).
     """
     config_path = _hermes_home / 'config.yaml'
     if not config_path.exists() or os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1":
@@ -558,8 +508,7 @@ def load_cli_config() -> Dict[str, Any]:
 
     defaults = _cli_config_defaults()
 
-    # Only a user's config file may overwrite terminal env vars already set by .env;
-    # defaults (no file / no terminal section) must not.
+    # Only a file's terminal section may overwrite terminal env vars already set by .env.
     _file_has_terminal_config = False
 
     if config_path.exists():
@@ -578,10 +527,8 @@ def load_cli_config() -> Dict[str, Any]:
     from hermes_cli.config import _expand_env_vars
     defaults = _expand_env_vars(defaults)
 
-    # Managed scope overlays administrator-pinned values LAST. cli.py builds its config
-    # independently of hermes_cli.config._load_config_impl, so without this the whole
-    # interactive CLI/TUI surface (skin, display prefs) would ignore managed scope
-    # while `hermes config`/`doctor` honor it. The shared helper is fail-open.
+    # Administrator-pinned (managed scope) values overlay LAST; cli.py builds its config
+    # independently of hermes_cli.config, so this keeps parity with `hermes config`. Fail-open.
     from hermes_cli import managed_scope
 
     defaults = managed_scope.apply_managed_overlay(defaults)
@@ -590,7 +537,6 @@ def load_cli_config() -> Dict[str, Any]:
 
     return defaults
 
-# Load configuration at module startup
 CLI_CONFIG = load_cli_config()
 
 
@@ -616,22 +562,18 @@ def _init_logging_and_display_from_config() -> None:
 
 _init_logging_and_display_from_config()
 
-# Neuter AsyncHttpxClientWrapper.__del__ before any AsyncOpenAI client exists: the
-# SDK's __del__ schedules aclose() on the running loop, which during CLI idle time is
-# prompt_toolkit's loop, closing transports bound to dead worker loops ("Event loop is
-# closed" / "Press ENTER to continue..."). A sys.meta_path finder applies the patch
-# when ``openai._base_client`` is first imported — eager import costs ~166ms/30MB per
-# cold start, and the import system guarantees the patch lands before instantiation.
+# Neuter AsyncHttpxClientWrapper.__del__ before any AsyncOpenAI client exists: it
+# schedules aclose() on the running loop (prompt_toolkit's, during idle), closing
+# transports bound to dead worker loops ("Event loop is closed" / "Press ENTER to
+# continue..."). A meta_path finder patches ``openai._base_client`` at first import —
+# eager import costs ~166ms/30MB cold, and the patch is guaranteed to land before
+# instantiation. See ``agent.auxiliary_client.neuter_async_httpx_del``.
 try:
     import sys as _httpx_neuter_sys
     import importlib.util as _httpx_neuter_imp_util
 
     class _AsyncHttpxDelNeuter:
-        """Defer ``AsyncHttpxClientWrapper.__del__`` neutering until import.
-
-        See ``agent.auxiliary_client.neuter_async_httpx_del`` for why ``__del__``
-        must be a no-op.
-        """
+        """Patch ``AsyncHttpxClientWrapper.__del__`` to a no-op when ``openai._base_client`` loads."""
 
         _armed = True
 
@@ -669,8 +611,7 @@ from rich.console import Console
 from rich.markup import escape as _escape
 from rich.text import Text as _RichText
 
-# Agent and tool systems are imported lazily: bare interactive startup only needs
-# the prompt; the full agent/tool registry is initialized on first use.
+# Agent/tool systems load lazily: bare startup only needs the prompt.
 AIAgent = _lazy_shim("run_agent", "AIAgent")
 
 
@@ -698,7 +639,6 @@ def _sync_process_session_id(session_id: str) -> None:
     set_current_session_id(session_id)
 
 
-# Cron job system for scheduled tasks (execution is handled by the gateway)
 get_job = _lazy_shim("cron", "get_job")
 _cleanup_all_terminals = _lazy_shim("tools.terminal_tool", "cleanup_all_environments", "_cleanup_all_terminals")
 set_sudo_password_callback = _lazy_shim("tools.terminal_tool", "set_sudo_password_callback")
@@ -706,24 +646,19 @@ set_approval_callback = _lazy_shim("tools.terminal_tool", "set_approval_callback
 set_secret_capture_callback = _lazy_shim("tools.skills_tool", "set_secret_capture_callback")
 _cleanup_all_browsers = _lazy_shim("tools.browser_tool", "_emergency_cleanup_all_sessions", "_cleanup_all_browsers")
 
-# Guard to prevent cleanup from running multiple times on exit
-_cleanup_done = False
+_cleanup_done = False  # _run_cleanup runs exactly once
 _cleanup_in_progress = False
 _cli_wake_owner = None
-# One-shot CLI finalization runs before process cleanup so plugins can observe the
-# session boundary while the agent is still attached; atexit cleanup must not emit
-# that session's finalization again.
+# One-shot finalization runs before process cleanup (plugins see the boundary while the
+# agent is attached); atexit cleanup must not finalize those sessions again.
 _single_query_finalize_attempted_session_ids: set[str | None] = set()
-# Sessions handed off to the gateway via /handoff: the gateway owns their lifecycle,
-# so _run_cleanup must NOT finalize them (it would set end_reason on a row the gateway
-# just reopened and is writing to, making the handoff leg vanish from history).
+# /handoff sessions belong to the gateway: finalizing them here would stamp end_reason on
+# a row the gateway just reopened, making the handoff leg vanish from history.
 _handed_off_session_ids: set[str | None] = set()
-# Weak reference to the active AIAgent for memory provider shutdown at exit
-_active_agent_ref = None
+_active_agent_ref = None  # active AIAgent, for memory-provider shutdown at exit
 _deferred_agent_startup_done = False
-# True once the TUI's prompt_toolkit app starts (focus reporting + mouse tracking on).
-# Gates the on-exit terminal reset so non-TUI one-shot runs — which also register
-# _run_cleanup via atexit — don't emit escape codes for modes they never enabled.
+# Set once the TUI app starts (focus reporting + mouse tracking on); gates the on-exit
+# terminal reset so non-TUI one-shot runs never emit codes for modes they never enabled.
 _tui_input_modes_active = False
 
 
@@ -793,29 +728,23 @@ def _exit_watchdog_timeout() -> float:
 
 
 def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = False) -> None:
-    """Guarantee the process actually exits once shutdown has begun.
+    """Daemon timer that ``os._exit(0)``s after ``timeout_s`` once shutdown has begun.
 
-    Backstop for two hang classes: a cleanup step wedged on network I/O (memory
-    provider ``on_session_end``, MCP teardown, remote terminal cleanup), and
-    interpreter teardown blocked joining non-daemon threads (stdlib
-    ``ThreadPoolExecutor`` workers are joined unconditionally by its atexit hook even
-    after ``shutdown(wait=False)``). A daemon timer keeps running through
-    ``Py_FinalizeEx``'s joins; after ``timeout_s`` it flushes logging/stdio and calls
-    ``os._exit(0)``. Tune with ``HERMES_EXIT_WATCHDOG_S`` (seconds); ``0`` disables.
+    Backstop for a cleanup step wedged on network I/O and for interpreter teardown
+    blocked joining non-daemon threads (ThreadPoolExecutor's atexit join). The daemon
+    timer survives ``Py_FinalizeEx``'s joins. ``HERMES_EXIT_WATCHDOG_S=0`` disables.
     """
     if timeout_s is None:
         timeout_s = _exit_watchdog_timeout()
     if timeout_s <= 0:
         return
-    # Never arm under pytest: tests invoke _run_cleanup() directly and a delayed
-    # os._exit(0) would silently kill the test worker.
+    # Never under pytest: a delayed os._exit(0) would silently kill the test worker.
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return
 
     def _watchdog():
         time.sleep(timeout_s)
-        # The signal-armed outer watchdog yields to the cleanup-owned timer once
-        # cleanup is in progress; it only wins when graceful unwind never started.
+        # The signal-armed watchdog yields to cleanup's own timer once cleanup is running.
         if from_signal and _cleanup_in_progress:
             return
 
@@ -840,16 +769,12 @@ _signal_watchdog_armed = False
 
 
 def _arm_exit_watchdog_on_shutdown_signal() -> None:
-    """Arm the exit backstop the moment a termination signal arrives.
+    """Arm the exit backstop the moment a termination signal arrives (idempotent; never raises).
 
-    The graceful signal -> interrupt -> app.exit -> finally -> ``_run_cleanup`` path
-    has several wedge points BEFORE ``_run_cleanup`` arms the normal watchdog (main
-    thread parked in a syscall, prompt_toolkit teardown never returning, an agent
-    worker blocking the ``finally``); then a "dead" CLI lingers with no backstop.
-    The leash is 2x the cleanup timeout so a slow-but-progressing cleanup (which arms
-    its own tighter timer) is never cut short. Deliberately NOT armed at chat startup:
-    the timer calls ``os._exit(0)`` unconditionally, so arming without shutdown intent
-    would hard-kill every session outliving it. Idempotent; never raises.
+    The graceful unwind has wedge points BEFORE ``_run_cleanup`` arms its own watchdog
+    (main thread in a syscall, prompt_toolkit teardown never returning). Leash is 2x
+    the cleanup timeout so a progressing cleanup is never cut short. Never arm at
+    startup: the timer exits unconditionally.
     """
     global _signal_watchdog_armed
     if _signal_watchdog_armed:
@@ -868,19 +793,16 @@ def _shutdown_agent_memory_provider(agent) -> None:
     """Memory-provider shutdown (on_session_end + shutdown_all) at the real session boundary."""
     if not (agent and hasattr(agent, 'shutdown_memory_provider')):
         return
-    # A /new shortly before exit leaves its end->switch boundary task (old-session
-    # extraction, LLM-bound) queued on the memory manager's serialized worker;
-    # shutdown_all()'s ~5s drain cancels queued tasks, so give pending work a bounded
-    # head start. The exit watchdog remains the hard backstop.
+    # A /new shortly before exit leaves an LLM-bound boundary task queued; shutdown_all()'s
+    # ~5s drain would cancel it, so give it a bounded head start (watchdog is the backstop).
     _mm = getattr(agent, '_memory_manager', None)
     if _mm is not None and hasattr(_mm, 'flush_pending'):
         try:
             _mm.flush_pending(timeout=10)
         except Exception:
             pass
-    # Forward the agent's own transcript so on_session_end hooks see the real
-    # conversation. ``_session_messages`` is refreshed every turn via ``_persist_session``;
-    # fall back to no-arg on test stubs / partially-initialised agents.
+    # Forward the agent's transcript so on_session_end hooks see the real conversation;
+    # no-arg fallback for stubs / partially-initialised agents.
     _session_msgs = getattr(agent, '_session_messages', None)
     _sid = getattr(agent, "session_id", None) or "<unknown>"
     if isinstance(_session_msgs, list):
@@ -908,14 +830,13 @@ def _shutdown_mcp_servers() -> None:
 
 
 def _shutdown_cached_aux_clients() -> None:
-    # Close cached auxiliary LLM clients so AsyncHttpxClientWrapper.__del__ doesn't
-    # fire on a closed loop and trigger prompt_toolkit's "Press ENTER to continue...".
+    # Otherwise AsyncHttpxClientWrapper.__del__ fires on a closed loop ("Press ENTER to continue...").
     from agent.auxiliary_client import shutdown_cached_clients
     shutdown_cached_clients()
 
 
-# Ordered best-effort teardown steps (module attribute names, resolved at call time so
-# tests can patch ``cli._cleanup_all_terminals`` etc.) and the exception each swallows.
+# Ordered teardown steps (attribute names, resolved at call time so tests can patch them)
+# and the exception class each swallows.
 _CLEANUP_STEPS = (
     ("_stop_cli_wake_word", Exception),
     ("_cleanup_all_terminals", Exception),
@@ -935,12 +856,9 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
     _cleanup_in_progress = True
 
     try:
-        # Bound total shutdown time: a wedged cleanup (or interpreter thread-join
-        # teardown) force-exits instead of leaving a zombie CLI holding the terminal.
         _arm_exit_watchdog()
-
-        # Reset terminal input modes FIRST: the slower teardown below can take seconds,
-        # and a later step raising must not skip the reset. No-op unless the TUI ran.
+        # Reset terminal input modes FIRST: teardown below can take seconds and a later
+        # step raising must not skip the reset. No-op unless the TUI ran.
         _reset_terminal_input_modes_on_exit()
 
         for step, swallow in _CLEANUP_STEPS:
@@ -1039,23 +957,19 @@ def _notify_single_query_session_finalize(cli, *, reason: str = "shutdown") -> N
 
 
 def _flush_one_shot_session_store(cli) -> None:
-    """Durably flush + finalize the one-shot session row before process exit.
+    """Durably flush + finalize the one-shot session row before exit (idempotent, best-effort).
 
-    The ``-q`` / ``-Q`` paths get exactly one turn and then exit, so unlike the
-    interactive CLI nothing retried a transiently-failed transcript flush (lost turns
-    under state.db write-lock contention), the resumed/created titled row was left
-    open, and queued token-accounting deltas relied on interpreter-exit hooks the
-    kanban ``os._exit(0)`` path skips. Idempotent and best-effort: ``_persist_session``
-    dedupes via per-message markers and ``end_session`` no-ops on an ended row.
-    Handed-off sessions are left strictly alone.
+    One-shot runs get a single turn, so nothing retries a transiently-failed transcript
+    flush, closes the session row, or drains token deltas the kanban ``os._exit(0)``
+    path skips. Handed-off sessions are left alone.
     """
     agent, session_id = _oneshot_agent_and_session(cli)
     if agent is None or not session_id or session_id in _handed_off_session_ids:
         return
     if getattr(agent, "_persist_disabled", False):
         return
-    # ``cli.conversation_history`` holds the resumed history's live dicts, so passing it
-    # keeps restored messages identity-skipped even when the failed flush never stamped them.
+    # Passing cli.conversation_history keeps resumed messages identity-skipped even when
+    # the failed flush never stamped them.
     try:
         msgs = getattr(agent, "_session_messages", None)
         if isinstance(msgs, list) and msgs and hasattr(agent, "_persist_session"):
@@ -1076,13 +990,10 @@ def _flush_one_shot_session_store(cli) -> None:
 
 
 def _wait_for_oneshot_background_completions(cli) -> None:
-    """Bounded linger for notify_on_complete background processes.
+    """Bounded linger for notify_on_complete background processes (children write to our pipes).
 
-    A one-shot run that spawned bounded background work (e.g. a Bot Mode handoff reply
-    via ``terminal(background=true, notify_on_complete=true)``) must not exit while it
-    runs: the children write to pipes owned by this process. Waits on the whole
-    registry (a one-shot process hosts exactly one agent, and task_id filtering would
-    skip processes registered before the session id settled). Cheap no-op when idle.
+    Waits on the whole registry: a one-shot process hosts one agent, and task_id
+    filtering would skip processes registered before the session id settled.
     """
     from tools.process_registry import process_registry
 
@@ -1119,14 +1030,11 @@ def _finalize_single_query(cli) -> None:
 
 
 def _reset_terminal_input_modes_on_exit() -> None:
-    """Best-effort: disable focus reporting + mouse tracking on TUI exit.
+    """Disable focus reporting + mouse tracking on TUI exit (best-effort).
 
-    prompt_toolkit restores these on a clean teardown, but Ctrl+C, SIGTERM/SIGHUP and
-    crashes bypass its unwind, leaving raw ``ESC[I``/``ESC[O`` focus events and SGR
-    mouse reports as visible text in the next shell sharing the tab. Gated on
-    ``_tui_input_modes_active`` so one-shot non-TUI runs never emit these codes. By
-    exit prompt_toolkit's output is torn down, so write to ``sys.stdout`` when it is
-    the terminal, else ``/dev/tty`` (the TUI may have driven it while stdout was redirected).
+    Ctrl+C / SIGTERM / crashes bypass prompt_toolkit's unwind, leaving focus events and
+    mouse reports as visible text in the next shell. Writes to stdout when it is the
+    terminal, else /dev/tty (the TUI may have run with stdout redirected).
     """
     global _tui_input_modes_active
     if not _tui_input_modes_active:
@@ -1148,10 +1056,6 @@ def _reset_terminal_input_modes_on_exit() -> None:
     except Exception:
         pass
 
-
-# =============================================================================
-# Git Worktree Isolation
-# =============================================================================
 
 from hermes_cli.worktree_ops import (  # noqa: F401  (mixins/tests/worktree_gc import via cli)
     _PACK_SPRAWL_THRESHOLD,
@@ -1188,16 +1092,11 @@ from hermes_cli.worktree_ops import (  # noqa: F401  (mixins/tests/worktree_gc i
     _worktree_merge_cache_path,
 )
 
-# Tracks the active worktree for cleanup on exit
 _active_worktree: Optional[Dict[str, str]] = None
 
 
 def _cleanup_worktree(info: Dict[str, str] = None) -> None:
-    """Remove a worktree and its branch on exit.
-
-    Preserved only when it has unpushed commits (real work). Uncommitted changes alone
-    are not enough — agent work lives in commits/PRs, not the working tree.
-    """
+    """Remove a worktree and its branch on exit; kept only when it has unpushed commits."""
     global _active_worktree
     info = info or _active_worktree
     if not info:
@@ -1209,8 +1108,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
 
     if _worktree_has_unpushed_commits(wt_path, timeout=10):
         if _repo_is_shallow(repo_root):
-            # The shallow boundary makes the unpushed verdict unreliable; the startup
-            # pruner deepens the clone in the background and reaps it later.
+            # Shallow boundary makes the unpushed verdict unreliable; the startup pruner reaps later.
             _cprint(f"\n\033[33m⚠ Shallow clone — cannot verify push state, keeping: {wt_path}\033[0m")
             print("  The next `hermes -w` session deepens the clone and prunes merged worktrees automatically.")
         else:
@@ -1229,11 +1127,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
 
 
 def _run_state_db_auto_maintenance(session_db) -> None:
-    """Run one-time repairs + ``SessionDB.maybe_auto_prune_and_vacuum`` per the ``sessions:`` config.
-
-    Uses :func:`hermes_cli.config.load_config` (deep-merges DEFAULT_CONFIG so unmigrated
-    configs still get defaults). Never raises — maintenance must never block startup.
-    """
+    """One-time repairs + auto-archive/prune/vacuum per the ``sessions:`` config. Never raises."""
     if session_db is None:
         return
     try:
@@ -1264,8 +1158,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
 
         cfg = (_load_full_config().get("sessions") or {})
 
-        # Auto-archive is independent of the destructive auto_prune sweep — run it
-        # first, before prune's early return.
+        # Auto-archive is independent of auto_prune: run it before prune's early return.
         if cfg.get("auto_archive", False):
             session_db.maybe_auto_archive(
                 idle_days=float(cfg.get("auto_archive_days", 3)),
@@ -1293,9 +1186,8 @@ def _run_checkpoint_auto_maintenance() -> None:
         if not cfg.get("auto_prune", False):
             return
         from tools.checkpoint_manager import maybe_auto_prune_checkpoints
-        # delete_orphans is never honoured here: a missing workdir at startup is
-        # ambiguous (deleted project vs. unmounted volume / VPN not yet up) and this
-        # sweep runs unattended. Orphans are only reclaimed by `hermes checkpoints prune`.
+        # delete_orphans stays False: a missing workdir at startup is ambiguous (unmounted
+        # volume / VPN down); orphans are only reclaimed by `hermes checkpoints prune`.
         maybe_auto_prune_checkpoints(
             retention_days=int(cfg.get("retention_days", 7)),
             min_interval_hours=int(cfg.get("min_interval_hours", 24)),
@@ -1306,19 +1198,11 @@ def _run_checkpoint_auto_maintenance() -> None:
         logger.debug("checkpoint auto-maintenance skipped: %s", exc)
 
 
-# ============================================================================
-# ASCII Art & Branding
-# ============================================================================
-
-# ANSI building blocks for conversation display
-_ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold — fallback
+_ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # #FFD700 bold fallback
 _BOLD = "\033[1m"
 _RST = "\033[0m"
-# No indent for streamed response text — leading whitespace pollutes terminal
-# copy/paste. Matches the response Panel's flush-left padding.
-_STREAM_PAD = ""
-# Tail of an unfinished logical line mirrored into the spinner while streaming.
-_STREAM_PARTIAL_PREVIEW_LEN = 60
+_STREAM_PAD = ""  # no indent: leading whitespace pollutes copy/paste
+_STREAM_PARTIAL_PREVIEW_LEN = 60  # tail of an unfinished line mirrored into the spinner
 
 
 def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
@@ -1331,21 +1215,13 @@ def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
         return _ACCENT_ANSI_DEFAULT if bold else "\033[38;2;184;134;11m"
 
 
-# ────────────────────────────────────────────────────────────────────────
-# Light/dark terminal mode detection (mirrors ui-tui/src/theme.ts detectLightMode()).
-# Decides whether near-white skin colors are remapped to darker equivalents readable
-# on a light Terminal.app / iTerm2 background. Priority:
-#   1. HERMES_LIGHT / HERMES_TUI_LIGHT env (true/false)
-#   2. HERMES_TUI_THEME=light|dark
-#   3. HERMES_TUI_BACKGROUND=#RRGGBB
-#   4. COLORFGBG (xterm/Konsole/urxvt) — bg slot 7/15 = light
-#   5. OSC 11 query — ask the terminal directly
-#   6. Default: dark
-# Cached after first call so the terminal is never queried twice.
+# Light/dark terminal detection (mirrors ui-tui/src/theme.ts detectLightMode()). Priority:
+# HERMES_LIGHT/HERMES_TUI_LIGHT env, HERMES_TUI_THEME, HERMES_TUI_BACKGROUND, COLORFGBG
+# (bg slot 7/15 = light), OSC 11 query, default dark. Cached so the terminal is queried once.
 _LIGHT_MODE_CACHE: bool | None = None
 _TRUE_RE = re.compile(r"^(1|true|on|yes|y)$")
 _FALSE_RE = re.compile(r"^(0|false|off|no|n)$")
-_LIGHT_DEFAULT_TERM_PROGRAMS = frozenset()  # Apple_Terminal doesn't reliably indicate; require explicit
+_LIGHT_DEFAULT_TERM_PROGRAMS = frozenset()  # Apple_Terminal isn't reliable; require explicit config
 
 
 def _luminance_from_hex(hex_str: str) -> float | None:
@@ -1366,18 +1242,12 @@ _DA1_REPLY_RE = re.compile(rb"\x1b\[\?[0-9;]*c")
 
 
 def _query_osc11_background() -> str | None:
-    """Ask the terminal for its background color via OSC 11; "#RRGGBB" or None.
+    """Terminal background via OSC 11 as "#RRGGBB", or None.
 
-    The query is fenced with a DA1 sentinel (``ESC[c``), as in the Ink TUI's
-    TerminalQuerier: terminals answer in order and virtually all answer DA1, so the
-    DA1 reply proves the terminal already processed (or ignored) our OSC 11. Without
-    the fence a reply arriving after we stop listening leaks into prompt_toolkit's
-    stdin as typed text (the "gibberish ANSI" seen under herdr/WSL bridges/tmux).
-
-    Skipped over SSH: the round-trip routinely exceeds the budget, and a late reply's
-    BEL terminator reads as Ctrl+G (open editor). After restoring termios with
-    TCSAFLUSH, a 50 ms drain catches late bytes that slipped past the flush (seen on
-    loaded VPS/container terminals).
+    Fenced with a DA1 sentinel (``ESC[c``): terminals answer in order and virtually all
+    answer DA1, so its reply proves our OSC 11 was processed — otherwise a late reply
+    leaks into prompt_toolkit's stdin as typed text. Skipped over SSH (round-trip too
+    slow; a late BEL reads as Ctrl+G). A 50 ms drain after TCSAFLUSH catches stragglers.
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
@@ -1402,9 +1272,7 @@ def _query_osc11_background() -> str | None:
             sys.stdout.flush()
         except Exception:
             return None
-        # Read until the DA1 fence closes (single-digit ms on real terminals). The 1s
-        # deadline is only a safety net for a terminal that ignores DA1; a slow in-order
-        # relay delivering OSC 11 at 400ms is handled since we wait for its DA1 reply.
+        # Read until the DA1 fence closes; the 1s deadline only covers terminals ignoring DA1.
         deadline = time.monotonic() + 1.0
         buf = b""
         while time.monotonic() < deadline:
@@ -1432,8 +1300,7 @@ def _query_osc11_background() -> str | None:
         r, g, b = norm(m.group(1)), norm(m.group(2)), norm(m.group(3))
         return f"#{r:02X}{g:02X}{b:02X}"
     finally:
-        # TCSAFLUSH discards unread input while restoring — scrubs a slow/partial
-        # OSC 11 reply before prompt_toolkit can read it as keystrokes.
+        # TCSAFLUSH discards unread input, scrubbing a partial reply before prompt_toolkit reads it.
         try:
             termios.tcsetattr(fd, termios.TCSAFLUSH, old)
         except Exception:
@@ -1449,16 +1316,11 @@ def _query_osc11_background() -> str | None:
 
 
 def _heal_cooked_mode_drift(fd: int) -> bool:
-    """Re-apply raw mode on *fd* when termios drifted back to cooked under prompt_toolkit.
+    """Re-apply raw mode on *fd* when termios drifted back to cooked (POSIX only).
 
-    prompt_toolkit's ``run_in_terminal`` wraps every print-above-the-prompt in a
-    ``cooked_mode()`` window; Hermes schedules those cross-thread constantly, and if a
-    restore is ever lost (coroutine cancelled mid-window, racing chains, an external
-    writer on the shared tty) the kernel line-buffers every keystroke and the CLI
-    appears to stop taking input while the process is healthy. This is the last line of
-    defense: mirrors ``prompt_toolkit.input.vt100.raw_mode`` flag surgery in place.
-    Returns True when drift was healed; False when already raw or not inspectable.
-    POSIX-only — callers must not invoke this on Windows (no termios).
+    A lost ``run_in_terminal`` cooked_mode() restore makes the kernel line-buffer every
+    keystroke and the CLI looks dead. Mirrors prompt_toolkit's raw_mode flag surgery in
+    place. Returns True when healed; False when already raw or not inspectable.
     """
     try:
         import termios
@@ -1468,11 +1330,8 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
     lflag = attrs[3]
     if not (lflag & (termios.ICANON | termios.ECHO)):
         return False  # still raw — nothing to do
-    # Same surgery as raw_mode._patch_lflag / _patch_iflag on the *current* attrs so
-    # user settings are preserved.
     attrs[3] = lflag & ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
     attrs[0] = attrs[0] & ~(termios.IXON | termios.IXOFF | termios.ICRNL | termios.INLCR | termios.IGNCR)
-    # VMIN=1 so reads return per-byte (prompt_toolkit sets this in raw_mode.__enter__).
     attrs[6][termios.VMIN] = 1
     try:
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
@@ -1483,36 +1342,29 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
 
 def _detect_light_mode_uncached() -> bool:
     """The detection ladder documented above; may raise (caller maps errors to dark)."""
-    # 1. Explicit env override
     for var in ("HERMES_LIGHT", "HERMES_TUI_LIGHT"):
         v = (os.environ.get(var) or "").strip().lower()
         if _TRUE_RE.match(v):
             return True
         if _FALSE_RE.match(v):
             return False
-    # 2. Theme hint
     theme = (os.environ.get("HERMES_TUI_THEME") or "").strip().lower()
     if theme == "light":
         return True
     if theme == "dark":
         return False
-    # 3. Explicit bg hex
     bg_lum = _luminance_from_hex(os.environ.get("HERMES_TUI_BACKGROUND") or "")
     if bg_lum is not None:
         return bg_lum >= 0.5
-    # 4. COLORFGBG (xterm/Konsole/urxvt)
     last = (os.environ.get("COLORFGBG") or "").strip().split(";")[-1]
     if last.isdigit() and 0 <= int(last) < 16:
         return int(last) in {7, 15}
-    # 5. OSC 11 query (best-effort, only when stdin/stdout are TTY)
     bg_color = _query_osc11_background()
     if bg_color:
         lum = _luminance_from_hex(bg_color)
         if lum is not None:
             return lum >= 0.5
-    # 6. TERM_PROGRAM allow-list (currently empty)
-    tp = (os.environ.get("TERM_PROGRAM") or "").strip()
-    return tp in _LIGHT_DEFAULT_TERM_PROGRAMS
+    return (os.environ.get("TERM_PROGRAM") or "").strip() in _LIGHT_DEFAULT_TERM_PROGRAMS
 
 
 def _detect_light_mode() -> bool:
@@ -1527,31 +1379,19 @@ def _detect_light_mode() -> bool:
     return result
 
 
-# Light-mode equivalents of skin colors unreadable on cream Terminal.app backgrounds,
-# applied by _SkinAwareAnsi at resolution time.
-# IMPORTANT: only remap colors used as STANDALONE foregrounds on the terminal
-# background. Colors paired with a dark bg (status bar text on bg:#1a1a2e) would
-# become invisible the OTHER direction — hence #C0C0C0/#888888/#555555/#8B8682 are skipped.
+# Light-mode equivalents of skin colors unreadable on cream backgrounds. Only colors used
+# as STANDALONE foregrounds: ones paired with a dark bg (status bar text on #1a1a2e) would
+# become invisible the other direction, hence #C0C0C0/#888888/#555555/#8B8682 are skipped.
 _LIGHT_MODE_REMAP: dict[str, str] = {
-    "#FFF8DC": "#1A1A1A",   # cornsilk -> near-black
-    "#FFD700": "#9A6B00",   # gold -> dark goldenrod (readable on cream)
-    "#FFBF00": "#8A5A00",   # amber -> dark amber
-    "#B8860B": "#5C4500",   # dark goldenrod -> deeper brown (more contrast)
-    "#DAA520": "#6B4F00",   # goldenrod -> dark olive
-    "#F1E6CF": "#1A1A1A",   # cream -> near-black
-    "#c9d1d9": "#24292F",   # github-light fg
-    "#EAF7FF": "#0F1B26",   # ice
-    "#F5F5F5": "#1A1A1A",
-    "#FFF0D4": "#1A1A1A",
-    "#CD7F32": "#8A4F1A",   # bronze -> darker bronze
-    "#FFEFB5": "#3A2A00",
+    "#FFF8DC": "#1A1A1A", "#FFD700": "#9A6B00", "#FFBF00": "#8A5A00", "#B8860B": "#5C4500",
+    "#DAA520": "#6B4F00", "#F1E6CF": "#1A1A1A", "#c9d1d9": "#24292F", "#EAF7FF": "#0F1B26",
+    "#F5F5F5": "#1A1A1A", "#FFF0D4": "#1A1A1A", "#CD7F32": "#8A4F1A", "#FFEFB5": "#3A2A00",
 }
-# Pre-uppercased lookup table for case-insensitive remapping
 _LIGHT_MODE_REMAP_UPPER = {k.upper(): v for k, v in _LIGHT_MODE_REMAP.items()}
 
 
 def _maybe_remap_for_light_mode(hex_color: str) -> str:
-    """In light mode, remap a dark-mode-tuned color to a higher-contrast equivalent. No-op in dark mode."""
+    """In light mode, remap a dark-tuned color to its higher-contrast equivalent."""
     if not _detect_light_mode():
         return hex_color
     if not hex_color or not hex_color.startswith("#"):
@@ -1583,8 +1423,7 @@ def _install_skin_light_mode_hook() -> None:
 _install_skin_light_mode_hook()
 
 
-# Prime the light-mode cache at module load when interactive, so OSC 11 happens
-# before prompt_toolkit grabs the tty. Skipped for non-tty contexts (subagents, gateway, tests).
+# Prime the light-mode cache when interactive so OSC 11 happens before prompt_toolkit owns the tty.
 try:
     if sys.stdin.isatty() and sys.stdout.isatty():
         _detect_light_mode()
@@ -1593,11 +1432,7 @@ except Exception:
 
 
 class _SkinAwareAnsi:
-    """Lazy ANSI escape resolved from the skin engine on first use.
-
-    Acts as a string in f-strings and concatenation. ``.reset()`` forces
-    re-resolution after a ``/skin`` switch.
-    """
+    """Lazy ANSI escape resolved from the skin on first use; ``.reset()`` after a ``/skin`` switch."""
 
     def __init__(self, skin_key: str, fallback_hex: str = "#FFD700", *, bold: bool = False):
         self._skin_key = skin_key
@@ -1629,13 +1464,12 @@ class _SkinAwareAnsi:
 
 
 _ACCENT = _SkinAwareAnsi("response_border", "#FFD700", bold=True)
-# ANSI dim+italic attributes instead of a hardcoded hex so dim/thinking text inherits
-# the terminal's default foreground and stays readable in light and dark modes.
+# dim+italic attributes (not a hex) so dim text inherits the terminal foreground in both modes.
 _DIM = "\x1b[2;3m"
 
 
 def _tty_wrap(s: str, sgr: str) -> str:
-    """Wrap *s* in an SGR attribute if stdout is a real TTY; plain text otherwise (slash-worker safe)."""
+    """Wrap *s* in an SGR attribute when stdout is a real TTY; plain text otherwise."""
     try:
         return f"{sgr}{s}\x1b[0m" if sys.stdout.isatty() else str(s)
     except Exception:
@@ -1656,15 +1490,14 @@ def _accent_hex() -> str:
 
 
 def _rich_text_from_ansi(text: str) -> _RichText:
-    """Render output that may contain ANSI escapes; literal ``[not markup]`` survives."""
+    """Rich Text from ANSI output; literal ``[brackets]`` are not treated as markup."""
     return _RichText.from_ansi(text or "")
 
 
 def _strip_markdown_syntax(text: str) -> str:
     """Best-effort markdown marker removal for plain-text display."""
     plain = _rich_text_from_ansi(text or "").plain
-    # HR markers: "-"/"_" runs of 3+, but "*" only when exactly 3 — Hermes output
-    # commonly shows cron schedules like "* * * * *" verbatim.
+    # HR markers: "-"/"_" runs of 3+, but "*" only when exactly 3 (cron schedules "* * * * *").
     plain = re.sub(r"^\s{0,3}(?:[-_]\s*){3,}$", "", plain, flags=re.MULTILINE)
     plain = re.sub(r"^\s{0,3}(?:\*\s*){3}\s*$", "", plain, flags=re.MULTILINE)
     plain = re.sub(r"^\s{0,3}#{1,6}\s+", "", plain, flags=re.MULTILINE)
@@ -1689,11 +1522,7 @@ _WINDOWS_PATH_WITH_DOT_SEGMENT_RE = re.compile(r"(?i)(?:\b[a-z]:\\|\\\\)[^\s`]*\
 
 
 def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
-    r"""Double the ``\`` before hidden directories in Windows-path-looking tokens.
-
-    CommonMark treats ``\.`` as an escaped dot, so Rich would render ``D:\repo\.ai`` as
-    ``D:\repo.ai``. Ordinary escapes like ``1\. not a list`` are left alone.
-    """
+    r"""Double the ``\`` before hidden dirs in Windows paths: CommonMark reads ``\.`` as an escaped dot."""
     if "\\." not in text:
         return text
 
@@ -1711,7 +1540,7 @@ def _terminal_columns() -> int:
 
 
 def _terminal_width_for_streaming() -> int:
-    """Display cells available inside the streamed response box (small margin for resize races)."""
+    """Display cells inside the streamed response box (small margin for resize races)."""
     return max(20, _terminal_columns() - len(_STREAM_PAD) - 2)
 
 
@@ -1719,8 +1548,7 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
     """Render final assistant content as markdown, stripped text, or raw text."""
     from rich.markdown import Markdown
 
-    # The final-response Panel renders flush-left with 1 border cell each side; small
-    # safety margin so resize races don't push a borderline table into soft-wrap.
+    # 1 border cell each side + margin so resize races don't push a borderline table into soft-wrap.
     panel_width = max(20, _terminal_columns() - 4)
 
     normalized_mode = str(mode or "render").strip().lower()
@@ -1730,8 +1558,7 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
     if normalized_mode == "raw":
         return _rich_text_from_ansi(text or "")
 
-    # Rich handles CJK width itself, but normalising model-emitted under-padded tables
-    # on the way in gives mid-render fallbacks (narrow panels) consistent input.
+    # Normalising under-padded tables up front gives narrow-panel fallbacks consistent input.
     plain = _rich_text_from_ansi(text or "").plain
     plain = _preserve_windows_dot_segments_for_markdown(plain)
     plain = realign_markdown_tables(plain, panel_width)
@@ -1739,12 +1566,7 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
 
 
 def _post_stream_transform_output(response: str, result: dict | None) -> str:
-    """Text still needing display after a streamed response transform.
-
-    When the transformed text keeps the streamed response as a prefix, only the suffix
-    is printed; a full replacement has no safe suffix, so the complete final response
-    is printed rather than silently dropped.
-    """
+    """Text still to display after a streamed response transform: the suffix, or the whole response when replaced."""
     if not result or not result.get("response_transformed"):
         return ""
 
@@ -1826,8 +1648,7 @@ def _replay_output_history() -> None:
                 lines = [entry]
             rendered_lines.extend(str(line) for line in lines)
         if rendered_lines:
-            # One ANSI payload, not per-line prints: each prompt_toolkit print forces a
-            # synchronous terminal I/O + redraw, which reads as a waterfall of old output.
+            # One payload: per-line pt prints each force a sync redraw (a waterfall of old output).
             _pt_print(_PT_ANSI("\n".join(rendered_lines)))
     except Exception:
         pass
@@ -1840,8 +1661,7 @@ def _pt_print_ansi(text: str) -> None:
     try:
         _pt_print(_PT_ANSI(text))
     except Exception:
-        # prompt_toolkit raises NoConsoleScreenBufferError (Windows) / OSError when
-        # stdout is e.g. a subprocess worker's log file.
+        # NoConsoleScreenBufferError (Windows) / OSError when stdout is e.g. a worker log file.
         try:
             print(text)
         except Exception:
@@ -1849,13 +1669,10 @@ def _pt_print_ansi(text: str) -> None:
 
 
 def _cprint(text: str):
-    """Print ANSI-colored text through prompt_toolkit's native renderer.
+    """Print ANSI text through prompt_toolkit's renderer (patch_stdout swallows raw ANSI).
 
-    Raw ANSI written via print() is swallowed by patch_stdout's StdoutProxy; routing
-    through print_formatted_text(ANSI(...)) renders real colors. From a background
-    thread while an Application is running (self-review summaries, curator output), a
-    direct print races the input area's redraw and can end up buried behind the
-    prompt — those cases go through ``run_in_terminal`` via ``call_soon_threadsafe``.
+    From a background thread while an Application runs, a direct print races the input
+    redraw and gets buried, so those go through ``run_in_terminal`` via ``call_soon_threadsafe``.
     """
     _record_output_history(text)
 
@@ -1870,8 +1687,6 @@ def _cprint(text: str):
     except Exception:
         app = None
 
-    # No active app: the direct print matches existing behavior (spinner frames,
-    # streamed tokens, tool activity prefixes, …).
     if app is None or not getattr(app, "_is_running", False):
         _pt_print_ansi(text)
         return
@@ -1883,21 +1698,18 @@ def _cprint(text: str):
     except Exception:
         loop = None
     try:
-        # get_running_loop(), not get_event_loop(): the latter warns from threads with
-        # no current loop (e.g. the process_loop background thread).
+        # get_running_loop(): get_event_loop() warns from threads with no current loop.
         current_loop = _asyncio.get_running_loop()
     except Exception:
         current_loop = None
-    # No loop, or same thread as the app's loop → safe to print directly.
     if loop is None or (current_loop is loop and loop.is_running()):
         _pt_print(_PT_ANSI(text))
         return
 
     def _schedule():
-        # run_in_terminal() returns a coroutine/Future (pt >= 3.0) that must be
-        # scheduled or the output is silently dropped, or None (mocks / older PT) when
-        # it already ran the callable synchronously. Never fall back to a bare
-        # _pt_print when ensure_future raises — the mock path already printed.
+        # run_in_terminal() returns an awaitable (pt >= 3.0) that must be scheduled or the
+        # output is dropped, or None (mocks / older pt) when it already ran synchronously.
+        # Never fall back to a bare print on error: the sync path already printed.
         try:
             import asyncio as _aio
             import inspect as _inspect
@@ -1914,12 +1726,10 @@ def _cprint(text: str):
 
 
 def _prepend_note_to_message(message, note: str):
-    """Prepend a one-shot system-style note to a user message.
+    """Prepend a one-shot note to a user message (str, or content-part list when an image is attached).
 
-    ``message`` is a str, or a list of OpenAI-style content parts when an image is
-    attached (naive ``note + message`` then raises TypeError — e.g. ``/model`` followed
-    by a pasted image). For lists the note is folded into the first text part or
-    inserted as a leading text part. Unknown shapes are returned unchanged.
+    For lists the note is folded into the first text part or inserted as a leading one.
+    Unknown shapes are returned unchanged.
     """
     note = str(note or "").strip()
     if not note:
@@ -1950,20 +1760,12 @@ def _pt_app_is_running() -> bool:
 
 
 def _cli_visible_print(text: str = "") -> None:
-    """Print normally unless prompt_toolkit owns the live terminal (then route via ``_cprint``).
-
-    Bare ``print()`` is swallowed by ``patch_stdout`` while an Application runs, so
-    ``/sessions`` and ``/history`` would render nothing.
-    """
+    """``print`` unless a prompt_toolkit Application owns the terminal (patch_stdout swallows bare prints)."""
     if _pt_app_is_running():
         _cprint(text)
     else:
         print(text)
 
-
-# ---------------------------------------------------------------------------
-# File-drop / local attachment detection — pure helpers.
-# ---------------------------------------------------------------------------
 
 _IMAGE_EXTENSIONS = frozenset({
     '.png', '.jpg', '.jpeg', '.gif', '.webp',
@@ -1979,7 +1781,7 @@ def _termux_example_image_path(filename: str = "cat.png") -> str:
         "/storage/emulated/0",
         "/storage/self/primary",
     ]
-    # Android roots are POSIX paths — literal "/" so the hint is right even on Windows.
+    # Literal "/" so the Android hint is right even on Windows.
     for root in candidates:
         if os.path.isdir(root):
             return f"{root}/Pictures/{filename}"
@@ -1987,14 +1789,7 @@ def _termux_example_image_path(filename: str = "cat.png") -> str:
 
 
 def _split_path_input(raw: str) -> tuple[str, str]:
-    r"""Split a leading file path token from trailing free-form text.
-
-    Supports quoted paths and backslash-escaped spaces so callers can accept
-    inputs like:
-      /tmp/pic.png describe this
-      ~/storage/shared/My\ Photos/cat.png what is this?
-      "/storage/emulated/0/DCIM/Camera/cat 1.png" summarize
-    """
+    r"""Split a leading path token (quoted or with ``\ `` escapes) from trailing free-form text."""
     raw = str(raw or "").strip()
     if not raw:
         return "", ""
@@ -2026,11 +1821,9 @@ def _split_path_input(raw: str) -> tuple[str, str]:
 
 
 def _resolve_attachment_path(raw_path: str) -> Path | None:
-    """Resolve a user-supplied local attachment path.
+    """Resolve a user-supplied attachment path (quotes, ``~``, env vars, ``file://``; relative to TERMINAL_CWD).
 
-    Accepts quoted or unquoted paths, expands ``~`` and env vars, and resolves
-    relative paths from ``TERMINAL_CWD`` when set (matching terminal tool cwd).
-    Returns ``None`` when the path does not resolve to an existing file.
+    Returns ``None`` unless it resolves to an existing file.
     """
     token = str(raw_path or "").strip()
     if not token:
@@ -2071,9 +1864,8 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     except Exception:
         resolved = path
 
-    # os.stat raises OSError (ENAMETOOLONG) for structurally invalid paths — e.g. a
-    # pasted `/goal <long prose>` that passed _detect_file_drop's `/` prefilter. Without
-    # this guard the error reaches process_loop and the input is silently lost.
+    # ENAMETOOLONG for a pasted `/goal <long prose>` that passed the `/` prefilter
+    # would otherwise reach process_loop and silently lose the input.
     try:
         if not resolved.exists() or not resolved.is_file():
             return None
@@ -2087,11 +1879,7 @@ def _file_drop_result(path: Path, remainder: str) -> dict:
 
 
 def _detect_file_drop(user_input: str) -> "dict | None":
-    """Detect a dragged/pasted local file path at the start of *user_input*.
-
-    Returns ``{"path": Path, "is_image": bool, "remainder": str}`` or None. Catches
-    paths before they are mistaken for slash commands (incl. Termux ``~/storage/...``).
-    """
+    """Detect a dragged/pasted file path at the start of *user_input* -> ``{path, is_image, remainder}`` or None."""
     if not isinstance(user_input, str):
         return None
 
@@ -2128,7 +1916,7 @@ def _detect_file_drop(user_input: str) -> "dict | None":
 
 
 def _format_image_attachment_badges(attached_images: list[Path], image_counter: int, width: int | None = None) -> str:
-    """Attached-image badge row: compact summary on narrow terminals (Termux), per-image badges otherwise."""
+    """Attached-image badge row: compact summary on narrow terminals, per-image badges otherwise."""
     if not attached_images:
         return ""
 
@@ -2165,13 +1953,11 @@ def _hermes_call_output_screen_diff(
     orig_osd, app, output, screen, current_pos, color_depth, previous_screen, last_style, is_done, full_screen,
     attrs_for_style_string, style_string_has_style, size, previous_width,
 ):
-    """Call prompt_toolkit ``_output_screen_diff`` with Hermes resize guards.
+    """prompt_toolkit ``_output_screen_diff`` with resize guards.
 
-    1. Inflate ``previous_screen.height`` when the new screen is taller so pt skips
-       the reserve-vertical-space cursor move that stamps chrome into scrollback.
-    2. On AttributeError/TypeError from a corrupt previous paint buffer (classic after
-       tmux attach at the same width), retry once with ``previous_screen=None`` so pt
-       first-paints cleanly instead of crashing the event loop.
+    Inflates ``previous_screen.height`` when the new screen is taller so pt skips the
+    cursor move that stamps chrome into scrollback; on a corrupt previous paint buffer
+    (tmux re-attach) retries once as a first paint instead of crashing the loop.
     """
     try:
         if previous_screen is not None and hasattr(previous_screen, "height") and previous_screen.height < screen.height:
@@ -2190,13 +1976,9 @@ def _hermes_call_output_screen_diff(
 
 
 def _apply_bracketed_paste_timeout_patch() -> None:
-    """Patch prompt_toolkit to recover from torn bracketed-paste sequences.
+    """Patch ``Vt100Parser.feed`` to flush a bracketed paste whose ESC[201~ end mark never arrives.
 
-    ``Vt100Parser.feed()`` buffers all input while waiting for the ESC[201~ end mark;
-    if the terminal drops it (race, torn write, SSH glitch, sleep/wake) input appears
-    frozen forever. The wrapper flushes the buffer as a normal ``BracketedPaste`` event
-    after ``_BP_TIMEOUT_S`` seconds without an end marker. Idempotent via the
-    ``_hermes_bp_timeout_patched`` module sentinel.
+    Without it a dropped end mark (SSH glitch, sleep/wake) freezes input forever. Idempotent.
     """
     try:
         import prompt_toolkit.input.vt100_parser as _vt100_mod
@@ -2206,7 +1988,7 @@ def _apply_bracketed_paste_timeout_patch() -> None:
         if getattr(_vt100_mod, "_hermes_bp_timeout_patched", False):
             return
 
-        _BP_TIMEOUT_S = 2.0  # max time to wait for ESC[201~ before flushing
+        _BP_TIMEOUT_S = 2.0
 
         def _patched_vt100_feed(self_parser, data: str) -> None:
             if self_parser._in_bracketed_paste:
@@ -2242,8 +2024,7 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                                 now - bp_start, len(paste_content),
                             )
             else:
-                # Re-inline the normal feed path: calling the original would
-                # double-buffer after the bracketed-paste entry transition.
+                # Re-inlined: calling the original would double-buffer after entering paste mode.
                 for i, c in enumerate(data):
                     if self_parser._in_bracketed_paste:
                         _patched_vt100_feed(self_parser, data[i:])
@@ -2257,29 +2038,22 @@ def _apply_bracketed_paste_timeout_patch() -> None:
         logger.debug("Bracketed-paste timeout patch skipped: %s", exc)
 
 
-# Cursor Position Report (CPR / DSR) replies ``ESC[<row>;<col>R`` to prompt_toolkit's
-# ``ESC[6n`` queries can race past the input parser under resize storms / tab switches
-# and land in the input buffer as literal text; the visible ``^[[...R`` form appears
-# when a prior filter stripped the ESC byte.
+# CPR replies (``ESC[<row>;<col>R``) can race past the input parser under resize storms
+# and land as literal text; the ``^[[...R`` form appears when a filter stripped the ESC.
 _DSR_CPR_ESC_RE = re.compile(r"\x1b\[\d+;\d+R")
 _DSR_CPR_VISIBLE_RE = re.compile(r"\^\[\[\d+;\d+R")
 _SGR_MOUSE_ESC_RE = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]")
 _SGR_MOUSE_VISIBLE_RE = re.compile(r"\^\[\[<\d+;\d+;\d+[Mm]")
-# Bare "<btn;col;rowM" fragments (ESC and "^[[" dropped). Deliberately broad: such
-# fragments are almost never intentional input and stripping beats corrupted prompts.
+# Bare "<btn;col;rowM" fragments; deliberately broad, they are almost never intentional input.
 _SGR_MOUSE_BARE_RE = re.compile(r"<\d+;\d+;\d+[Mm]")
 _TERMINAL_INPUT_MODE_RESET_SEQ = (
-    "\x1b[?1006l"  # disable SGR mouse
-    "\x1b[?1003l"  # disable any-motion tracking
-    "\x1b[?1002l"  # disable button-motion tracking
-    "\x1b[?1000l"  # disable click tracking
-    "\x1b[?1004l"  # disable focus events
-    "\x1b[?2004l"  # disable bracketed paste
-    "\x1b[?1049l"  # leave alt screen (if stuck there)
-    "\x1b[<u"      # pop kitty keyboard mode
-    "\x1b[>4m"     # reset modifyOtherKeys
-    "\x1b[0m"      # reset text attributes
-    "\x1b[?25h"    # ensure cursor visible
+    "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l"  # mouse: SGR, any-motion, button-motion, click
+    "\x1b[?1004l"  # focus events
+    "\x1b[?2004l"  # bracketed paste
+    "\x1b[?1049l"  # leave alt screen
+    "\x1b[<u"  # pop kitty keyboard mode
+    "\x1b[>4m"  # reset modifyOtherKeys
+    "\x1b[0m\x1b[?25h"  # reset attributes, show cursor
 )
 _KITTY_KEYBOARD_PUSH_SEQ = "\x1b[>1u"
 _MODIFY_OTHER_KEYS_SEQ = "\x1b[>4;2m"
@@ -2290,27 +2064,17 @@ _BACKSLASH_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*$")
 
 
 def _is_ghostty_terminal(env: Optional[Mapping[str, str]] = None) -> bool:
-    """Whether the terminal is Ghostty (either detection path).
+    """Whether the terminal is Ghostty.
 
-    Ghostty must be pushed ONLY modifyOtherKeys, not the Kitty keyboard protocol: its
-    Kitty disambiguate mode strips Alt from Backspace (Option+Backspace arrives as bare
-    \\x7f, breaking backward-kill-word — upstream bug), while its modifyOtherKeys is
-    correct. Matches exactly the two conditions that admit Ghostty through
-    ``_terminal_supports_extended_enter_keys``.
+    Ghostty gets ONLY modifyOtherKeys: its Kitty disambiguate mode strips Alt from
+    Backspace (upstream bug), breaking backward-kill-word.
     """
     env = os.environ if env is None else env
     return (env.get("TERM_PROGRAM") or "").strip() == "ghostty" or (env.get("TERM") or "").strip().lower() == "xterm-ghostty"
 
 
 def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = None) -> bool:
-    """Whether it is safe/useful to request modified Enter key reporting.
-
-    The classic CLI already maps Kitty CSI-u / xterm modifyOtherKeys Shift+Enter
-    byte sequences to the newline handler. Some terminals (notably iTerm2) only
-    emit those distinct sequences after the application asks for extended key
-    mode. Keep this allowlist aligned with the Ink TUI, which enables the same
-    modes for these terminals.
-    """
+    """Allowlist of terminals where requesting modified-Enter reporting is safe (aligned with the Ink TUI)."""
     env = os.environ if env is None else env
     term_program = (env.get("TERM_PROGRAM") or "").strip()
     term = (env.get("TERM") or "").strip().lower()
@@ -2326,18 +2090,14 @@ def _terminal_supports_extended_enter_keys(env: Optional[Mapping[str, str]] = No
 def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = None) -> bool:
     """Ask allowlisted terminals to report modified keys distinctly.
 
-    Writes BOTH the Kitty keyboard protocol push (CSI >1u, disambiguate mode) and xterm
-    modifyOtherKeys level 2 (CSI >4;2m), mirroring the Ink TUI: kitty dropped
-    modifyOtherKeys entirely while tmux/VS Code only accept modifyOtherKeys. Either
-    protocol re-encodes modified keys as escape sequences (``ESC[<cp>;<mod>u`` /
-    ``ESC[27;<mod>;<cp>~``) that stock prompt_toolkit barely maps — Ctrl+C once arrived
-    as ``ESC[99;5u`` and died — so ``install_modify_other_keys_aliases()`` (run at CLI
-    startup) must populate ``ANSI_SEQUENCES`` under both formats first. Ghostty gets only
-    modifyOtherKeys (see ``_is_ghostty_terminal``). The exit reset sequence pops both modes.
+    Pushes BOTH kitty keyboard protocol and xterm modifyOtherKeys (kitty dropped the
+    latter; tmux/VS Code only accept it). Both re-encode modified keys as sequences
+    stock prompt_toolkit barely maps (Ctrl+C once arrived as ``ESC[99;5u``), so
+    ``install_modify_other_keys_aliases()`` must have run first. Ghostty gets only
+    modifyOtherKeys. The exit reset pops both modes.
     """
     if not _terminal_supports_extended_enter_keys(env):
         return False
-    # Ghostty exception: only modifyOtherKeys — see _is_ghostty_terminal.
     seq = _MODIFY_OTHER_KEYS_SEQ if _is_ghostty_terminal(env) else _EXTENDED_ENTER_KEYS_SEQ
     try:
         if output is not None and hasattr(output, "write_raw"):
@@ -2354,12 +2114,7 @@ def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = 
 
 
 def _cli_multiline_shortcuts_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
-    """Whether classic CLI harness-standard multiline fallbacks (Ctrl+J = newline) are on.
-
-    Default on, matching adjacent agent harnesses. POSIX PTYs that send bare LF for
-    plain Enter can set ``display.cli_multiline_shortcuts: false`` to restore the
-    legacy c-j submit fallback.
-    """
+    """``display.cli_multiline_shortcuts`` (default on: Ctrl+J = newline; off restores the legacy c-j submit)."""
     if config is None:
         config = CLI_CONFIG
     display = config.get("display") if isinstance(config, dict) else None
@@ -2380,13 +2135,7 @@ def _apply_backslash_line_continuation(text: str) -> str:
 
 
 def _preserve_ctrl_enter_newline() -> bool:
-    """Detect environments where Ctrl+Enter must produce a newline, not submit.
-
-    Windows Terminal, WSL, SSH, Ghostty and some modern terminals deliver Ctrl+Enter as
-    bare LF (c-j); binding c-j to submit there makes Ctrl+Enter submit. Local thin POSIX
-    PTYs that deliver Enter as LF still need c-j bound to submit when
-    display.cli_multiline_shortcuts is disabled, so that legacy opt-out survives.
-    """
+    """Environments delivering Ctrl+Enter as bare LF (Windows Terminal, WSL, SSH, Ghostty): c-j must stay newline."""
     env = os.environ
     if (
         sys.platform == "win32"
@@ -2396,7 +2145,7 @@ def _preserve_ctrl_enter_newline() -> bool:
         or "microsoft" in env.get("WSL_DISTRO_NAME", "").lower()
     ):
         return True
-    # WSL detection — env vars can be scrubbed under sudo, also peek /proc.
+    # WSL env vars can be scrubbed under sudo; also peek /proc.
     for p in ("/proc/version", "/proc/sys/kernel/osrelease"):
         try:
             with open(p, "r", encoding="utf-8", errors="ignore") as f:
@@ -2408,13 +2157,7 @@ def _preserve_ctrl_enter_newline() -> bool:
 
 
 def _bind_prompt_submit_keys(kb, handler, *, multiline_shortcuts_enabled: Optional[bool] = None) -> None:
-    """Bind terminal Enter forms to the submit handler.
-
-    Enter is always submit; c-j (Ctrl+J/LF) is left for the newline handler unless
-    ``display.cli_multiline_shortcuts: false`` restores the legacy POSIX submit
-    fallback — and even then environments where Ctrl+Enter arrives as c-j
-    (``_preserve_ctrl_enter_newline``) keep it reserved for newline.
-    """
+    """Enter always submits; c-j submits only with multiline shortcuts off AND where Ctrl+Enter isn't c-j."""
     if multiline_shortcuts_enabled is None:
         multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled()
     kb.add("enter")(handler)
@@ -2431,25 +2174,12 @@ def _disable_prompt_toolkit_cpr_warning(app) -> None:
 
 
 def _terminal_may_leak_cpr() -> bool:
-    """Whether classic CLI should suppress prompt_toolkit CPR (ESC[6n) queries.
-
-    Delayed CPR replies leak into the status line and can freeze input on SSH/slow
-    PTYs and on loaded local TTYs. ``PROMPT_TOOLKIT_NO_CPR=1`` always suppresses;
-    native Windows otherwise keeps prompt_toolkit's default (no Application coverage
-    yet); every other platform suppresses (CPR is only a layout hint).
-    """
+    """Suppress prompt_toolkit CPR queries (delayed replies leak into input); Windows keeps pt's default."""
     return os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1" or sys.platform != "win32"
 
 
 def _build_cpr_disabled_output(stdout):
-    """Build a Vt100_Output that never sends Cursor Position Report queries.
-
-    ``enable_cpr=False`` marks CPR ``NOT_SUPPORTED`` so ``ESC[6n`` is never sent and
-    prompt_toolkit uses its heuristic height; input-side
-    ``_strip_leaked_terminal_responses`` stays as belt-and-suspenders.
-    ``Vt100_Output.from_pty()`` doesn't expose ``enable_cpr`` in pt 3.x, so its
-    ``get_size`` setup is reproduced here. Returns None on failure (caller keeps pt's default).
-    """
+    """Vt100_Output with ``enable_cpr=False`` (``from_pty()`` doesn't expose it), or None on failure."""
     try:
         import io as _io
         from prompt_toolkit.output.vt100 import Vt100_Output, _get_size
@@ -2469,21 +2199,12 @@ def _build_cpr_disabled_output(stdout):
 
 
 def _select_classic_cli_pt_output(stdout):
-    """Select prompt_toolkit Output for classic-CLI Application construction.
-
-    Returns a CPR-disabled ``Vt100_Output`` when ``_terminal_may_leak_cpr()``
-    is true, otherwise ``None`` so Application keeps prompt_toolkit's default
-    output (Windows preserve-default path).
-    """
+    """CPR-disabled ``Vt100_Output`` when CPR may leak, else None (Application keeps pt's default)."""
     return _build_cpr_disabled_output(stdout) if _terminal_may_leak_cpr() else None
 
 
 def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
-    """Strip leaked CPR/DSR replies and SGR mouse-report fragments from user input.
-
-    Returns ``(cleaned_text, had_mouse_reports)`` so callers can trigger an in-place
-    terminal mode recovery when mouse reports leaked.
-    """
+    """Strip leaked CPR replies and mouse-report fragments -> ``(cleaned, had_mouse_reports)``."""
     if not text:
         return text, False
 
@@ -2511,11 +2232,9 @@ def _strip_leaked_terminal_responses(text: str) -> str:
 def _estimate_tui_input_height(
     lines: list[str] | tuple[str, ...], prompt_text: str, terminal_columns: int, *, max_height: int = 8,
 ) -> int:
-    """Estimate classic prompt_toolkit input rows using live terminal cells.
+    """Input rows from live terminal cells; the BeforeInput prompt consumes cells only on line 0.
 
-    The prompt is injected via BeforeInput, so it consumes cells only on logical line 0;
-    continuation rows use the full width. Never substitute a fake wide fallback: mis-
-    allocating the TextArea height leaves stale prompt/input cells at the terminal bottom.
+    Never substitute a fake wide fallback: a mis-sized TextArea leaves stale cells at the bottom.
     """
     try:
         from prompt_toolkit.utils import get_cwidth
@@ -2534,12 +2253,7 @@ def _estimate_tui_input_height(
 
 
 def _status_bar_visible_from_display_config(display_config: object) -> bool:
-    """Initial classic-CLI status-bar visibility from display config.
-
-    YAML parses bare ``off`` as False, while older snapshots or hand edits may hold
-    strings like ``"off"``/``"hidden"``; treat both so a new process never re-enables
-    a status bar the user disabled.
-    """
+    """Initial status-bar visibility; both YAML ``off`` (False) and strings like ``"hidden"`` mean off."""
     if not isinstance(display_config, dict):
         display_config = {}
     statusbar_config = display_config.get("statusbar", display_config.get("tui_statusbar", "top"))
@@ -2570,14 +2284,12 @@ def _collect_query_images(query: str | None, image_arg: str | None = None) -> tu
     return message, list(dict.fromkeys(images))
 
 
-# OSC sequences (e.g. OSC-8 hyperlinks): prompt_toolkit's ANSI parser strips the ESC
-# but passes the payload through as literal text, garbling TUI output.
+# OSC sequences (e.g. OSC-8 links): pt's ANSI parser strips the ESC but leaks the payload as text.
 _OSC_ESCAPE_RE = re.compile(r"\x1b\][\s\S]*?(?:\x07|\x1b\\)")
 
 
 class ChatConsole:
-    """Rich Console drop-in that routes rendered ANSI through ``_cprint`` so colors
-    and markup survive prompt_toolkit's patch_stdout in the interactive loop."""
+    """Rich Console drop-in routing rendered ANSI through ``_cprint`` so colors survive patch_stdout."""
 
     def __init__(self):
         from io import StringIO
@@ -2587,7 +2299,6 @@ class ChatConsole:
     def print(self, *args, **kwargs):
         self._buffer.seek(0)
         self._buffer.truncate()
-        # Read terminal width at render time so panels adapt to current size
         self._inner.width = shutil.get_terminal_size((80, 24)).columns
         self._inner.print(*args, **kwargs)
         for line in _OSC_ESCAPE_RE.sub("", self._buffer.getvalue()).rstrip("\n").split("\n"):
@@ -2595,16 +2306,10 @@ class ChatConsole:
 
     @contextmanager
     def status(self, *_args, **_kwargs):
-        """No-op Rich-compatible status context.
-
-        Slash-command helpers call ``console.status(...)``; a silent context keeps them
-        compatible without duplicating ``HermesCLI._busy_command()``'s busy indicator.
-        """
+        """No-op ``console.status`` so slash helpers don't duplicate ``_busy_command()``'s indicator."""
         yield self
 
-# Rich-markup ASCII art (re-exported; canonical copies live in hermes_cli.banner).
-from hermes_cli.banner import HERMES_AGENT_LOGO, HERMES_CADUCEUS  # noqa: E402,F401
-
+from hermes_cli.banner import HERMES_AGENT_LOGO, HERMES_CADUCEUS  # noqa: E402,F401  (re-exported)
 
 
 def _build_compact_banner() -> str:
@@ -2644,7 +2349,6 @@ def _build_compact_banner() -> str:
     bar = "═" * w
     content_width = inner - 2
 
-    # Truncate and pad to fit
     line1 = line1[:content_width].ljust(content_width)
     line2 = version_line[:content_width].ljust(content_width)
 
@@ -2656,22 +2360,12 @@ def _build_compact_banner() -> str:
     )
 
 
-
-# ============================================================================
-# Slash-command detection helper
-# ============================================================================
-
 def _looks_like_slash_command(text: str) -> bool:
-    """True if *text* looks like a slash command (``/help``), not a pasted path
-    (``/Users/x/file.md ...``): a command's first word has no further ``/``."""
+    """``/help`` yes, ``/Users/x/file.md`` no: a command's first word has no further ``/``."""
     if not text or not text.startswith("/"):
         return False
     return "/" not in text.split()[0][1:]
 
-
-# ============================================================================
-# Skill Slash Commands — dynamic commands generated from installed skills
-# ============================================================================
 
 _skill_commands = None
 _skill_bundles = None
@@ -2731,26 +2425,21 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
 
 
 def save_config_value(key_path: str, value: any) -> bool:
-    """Persist ``key_path`` (dot-separated, e.g. "agent.system_prompt") = value; True on success.
+    """Persist dot-separated ``key_path`` = value into HERMES_HOME/config.yaml; True on success.
 
-    ALWAYS targets HERMES_HOME/config.yaml (created if needed), resolved live so profile
-    switches and test isolation land right. Never the repo's cli-config.yaml: it is a
-    shipped template no config reader loads, so a value written there silently vanishes.
+    Never the repo's cli-config.yaml: no config reader loads it, so the value would vanish.
     """
     config_path = get_hermes_home() / 'config.yaml'
 
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write preserving comments, ordering, quotes and readable Unicode.
         from utils import atomic_roundtrip_yaml_update
         atomic_roundtrip_yaml_update(config_path, key_path, value)
-        # Owner-only permissions: config files contain API keys.
-        try:
+        try:  # owner-only: config files contain API keys
             os.chmod(config_path, 0o600)
         except (OSError, NotImplementedError):
             pass
-        # /model and the TUI persist through here rather than `hermes config set`;
-        # surface the same fail-closed cron drift warning for every model switch.
+        # Same fail-closed cron drift warning as `hermes config set` for every model switch.
         from hermes_cli.config import warn_unpinned_cron_jobs_after_model_config_change
 
         warn_unpinned_cron_jobs_after_model_config_change(key_path, value)
@@ -2760,20 +2449,8 @@ def save_config_value(key_path: str, value: any) -> bool:
         return False
 
 
-
-
-# ============================================================================
-# HermesCLI Class
-# ============================================================================
-
-
 def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Map ``moa:<preset>`` to ``("moa", "<preset>")``; anything else -> ``(None, model)``.
-
-    Gives ``hermes chat -Q -m moa:<preset>`` the same routing as the interactive
-    ``/moa`` command (``resolve_runtime_provider`` / ``agent_init`` key off
-    ``provider == "moa"``); the raw string would be rejected by the real provider.
-    """
+    """``moa:<preset>`` -> ``("moa", preset)`` (same routing as ``/moa``); anything else -> ``(None, model)``."""
     if isinstance(model, str) and model.strip().lower().startswith("moa:"):
         preset = model.strip().split(":", 1)[1].strip()
         if preset:
@@ -2784,8 +2461,7 @@ _split_model_config_default = _lazy_shim("hermes_cli.config", "split_model_confi
 
 
 class _VoiceInputMessage:
-    """Sentinel for voice-transcribed messages in ``_pending_input`` so the concise
-    voice-response prefix applies only to microphone input, not typed text."""
+    """Sentinel for voice-transcribed input so the concise voice prefix never applies to typed text."""
 
     __slots__ = ("text",)
 
@@ -2797,12 +2473,7 @@ class _VoiceInputMessage:
 
 
 class _SeededQueryMessage:
-    """Sentinel wrapper for a ``-q/--query`` prompt seeded into an interactive session.
-
-    The seeded prompt is arbitrary user text (OS launcher, script) and must be treated
-    LITERALLY — no slash-command routing, ``!`` shell dispatch, or file-drop detection.
-    ``process_loop`` skips those dispatchers for this message only.
-    """
+    """Sentinel for a ``-q`` prompt seeded into an interactive session; treated LITERALLY (no slash/!/file-drop)."""
 
     __slots__ = ("text", "images")
 
@@ -2815,12 +2486,7 @@ class _SeededQueryMessage:
 
 
 def _should_seed_interactive(query, image, quiet: bool, oneshot: bool) -> bool:
-    """Whether a ``-q/--image`` invocation should seed an interactive session.
-
-    On a real TTY ``chat -q`` submits the prompt as the first interactive turn. The
-    legacy answer-and-exit behavior is kept for every automation surface: ``--oneshot``,
-    ``-Q/--quiet``, and any non-TTY stdin/stdout (kanban, cron, pipes, A2A).
-    """
+    """``-q`` seeds an interactive session only on a real TTY without ``--oneshot``/``-Q`` (automation answers and exits)."""
     if not (query or image) or oneshot or quiet:
         return False
     try:
@@ -2834,7 +2500,7 @@ def _panel_box_width(title: str, content_lines: list[str], min_width: int = 46, 
     term_cols = shutil.get_terminal_size((100, 20)).columns
     longest = max([len(title)] + [len(line) for line in content_lines] + [min_width - 4])
     inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
-    return inner + 2  # account for the single leading/trailing spaces inside borders
+    return inner + 2  # leading/trailing space inside the borders
 
 
 def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "", *, keep_ws: bool = False) -> list[str]:
@@ -2859,9 +2525,8 @@ def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
 class _ChatTurn:
     """Per-turn state shared by the ``chat()`` phases and the agent worker thread.
 
-    ``result`` is written by the worker thread and read after the join (same object, so
-    late writes from an abandoned thread stay visible). ``tts_normal_exit`` is set only
-    when the TTS worker drained on its own so the ``finally`` never cuts the last sentence.
+    ``result`` is written by the worker and read after the join; ``tts_normal_exit`` is
+    set only when the TTS worker drained on its own so the last sentence is never cut.
     """
 
     result: Optional[dict] = None
@@ -2881,16 +2546,10 @@ _PASTE_REF_RE = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
 
 
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
-    """
-    Interactive CLI for the Hermes Agent.
-    
-    Provides a REPL interface with rich formatting, command history,
-    and tool execution capabilities.
-    """
+    """Interactive REPL for the Hermes Agent."""
 
-    # Seeded -q handoff from main() → run() (see _should_seed_interactive):
-    # run() re-creates _pending_input, so the seeded first message rides in
-    # on this attribute and is enqueued after the fresh queue exists.
+    # Seeded -q first message (see _should_seed_interactive); run() re-creates
+    # _pending_input, so it is enqueued only after the fresh queue exists.
     _seeded_first_message: Optional["_SeededQueryMessage"] = None
 
     def __init__(
@@ -2910,27 +2569,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         pass_session_id: bool = False,
         ignore_rules: bool = False,
     ):
-        """
-        Initialize the Hermes CLI.
-
-        Args:
-            model: Model to use (default: from env or claude-sonnet)
-            toolsets: List of toolsets to enable (default: all)
-            provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
-            reasoning: Reasoning effort override for this run (none|minimal|low|medium|high|xhigh|max|ultra). Wins over config.
-            api_key: API key (default: from environment)
-            base_url: API base URL (default: OpenRouter)
-            max_turns: Maximum tool-calling iterations shared with subagents (default: 500)
-            verbose: Enable verbose logging
-            compact: Use compact display mode
-            resume: Session ID to resume (restores conversation history from SQLite)
-            pass_session_id: Include the session ID in the agent's system prompt
-        """
+        """CLI args win over config; ``reasoning`` is per-run only; ``resume`` restores history from SQLite."""
         self._init_display_options(verbose, compact)
-        
         self._init_model_routing(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                  checkpoints, pass_session_id, ignore_rules)
-
         self._init_runtime_state(resume)
 
     def _init_display_options(self, verbose, compact):
@@ -2939,14 +2581,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.config = CLI_CONFIG
         display = CLI_CONFIG["display"]
         self.compact = compact if compact is not None else display.get("compact", False)
-        # tool_progress: "off" | "new" | "all" | "verbose". YAML 1.1 parses bare
-        # `off` as False — normalise to the string.
+        # tool_progress: "off" | "new" | "all" | "verbose"; YAML 1.1 parses bare `off` as False.
         _raw_tp = display.get("tool_progress", "all")
         self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp)
-        # focus_view (/focus): display-only. Snaps tool_progress to "off" so the
-        # EXISTING suppression path hides per-tool lines and stashes the pre-focus
-        # mode for /focus off. Never changes what is sent to the model
-        # (hermes_cli/focus_view.py).
+        # focus_view (/focus) is display-only: snaps tool_progress to "off" (stashing the
+        # pre-focus mode for /focus off); never changes what is sent to the model.
         self._focus_view_enabled = bool(display.get("focus_view", False))
         self._focus_saved_tool_progress = self._focus_last_counted_tool = None
         self._focus_hidden_lines = 0
@@ -2957,26 +2596,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self.tool_progress_mode = FOCUS_TOOL_PROGRESS_MODE
         self.resume_display = display.get("resume_display", "full")  # "full" | "minimal"
         self.bell_on_complete = display.get("bell_on_complete", False)
-        # bell_on_prompt: terminal bell whenever a blocking prompt modal opens
-        # (clarify, approval, sudo password, secret capture).
-        self.bell_on_prompt = display.get("bell_on_prompt", False)
+        self.bell_on_prompt = display.get("bell_on_prompt", False)  # bell when a blocking modal opens
         self.show_reasoning = display.get("show_reasoning", True)
-        # reasoning_full: post-response recap box uncollapsed instead of the first 10 lines.
         self.reasoning_full = display.get("reasoning_full", False)
         _configure_output_history(
             enabled=display.get("persistent_output", True),
             max_lines=display.get("persistent_output_max_lines", 200),
         )
-        # busy_input_mode: "interrupt" (Enter redirects the current run), "queue"
-        # (Enter queues for the next turn) or "steer" (inject mid-run via /steer).
+        # busy_input_mode: "interrupt" (redirect the run) | "queue" (next turn) | "steer" (inject mid-run).
         _bim = str(display.get("busy_input_mode", "interrupt")).strip().lower()
         self.busy_input_mode = _bim if _bim in ("queue", "steer") else "interrupt"
 
-        # self.verbose ONLY controls global DEBUG logging (root logger level).
-        # display.tool_progress="verbose" controls tool-call rendering and is
-        # independent (see _apply_logging_levels): coupling the two made every
-        # module's DEBUG logs spew to the console whenever a user set
-        # tool_progress: verbose.
+        # verbose ONLY controls global DEBUG logging; tool_progress="verbose" is independent
+        # (coupling them spewed every module's DEBUG logs to the console).
         self.verbose = bool(verbose) if verbose is not None else False
 
         self.streaming_enabled = display.get("streaming", False)
@@ -2985,21 +2617,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         _frm = str(display.get("final_response_markdown", "strip")).strip().lower()
         self.final_response_markdown = _frm if _frm in {"render", "strip", "raw"} else "strip"
 
-        self._inline_diffs_enabled = display.get("inline_diffs", True)  # diff previews for write actions
+        self._inline_diffs_enabled = display.get("inline_diffs", True)
 
-        # Per-turn accounting (display.turn_summary / display.spinner_token_flow):
-        # CLI-only chrome; the collector rides the tool-progress feed this class
-        # already receives, so no agent-loop bookkeeping is involved.
+        # Per-turn accounting: CLI-only chrome riding the tool-progress feed.
         self._turn_summary_enabled = bool(display.get("turn_summary", True))
         self._spinner_token_flow_enabled = bool(display.get("spinner_token_flow", True))
         self._turn_summary_collector = None
         self._turn_summary_start = 0.0
         self._turn_token_baseline = 0
-        # True only while an interactive (run()-loop) turn is in flight; -Q and
-        # gateway paths never set it, which keeps the summary line off them.
-        self._interactive_turn = False
+        self._interactive_turn = False  # only run()-loop turns; keeps the summary line off -Q
 
-        # Submitted multiline user-message preview (display.user_message_preview)
         _ump = display.get("user_message_preview", {})
         if not isinstance(_ump, dict):
             _ump = {}
@@ -3007,11 +2634,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.user_message_preview_last_lines = max(0, _int_or(_ump.get("last_lines", 2), 2))
 
         # Streaming display state
-        self._stream_buf = ""  # partial line buffer for line-buffered rendering
-        self._reasoning_preview_buf = ""  # coalesce tiny reasoning chunks for [thinking] output
-        self._stream_started = self._stream_box_opened = False  # first delta seen / box header printed
-        # Lines that may belong to a markdown table are held here until the block
-        # ends so they can be re-padded with wcwidth-aware widths.
+        self._stream_buf = ""  # partial line buffer
+        self._reasoning_preview_buf = ""  # coalesces tiny reasoning chunks
+        self._stream_started = self._stream_box_opened = False
+        # Possible markdown-table lines held until the block ends for wcwidth-aware re-padding.
         self._stream_table_buf: list[str] = []
         self._in_stream_table = False
         self._pending_edit_snapshots = {}
@@ -3028,19 +2654,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _init_model_and_provider(self, model, provider, api_key, base_url):
         """Priority: CLI args > env vars > config file. Returns the raw ``model`` config section."""
-        # Model comes from the CLI arg or config.yaml (single source of truth) —
-        # LLM_MODEL/OPENAI_MODEL env vars are NOT checked, so multi-agent setups
-        # don't stomp each other through the environment.
+        # LLM_MODEL/OPENAI_MODEL env vars are deliberately NOT checked (multi-agent setups
+        # would stomp each other through the environment).
         _model_config = CLI_CONFIG.get("model", {})
         _raw_default = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
-        # A dict-valued default (``model.default: {provider: ..., model: ...}``)
-        # carries its own provider; flatten it so that nested provider feeds
-        # ``requested_provider`` instead of being replaced by the outer merged
-        # ``model.provider`` (typically "auto").
+        # A dict-valued default carries its own provider, which must feed requested_provider
+        # instead of being replaced by the merged model.provider (typically "auto").
         _config_model, _nested_provider = _split_model_config_default(_raw_default)
         _DEFAULT_CONFIG_MODEL = ""
-        # Whether -m/--model was passed: resume must not clobber an explicit
-        # override with the session's stored model.
+        # resume must not clobber an explicit -m with the session's stored model.
         self._explicit_model_override = bool(model)
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
         _cfg_provider = CLI_CONFIG["model"].get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER")
@@ -3062,12 +2684,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _startup_provider_override = _startup_route.provider
                 _startup_base_url_override = _startup_route.base_url
                 _startup_api_key_override = _startup_route.api_key
-        # ``moa:<preset>`` selects the MoA virtual provider in one shot (parity
-        # with /moa and the picker). Done before provider resolution so
-        # ``-Q -m moa:<preset>`` never hits the real provider with an unknown
-        # model (#56828); the prefix wins over an explicit --provider.
+        # ``moa:<preset>`` selects the MoA virtual provider before provider resolution so the
+        # real provider never sees the unknown model; the prefix wins over --provider.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
-        # max_tokens: HERMES_MAX_TOKENS env overrides config.
         _env_mt = os.environ.get("HERMES_MAX_TOKENS")
         if _env_mt:
             self.max_tokens = _int_or(_env_mt, None)
@@ -3076,7 +2695,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self.max_tokens = _mt if isinstance(_mt, int) else None
         else:
             self.max_tokens = None
-        # Auto-detect the model from a local server if still on the default.
         if self.model == _DEFAULT_CONFIG_MODEL:
             _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
             if base_url_hostname(_base_url) in ("localhost", "127.0.0.1"):
@@ -3084,26 +2702,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _detected = _auto_detect_local_model(_base_url)
                 if _detected:
                     self.model = _detected
-        # Provider-specific normalisation may silently override the global
-        # default but must warn when overriding an explicit choice. A config
-        # model equal to the global fallback is NOT explicit; "gpt-5.3-codex" is.
+        # Provider normalisation may silently override the default but must warn for an
+        # explicit choice (a config model equal to the global fallback is NOT explicit).
         self._model_is_default = not model and (
             not _config_model or _config_model == _DEFAULT_CONFIG_MODEL
         )
 
-        # An explicit --api-key wins; otherwise a URL-bearing startup alias
-        # carries its own credential for the alias host (#28660).
+        # --api-key wins; otherwise a URL-bearing startup alias carries its own credential.
         self._explicit_api_key = api_key or _startup_api_key_override or None
         self._explicit_base_url = base_url
 
-        # Provider selection is resolved lazily at use-time via _ensure_runtime_credentials().
+        # Resolved lazily at use-time via _ensure_runtime_credentials().
         self.requested_provider = (
             _moa_provider_override or provider or _startup_provider_override or _nested_provider
             or _cfg_provider or "auto"
         )
-        # `--provider <custom>` without `-m` must use that entry's default_model,
-        # otherwise the global model.default is sent to the custom endpoint and
-        # the compressor inherits the wrong context length (#86978).
+        # `--provider <custom>` without `-m` uses that entry's default_model, else the global
+        # default goes to the custom endpoint and the compressor gets the wrong context length.
         if not model and provider:
             try:
                 from hermes_cli.runtime_provider import _get_named_custom_provider
@@ -3128,8 +2743,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             base_url or _startup_base_url_override or CLI_CONFIG["model"].get("base_url", "")
             or os.getenv("OPENROUTER_BASE_URL", "")
         ) or None
-        # Match the key to the resolved base_url; re-resolved by
-        # _ensure_runtime_credentials() before first use.
+        # Key matches the resolved base_url; re-resolved by _ensure_runtime_credentials().
         _keys = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
         if not (self.base_url and base_url_host_matches(self.base_url, "openrouter.ai")):
             _keys = _keys[::-1]
@@ -3138,22 +2752,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _init_turn_limits(self, max_turns, run_budget):
         """max_turns: CLI arg > config > env var > default; run budget: CLI flag > config."""
-        # Everything goes through resolve_turn_limit() so "none"/"unlimited"
-        # (-> sys.maxsize) are accepted alongside ints.
+        # resolve_turn_limit() accepts "none"/"unlimited" (-> sys.maxsize) alongside ints.
         from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
         if max_turns is not None:
             self.max_turns = _resolve_turn_limit(max_turns)
         elif CLI_CONFIG["agent"].get("max_turns") is not None:
             self.max_turns = _resolve_turn_limit(CLI_CONFIG["agent"]["max_turns"])
         elif CLI_CONFIG.get("max_turns") is not None:
-            # KEEP: root-level max_turns is only folded at load time
-            # (_normalize_max_turns_config), never migrated on disk, and configs
-            # read through other paths may bypass it — this is the only safety net.
+            # KEEP: root-level max_turns is never migrated on disk; other config paths may
+            # bypass the load-time fold, so this is the only safety net.
             self.max_turns = _resolve_turn_limit(CLI_CONFIG["max_turns"])
         else:
-            # Env bridge (gateway/run.py or the user); empty/unset -> unlimited.
             self.max_turns = _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
-        # None keeps the wall-clock budget fully off (AIAgent stays dormant).
         self.run_budget_seconds = run_budget if run_budget is not None else CLI_CONFIG["agent"].get("run_budget_seconds")
 
     def _init_toolsets(self, toolsets):
@@ -3163,15 +2773,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.disabled_toolsets = parse_config_string_list(CLI_CONFIG["agent"].get("disabled_toolsets"))
 
         if toolsets and "all" not in toolsets and "*" not in toolsets:
-            # MCP server names resolve via live registry aliases registered during
-            # discover_mcp_tools, which hasn't run yet — exclude them from validation.
+            # MCP server names only resolve after discover_mcp_tools runs; skip them here.
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
 
     def _init_checkpoints_and_rules(self, checkpoints, pass_session_id, ignore_rules):
-        # Filesystem checkpoints: CLI flag > config
         cp_cfg = CLI_CONFIG.get("checkpoints", {})
         if isinstance(cp_cfg, bool):
             cp_cfg = {"enabled": cp_cfg}
@@ -3180,29 +2788,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.checkpoint_max_total_size_mb = cp_cfg.get("max_total_size_mb", 500)
         self.checkpoint_max_file_size_mb = cp_cfg.get("max_file_size_mb", 10)
         self.pass_session_id = pass_session_id
-        # --ignore-rules (flag or the env var set by `hermes chat --ignore-rules`):
-        # AIAgent gets skip_context_files=True and skip_memory=True so
-        # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
+        # --ignore-rules: AIAgent skips context files (AGENTS.md/SOUL.md/...) and memory.
         self.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
 
     def _init_prompt_and_reasoning(self, reasoning):
         """Ephemeral system prompt/prefill, reasoning + service tier, OpenRouter routing knobs, fallback chain."""
-        # Env var wins, then display.personality / agent.system_prompt via
-        # hermes_cli.personality (single owner of overlay resolution).
+        # Env var wins, then hermes_cli.personality (single owner of overlay resolution).
         from hermes_cli.personality import available_personalities, resolve_ephemeral_system_prompt
 
         self.system_prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "") or resolve_ephemeral_system_prompt(CLI_CONFIG)
         self.personalities = available_personalities(CLI_CONFIG)
 
-        # Ephemeral prefill messages (few-shot priming, never persisted)
         self.prefill_messages = _load_prefill_messages(_resolve_prefill_messages_file(CLI_CONFIG))
 
-        # Per-model override > global reasoning_effort (shared chokepoint, #21256).
+        # Per-model override > global reasoning_effort.
         from hermes_constants import resolve_reasoning_config
         self.reasoning_config = resolve_reasoning_config(CLI_CONFIG, self.model)
-        # An explicit --reasoning wins for this run only (never persisted; Kanban
-        # pins a task's thinking depth this way). An unparseable level is ignored
-        # with a warning, same contract as the config path.
+        # --reasoning wins for this run only (never persisted); unparseable -> warn and ignore.
         if reasoning is not None and str(reasoning).strip():
             _cli_reasoning = _parse_reasoning_config(reasoning)
             if _cli_reasoning is None:
@@ -3211,7 +2813,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 self.reasoning_config = _cli_reasoning
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
 
-        # OpenRouter provider routing preferences
         pr = CLI_CONFIG.get("provider_routing", {}) or {}
         self._provider_sort = pr.get("sort")
         self._providers_only = pr.get("only")
@@ -3220,8 +2821,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._provider_require_params = pr.get("require_parameters", False)
         self._provider_data_collection = pr.get("data_collection")
 
-        # OpenRouter Pareto Code router: coding-score floor (0.0-1.0), only applied
-        # when model.model == "openrouter/pareto-code". Empty/None/out-of-range = unset.
+        # OpenRouter Pareto Code router coding-score floor; out-of-range = unset.
         _or_cfg = CLI_CONFIG.get("openrouter", {}) or {}
         _raw_score = _or_cfg.get("min_coding_score")
         self._openrouter_min_coding_score: Optional[float] = None
@@ -3233,14 +2833,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             except (TypeError, ValueError):
                 pass
 
-        # Fallback provider chain (new ``fallback_providers`` merged with legacy
-        # ``fallback_model`` entries so old configs still participate).
         self._fallback_model = get_fallback_chain(CLI_CONFIG)
 
     def _init_runtime_state(self, resume):
         """Session store + all per-run mutable state (queues, overlays, pet/voice/status-bar fields)."""
-        # Runtime signature of the initialised agent; a change across turns
-        # (/model, credential rotation) rebuilds the agent.
+        # A signature change across turns (/model, credential rotation) rebuilds the agent.
         self._active_agent_route_signature = None
         self.agent: Optional[Any] = None  # initialized on first use
         self._tool_callbacks_installed = False
@@ -3250,13 +2847,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
         self._resumed = False
-        # Per-prompt elapsed timer: started each turn, frozen when the agent thread
-        # completes, shown in the status bar.
+        # Per-prompt elapsed timer shown in the status bar.
         self._prompt_start_time: Optional[float] = None
         self._prompt_duration: float = 0.0
         self._last_turn_finished_at: Optional[float] = None
         self._init_session_store()
-        # Deferred title: held until the session row exists in the DB.
         self._pending_title: Optional[str] = None
         if resume:
             self.session_id = resume
@@ -3267,22 +2862,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self.session_id = f"{timestamp_str}_{short_uuid}"
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
 
-        self._history_file = _hermes_home / ".hermes_history"  # persistent input recall
-        self._last_invalidate: float = 0.0  # throttle UI repaints
+        self._history_file = _hermes_home / ".hermes_history"
+        self._last_invalidate: float = 0.0  # throttles UI repaints
         self._app = None
         self._init_ui_state()
 
     def _init_session_store(self):
-        """Open the SQLite session store early (so /title works before the first message) + opportunistic maintenance."""
+        """Open the session store early (so /title works before the first message) + opportunistic maintenance."""
         self._session_db = None
         self._session_db_unavailable = False
         try:
             from hermes_state import SessionDB
             self._session_db = SessionDB()
         except Exception as e:
-            # #41386: with no store the transcript is NOT persisted — the live chat
-            # looks healthy but resume later shows a truncated/empty session, so
-            # surface it prominently rather than only logging.
+            # Without a store the transcript is NOT persisted while the chat looks healthy,
+            # so surface it prominently rather than only logging.
             self._session_db_unavailable = True
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
             try:
@@ -3294,38 +2888,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     "  Fix the state.db store (e.g. `hermes update` to rebuild the venv) to restore persistence."
                 )
             except Exception:
-                # Never let the warning path itself break startup.
                 print(
                     "WARNING: Session store unavailable — this conversation will NOT be "
                     f"saved to disk and cannot be resumed later. Reason: {e}"
                 )
-        # state.db maintenance: at most once per min_interval_hours, tracked in
-        # state_meta so it is shared across every Hermes process for this
-        # HERMES_HOME; never blocks startup on failure.
         _run_state_db_auto_maintenance(self._session_db)
-        # Orphan/stale checkpoint shadow repos (opt-in via checkpoints.auto_prune).
         _run_checkpoint_auto_maintenance()
 
     def _init_ui_state(self):
-        """Per-run mutable UI state shared by interactive run() and single-query chat().
-
-        Everything here must exist before any direct chat() call because
-        single-query mode does not go through run().
-        """
+        """Per-run mutable UI state; must exist before any chat() call since -q never goes through run()."""
         self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
-        # Whether the turn that just finished was Ctrl+C'd; _maybe_continue_goal_after_turn
-        # reads it so /goal never auto-queues on top of a user-cancelled turn.
-        self._last_turn_interrupted = False
-        # Set when stdout/PTY raises EIO (broken pipe after a stream-stall interrupt)
-        # to freeze UI paints instead of spinning on escape-sequence writes (#81521).
-        self._terminal_io_broken = False
+        self._last_turn_interrupted = False  # /goal never auto-queues on a Ctrl+C'd turn
+        self._terminal_io_broken = False  # stdout EIO: freeze UI paints instead of spinning
         self._should_exit = False
-        # /exit --delete: delete this session's SQLite history + transcripts at shutdown.
-        self._delete_session_on_exit = False
-        # /update: run() execs relaunch() after prompt_toolkit has fully exited and
-        # restored terminal modes — on the main thread, not the process_loop thread.
+        self._delete_session_on_exit = False  # /exit --delete
+        # /update: relaunch() runs from run() after prompt_toolkit restored terminal modes.
         self._pending_relaunch: list[str] | None = None
         self._last_ctrl_c_time = 0
         # Blocking-prompt overlays (clarify / sudo / approval / slash-confirm / model picker).
@@ -3338,51 +2917,43 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._approval_lock = threading.Lock()
         self._slash_confirm_state = self._model_picker_state = None
         self._slash_confirm_deadline = 0
-        # Composer placeholder chosen once per session so it stays stable on screen.
-        try:
+        try:  # composer placeholder chosen once so it stays stable on screen
             from hermes_cli.tips import get_random_composer_placeholder
             self._composer_placeholder = get_random_composer_placeholder()
         except Exception:
             self._composer_placeholder = ""
         self._command_palette_state = None
-        # Armed by a bare `/resume` list so the next bare number selects that
-        # session; one-shot, cleared on the next submitted input (#34584).
-        self._pending_resume_sessions = None
-        # One-shot agent seed set by a slash handler (e.g. /blueprint <name>);
-        # consumed by the interactive loop right after process_command() returns.
-        self._pending_agent_seed = self._secret_state = None
+        self._pending_resume_sessions = None  # armed by a bare `/resume`; the next bare number selects
+        self._pending_agent_seed = self._secret_state = None  # one-shot seed from a slash handler
         self._secret_deadline = 0
-        self._spinner_text: str = ""  # thinking spinner text for TUI
-        self._tool_start_time: float = 0.0  # monotonic start of the current tool (live elapsed)
-        self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
-        self._last_scrollback_tool: str = ""  # last tool name printed to scrollback ("new" dedup)
+        self._spinner_text: str = ""
+        self._tool_start_time: float = 0.0
+        self._pending_tool_info: dict = {}  # function_name -> [(preview, args)] for stacked scrollback
+        self._last_scrollback_tool: str = ""  # "new" mode dedup
         self._command_running = self._command_blocks_input = False
         self._command_status = ""
-        # Petdex mascot (opt-in via display.pet). Kitty/Ghostty: Unicode placeholders
-        # + out-of-band image transmission; other terminals: truecolor half-blocks.
-        self._pet_renderer = self._pet_anim_thread = None  # agent.pet.render.PetRenderer | None
+        # Petdex mascot (display.pet): kitty placeholders on kitty/Ghostty, half-blocks elsewhere.
+        self._pet_renderer = self._pet_anim_thread = None
         self._pet_slug = self._pet_kitty_pending = ""
         self._pet_enabled = self._pet_anim_running = False
         self._pet_cols: int = 18
         self._pet_scale: float = 0.7
-        self._pet_frames_cache: dict = {}  # state -> list[grid]
-        self._pet_kitty_cache: dict = {}  # state -> kitty placeholder payload
+        self._pet_frames_cache: dict = {}
+        self._pet_kitty_cache: dict = {}
         self._pet_kitty_image_id = self._pet_frame_idx = 0
         self._pet_lock = threading.Lock()
         self._pet_cfg_checked: float = 0.0
-        # Transient reaction beats (wave/jump/failed) + steady reasoning flag.
         self._pet_event: str = ""
         self._pet_event_until: float = 0.0
         self._pet_reasoning = self._pet_turn_error = False
         self._attached_images: list[Path] = []
         self._image_counter = 0
-        # Ctrl+S prompt stash. In-memory only: drafts routinely contain secrets.
+        # Ctrl+S prompt stash; in-memory only because drafts routinely contain secrets.
         from hermes_cli.prompt_stash import PromptStash as _PromptStash
         self._prompt_stash = _PromptStash()
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
-        # Background --skills preload (started by cmd_chat; joined by
-        # finalize_preloaded_skills before any agent is built).
+        # Background --skills preload, joined by finalize_preloaded_skills before any agent is built.
         self._preload_skills_thread: Optional[threading.Thread] = None
         self._preload_skills_result: Optional[tuple] = None
         self._preload_skills_error: Optional[BaseException] = None
@@ -3397,31 +2968,25 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._voice_recorder = None
         self._voice_tts_done = threading.Event()
         self._voice_tts_done.set()
-        self._voice_tts_stop = None  # active streaming pipeline's stop event
+        self._voice_tts_stop = None
         self._voice_barge_capture = threading.Event()  # barge monitor is capturing the interruption
-        self._voice_last_tts_text = ""  # most recently spoken TTS text (echo guard, #75780)
-        self._voice_barge_phase = None  # "generation" or "playback" phase of the last barge trip
+        self._voice_last_tts_text = ""  # echo guard
+        self._voice_barge_phase = None  # "generation" | "playback"
 
         self._status_bar_visible = _status_bar_visible_from_display_config(CLI_CONFIG.get("display"))
-        self._battery_visible = bool(CLI_CONFIG["display"].get("battery", False))  # /battery, persisted
-        # While True the input rules + status bar stay hidden until the next input:
-        # set by _recover_after_resize() so a SIGWINCH cannot stamp a fresh status
-        # bar over one the terminal just reflowed into scrollback (#19280, #22976).
+        self._battery_visible = bool(CLI_CONFIG["display"].get("battery", False))
+        # Hide rules + status bar until the next input after a resize, so SIGWINCH cannot
+        # stamp a fresh status bar over one the terminal just reflowed into scrollback.
         self._status_bar_suppressed_after_resize = self._resize_recovery_pending = False
         self._resize_recovery_lock = threading.Lock()
         self._resize_recovery_timer = None
-        # Debounced timer clearing that suppression once the reflow settles.
-        self._status_bar_unsuppress_timer = None
-        # Last width seen by the resize handler: width change (reflow -> possible
-        # ghost chrome, needs a viewport clear) vs rows-only change. None until
-        # the first resize.
-        self._last_resize_width = None
+        self._status_bar_unsuppress_timer = None  # debounced clear of that suppression
+        self._last_resize_width = None  # width change (reflow, needs viewport clear) vs rows-only
 
-        self._background_tasks: Dict[str, threading.Thread] = {}  # task_id -> thread
+        self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
 
-        # Cache-hit ratio baseline — reset on model switch and on context compression
-        # so the bar reflects the current cache regime, not a lifetime average.
+        # Cache-hit baseline, reset on model switch / compression so the bar shows the current regime.
         self._cache_hit_baseline_prompt = self._cache_hit_baseline_read = 0
         self._cache_hit_baseline_compressions = 0
         self._cache_hit_baseline_model: Optional[str] = None
@@ -3437,9 +3002,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 session_id=self.session_id,
                 surface=surface,
                 config=self.config,
-                # Writer identity for re-entrancy (#94595): a re-claim by this
-                # same process for this same session replaces its own entry
-                # instead of fencing itself out.
+                # Writer identity: a re-claim by this process replaces its own entry.
                 metadata={"live_session_id": str(self.session_id)},
             )
         except Exception as exc:
@@ -3469,7 +3032,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         finally:
             self._active_session_lease = None
 
-    # Petdex pet pane cadence (see CLIStatusBarMixin).
     _PET_FRAME_INTERVAL = 0.16
     _PET_CFG_INTERVAL = 2.5
 
@@ -3508,36 +3070,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             pass
 
     def _show_security_advisories(self):
-        """Show a startup banner if any unacked security advisories match.
-
-        Renders a single bold-red box on stderr (so piped stdout remains
-        clean) listing the worst hit and pointing at ``hermes doctor``.
-        Banner-cache rate-limits this to once per 24h per advisory; full
-        remediation lives behind ``hermes doctor`` so the banner stays
-        small.
-        """
+        """Startup banner for unacked security advisories, on stderr (piped stdout stays clean); 24h rate-limited."""
         try:
             from hermes_cli.security_advisories import detect_compromised, startup_banner
 
             banner = startup_banner(detect_compromised())
             if banner:
-                # Print to stderr — keeps stdout clean for piped automation,
-                # and Rich's banner rendering already wrote to stdout above.
                 print(banner, file=sys.stderr, flush=True)
         except Exception:
-            # Never let the security banner block startup. Failures are
-            # logged at DEBUG by the advisory module.
-            pass
+            pass  # never block startup
 
     def _show_browser_backend_notice(self):
-        """One-time hint when the default Browser Use backend isn't runnable.
-
-        Browser Use mode is the default browser backend, but it silently
-        falls back to the built-in browser tools when neither the
-        browser-use CLI nor uvx can be found. Surface that downgrade once
-        per 24h so users know why browsing behaves differently and how to
-        fix it (rate limiting lives in default_downgrade_notice()).
-        """
+        """Once-per-24h hint when the default Browser Use backend silently fell back to built-in tools."""
         try:
             from tools.browser_use_cli import default_downgrade_notice
 
@@ -3545,17 +3089,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             if notice:
                 self._console_print(f"[yellow]⚠ {notice}[/yellow]")
         except Exception:
-            # Never let a hint block startup.
             logger.debug("browser backend notice failed", exc_info=True)
 
     def finalize_preloaded_skills(self) -> None:
-        """Join the background --skills preload and fold it into the prompt.
+        """Join the background --skills preload and fold it into the prompt (idempotent).
 
-        Idempotent; no-op when no preload was requested. Called from
-        ``_init_agent`` (before the agent snapshots ``self.system_prompt``)
-        and safe to call from any other consumer of the system prompt.
-        Raises ``ValueError`` when EVERY requested skill was unknown —
-        the same contract the old synchronous path enforced in cmd_chat.
+        Raises ``ValueError`` only when EVERY requested skill was unknown.
         """
         if getattr(self, "_preload_skills_finalized", False):
             return
@@ -3574,11 +3113,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         skills_prompt, loaded_skills, missing_skills = result
         if missing_skills:
             missing_display = ", ".join(missing_skills)
-            # If at least one skill loaded, degrade gracefully: skip the
-            # unknown ones and continue. A typo'd skill name should not crash
-            # the worker (which auto-blocks the Kanban task after retries).
-            # Only when EVERY requested skill is missing do we hard-fail, so a
-            # fully-misconfigured worker fails loudly instead of running blind.
+            # A typo'd name must not crash a kanban worker; only a fully-missing set fails loudly.
             if loaded_skills:
                 logger.warning(
                     "Unknown skill(s) requested, skipping: %s. "
@@ -3594,13 +3129,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self.preloaded_skills = loaded_skills
 
     def _show_tool_availability_warnings(self):
-        """Show warnings about disabled tools due to missing API keys."""
+        """Warn about tools disabled by missing API keys (not system deps)."""
         try:
             from model_tools import check_tool_availability
-            
+
             available, unavailable = check_tool_availability()
-            
-            # Filter to only those missing API keys (not system deps)
             api_key_missing = [u for u in unavailable if u["missing_vars"]]
 
             if api_key_missing:
@@ -3610,11 +3143,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     self._console_print(f"   [dim]• {item['name']}[/] [dim italic]({', '.join(item['missing_vars'])})[/]")
                 self._console_print("[dim]   Run 'hermes setup' to configure[/]")
         except Exception:
-            pass  # Don't crash on import errors
-    
+            pass
+
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
-        # Get terminal config from environment (which was set from cli-config.yaml)
         terminal_env = os.getenv("TERMINAL_ENV", "local")
         terminal_cwd = os.getenv("TERMINAL_CWD", os.getcwd())
         terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "60")
@@ -3624,14 +3156,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             config_path = Path(__file__).parent / 'cli-config.yaml'
         config_status = "(loaded)" if config_path.exists() else "(not found)"
 
-        # ``self.api_key`` may be a callable (Azure Foundry Entra ID bearer
-        # provider). Never invoke it; just identify the auth surface.
+        # ``api_key`` may be a callable (Entra ID bearer provider): never invoke it. Prefer the
+        # LIVE agent's key: the constructor seeds self.api_key from env before provider
+        # resolution, so on non-OpenAI providers it can be another vendor's key.
         from agent.azure_identity_adapter import is_token_provider
 
-        # Prefer the LIVE agent's credential: the constructor seeds self.api_key
-        # from OPENAI/OPENROUTER env vars before provider resolution, so on
-        # non-OpenAI providers it is a different vendor's key than the one
-        # actually authenticating (an sk-proj-... key next to a Nous base URL).
         display_key = self.api_key
         if self.agent is not None and getattr(self.agent, "api_key", None):
             display_key = self.agent.api_key
@@ -3678,11 +3207,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 print(f"  {label} {value}")
         print()
     
-    # Slash dispatch: canonical command -> (method name, pass cmd_original?).
-    # Commands absent here resolve by convention to ``_handle_<name>_command(cmd)``
-    # (dashes -> underscores). Resolved via getattr at dispatch time so
-    # instance/class-level monkeypatching still works. Handlers return False
-    # to exit the REPL; anything else keeps it alive.
+    # canonical command -> (method name, pass cmd_original?). Absent commands resolve to
+    # ``_handle_<name>_command(cmd)``. Looked up via getattr at dispatch time so
+    # monkeypatching works. A handler returning False exits the REPL.
     _SLASH_DISPATCH: dict[str, tuple[str, bool]] = {
         "exit": ("_cmd_exit", True),
         "quit": ("_cmd_exit", True),
@@ -3741,30 +3268,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         return entry
 
     def process_command(self, command: str) -> bool:
-        """
-        Process a slash command.
-        
-        Args:
-            command: The command string (starting with /)
-            
-        Returns:
-            bool: True to continue, False to exit
-        """
-        # Lowercase only for dispatch matching; preserve original case for arguments
-        cmd_lower = command.lower().strip()
+        """Dispatch a slash command; returns False to exit the REPL."""
+        cmd_lower = command.lower().strip()  # lowercase only for matching; args keep their case
         cmd_original = command.strip()
 
-        # Resolve aliases via central registry so adding an alias is a one-line
-        # change in hermes_cli/commands.py instead of touching every dispatch site.
+        # Aliases resolve via the central registry (hermes_cli/commands.py).
         from hermes_cli.commands import resolve_command as _resolve_cmd
         _base_word = cmd_lower.split()[0].lstrip("/")
         _cmd_def = _resolve_cmd(_base_word)
         canonical = _cmd_def.name if _cmd_def else _base_word
 
-        # pre_command observer hook (#64204): fires for every recognized
-        # slash command BEFORE its handler runs. Observer-only in v1 —
-        # return values are ignored (fire_pre_command_hook logs directives
-        # at debug). Never raises, so a broken plugin can't break dispatch.
+        # Observer-only pre_command plugin hook (return values ignored; never raises).
         if _cmd_def is not None:
             from hermes_cli.plugins import fire_pre_command_hook
             fire_pre_command_hook(
@@ -3772,10 +3286,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 session_key=getattr(self, "session_id", None), platform="cli",
             )
 
-        # A bare `/resume` prompt is one-shot: any command other than the
-        # resume/sessions handlers (which manage the pending state themselves)
-        # disarms it so a later number isn't swallowed as a stale selection.
-        # See #34584.
+        # A bare `/resume` prompt is one-shot: any other command disarms it so a later
+        # number isn't swallowed as a stale selection.
         if canonical not in {"resume", "sessions"}:
             self._pending_resume_sessions = None
 
@@ -3788,13 +3300,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         return result is not False
 
     def _process_unregistered_slash(self, cmd_original: str, cmd_lower: str) -> bool:
-        """Fallthrough for slash input with no built-in handler.
-
-        Precedence (order matters): user quick_commands (exec/alias) ->
-        plugin commands -> skill bundles -> skill commands -> unique-prefix
-        expansion -> unknown-command message. Always returns True unless
-        it re-dispatches through process_command.
-        """
+        """Slash input with no built-in handler; precedence: quick_commands -> plugins -> bundles -> skills -> prefix expansion."""
         base_cmd = cmd_lower.split()[0]
         bare = base_cmd.lstrip("/")
         skill_commands = _ensure_skill_commands()
@@ -3823,15 +3329,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
                 return True
             try:
-                # shell=True is intentional: user-defined shell snippets from config.yaml,
-                # never agent/LLM controlled. The env is sanitized because the CLI process
-                # holds every API key in os.environ.
+                # shell=True is intentional (user-authored config snippets, never LLM controlled);
+                # the env is sanitized because this process holds every API key.
                 from tools.environments.local import build_subprocess_env
                 from hermes_cli._subprocess_compat import windows_hide_flags
                 result = subprocess.run(
                     exec_cmd, shell=True, capture_output=True,
                     text=True, encoding="utf-8", errors="replace", timeout=30, env=build_subprocess_env(),
-                    # No console flash on Windows (#56747).
                     creationflags=windows_hide_flags(),
                 )
                 output = result.stdout.strip() or result.stderr.strip()
@@ -3937,12 +3441,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         return True
 
     def _owns_process_notification(self, event: dict) -> bool:
-        """Return whether this CLI session provably owns a delegation event.
-
-        Delegations dispatched before context compression retain the original
-        session key, so resolve that key to its continuation before comparing.
-        Missing or foreign keys fail closed and remain queued for their owner.
-        """
+        """Whether this session owns a delegation event (pre-compression keys resolve to their continuation; fail closed)."""
         event_key = str(event.get("session_key") or "")
         current_key = str(getattr(self, "session_id", "") or "")
         if not event_key or not current_key:
@@ -3959,13 +3458,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         return str(resolved_key) == current_key
 
     def _drain_process_notifications(self, consumer: str) -> None:
-        """Queue background notifications owned by this visible CLI session.
-
-        ``process_registry`` restores durable delegation completions into every
-        process using the same Hermes profile.  Always pass this CLI's stable
-        session identity when draining so another window cannot claim and mark
-        delivered a completion that belongs to this one.
-        """
+        """Queue background notifications owned by this session (drained with our stable identity so another window can't claim them)."""
         from tools.process_registry import process_registry
         from tools.async_delegation import claim_event_delivery, complete_event_delivery
 
@@ -3979,21 +3472,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             complete_event_delivery(event, claim)
 
     def _drain_interrupt_queue_to_pending_input(self) -> None:
-        """Move stray messages from ``_interrupt_queue`` into ``_pending_input``.
+        """Move stray ``_interrupt_queue`` messages into ``_pending_input`` after every turn.
 
-        While the agent is running, user input is routed into
-        ``_interrupt_queue`` (see the architecture comment near
-        ``_route_user_input_when_busy``). The explicit-interrupt path at the
-        top of ``process_loop`` only drains that queue when
-        ``busy_input_mode == "interrupt"`` AND a ``pending_message`` was
-        acknowledged. If the agent's turn finishes naturally (no interrupt),
-        any messages typed during the turn stay stuck in ``_interrupt_queue``
-        forever. Subsequent ``Enter`` presses re-route to the same blocked
-        queue and the CLI appears to hang.
-
-        Called once at the end of every turn from ``process_loop``'s ``finally``
-        block. Catches and swallows ``Exception`` because the drain must never
-        break the main loop. (#20271)
+        Busy-time input lands in ``_interrupt_queue`` and is only drained by the explicit
+        interrupt path; a turn that finishes naturally would otherwise strand it and the
+        CLI appears to hang. Never raises.
         """
         try:
             while not self._interrupt_queue.empty():
@@ -4001,7 +3484,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 if stray:
                     self._pending_input.put(stray)
         except Exception:
-            pass  # Non-fatal — never break the main loop
+            pass
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -4010,11 +3493,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._reasoning_preview_buf = getattr(self, "_reasoning_preview_buf", "") + reasoning_text
         self._flush_reasoning_preview(force=False)
 
-    # Inline-skip tokens that bypass the destructive-slash confirmation modal.
-    # A general escape hatch for non-interactive use (scripting/automation) and
-    # for the degraded path where the modal can't be marshaled onto the app loop
-    # — lets users self-serve without flipping approvals.destructive_slash_confirm
-    # in config. (Native Windows now drives the modal normally — see #33961.)
+    # Inline tokens that bypass the destructive-slash confirmation modal (scripting, or
+    # when the modal can't be marshaled onto the app loop).
     _DESTRUCTIVE_SKIP_TOKENS = frozenset({"now", "--yes", "-y"})
 
     def _tui_process_loop(self):
@@ -4037,14 +3517,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_idle_tick(self):
         """Idle housekeeping between inputs (agent not running)."""
-        # Auto-reload MCP on mcp_servers change.
-        self._check_config_mcp_changes()
-        # Heal cooked-mode termios drift (lost run_in_terminal restore) first —
-        # a drifted tty makes the CLI look dead even though the loop is healthy.
+        self._check_config_mcp_changes()  # auto-reload MCP on mcp_servers change
+        # Termios drift heal first: a drifted tty makes the CLI look dead while the loop is healthy.
         for step in (
             self._check_termios_drift,
-            lambda: self._drain_process_notifications("cli-idle"),  # background completions / watch matches
-            self._maybe_fire_loop_tick,  # due /loop wakeup (defers to queued input + /goal)
+            lambda: self._drain_process_notifications("cli-idle"),
+            self._maybe_fire_loop_tick,
         ):
             try:
                 step()
@@ -4052,13 +3530,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 pass
 
     def _tui_unwrap_input(self, user_input):
-        """Unwrap sentinel-wrapped inputs -> ``(text_or_tuple, is_voice_input, is_seeded_query)``.
-
-        Voice-transcribed messages arrive in ``_VoiceInputMessage`` so only genuine
-        STT output gets the voice prefix (#65827). Seeded -q prompts arrive in
-        ``_SeededQueryMessage``: launcher/script text submitted LITERALLY — no slash
-        routing, ! shell dispatch, or file-drop detection.
-        """
+        """Unwrap ``_VoiceInputMessage`` / ``_SeededQueryMessage`` -> ``(text_or_tuple, is_voice_input, is_seeded_query)``."""
         is_voice_input = isinstance(user_input, _VoiceInputMessage)
         if is_voice_input:
             user_input = user_input.text
@@ -4073,10 +3545,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         user_input, is_voice_input, is_seeded_query = self._tui_unwrap_input(user_input)
         if not user_input:
             return
-        # A submitted input ends any post-resize transient suppression.
-        self._status_bar_suppressed_after_resize = False
+        self._status_bar_suppressed_after_resize = False  # input ends post-resize suppression
 
-        # Unpack image payload: (text, [Path, ...]) or plain str
         submit_images = []
         if isinstance(user_input, tuple):
             user_input, submit_images = user_input
@@ -4087,13 +3557,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             if _had_mouse_reports:
                 self._recover_terminal_input_modes(reason="mouse reports leaked into submitted input")
 
-        # A typed bare stop phrase ends an active voice chat (same as SAYING "stop").
-        # Voice transcripts are already stop-checked at the transcription points.
+        # A typed bare stop phrase ends an active voice chat (transcripts are checked earlier).
         if not is_voice_input and self._typed_voice_stop(user_input):
             return
 
-        # Dragged/pasted file paths are detected before any dispatch (see
-        # _detect_file_drop). Seeded -q prompts are literal text: none of it.
+        # File drops are detected before any dispatch; seeded -q prompts are literal text.
         _file_drop = _detect_file_drop(user_input) if isinstance(user_input, str) and not is_seeded_query else None
         if _file_drop:
             _drop_path = _file_drop["path"]
@@ -4106,13 +3574,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _cprint(f"  📄 Detected file: {_drop_path.name}")
                 user_input = f"[User attached file: {_drop_path}]" + (f"\n{_remainder}" if _remainder else "")
         elif isinstance(user_input, str):
-            # A bare number right after a bare `/resume` prompt selects that
-            # session (#34584) — checked before chat routing so the digit is
-            # never sent to the agent.
+            # A bare number right after a bare `/resume` selects that session (never sent to the agent).
             if self._pending_resume_sessions and self._consume_pending_resume_selection(user_input):
                 return
             if not is_seeded_query:
-                # `!<command>` shell mode: nothing enters history, no model turn.
                 if self.handle_bang_shell(user_input):
                     return
                 if _looks_like_slash_command(user_input):
@@ -4120,7 +3585,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     if user_input is None:
                         return
 
-        # Expand paste references back to full content
         if isinstance(user_input, str) and _PASTE_REF_RE.search(user_input):
             user_input = self._expand_paste_references(user_input)
         print()
@@ -4135,7 +3599,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._pet_turn_error = False
         self._pet_reasoning = False
         self._turn_summary_begin()
-        self._app.invalidate()  # Refresh status line
+        self._app.invalidate()
         try:
             self.chat(user_input, images=submit_images or None, voice_input=is_voice_input)
         finally:
@@ -4150,12 +3614,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 if self._app.is_running:
                     self._app.exit()
         except KeyboardInterrupt:
-            # Ctrl+C during a slow slash command (/skills browse, /sessions list on
-            # a large DB) returns to the prompt instead of killing the session.
+            # Ctrl+C during a slow slash command returns to the prompt instead of exiting.
             _cprint("\n[dim]Command interrupted.[/dim]")
             return None
-        # A slash handler may set a one-shot seed (e.g. /blueprint <name>) to run
-        # as the next agent turn.
         _seed, self._pending_agent_seed = self._pending_agent_seed, None
         return _seed or None
 
@@ -4168,27 +3629,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._last_scrollback_tool = ""
         self._pet_reasoning = False
         self._pet_react_turn_end()
-        # Post-turn accounting line (display.turn_summary) — a footer for the turn.
         self._turn_summary_emit()
         self._interactive_turn = False
+        self._app.invalidate()
 
-        self._app.invalidate()  # Refresh status line
-
-        # After an interrupt the prompt_toolkit renderer may have drifted from
-        # the terminal: CSI 6n reports leak as literal text (^[[19;1R) and the
-        # VT100 parser can stall in a partial-escape state (#33271). Drain stray
-        # escape bytes and force a clean redraw.
+        # After an interrupt the renderer may have drifted (leaked CPR text, VT100 parser
+        # stalled mid-escape): drain stray bytes and force a clean redraw.
         if self._last_turn_interrupted:
             self._recover_terminal_after_interrupt()
 
-        # Re-queue messages that landed in _interrupt_queue during the turn and
-        # were never claimed by the explicit interrupt path (#20271).
         self._drain_interrupt_queue_to_pending_input()
 
-        # Goal continuation: if a standing goal is active and unmet, and no real
-        # user message is queued, push the continuation prompt into
-        # _pending_input (user input arriving in between still preempts).
-        # Then /loop tick completion: LOOP_COMPLETE / --until judge / caps -> next tick.
+        # /goal continuation (queued user input still preempts), then /loop tick completion.
         for hook, what in (
             (self._maybe_continue_goal_after_turn, "goal continuation"),
             (self._maybe_complete_loop_tick_after_turn, "loop completion"),
@@ -4198,17 +3650,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             except Exception as _exc:
                 logging.debug("%s hook failed: %s", what, _exc)
 
-        # Continuous voice: auto-restart recording after the agent responds.
-        # Off-thread because play_beep (sd.wait) and AudioRecorder.start (lock
-        # acquire) must never block process_loop.
+        # Continuous voice: restart recording off-thread (beep + recorder start would block process_loop).
         if self._voice_mode and self._voice_continuous and not self._voice_recording:
             def _restart_recording():
                 try:
                     if self._voice_tts:
                         self._voice_tts_done.wait(timeout=60)
                         time.sleep(0.3)
-                    # A barge-in capture already owns the mic and
-                    # will submit the interruption itself.
+                    # A barge-in capture already owns the mic and submits the interruption itself.
                     if self._voice_barge_capture.is_set():
                         return
                     self._voice_start_recording()
@@ -4217,44 +3666,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     _cprint(f"{_DIM}Voice auto-restart failed: {e}{_RST}")
             threading.Thread(target=_restart_recording, daemon=True).start()
 
-        # Process notifications (completions + watch matches) that arrived mid-turn.
         try:
             self._drain_process_notifications("cli-post-turn")
         except Exception:
-            pass  # Non-fatal — never break the main loop
+            pass
 
     def _tui_signal_handler(self, signum, frame):
-        """Handle SIGHUP/SIGTERM by triggering graceful cleanup.
+        """SIGHUP/SIGTERM -> graceful shutdown.
 
-        The agent is hard-interrupted first (see _interrupt_agent_for_signal) so
-        its daemon thread can kill the tool's setsid subprocess group before the
-        main thread unwinds — otherwise the child survives as an orphan (PPID=1).
-
-        The ``logger.debug`` is guarded: CPython's logging is not reentrant-safe;
-        ``Logger.isEnabledFor`` caches in ``Logger._cache``, which under shutdown
-        races can be cleared or mid-mutation when the signal fires, raising
-        ``KeyError: <level_int>`` inside the handler. That escapes before the
-        KeyboardInterrupt, bypasses prompt_toolkit's interrupt unwind and surfaces
-        as the EIO cascade of #13710.
+        The agent is hard-interrupted first so its daemon thread can kill the tool's
+        setsid subprocess group before the main thread unwinds (else an orphan child).
+        ``logger.debug`` is guarded: logging is not reentrant-safe and a shutdown race
+        can raise ``KeyError`` inside the handler, bypassing prompt_toolkit's unwind.
         """
         try:
             logger.debug("Received signal %s, triggering graceful shutdown", signum)
         except Exception:
-            pass  # never let logging raise from a signal handler (#13710 regression)
-        # Arm the exit backstop IMMEDIATELY: if the unwind below wedges (main
-        # thread parked in a syscall, prompt_toolkit teardown never returning),
-        # _run_cleanup never runs and would never arm its own watchdog, leaving
-        # a "dead" CLI alive for minutes (#65998 class). Never raises.
+            pass
+        # Arm the backstop IMMEDIATELY: if the unwind wedges, _run_cleanup never arms its own.
         _arm_exit_watchdog_on_shutdown_signal()
         if self._agent_running:
             _interrupt_agent_for_signal(self.agent, signum)
-        # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`: a
-        # KBI raised from a signal handler lands in whatever frame is running —
-        # typically `await asyncio.sleep()` in pt's `_poll_output_size` — becomes
-        # a Task exception, pt prints "Unhandled exception in event loop" and
-        # parks the terminal on "Press ENTER to continue..." (#13710 variant).
-        # `app.exit()` via `call_soon_threadsafe` lets the loop unwind normally;
-        # `app.run()` returns and run()'s except block handles the rest.
+        # Prefer app.exit() over raising KeyboardInterrupt: a KBI from a signal handler
+        # lands in a pt Task ("Unhandled exception in event loop" + "Press ENTER to
+        # continue..."); call_soon_threadsafe lets the loop unwind normally.
         try:
             from prompt_toolkit.application.current import get_app_or_none
             _app = get_app_or_none()
@@ -4268,17 +3703,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_print_startup(self):
         """Startup output: light-mode probe, banner, advisories, resume/welcome lines, tips."""
-        # Detect light/dark terminal mode now (before pt grabs the tty).
-        # Caches the result so subsequent _hex_to_ansi / style calls
-        # don't risk re-querying mid-render.
-        try:
+        try:  # light-mode probe before pt grabs the tty (cached, never re-queried mid-render)
             _detect_light_mode()
         except Exception:
             pass
-        # Push the entire TUI to the bottom of the terminal so the banner,
-        # responses, and prompt all appear pinned to the bottom — empty
-        # space stays above, not below.  This prints enough blank lines to
-        # scroll the cursor to the last row before any content is rendered.
+        # Scroll the cursor to the last row so banner, responses and prompt pin to the bottom.
         try:
             _term_lines = shutil.get_terminal_size().lines
             if _term_lines > 2:
@@ -4287,30 +3716,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             pass
 
         self.show_banner()
-        # Surface any active supply-chain security advisories right after the
-        # welcome banner. Quiet/single-query paths call this themselves.
         self._show_security_advisories()
-        # Surface a silent browser-backend downgrade (default Browser Use
-        # mode with no runnable CLI) — one line, rate-limited to 24h.
         self._show_browser_backend_notice()
 
-        # First-run: a completely unconfigured install must route into
-        # provider onboarding, not a chat that cannot work. Previously a
-        # keyless `hermes` accepted a message, spun for ~30s, then failed
-        # with a provider-specific error the user never chose. Only fires
-        # on a real TTY; quiet/single-query paths keep their own handling.
+        # First-run: an unconfigured install routes into provider onboarding instead of
+        # a chat that spins ~30s and fails with a provider-specific error. TTY only.
         try:
             if sys.stdin.isatty() and not self._runtime_credentials_ready():
                 self._offer_first_run_setup()
         except Exception:
             logger.debug("first-run setup offer failed", exc_info=True)
 
-        # If resuming a session, load history and display it immediately
-        # so the user has context before typing their first message.
         if self._resumed and self._preload_resumed_session():
             self._display_resumed_history()
 
-        _welcome_skin = None  # None when the skin engine failed: residue banner falls back to its default color
+        _welcome_skin = None  # stays None when the skin engine failed
         try:
             from hermes_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
@@ -4325,9 +3745,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._print_random_tip()
 
         self._tui_startup_background_maintenance()
-        # When the background --skills preload hasn't been folded in yet (it joins at
-        # agent init), show the REQUESTED names — identical to the loaded set except
-        # for typo'd names, which warn later.
+        # Before the background preload is folded in (at agent init), show the REQUESTED names.
         _skills_for_line = self.preloaded_skills or list(self._preload_skills_requested or [])
         if _skills_for_line and not self._startup_skills_line_shown:
             self._console_print(f"[bold {_accent_hex()}]Activated skills:[/] {', '.join(_skills_for_line)}")
@@ -4336,25 +3754,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_startup_prewarm_and_warnings(self, _welcome_skin):
         """Idle-window prewarms (picker cache, agent runtime imports) plus the redaction-off and OpenClaw-residue banners."""
-        # Warm the /model picker's provider-models cache off-thread during this
-        # idle window (banner shown, user about to type). The no-args picker
-        # otherwise blocks ~1-2s on serial /v1/models fetches the first time
-        # it's opened in a session. Fire-and-forget, guarded once-per-process.
+        # Warm the /model picker cache off-thread (else its first open blocks ~1-2s).
         try:
             from hermes_cli.model_switch import prewarm_picker_cache_async
             prewarm_picker_cache_async()
         except Exception:
             pass
 
-        # Pre-import the agent runtime off-thread during the same idle window.
-        # The first turn otherwise pays ~1.5s of module imports on the
-        # time-to-first-token critical path: `import run_agent` (~0.9s,
-        # deferred by the lazy AIAgent wrapper above) plus the OpenAI SDK
-        # (~0.6s, deferred until client construction). Python's import lock
-        # makes this safe: if the user submits before the warm finishes, the
-        # main thread simply blocks on the remaining import work instead of
-        # redoing it. Skipped when agent startup is explicitly deferred
-        # (Termux) — that path defers heavy work on purpose.
+        # Pre-import the agent runtime (~1.5s: run_agent + OpenAI SDK) off-thread; the import
+        # lock makes an early submit block on the remaining work rather than redo it.
+        # Skipped when Termux defers agent startup on purpose.
         if os.environ.get("HERMES_DEFER_AGENT_STARTUP") != "1":
             def _prewarm_agent_runtime() -> None:
                 try:
@@ -4365,10 +3774,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
             threading.Thread(target=_prewarm_agent_runtime, name="agent-runtime-prewarm", daemon=True).start()
 
-        # Redaction opt-out warning (#17691): ON by default, loud when off.
-        # The redactor snapshots its state at import time so any toggle now
-        # won't affect the running process — we just want the operator to
-        # see that they're running without the safety net.
+        # Redaction is ON by default; be loud when the operator turned it off.
         try:
             _redact_raw = os.getenv("HERMES_REDACT_SECRETS", "true")
             if _redact_raw.lower() not in {"1", "true", "yes", "on"}:
@@ -4382,9 +3788,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 )
         except Exception:
             pass
-        # First-time OpenClaw-residue banner — fires once if ~/.openclaw/ exists
-        # after an OpenClaw→Hermes migration (especially migrations done by
-        # OpenClaw's own tool, which doesn't archive the source directory).
+        # One-time banner when ~/.openclaw/ is left over from a migration.
         try:
             from agent.onboarding import (
                 OPENCLAW_RESIDUE_FLAG, detect_openclaw_residue, is_seen, mark_seen, openclaw_residue_hint_cli,
@@ -4399,16 +3803,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     from hermes_cli.config import get_config_path as _get_cfg_path_resid
                     mark_seen(_get_cfg_path_resid(), OPENCLAW_RESIDUE_FLAG)
                 except Exception:
-                    pass  # best-effort — banner will fire again next session
+                    pass  # banner fires again next session
         except Exception:
-            pass  # banner is non-critical — never break startup
+            pass
 
     def _tui_startup_background_maintenance(self):
-        """Best-effort startup passes: curator skill maintenance, personal + org skill sync. Never blocks startup."""
-        # Curator — kick off a background skill-maintenance pass on startup
-        # if the schedule says we're due.  Runs in a daemon thread so it
-        # never blocks the interactive loop.  Best-effort; any failure is
-        # swallowed to avoid breaking session startup.
+        """Best-effort startup passes: curator skill maintenance, personal + org skill sync."""
         try:
             from agent.curator import maybe_run_curator
             maybe_run_curator(
@@ -4434,15 +3834,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_build_application(self, layout, kb, style):
         """Construct the prompt_toolkit Application for the REPL."""
-        # CPR-disabled output when _terminal_may_leak_cpr() says so (POSIX local +
-        # SSH; Windows keeps the PT default). None -> prompt_toolkit's default;
-        # _strip_leaked_terminal_responses still scrubs residual leaks from input.
         _cpr_disabled_output = _select_classic_cli_pt_output(sys.stdout)
 
-        # Kitty placeholders encode the image id in exact foreground RGB, so
-        # placeholder-capable terminals (kitty/Ghostty) run the whole app in
-        # 24-bit color — quantizing only that pane is not supported. ColorDepth is
-        # imported lazily so tests that stub ``prompt_toolkit`` can still import cli.
+        # Kitty placeholders encode the image id in exact foreground RGB, so the whole app
+        # runs 24-bit there. ColorDepth is imported lazily for tests that stub prompt_toolkit.
         extra_kw = {}
         if pet_render.supports_kitty_placeholders():
             from prompt_toolkit.output import ColorDepth
@@ -4458,16 +3853,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             style=style,
             full_screen=False,
             mouse_support=False,
-            # display.cli_refresh_interval (default 0 = disabled): non-zero keeps
-            # wall-clock status-bar read-outs ticking during idle; 0 avoids fighting
-            # terminal auto-scroll in non-fullscreen mode (Xshell, iTerm2, Windows
-            # Terminal). See #48309.
+            # 0 (default) avoids fighting terminal auto-scroll in non-fullscreen mode.
             refresh_interval=float(CLI_CONFIG.get("display", {}).get("cli_refresh_interval", 0)),
-            # Erase the live bottom chrome (status bar, input box, rules) on exit
-            # instead of freezing a final copy into scrollback, where it would sit
-            # between the transcript and the exit summary and stack with the next
-            # session's UI on resume (#38252). The transcript itself goes through
-            # patch_stdout into normal scrollback and is unaffected.
+            # Erase the bottom chrome on exit instead of freezing a copy into scrollback.
             erase_when_done=True,
             **extra_kw,
         )
@@ -4480,26 +3868,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             if hasattr(_signal, 'SIGHUP'):
                 _signal.signal(_signal.SIGHUP, self._tui_signal_handler)
 
-            # Windows: absorb SIGINT. Win32 delivers spurious CTRL_C_EVENT when
-            # child processes are spawned from background threads; Python's
-            # default handler would unwind app.run() and run _run_cleanup
-            # mid-turn ("Daemon process exited during startup"). Real Ctrl+C
-            # still works — prompt_toolkit binds c-c at the TUI layer and never
-            # reaches this path. POSIX keeps the default handler (prompt_toolkit
-            # installs its own). Do NOT call agent.interrupt() here: it would
-            # inject a fake user message on every spurious event.
+            # Windows: absorb SIGINT. Win32 delivers spurious CTRL_C_EVENT when children spawn
+            # from background threads, which would unwind app.run() mid-turn. Real Ctrl+C is
+            # bound by prompt_toolkit. Never call agent.interrupt() here (fake user message).
             if sys.platform == "win32":
                 _signal.signal(_signal.SIGINT, lambda signum, frame: None)
         except Exception:
-            pass  # Signal handlers may fail in restricted environments
+            pass  # restricted environments
 
     def _tui_stdin_usable(self) -> bool:
-        """Validate fd 0 before prompt_toolkit starts; on macOS swap in a select()-backed loop if kqueue can't watch it.
-
-        With uv-managed Python on macOS fd 0 can be invalid or unregisterable with
-        the asyncio selector ("KeyError: '0 is not registered'", OSError(EINVAL) from
-        kqueue.control() in loop.add_reader) — #6393.
-        """
+        """Validate fd 0 before prompt_toolkit starts; on macOS fall back to a select() loop when kqueue can't watch it (uv-managed Python)."""
         try:
             os.fstat(0)
         except OSError:
@@ -4543,23 +3921,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         app = self._tui_build_application(layout, kb, style)
         _disable_prompt_toolkit_cpr_warning(app)
         app.after_render += self._pet_flush_kitty_frame
-        self._app = app  # Store reference for clarify_callback
+        self._app = app
 
-        # ── Fix ghost status-bar lines on terminal resize ──────────────
-        # prompt_toolkit's renderer moves the cursor to the canvas bottom after
-        # painting so the terminal scrolls up; in non-fullscreen mode that pushes
-        # chrome (status bar, input rules) into scrollback on every render, and a
-        # column-shrink reflows the old full-width rows into ghost duplicates
-        # (pt #29/#1675/#1933). Wrap _output_screen_diff so its
-        # `current_height > previous_screen.height` branch never fires, by
-        # inflating previous_screen.height first.
+        # Ghost status-bar lines on resize: pt's renderer scrolls the terminal after each
+        # paint, pushing chrome into scrollback where a column-shrink reflows it into
+        # duplicates. Wrapping _output_screen_diff keeps its reserve-space branch from firing.
         try:
             import prompt_toolkit.renderer as _pt_renderer
             from prompt_toolkit.renderer import _output_screen_diff as _orig_osd
 
             if not getattr(_pt_renderer, "_hermes_osd_patched", False):
-                # Same parameter names as pt's function, so pt's keyword call
-                # site binds unchanged; the guards live in the helper's docstring.
                 _pt_renderer._output_screen_diff = functools.partial(
                     _hermes_call_output_screen_diff, _orig_osd
                 )
@@ -4567,29 +3938,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         except Exception:
             pass
 
-        # Apply bracketed-paste timeout recovery so torn ESC[201~ end marks
-        # don't permanently freeze the input (issue #16263). Idempotent.
         _apply_bracketed_paste_timeout_patch()
 
         self._install_resize_recovery(app)
 
-        spinner_thread = threading.Thread(target=self._tui_spinner_loop, daemon=True)
-        spinner_thread.start()
-        
-        # Background thread to process inputs and run agent
-        
-        # Start processing thread
-        process_thread = threading.Thread(target=self._tui_process_loop, daemon=True)
-        process_thread.start()
-
-        # Wake word ("Hey Hermes") — start the always-on hotword listener if
-        # enabled. Off-thread so a first-run engine install never blocks the
-        # prompt; best-effort, so deps/mic/key gaps are surfaced, never fatal.
+        threading.Thread(target=self._tui_spinner_loop, daemon=True).start()
+        threading.Thread(target=self._tui_process_loop, daemon=True).start()
+        # Wake word listener off-thread so a first-run engine install never blocks the prompt.
         threading.Thread(target=self._tui_wake_startup, daemon=True, name="wake-startup").start()
 
-        # Register atexit cleanup so resources are freed even on unexpected exit
         atexit.register(_run_cleanup)
-        
         self._tui_install_signal_handlers()
 
         if not self._tui_stdin_usable():
@@ -4597,29 +3955,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self._print_exit_summary()
             return
 
-        # Run the application with patch_stdout for proper output handling
         try:
             with patch_stdout():
-                # Set the custom handler on prompt_toolkit's event loop
                 try:
                     import asyncio as _aio
-                    # Use get_running_loop() to avoid DeprecationWarning on
-                    # Python 3.10+ when called outside an async context.
-                    _loop = _aio.get_running_loop()
-                    _loop.set_exception_handler(self._tui_suppress_closed_loop_errors)
-                except RuntimeError:
-                    pass  # No running loop -- nothing to patch
+                    _aio.get_running_loop().set_exception_handler(self._tui_suppress_closed_loop_errors)
                 except Exception:
-                    pass
-                # The app enables focus reporting + mouse tracking; record that
-                # so _run_cleanup resets them on exit (#36823). When multiline
-                # shortcuts are on, also ask supported terminals (e.g. iTerm2)
-                # to report modified keys distinctly (kitty protocol +
-                # modifyOtherKeys); the cleanup reset pops both modes.
+                    pass  # no running loop -- nothing to patch
+                # Record that the app enables focus reporting + mouse tracking so _run_cleanup
+                # resets them; extended key modes are popped by the same reset.
                 _mark_tui_input_modes_active()
                 if self._tui_multiline_shortcuts:
                     _enable_extended_enter_keys(app.output)
-                # Drive the petdex mascot animation (no-op when no pet enabled).
                 self._pet_start_anim()
                 app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
@@ -4645,34 +3992,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         finally:
             self._tui_shutdown()
 
-        # Deferred relaunch: /update sets _pending_relaunch so the exec
-        # happens here — after prompt_toolkit has exited and fully restored
-        # terminal modes — rather than from the background process_loop
-        # thread (which would skip terminal cleanup on POSIX and only exit
-        # the worker thread on Windows).
+        # /update relaunch happens here, after prompt_toolkit restored terminal modes, on the
+        # main thread (the process_loop thread would skip cleanup / only exit itself on Windows).
         if self._pending_relaunch:
             from hermes_cli.relaunch import relaunch
             relaunch(self._pending_relaunch, preserve_inherited=False)
 
     def _tui_shutdown(self):
-        """Teardown after the prompt_toolkit app exits: interrupt the agent, stop voice/pet, persist + close the session, run cleanup, print the exit summary."""
+        """Teardown after the app exits: interrupt agent, stop voice/pet, persist + close session, cleanup, exit summary."""
         self._should_exit = True
         self._pet_stop_anim()
-        # prompt_toolkit just tore down the input box + status bar; without a
-        # line here the terminal sits silent through the whole cleanup window
-        # (session flush, memory shutdown, MCP/browser/terminal teardown).
+        # Without this line the terminal sits silent through the whole cleanup window.
         try:
             print(f"{_DIM}Shutting down… (finalizing session){_RST}", flush=True)
         except Exception:
             pass
-        # Interrupt the agent now so its daemon thread stops making API calls
-        # and run_conversation gets to clean up.
         if self.agent and self._agent_running:
             try:
                 request_hard_interrupt(self.agent)
             except Exception:
                 pass
-        # Release the persistent audio stream.
         if self._voice_recorder:
             try:
                 self._voice_recorder.shutdown()
@@ -4684,12 +4023,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             cleanup_temp_recordings()
         except Exception:
             pass
-        # Unregister callbacks to avoid dangling references
         set_sudo_password_callback(None)
         set_approval_callback(None)
         set_secret_capture_callback(None)
-        # On SIGHUP/SIGTERM/window close the agent thread may not reach its normal
-        # run_conversation() persistence before the daemon thread is reaped.
+        # On SIGHUP/SIGTERM the agent thread may be reaped before its own persistence runs.
         self._persist_active_session_before_close()
 
         if self._session_db and self.agent:
@@ -4698,10 +4035,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Could not close session in DB: %s", e)
             if not self._delete_session_on_exit:
-                # Started-and-immediately-quit sessions never gained content; drop
-                # the empty row so /resume and `hermes sessions list` stay clean
-                # (gemini-cli#27770 port). No-op for resumed/titled sessions and
-                # anything with messages or children.
+                # Drop the empty row of a start-and-quit session so /resume stays clean.
                 try:
                     self._discard_session_if_empty(self.agent.session_id)
                 except (Exception, KeyboardInterrupt) as e:
@@ -4716,8 +4050,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                         _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not delete session on exit: %s", e)
-        # on_session_end safety net: run_conversation() fires it per turn on normal
-        # completion, so only fire here when the exit happened mid-turn.
+        # run_conversation() fires on_session_end on normal completion; only fire here mid-turn.
         if self.agent and self._agent_running:
             _invoke_interrupted_session_end(self.agent, self.agent.session_id, "shutdown")
         _run_cleanup()
@@ -4734,13 +4067,10 @@ def _int_or(value, default: int) -> int:
 
 
 def _interrupt_agent_for_signal(agent, signum) -> None:
-    """Hard-interrupt ``agent`` for a shutdown signal, then sleep the grace window.
+    """Hard-interrupt ``agent`` for a shutdown signal, then sleep ``HERMES_SIGTERM_GRACE`` (1.5 s).
 
-    The grace (``HERMES_SIGTERM_GRACE``, default 1.5 s) lets the agent daemon thread
-    see the interrupt on its next poll and ``_kill_process`` the tool's setsid
-    subprocess group before the main thread unwinds — otherwise the child survives
-    as an orphan. ``time.sleep`` releases the GIL so the daemon actually runs.
-    Never raises (signal handler context).
+    The grace lets the agent thread kill the tool's setsid subprocess group before the
+    main thread unwinds (else an orphan child). Never raises.
     """
     try:
         if agent is not None:
@@ -4752,19 +4082,10 @@ def _interrupt_agent_for_signal(agent, signum) -> None:
         pass  # never block signal handling
 
 
-# ============================================================================
-# Main Entry Point
-# ============================================================================
-
 def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
-    """Drive a kanban goal_mode worker through the Ralph-style goal loop.
+    """Drive a kanban goal_mode worker through ``goals.run_kanban_goal_loop`` after its first turn.
 
-    Called from the quiet single-query path AFTER the worker's first turn,
-    only when ``HERMES_KANBAN_GOAL_MODE`` is set (dispatcher-spawned
-    goal_mode card). Wires the worker's ``run_conversation`` and the kanban
-    DB into ``goals.run_kanban_goal_loop``. All errors are swallowed by the
-    caller — a broken goal loop must never wedge a worker, the dispatcher's
-    claim TTL / crash detection is the backstop.
+    The caller swallows all errors: a broken loop must never wedge a worker.
     """
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     if not task_id:
@@ -4780,8 +4101,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     from hermes_cli import kanban_db as _kb
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
 
-    # Resolve goal text from the card (title + body = the acceptance
-    # criteria the judge evaluates against).
+    # Goal text = title + body (the acceptance criteria the judge evaluates against).
     with _kb.connect_closing() as conn:
         task = _kb.get_task(conn, task_id)
     if task is None:
@@ -4842,34 +4162,19 @@ def _run_quiet_single_query(cli, effective_query):
     elif response:
         print(response)
 
-    # Kanban goal-loop mode: a worker spawned for a
-    # goal_mode card keeps working in THIS session until an
-    # auxiliary judge agrees the card is done, the worker
-    # terminates the task itself, or the turn budget runs
-    # out (→ sticky block). Gated on the env vars the
-    # dispatcher sets in `_default_spawn`; a no-op for every
-    # normal worker and every non-kanban `-q` run.
+    # Kanban goal_mode: keep working in THIS session until a judge agrees the card is
+    # done, the worker terminates it, or the turn budget runs out (sticky block).
     if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
         try:
             _run_kanban_goal_loop_q(cli, response)
         except Exception as _goal_exc:
             logger.debug("kanban goal loop failed: %s", _goal_exc)
 
-    # Session ID goes to stderr so piped stdout is clean.
     print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
 
-    # Ensure proper exit code for automation wrappers.
-    #
-    # Kanban workers get a special case: when the run failed
-    # purely because the provider rate-limited / exhausted
-    # quota (not because the task itself is broken), exit with
-    # the EX_TEMPFAIL sentinel instead of the generic 1. The
-    # dispatcher's reap classifier maps that code to a
-    # ``rate_limited`` exit and releases the task back to
-    # ``ready`` WITHOUT incrementing the failure counter, so a
-    # 5-hour quota window can't trip the circuit breaker and
-    # permanently block the card. Non-kanban runs keep the
-    # plain 0/1 contract automation wrappers expect.
+    # Exit code 0/1 for automation wrappers. Kanban workers that failed purely on
+    # rate-limit/billing exit with the EX_TEMPFAIL sentinel so the dispatcher releases
+    # the task without counting a failure (a quota window must not trip the breaker).
     _exit_code = 0
     if isinstance(result, dict) and result.get("failed"):
         _exit_code = 1
@@ -4927,14 +4232,7 @@ def _route_single_query_images(cli, query, effective_query, single_query_images,
 
 
 def _collect_kanban_task_images(single_query_images):
-    """Kanban workers: scan the task body for image paths/URLs and add them to the first turn's attachments."""
-    # Kanban workers spawn with ``hermes chat -q "work kanban task <id>"``;
-    # the actual task description lives in the task body. Mirror the
-    # gateway/CLI behaviour for inbound images by scanning the body for
-    # local image paths and http(s) image URLs and attaching them to the
-    # worker's first turn. Without this, users who paste a screenshot
-    # path or URL into a kanban task body never get it routed to the
-    # model's vision input.
+    """Kanban workers: image paths/URLs in the task body join the first turn's attachments."""
     single_query_image_urls: list[str] = []
     _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
     if not _kanban_task_id:
@@ -4962,27 +4260,20 @@ def _collect_kanban_task_images(single_query_images):
 
 
 def _install_single_query_signal_handlers(cli):
-    """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() (worker threads see it) before unwinding; kanban workers hard-exit."""
+    """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() before unwinding; kanban workers hard-exit.
+
+    A plain KeyboardInterrupt only unwinds the main thread, so tool worker threads
+    would orphan the setsid child; the interrupt + grace window lets them kill it.
+    """
     import signal as _signal
 
-    # Single-query (`-q`) signal handling. Interactive mode registers its own in
-    # HermesCLI.run(); here AIAgent's tool worker threads would outlive a plain
-    # KeyboardInterrupt (only the main thread unwinds) and orphan the setsid child
-    # subprocess. So route SIGTERM/SIGHUP through agent.interrupt() (the worker
-    # poll loop checks it every 200 ms), give it a grace window to _kill_process,
-    # then raise KeyboardInterrupt. HERMES_SIGTERM_GRACE overrides the 1.5 s default.
     def _signal_handler_q(signum, frame):
         logger.debug("Received signal %s in single-query mode", signum)
-        # Arm the exit backstop now that shutdown intent is unambiguous —
-        # covers wedges in the unwind below that would otherwise leave the
-        # process alive with no watchdog (#65998 class). Never raises.
-        _arm_exit_watchdog_on_shutdown_signal()
+        _arm_exit_watchdog_on_shutdown_signal()  # covers wedges in the unwind below
         _interrupt_agent_for_signal(getattr(cli, "agent", None), signum)
-        # Kanban worker (#28181): a non-daemon worker thread blocked in
-        # _wait_for_process survives KeyboardInterrupt, so the PID stays alive and
-        # the dispatcher's _pid_alive sees 'running' forever. os._exit(0) instead,
-        # so detect_crashed_workers reclaims the claim next tick. Flush logging +
-        # stdio first (SIGALRM deadman guards a rare blocking flush).
+        # Kanban: a non-daemon worker blocked in _wait_for_process survives KeyboardInterrupt
+        # and the dispatcher sees 'running' forever, so os._exit(0) (SIGALRM deadman guards
+        # a blocking flush). That skips atexit + the token-drain hook, hence the explicit flush.
         if os.environ.get("HERMES_KANBAN_TASK"):
             try:
                 if hasattr(_signal, "SIGALRM"):
@@ -4990,10 +4281,6 @@ def _install_single_query_signal_handlers(cli):
                     _signal.alarm(5)
             except Exception:
                 pass
-            # os._exit(0) skips atexit AND SessionDB's token-drain hook, so
-            # flush + finalize the session store here or the worker's turn
-            # (and its usage deltas) never become durable (#88583 / #50881
-            # class). Best-effort under the SIGALRM deadman above.
             try:
                 _flush_one_shot_session_store(cli)
             except Exception:
@@ -5006,7 +4293,7 @@ def _install_single_query_signal_handlers(cli):
             if hasattr(_signal, _name):
                 _signal.signal(getattr(_signal, _name), _signal_handler_q)
     except Exception:
-        pass  # signal handler may fail in restricted environments
+        pass  # restricted environments
 
 
 def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
@@ -5020,10 +4307,7 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
         for t in toolsets:
             toolsets_list.extend([x.strip() for x in t.split(",")] if isinstance(t, str) else [str(t)])
     elif not toolsets:
-        # Coding posture: with no explicit --toolsets, collapse to the coding
-        # toolset (+ enabled MCP servers) inside a code workspace
-        # (agent/coding_context.py); otherwise the shared platform resolver so
-        # MCP servers are included at runtime.
+        # Coding posture inside a code workspace, else the shared platform resolver.
         try:
             from agent.coding_context import coding_selection
             toolsets_list = coding_selection(platform="cli", config=CLI_CONFIG)
@@ -5035,7 +4319,6 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
 
     parsed_skills = _parse_skills_argument(skills)
 
-    # Create CLI instance
     try:
         cli = HermesCLI(
             model=model,
@@ -5054,8 +4337,7 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
             ignore_rules=ignore_rules,
         )
     except ImportError as e:
-        # Direct `python cli.py` / `python -m cli` bypasses cmd_chat's
-        # ImportError handler. Same mixed-tree class as #96900.
+        # Direct `python cli.py` bypasses cmd_chat's partial-update ImportError handler.
         from hermes_constants import emit_partial_update_hint
 
         if emit_partial_update_hint(e):
@@ -5080,10 +4362,8 @@ def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url
 
 
 def _run_legacy_gateway():
-    """Legacy `cli.py --gateway` entry: arm the startup watchdog, then run the gateway event loop."""
+    """Legacy `cli.py --gateway` entry: arm the startup watchdog (before importing the gateway graph), then run it."""
     import asyncio
-    # Startup-liveness watchdog (OOF-298): this legacy entry point must
-    # be covered too — arm before importing the gateway graph.
     try:
         from hermes_startup_watchdog import arm_startup_watchdog
         arm_startup_watchdog()
@@ -5095,22 +4375,15 @@ def _run_legacy_gateway():
 
 
 def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
-    """Kick off isolated-worktree creation (+ tool prewarm) in the background.
+    """Start isolated-worktree creation (+ tool prewarm) in the background.
 
-    Returns the ``_join_worktree`` callable that waits for the setup, publishes
-    ``_active_worktree``/TERMINAL_CWD and schedules stale-worktree GC — or None when
-    no worktree is wanted (list commands exit immediately, or -w not requested).
+    Returns a join callable that publishes ``_active_worktree``/TERMINAL_CWD and
+    schedules stale-worktree GC, or None when no worktree is wanted.
     """
-    if list_tools or list_toolsets:
+    if list_tools or list_toolsets or not (worktree or w or CLI_CONFIG.get("worktree", False)):
         return None
-    # Git worktree isolation (#652): this agent instance must not collide with
-    # other agents working on the same repo.
-    if not (worktree or w or CLI_CONFIG.get("worktree", False)):
-        return None
-    # Overlap tool discovery with the network/subprocess-bound worktree setup
-    # (both release the GIL for most of their wall time) so show_banner() hits
-    # the warm cache instead of paying ~0.4s serially. Only on the -w path: on
-    # plain `hermes` there is no I/O wait to hide and the thread just contends.
+    # Overlap tool discovery with the I/O-bound worktree setup so show_banner() hits a warm
+    # cache (~0.4s). Only on the -w path: plain `hermes` has no I/O wait to hide.
     def _prewarm_tools() -> None:
         try:
             import model_tools as _mt
@@ -5119,9 +4392,6 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
             logger.debug("tool prewarm failed", exc_info=True)
 
     threading.Thread(target=_prewarm_tools, name="tool-prewarm", daemon=True).start()
-    # Worktree creation (~0.2-0.6s of git wall time) runs concurrently with the
-    # rest of startup; joined right after HermesCLI construction, before anything
-    # consumes TERMINAL_CWD / wt_info. Setup failure still aborts the session.
     _sync_base = CLI_CONFIG.get("worktree_sync", True)
     _wt_result: dict = {}
 
@@ -5143,17 +4413,13 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
             _active_worktree = info
             os.environ["TERMINAL_CWD"] = info["path"]
             atexit.register(_cleanup_worktree, info)
-            # Prune stale worktrees from crashed sessions in the background —
-            # pure GC. Ordered AFTER _setup_worktree so the two never race on
-            # git's worktrees metadata; the new tree is immune to reaping
-            # (<24h age gate + live pid lock).
+            # GC stale worktrees AFTER _setup_worktree so they never race on git's worktree
+            # metadata (the new tree is immune: <24h age gate + live pid lock); then repack
+            # once refs are final so lookups stay fast on multi-agent boxes.
             _repo = _git_repo_root()
             if _repo:
                 def _worktree_maintenance(repo: str) -> None:
                     _prune_stale_worktrees(repo)
-                    # Repack when packs sprawl so object lookups (and the next
-                    # `worktree add`) stay fast on multi-agent boxes; after the
-                    # pruner so the repack sees final refs.
                     _maintain_pack_health(repo)
 
                 threading.Thread(target=_worktree_maintenance, args=(_repo,), name="worktree-prune", daemon=True).start()
@@ -5163,31 +4429,22 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
 
 
 def _configure_quiet_agent(agent) -> None:
-    """Neutralize every stdout-writing callback so -Q stdout carries only the final response (#93220)."""
+    """Neutralize every stdout-writing callback so -Q stdout carries only the final response."""
     agent.quiet_mode = True
     agent.suppress_status_output = True
-    # No styled "Hermes" box, tool-gen status lines, or reasoning box.
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
     agent.reasoning_callback = None
-    # Inline-diff and progress callbacks print directly to stdout and are gated
-    # by NEITHER quiet_mode nor tool_progress_mode (_on_tool_complete renders
-    # full file diffs; _on_tool_progress prints MoA reference blocks before its
-    # mode check), so they must go too.
+    # The diff/progress callbacks print directly and are gated by neither quiet_mode nor
+    # tool_progress_mode, so they must go too; "off" also covers the executor's direct prints.
     agent.tool_progress_callback = None
     agent.tool_start_callback = None
     agent.tool_complete_callback = None
-    # Belt-and-braces for the executor's direct prints (they check
-    # agent.tool_progress_mode, initialized from display.tool_progress).
     agent.tool_progress_mode = "off"
 
 
 def _run_single_query_mode(cli, query, image, quiet, oneshot):
     """``-q``/``--image`` entry: seed an interactive session on a TTY, else run the one-shot turn and exit."""
-    # NEW DEFAULT (Aug 2026): on a real TTY, -q/--image seeds a normal interactive
-    # session with the prompt as the first turn, submitted LITERALLY (no slash/!
-    # dispatch). Answer-and-exit is kept for --oneshot, -Q, and every non-TTY
-    # invocation (kanban/cron/pipes) — see _should_seed_interactive().
     if _should_seed_interactive(query, image, quiet, oneshot):
         seeded_query, seeded_images = _collect_query_images(query, image)
         logger.info(
@@ -5196,13 +4453,8 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
         )
         cli._seeded_first_message = _SeededQueryMessage(seeded_query, seeded_images)
         return cli.run()
-    # One-shot: no between-turns MCP late-binding refresh, so the agent waits the
-    # full MCP cold-start bound before its only tool snapshot (#51316).
-    cli._single_query_mode = True
-    # A -q run has NO user to answer approval prompts: the approval gate reads
-    # this marker (gateway.session_context.get_session_env, falling back to
-    # os.environ) and takes the deterministic approvals.single_query_mode path
-    # instead of waiting the full timeout (#86878).
+    cli._single_query_mode = True  # agent waits the full MCP cold-start before its only tool snapshot
+    # No user can answer approval prompts: the approval gate takes the deterministic path.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         sys.exit(1)
@@ -5211,7 +4463,6 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
         single_query_image_urls = _collect_kanban_task_images(single_query_images)
         if quiet:
             # Quiet mode: suppress banner, spinner, tool previews.
-            # Only print the final response and parseable session info.
             cli.tool_progress_mode = "off"
             if cli._ensure_runtime_credentials():
                 effective_query: Any = _route_single_query_images(
@@ -5228,11 +4479,8 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
                     _configure_quiet_agent(cli.agent)
                     _run_quiet_single_query(cli, effective_query)
 
-            # Exit with error code if credentials or agent init fails
-            sys.exit(1)
-        # Single-query (`-q`): skip the welcome banner (~420 ms cold — version
-        # check + toolset/skill enumeration + Rich render). The session id /
-        # resume hint come from _print_exit_summary().
+            sys.exit(1)  # credentials or agent init failed
+        # No welcome banner (~420 ms cold); session id / resume hint come from _print_exit_summary().
         _query_label = query or ("[image attached]" if single_query_images else "")
         if _query_label:
             cli.console.print(f"[bold blue]Query:[/] {_query_label}")
@@ -5309,20 +4557,15 @@ def main(
         python cli.py -w                         # Start in isolated git worktree
         python cli.py -w -q "Fix issue #123"     # Single query in worktree
     """
-    # Force UTF-8 stdio on Windows before any banner/print() runs — the
-    # Rich console prints Unicode box-drawing characters that would
-    # UnicodeEncodeError on cp1252.  No-op on Linux/macOS.
+    # UTF-8 stdio on Windows before any print (Rich box-drawing would UnicodeEncodeError on cp1252).
     try:
         from hermes_cli.stdio import configure_windows_stdio
         configure_windows_stdio()
     except Exception:
         pass
 
-    # Signal to terminal_tool that we're in interactive mode
-    # This enables interactive sudo password prompts with timeout
-    os.environ["HERMES_INTERACTIVE"] = "1"
-    
-    # Handle gateway mode (messaging + cron)
+    os.environ["HERMES_INTERACTIVE"] = "1"  # terminal_tool: interactive sudo prompts with timeout
+
     if gateway:
         _run_legacy_gateway()
         return
@@ -5348,23 +4591,18 @@ def main(
             f"The original repo is at {wt_info['repo_root']}.]"
         )
         cli.system_prompt = (cli.system_prompt or "") + wt_note
-    
-    # Handle list commands (don't init agent for these)
+
     if list_tools or list_toolsets:
         cli.show_banner()
         (cli.show_tools if list_tools else cli.show_toolsets)()
         sys.exit(0)
-    
-    # Register cleanup for single-query mode (interactive mode registers in run())
-    atexit.register(_run_cleanup)
 
+    atexit.register(_run_cleanup)  # interactive mode registers again in run() (idempotent)
     _install_single_query_signal_handlers(cli)
-    
+
     if query or image:
         _run_single_query_mode(cli, query, image, quiet, oneshot)
         return
-
-    # Run interactive mode
     cli.run()
 
 
