@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import suppress
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
@@ -89,30 +90,24 @@ def _provider_default_routes(provider: str) -> set[str]:
         if route:
             routes.add(route)
 
-    try:
+    with suppress(Exception):
         from hermes_cli.providers import HERMES_OVERLAYS, get_provider
         overlay = HERMES_OVERLAYS.get(provider)
         provider_def = get_provider(provider, allow_network=False)
         add(getattr(overlay, "base_url_override", ""))
         add(getattr(provider_def, "base_url", ""))
-    except Exception:
-        pass
 
-    try:
+    with suppress(Exception):
         from providers import get_provider_profile
         add(getattr(get_provider_profile(provider), "base_url", ""))
-    except Exception:
-        pass
 
-    try:
+    with suppress(Exception):
         from hermes_cli.auth import PROVIDER_REGISTRY
         from hermes_cli.models import normalize_provider as normalize_model_provider
         from hermes_cli.providers import normalize_provider as normalize_registry_provider
         for provider_id, config in PROVIDER_REGISTRY.items():
             if normalize_registry_provider(normalize_model_provider(provider_id)) == provider:
                 add(getattr(config, "inference_base_url", ""))
-    except Exception:
-        pass
 
     if provider == "gemini":
         routes.update(f"{route.rstrip('/')}/openai" for route in list(routes))
@@ -144,12 +139,10 @@ def _context_route_mismatch(
     except Exception:
         configured_provider = configured_provider.lower()
         active_provider = active_provider.lower()
-    try:
+    with suppress(Exception):
         from hermes_cli.providers import normalize_provider as normalize_registry_provider
         configured_provider = normalize_registry_provider(configured_provider)
         active_provider = normalize_registry_provider(active_provider)
-    except Exception:
-        pass
 
     if active_route:
         configured_routes = _provider_default_routes(configured_provider)
@@ -461,20 +454,16 @@ def _finalize_routing(agent, api_mode, credential_pool):
             agent._credential_pool = None
 
     # Warm the transport cache so import errors surface at init (non-fatal: some modes lack one).
-    try:
+    with suppress(Exception):
         agent._get_transport()
-    except Exception:
-        pass
 
-    try:
+    with suppress(Exception):
         from hermes_cli.model_normalize import (
             _AGGREGATOR_PROVIDERS, normalize_model_for_provider
         )
 
         if agent.provider not in _AGGREGATOR_PROVIDERS:
             agent.model = normalize_model_for_provider(agent.model, agent.provider)
-    except Exception:
-        pass
 
     # Auto-upgrade to Responses for GPT-5.x-style models and direct OpenAI URLs, unless
     # api_mode was explicit, the runtime is ACP (`acp://` clients route themselves, no
@@ -649,7 +638,7 @@ def _init_prompt_cache_config(agent):
     # billing cache writes, proxies adding their own cache_control); the disable survives
     # /model switches and fallback re-derivation.
     agent._cache_ttl = "5m"
-    try:
+    with suppress(Exception):
         from hermes_cli.config import load_config_readonly as _load_pc_cfg
         from agent.agent_runtime_helpers import cache_ttl_means_disabled
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
@@ -661,8 +650,6 @@ def _init_prompt_cache_config(agent):
             agent._use_native_cache_layout = False
             agent._cache_ttl = None
             agent._cache_disabled = True
-    except Exception:
-        pass
 
 
 def _init_turn_state(agent, run_budget_seconds):
@@ -774,7 +761,7 @@ def _init_bedrock_client(agent, base_url):
     agent._bedrock_region = _bedrock_region_from_url(base_url)
     # Guardrail config — read from config.yaml at init time.
     agent._bedrock_guardrail_config = None
-    try:
+    with suppress(Exception):
         from hermes_cli.config import load_config_readonly as _load_br_cfg
         _gr = _load_br_cfg().get("bedrock", {}).get("guardrail", {})
         if _gr.get("guardrail_identifier") and _gr.get("guardrail_version"):
@@ -785,8 +772,6 @@ def _init_bedrock_client(agent, base_url):
             for _src, _dst in (("stream_processing_mode", "streamProcessingMode"), ("trace", "trace")):
                 if _gr.get(_src):
                     agent._bedrock_guardrail_config[_dst] = _gr[_src]
-    except Exception:
-        pass
     agent.client = None
     agent._client_kwargs = {}
     if not agent.quiet_mode:
@@ -808,27 +793,23 @@ def _explicit_client_kwargs(agent, api_key, base_url, _provider_timeout) -> Dict
         client_kwargs["args"] = agent.acp_args
     # OpenCode Zen free tier is served ANONYMOUSLY and 401s any bearer (incl. our keyless
     # placeholder): send an empty Authorization header to override the SDK's "Bearer <key>".
-    try:
+    with suppress(Exception):
         from hermes_cli.models import (
             OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER, opencode_zen_free_headers
         )
         if api_key == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER:
             client_kwargs["default_headers"] = opencode_zen_free_headers()
-    except Exception:
-        pass
     _headers_for = _host_default_headers_factory(base_url)
     if _headers_for is not None:
         client_kwargs["default_headers"] = _headers_for(api_key, base_url)
     elif "default_headers" not in client_kwargs:
         # Fall back to profile.default_headers for providers that declare custom headers
         # (Vercel AI Gateway attribution, Kimi User-Agent on non-kimi.com endpoints).
-        try:
+        with suppress(Exception):
             from providers import get_provider_profile as _gpf
             _ph = _gpf(agent.provider)
             if _ph and _ph.default_headers:
                 client_kwargs["default_headers"] = dict(_ph.default_headers)
-        except Exception:
-            pass
     return client_kwargs
 
 
@@ -867,13 +848,11 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Dict[str,
         # Explicit non-OpenRouter provider with no creds and no usable fallback: fail fast.
         # Use the provider's real env var name (alibaba → DASHSCOPE_API_KEY).
         _env_hint = f"{_explicit.upper()}_API_KEY"
-        try:
+        with suppress(Exception):
             from hermes_cli.auth import PROVIDER_REGISTRY
             _pcfg = PROVIDER_REGISTRY.get(_explicit)
             if _pcfg and _pcfg.api_key_env_vars:
                 _env_hint = _pcfg.api_key_env_vars[0]
-        except Exception:
-            pass
         raise RuntimeError(
             f"Provider '{_explicit}' is set in config.yaml but no API key "
             f"was found. Set the {_env_hint} environment "
@@ -1135,12 +1114,10 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
     agent.logs_dir.mkdir(parents=True, exist_ok=True)
     # Per-session JSON snapshot is opt-in (sessions.write_json_snapshots); state.db is canonical.
     agent._session_json_enabled = False
-    try:
+    with suppress(Exception):
         from hermes_cli.config import load_config_readonly as _load_sess_cfg
         _sess_cfg = (_load_sess_cfg().get("sessions") or {})
         agent._session_json_enabled = bool(_sess_cfg.get("write_json_snapshots", False))
-    except Exception:
-        pass
 
     _set_defaults(agent, _SESSION_STATE)
 
@@ -1161,12 +1138,10 @@ def _init_session_state(agent, session_id, session_db, parent_session_id, reason
     }
     # Process-scoped --yolo is persisted so `hermes --resume` restores the bypass
     # (SessionDB.session_yolo_enabled); session-scoped /yolo toggles persist separately.
-    try:
+    with suppress(Exception):
         from tools.approval import _YOLO_MODE_FROZEN
         if _YOLO_MODE_FROZEN:
             agent._session_init_model_config["yolo_mode"] = True
-    except Exception:
-        pass
 
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
@@ -1226,12 +1201,10 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
         kwargs["status_callback"] = agent._emit_status
     # Session title (e.g. honcho derives chat-scoped session keys from it).
     if agent._session_db:
-        try:
+        with suppress(Exception):
             _st = agent._session_db.get_session_title(agent.session_id)
             if _st:
                 kwargs["session_title"] = _st
-        except Exception:
-            pass
     # Gateway user/chat identity for per-user scoping (gateway_session_key: stable per-chat
     # Honcho session isolation).
     for _ident in _GATEWAY_IDENTITY_PARAMS:
@@ -1239,12 +1212,10 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
         if _val:
             kwargs[_ident] = _val
     # Profile identity for per-profile provider scoping
-    try:
+    with suppress(Exception):
         from hermes_cli.profiles import get_active_profile_name
         kwargs["agent_identity"] = get_active_profile_name()
         kwargs["agent_workspace"] = "hermes"
-    except Exception:
-        pass
     return kwargs
 
 
@@ -1263,7 +1234,8 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
         and "memory" not in (agent.disabled_toolsets or [])
     )
     if not skip_memory or _memory_toolset_requested:
-        try:
+        # Memory is optional — don't break agent init
+        with suppress(Exception):
             from tools.memory_tool import (
                 MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
             )
@@ -1280,8 +1252,6 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
                     user_profile_enabled=agent._user_profile_enabled,
                 )
                 agent._memory_store.load_from_disk()
-        except Exception:
-            pass  # Memory is optional — don't break agent init
 
     # External memory provider plugin (one at a time, alongside built-in): memory.provider.
     agent._memory_manager = None
@@ -1321,10 +1291,8 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
 def _apply_agent_section(agent, _agent_cfg):
     # Skills config: nudge interval for skill creation reminders
     agent._skill_nudge_interval = 10
-    try:
+    with suppress(Exception):
         agent._skill_nudge_interval = int(_agent_cfg.get("skills", {}).get("creation_nudge_interval", 10))
-    except Exception:
-        pass
 
     _agent_section = _cfg_dict(_agent_cfg, "agent")
     # Both: "auto" (model-list match), true, false, or list of model substrings; independent
@@ -1356,11 +1324,9 @@ def _apply_agent_section(agent, _agent_cfg):
         setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
-        try:
+        with suppress(Exception):
             from tools.env_probe import warm_environment_probe_async
             warm_environment_probe_async()
-        except Exception:
-            pass
 
     # "Bot Chat" gate hint for hosts that defer the DB title write past the first prompt build.
     agent._session_title_hint = None
@@ -1395,7 +1361,7 @@ def _compression_threshold(agent, cfg: Dict[str, Any]) -> tuple[float, bool]:
     autoraise = _cfg_flag(cfg, "codex_gpt55_autoraise", True)
     notice_enabled = _cfg_flag(cfg, "codex_gpt55_autoraise_notice", True)
     agent._compression_threshold_autoraised = None
-    try:
+    with suppress(Exception):
         from agent.auxiliary_client import (
             _compression_threshold_for_model as _cthresh_fn,
             _is_codex_gpt54_or_gpt55 as _is_codex_gpt54_or_gpt55_fn,
@@ -1415,8 +1381,6 @@ def _compression_threshold(agent, cfg: Dict[str, Any]) -> tuple[float, bool]:
                 or _is_codex_spark_fn(agent.model, agent.provider)
             ),
         )
-    except Exception:
-        pass
     return threshold, notice_enabled
 
 
@@ -1594,13 +1558,11 @@ def _configured_default_base_url(_agent_cfg, _model_cfg, _custom_providers) -> s
     if _norm in _RUNTIME_FIRST_PROVIDER_IDS:
         _custom_provider_candidate = False
     elif _custom_provider_candidate and _norm != "custom" and not _norm.startswith("custom:"):
-        try:
+        with suppress(Exception):
             from hermes_cli.auth import resolve_provider as resolve_auth_provider
             _custom_provider_candidate = (
                 str(resolve_auth_provider(_norm) or "").strip().lower() != _norm
             )
-        except Exception:
-            pass
     if not _configured_base_url and _custom_provider_candidate:
         _configured_base_url = _custom_provider_configured_base_url(
             _configured_provider, _agent_cfg, _custom_providers
@@ -1643,14 +1605,12 @@ def _scope_context_length_to_default_runtime(
     _configured_default_runtime_model = _configured_default_model
     _active_runtime_model = agent.model
     if _configured_default_model:
-        try:
+        with suppress(Exception):
             from hermes_cli.model_normalize import normalize_model_for_provider
             _configured_default_runtime_model = normalize_model_for_provider(
                 _configured_default_model, agent.provider
             )
             _active_runtime_model = normalize_model_for_provider(agent.model, agent.provider)
-        except Exception:
-            pass
     _configured_base_url = _configured_default_base_url(_agent_cfg, _model_cfg, _custom_providers)
     _active_base_url = _active_route_url(agent, base_url)
     _route_mismatch = _context_route_mismatch(
@@ -1757,15 +1717,13 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
     _merge_custom_provider_extra_body(agent, _custom_providers)
 
     if _config_context_length is None and _custom_providers:
-        try:
+        with suppress(Exception):
             from hermes_cli.config import get_custom_provider_context_length
             _cp_ctx_resolved = get_custom_provider_context_length(
                 model=agent.model, base_url=agent.base_url, custom_providers=_custom_providers
             )
             if _cp_ctx_resolved:
                 _config_context_length = int(_cp_ctx_resolved)
-        except Exception:
-            pass
         if _config_context_length is None:
             _warn_invalid_custom_provider_context_length(agent, _custom_providers)
 
@@ -1788,10 +1746,8 @@ def _select_context_engine(_agent_cfg):
     """Config-driven context engine: ``context.engine`` → plugins/context_engine/<name>/ →
     general plugin system → None (built-in ContextCompressor)."""
     _engine_name = "compressor"
-    try:
+    with suppress(Exception):
         _engine_name = _agent_cfg.get("context", {}).get("engine", "compressor") or "compressor"
-    except Exception:
-        pass
     if _engine_name == "compressor":
         return None  # built-in; don't auto-activate plugins
     _selected_engine = None
@@ -1838,7 +1794,7 @@ def _compressor_max_tokens(agent):
     reserving 0 let the provider 400 before compaction fired."""
     if agent.max_tokens is not None:
         return agent.max_tokens
-    try:
+    with suppress(Exception):
         from agent.gemini_native_adapter import (
             GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, is_native_gemini_base_url
         )
@@ -1847,8 +1803,6 @@ def _compressor_max_tokens(agent):
         }
         if _gemini_provider or is_native_gemini_base_url(agent.base_url):
             return GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
-    except Exception:
-        pass
     return None
 
 
@@ -1892,10 +1846,8 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
         )
     _bind_session_state = getattr(agent.context_compressor, "bind_session_state", None)
     if callable(_bind_session_state):
-        try:
+        with suppress(Exception):
             _bind_session_state(session_db=session_db, session_id=agent.session_id)
-        except Exception:
-            pass
     agent.compression_enabled = cs.enabled
     agent.compression_in_place = cs.in_place
     _cc = agent.context_compressor
@@ -1955,7 +1907,7 @@ def _warn_nonagentic_hermes_model(agent):
     # warns on the CLI, so skip platform=="cli"; non-quiet non-CLI surfaces still get it.
     if agent.quiet_mode or (agent.platform or "cli") == "cli":
         return
-    try:
+    with suppress(Exception):
         from hermes_cli.model_switch import _check_hermes_model_warning
         _hermes_warn = _check_hermes_model_warning(agent.model or "")
         if _hermes_warn:
@@ -1967,8 +1919,6 @@ def _warn_nonagentic_hermes_model(agent):
             )
             agent._emit_warning(_user_msg)
             _ra().logger.warning(_hermes_warn)
-    except Exception:
-        pass
 
 
 def _inject_context_engine_tools(agent):
