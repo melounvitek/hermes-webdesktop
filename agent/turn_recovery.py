@@ -1,13 +1,10 @@
 """Recovery-branch handlers for the conversation turn's inner retry loop.
 
-``run_conversation`` wraps every model API call in ``while retry_count < max_retries``.
-When the call raises, a chain of one-shot recovery branches runs before the generic
-retry/backoff path. Each handler owns one contiguous chain and returns a verdict:
-``True`` → request repaired in place, the loop ``continue``s with the same
-``retry_count``; ``False`` → nothing applied, fall through to the generic retry path.
-One-shot guards live on ``TurnRetryState``. Handlers mutate ``agent`` / ``messages`` /
-``api_messages`` in place. Logger name stays ``agent.conversation_loop`` (caplog pins);
-``agent.conversation_loop`` is only imported lazily (cycle + ``patch(...)`` sites).
+When the model call raises, one-shot recovery chains run before the generic retry/backoff
+path. Handlers return ``True`` (request repaired in place; loop ``continue``s with the same
+``retry_count``) or ``False`` (fall through). Guards live on ``TurnRetryState``; handlers
+mutate ``agent`` / ``messages`` / ``api_messages`` in place. Logger name stays
+``agent.conversation_loop`` (caplog pins); that module is only imported lazily (cycle + patch sites).
 """
 
 from __future__ import annotations
@@ -136,11 +133,10 @@ def _recover_unicode_encode_error(
         if _sanitized_system != active_system_prompt:
             active_system_prompt = agent._cached_system_prompt = _sanitized_system
             _system_sanitized = True
-    if isinstance(getattr(agent, "ephemeral_system_prompt", None), str):
-        _sanitized_ephemeral = _strip_non_ascii(agent.ephemeral_system_prompt)
-        if _sanitized_ephemeral != agent.ephemeral_system_prompt:
-            agent.ephemeral_system_prompt = _sanitized_ephemeral
-            _system_sanitized = True
+    _ephemeral = getattr(agent, "ephemeral_system_prompt", None)
+    if isinstance(_ephemeral, str) and _strip_non_ascii(_ephemeral) != _ephemeral:
+        agent.ephemeral_system_prompt = _strip_non_ascii(_ephemeral)
+        _system_sanitized = True
 
     _client_kwargs = getattr(agent, "_client_kwargs", None)
     _default_headers = _client_kwargs.get("default_headers") if isinstance(_client_kwargs, dict) else None
@@ -615,16 +611,21 @@ def _print_nonretryable_auth_guidance(
         _vlines(agent, "      • Check credits: https://openrouter.ai/settings/credits")
 
 
+# Terminal status label per non-retryable reason (default names the HTTP status).
+_NONRETRYABLE_LABELS = {
+    FailoverReason.content_policy_blocked: "Provider safety filter blocked this request",
+    FailoverReason.ssl_cert_verification: "TLS certificate verification failed",
+}
+
+
 def nonretryable_client_error_result(
     agent: Any, api_error: Exception, classified: Any, *, status_code: Optional[int],
     api_kwargs: Any, api_messages: Any, messages: List[Dict[str, Any]], conversation_history: Any,
     api_call_count: int, approx_tokens: int, provider: Any, base_url: Any, model: Any,
 ) -> Dict[str, Any]:
-    """Terminal path for a non-retryable 4xx once fallback is exhausted: dump the
-    request for debugging, flush the buffered retry trace, print actionable auth /
-    billing / content-policy / TLS guidance, persist the session (skipped for likely
-    context-overflow 400s so the failure does not grow the session) and build the
-    failed-turn result dict."""
+    """Terminal path for a non-retryable 4xx once fallback is exhausted: debug dump, flush
+    the retry trace, print auth / billing / content-policy / TLS guidance, persist (skipped
+    for likely context-overflow 400s so the failure does not grow the session), build result."""
     # Result/guidance helpers stay in the loop module (tests import + patch them there).
     from agent.conversation_loop import (
         _CONTENT_POLICY_RECOVERY_HINT, _billing_failure_result, _content_policy_blocked_result,
@@ -637,12 +638,8 @@ def nonretryable_client_error_result(
     # Summarize once: Cloudflare/proxy HTML pages and raw provider bodies must be
     # collapsed here or they leak verbatim via the ``error`` field.
     _nonretryable_summary = agent._summarize_api_error(api_error)
-    if classified.reason == FailoverReason.content_policy_blocked:
-        agent._emit_status(f"❌ Provider safety filter blocked this request: {_nonretryable_summary}")
-    elif classified.reason == FailoverReason.ssl_cert_verification:
-        agent._emit_status(f"❌ TLS certificate verification failed: {_nonretryable_summary}")
-    else:
-        agent._emit_status(f"❌ Non-retryable error (HTTP {status_code}): {_nonretryable_summary}")
+    _label = _NONRETRYABLE_LABELS.get(classified.reason, f"Non-retryable error (HTTP {status_code})")
+    agent._emit_status(f"❌ {_label}: {_nonretryable_summary}")
     _vlines(
         agent,
         f"❌ Non-retryable client error (HTTP {status_code}). Aborting.",
@@ -717,11 +714,10 @@ def max_retries_exhausted_result(
     conversation_history: Any, api_call_count: int, approx_tokens: int, provider: Any,
     base_url: Any, model: Any,
 ) -> Dict[str, Any]:
-    """Terminal path once ``retry_count >= max_retries`` and transport recovery +
-    fallback both failed: flush the buffered trace, emit the billing / rate-limit /
-    generic status line, print stream-drop or thinking-timeout guidance (the latter
-    wins), persist, and build the failed-turn result dict carrying the classified
-    ``failure_reason`` / ``failure_retryable`` / ``billing_block``."""
+    """Terminal path once retries, transport recovery and fallback all failed: flush the
+    trace, emit the billing / rate-limit / generic status, print stream-drop or thinking-timeout
+    guidance (the latter wins), persist, build the result with ``failure_reason`` /
+    ``failure_retryable`` / ``billing_block``."""
     # Result/guidance helpers stay in the loop module (tests import + patch them there).
     from agent.conversation_loop import (
         _billing_block_dict, _billing_or_entitlement_message, _billing_terminal_label,
@@ -741,14 +737,12 @@ def max_retries_exhausted_result(
             )
         else:
             agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")
-        _billing_guidance = _billing_or_entitlement_message(
+        _billing_kw = dict(
             capability="model access", provider=provider, base_url=str(base_url), model=model,
             unverified=classified.billing_unverified,
         )
-        _print_billing_or_entitlement_guidance(
-            agent, capability="model access", provider=provider, base_url=str(base_url),
-            model=model, unverified=classified.billing_unverified,
-        )
+        _billing_guidance = _billing_or_entitlement_message(**_billing_kw)
+        _print_billing_or_entitlement_guidance(agent, **_billing_kw)
     elif is_rate_limited:
         agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
     else:
@@ -840,12 +834,9 @@ def log_api_error_attempt(
     agent: Any, api_error: Exception, *, retry_count: int, max_retries: int,
     status_code: Optional[int], elapsed_time: float, api_messages: Any, approx_tokens: int,
 ) -> Tuple[str, str, Any, Any, Any]:
-    """Log one failed API attempt: the ``API call failed`` warning plus the buffered
-    retry trace (provider/endpoint/error/4xx body/elapsed), the OpenRouter "no tool
-    endpoints" hint and the bare-404 missing-vendor-prefix hint. The buffer only
-    surfaces if every retry+fallback exhausts.
-
-    Returns ``(error_type, error_msg, provider, base_url, model)``."""
+    """Log one failed API attempt (warning + buffered retry trace, OpenRouter "no tool
+    endpoints" hint, bare-404 missing-vendor-prefix hint); the buffer only surfaces if every
+    retry+fallback exhausts. Returns ``(error_type, error_msg, provider, base_url, model)``."""
     error_type = type(api_error).__name__
     error_msg = str(api_error).lower()
     _error_summary = agent._summarize_api_error(api_error)
@@ -924,12 +915,9 @@ def interruptible_backoff_sleep(
     """Sleep ``wait_time`` in 200 ms slices so interrupts are honoured promptly, touching
     activity every ~30 s so the gateway's inactivity monitor knows we are alive.
 
-    On interrupt: when ``_retry`` is given and a redirect is pending, preserve it
-    (``clear_interrupt(preserve_redirect=True)``), set
-    ``_retry.restart_with_redirected_messages`` and return ``None`` — the caller
-    rebuilds the turn from the correction. Otherwise close any open tool sequence,
-    persist, clear the interrupt and return the ``interrupted`` result dict.
-    Returns ``None`` when the wait completed."""
+    On interrupt with ``_retry`` given and a redirect pending: preserve the redirect, arm
+    ``_retry.restart_with_redirected_messages`` and return ``None`` (caller rebuilds the
+    turn). Otherwise return the ``interrupted`` result dict. ``None`` when the wait completed."""
     sleep_end = time.time() + wait_time
     _touch_counter = 0
     while time.time() < sleep_end:
@@ -958,13 +946,10 @@ def compute_error_backoff(
     agent: Any, api_error: Exception, *, retry_count: int, max_retries: int, is_rate_limited: bool,
     is_zai_coding_overload: bool, base_url: Any, model: Any,
 ) -> float:
-    """Pick the wait before the next API retry and announce it.
-
-    Retry-After header wins for rate limits (capped at 600s: Anthropic Tier 1 buckets
-    reset in ~171s, so a 120s cap retried early and re-tripped the limit); otherwise
-    jittered exponential backoff, replaced by the adaptive rate-limit policy for 429s /
-    Z.AI overloads. Normal retries are buffered to avoid chatter; long Z.AI Coding waits
-    can last minutes, so those surface immediately."""
+    """Pick the wait before the next API retry and announce it. Retry-After wins for rate
+    limits (capped at 600s: Anthropic Tier 1 buckets reset in ~171s, so a 120s cap re-tripped
+    the limit); otherwise jittered backoff, replaced by the adaptive policy for 429s / Z.AI
+    overloads. Normal retries are buffered; long Z.AI Coding waits surface immediately."""
     # Resolved through the loop module so tests that patch
     # ``agent.conversation_loop.jittered_backoff`` / ``adaptive_rate_limit_backoff``
     # (incl. the run_agent conftest fast-backoff fixture) keep intercepting.
@@ -1005,11 +990,10 @@ def compute_error_backoff(
 
 
 def validate_response_shape(agent: Any, response: Any) -> Tuple[bool, List[str]]:
-    """Validate the raw provider response per api_mode via the transport's
-    ``validate_response``. Returns ``(response_invalid, error_details)``; a Codex
-    ``failed``/``cancelled`` status (terminal provider failure, e.g. quota exhaustion)
-    is treated as invalid so the fallback chain triggers, while an empty Codex
-    ``output`` with a non-empty ``output_text`` is deferred to normalization."""
+    """Validate the raw provider response via the transport; ``(response_invalid,
+    error_details)``. A Codex ``failed``/``cancelled`` status (e.g. quota exhaustion) is
+    invalid so the fallback chain triggers; an empty Codex ``output`` with non-empty
+    ``output_text`` is deferred to normalization."""
     if agent._get_transport().validate_response(response):
         return False, []
     if response is None:
@@ -1225,14 +1209,12 @@ def route_classified_error(
     compression_attempts: int, max_compression_attempts: int, api_call_count: int,
     effective_task_id: Any,
 ) -> ClassifiedErrorVerdict:
-    """Ordered recovery steps between classification logging and overflow handling:
-    compaction-disabled overflow → terminal error (output-cap errors exempt);
-    Anthropic long-context tier 429 → cap at 200k and compress; eager fallback for
-    rate-limit/billing (immediately) and transport failures (after 1 retry), unless
-    credential-pool rotation may still recover (upstream-aggregator 429s always fall
-    back); persistent 401/403 → fallback chain once; genuine Nous 429 → record to the
-    cross-session breaker and re-enter the loop exactly once so the top-of-loop guard
-    runs. Order is load-bearing."""
+    """Ordered (load-bearing) recovery steps between classification and overflow handling:
+    compaction-disabled overflow → terminal error (output-cap errors exempt); Anthropic
+    long-context tier 429 → cap at 200k and compress; eager fallback for rate-limit/billing
+    (immediately) and transport failures (after 1 retry) unless credential-pool rotation may
+    still recover (upstream-aggregator 429s always fall back); persistent 401/403 → fallback
+    chain once; genuine Nous 429 → cross-session breaker + re-enter the loop exactly once."""
     from agent.conversation_loop import (
         _arm_fallback_restart, _ra, conversation_history_after_compression,
         estimate_request_tokens_rough,

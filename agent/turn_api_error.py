@@ -18,7 +18,8 @@ from typing import Any, Dict, Optional
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.turn_overflow import recover_from_overflow
 from agent.turn_recovery import (
-    abort_turn_on_interrupt, compute_error_backoff, interruptible_backoff_sleep, log_api_error_attempt,
+    _NONRETRYABLE_LABELS, abort_turn_on_interrupt, compute_error_backoff, interruptible_backoff_sleep,
+    log_api_error_attempt,
     max_retries_exhausted_result, nonretryable_client_error_result, recover_after_classification,
     recover_before_classification, route_classified_error,
 )
@@ -302,12 +303,8 @@ def settle_unrecovered_error(
         # Announce the fallback only when a chain exists, else "trying fallback..." lies
         # before a silent abort.
         if agent._has_pending_fallback():
-            if classified.reason == FailoverReason.content_policy_blocked:
-                agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
-            elif classified.reason == FailoverReason.ssl_cert_verification:
-                agent._buffer_status("⚠️ TLS certificate verification failed — trying fallback...")
-            else:
-                agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
+            _label = _NONRETRYABLE_LABELS.get(classified.reason, f"Non-retryable error (HTTP {status_code})")
+            agent._buffer_status(f"⚠️ {_label} — trying fallback...")
         if agent._try_activate_fallback():
             # Direct ``return _verdict("break")`` is load-bearing: the restart handler
             # re-runs the pre-API preflight against the fallback's context window.
