@@ -132,10 +132,9 @@ def _notif_release_turn(session: dict) -> None:
 def _notif_claim_turn(session: dict) -> bool:
     """Claim the idle session (running=True) under history_lock; False if a turn is live."""
     with session["history_lock"]:
-        if session.get("running"):
-            return False
+        claimed = not session.get("running")
         session["running"] = True
-        return True
+        return claimed
 
 
 def _notif_log_failure(what: str, exc: BaseException) -> None:
@@ -494,28 +493,24 @@ def _wire_desktop_sinks() -> None:
     global _desktop_ui_wired
     from tools.process_registry import process_registry
 
-    def _owner_sid_for_process(session) -> str:
-        session_key = str(getattr(session, "session_key", "") or "")
+    def _owner_sid(session) -> str:
+        # session may be None (process already finished/pruned) — the tab can still linger and be closed.
+        session_key = str(getattr(session, "session_key", "") or "") if session is not None else ""
         if not session_key:
             return ""
         with _sessions_lock:
             return next((sid for sid, s in _sessions.items() if str(s.get("session_key") or "") == session_key), "")
     if getattr(process_registry, "on_output", None) is None:
         process_registry.on_output = lambda session, chunk: _emit(
-            "agent.terminal.output", _owner_sid_for_process(session), {"process_id": session.id, "chunk": chunk}
+            "agent.terminal.output", _owner_sid(session), {"process_id": session.id, "chunk": chunk}
         )
     if getattr(process_registry, "on_close", None) is None:
-        # session may be None (process already finished/pruned) — the tab can still linger and be closed.
-        process_registry.on_close = lambda session, process_id: _emit(
-            "terminal.close", _owner_sid_for_process(session) if session is not None else "", {"process_id": process_id}
-        )
+        process_registry.on_close = lambda session, pid: _emit("terminal.close", _owner_sid(session), {"process_id": pid})
     if not _desktop_ui_wired:
-        try:
+        with contextlib.suppress(Exception):
             from tools import desktop_ui
-        except Exception:
-            return
-        desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
-        _desktop_ui_wired = True
+            desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
+            _desktop_ui_wired = True
 
 
 # (stop_event, thread) for every poller started in this process, pruned of dead threads on each spawn.
@@ -528,11 +523,8 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (thread name is greppable)."""
     _wire_desktop_sinks()
     stop = threading.Event()
-    t = threading.Thread(
-        target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}"
-    )
-    _notification_pollers[:] = [(s, th) for (s, th) in _notification_pollers if th.is_alive()]
-    _notification_pollers.append((stop, t))
+    t = threading.Thread(target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}")
+    _notification_pollers[:] = [(s, th) for (s, th) in _notification_pollers if th.is_alive()] + [(stop, t)]
     t.start()
     return stop
 
@@ -549,11 +541,9 @@ def _prepend_note(run_message: Any, note: str) -> Any:
     """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone: everything the model must
     know that the user did not type (interrupted reply, reactions, surface) arrives this way, so no
     scaffolding reaches the transcript and no sent message is rewritten — the cached prefix survives."""
-    if not note:
-        return run_message
-    if isinstance(run_message, str):
+    if note and isinstance(run_message, str):
         return f"{note}\n\n{run_message}"
-    if isinstance(run_message, list):
+    if note and isinstance(run_message, list):
         return [{"type": "text", "text": note}, *run_message]
     return run_message
 
