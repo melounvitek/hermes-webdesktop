@@ -112,8 +112,7 @@ class LiveTranscriptWriter:
             logger.debug("Live transcript write failed (%s): %s", self.path, exc)
 
     def _line(self, role: str, text: str, limit: int) -> None:
-        t = _one_line(text, limit)
-        if t:
+        if t := _one_line(text, limit):
             self.event(role, t)
 
     def assistant_text(self, text: str) -> None:
@@ -177,8 +176,8 @@ class LiveTranscriptWriter:
         "subagent.start": lambda s, n, p, a, kw: s.event("start", _one_line(p, _KICKOFF_MAX)),
         "subagent.complete": _on_complete}
 
-    def observe(self, event_type: Any, tool_name: Any = None,
-                preview: Any = None, args: Any = None, **kwargs: Any) -> None:
+    def observe(self, event_type: Any, tool_name: Any = None, preview: Any = None,
+                args: Any = None, **kwargs: Any) -> None:
         """Map a child tool_progress_callback event onto transcript lines.
         Unknown events are ignored. Never raises (event() swallows I/O)."""
         handler = self._OBSERVERS.get(str(event_type or ""))
@@ -228,10 +227,7 @@ def create_live_transcripts(
     Returns ``(delegation_id, writers, paths)``; on any top-level failure
     ``(None, [None]*n, [])`` so delegation proceeds untouched."""
     n = len(task_list)
-    try:
-        prune_stale_live_dirs()
-    except Exception:
-        pass
+    prune_stale_live_dirs()  # best-effort; never raises
     try:
         # Same id shape as async_delegation's so the dir name matches the handle.
         deleg_id = delegation_id or f"deleg_{uuid.uuid4().hex[:8]}"
@@ -257,18 +253,14 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     provider: Optional[str] = None) -> None:
     try:
         _dump_json(_manifest_path(delegation_id), {
-            "delegation_id": delegation_id,
-            "started": time.strftime(_TIME_FMT),
-            "task_count": len(task_list),
-            "model": model,
-            "provider": provider,
+            "delegation_id": delegation_id, "started": time.strftime(_TIME_FMT),
+            "task_count": len(task_list), "model": model, "provider": provider,
             "tasks": [{
                 "index": i,
                 # Same mounted dir as the .log files, so the goal needs the same redaction.
                 "goal": _redact(str(t.get("goal", ""))[:500]),
                 "log": paths[i] if i < len(paths) else None,
-                "status": "running",
-            } for i, t in enumerate(task_list)]})
+                "status": "running"} for i, t in enumerate(task_list)]})
     except Exception as exc:
         logger.debug("Live transcript manifest write failed: %s", exc)
 

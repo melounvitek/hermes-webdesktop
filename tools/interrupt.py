@@ -12,17 +12,14 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Opt-in debug tracing — pairs with HERMES_DEBUG_INTERRUPT in
-# tools/environments/base.py; logs caller/target thread and state per set/check.
+# Opt-in debug tracing — pairs with HERMES_DEBUG_INTERRUPT in tools/environments/base.py.
 _DEBUG_INTERRUPT = bool(os.getenv("HERMES_DEBUG_INTERRUPT"))
-
 if _DEBUG_INTERRUPT:
     # AIAgent's quiet_mode forces the `tools` logger to ERROR on CLI startup;
     # force ours back to INFO so the trace is visible in agent.log.
     logger.setLevel(logging.INFO)
 
-# Interrupted thread idents, plus an optional user-safe cause per signal.  The
-# cause deliberately never contains an incoming user's message text.
+# Interrupted thread idents + optional user-safe cause (never the user's message text).
 _interrupted_threads: set[int] = set()
 _interrupt_reasons: dict[int, str] = {}
 _lock = threading.Lock()
@@ -33,14 +30,10 @@ def set_interrupt(active: bool, thread_id: int | None = None, *, reason: str | N
     CLI/tests).  ``reason`` is an optional user-safe cause."""
     tid = thread_id if thread_id is not None else threading.current_thread().ident
     with _lock:
-        if active:
-            _interrupted_threads.add(tid)
-            if reason:
-                _interrupt_reasons[tid] = reason
-            else:
-                _interrupt_reasons.pop(tid, None)
+        (_interrupted_threads.add if active else _interrupted_threads.discard)(tid)
+        if active and reason:
+            _interrupt_reasons[tid] = reason
         else:
-            _interrupted_threads.discard(tid)
             _interrupt_reasons.pop(tid, None)
         _snapshot = set(_interrupted_threads) if _DEBUG_INTERRUPT else None
     if _DEBUG_INTERRUPT:
