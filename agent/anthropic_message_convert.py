@@ -29,7 +29,6 @@ _BEDROCK_REGION_PREFIXES = (
 )
 
 
-
 def _block_type(b: Any) -> Any:
     """``type`` of a dict block, None for non-dicts."""
     return b.get("type") if isinstance(b, dict) else None
@@ -81,10 +80,17 @@ def _block_ids(blocks: List[Any], btype: str, key: str) -> set:
     return {b.get(key) for b in blocks if _block_type(b) == btype}
 
 
-def _carry_cache_control(out: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy a dict-valued ``cache_control`` marker from ``b`` onto ``out`` (returned)."""
-    if _cache_control_of(b) is not None:
-        out["cache_control"] = b["cache_control"]
+def _assistant_block_lists(result: List[Dict[str, Any]]):
+    """``(index, message)`` for every assistant message whose content is a block list."""
+    return ((i, m) for i, m in enumerate(result) if m.get("role") == "assistant" and isinstance(m.get("content"), list))
+
+
+def _carry_cache_control(out: Dict[str, Any], b: Any, *, copy: bool = False) -> Dict[str, Any]:
+    """Carry a dict-valued ``cache_control`` marker from ``b`` onto ``out`` (returned); ``copy``
+    shallow-copies it so the caller's dict is never shared with the wire payload."""
+    cc = _cache_control_of(b)
+    if cc is not None:
+        out["cache_control"] = dict(cc) if copy else cc
     return out
 
 
@@ -102,7 +108,6 @@ def _split_blank_text_blocks(blocks: List[Any]) -> Tuple[List[Any], Any, List[in
         else:
             kept.append(blk)
     return kept, relocated_cc, dropped
-
 
 
 def _is_bedrock_model_id(model: str) -> bool:
@@ -177,12 +182,8 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
             "description": fn.get("description", ""),
             "input_schema": _normalize_tool_input_schema(fn.get("parameters") or {}),
         }
-        cache_control = _cache_control_of(t)
-        if cache_control is not None:
-            anthropic_tool["cache_control"] = dict(cache_control)
-        result.append(anthropic_tool)
+        result.append(_carry_cache_control(anthropic_tool, t, copy=True))
     return result
-
 
 
 def _image_source_from_openai_url(url: str) -> Dict[str, str]:
@@ -303,7 +304,6 @@ def _safe_text(text: Any) -> str:
     return text if text.strip() else _EMPTY_TEXT_PLACEHOLDER
 
 
-
 def _replay_text(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # Drop blank blocks rather than coerce in place: the caller relocates any cache_control and
     # falls back to a placeholder only when nothing survives, so "(empty)" never sits as
@@ -358,7 +358,6 @@ def _apply_assistant_cache_control_to_last_cacheable_block(blocks: List[Dict[str
         if _block_type(block) in _CACHEABLE_TYPES:
             block.setdefault("cache_control", dict(cache_control))
             break
-
 
 
 def _replay_ordered_blocks(m: Dict[str, Any], ordered_blocks: List[Any]) -> Optional[List[Dict[str, Any]]]:
@@ -479,9 +478,7 @@ def _convert_tool_message_to_result(result: List[Dict[str, Any]], m: Dict[str, A
         "type": "tool_result", "tool_use_id": _sanitize_tool_id(m.get("tool_call_id", "")),
         "content": _tool_result_content(m),
     }
-    cache_control = _cache_control_of(m)
-    if cache_control is not None:
-        tool_result["cache_control"] = dict(cache_control)
+    _carry_cache_control(tool_result, m, copy=True)
     last = result[-1] if result else {}
     if last.get("role") == "user" and isinstance(last.get("content"), list) and last["content"] \
             and last["content"][0].get("type") == "tool_result":
@@ -493,15 +490,13 @@ def _convert_tool_message_to_result(result: List[Dict[str, Any]], m: Dict[str, A
 def _convert_user_message(content: Any) -> Dict[str, Any]:
     """Validate and convert a user message to Anthropic format."""
     if isinstance(content, list):
-        kept_blocks = _fix_blank_text_blocks_in_list(
+        content = _fix_blank_text_blocks_in_list(
             _convert_content_to_anthropic(content), placeholder_text="(empty message)",
             msg_index=-1, role="user", location="_convert_user_message",
         )
-        return {"role": "user", "content": kept_blocks}
-    if not content or (isinstance(content, str) and not content.strip()):
+    elif not content or (isinstance(content, str) and not content.strip()):
         content = "(empty message)"
     return {"role": "user", "content": content}
-
 
 
 def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
@@ -510,9 +505,7 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
     tool_result in the IMMEDIATELY FOLLOWING user message — a global id match is not enough.
     Mutates ``result`` in place."""
     # Pass 1: tool_use without an adjacent result.
-    for i, m in enumerate(result):
-        if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
-            continue
+    for i, m in _assistant_block_lists(result):
         tool_use_ids_in_turn = _block_ids(m["content"], "tool_use", "id")
         if not tool_use_ids_in_turn:
             continue
@@ -534,9 +527,8 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
 
     # Pass 2: tool_result whose tool_use no longer exists anywhere.
     surviving_tool_use_ids: set = set()
-    for m in result:
-        if m.get("role") == "assistant" and isinstance(m.get("content"), list):
-            surviving_tool_use_ids |= _block_ids(m["content"], "tool_use", "id")
+    for _, m in _assistant_block_lists(result):
+        surviving_tool_use_ids |= _block_ids(m["content"], "tool_use", "id")
     for m in result:
         if m.get("role") != "user" or not isinstance(m.get("content"), list):
             continue
@@ -612,9 +604,7 @@ def _manage_thinking_signatures(result: List[Dict[str, Any]], base_url: str | No
     is_deepseek = _is_deepseek_anthropic_endpoint(base_url)
     last_assistant_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "assistant"), None)
 
-    for idx, m in enumerate(result):
-        if m.get("role") != "assistant" or not isinstance(m.get("content"), list):
-            continue
+    for idx, m in _assistant_block_lists(result):
         if is_kimi:
             pass  # shared cleanup below still strips cache markers + the flag
         elif is_deepseek:
@@ -643,12 +633,8 @@ def _evict_old_screenshots(result: List[Dict[str, Any]]) -> None:
     image_count = 0
     for msg in reversed(result):
         content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if _block_type(block) != "tool_result":
-                continue
-            inner = block.get("content")
+        for block in content if isinstance(content, list) else []:
+            inner = block.get("content") if _block_type(block) == "tool_result" else None
             if not isinstance(inner, list) or not _has_block_type(inner, {"image"}):
                 continue
             image_count += 1
@@ -697,19 +683,16 @@ def _scrub_blank_text_blocks(result: List[Dict[str, Any]]) -> None:
         content = msg.get("content")
         if not isinstance(content, list) or not content:
             continue
-        new_content = _fix_blank_text_blocks_in_list(
+        msg["content"] = _fix_blank_text_blocks_in_list(
             content, placeholder_text=_EMPTY_TEXT_PLACEHOLDER if role == "assistant" else "(empty message)",
             msg_index=msg_index, role=role, location="content",
         )
-        for blk in new_content:
-            if _block_type(blk) != "tool_result":
-                continue
-            inner = blk.get("content")
+        for blk in msg["content"]:
+            inner = blk.get("content") if _block_type(blk) == "tool_result" else None
             if isinstance(inner, list) and inner:
                 blk["content"] = _fix_blank_text_blocks_in_list(
                     inner, placeholder_text="(no output)", msg_index=msg_index, role=role, location="tool_result",
                 )
-        msg["content"] = new_content
 
 
 def _convert_system_content(content: Any) -> Any:
@@ -721,14 +704,11 @@ def _convert_system_content(content: Any) -> Any:
         return content
     if not any(p.get("cache_control") for p in content if isinstance(p, dict)):
         return "\n".join(p["text"] for p in content if p.get("type") == "text")
-    system = []
-    for p in content:
-        if not isinstance(p, dict):
-            continue
-        if p.get("type") == "text" and isinstance(p.get("text"), str) and not p["text"].strip():
-            p = {**p, "text": _EMPTY_TEXT_PLACEHOLDER}
-        system.append(p)
-    return system
+    return [
+        {**p, "text": _EMPTY_TEXT_PLACEHOLDER} if _is_blank_text_block(p) and isinstance(p.get("text"), str) else p
+        for p in content
+        if isinstance(p, dict)
+    ]
 
 
 def convert_messages_to_anthropic(
