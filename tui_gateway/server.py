@@ -772,10 +772,8 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
             return None
         waited = time.monotonic() - start
         if waited >= cap:
-            return _err(
-                rid, 5032,
-                f"agent initialization timed out after {int(waited)}s — "
-                "your message was not sent; retry once the session is ready")
+            return _err(rid, 5032, f"agent initialization timed out after {int(waited)}s — "
+                        "your message was not sent; retry once the session is ready")
         build_thread = session.get("_agent_build_thread")
         if build_thread is not None and not build_thread.is_alive() and not ready.is_set():
             # _build's finally guarantees ready.set(); dead thread + unset ready = died hard.
@@ -993,10 +991,9 @@ def _sess_nowait(params, rid):
         return (s, None)
     # Stale runtime id (reaped/evicted/TTL): the client should session.resume the STORED id. Logged so
     # "message vanished" reads as "arrived and was rejected".
-    logger.warning(
-        "session-scoped RPC rejected: method=%s session_id=%r not in memory "
-        "(detached/reaped runtime; client should resume the stored session), rid=%r",
-        _current_rpc_method.get() or "?", sid, rid)
+    logger.warning("session-scoped RPC rejected: method=%s session_id=%r not in memory "
+                   "(detached/reaped runtime; client should resume the stored session), rid=%r",
+                   _current_rpc_method.get() or "?", sid, rid)
     return (None, _err(rid, 4001, "session not found"))
 
 
@@ -1010,10 +1007,9 @@ def _sess_building(params, rid):
     clipboard.paste, image.detach), which only touch creation-time fields and run inline on the socket
     reader thread, where waiting on a cold build stalled every RPC behind it ("text is instant, images hang")."""
     s, err = _sess_nowait(params, rid)
-    if err:
-        return (None, err)
-    _start_agent_build(params.get("session_id") or "", s)
-    return (s, None)
+    if not err:
+        _start_agent_build(params.get("session_id") or "", s)
+    return (None, err) if err else (s, None)
 
 
 # ── Config I/O ────────────────────────────────────────────────────────
@@ -1244,13 +1240,10 @@ _TOUR_PROBE_TIMEOUT_S = 10
 
 _TOUR_BRIDGE_UNAVAILABLE = json.dumps({
     "success": False,
-    "error": (
-        "No Hermes Desktop window answered the tour request. The tour is "
-        "driven by the desktop app's renderer, which updates separately "
-        "from this backend, so an app build older than the tour tool has "
-        "nothing listening. Update the Hermes Desktop app and start a new "
-        "session. Do not retry tour in this session."),
-})
+    "error": ("No Hermes Desktop window answered the tour request. The tour is driven by the desktop app's "
+              "renderer, which updates separately from this backend, so an app build older than the tour tool "
+              "has nothing listening. Update the Hermes Desktop app and start a new session. Do not retry tour "
+              "in this session.")})
 
 
 def _tour_request(sid: str, payload: dict) -> str:
@@ -1504,11 +1497,9 @@ def _live_session_agent_db(session: dict | None):
 def _persist_live_session_system_prompt(session: dict | None) -> None:
     """Refresh the stored system prompt after a live runtime identity change."""
     live = _live_session_agent_db(session)
-    if live is None:
+    if live is None or not hasattr(live[0], "_build_system_prompt") or not hasattr(live[2], "update_system_prompt"):
         return
     agent, session_key, db = live
-    if not hasattr(agent, "_build_system_prompt") or not hasattr(db, "update_system_prompt"):
-        return
     # Re-bind the session's profile HERMES_HOME (the build's finally reset it → root profile's SOUL.md/skills)
     # and session context (on the RPC thread _SESSION_CWD is unset → the process TERMINAL_CWD would persist).
     profile_home = session.get("profile_home")
@@ -1704,9 +1695,7 @@ def _resolve_explicit_toolsets(explicit: list[str], validate_toolset) -> list[st
         unresolved = [name for name in unresolved if name not in plugin_valid]
     if any(name in {"all", "*"} for name in built_in):
         if ignored := [name for name in explicit if name not in {"all", "*"}]:
-            _tui_notice(
-                "[tui] HERMES_TUI_TOOLSETS=all enables every toolset; "
-                f"ignoring additional entries: {', '.join(ignored)}")
+            _tui_notice(f"[tui] HERMES_TUI_TOOLSETS=all enables every toolset; ignoring additional entries: {', '.join(ignored)}")
         return None
     if not unresolved:
         return built_in
@@ -1728,10 +1717,8 @@ def _resolve_explicit_toolsets(explicit: list[str], validate_toolset) -> list[st
     if unknown:
         _tui_notice(f"[tui] ignoring unknown HERMES_TUI_TOOLSETS entries: {', '.join(unknown)}")
     if disabled:
-        _tui_notice(
-            "[tui] ignoring disabled MCP servers in HERMES_TUI_TOOLSETS "
-            "(set enabled: true in config.yaml to use): "
-            f"{', '.join(disabled)}")
+        _tui_notice("[tui] ignoring disabled MCP servers in HERMES_TUI_TOOLSETS "
+                    f"(set enabled: true in config.yaml to use): {', '.join(disabled)}")
     return (built_in + mcp_valid) or False
 
 
@@ -1873,9 +1860,8 @@ def _probe_config_health(cfg: dict) -> str:
     warnings: list[str] = []
     if null_keys := sorted(k for k, v in cfg.items() if v is None):
         keys = ", ".join(f"`{k}`" for k in null_keys)
-        warnings.append(
-            f"config.yaml has empty section(s): {keys}. Remove the line(s) or set them to `{{}}` — "
-            f"empty sections silently drop nested settings.")
+        warnings.append(f"config.yaml has empty section(s): {keys}. Remove the line(s) or set them to `{{}}` — "
+                        f"empty sections silently drop nested settings.")
     display_cfg = cfg.get("display")
     if isinstance(display_cfg, dict):
         personality = str(display_cfg.get("personality", "") or "").strip().lower()
@@ -1883,10 +1869,8 @@ def _probe_config_health(cfg: dict) -> str:
             with contextlib.suppress(Exception):
                 from hermes_cli.personality import available_personalities
                 if personality not in available_personalities(cfg):
-                    warnings.append(
-                        f"`display.personality: {personality}` does not match any "
-                        "built-in or `agent.personalities` entry; personality "
-                        "overlay will be skipped.")
+                    warnings.append(f"`display.personality: {personality}` does not match any built-in or "
+                                    "`agent.personalities` entry; personality overlay will be skipped.")
     return " ".join(warnings).strip()
 
 
@@ -2153,10 +2137,8 @@ def _startup_system_prompt(cfg: dict, task_id: str) -> str:
         missing_display = ", ".join(missing_skills)
         if not loaded_skills:
             raise ValueError(f"Unknown skill(s): {missing_display}")
-        logger.warning(
-            "Unknown skill(s) requested, skipping: %s. Continuing with: %s. "
-            "List available skills with `hermes skills list`.",
-            missing_display, ", ".join(loaded_skills))
+        logger.warning("Unknown skill(s) requested, skipping: %s. Continuing with: %s. "
+                       "List available skills with `hermes skills list`.", missing_display, ", ".join(loaded_skills))
     if skills_prompt:
         system_prompt = "\n\n".join(part for part in (system_prompt, skills_prompt) if part).strip()
     return system_prompt
@@ -2222,10 +2204,8 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
         except Exception:
             # FAIL CLOSED (as the deferred-build bind): a named-profile session must never touch the launch
             # state.db — skip hydration (the row lands on the agent's own lazy-create once the store recovers).
-            logger.warning(
-                "profile session store unavailable for %s — skipping cwd "
-                "hydration instead of touching the launch state.db",
-                profile_home, exc_info=True)
+            logger.warning("profile session store unavailable for %s — skipping cwd hydration instead of "
+                           "touching the launch state.db", profile_home, exc_info=True)
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
@@ -2414,9 +2394,8 @@ def _load_resume_transcript(db, stored_id: str) -> tuple[list, list, list]:
             guard(stored_id)
         except SessionResumeTooLargeError as exc:
             prefix_fits = False
-            logger.info(
-                "resume %s: compression lineage exceeds the resume limit (%s); hydrating the tip segment only",
-                stored_id, exc)
+            logger.info("resume %s: compression lineage exceeds the resume limit (%s); hydrating the tip segment only",
+                        stored_id, exc)
         except Exception:
             logger.debug("resume lineage guard failed; loading full lineage", exc_info=True)
     if prefix_fits:
@@ -2448,9 +2427,8 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             if todo_state is not None and session.get("todo_state") is None:
                 session["todo_state"] = todo_state
             session["resume_history_ready"].set()
-            _emit(
-                "session.resume_progress", sid,
-                {"message_count": len(display_history), "phase": "history", "status": "complete"})
+            _emit("session.resume_progress", sid,
+                  {"message_count": len(display_history), "phase": "history", "status": "complete"})
             _maybe_schedule_auto_continue(sid, session, stored_id)
             _start_agent_build(sid, session)
         except Exception as exc:
@@ -2476,11 +2454,8 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
 
 
 def _session_pending_kind(sid: str) -> str:
-    for rid, (owner_sid, _ev) in list(_pending.items()):
-        if owner_sid == sid:
-            event, _payload = _pending_prompt_payloads.get(rid, ("input.request", {}))
-            return str(event).removesuffix(".request")
-    return ""
+    return next((str(_pending_prompt_payloads.get(rid, ("input.request", {}))[0]).removesuffix(".request")
+                 for rid, (owner_sid, _ev) in list(_pending.items()) if owner_sid == sid), "")
 
 
 def _session_live_status(sid: str, session: dict) -> str:
@@ -2774,9 +2749,8 @@ def _pet_gen_sweep(root, *, max_age_s: float = 3600.0) -> None:
     import shutil
     try:
         now = time.time()
-        for child in root.iterdir():
-            if child.is_dir() and now - child.stat().st_mtime > max_age_s:
-                shutil.rmtree(child, ignore_errors=True)
+        for child in (c for c in root.iterdir() if c.is_dir() and now - c.stat().st_mtime > max_age_s):
+            shutil.rmtree(child, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
         logger.debug("pet-gen sweep failed: %s", exc)
 
@@ -2788,8 +2762,7 @@ def _pet_png_data_uri(path, *, max_px: int = 160) -> str:
     with Image.open(path) as opened:
         img = opened.convert("RGBA")
     img.thumbnail((max_px, max_px), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf := io.BytesIO(), format="PNG")
     return "data:image/png;base64," + base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -2822,8 +2795,7 @@ def _pet_reference_images_from_data_url(ref_raw: str, stage) -> list:
         raise ValueError("invalid reference image data") from exc
     if len(raw) > _PET_REFERENCE_MAX_BYTES:
         raise ValueError("reference image too large")
-    ref_path = stage / f"reference.{ext}"
-    ref_path.write_bytes(raw)
+    (ref_path := stage / f"reference.{ext}").write_bytes(raw)
     return [ref_path]
 
 
@@ -2857,8 +2829,7 @@ def _spawn_trees_root():
 
 
 def _spawn_tree_session_dir(session_id: str):
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown"
-    d = _spawn_trees_root() / safe
+    d = _spawn_trees_root() / ("".join(c if c.isalnum() or c in "-_" else "_" for c in session_id) or "unknown")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -2906,10 +2877,9 @@ def _start_usage_ticker(sid: str, agent, interval: float = 1.0) -> tuple[threadi
     stop = threading.Event()
     # Dedup baseline sampled BEFORE the thread starts (the client has the turn-start values); a late-scheduled
     # thread would otherwise absorb the first counter growth and never emit it.
-    try:
-        baseline: dict | None = _get_usage(agent)
-    except Exception:
-        baseline = None
+    baseline: dict | None = None
+    with contextlib.suppress(Exception):
+        baseline = _get_usage(agent)
 
     def _loop() -> None:
         last = baseline
