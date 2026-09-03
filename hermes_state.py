@@ -1108,7 +1108,8 @@ class SessionDB(
         <3.12 has no setconfig; the residual checkpoint only carries
         pre-quarantine committed frames, which is tolerable."""
         flag = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
-        setconfig = getattr(self._conn, "setconfig", None)
+        conn = self._conn
+        setconfig = getattr(conn, "setconfig", None)
         if flag is None or setconfig is None:
             return
         try:
