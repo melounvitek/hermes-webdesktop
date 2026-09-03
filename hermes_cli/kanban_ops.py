@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli.kanban_output import _err, _fmt_ts, _print_json
 
 
@@ -43,7 +46,7 @@ def _cmd_tail(args: argparse.Namespace) -> int:
 
     def tick():
         nonlocal last_id
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             events = kb.list_events(conn, args.task_id)
         for e in events:
             if e.id > last_id:
@@ -63,28 +66,28 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         _cfg = load_config()
         _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = kb._positive_int(
+        max_in_progress_per_profile = kbd._positive_int(
             _kanban_cfg.get("max_in_progress_per_profile"), None
         )
         # Memory-derived default when unset — same fallback the gateway applies.
-        max_in_progress = kb.resolve_max_in_progress(
-            kb._positive_int(_kanban_cfg.get("max_in_progress"), None)
+        max_in_progress = kbd.resolve_max_in_progress(
+            kbd._positive_int(_kanban_cfg.get("max_in_progress"), None)
         )
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
         max_spawn = (
-            cli_max if cli_max is not None else kb._positive_int(_kanban_cfg.get("max_spawn"), None)
+            cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
-    with kb.connect_closing() as conn:
-        res = kb.dispatch_once(
+    with kbc.connect_closing() as conn:
+        res = kbd.dispatch_once(
             conn,
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
-            failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
+            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
         )
@@ -187,8 +190,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         """Is there a ready+assigned+unclaimed task the dispatcher would spawn for?
         Control-plane lanes pulled via ``claim_task`` are correctly idle, not stuck."""
         try:
-            with kb.connect_closing() as conn:
-                return kb.has_spawnable_ready(conn)
+            with kbc.connect_closing() as conn:
+                return kbd.has_spawnable_ready(conn)
         except Exception:
             return False
 
@@ -227,10 +230,10 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             )
 
     try:
-        kb.run_daemon(
+        kbd.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
-            failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
+            failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
             on_tick=_on_tick,
         )
     finally:
@@ -248,12 +251,12 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     kinds = {k.strip() for k in args.kinds.split(",") if k.strip()} if args.kinds else None
     print("Watching kanban events. Ctrl-C to stop.", flush=True)
     # Seed cursor at the latest id so we don't replay history.
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         cursor = int(conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"])
 
     def tick():
         nonlocal cursor
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             rows = conn.execute(
                 "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at,        t.assignee, "
                 "t.tenant FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.id > ? "
@@ -284,7 +287,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     import shutil
     scratch_root = kb.workspaces_root()
     removed_ws = 0
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         rows = conn.execute(
             "SELECT id, workspace_kind, workspace_path, branch_name FROM tasks "
             "WHERE status = 'archived'"
@@ -295,7 +298,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             # Same safety predicate: only clean, fully-pushed worktrees go.
             wt_path = row["workspace_path"]
             if wt_path and Path(wt_path).is_dir():
-                kb._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
+                kbw._cleanup_worktree_workspace(row["id"], wt_path, row["branch_name"])
                 if not Path(wt_path).is_dir():
                     removed_ws += 1
             continue
@@ -317,7 +320,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 
     event_days = getattr(args, "event_retention_days", 30)
     log_days = getattr(args, "log_retention_days", 30)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         removed_events = kb.gc_events(conn, older_than_seconds=event_days * 24 * 3600)
     removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600)
     print(f"GC complete: {removed_ws} workspace(s), "
@@ -330,7 +333,7 @@ def _cmd_repair(args: argparse.Namespace) -> int:
     the auto ``kb.init_db()`` (init refuses corrupt DBs). Exit 0 = healthy /
     repaired / no DB file, 1 = still corrupt."""
     try:
-        report = kb.repair_db()
+        report = kbc.repair_db()
     except Exception as exc:  # locked/busy probe, unexpected I/O
         return _err(f"kanban repair: {exc}")
 

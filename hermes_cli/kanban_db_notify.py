@@ -1,7 +1,7 @@
 """Notification subscriptions consumed by the gateway kanban-notifier: per-(task, platform, chat, thread) rows with delivery metadata, unseen-event cursors and purge of stale done-task subs.
 
-Split out of ``hermes_cli.kanban_db``; every name is re-exported there, and
-origin-resident helpers are reached late-bound via ``_kb`` so monkeypatching
+Split out of ``hermes_cli.kanban_db``; origin-resident helpers are reached
+late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 ``kanban_db.<name>`` keeps working.
 """
 
@@ -412,5 +412,5 @@ def rewind_notify_cursor(
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
-# module is fully populated before ``kanban_db`` re-exports from it.
+# module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb  # noqa: E402

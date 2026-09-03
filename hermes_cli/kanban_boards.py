@@ -9,6 +9,7 @@ import argparse
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban_output import _err, _fmt_counts, _json_out
 
 
@@ -26,7 +27,7 @@ def _board_task_counts(slug: str) -> dict[str, int]:
     try:
         if not kb.kanban_db_path(board=slug).exists():
             return {}
-        with kb.connect_closing(board=slug) as conn:
+        with kbc.connect_closing(board=slug) as conn:
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").fetchall()
         return {r["status"]: int(r["n"]) for r in rows}
     except Exception:

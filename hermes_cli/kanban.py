@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
@@ -313,15 +317,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
-        ok = kb.heartbeat_worker(conn, args.task_id, note=getattr(args, "note", None),
+    with kbc.connect_closing() as conn:
+        ok = kbd.heartbeat_worker(conn, args.task_id, note=getattr(args, "note", None),
                                  expected_run_id=_worker_run_id_for(args.task_id))
     return _ok_or_err(ok, f"cannot heartbeat {args.task_id} (not running?)",
                       f"Heartbeat recorded for {args.task_id}")
 
 
 def _cmd_assignees(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         data = kb.known_assignees(conn)
     if _json_out(args, data):
         return 0
@@ -351,7 +355,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title=args.title, body=args.body, assignee=args.assignee,
             created_by=args.created_by or _profile_author(),
@@ -387,7 +391,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         return _err(f"kanban swarm: {exc}", 2)
     if not workers:
         return _err("kanban swarm: at least one --worker is required", 2)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         created = ks.create_swarm(
             conn, goal=args.goal, workers=workers, verifier_assignee=args.verifier,
             synthesizer_assignee=args.synthesizer, tenant=args.tenant,
@@ -408,7 +412,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
     assignee = args.assignee
     if args.mine and not assignee:
         assignee = _profile_author()
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         # Cheap mini-dispatch so list reflects dependencies cleared since the last tick.
         kb.recompute_ready(conn)
         tasks = kb.list_tasks(
@@ -465,7 +469,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         return rc
     graph = None
     want_json = getattr(args, "json", False)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task = kb.get_task(conn, args.task_id)
         if not task:
             return _err(f"no such task: {args.task_id}")
@@ -560,7 +564,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.assign_task(conn, args.task_id, profile)
     return _ok_or_err(ok, f"no such task: {args.task_id}",
                       f"Assigned {args.task_id} to {profile or '(unassigned)'}")
@@ -572,7 +576,7 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
         model = None
     provider = getattr(args, "provider", None)
     try:
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             ok = kb.set_model_override(conn, args.task_id, model, provider=provider)
     except (ValueError, RuntimeError) as exc:
         return _err(f"kanban: {exc}", 2)
@@ -587,7 +591,7 @@ def _cmd_set_model(args: argparse.Namespace) -> int:
 
 
 def _cmd_reclaim(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.reclaim_task(conn, args.task_id, reason=getattr(args, "reason", None))
     return _ok_or_err(ok, f"cannot reclaim {args.task_id} (not running or unknown id)",
                       f"Reclaimed {args.task_id}")
@@ -596,7 +600,7 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = _none_profile(args.profile)
     reclaim = bool(getattr(args, "reclaim", False))
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.reassign_task(conn, args.task_id, profile, reclaim_first=reclaim, reason=getattr(args, "reason", None))
     return _ok_or_err(
         ok,
@@ -626,7 +630,7 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
     diag_config = kd.config_from_runtime_config(load_config())
 
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         # Either one-task mode or fleet mode.
         if getattr(args, "task", None):
             task = kb.get_task(conn, args.task)
@@ -686,21 +690,21 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
 
 def _cmd_link(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.link_tasks(conn, args.parent_id, args.child_id)
     print(f"Linked {args.parent_id} -> {args.child_id}")
     return 0
 
 
 def _cmd_unlink(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.unlink_tasks(conn, args.parent_id, args.child_id)
     return _ok_or_err(ok, f"No such link: {args.parent_id} -> {args.child_id}",
                       f"Unlinked {args.parent_id} -> {args.child_id}")
 
 
 def _cmd_claim(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task = kb.claim_task(conn, args.task_id, ttl_seconds=args.ttl)
         if task is None:
             existing = kb.get_task(conn, args.task_id)
@@ -708,8 +712,8 @@ def _cmd_claim(args: argparse.Namespace) -> int:
                 return _err(f"no such task: {args.task_id}")
             return _err(f"cannot claim {args.task_id}: status={existing.status} "
                         f"lock={existing.claim_lock or '(none)'}")
-        workspace = kb.resolve_workspace(task)
-        kb.set_workspace_path(conn, task.id, str(workspace))
+        workspace = kbw.resolve_workspace(task)
+        kbw.set_workspace_path(conn, task.id, str(workspace))
     print(f"Claimed {task.id}\nWorkspace: {workspace}")
     return 0
 
@@ -723,7 +727,7 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             suffix = f"\n\n[trimmed to {args.max_len} chars by --max-len]"
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         kb.add_comment(conn, args.task_id, author, body)
     print(f"Comment added to {args.task_id}")
     return 0
@@ -742,7 +746,7 @@ def _cmd_attach(args: argparse.Namespace) -> int:
     content_type = args.content_type or mimetypes.guess_type(name)[0]
     uploaded_by = args.author or _profile_author()
     try:
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             att_id = kb.store_attachment_bytes(conn, args.task_id, name, data, content_type=content_type,
                                                uploaded_by=uploaded_by)
     except kb.AttachmentTooLarge as exc:
@@ -752,7 +756,7 @@ def _cmd_attach(args: argparse.Namespace) -> int:
 
 
 def _cmd_attachments(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")
         atts = kb.list_attachments(conn, args.task_id)
@@ -770,7 +774,7 @@ def _cmd_attachments(args: argparse.Namespace) -> int:
 
 
 def _cmd_attach_rm(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         removed = kb.delete_attachment(conn, args.attachment_id)
     if removed is None:
         return _err(f"no such attachment: {args.attachment_id}")
@@ -855,7 +859,7 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     if rc:
         return rc
     fail_msg: dict[str, str] = {}
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         def op(tid):
             gate_err = _goal_gate_error(
                 conn, tid, (summary or args.result or "").strip(), "completion",
@@ -875,7 +879,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
         return rc
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.edit_completed_task_result(conn, args.task_id, result=args.result,
                                            summary=getattr(args, "summary", None), metadata=metadata)
     return _ok_or_err(ok, f"cannot edit {args.task_id} (unknown id or task is not done)", f"Edited {args.task_id}")
@@ -896,7 +900,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         def ok_msg(tid):
             # Report where it landed: dependency blocks -> todo, tripped unblock-loop breaker -> triage.
             landed = kb.get_task(conn, tid)
@@ -917,7 +921,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     author = _profile_author()
     ids = _bulk_ids(args)
     suffix = f": {reason}" if reason else ""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
             conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
         return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
@@ -930,7 +934,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     reason = _stripped_or_none(getattr(args, "reason", None))
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
@@ -942,7 +946,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
         return rc
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         gate_err = _goal_gate_error(
             conn, tid, summary or "", "review handoff",
             "Record the block with kanban block instead of requesting review.",
@@ -963,7 +967,7 @@ def _cmd_request_review(args: argparse.Namespace) -> int:
 def _cmd_request_changes(args: argparse.Namespace) -> int:
     tid = args.task_id
     reason = " ".join(args.reason).strip()
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok, detail = kb.request_changes(conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid))
         if not ok:
             return _err(f"cannot request changes for {tid}: {detail or 'invalid review state'}")
@@ -980,7 +984,7 @@ def _cmd_reopen_review(args: argparse.Namespace) -> int:
         reason = str(kb.redact_review_value(reason.strip())).strip() or None
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         def op(tid):
             if not kb.reopen_review_task(conn, tid):
                 return False
@@ -1000,7 +1004,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     dry_run, force = bool(args.dry_run), bool(args.force)
 
     results: list[dict[str, object]] = []
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         for tid in ids:
             ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, force=force, dry_run=dry_run)
             results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run, "forced": force,
@@ -1030,7 +1034,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
         return _err("choose either task_ids to archive or --rm archived task_ids")
     if not ids and not purge_ids:
         return _err("at least one task_id is required")
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         if purge_ids:
             return _bulk_apply(purge_ids, lambda tid: kb.delete_archived_task(conn, tid), lambda tid: f"Deleted {tid}",
                                lambda tid: f"cannot delete {tid} (must already be archived)")
@@ -1039,7 +1043,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         stats = kb.board_stats(conn)
     if _json_out(args, stats):
         return 0
@@ -1057,10 +1061,10 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")
-        kb.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
             chat_type=args.chat_type, thread_id=args.thread_id, user_id=args.user_id,
             user_id_alt=getattr(args, "user_id_alt", None),
@@ -1073,8 +1077,8 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_list(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
-        subs = kb.list_notify_subs(conn, args.task_id)
+    with kbc.connect_closing() as conn:
+        subs = kbn.list_notify_subs(conn, args.task_id)
     if _json_out(args, subs):
         return 0
     if not subs:
@@ -1094,8 +1098,8 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
-        ok = kb.remove_notify_sub(conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
+    with kbc.connect_closing() as conn:
+        ok = kbn.remove_notify_sub(conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
                                   thread_id=args.thread_id)
     return _ok_or_err(ok, "(no such subscription)", f"Unsubscribed from {args.task_id}")
 
@@ -1115,7 +1119,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
     rsk, rc = _run_state_kwargs(args, "runs")
     if rc:
         return rc
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         runs = kb.list_runs(conn, args.task_id, **rsk)
     if _json_out(args, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]):
         return 0
@@ -1138,7 +1142,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
 
 
 def _cmd_context(args: argparse.Namespace) -> int:
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         text = kb.build_worker_context(conn, args.task_id)
     print(text)
     return 0

@@ -590,7 +590,7 @@ _cleanup_all_terminals = _lazy_shim("tools.terminal_tool", "cleanup_all_environm
 set_sudo_password_callback = _lazy_shim("tools.terminal_tool", "set_sudo_password_callback")
 set_approval_callback = _lazy_shim("tools.terminal_tool", "set_approval_callback")
 set_secret_capture_callback = _lazy_shim("tools.skills_tool", "set_secret_capture_callback")
-_cleanup_all_browsers = _lazy_shim("tools.browser_tool", "_emergency_cleanup_all_sessions", "_cleanup_all_browsers")
+_cleanup_all_browsers = _lazy_shim("tools.browser_tool_lifecycle", "_emergency_cleanup_all_sessions", "_cleanup_all_browsers")
 
 _cleanup_done = False  # _run_cleanup runs exactly once
 _cleanup_in_progress = False
@@ -4049,10 +4049,11 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         logger.warning("invalid HERMES_KANBAN_RUN_ID=%r", raw_run_id)
 
     from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_db_connect as _kbc
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
 
     # Goal text = title + body (the acceptance criteria the judge evaluates against).
-    with _kb.connect_closing() as conn:
+    with _kbc.connect_closing() as conn:
         task = _kb.get_task(conn, task_id)
     if task is None:
         return
@@ -4070,11 +4071,11 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return resp or ""
 
     def _task_status() -> "str | None":
-        with _kb.connect_closing() as c:
+        with _kbc.connect_closing() as c:
             return _kb.goal_run_status(c, task_id, worker_run_id)
 
     def _block(reason: str) -> None:
-        with _kb.connect_closing() as c:
+        with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
     _run_loop(
@@ -4189,9 +4190,10 @@ def _collect_kanban_task_images(single_query_images):
         return single_query_image_urls
     try:
         from hermes_cli import kanban_db as _kb
+        from hermes_cli import kanban_db_connect as _kbc
         from agent.image_routing import extract_image_refs as _extract_refs
 
-        with _kb.connect_closing() as _conn:
+        with _kbc.connect_closing() as _conn:
             _task = _kb.get_task(_conn, _kanban_task_id)
         _body = getattr(_task, "body", "") if _task is not None else ""
         if _body:

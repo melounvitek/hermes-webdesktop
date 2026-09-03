@@ -1,7 +1,7 @@
 """Task workspace lifecycle: scratch/dir/worktree resolution (incl. git worktree creation), post-completion cleanup with containment guards, worker tmux teardown and the first-use scratch-workspace tip.
 
-Split out of ``hermes_cli.kanban_db``; every name is re-exported there, and
-origin-resident helpers are reached late-bound via ``_kb`` so monkeypatching
+Split out of ``hermes_cli.kanban_db``; origin-resident helpers are reached
+late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 ``kanban_db.<name>`` keeps working.
 """
 
@@ -545,5 +545,5 @@ def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) ->
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
-# module is fully populated before ``kanban_db`` re-exports from it.
+# module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb  # noqa: E402

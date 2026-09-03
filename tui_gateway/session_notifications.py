@@ -259,17 +259,19 @@ def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
     """Claim + format this session's unseen events on one board. One poller per live session: the board is not opened
     writable unless it has a subscription owned by this exact session (a failed read-only probe — locked/corrupt DB —
     falls through so delivery is preserved)."""
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli import kanban_db_notify as _kbn
     with contextlib.suppress(Exception):
-        if _kb.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
+        if _kbn.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
             return []
     try:
-        conn = _kb.connect(board=slug)
+        conn = _kbc.connect(board=slug)
     except Exception:
         return []
     texts: list = []
     with contextlib.closing(conn):
         try:
-            subs = _kb.list_notify_subs(conn)
+            subs = _kbn.list_notify_subs(conn)
         except Exception:
             return []
         for sub in subs:
@@ -277,7 +279,7 @@ def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
                 continue
             sub_ident = dict(task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                              thread_id=sub.get("thread_id") or "")
-            _old, _new, events = _kb.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
+            _old, _new, events = _kbn.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
             if not events:
                 continue
             task = _kb.get_task(conn, sub["task_id"])
@@ -286,7 +288,7 @@ def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
             # later reopen notify the same session. The claimed cursor prevents replay.
             if task and getattr(task, "status", "") == "archived":
                 with contextlib.suppress(Exception):
-                    _kb.remove_notify_sub(conn, **sub_ident)
+                    _kbn.remove_notify_sub(conn, **sub_ident)
     return texts
 
 

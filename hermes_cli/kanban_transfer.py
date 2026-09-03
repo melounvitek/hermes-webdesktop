@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.archive_safe import (
     archive_root_dirs,
     copy_regular_files,
@@ -346,7 +347,7 @@ def import_board(
     # relocation pass writes to it.
     kb.init_db(board=target)
 
-    with kb.connect_closing(board=target) as conn:
+    with kbc.connect_closing(board=target) as conn:
         stats, warnings = _relocate_imported_rows(conn, target)
         counts = _count_rows(conn)
 

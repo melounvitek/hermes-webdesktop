@@ -386,9 +386,11 @@ class GatewaySlashCommandsMixin(
 
         def _sub():
             from hermes_cli import kanban_db as _kb
-            conn = _kb.connect(board=requested_board)
+            from hermes_cli import kanban_db_connect as _kbc
+            from hermes_cli import kanban_db_notify as _kbn
+            conn = _kbc.connect(board=requested_board)
             try:
-                _kb.add_notify_sub(
+                _kbn.add_notify_sub(
                     conn, task_id=task_id, platform=platform_str, chat_id=chat_id, chat_type=chat_type,
                     thread_id=_field("thread_id"), user_id=_field("user_id"),
                     # Also persist the stable alt id (Signal UUID, Feishu union_id): build_session_key

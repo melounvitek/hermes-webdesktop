@@ -16,6 +16,16 @@ from typing import Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
 
+
+def _kbc():
+    from hermes_cli import kanban_db_connect
+    return kanban_db_connect
+
+
+def _kbd():
+    from hermes_cli import kanban_db_dispatch
+    return kanban_db_dispatch
+
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
 
 
@@ -51,7 +61,7 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     # out. Explicit config wins; otherwise a memory-derived default (unbounded
     # fan-out swap-thrashes small hosts), or None where total memory can't be read.
     max_in_progress = _positive_int_setting(kanban_cfg, "max_in_progress")
-    effective_max_in_progress = kb.resolve_max_in_progress(max_in_progress)
+    effective_max_in_progress = _kbd().resolve_max_in_progress(max_in_progress)
     if max_in_progress is None and effective_max_in_progress is not None:
         logger.info(
             "kanban dispatcher: kanban.max_in_progress unset; using "
@@ -139,8 +149,7 @@ class _KanbanDispatcher:
         return (resolved, stat.st_mtime_ns, stat.st_size)
 
     def is_corrupt_board_db_error(self, exc: Exception) -> bool:
-        corrupt_guard_error = getattr(self.kb, "KanbanDbCorruptError", None)
-        if corrupt_guard_error is not None and isinstance(exc, corrupt_guard_error):
+        if isinstance(exc, _kbc().KanbanDbCorruptError):
             return True
         return isinstance(exc, sqlite3.DatabaseError) and any(m in str(exc).lower() for m in _CORRUPT_DB_MARKERS)
 
@@ -175,8 +184,8 @@ class _KanbanDispatcher:
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
-            conn = self.kb.connect(board=slug)
-            return self.kb.dispatch_once(conn, board=slug, **kwargs)
+            conn = _kbc().connect(board=slug)
+            return _kbd().dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -209,13 +218,13 @@ class _KanbanDispatcher:
         review dispatch is on (same gate as the dispatcher): a task waiting
         for a human reviewer is idle, not stuck.
         """
-        kb = self.kb
-        _review_probe = kb.review_dispatch_enabled()
+        kbd = _kbd()
+        _review_probe = kbd.review_dispatch_enabled()
         for slug in self._board_slugs():
             conn = None
             try:
-                conn = kb.connect(board=slug)
-                if kb.has_spawnable_ready(conn) or (_review_probe and kb.has_spawnable_review(conn)):
+                conn = _kbc().connect(board=slug)
+                if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
                     return True
             except Exception:
                 continue

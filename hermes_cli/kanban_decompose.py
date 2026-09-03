@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
 from hermes_cli.kanban_specify import (
     _call_aux, _extract_json_blob, _load_triage_task, _task_prompt_fields, _title_body,
@@ -222,7 +223,7 @@ def _apply_single(task: kb.Task, parsed: dict, routing: _Routing, author: str) -
         )
     if title_val is None and body_val is None:
         return DecomposeOutcome(task.id, False, "decomposer returned fanout=false with no title/body")
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
             conn, task.id, title=title_val, body=body_val, assignee=assignee_val, author=author,
         )
@@ -273,7 +274,7 @@ def _apply_fanout(task_id: str, parsed: dict, routing: _Routing, author: str) ->
     if reason:
         return DecomposeOutcome(task_id, False, reason)
     try:
-        with kb.connect_closing() as conn:
+        with kbc.connect_closing() as conn:
             child_ids = kb.decompose_triage_task(
                 conn,
                 task_id,
@@ -332,6 +333,6 @@ def decompose_task(
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
     return [row.id for row in rows]

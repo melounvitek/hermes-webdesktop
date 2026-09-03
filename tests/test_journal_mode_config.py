@@ -287,7 +287,7 @@ def test_real_db_openers_honor_configured_delete(monkeypatch, tmp_path):
     finally:
         session_db.close()
 
-    kanban_conn = kanban_db.connect(db_path=tmp_path / "kanban.db")
+    kanban_conn = kbc.connect(db_path=tmp_path / "kanban.db")
     try:
         observed["kanban"] = kanban_conn.execute(
             "PRAGMA journal_mode"

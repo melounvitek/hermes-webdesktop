@@ -15,6 +15,16 @@ from agent.i18n import t
 
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 
+
+def _kbc():
+    from hermes_cli import kanban_db_connect
+    return kanban_db_connect
+
+
+def _kbn():
+    from hermes_cli import kanban_db_notify
+    return kanban_db_notify
+
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
@@ -135,7 +145,7 @@ class _Collector:
         """Cheap read-only probe before the writable connect() (schema init, WAL
         sidecars, checkpoints); a probe failure falls back to the writable open."""
         try:
-            count = self.kb.count_notify_subs(
+            count = _kbn().count_notify_subs(
                 board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
         except Exception as exc:
             logger.debug("kanban notifier: read-only subscription probe failed "
@@ -149,7 +159,7 @@ class _Collector:
     def _gc_stale_subs(self, conn: Any, slug: str) -> None:
         """Best-effort stale-sub sweep: a failed sweep never blocks delivery; the next hourly gate retries."""
         try:
-            _purged = self.kb.purge_stale_done_notify_subs(conn, max_age_days=self.gc_retention_days)
+            _purged = _kbn().purge_stale_done_notify_subs(conn, max_age_days=self.gc_retention_days)
             if _purged:
                 logger.info("kanban notifier: purged %d stale done/blocked-task subscription(s) on board %s (retention %dd)",
                             _purged, slug, self.gc_retention_days)
@@ -168,7 +178,7 @@ class _Collector:
             logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
                          sub.get("task_id"), platform or "<missing>")
             return None
-        old_cursor, cursor, events = self.kb.claim_unseen_events_for_sub(
+        old_cursor, cursor, events = _kbn().claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
             thread_id=sub.get("thread_id") or "", kinds=TERMINAL_KINDS,
         )
@@ -185,7 +195,7 @@ class _Collector:
             return
         kb = self.kb
         try:
-            conn = kb.connect(board=slug)
+            conn = _kbc().connect(board=slug)
         except Exception as exc:
             logger.debug("kanban notifier: cannot open board %s: %s", slug, exc)
             return
@@ -195,7 +205,7 @@ class _Collector:
             # No explicit init_db(): connect() already runs the migration once per
             # process, and init_db() would re-run it on a second connection racing
             # the first.
-            subs = kb.list_notify_subs(conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
+            subs = _kbn().list_notify_subs(conn, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
             if not subs:
                 logger.debug("kanban notifier: board %s has no subscriptions", slug)
             for sub in subs:

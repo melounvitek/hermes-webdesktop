@@ -29,6 +29,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_db_connect as kbc
+from hermes_cli import kanban_db_notify as kbn
+from hermes_cli import kanban_db_dispatch as kbd
+from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli.kanban_db import KANBAN_ATTACHMENT_MAX_BYTES, _collision_free_path, _safe_attachment_name
 
@@ -42,11 +46,11 @@ _BOARD_Q = Query(None, description="Kanban board slug (omit for current)")
 # --- Connection / board helpers ---------------------------------------------
 
 def _ws_upgrade_authorized(ws: "WebSocket") -> bool:
-    """Authorize a WS upgrade via the dashboard's canonical gate (``web_server._ws_auth_ok``:
+    """Authorize a WS upgrade via the dashboard's canonical gate (``web_server_chat._ws_auth_ok``:
     ``?token=`` / ``?ticket=`` / ``?internal=``) so this endpoint can never drift from core
-    auth; accepts when ``web_server`` isn't importable (bare-FastAPI test harness)."""
+    auth; accepts when the dashboard isn't importable (bare-FastAPI test harness)."""
     try:
-        from hermes_cli import web_server as _ws
+        from hermes_cli import web_server_chat as _ws
     except Exception:
         return True
     return bool(_ws._ws_auth_ok(ws))
@@ -83,7 +87,7 @@ def _conn(board: Optional[str] = None):
         kanban_db.init_db(board=board)
     except Exception as exc:
         log.warning("kanban init_db failed: %s", exc)
-    return kanban_db.connect(board=board)
+    return kbc.connect(board=board)
 
 
 @contextmanager
@@ -1115,7 +1119,7 @@ def get_home_channels(task_id: Optional[str] = Query(None), board: Optional[str]
     subscribed_homes: set[tuple[str, str, str]] = set()
     if task_id:
         with _board_conn(board) as (board, conn):
-            subs = kanban_db.list_notify_subs(conn, task_id)
+            subs = kbn.list_notify_subs(conn, task_id)
         subscribed_homes = {
             (str(sub.get("platform") or ""), str(sub.get("chat_id") or ""), str(sub.get("thread_id") or "")) for sub in subs}
     return {"home_channels": [
@@ -1133,7 +1137,7 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         f"gateway.platforms.{platform}.home_channel in config.yaml.")
     with _board_conn(board) as (board, conn):
         _require_task(conn, task_id)
-        kanban_db.add_notify_sub(
+        kbn.add_notify_sub(
             conn, task_id=task_id, platform=platform, chat_id=home["chat_id"],
             thread_id=home["thread_id"] or None, notifier_profile=_active_profile_name())
         return {"ok": True, "task_id": task_id, "home_channel": home}
@@ -1144,7 +1148,7 @@ def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(N
     """Remove any notify subscription on *task_id* matching *platform*'s home."""
     home = _home_for_platform(platform, f"No home channel configured for platform {platform!r}.")
     with _board_conn(board) as (board, conn):
-        kanban_db.remove_notify_sub(
+        kbn.remove_notify_sub(
             conn, task_id=task_id, platform=platform, chat_id=home["chat_id"], thread_id=home["thread_id"] or None)
         return {"ok": True, "task_id": task_id, "home_channel": home}
 
@@ -1184,7 +1188,7 @@ def get_task_log(task_id: str, tail: Optional[int] = Query(None, ge=1, le=2_000_
 def dispatch(dry_run: bool = Query(False), max_n: int = Query(8, alias="max"), board: Optional[str] = Query(None)):
     """Dispatch nudge so the UI doesn't wait out the 60 s dispatcher tick."""
     with _board_conn(board) as (board, conn):
-        result = kanban_db.dispatch_once(conn, dry_run=dry_run, max_spawn=max_n, board=board)
+        result = kbd.dispatch_once(conn, dry_run=dry_run, max_spawn=max_n, board=board)
         try:
             return asdict(result)  # DispatchResult is a dataclass
         except TypeError:
@@ -1285,7 +1289,7 @@ def _board_counts(slug: str) -> dict[str, int]:
     try:
         if not kanban_db.kanban_db_path(board=slug).exists():
             return {}
-        with closing(kanban_db.connect(board=slug)) as conn:
+        with closing(kbc.connect(board=slug)) as conn:
             rows = conn.execute("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status").fetchall()
             return {r["status"]: int(r["n"]) for r in rows}
     except Exception:
@@ -1298,7 +1302,7 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
     if not workdir:
         return "scratch"
     try:
-        return "worktree" if kanban_db._git_toplevel(Path(workdir)) else "dir"
+        return "worktree" if kbw._git_toplevel(Path(workdir)) else "dir"
     except (OSError, ValueError):
         return "dir"
 
@@ -1630,7 +1634,7 @@ class _EventTail:
 
     def _fetch(self, cursor: int) -> tuple[int, list[dict]]:
         if self._conn is None:
-            self._conn = kanban_db.connect(board=self._board)
+            self._conn = kbc.connect(board=self._board)
         rows = self._conn.execute(
             "SELECT id, task_id, run_id, kind, payload, created_at "
             "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT 200",

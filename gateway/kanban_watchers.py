@@ -109,11 +109,12 @@ class GatewayKanbanWatchersMixin:
             await self._sleep_between_ticks(interval)
 
     def _kanban_sub_op(self, board: Optional[str], op: str, sub: dict, **extra: Any) -> None:
-        """Sync helper (runs in to_thread): call ``kanban_db.<op>`` for one subscription on its board."""
-        from hermes_cli import kanban_db as _kb
-        conn = _kb.connect(board=board)
+        """Sync helper (runs in to_thread): call ``kanban_db_notify.<op>`` for one subscription on its board."""
+        from hermes_cli import kanban_db_connect as _kbc
+        from hermes_cli import kanban_db_notify as _kbn
+        conn = _kbc.connect(board=board)
         try:
-            getattr(_kb, op)(
+            getattr(_kbn, op)(
                 conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "", **extra,
             )
@@ -234,7 +235,7 @@ class GatewayKanbanWatchersMixin:
 
         Gated by `kanban.dispatch_in_gateway` (default True); when false the
         loop exits and an external `hermes kanban daemon` is expected. Each
-        tick runs :func:`kanban_db.dispatch_once` in a thread; one tick's
+        tick runs :func:`kanban_db_dispatch.dispatch_once` in a thread; one tick's
         failure never stops the next. Shutdown: ``self._running`` is checked
         between ticks and the in-flight ``to_thread`` returns on its own.
         """
@@ -260,7 +261,8 @@ class GatewayKanbanWatchersMixin:
             try:
                 # Reap zombies before per-board work so a board DB failure
                 # cannot block cleanup of unrelated workers.
-                pids = await _to_thread_process_service(_kb.reap_worker_zombies)
+                from hermes_cli import kanban_db_dispatch as _kbd
+                pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
                 if pids:
                     logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
             except Exception:

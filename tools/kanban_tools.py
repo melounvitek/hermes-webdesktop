@@ -202,7 +202,8 @@ def _board(board: Optional[str], *, quiet_close: bool = False):
     contexts. ``board=None`` keeps the env/symlink resolution chain; an explicit slug
     overrides it per call. ``quiet_close`` swallows close() errors (best-effort bridges)."""
     from hermes_cli import kanban_db as kb
-    conn = kb.connect(board=board)
+    from hermes_cli import kanban_db_connect as kbc
+    conn = kbc.connect(board=board)
     try:
         yield kb, conn
     finally:
@@ -425,12 +426,14 @@ def heartbeat_current_worker_from_env() -> bool:
         return False
     _auto_heartbeat_last_attempt = now
     try:
+        from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (kb, conn):
-            ops = (("heartbeat_claim", {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
-                   ("heartbeat_worker", {"note": None, "expected_run_id": _worker_run_id(tid)}))
-            for op, kwargs in ops:
+            ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
+                   (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
+            for fn, kwargs in ops:
+                op = fn.__name__
                 try:
-                    getattr(kb, op)(conn, tid, **kwargs)
+                    fn(conn, tid, **kwargs)
                 except Exception:
                     logger.debug("auto-heartbeat: %s failed", op, exc_info=True)
         return True
@@ -664,11 +667,12 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     Without the claim half, a worker blocked in one long tool call would still
     be reclaimed by ``release_stale_claims``."""
     tid = _worker_guard("kanban_heartbeat", args)
+    from hermes_cli import kanban_db_dispatch as kbd
     with _board(args.get("board")) as (kb, conn):
         # The dispatcher pins HERMES_KANBAN_CLAIM_LOCK at spawn; the default
         # claimer covers locally-driven workers that bypassed the dispatcher.
         kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
-        ok = kb.heartbeat_worker(
+        ok = kbd.heartbeat_worker(
             conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
         return _ok(task_id=tid)
@@ -904,7 +908,8 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
         if target is None:
             return False  # CLI / cron / test — no persistent channel
         from hermes_cli import kanban_db as _kb
-        _kb.add_notify_sub(conn, task_id=task_id, **target)
+        from hermes_cli import kanban_db_notify as _kbn
+        _kbn.add_notify_sub(conn, task_id=task_id, **target)
         return True
     except Exception as _exc:
         logger.warning(

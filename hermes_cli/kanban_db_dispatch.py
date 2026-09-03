@@ -1,7 +1,7 @@
 """Dispatcher: crash/stale/orphan detection, failure accounting and the respawn circuit breaker, memory-aware concurrency caps, the one-shot ``dispatch_once`` pass, worker spawning (``_default_spawn``), worker-log rotation and the long-lived ``run_daemon`` loop.
 
-Split out of ``hermes_cli.kanban_db``; every name is re-exported there, and
-origin-resident helpers are reached late-bound via ``_kb`` so monkeypatching
+Split out of ``hermes_cli.kanban_db``; origin-resident helpers are reached
+late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 ``kanban_db.<name>`` keeps working.
 """
 
@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 # After this many consecutive non-success attempts on a task/profile the
 # dispatcher parks the task in ``blocked`` with a reason — prevents retry storms.
 DEFAULT_FAILURE_LIMIT = 2
-# Legacy alias — callers / tests still reference the old name.
-DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
 # Worker log files larger than this at spawn time are rotated.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
@@ -492,7 +490,7 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # own. If the breaker trips this flips the task to ``blocked`` and emits
         # ``gave_up`` on top of the ``timed_out`` already emitted.
         if cur.rowcount == 1:
-            _kb._record_task_failure(
+            _record_task_failure(
                 conn, tid,
                 error=error,
                 outcome="timed_out",
@@ -754,7 +752,7 @@ class _DeadWorker:
 
 def _classify_dead_worker(pid: int, claimer: Optional[str]) -> _DeadWorker:
     """Map a dead worker's reaped exit status to its reclaim bookkeeping."""
-    kind, code = _kb._classify_worker_exit(pid)
+    kind, code = _classify_worker_exit(pid)
     if kind == "clean_exit":
         # rc=0 while still ``running``: usually the work succeeded and only the
         # paperwork was skipped; the corrective sentence reaches the retry
@@ -905,7 +903,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
                 continue
             # ``force_trip``: the decision (incl. per-task ``max_retries``) was
             # already made against the violation streak above.
-            tripped = _kb._record_task_failure(
+            tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
@@ -922,7 +920,7 @@ def _account_crashes(conn: sqlite3.Connection, crash_details: list) -> list[str]
             )
         else:
             is_systemic = fp_counts.get(_error_fingerprint(error_text), 0) >= 3
-            tripped = _kb._record_task_failure(
+            tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
@@ -1097,23 +1095,6 @@ def _record_task_failure(
             payload.update(event_payload_extra)
         _kb._append_event(conn, task_id, "gave_up", payload, run_id=run_id)
         return True
-
-
-# Backward-compat alias; new code should call ``_record_task_failure``.
-def _record_spawn_failure(
-    conn: sqlite3.Connection,
-    task_id: str,
-    error: str,
-    *,
-    failure_limit: int = None,
-) -> bool:
-    return _kb._record_task_failure(
-        conn, task_id, error,
-        outcome="spawn_failed",
-        failure_limit=failure_limit,
-        release_claim=True,
-        end_run=True,
-    )
 
 
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
@@ -1323,7 +1304,7 @@ def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -
     machines are unaffected.
     """
     if sample is None:
-        sample = _kb._system_memory_sample()
+        sample = _system_memory_sample()
     total_kib = sample.get("mem_total_kib")
     if isinstance(total_kib, bool) or not isinstance(total_kib, int) or total_kib <= 0:
         return None
@@ -1338,7 +1319,7 @@ def resolve_max_in_progress(configured: Optional[int]) -> Optional[int]:
     """
     if configured is not None:
         return configured
-    return _kb.derive_default_max_in_progress()
+    return derive_default_max_in_progress()
 
 
 def configured_max_in_progress() -> Optional[int]:
@@ -1404,7 +1385,7 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
                 continue
             if not path.exists():
                 continue
-            other = _kb.connect(board=slug)
+            other = _kbc.connect(board=slug)
             try:
                 total += count_running_tasks(other)
             finally:
@@ -1424,7 +1405,7 @@ def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
     where /proc is unavailable.
     """
     if sample is None:
-        sample = _kb._system_memory_sample()
+        sample = _system_memory_sample()
     if not sample:
         return "unknown"
     try:
@@ -1442,7 +1423,7 @@ def dispatch_once(
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
     max_in_progress: Optional[int] = None,
-    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
     stale_timeout_seconds: int = 0,
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
@@ -1480,13 +1461,13 @@ def dispatch_once(
         result = _locked_tick()
         _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
-    with _kb._dispatch_tick_lock(db_path) as held:
+    with _kbc._dispatch_tick_lock(db_path) as held:
         if not held:
             result = DispatchResult(skipped_locked=True)
         else:
             result = _locked_tick()
             # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kb._maybe_checkpoint_wal(conn, db_path)
+            _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
     _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
@@ -1541,7 +1522,7 @@ def _dispatch_lane_task(
         if current >= per_profile_cap:
             result.skipped_per_profile_capped.append((task_id, assignee, current))
             return False
-    guard_reason = _kb.check_respawn_guard(conn, task_id, lane=lane)
+    guard_reason = check_respawn_guard(conn, task_id, lane=lane)
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
@@ -1573,17 +1554,20 @@ def _dispatch_lane_task(
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":
-            workspace, resolved_branch_name = _kb._resolve_worktree_workspace(claimed, board=board)
+            workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
         else:
-            workspace = _kb.resolve_workspace(claimed, board=board)
+            workspace = _kbw.resolve_workspace(claimed, board=board)
     except Exception as exc:
-        if _record_spawn_failure(conn, claimed.id, f"workspace: {exc}", failure_limit=failure_limit):
+        if _record_task_failure(
+            conn, claimed.id, f"workspace: {exc}",
+            outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+        ):
             result.auto_blocked.append(claimed.id)
         return False
-    _kb.set_workspace_path(conn, claimed.id, str(workspace))
+    _kbw.set_workspace_path(conn, claimed.id, str(workspace))
     if claimed.workspace_kind == "worktree":
-        _kb.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
-    _kb._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+    _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
@@ -1601,7 +1585,10 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
-        if _record_spawn_failure(conn, claimed.id, str(exc), failure_limit=failure_limit):
+        if _record_task_failure(
+            conn, claimed.id, str(exc),
+            outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+        ):
             result.auto_blocked.append(claimed.id)
         return False
 
@@ -1768,7 +1755,7 @@ def _dispatch_once_locked(
     dry_run: bool = False,
     max_spawn: Optional[int] = None,
     max_in_progress: Optional[int] = None,
-    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
     stale_timeout_seconds: int = 0,
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
@@ -2099,7 +2086,7 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     cmd = [
-        *_kb._resolve_hermes_argv(),
+        *_resolve_hermes_argv(),
         "-p", profile_arg,
         # A worker must NEVER boot the interactive TUI: its no-TTY bail-out
         # exits 0 without doing the task → "protocol violation" every attempt.
@@ -2252,7 +2239,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # match after `hermes -p` rewrites HERMES_HOME (symlink / Docker layouts).
     env["HERMES_KANBAN_DB"] = str(_kb.kanban_db_path(board=board))
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(_kb.workspaces_root(board=board))
-    _kb._retag_legacy_worker_sessions(env["HERMES_KANBAN_WORKSPACES_ROOT"])
+    _retag_legacy_worker_sessions(env["HERMES_KANBAN_WORKSPACES_ROOT"])
     # Board slug — defense-in-depth pin if a path is resolved without the
     # DB / workspaces env vars.
     env["HERMES_KANBAN_BOARD"] = _kb._normalize_board_slug(board) or _kb.get_current_board()
@@ -2299,7 +2286,7 @@ def run_daemon(
     *,
     interval: float = 60.0,
     max_spawn: Optional[int] = None,
-    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
 ) -> None:
@@ -2332,9 +2319,9 @@ def run_daemon(
         try:
             # Re-resolved every tick (config load is mtime-cached) so operator
             # edits apply without a restart.
-            max_in_progress = resolve_max_in_progress(_kb.configured_max_in_progress())
-            with contextlib.closing(_kb.connect()) as conn:
-                res = _kb.dispatch_once(
+            max_in_progress = resolve_max_in_progress(configured_max_in_progress())
+            with contextlib.closing(_kbc.connect()) as conn:
+                res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
@@ -2351,5 +2338,7 @@ def run_daemon(
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
-# module is fully populated before ``kanban_db`` re-exports from it.
+# module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb  # noqa: E402
+from hermes_cli import kanban_db_connect as _kbc  # noqa: E402
+from hermes_cli import kanban_db_workspace as _kbw  # noqa: E402

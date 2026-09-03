@@ -1,7 +1,7 @@
 """SQLite connection lifecycle for the Kanban DB: open/configure, cross-process init and dispatch-tick locks, WAL checkpoints, corruption detection + quarantine + repair, additive migrations and the busy-retrying ``write_txn`` boundary.
 
-Split out of ``hermes_cli.kanban_db``; every name is re-exported there, and
-origin-resident helpers are reached late-bound via ``_kb`` so monkeypatching
+Split out of ``hermes_cli.kanban_db``; origin-resident helpers are reached
+late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 ``kanban_db.<name>`` keeps working.
 """
 
@@ -131,7 +131,7 @@ def _cross_process_init_lock(path: Path):
     handle = lock_path.open("a+b")
     acquired = False
     try:
-        deadline = time.monotonic() + _kb._INIT_LOCK_TIMEOUT_SECONDS
+        deadline = time.monotonic() + _INIT_LOCK_TIMEOUT_SECONDS
         while True:
             try:
                 acquired = _try_lock_nb(handle)
@@ -146,7 +146,7 @@ def _cross_process_init_lock(path: Path):
                 "without the cross-process lock (in-process lock + idempotent "
                 "init are the correctness backstop). A stuck holder is no longer "
                 "able to block this connect indefinitely (#36644).",
-                lock_path, _kb._INIT_LOCK_TIMEOUT_SECONDS,
+                lock_path, _INIT_LOCK_TIMEOUT_SECONDS,
             )
         yield
     finally:
@@ -326,7 +326,7 @@ def _prune_corrupt_backups(parent: Path, base_name: str, keep: Optional[Path] = 
         ]
     except OSError:
         return
-    budget = max(_kb._CORRUPT_BACKUP_RETENTION - (1 if keep is not None else 0), 0)
+    budget = max(_CORRUPT_BACKUP_RETENTION - (1 if keep is not None else 0), 0)
     if len(backups) <= budget:
         return
 
@@ -732,7 +732,7 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
 
     See #33159 for the production incident.
     """
-    conn = _kb.connect(db_path=db_path, board=board)
+    conn = connect(db_path=db_path, board=board)
     try:
         yield conn
     finally:
@@ -750,7 +750,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(str(path.resolve()))
-    with contextlib.closing(_kb.connect(path)):
+    with contextlib.closing(connect(path)):
         pass
     return path
 
@@ -1183,7 +1183,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
                 conn.execute("ROLLBACK")
             raise
         # Post-commit torn-extend check — raise now rather than silently corrupt.
-        _kb._check_file_length_invariant(conn)
+        _check_file_length_invariant(conn)
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this

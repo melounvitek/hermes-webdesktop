@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
 
 from utils import env_int
 
@@ -124,7 +125,7 @@ def _profile_author(default: str = "specifier") -> str:
 
 def _load_triage_task(task_id: str) -> tuple[Optional[kb.Task], str]:
     """``(task, "")`` when the task exists and is in triage, else ``(None, reason)``."""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
     if task is None:
         return None, "unknown task id"
@@ -209,7 +210,7 @@ def specify_task(
         if new_body is None and new_title is None:
             return SpecifyOutcome(task_id, False, "LLM response missing title and body")
 
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         ok = kb.specify_triage_task(
             conn,
             task_id,
@@ -225,6 +226,6 @@ def specify_task(
 
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
-    with kb.connect_closing() as conn:
+    with kbc.connect_closing() as conn:
         tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
     return [t.id for t in tasks]
