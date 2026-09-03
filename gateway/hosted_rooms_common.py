@@ -13,7 +13,6 @@ import re
 import sqlite3
 import time
 from contextlib import contextmanager
-from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
@@ -38,10 +37,6 @@ def bounded_int(value: Any, *, error: type[Exception], message: str, low: int = 
     if isinstance(value, bool) or not isinstance(value, int) or value < low or (high is not None and value > high):
         raise error(message)
     return value
-
-
-positive_int = partial(bounded_int, low=1)
-non_negative_int = partial(bounded_int, low=0)
 
 
 def exact_fields(
