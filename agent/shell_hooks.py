@@ -1,16 +1,11 @@
 """Shell-script hooks bridge.
 
 Reads the ``hooks:`` block from config, prompts for first-use consent per ``(event, command)``
-pair, and registers callbacks on the plugin hook manager so every ``invoke_hook()`` site
-dispatches to the configured scripts.
-
-Wire protocol — stdin JSON ``{"hook_event_name", "tool_name", "tool_input", "session_id", "cwd",
-"extra"}``; stdout JSON (optional) ``{"decision"|"action": "block", "reason"|"message": ...}``
-blocks a ``pre_tool_call``, ``{"action": "modify", "args"}`` / ``{"decision": "modify",
-"tool_input"}`` rewrites tool args, ``{"context": ...}`` injects context, ``pre_verify`` accepts
-``continue``/``block`` with a message. Exit code 2 blocks a ``pre_tool_call`` even without JSON
-(Claude-Code / Cursor compatible). Hooks fail open unless ``fail_closed`` on a blocking-capable
-event, where spawn errors, timeouts and unparseable stdout block.
+pair, and registers callbacks on the plugin hook manager so every ``invoke_hook()`` site dispatches
+to the configured scripts. Wire protocol: stdin JSON ``{hook_event_name, tool_name, tool_input,
+session_id, cwd, extra}``; optional stdout JSON ``{"decision"|"action": "block"|"modify", ...}`` /
+``{"context": ...}`` translated by ``_parse_response``. Exit code 2 blocks a ``pre_tool_call`` even
+without JSON (Claude-Code / Cursor compatible). Hooks fail open unless ``fail_closed``.
 """
 
 from __future__ import annotations
