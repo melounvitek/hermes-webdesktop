@@ -3693,4 +3693,3 @@ class GatewayTurnMixin:
         await self._run_agent_mark_streamed_delivery(response, turn_ctx)
         self._run_agent_schedule_bubble_cleanup(response, _cleanup_adapter, turn_ctx)
         return response
-

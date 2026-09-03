@@ -342,4 +342,3 @@ def ensure_hub_dirs() -> None:
     ):
         if not path.exists():
             path.write_text(initial, encoding="utf-8")
-

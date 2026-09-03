@@ -193,4 +193,3 @@ def get_active_search_provider() -> Optional[WebSearchProvider]:
 def get_active_extract_provider() -> Optional[WebSearchProvider]:
     """Resolve the currently-active web extract provider."""
     return _resolve(_configured_backend("extract"), capability="extract")
-

@@ -3031,7 +3031,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         terminal_env = os.getenv("TERMINAL_ENV", "local")
         terminal_cwd = os.getenv("TERMINAL_CWD", os.getcwd())
         terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "60")
-        
+
         config_path = _hermes_home / 'config.yaml'
         if not config_path.exists():
             config_path = Path(__file__).parent / 'cli-config.yaml'
@@ -3087,7 +3087,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             for label, value in rows:
                 print(f"  {label} {value}")
         print()
-    
+
     # canonical command -> (method name, pass cmd_original?). Absent commands resolve to
     # ``_handle_<name>_command(cmd)``. Looked up via getattr at dispatch time so
     # monkeypatching works. A handler returning False exits the REPL.

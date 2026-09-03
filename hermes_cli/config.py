@@ -2228,9 +2228,9 @@ def save_config(
         if is_managed():
             managed_error("save configuration")
             return
-    
+
         config = _strip_managed_keys_for_save(config)
-    
+
         ensure_hermes_home()
         config_path = get_config_path()
         require_readable_config_before_write(config_path)

@@ -1341,13 +1341,13 @@ _LIST_TOOLS_USAGE = """
   python run_agent.py --enabled_toolsets=research --query='search for Python news'
   python run_agent.py --enabled_toolsets=development --query='debug this code'
   python run_agent.py --enabled_toolsets=safe --query='analyze without terminal'
-  
+
   # Combine multiple toolsets
   python run_agent.py --enabled_toolsets=web,vision --query='analyze website'
-  
+
   # Disable toolsets
   python run_agent.py --disabled_toolsets=terminal --query='no command execution'
-  
+
   # Run with trajectory saving enabled
   python run_agent.py --save_trajectories --query='your question here'"""
 

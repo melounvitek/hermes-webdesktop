@@ -2614,7 +2614,7 @@ def _repair_timezone_shifted_cron(d: _DueJob) -> bool:
 def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
     """Re-arm a recurring job wedged in persisted last_status=error; returns the effective
     next_run_dt.
-    
+
     Such a job errored, mark_job_run parked next_run_at in the future, and nothing re-dispatched it
     (the in-memory stale-claim sweep cannot see it). Interval jobs re-arm to now (always a legal
     fire); cron jobs re-arm to the next LEGAL occurrence, since re-arming to now would fire at times
@@ -2680,7 +2680,7 @@ def _reanchor_stale_cron(d: _DueJob) -> bool:
 
 def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> None:
     """Recurring job past its grace window: skip the accumulated misses, fire once now.
-    
+
     The fast-forward is persisted immediately — NOT redundant with advance_next_run/mark_job_run:
     it
     protects the crash window before mark_job_run and covers the external fire_due path, which never

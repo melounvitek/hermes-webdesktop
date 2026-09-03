@@ -181,7 +181,7 @@ class CLISessionMixin:
         if is_session_yolo_enabled(session_key):
             return
         enable_session_yolo(session_key)
-        _dim_notice(self, 
+        _dim_notice(self,
             "⚡ YOLO mode restored from session — all commands auto-approved. /yolo to turn off.",
             quiet)
 

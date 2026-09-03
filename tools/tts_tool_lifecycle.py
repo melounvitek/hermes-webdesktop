@@ -166,4 +166,3 @@ def tts_lease_holders() -> List[str]:
 def _reset_tts_leases_for_tests() -> None:
     with _tts_lease_lock:
         _tts_leases.clear()
-

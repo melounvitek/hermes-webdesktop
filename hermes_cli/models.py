@@ -2369,5 +2369,3 @@ def cached_fetch_api_models(
     if _cache_entry_valid(entry, fp):
         return list(entry["models"])
     return live
-
-
