@@ -1,5 +1,5 @@
-"""Session title mixin for SessionDB: sanitizing, auto/user provenance
-ranking, and lineage-aware lookups."""
+"""Session title mixin for SessionDB: sanitizing, auto/user provenance ranking, and
+lineage-aware lookups."""
 
 from __future__ import annotations
 
@@ -25,17 +25,16 @@ class SessionTitlesMixin:
 
     @classmethod
     def _title_rank(cls, source: Optional[str]) -> int:
-        """Rank a stored title_source. NULL (pre-provenance rows) is indistinguishable
-        from a manual ``/title`` of that era, so it ranks as ``user``."""
+        """Rank a stored title_source. NULL (pre-provenance rows) is indistinguishable from a
+        manual ``/title`` of that era, so it ranks as ``user``."""
         if source is None:
             return cls._TITLE_SOURCE_RANK[cls.TITLE_SOURCE_USER]
         return cls._TITLE_SOURCE_RANK.get(str(source), 0)
 
     @staticmethod
     def sanitize_title(title: Optional[str]) -> Optional[str]:
-        """Strip control/zero-width/bidi chars (and lone surrogates sqlite3 cannot
-        bind), collapse whitespace, normalize empty to None. Raises ValueError if
-        longer than MAX_TITLE_LENGTH after cleaning."""
+        """Strip control/zero-width/bidi chars (and lone surrogates sqlite3 cannot bind),
+        collapse whitespace, normalize empty to None. ValueError past MAX_TITLE_LENGTH."""
         from hermes_state import SessionDB
         if not title:
             return None
@@ -72,14 +71,12 @@ class SessionTitlesMixin:
         return row is not None
 
     def _set_session_title(self, session_id: str, title: str, *, source: str) -> bool:
-        """Write a title, enforcing provenance precedence.
-
-        A ``user`` write always lands. ``derived``/``llm`` land only when the row is
-        untitled or holds strictly lower authority (derived upgrades to llm exactly once,
-        nothing overwrites a user name, re-running the titler on an llm row is a no-op).
-        No writer may move a hidden canonical Bot Chat off its title. Read and write are
-        one compare-and-swap transaction, so a manual ``/title`` racing an in-flight
-        generation is not clobbered."""
+        """Write a title, enforcing provenance precedence. A ``user`` write always lands;
+        ``derived``/``llm`` land only when the row is untitled or holds strictly lower
+        authority (derived upgrades to llm exactly once, nothing overwrites a user name,
+        re-running the titler on an llm row is a no-op). No writer may move a hidden
+        canonical Bot Chat off its title. Read and write are one compare-and-swap
+        transaction, so a manual ``/title`` racing an in-flight generation is not clobbered."""
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
         new_rank = self._title_rank(source) if not is_user else None
@@ -91,9 +88,9 @@ class SessionTitlesMixin:
             if current is None:
                 return 0
             # The canonical Bot Chat's NAME is its identity (Bot Mode resolves it by
-            # exact-title lookup on every open), so a rename orphans the conversation.
-            # Hidden is the discriminator: canonical chats are born hidden; a visible
-            # session merely named "Bot Chat" stays renameable. Provenance-blind.
+            # exact-title lookup on every open), so a rename orphans the conversation. Hidden
+            # is the discriminator: canonical chats are born hidden; a visible session merely
+            # named "Bot Chat" stays renameable. Provenance-blind.
             if (
                 (current["title"] or "") == self.CANONICAL_BOT_CHAT_TITLE
                 and bool(current["hidden"])
@@ -114,17 +111,16 @@ class SessionTitlesMixin:
                 ).fetchone()
                 if conflict:
                     conflict_id = conflict["id"]
-                    # A hidden compressed ancestor holding the title cannot be freed by
-                    # the user, so transfer it onto the tip (uniqueness + lineage kept).
+                    # A hidden compressed ancestor holding the title cannot be freed by the
+                    # user, so transfer it onto the tip (uniqueness + lineage kept).
                     if self._is_compression_ancestor(conn, ancestor_id=conflict_id, descendant_id=session_id):
                         conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (conflict_id,))
                     else:
                         raise ValueError(f"Title '{title}' is already in use by session {conflict_id}")
-            # CAS on the values just read (``IS`` is NULL-safe): a concurrent write
-            # between the SELECT and here loses instead of being overwritten.
+            # CAS on the values just read (``IS`` is NULL-safe): a concurrent write between
+            # the SELECT and here loses instead of being overwritten.
             cursor = conn.execute(
-                "UPDATE sessions SET title = ?, title_source = ? "
-                "WHERE id = ? AND title IS ? AND title_source IS ?",
+                "UPDATE sessions SET title = ?, title_source = ? WHERE id = ? AND title IS ? AND title_source IS ?",
                 (title, source if title else None, session_id, current["title"], current["title_source"]),
             )
             return cursor.rowcount
@@ -132,13 +128,12 @@ class SessionTitlesMixin:
         return self._execute_write(_do) > 0
 
     def set_session_title(self, session_id: str, title: str) -> bool:
-        """Set a title on the user's behalf (``user`` provenance). Empty clears it.
-        Raises ValueError on conflict or validation failure."""
+        """Set a title on the user's behalf (``user`` provenance). Empty clears it. Raises
+        ValueError on conflict or validation failure."""
         return self._set_session_title(session_id, title, source=self.TITLE_SOURCE_USER)
 
     def set_auto_title(self, session_id: str, title: str, *, source: str) -> bool:
-        """Set an automatic title; False (untouched) when a higher-authority title
-        already holds the row."""
+        """Set an automatic title; False (untouched) when a higher-authority title holds the row."""
         if source not in (self.TITLE_SOURCE_DERIVED, self.TITLE_SOURCE_LLM):
             raise ValueError(f"invalid automatic title source: {source!r}")
         return self._set_session_title(session_id, title, source=source)
@@ -160,13 +155,12 @@ class SessionTitlesMixin:
         return row["title_source"]
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
-        """Overwrite a title's provenance without touching the text (a title copied
-        across a compression rotation keeps the original's authority)."""
+        """Overwrite a title's provenance without touching the text (a title copied across a
+        compression rotation keeps the original's authority)."""
         if source not in self._TITLE_SOURCE_RANK:
             raise ValueError(f"invalid title source: {source!r}")
         return self._write_rowcount(
-            "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL",
-            (source, session_id),
+            "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL", (source, session_id)
         ) > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
@@ -178,8 +172,7 @@ class SessionTitlesMixin:
         return self._session_row_dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
-        """Resolve a title to a session ID, preferring the latest "title #N"
-        continuation over the exact match."""
+        """Resolve a title to a session ID, preferring the latest "title #N" continuation."""
         exact = self.get_session_by_title(title)
         # Escape LIKE wildcards so "%"/"_" in titles cannot false-match.
         numbered = self._read_all(
@@ -191,8 +184,8 @@ class SessionTitlesMixin:
         return exact["id"] if exact else None
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
-        """Next title in a lineage ("my session" -> "my session #2"): strip any " #N"
-        suffix, then increment the highest existing number."""
+        """Next title in a lineage ("my session" -> "my session #2"): strip any " #N" suffix,
+        then increment the highest existing number."""
         match = _NUMBERED_TITLE_RE.match(base_title)
         base = match.group(1) if match else base_title
         rows = self._read_all(
@@ -201,5 +194,5 @@ class SessionTitlesMixin:
         if not rows:
             return base
         # The unnumbered original counts as #1.
-        numbers = [int(m.group(1)) for m in (re.match(r'^.* #(\d+)$', row["title"]) for row in rows) if m]
+        numbers = [int(m.group(2)) for m in (_NUMBERED_TITLE_RE.match(row["title"]) for row in rows) if m]
         return f"{base} #{max([1, *numbers]) + 1}"
