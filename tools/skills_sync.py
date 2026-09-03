@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Skills Sync -- manifest-based seeding and updating of bundled skills.
-
-Copies repo skills/ into ~/.hermes/skills/, tracking each synced skill's origin hash in
-.bundled_manifest (v2 "name:hash" lines; v1 plain names auto-migrate). NEW skills are copied
-and recorded; EXISTING skills update only when bundled changed AND the user copy still matches
-the origin hash (else user-customized -> SKIP); user-DELETED skills are not re-added;
-upstream-REMOVED ones leave the manifest.
-"""
+"""Skills Sync -- manifest-based seeding and updating of bundled skills. Copies repo skills/ into
+~/.hermes/skills/, tracking each synced skill's origin hash in .bundled_manifest (v2 "name:hash"
+lines; v1 plain names auto-migrate). NEW skills are copied and recorded; EXISTING skills update
+only when bundled changed AND the user copy still matches the origin hash (else user-customized
+-> SKIP); user-DELETED skills are not re-added; upstream-REMOVED ones leave the manifest."""
 
 import hashlib
 import logging
@@ -61,10 +58,6 @@ def _manifest_file() -> Path:
     return _live(MANIFEST_FILE, _MANIFEST_FILE_AT_IMPORT, lambda: _skills_dir() / ".bundled_manifest")
 
 
-def _rel_skills_posix(path: Path) -> str:
-    return path.relative_to(_skills_dir()).as_posix()
-
-
 # Written by `hermes profile create --no-skills` / installer `--no-skills`: sync seeds only
 # essential skills. Mirrors hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (no CLI import here).
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
@@ -76,6 +69,10 @@ def _get_bundled_dir() -> Path:  # HERMES_BUNDLED_SKILLS env first, then repo-re
 
 def _get_optional_dir() -> Path:
     return get_optional_skills_dir(Path(__file__).parent.parent / "optional-skills")
+
+
+def _rel_skills_posix(path: Path) -> str:
+    return path.relative_to(_skills_dir()).as_posix()
 
 
 def _iter_skill_mds(root: Path, sort: bool = False) -> Iterator[Path]:
@@ -123,15 +120,16 @@ def _write_manifest(entries: Dict[str, str]):
     """Atomic v2 write, preserving an existing file's mode/owner (not mkstemp's 0600)."""
     _manifest_file().parent.mkdir(parents=True, exist_ok=True)
     try:
-        atomic_write_text(_manifest_file(), "".join(f"{n}:{h}\n" for n, h in sorted(entries.items())),
-                          tmp_prefix=".bundled_manifest_", preserve_mode=True)
+        data = "".join(f"{n}:{h}\n" for n, h in sorted(entries.items()))
+        atomic_write_text(_manifest_file(), data, tmp_prefix=".bundled_manifest_", preserve_mode=True)
     except Exception as e:
         logger.debug("Failed to write skills manifest %s: %s", _manifest_file(), e, exc_info=True)
 
 
 def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
     """``(skill_name, skill_dir)`` per SKILL.md under the bundled dir. Exclusions are evaluated
-    relative to the bundled tree: the install prefix itself may contain ``venv``/``site-packages``."""
+    relative to the bundled tree: the install prefix itself may contain ``venv``/``site-packages``
+    (which once made wheel installs discover zero skills)."""
     if not bundled_dir.exists():
         return []
     return [
@@ -169,8 +167,7 @@ def _copy_dir(src: Path, dest: Path) -> None:
 def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Optional[str]:
     """Move a bundled skill's stale copy to its new canonical path after an upstream RENAME /
     RECATEGORIZATION (else it is misread as user-deleted and stranded forever). Only a copy
-    byte-identical to the origin hash — proof *we* placed it — is moved; user-edited or
-    hub-installed copies stay. Returns the rel source path on move."""
+    byte-identical to the origin hash — proof *we* placed it — moves. Returns rel source path."""
     origin_hash = st.manifest.get(skill_name, "")
     if not origin_hash:
         return None
@@ -261,8 +258,9 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
                 st.manifest[skill_name] = bundled_hash
             else:
                 st.say(
-                    f"  ⚠ {skill_name}: bundled version shipped but you already have a local skill by this name — "
-                    f"yours was kept. Run `hermes skills reset {skill_name}` to replace it with the bundled version.")
+                    f"  ⚠ {skill_name}: bundled version shipped but you already have a local skill "
+                    f"by this name — yours was kept. Run `hermes skills reset {skill_name}` to "
+                    f"replace it with the bundled version.")
         else:
             _copy_dir(skill_src, dest)
             st.copied.append(skill_name)
@@ -273,7 +271,7 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
 
 
 def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
-    """Replace ``dest`` with a fresh copy of ``skill_src`` via a ``.bak`` sibling, restoring on failure."""
+    """Replace ``dest`` with a fresh copy of ``skill_src`` via a .bak sibling; restore on failure."""
     backup = dest.with_suffix(".bak")
     if backup.exists():  # a stale .bak would make shutil.move() nest dest INSIDE it
         _rmtree_writable(backup)
@@ -286,7 +284,8 @@ def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
                 try:
                     _rmtree_writable(dest)
                 except OSError:
-                    logger.warning("Could not clear partial copy %s during restore", dest, exc_info=True)
+                    logger.warning("Could not clear partial copy %s during restore", dest,
+                                   exc_info=True)
             if not dest.exists():
                 shutil.move(str(backup), str(dest))
         raise
@@ -303,7 +302,7 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
         st.skipped += 1
         return
     user_hash = _dir_hash(dest)
-    if not origin_hash:  # v1 migration: baseline from the user's copy (can't tell edit from upstream change)
+    if not origin_hash:  # v1 migration: baseline from user's copy (can't tell edit from upstream)
         st.manifest[skill_name] = user_hash
         st.skipped += 1
         return
@@ -389,14 +388,13 @@ def sync_skills(quiet: bool = False) -> dict:
         "total_bundled": len(bundled_skills),
         "optional_provenance_backfilled": _backfill_optional_provenance(quiet=quiet),
         "shadowed_by_external": st.shadowed_by_external,
-        "skipped_opt_out": essential_only}  # lets callers report "opted out" rather than a normal sync
+        "skipped_opt_out": essential_only}  # lets callers report "opted out", not a normal sync
 
 
 def _rmtree_writable(path: Path) -> None:
     """rmtree that first makes read-only entries writable (Nix/deb/rpm keep r-x dirs; unlinking
     a child needs a writable parent, so chmod both). Scope guard: refuses anything not a STRICT
-    child of the active skills root, so a bad join / missing HERMES_HOME / malicious manifest
-    entry raises instead of wiping ``~/.hermes``."""
+    child of the active skills root (bad join / missing HERMES_HOME / malicious manifest entry)."""
     target = Path(path).resolve()
     skills_root = _skills_dir().resolve()
     if skills_root not in target.parents:

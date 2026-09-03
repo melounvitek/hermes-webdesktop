@@ -1,5 +1,5 @@
-"""Official optional-skill provenance: hub-lock backfill and restore. Profile-scoped paths
-and patchable helpers resolve through ``_ss()`` at call time (``tools.skills_sync`` patches work)."""
+"""Official optional-skill provenance: hub-lock backfill and restore. Profile-scoped paths and
+patchable helpers resolve through ``_ss()`` at call time so ``tools.skills_sync`` patches work."""
 
 import json
 import logging
@@ -21,7 +21,7 @@ def _ss():
 
 
 def _content_hash(directory: Path) -> str:
-    """Hub-lock hash style; provenance metadata only, so fall back to local MD5 without guard deps."""
+    """Hub-lock hash style; provenance metadata only, so fall back to local MD5 sans guard deps."""
     try:
         from tools.skills_guard import content_hash
         return content_hash(directory)
@@ -74,14 +74,15 @@ def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterato
 
 
 def _optional_skill_index() -> Dict[str, Tuple[str, str, Path]]:
-    """Official optional skills keyed by BOTH folder name and frontmatter name (hub-lock
-    slug or user-facing name). Values are ``(folder_name, install_path, source_dir)``."""
+    """Official optional skills keyed by BOTH folder name and frontmatter name (hub-lock slug or
+    user-facing name). Values are ``(folder_name, install_path, source_dir)``."""
     ss = _ss()
     optional_dir = ss._get_optional_dir()
     index: Dict[str, Tuple[str, str, Path]] = {}
     if optional_dir.exists():
         for skill_md, src, install_path in _iter_optional_skills(optional_dir, root_relative=True):
-            index[src.name] = index[ss._read_skill_name(skill_md, src.name)] = (src.name, install_path, src)
+            value = (src.name, install_path, src)
+            index[src.name] = index[ss._read_skill_name(skill_md, src.name)] = value
     return index
 
 
@@ -192,15 +193,16 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
             continue
         timestamp = datetime.now(timezone.utc).isoformat()
         installed[lock_name] = {
-            "source": "official", "identifier": f"official/{install_path}", "trust_level": "builtin",
-            "scan_verdict": "backfilled", "content_hash": _content_hash(dest), "install_path": install_path,
+            "source": "official", "identifier": f"official/{install_path}",
+            "trust_level": "builtin", "scan_verdict": "backfilled",
+            "content_hash": _content_hash(dest), "install_path": install_path,
             "files": _skill_file_list(dest), "metadata": {"backfilled_from": "optional-skills"},
             "installed_at": timestamp, "updated_at": timestamp}
         existing_paths.add(install_path)
         backfilled.append(lock_name)
         if not quiet:
             print(f"  = {lock_name} (official optional provenance backfilled)")
-    if backfilled:  # atomic: a crash mid-write must not wipe all provenance (reader resets on bad JSON)
-        atomic_write_text(ss._skills_dir() / ".hub" / "lock.json",
-                          json.dumps(data, indent=2, ensure_ascii=False) + "\n", tmp_prefix=".lock_")
+    if backfilled:  # atomic: a mid-write crash must not wipe provenance (reader resets bad JSON)
+        atomic_write_text(ss._skills_dir() / ".hub" / "lock.json", tmp_prefix=".lock_",
+                          content=json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return backfilled

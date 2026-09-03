@@ -1,9 +1,6 @@
-"""Plugin-provided skill serving for ``skill_view`` (``plugin:skill`` names) plus the
-JSON / file-serving helpers shared with the local-skill path.
-
-Helpers tests patch on the origin module (``_is_skill_disabled``, ``_parse_frontmatter``,
-``skill_matches_platform``) are looked up lazily via ``tools.skills_tool``.
-"""
+"""Plugin-provided skill serving for ``skill_view`` (``plugin:skill`` names) plus the JSON /
+file-serving helpers shared with the local-skill path. Helpers tests patch on the origin module
+(``_is_skill_disabled``, ``_parse_frontmatter``, ``skill_matches_platform``) resolve lazily."""
 
 import json
 import logging
@@ -34,8 +31,8 @@ def _fail(error: str, **extra) -> str:
 
 
 def _read_skill_text(path: Path) -> str:
-    """utf-8-sig + errors="replace": user-authored SKILL.md may carry a Notepad BOM
-    or stray bytes; pinning UTF-8 keeps skill_view deterministic across host locales."""
+    """utf-8-sig + errors="replace": user-authored SKILL.md may carry a Notepad BOM or stray
+    bytes; pinning UTF-8 keeps skill_view deterministic across host locales."""
     return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
@@ -84,8 +81,9 @@ def _serve_skill_file(
         return _fail(path_error, **extra)
     # is_file(), not exists(): a bare directory must take the not-found branch.
     if not target.is_file():
-        listing = {"available_files": _available_skill_files(skill_root),
-                   "hint": "Use one of the available file paths listed above"} if list_available else {}
+        listing = {} if not list_available else {
+            "available_files": _available_skill_files(skill_root),
+            "hint": "Use one of the available file paths listed above"}
         return _fail(f"File '{file_path}' not found in skill '{label}'.", **listing)
     try:
         content = _read_skill_text(target)
@@ -150,11 +148,11 @@ def _serve_plugin_skill(
     with suppress(Exception):  # bundle-context banner: sibling skills of the same plugin
         siblings = [s for s in get_plugin_manager().list_plugin_skills(namespace) if s != bare]
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin." + (
-            f"\nSibling skills: {', '.join(siblings)}.\n"
-            f"Use qualified form to invoke siblings (e.g. {namespace}:{siblings[0]})." if siblings else ""
-        ) + "]\n\n"
+            f"\nSibling skills: {', '.join(siblings)}.\nUse qualified form to invoke siblings "
+            f"(e.g. {namespace}:{siblings[0]})." if siblings else "") + "]\n\n"
     rendered_content = content if not preprocess else _preprocess_skill(
-        content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s", namespace, bare)
+        content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s",
+        namespace, bare)
     return _json({
         "success": True, "name": qualified_name, "content": banner + rendered_content,
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),

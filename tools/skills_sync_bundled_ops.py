@@ -9,7 +9,7 @@ from tools.skills_sync_optional import _skill_file_list, _ss
 
 def _is_tracked_user_modification(origin_hash: str, user_hash: str) -> bool:
     """User modification ``hermes update`` keeps: a recorded origin hash (un-baselined v1 entries
-    don't count) AND differing content. Shared by the sync loop and list-modified so they never drift."""
+    don't count) AND differing content. Shared by the sync loop and list-modified (no drift)."""
     return bool(origin_hash) and user_hash != origin_hash
 
 
@@ -140,7 +140,7 @@ _OPT_OUT_MESSAGES = {  # (enabled, changed) -> message
 
 def set_bundled_skills_opt_out(enabled: bool) -> dict:
     """Toggle the .no-bundled-skills marker (on-disk half of ``hermes skills opt-out`` / ``opt-in``;
-    removing present skills is ``remove_pristine_bundled_skills``). ``{ok, changed, marker, message}``."""
+    removing present skills is ``remove_pristine_bundled_skills``)."""
     ss = _ss()
     marker = ss._hermes_home() / ss.NO_BUNDLED_SKILLS_MARKER
     existed = marker.exists()

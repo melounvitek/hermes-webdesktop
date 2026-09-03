@@ -35,7 +35,8 @@ def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
     """Record a served skill_view so an identical repeat can be deduped."""
     # Never dedup setup-needed views: readiness depends on config/env state that
     # changes without the file changing; the model must see the refreshed status.
-    if not task_id or payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
+    if (not task_id or payload.get("setup_needed")
+            or payload.get("readiness_status") == "setup_needed"):
         return
     if (fp := _skill_view_fingerprint(payload)) is None:
         return
@@ -73,9 +74,9 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
                 cache.pop(key, None)
                 return None
             return json.dumps({
-                "success": True, "status": "unchanged", "name": rec_name, "file": file_path or "SKILL.md",
-                "dedup": True, "content_returned": False, "message": _SKILL_VIEW_DEDUP_MESSAGE},
-                ensure_ascii=False)
+                "success": True, "status": "unchanged", "name": rec_name,
+                "file": file_path or "SKILL.md", "dedup": True, "content_returned": False,
+                "message": _SKILL_VIEW_DEDUP_MESSAGE}, ensure_ascii=False)
     return None
 
 

@@ -1,9 +1,6 @@
-"""Skill readiness: required env vars, secret capture, and setup notes.
-
-Split out of ``tools.skills_tool`` (names re-imported there). Module state
-(``_secret_capture_callback``, ``load_env``) stays in ``tools.skills_tool`` and is read
-lazily at call time so test patches on the origin module are honored.
-"""
+"""Skill readiness: required env vars, secret capture, and setup notes. Split out of
+``tools.skills_tool`` (names re-imported there); module state (``_secret_capture_callback``,
+``load_env``) stays there and is read lazily at call time so origin-module patches are honored."""
 
 import logging
 import os
@@ -37,20 +34,9 @@ def _is_remote_env_backend(backend: str) -> bool:
         return False
 
 
-def _legacy_env_vars(frontmatter: Dict[str, Any]) -> List[str]:
-    """``prerequisites.env_vars`` (legacy form): a single string or a list."""
-    prereqs = frontmatter.get("prerequisites")
-    value = prereqs.get("env_vars") if isinstance(prereqs, dict) else None
-    if not value:
-        return []
-    return [str(item) for item in ([value] if isinstance(value, str) else value) if str(item).strip()]
-
-
 def _as_dict_list(raw: Any) -> list:
     """Accept a single mapping or a list; anything else is treated as empty."""
-    if isinstance(raw, dict):
-        return [raw]
-    return raw if isinstance(raw, list) else []
+    return [raw] if isinstance(raw, dict) else raw if isinstance(raw, list) else []
 
 
 def _clean_str(value: Any) -> str | None:
@@ -64,15 +50,19 @@ def _get_required_environment_variables(frontmatter: Dict[str, Any]) -> List[Dic
     setup = frontmatter.get("setup")
     setup = setup if isinstance(setup, dict) else {}
     setup_help = _clean_str(setup.get("help"))
+    prereqs = frontmatter.get("prerequisites")
+    legacy = (prereqs.get("env_vars") if isinstance(prereqs, dict) else None) or []
+    legacy = [legacy] if isinstance(legacy, str) else legacy
     required: Dict[str, Dict[str, Any]] = {}  # env name -> entry, insertion-ordered, first wins
     declared = _as_dict_list(frontmatter.get("required_environment_variables"))
-    entries = [{"name": i} if isinstance(i, str) else i for i in declared if isinstance(i, (str, dict))]
+    entries = [{"name": i} if isinstance(i, str) else i for i in declared
+               if isinstance(i, (str, dict))]
     # collect_secrets entries: env_var is the name; provider_url (or url) doubles as help.
     entries += [
         {"name": i.get("env_var"), "prompt": i.get("prompt"),
          "url": str(i.get("provider_url") or i.get("url") or "").strip() or None}
         for i in _as_dict_list(setup.get("collect_secrets")) if isinstance(i, dict)]
-    entries += [{"name": v} for v in _legacy_env_vars(frontmatter)]
+    entries += [{"name": str(v)} for v in legacy if str(v).strip()]
     for entry in entries:
         env_name = str(entry.get("name") or entry.get("env_var") or "").strip()
         if not env_name or env_name in required or not _ENV_VAR_NAME_RE.match(env_name):
@@ -106,7 +96,12 @@ def _capture_required_environment_variables(
     # hint. Interactive gateway surfaces (desktop app / TUI) set HERMES_INTERACTIVE (same flag
     # tools/approval.py uses) and register a callback routing to a secure secret.request overlay.
     if _is_gateway_surface() and not env_var_enabled("HERMES_INTERACTIVE"):
-        return _capture_result(missing_names, gateway_setup_hint=_gateway_setup_hint())
+        try:
+            from gateway.platforms.base import GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE as hint
+        except Exception:
+            hint = (f"Secure secret entry is not available. Load this skill in the local CLI to be "
+                    f"prompted, or add the key to {display_hermes_home()}/.env manually.")
+        return _capture_result(missing_names, gateway_setup_hint=hint)
     if (callback := _st._secret_capture_callback) is None:
         return _capture_result(missing_names)
     remaining_names: List[str] = []
@@ -130,25 +125,14 @@ def _is_gateway_surface() -> bool:
     return bool(get_session_env("HERMES_SESSION_PLATFORM"))
 
 
-def _get_terminal_backend_name() -> str:
-    return str(os.getenv("TERMINAL_ENV", "local")).strip().lower() or "local"
-
-
 def _is_env_var_persisted(var_name: str, env_snapshot: Dict[str, str]) -> bool:
     """Set (non-empty) in the .env snapshot, else in the process environment."""
     return bool(env_snapshot[var_name] if var_name in env_snapshot else os.getenv(var_name))
 
 
-def _gateway_setup_hint() -> str:
-    try:
-        from gateway.platforms.base import GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
-        return GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
-    except Exception:
-        return f"Secure secret entry is not available. Load this skill in the local CLI to be prompted, or add the key to {display_hermes_home()}/.env manually."
-
-
 def _build_setup_note(
-    readiness_status: SkillReadinessStatus, missing: List[str], setup_help: str | None = None) -> str | None:
+    readiness_status: SkillReadinessStatus, missing: List[str],
+    setup_help: str | None = None) -> str | None:
     if readiness_status != SkillReadinessStatus.SETUP_NEEDED:
         return None
     note = f"Setup needed before using this skill: missing {', '.join(missing) if missing else 'required prerequisites'}."
