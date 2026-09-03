@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -19,20 +20,16 @@ logger = logging.getLogger(__name__)
 
 RELEASE_URL = "https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{asset}"
 
-# Windows CUDA zips ship per CUDA major; the runtime zip must be paired with
-# its cudart zip so end users need no toolkit. 13.3 verified on 13.1 and
-# 13.2 drivers.
+# Windows CUDA zips ship per CUDA major; the runtime zip must be paired with its cudart zip so
+# end users need no toolkit. 13.3 verified on 13.1 and 13.2 drivers.
 _WIN_CUDA_VERSION = "13.3"
-# arm64 Windows CUDA prebuilts landed upstream (~b1036x) on CUDA 13.4 —
-# verified against live asset lists (b10362, b10630, b10679). Tags at or before
-# b10290 don't have them; resolution succeeds and the download 404s
-# honestly on such tags, which only arises if a user pins backward.
+# arm64 Windows CUDA prebuilts landed upstream (~b1036x) on CUDA 13.4. Tags at or before b10290
+# don't have them; resolution succeeds and the download 404s honestly if a user pins backward.
 _WIN_CUDA_VERSION_ARM64 = "13.4"
 
 
-# Fallback when the config section is missing entirely (deep-merge normally
-# guarantees the key). Single source: DEFAULT_CONFIG owns the shipped tag.
 def default_tag() -> str:
+    """Fallback when the config section is missing entirely; DEFAULT_CONFIG owns the shipped tag."""
     from hermes_cli.config_defaults import DEFAULT_CONFIG
 
     return DEFAULT_CONFIG["local_runtime"]["tag"]
@@ -56,65 +53,57 @@ class AssetPlan:
 
 
 def runtimes_root() -> Path:
-    """Machine-scoped, deliberately NOT profile-scoped. Engine binaries, presets, and server state
+    """Machine-scoped, deliberately NOT profile-scoped: engine binaries, presets and server state
     describe this machine's hardware and its one managed server (stable port) — a second profile
     re-downloading the engine or fighting over the port would be the bug. Profile-scoped things
-    (which model is the default, enabled) live in each profile's config.yaml as ever.
-    """
+    (default model, enabled) live in each profile's config.yaml."""
     from hermes_constants import get_default_hermes_root
 
     return get_default_hermes_root() / "runtimes" / "llamacpp"
 
 
+def manifest_verified(manifest: Path) -> bool:
+    """True when an install manifest records a verified_version (missing/damaged -> False)."""
+    try:
+        return bool(json.loads(manifest.read_text(encoding="utf-8")).get("verified_version"))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def _release_number(tag: str) -> int:
+    digits = "".join(ch for ch in tag if ch.isdigit())
+    return int(digits) if digits else 0
+
+
 def installed_tags() -> list[str]:
-    """Tags with a verified install (manifest carries verified_version),
-    newest first by release number. The boot ladder and the update check
-    both read installed-ness from here — one resolver, every caller."""
+    """Tags with a verified install, newest first by release number. The boot ladder and the
+    update check both read installed-ness from here — one resolver, every caller."""
     root = runtimes_root()
     if not root.exists():
         return []
-    found: list[str] = []
-    for entry in root.iterdir():
-        if not entry.is_dir() or entry.name == "downloads":
-            continue
-        for manifest in entry.glob("*/manifest.json"):
-            try:
-                if json.loads(manifest.read_text(encoding="utf-8")).get("verified_version"):
-                    found.append(entry.name)
-                    break
-            except (json.JSONDecodeError, OSError):
-                continue
-
-    def _release_number(tag: str) -> int:
-        digits = "".join(ch for ch in tag if ch.isdigit())
-        return int(digits) if digits else 0
-
-    return sorted(set(found), key=_release_number, reverse=True)
+    found = {entry.name for entry in root.iterdir()
+             if entry.is_dir() and entry.name != "downloads"
+             and any(manifest_verified(m) for m in entry.glob("*/manifest.json"))}
+    return sorted(found, key=_release_number, reverse=True)
 
 
 def _host_os_arch() -> tuple[str, str]:
-    """(os, arch) normalized to release-asset vocabulary.
-
-    PITFALL: PROCESSOR_ARCHITECTURE lies under x64 emulation on ARM64 Windows. platform.machine()
-    reads the same env on some Pythons, so on Windows prefer PROCESSOR_IDENTIFIER's text when
-    present.
-    """
+    """(os, arch) normalized to release-asset vocabulary. PITFALL: PROCESSOR_ARCHITECTURE lies
+    under x64 emulation on ARM64 Windows, and platform.machine() reads the same env on some
+    Pythons — so on Windows prefer PROCESSOR_IDENTIFIER's text when present."""
     system = platform.system().lower()
     os_name = {"windows": "win", "darwin": "macos", "linux": "ubuntu"}.get(system, system)
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     if os_name == "win":
-        import os as _os
-        ident = _os.environ.get("PROCESSOR_IDENTIFIER", "").lower()
+        ident = os.environ.get("PROCESSOR_IDENTIFIER", "").lower()
         if "armv8" in ident or "arm " in ident:
             arch = "arm64"
     return os_name, arch
 
 
 def select_backend(gpu_vendor: str | None, os_name: str | None = None) -> str:
-    """Backend choice per design: CUDA if NVIDIA, Metal on macOS, Vulkan if
-    a non-NVIDIA GPU is present, else CPU. ``--list-devices`` validates the
-    choice post-install; the supervisor's touch generation is ground truth."""
+    """CUDA if NVIDIA, Metal on macOS, Vulkan if a non-NVIDIA GPU is present, else CPU.
+    ``--list-devices`` validates post-install; the supervisor's touch generation is ground truth."""
     if os_name is None:
         os_name, _ = _host_os_arch()
     if os_name == "macos":
@@ -127,8 +116,8 @@ def select_backend(gpu_vendor: str | None, os_name: str | None = None) -> str:
     return "cpu"
 
 
-# Per-OS (human label, {backend: asset-name templates}). Windows CUDA pairs the
-# runtime zip with its cudart zip; ubuntu ships tarballs, win ships zips.
+# Per-OS (human label, {backend: asset-name templates}). Windows CUDA pairs the runtime zip with
+# its cudart zip; ubuntu ships tarballs, win ships zips.
 _ASSET_TEMPLATES = {
     "ubuntu": ("linux", {
         "vulkan": ["llama-{tag}-bin-ubuntu-vulkan-{arch}.tar.gz"],
@@ -147,11 +136,8 @@ _ASSET_TEMPLATES = {
 
 def resolve_assets(tag: str, backend: str, os_name: str | None = None,
                    arch: str | None = None) -> AssetPlan:
-    """Compose the asset list for (tag, backend, platform).
-
-    Raises BinaryResolutionError for platform/backend pairs the release ships no artifact for;
-    callers fall back down the backend ladder cuda -> vulkan -> cpu.
-    """
+    """Compose the asset list for (tag, backend, platform). Raises BinaryResolutionError for pairs
+    the release ships no artifact for; callers fall back down the ladder cuda -> vulkan -> cpu."""
     host_os, host_arch = _host_os_arch()
     os_name = os_name or host_os
     arch = arch or host_arch
@@ -161,8 +147,8 @@ def resolve_assets(tag: str, backend: str, os_name: str | None = None,
     if os_name not in _ASSET_TEMPLATES:
         raise BinaryResolutionError(f"unsupported platform {os_name}-{arch}")
     if os_name == "ubuntu" and backend == "cuda":
-        # No prebuilt Linux CUDA zips at current tags — Linux CUDA users
-        # build from source or use vulkan; resolver is honest about it.
+        # No prebuilt Linux CUDA zips at current tags — Linux CUDA users build from source or
+        # use vulkan; the resolver is honest about it.
         raise BinaryResolutionError(
             f"no prebuilt linux CUDA asset at {tag}; use vulkan/cpu or a source build")
     if os_name == "win" and backend == "vulkan" and arch == "arm64":
@@ -185,9 +171,8 @@ def _sha256(path: Path) -> str:
 
 def _download(url: str, dest: Path,
               progress: "Callable[[int, int], None] | None" = None) -> None:
-    """Stream url -> dest. ``progress(done_bytes, total_bytes)`` ticks per
-    chunk (total 0 when the server sends no Content-Length) — a several-
-    hundred-MB archive on a slow line must never look hung."""
+    """Stream url -> dest. ``progress(done_bytes, total_bytes)`` ticks per chunk (total 0 when
+    the server sends no Content-Length) — a several-hundred-MB archive must never look hung."""
     logger.info("downloading %s", url)
     tmp = dest.with_suffix(dest.suffix + ".part")
     with urllib.request.urlopen(url, timeout=120) as r, open(tmp, "wb") as f:
@@ -206,8 +191,7 @@ def _download(url: str, dest: Path,
 
 def _extract(archive: Path, dest: Path,
              progress: "Callable[[int, int], None] | None" = None) -> None:
-    """Extract member by member so ``progress(done, total)`` can tick in
-    uncompressed bytes — big archives take real time on laptop disks."""
+    """Extract member by member so ``progress(done, total)`` can tick in uncompressed bytes."""
     if archive.name.endswith(".zip"):
         opener, list_members, size = zipfile.ZipFile, "infolist", "file_size"
         kwargs = {}
@@ -227,8 +211,8 @@ def _extract(archive: Path, dest: Path,
 
 
 def server_binary(install_dir: Path) -> Path:
-    """Locate llama-server within an extracted runtime (zips differ in
-    whether they nest a build/bin directory)."""
+    """Locate llama-server within an extracted runtime (zips differ in whether they nest a
+    build/bin directory)."""
     names = ("llama-server.exe", "llama-server")
     for name in names:
         direct = install_dir / name
@@ -242,8 +226,7 @@ def server_binary(install_dir: Path) -> Path:
 
 
 def verify_install(install_dir: Path, tag: str) -> str:
-    """Run --version; require the tag's build number in the output.
-    (The binary prints the tag WITHOUT the 'b' prefix.)"""
+    """Run --version; require the tag's build number in the output (printed WITHOUT the 'b')."""
     exe = server_binary(install_dir)
     out = subprocess.run([str(exe), "--version"], capture_output=True,
                          text=True, encoding="utf-8", errors="replace",
@@ -256,8 +239,8 @@ def verify_install(install_dir: Path, tag: str) -> str:
 
 
 def prune_old_tags(keep: list[str]) -> None:
-    """Retain only the tags in ``keep`` (current + previous — N-1 rollback).
-    The shared ``downloads/`` archive cache is not a tag and always survives."""
+    """Retain only the tags in ``keep`` (current + previous — N-1 rollback). The shared
+    ``downloads/`` archive cache is not a tag and always survives."""
     root = runtimes_root()
     if not root.exists():
         return
@@ -270,27 +253,25 @@ def prune_old_tags(keep: list[str]) -> None:
 def ensure_runtime_installed(tag: str, backend: str,
                              expected_sha256: dict[str, str] | None = None,
                              progress: "Callable[[str, int, int, str], None] | None" = None) -> Path:
-    """Idempotent: resolve, download, verify, extract, version-check.
-
-    ``expected_sha256`` pins hashes per asset when the catalog has them; without pins the computed
-    hash is recorded in the manifest (trust on first download, verified on every reinstall).
-    ``progress(stage, done, total, label)`` ticks through download/extract/verify. Returns the
-    install dir containing llama-server.
-    """
+    """Idempotent: resolve, download, verify, extract, version-check; returns the install dir.
+    ``expected_sha256`` pins hashes per asset; without pins the computed hash is recorded in the
+    manifest (trust on first download, verified on every reinstall). ``progress(stage, done,
+    total, label)`` ticks through download/extract/verify."""
     plan = resolve_assets(tag, backend)
     install_dir = plan.install_dir
     manifest_path = install_dir / "manifest.json"
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("verified_version"):
-                return install_dir
-        except (json.JSONDecodeError, OSError):
-            pass  # damaged manifest -> reinstall
+    if manifest_verified(manifest_path):
+        return install_dir
 
     install_dir.mkdir(parents=True, exist_ok=True)
     downloads = runtimes_root() / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
+
+    def stage_progress(stage: str, label: str):
+        if progress is None:
+            return None
+        tick = progress
+        return lambda d, t: tick(stage, d, t, label)
 
     recorded: dict[str, str] = {}
     n_assets = len(plan.assets)
@@ -299,8 +280,7 @@ def ensure_runtime_installed(tag: str, backend: str,
         archive = downloads / asset
         if not archive.exists():
             _download(RELEASE_URL.format(tag=tag, asset=asset), archive,
-                      progress=(lambda d, t, _l=label: progress("download", d, t, _l))
-                      if progress is not None else None)
+                      progress=stage_progress("download", label))
         if progress is not None:
             progress("verify", 0, 0, label)
         digest = _sha256(archive)
@@ -310,16 +290,12 @@ def ensure_runtime_installed(tag: str, backend: str,
             raise BinaryResolutionError(
                 f"sha256 mismatch for {asset}: expected {expected}, got {digest}")
         recorded[asset] = digest
-        _extract(archive, install_dir,
-                 progress=(lambda d, t, _l=label: progress("extract", d, t, _l))
-                 if progress is not None else None)
+        _extract(archive, install_dir, progress=stage_progress("extract", label))
 
     if progress is not None:
         progress("verify", 0, 0, "")
     version = verify_install(install_dir, tag)
-    manifest_path.write_text(json.dumps({
-        "tag": tag, "backend": plan.backend, "assets": recorded,
-        "verified_version": version,
-    }, indent=2), encoding="utf-8")
+    manifest_path.write_text(json.dumps({"tag": tag, "backend": plan.backend, "assets": recorded,
+                                         "verified_version": version}, indent=2), encoding="utf-8")
     logger.info("installed llama.cpp %s (%s): %s", tag, backend, version)
     return install_dir
