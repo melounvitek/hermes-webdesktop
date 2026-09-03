@@ -10,21 +10,16 @@ from tools.mcp_tool_common import _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-# Live stdio MCP children (pid -> server_name), added after connection and
-# removed on normal shutdown, so they can be force-killed if SDK teardown fails.
+# Live stdio MCP children (pid -> server_name), added after connection and removed on normal
+# shutdown, so they can be force-killed if SDK teardown fails.
 _stdio_pids: Dict[int, str] = {}
-
-# PIDs that survived their session context exit (SDK teardown failed to kill
-# them); detected in _run_stdio's finally, reaped by _kill_orphaned_mcp_children().
-# Kept separate from _stdio_pids so cleanup sweeps never race active sessions.
+# PIDs that survived their session context exit (detected in _run_stdio's finally, reaped by
+# _kill_orphaned_mcp_children). Separate from _stdio_pids so sweeps never race active sessions.
 _orphan_stdio_pids: set = set()
 _orphan_stdio_pid_servers: Dict[int, str] = {}
-
-# pid -> pgid captured at spawn. The SDK spawns children with
-# start_new_session=True (PGID == PID); grandchildren inherit that PGID and
-# keep it after the direct child exits, so killpg still reaches them. Tracked
-# separately from _stdio_pids so the PGID survives the child's removal.
-# Empty on Windows (os.getpgid is POSIX-only).
+# pid -> pgid captured at spawn. The SDK spawns with start_new_session=True (PGID == PID);
+# grandchildren keep that PGID after the direct child exits, so killpg still reaches them.
+# Separate from _stdio_pids so the PGID survives the child's removal. Empty on Windows.
 _stdio_pgids: Dict[int, int] = {}
 
 
@@ -53,53 +48,49 @@ def _snapshot_child_pids() -> set:
         return set()
 
 
-# argv markers of non-MCP gateway children that can race into the snapshot
-# delta during an MCP spawn (defense-in-depth; LSP/slash_worker already use
-# start_new_session). Matched against argv[1:] because Python/Java children
-# start with the interpreter path.
+# argv markers of non-MCP gateway children that can race into the snapshot delta during an
+# MCP spawn (defense-in-depth; LSP/slash_worker already use start_new_session). Matched against
+# argv[1:] because Python/Java children start with the interpreter path.
 _NON_MCP_CHILD_CMDLINE_MARKERS: tuple[str, ...] = (
-    "tui_gateway.slash_worker",
-    "tui_gateway.entry",
-    "-dorg.eclipse.equinox.launcher",  # jdtls (legacy arg style)
-    "eclipse.jdt.ls",
-    "org.eclipse.equinox.launcher_")
+    "tui_gateway.slash_worker", "tui_gateway.entry",
+    "-dorg.eclipse.equinox.launcher", "eclipse.jdt.ls", "org.eclipse.equinox.launcher_",  # jdtls
+)
 
 
 def _filter_mcp_children(pids: set) -> set:
-    """Drop non-MCP children from a PID snapshot delta. Tracking a stray child in
-    _stdio_pgids is catastrophic if it lacks start_new_session: its pgid can be
-    the TUI parent's, so the shutdown killpg() would kill the TUI itself."""
+    """Drop non-MCP children from a PID snapshot delta. Tracking a stray child in _stdio_pgids
+    is catastrophic if it lacks start_new_session: its pgid can be the TUI parent's, so the
+    shutdown killpg() would kill the TUI itself."""
     if not pids:
         return pids
     try:
         import psutil
     except ImportError:
         return pids  # keep all PIDs (prior behavior)
-
-    def _is_mcp(pid: int) -> bool:
+    kept = set()
+    for pid in pids:
         try:
             argv = psutil.Process(pid).cmdline()
         except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            return False  # raced away or zombie — cannot be our fresh server, unsafe to track
-        return not any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS)
-
-    return {pid for pid in pids if _is_mcp(pid)}
+            continue  # raced away or zombie — cannot be our fresh server, unsafe to track
+        if not any(marker in arg for arg in argv[1:] for marker in _NON_MCP_CHILD_CMDLINE_MARKERS):
+            kept.add(pid)
+    return kept
 
 
 def _clear_connect_cooldowns() -> None:
-    """Drop connect-retry cooldowns: a restart must re-attempt every server
-    immediately, not honour a stale per-server backoff. Caller holds ``_core._lock``."""
+    """Drop connect-retry cooldowns: a restart must re-attempt every server immediately, not
+    honour a stale per-server backoff. Caller holds ``_core._lock``."""
     _core._server_connect_retry_after.clear()
     _core._server_connect_failures.clear()
 
 
 def shutdown_mcp_servers(*, scope: Optional[str] = None):
-    """Close MCP server connections (in parallel) and stop the background loop.
-    Each server Task is signalled to exit its own ``async with`` so the anyio
-    cancel-scope cleanup runs in the Task that opened it. ``scope`` restricts
-    teardown to one multiplexed profile's servers (its ``/reload-mcp`` must not
-    kill other profiles') and leaves the shared loop running if anything else is
-    still connected."""
+    """Close MCP server connections (in parallel) and stop the background loop. Each server
+    Task is signalled to exit its own ``async with`` so the anyio cancel-scope cleanup runs in
+    the Task that opened it. ``scope`` restricts teardown to one multiplexed profile's servers
+    (its ``/reload-mcp`` must not kill other profiles') and leaves the shared loop running if
+    anything else is still connected."""
     with _core._lock:
         selected = [name for name in _core._servers if scope is None or _core._server_scope_keys.get(name) == scope]
         servers_snapshot = [_core._servers[name] for name in selected]
@@ -143,8 +134,8 @@ def _take_reapable_pids(include_active: bool, server_name: Optional[str]) -> tup
 
     with _core._lock:
         pids = _owned({opid: _orphan_stdio_pid_servers.get(opid, "orphan") for opid in _orphan_stdio_pids})
+        _orphan_stdio_pids.difference_update(pids)
         for opid in pids:
-            _orphan_stdio_pids.discard(opid)
             _orphan_stdio_pid_servers.pop(opid, None)
         if include_active:
             active = _owned(_stdio_pids)
@@ -156,18 +147,16 @@ def _take_reapable_pids(include_active: bool, server_name: Optional[str]) -> tup
 
 
 def _signal_mcp_process(pid: int, sig: int, server_name: str, pgid: Optional[int], my_pgid: Optional[int]) -> None:
-    """SIGTERM/SIGKILL via the spawn-time pgroup on POSIX (reaches reparented
-    grandchildren), falling back to a per-pid signal."""
+    """SIGTERM/SIGKILL via the spawn-time pgroup on POSIX (reaches reparented grandchildren),
+    falling back to a per-pid signal."""
     killpg = getattr(os, "killpg", None)
     if pgid is not None and killpg is not None:
         if my_pgid is not None and pgid == my_pgid:
             # Child shares the gateway's pgroup: killpg would kill the gateway too, so use
             # per-pid kill. Warn because per-pid kill can't reach grandchildren in this group.
-            logger.warning(
-                "MCP server '%s' pgid %d matches gateway pgid; skipping "
-                "killpg to avoid self-kill and using per-pid kill — any "
-                "grandchildren in this group may not be reaped",
-                server_name, pgid)
+            logger.warning("MCP server '%s' pgid %d matches gateway pgid; skipping "
+                           "killpg to avoid self-kill and using per-pid kill — any "
+                           "grandchildren in this group may not be reaped", server_name, pgid)
         else:
             try:
                 killpg(pgid, sig)
@@ -183,14 +172,12 @@ def _signal_mcp_process(pid: int, sig: int, server_name: str, pgid: Optional[int
 
 
 def _kill_orphaned_mcp_children(include_active: bool = False, server_name: Optional[str] = None) -> None:
-    """Best-effort reap of stdio MCP subprocesses: SIGTERM, wait 2s, SIGKILL survivors.
-    By default only ``_orphan_stdio_pids`` (PIDs that outlived their session
-    context) are reaped so concurrent cron jobs / live sessions are untouched;
-    ``include_active=True`` also kills every ``_stdio_pids`` entry and is only
-    for final shutdown after the MCP loop has stopped. ``server_name`` limits the
-    sweep to one server (stdio reconnects cleaning up their old transport)."""
+    """Best-effort reap of stdio MCP subprocesses: SIGTERM, wait 2s, SIGKILL survivors. By
+    default only ``_orphan_stdio_pids`` are reaped so concurrent cron jobs / live sessions are
+    untouched; ``include_active=True`` also kills every ``_stdio_pids`` entry and is only for
+    final shutdown after the MCP loop has stopped. ``server_name`` limits the sweep to one
+    server (stdio reconnects cleaning up their old transport)."""
     import signal as _signal
-
     pids, pgids = _take_reapable_pids(include_active, server_name)
     if not pids:  # skip the 2s sleep every MCP-free shutdown would otherwise pay
         return
@@ -203,17 +190,13 @@ def _kill_orphaned_mcp_children(include_active: bool = False, server_name: Optio
     for pid, owner in pids.items():
         _signal_mcp_process(pid, _signal.SIGTERM, owner, pgids.get(pid), my_pgid)
         logger.debug("Sent SIGTERM to orphaned MCP process %d (%s)", pid, owner)
-
     time.sleep(2)
-
     sigkill = getattr(_signal, "SIGKILL", _signal.SIGTERM)
-    # ``os.kill(pid, 0)`` is NOT a no-op on Windows; use the portable check.
-    from gateway.status import _pid_exists
+    from gateway.status import _pid_exists  # ``os.kill(pid, 0)`` is NOT a no-op on Windows
     for pid, owner in pids.items():
-        if not _pid_exists(pid):
-            continue  # exited after SIGTERM
-        _signal_mcp_process(pid, sigkill, owner, pgids.get(pid), my_pgid)
-        logger.warning("Force-killed MCP process %d (%s) after SIGTERM timeout", pid, owner)
+        if _pid_exists(pid):  # survived SIGTERM
+            _signal_mcp_process(pid, sigkill, owner, pgids.get(pid), my_pgid)
+            logger.warning("Force-killed MCP process %d (%s) after SIGTERM timeout", pid, owner)
 
 
 def _stop_mcp_loop_if_idle() -> bool:
@@ -239,13 +222,8 @@ async def _drain_mcp_loop_tasks(*, timeout: Optional[float] = None) -> None:
         task.cancel()
     done, still_pending = await asyncio.wait(pending, timeout=timeout)
     for task in done:
-        try:
-            if not task.cancelled():
-                task.exception()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.debug("Pending MCP loop task ended during shutdown: %s", exc)
+        if not task.cancelled():
+            task.exception()  # mark retrieved so asyncio doesn't warn "exception was never retrieved"
     if still_pending:
         logger.warning("%d MCP loop task(s) still pending after %.1fs drain", len(still_pending), timeout)
 

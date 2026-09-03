@@ -17,24 +17,6 @@ logger = logging.getLogger("tools.mcp_tool")
 _KEEPALIVE_RPC_TIMEOUT = 30.0
 
 
-def _stdio_children_dead_impl(pids, is_http: bool) -> bool:
-    """True when every pid has exited. Best-effort: False (unknown → don't fail fast) for HTTP,
-    no captured PIDs, missing psutil, or a failed probe."""
-    if not pids or is_http:
-        return False
-    try:
-        import psutil
-    except ImportError:
-        return False
-    for pid in pids:
-        try:
-            if psutil.pid_exists(pid):  # handles Windows without signal-permission noise
-                return False
-        except Exception:
-            return False
-    return True
-
-
 class MCPServerHealthMixin:
     """Methods of :class:`tools.mcp_tool.MCPServerTask` (mixed in; relies on its attributes)."""
 
@@ -85,15 +67,15 @@ class MCPServerHealthMixin:
 
     # -- notifications / logs --
 
-    async def _refresh_tools_task(self):
-        try:
-            await self._refresh_tools()
-        except Exception:
-            logger.exception("MCP server '%s': dynamic tool refresh failed", self.name)
-
     def _schedule_tools_refresh(self) -> asyncio.Task:
-        """Schedule a background tool refresh and keep it strongly referenced."""
-        task = asyncio.create_task(self._refresh_tools_task())
+        """Schedule a background tool refresh (failures logged) and keep it strongly referenced."""
+        async def _run():
+            try:
+                await self._refresh_tools()
+            except Exception:
+                logger.exception("MCP server '%s': dynamic tool refresh failed", self.name)
+
+        task = asyncio.create_task(_run())
         self._pending_refresh_tasks.add(task)
         task.add_done_callback(self._pending_refresh_tasks.discard)
         return task
@@ -129,19 +111,15 @@ class MCPServerHealthMixin:
                     return
                 if not (_core._MCP_NOTIFICATION_TYPES and isinstance(message, _core.ServerNotification)):
                     return
-                # mcp 2.0 made ServerNotification a plain union (payload IS the message) instead
-                # of a RootModel (payload under ``.root``). ``isinstance`` accepts both; only the
-                # unwrap differs — without it ``.root`` raises into the catch-all and refreshes stop.
+                # mcp 2.0 made ServerNotification a plain union (payload IS the message) instead of
+                # a RootModel (payload under ``.root``); without this unwrap refreshes silently stop.
                 payload = getattr(message, "root", message)
                 if isinstance(payload, _core.ToolListChangedNotification):
                     logger.info("MCP server '%s': received tools/list_changed notification", self.name)
-                    # Refresh in a separate task: some servers emit list_changed right after
-                    # initialize while another request is in flight, and refreshing synchronously
-                    # inside the handler can wedge the stdio JSON-RPC stream.
+                    # Separate task: refreshing synchronously inside the handler can wedge the stdio
+                    # JSON-RPC stream when list_changed arrives while another request is in flight.
                     self._schedule_tools_refresh()
-                    # Yield one tick so short-lived notification contexts (and tests) can observe
-                    # the scheduled refresh.
-                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)  # one tick so short-lived contexts (and tests) observe it
                 elif isinstance(payload, _core.PromptListChangedNotification):
                     logger.debug("MCP server '%s': prompts/list_changed (ignored)", self.name)
                 elif isinstance(payload, _core.ResourceListChangedNotification):
@@ -154,7 +132,6 @@ class MCPServerHealthMixin:
         """Deregister *tool_names* this server's toolset still owns. Never removes a colliding
         name currently owned by another server."""
         from tools.registry import registry
-
         toolset_name = f"mcp-{self.name}"
         for tool_name in tool_names:
             if registry.get_toolset_for_tool(tool_name) != toolset_name:
@@ -172,13 +149,11 @@ class MCPServerHealthMixin:
             old_tool_names = set(self._registered_tool_names)
             async with self._rpc_lock:
                 new_mcp_tools = await _core._paginate_full_list(self.session.list_tools, "tools", self.name)
-            # Remove only stale names first — no nuke-and-repave: live agent turns may hold
-            # tool-call IDs pointing at existing handlers, and in-place replacement avoids
-            # transient "tool not connected" races.
+            # Remove only stale names first — no nuke-and-repave: live turns may hold tool-call
+            # IDs pointing at existing handlers; in-place replacement avoids "not connected" races.
             self._deregister_owned(old_tool_names - {mcp_prefixed_tool_name(self.name, tool.name) for tool in new_mcp_tools})
-            # Re-register; the helper may skip names ambiguous after normalization. A raw name
-            # can become ambiguous without changing its normalized name, so the pre-pass misses
-            # it: drop any old entry the final collision-checked registration no longer owns.
+            # Re-register; a raw name can become ambiguous after normalization without changing
+            # its normalized name, so also drop old entries the final registration no longer owns.
             self._tools = new_mcp_tools
             registered_names = _core._register_server_tools(self.name, self, self._config)
             self._deregister_owned(old_tool_names - set(registered_names))
@@ -197,9 +172,8 @@ class MCPServerHealthMixin:
 
     async def _keepalive_probe(self) -> None:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
-        OPTIONAL utility). On -32601 latch ``_ping_unsupported`` and fall back to ``list_tools``
-        when the server advertises tools; otherwise the -32601 propagates (no liveness primitive
-        left). The latch resets on each fresh transport connection."""
+        OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
+        back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
@@ -212,9 +186,8 @@ class MCPServerHealthMixin:
                     logger.info("MCP server '%s': does not implement the optional 'ping' utility (-32601); "
                                 "using 'list_tools' for keepalive on this connection.", self.name)
                 elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)) and self._advertises_tools():
-                    # A server that silently drops ping looks like a dead transport. Confirm with
-                    # list_tools before declaring it dead; if that also fails, propagate the
-                    # original failure.
+                    # A server that silently drops ping looks like a dead transport: confirm with
+                    # list_tools before declaring it dead, else propagate the original failure.
                     try:
                         await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
                     except Exception:
@@ -282,11 +255,10 @@ class MCPServerHealthMixin:
         return True
 
     def _fail_inflight_calls(self, reason: str) -> None:
-        """Cancel every in-flight RPC on this connection. Called from lifecycle exits BEFORE the
-        transport unwinds: the SDK does not always fail pending requests when streams close, so a
-        call would otherwise wait out the full tool timeout. Cancelling anything flags
-        ``_teardown_race`` so run() treats the next reconnect as recovery rather than charging
-        the rapid-drop budget."""
+        """Cancel every in-flight RPC BEFORE the transport unwinds: the SDK does not always fail
+        pending requests when streams close, so a call would otherwise wait out the full tool
+        timeout. Cancelling anything flags ``_teardown_race`` so run() treats the next reconnect
+        as recovery rather than charging the rapid-drop budget."""
         victims = [t for t in self._inflight_tasks if not t.done()]
         if not victims:
             return
@@ -297,7 +269,16 @@ class MCPServerHealthMixin:
             task.cancel()
 
     def _stdio_children_dead(self) -> bool:
-        return _stdio_children_dead_impl(getattr(self, "_stdio_child_pids", None), self._is_http())
+        """True when every stdio child we spawned has exited. Best-effort: False (unknown → don't
+        fail fast) for HTTP, no captured PIDs, missing psutil, or a failed probe."""
+        pids = getattr(self, "_stdio_child_pids", None)
+        if not pids or self._is_http():
+            return False
+        try:
+            import psutil
+            return not any(psutil.pid_exists(pid) for pid in pids)  # Windows-safe, no signal noise
+        except Exception:  # missing psutil or failed probe → unknown → don't fail fast
+            return False
 
     async def _watch_stdio_children(self) -> None:
         """Poll child liveness while a stdio RPC is in flight; resolves when a tracked child dies

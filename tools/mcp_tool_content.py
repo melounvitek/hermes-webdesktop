@@ -13,14 +13,11 @@ from tools.mcp_tool_schema import mcp_prefixed_tool_name
 logger = logging.getLogger("tools.mcp_tool")
 
 
-# Hard allocation ceiling for one MCP text payload (chars): the first line of defense against
-# a multi-megabyte flood being JSON-encoded and handed downstream. Deliberately far ABOVE the
-# budget layer's 50K spillover threshold so ordinary large results reach spillover intact.
+# Hard ceiling for one MCP text payload (chars), deliberately far ABOVE the budget layer's 50K
+# spillover threshold so ordinary large results reach spillover intact; only floods are lossy.
 _MCP_HARD_RESULT_CAP_CHARS = 2_000_000
-
-# Hard cap on decoded resource bytes from one block, so a misbehaving server can't fill the
-# cache disk. Base64 expands ~4/3; oversized payloads are rejected BEFORE decoding so a
-# multi-GB blob string is never transiently doubled in memory.
+# Cap on decoded resource bytes per block (a misbehaving server can't fill the cache disk).
+# Base64 expands ~4/3; oversized payloads are rejected BEFORE decoding (never doubled in memory).
 _MCP_RESOURCE_MAX_BYTES = 50 * 1024 * 1024
 _MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
 
@@ -33,11 +30,8 @@ def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_C
     head_chars = int(max_chars * 0.4)
     tail_chars = max_chars - head_chars
     omitted = len(text) - head_chars - tail_chars
-    return (
-        text[:head_chars]
-        + f"\n\n... [MCP RESULT TRUNCATED - {omitted:,} chars omitted "
-          f"out of {len(text):,} total] ...\n\n"
-        + text[-tail_chars:])
+    return (text[:head_chars] + f"\n\n... [MCP RESULT TRUNCATED - {omitted:,} chars omitted "
+            f"out of {len(text):,} total] ...\n\n" + text[-tail_chars:])
 
 
 def _is_reserved_mcp_meta_key(key: str) -> bool:
@@ -93,12 +87,10 @@ def _decode_block_b64(data, what: str, label: str, *, cap_what: Optional[str] = 
 def _write_block_cache(writer: str, what: str, skip_label: str, *args,
                        unavailable: str = "", failed: str = "", **kwargs) -> Tuple[Optional[str], str]:
     """Call ``gateway.platforms.base.<writer>(*args, **kwargs)``: ``(path, "")`` or ``(None,
-    marker)``. Fail-open: gateway deps missing (e.g. cron without gateway) → debug log +
-    ``unavailable``; any other cache error → warning + ``failed``. One bad block must never
-    kill the tool result."""
+    marker)``. Fail-open so one bad block never kills the tool result: gateway deps missing
+    (cron without gateway) → ``unavailable``; any other cache error → warning + ``failed``."""
     try:
         import gateway.platforms.base as _base
-
         return getattr(_base, writer)(*args, **kwargs), ""
     except ImportError:
         logger.debug("MCP %s caching skipped — gateway.platforms.base unavailable", skip_label)
@@ -146,22 +138,18 @@ def _mcp_resource_filename(uri: str, mime_type: str) -> str:
     import re as _re
     from pathlib import Path
     from urllib.parse import urlparse, unquote
-
     name = ""
     if uri:
         try:
             name = Path(unquote(urlparse(str(uri)).path or "")).name
         except (ValueError, TypeError):
-            name = ""
+            pass
     # Strip control chars (hostile URIs could inject newlines/ANSI into the filename and
     # transcript marker) and cap length, preserving the extension.
     name = _re.sub(r"[\x00-\x1f\x7f]", "", name).strip()
     if len(name) > 150:
         stem, dot, ext = name.rpartition(".")
-        if dot and 0 < len(ext) <= 12:
-            name = stem[: 150 - len(ext) - 1] + "." + ext
-        else:
-            name = name[:150]
+        name = stem[: 150 - len(ext) - 1] + "." + ext if dot and 0 < len(ext) <= 12 else name[:150]
     if not name or name in {".", ".."}:
         ext = mimetypes.guess_extension(_base_mime(mime_type)) or ".bin"
         name = f"resource{ext}"
@@ -175,22 +163,15 @@ def _render_mcp_resource_block(block, server_name: str = "") -> str:
     are only readable via the originating session). "" for non-resource blocks; failures are
     reported inline rather than silently dropped."""
     block_type = getattr(block, "type", "")
-
-    if block_type == "resource_link" or (
-            hasattr(block, "uri") and not hasattr(block, "resource") and block_type != "text"):
+    if block_type == "resource_link" or (hasattr(block, "uri") and not hasattr(block, "resource") and block_type != "text"):
         uri = getattr(block, "uri", None)
         if not uri:
             return ""
         name = getattr(block, "name", "") or ""
         mime = mcp_field(block, "mime_type", "mimeType", "") or ""
-        details = f"uri={uri}"
-        if name:
-            details += f", name={name}"
-        if mime:
-            details += f", mimeType={mime}"
+        details = f"uri={uri}" + (f", name={name}" if name else "") + (f", mimeType={mime}" if mime else "")
         reader = mcp_prefixed_tool_name(server_name, "read_resource") if server_name else "the MCP server's read_resource tool"
         return f"[MCP resource link: {details} — fetch it with {reader}]"
-
     resource = getattr(block, "resource", None)
     if resource is None:
         return ""
@@ -200,7 +181,6 @@ def _render_mcp_resource_block(block, server_name: str = "") -> str:
     blob = getattr(resource, "blob", None)
     if blob is None:
         return ""
-
     uri = str(getattr(resource, "uri", "") or "")
     mime = str(mcp_field(resource, "mime_type", "mimeType", "") or "")
     raw_bytes, err = _decode_block_b64(
