@@ -11,28 +11,21 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .store import MemoryStore
 
-try:
-    from . import holographic as hrr
-except ImportError:
-    import holographic as hrr  # type: ignore[no-redef]
+from . import holographic as hrr
 
-_FACT_COLUMNS = (
-    "fact_id, content, category, tags, trust_score, "
-    "retrieval_count, helpful_count, created_at, updated_at"
-)
+_FACT_COLUMNS = "fact_id, content, category, tags, trust_score, retrieval_count, helpful_count, created_at, updated_at"
 _ROLE_ENTITY, _ROLE_CONTENT = hrr.ROLE_ENTITY, hrr.ROLE_CONTENT
 _PUNCT = ".,;:!?\"'()[]{}#@<>"
 _FTS_OPERATORS = str.maketrans("", "", '"()*^:-+')
 # Stopwords dropped before FTS5 OR-expansion: short English function words that
 # carry no retrieval signal and force false-negative AND matches.
 _FTS_STOPWORDS = frozenset("""
-    a about above after again all am an and any are as at be because been before being between both but by
-    can could did do does doing don down during each few for from further had has have having he her here hers
-    herself him himself his how i if in into is it its itself just me more most my myself no nor not now of off
-    on once only or other our ours ourselves out over own same she should so some such than that the their theirs
-    them themselves then there these they this those through to too under until up very was we were what when
-    where which while who whom why will with would you your yours yourself yourselves
-""".split())
+    a about above after again all am an and any are as at be because been before being between both but by can could
+    did do does doing don down during each few for from further had has have having he her here hers herself him himself
+    his how i if in into is it its itself just me more most my myself no nor not now of off on once only or other our
+    ours ourselves out over own same she should so some such than that the their theirs them themselves then there these
+    they this those through to too under until up very was we were what when where which while who whom why will with
+    would you your yours yourself yourselves""".split())
 
 
 def _shift(sim: float) -> float:
@@ -60,11 +53,9 @@ class FactRetriever:
         """Hybrid search: FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting →
         optional temporal decay 0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc."""
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
-        if not candidates:
-            return []
         query_tokens = self._tokenize(query)
-        # Query vector is loop-invariant; encode lazily on the first candidate that carries
-        # an HRR vector so stores whose hrr_vector was never backfilled don't pay for it.
+        # Query vector is loop-invariant; encode lazily on the first candidate that carries an HRR vector
+        # so stores whose hrr_vector was never backfilled don't pay for it.
         query_vec = None
         for fact in candidates:
             jaccard = self._jaccard_similarity(query_tokens, self._tokenize(fact["content"]) | self._tokenize(fact.get("tags", "")))
@@ -234,9 +225,7 @@ class FactRetriever:
             return 1.0
         try:
             ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00")) if isinstance(timestamp_str, str) else timestamp_str
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
-            age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400
+            age_days = (datetime.now(timezone.utc) - (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc))).total_seconds() / 86400
             return 1.0 if age_days < 0 else math.pow(0.5, age_days / self.half_life)
         except (ValueError, TypeError):
             return 1.0

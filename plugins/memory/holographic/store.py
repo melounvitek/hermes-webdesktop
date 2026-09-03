@@ -6,10 +6,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-try:
-    from . import holographic as hrr
-except ImportError:
-    import holographic as hrr  # type: ignore[no-redef]
+from . import holographic as hrr
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -121,8 +118,8 @@ class MemoryStore:
         with MemoryStore._shared_guard:
             entry = MemoryStore._shared.get(self._key)
             if entry is None:
-                # Autocommit: a write that raises mid-method can never leave a dangling
-                # transaction (and its write lock) open; explicit commit() calls are no-ops.
+                # Autocommit: a write that raises mid-method can't leave a dangling transaction (and its
+                # write lock) open; the explicit commit() calls in _write are then harmless no-ops.
                 conn = sqlite3.connect(self._key, check_same_thread=False, timeout=10.0, isolation_level=None)
                 conn.row_factory = sqlite3.Row
                 entry = MemoryStore._shared[self._key] = {"conn": conn, "lock": threading.RLock(), "refs": 0, "ready": False}
@@ -134,8 +131,7 @@ class MemoryStore:
                 self._entry["ready"] = True
 
     def _init_db(self) -> None:
-        """Create schema, enable WAL via the shared fallback helper (NFS/SMB/FUSE HERMES_HOME
-        degrades gracefully), and add hrr_vector to pre-HRR databases."""
+        """Create schema, enable WAL via the shared fallback helper (NFS/SMB/FUSE degrade gracefully), add hrr_vector to pre-HRR DBs."""
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
         self._conn.executescript(_SCHEMA)
@@ -152,8 +148,8 @@ class MemoryStore:
         return cur
 
     def add_fact(self, content: str, category: str = "general", tags: str = "") -> int:
-        """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the
-        existing fact_id untouched. Links extracted entities and rebuilds the category bank."""
+        """Insert a fact and return its fact_id; on duplicate content (UNIQUE) return the existing fact_id untouched.
+        Links extracted entities and rebuilds the category bank."""
         with self._lock:
             content = content.strip()
             if not content:
