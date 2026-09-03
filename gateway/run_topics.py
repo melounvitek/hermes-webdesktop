@@ -67,8 +67,7 @@ class GatewayTopicThreadsMixin:
             return False
         try:
             raw = session_db.is_telegram_topic_mode_enabled(
-                chat_id=str(source.chat_id),
-                user_id=str(source.user_id),
+                chat_id=str(source.chat_id), user_id=str(source.user_id),
                 profile_name=self._telegram_topic_profile_name(source),
             )
         except Exception:
@@ -186,10 +185,8 @@ class GatewayTopicThreadsMixin:
         if session_db is None or not source.chat_id or not source.thread_id:
             return
         session_db.bind_telegram_topic(
-            chat_id=str(source.chat_id),
-            thread_id=str(source.thread_id),
-            user_id=str(source.user_id or ""),
-            session_key=session_entry.session_key,
+            chat_id=str(source.chat_id), thread_id=str(source.thread_id),
+            user_id=str(source.user_id or ""), session_key=session_entry.session_key,
             session_id=session_entry.session_id,
             profile_name=self._telegram_topic_profile_name(source),
         )
@@ -232,8 +229,7 @@ class GatewayTopicThreadsMixin:
             return None
         try:
             bindings = session_db.list_telegram_topic_bindings_for_chat(
-                chat_id=str(source.chat_id),
-                profile_name=self._telegram_topic_profile_name(source),
+                chat_id=str(source.chat_id), profile_name=self._telegram_topic_profile_name(source)
             )
         except Exception:
             logger.debug("topic-recover: read failed", exc_info=True)
@@ -289,8 +285,7 @@ class GatewayTopicThreadsMixin:
         message_id = None
         try:
             send_result = await adapter.send(
-                source.chat_id,
-                "System topic for Hermes commands and status.",
+                source.chat_id, "System topic for Hermes commands and status.",
                 metadata={"thread_id": str(thread_id)},
             )
             message_id = getattr(send_result, "message_id", None)
@@ -303,9 +298,7 @@ class GatewayTopicThreadsMixin:
             return
         try:
             await bot.pin_chat_message(
-                chat_id=int(source.chat_id),
-                message_id=int(message_id),
-                disable_notification=True,
+                chat_id=int(source.chat_id), message_id=int(message_id), disable_notification=True
             )
         except Exception:
             logger.debug("Failed to pin Telegram System topic intro", exc_info=True)
@@ -320,8 +313,7 @@ class GatewayTopicThreadsMixin:
             return
         try:
             await adapter.send_image_file(
-                chat_id=source.chat_id,
-                image_path=str(image_path),
+                chat_id=source.chat_id, image_path=str(image_path),
                 caption="BotFather → Bot Settings → Threads Settings",
                 metadata={"thread_id": str(source.thread_id)} if source.thread_id else None,
             )
@@ -429,10 +421,7 @@ class GatewayTopicThreadsMixin:
             return None
 
     async def _rename_discord_auto_thread_for_session_title(
-        self,
-        source: SessionSource,
-        session_id: str,
-        title: str,
+        self, source: SessionSource, session_id: str, title: str,
         relay_info: Optional[Tuple[str, str]] = None,
     ) -> None:
         """Best-effort semantic rename of a newly auto-created Discord thread.
@@ -593,8 +582,7 @@ class GatewayTopicThreadsMixin:
         if session_db is not None:
             try:
                 binding = await session_db.get_telegram_topic_binding(
-                    chat_id=str(source.chat_id),
-                    thread_id=str(source.thread_id),
+                    chat_id=str(source.chat_id), thread_id=str(source.thread_id),
                     profile_name=self._telegram_topic_profile_name(source),
                 )
                 if binding and str(binding.get("session_id") or "") != str(session_id):
@@ -674,10 +662,8 @@ class GatewayTopicThreadsMixin:
         ]
         try:
             sessions = await self._session_db.list_unlinked_telegram_sessions_for_user(
-                chat_id=str(source.chat_id),
-                user_id=str(source.user_id),
-                profile_name=self._telegram_topic_profile_name(source),
-                limit=10,
+                chat_id=str(source.chat_id), user_id=str(source.user_id),
+                profile_name=self._telegram_topic_profile_name(source), limit=10,
             )
         except Exception:
             logger.debug("Failed to list unlinked Telegram sessions", exc_info=True)
@@ -692,16 +678,14 @@ class GatewayTopicThreadsMixin:
                 lines.append(line)
             lines.extend([
                 "",
-                "To restore one:",
-                *_TOPIC_RESTORE_STEPS,
+                "To restore one:", *_TOPIC_RESTORE_STEPS,
                 f"Example: Send /topic {sessions[0].get('id')} inside a topic.",
             ])
         else:
             lines.extend([
                 "No previous unlinked Telegram sessions found.",
                 "",
-                "To restore a previous session later:",
-                *_TOPIC_RESTORE_STEPS,
+                "To restore a previous session later:", *_TOPIC_RESTORE_STEPS,
             ])
         return "\n".join(lines)
 
@@ -727,13 +711,9 @@ class GatewayTopicThreadsMixin:
             return already_linked
         try:
             await db.bind_telegram_topic(
-                chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
-                user_id=str(source.user_id),
-                session_key=self._session_key_for_source(source),
-                session_id=session_id,
-                managed_mode="restored",
-                profile_name=topic_profile,
+                chat_id=str(source.chat_id), thread_id=str(source.thread_id),
+                user_id=str(source.user_id), session_key=self._session_key_for_source(source),
+                session_id=session_id, managed_mode="restored", profile_name=topic_profile,
             )
         except ValueError as exc:
             if "already linked" in str(exc):

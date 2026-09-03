@@ -51,9 +51,7 @@ class TurnRunner:
         """Hop a coroutine from the agent's sync worker thread onto the gateway loop."""
         from gateway.run import safe_schedule_threadsafe
         return safe_schedule_threadsafe(
-            coro,
-            self._ctx._loop_for_step if loop is None else loop,
-            logger=logger,
+            coro, self._ctx._loop_for_step if loop is None else loop, logger=logger,
             log_message=log_message,
         )
 
@@ -158,9 +156,7 @@ class TurnRunner:
             from tools.delegate_tool import SUBAGENT_FAILURE_STATUSES, format_subagent_failure_line
             if status in SUBAGENT_FAILURE_STATUSES and ctx._run_still_current():
                 line = format_subagent_failure_line(
-                    kwargs.get("goal"),
-                    status,
-                    error=kwargs.get("summary") or preview,
+                    kwargs.get("goal"), status, error=kwargs.get("summary") or preview,
                     duration_seconds=kwargs.get("duration_seconds"),
                 )
                 self._schedule(
@@ -368,9 +364,7 @@ class TurnRunner:
         text = st.fallback_text()
         if st.fallback_msg_id:
             result = await st.adapter.edit_message(
-                chat_id=ctx.source.chat_id,
-                message_id=st.fallback_msg_id,
-                content=text,
+                chat_id=ctx.source.chat_id, message_id=st.fallback_msg_id, content=text,
                 metadata=ctx._progress_metadata,
             )
             if getattr(result, "success", False):
@@ -385,11 +379,8 @@ class TurnRunner:
             return
         if not st.native_failed:
             result = await st.adapter.send_native_task_card_progress(
-                chat_id=ctx.source.chat_id,
-                tasks=st.visible_tasks(),
-                title="Hermes is working",
-                reply_to=ctx._progress_reply_to,
-                metadata=ctx._progress_metadata,
+                chat_id=ctx.source.chat_id, tasks=st.visible_tasks(), title="Hermes is working",
+                reply_to=ctx._progress_reply_to, metadata=ctx._progress_metadata,
                 fallback_text=st.fallback_text(),
             )
             if getattr(result, "success", False):
@@ -397,8 +388,7 @@ class TurnRunner:
             st.native_failed = True
             logger.warning(
                 "Slack native task-card progress failed; falling back "
-                "to an editable text update: %s",
-                getattr(result, "error", "unknown error"),
+                "to an editable text update: %s", getattr(result, "error", "unknown error"),
             )
         # Once the native rail fails, every later lifecycle event edits the same fallback message.
         await self._task_card_send_or_edit_fallback(st)
@@ -444,8 +434,7 @@ class TurnRunner:
                 # final-delivery logic (cleanup awaits catch only CancelledError).
                 try:
                     await adapter.stop_native_task_card_progress(
-                        ctx.source.chat_id,
-                        reply_to=ctx._progress_reply_to,
+                        ctx.source.chat_id, reply_to=ctx._progress_reply_to,
                         metadata=ctx._progress_metadata,
                     )
                 except asyncio.CancelledError:
@@ -535,9 +524,7 @@ class TurnRunner:
     async def _send_progress_text(self, st, text: str):
         ctx = self._ctx
         result = await st.adapter.send(
-            chat_id=ctx.source.chat_id,
-            content=text,
-            reply_to=ctx._progress_reply_to,
+            chat_id=ctx.source.chat_id, content=text, reply_to=ctx._progress_reply_to,
             metadata=ctx._progress_metadata,
         )
         self._track_progress_result(result)
@@ -732,8 +719,7 @@ class TurnRunner:
             return
         try:
             self._schedule(
-                adapter.play_ack_in_voice(ctx._voice_ack_guild[0]),
-                "voice ack scheduling error",
+                adapter.play_ack_in_voice(ctx._voice_ack_guild[0]), "voice ack scheduling error",
                 loop=ctx._voice_ack_loop,
             )
         except Exception as err:
@@ -852,8 +838,7 @@ class TurnRunner:
 
     def _status_callback_sync(self, event_type: str, message: str) -> None:
         from gateway.run import (
-            _prepare_gateway_status_message,
-            _redact_gateway_user_facing_secrets,
+            _prepare_gateway_status_message, _redact_gateway_user_facing_secrets,
             _send_or_update_status_coro,
         )
         ctx = self._ctx
@@ -863,8 +848,7 @@ class TurnRunner:
         if prepared is None:
             logger.debug(
                 "status_callback suppressed for %s/%s: %s",
-                ctx.source.platform.value if ctx.source.platform else "unknown",
-                event_type,
+                ctx.source.platform.value if ctx.source.platform else "unknown", event_type,
                 _redact_gateway_user_facing_secrets(str(message or ""))[:160],
             )
             return
@@ -1034,16 +1018,14 @@ class TurnRunner:
                     "cached agent's session_id %s is ended in "
                     "state.db (stale self-heal artifact, "
                     "#54878 x #54947) — discarding instead of "
-                    "reusing across the routing recovery",
-                    ctx.session_key, cached_sid,
+                    "reusing across the routing recovery", ctx.session_key, cached_sid,
                 )
                 out.evicted = self._pop_cached_agent_for_eviction()
             elif not sid_mismatch and cached_mc is not None and msg_count is not None and msg_count != cached_mc:
                 logger.info(
                     "Agent cache invalidated for session %s: "
                     "message_count changed (%s -> %s), "
-                    "possible cross-process write",
-                    ctx.session_key, cached_mc, msg_count,
+                    "possible cross-process write", ctx.session_key, cached_mc, msg_count,
                 )
                 out.evicted = self._pop_cached_agent_for_eviction()
             else:
@@ -1063,9 +1045,7 @@ class TurnRunner:
         """Off-lock soft release on a daemon thread so teardown never blocks the gateway loop."""
         try:
             threading.Thread(
-                target=self._runner._release_evicted_agent_soft,
-                args=(agent,),
-                daemon=True,
+                target=self._runner._release_evicted_agent_soft, args=(agent,), daemon=True,
                 name=f"agent-xproc-evict-{str(self._ctx.session_key)[:24]}",
             ).start()
         except Exception:
@@ -1123,10 +1103,7 @@ class TurnRunner:
         runner = self._runner
         skip_context_files = self._skip_context_files(platform_key)
         sig = runner._agent_config_signature(
-            turn_route["model"],
-            turn_route["runtime"],
-            ctx.enabled_toolsets,
-            combined_ephemeral,
+            turn_route["model"], turn_route["runtime"], ctx.enabled_toolsets, combined_ephemeral,
             cache_keys=runner._extract_cache_busting_config(ctx.user_config),
             user_id=getattr(ctx.source, "user_id", None),
             user_id_alt=getattr(ctx.source, "user_id_alt", None),
@@ -1338,11 +1315,8 @@ class TurnRunner:
         session_key = ctx.session_key or ""
         clarify_id = uuid.uuid4().hex[:10]
         clarify_mod.register(
-            clarify_id=clarify_id,
-            session_key=session_key,
-            question=question,
-            choices=list(choices) if choices else None,
-            multi_select=bool(multi_select),
+            clarify_id=clarify_id, session_key=session_key, question=question,
+            choices=list(choices) if choices else None, multi_select=bool(multi_select),
         )
         # Unlike approval, clarify passes reopen=True so the continuation re-opens a native stream
         # below the question; if the re-seed fails the consumer degrades to send() automatically.
@@ -1362,12 +1336,9 @@ class TurnRunner:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
         fut = self._schedule(
             ctx._status_adapter.send_clarify(
-                chat_id=ctx._status_chat_id,
-                question=question,
-                choices=list(choices) if choices else None,
-                clarify_id=clarify_id,
-                session_key=session_key,
-                metadata=ctx._status_thread_metadata,
+                chat_id=ctx._status_chat_id, question=question,
+                choices=list(choices) if choices else None, clarify_id=clarify_id,
+                session_key=session_key, metadata=ctx._status_thread_metadata,
             ),
             "Clarify send failed to schedule",
         )
@@ -1400,9 +1371,7 @@ class TurnRunner:
         else a plain text message with ``/approve`` instructions.
         """
         from gateway.run import (
-            _approval_send_outcome,
-            _format_exec_approval_fallback,
-            _interim_metadata,
+            _approval_send_outcome, _format_exec_approval_fallback, _interim_metadata,
             _redact_approval_command,
         )
         ctx = self._ctx
@@ -1426,12 +1395,8 @@ class TurnRunner:
             try:
                 fut = self._schedule(
                     adapter.send_exec_approval(
-                        chat_id=ctx._status_chat_id,
-                        command=cmd,
-                        session_key=ctx.session_key or "",
-                        description=desc,
-                        metadata=ctx._status_thread_metadata,
-                        **flags,
+                        chat_id=ctx._status_chat_id, command=cmd, session_key=ctx.session_key or "",
+                        description=desc, metadata=ctx._status_thread_metadata, **flags,
                     ),
                     "send_exec_approval scheduling error",
                 )
@@ -1473,9 +1438,7 @@ class TurnRunner:
 
     def _load_turn_history(self, agent, reused_cached_agent):
         from gateway.run import (
-            _build_gateway_agent_history,
-            _collect_history_media_paths,
-            _message_timestamps_enabled,
+            _build_gateway_agent_history, _collect_history_media_paths, _message_timestamps_enabled,
             _select_cached_agent_history,
         )
         ctx = self._ctx
@@ -1484,8 +1447,7 @@ class TurnRunner:
         # sequences. Telegram observed=True rows are withheld from replayable history and attached to
         # the current addressed message as API-only context.
         agent_history, observed_group_context = _build_gateway_agent_history(
-            ctx.history,
-            channel_prompt=ctx.channel_prompt,
+            ctx.history, channel_prompt=ctx.channel_prompt,
             inject_timestamps=_message_timestamps_enabled(ctx.user_config),
         )
         # FTS write-corruption guard: if persistence failed silently, the reloaded transcript is
@@ -1529,11 +1491,8 @@ class TurnRunner:
         kept separate from API-only recovery guidance so stale guidance never replays as user text.
         """
         from gateway.run import (
-            _auto_continue_freshness_window,
-            _is_fresh_gateway_interruption,
-            _last_transcript_timestamp,
-            _prepare_resume_pending_message,
-            build_resume_recovery_note,
+            _auto_continue_freshness_window, _is_fresh_gateway_interruption,
+            _last_transcript_timestamp, _prepare_resume_pending_message, build_resume_recovery_note,
         )
         ctx = self._ctx
         persist_override: Optional[Any] = ctx.persist_user_message
@@ -1578,8 +1537,7 @@ class TurnRunner:
         # user turn. Restricted to resume_pending sessions so caption-less image turns are untouched.
         if isinstance(ctx.message, str) and not ctx.message.strip() and resume_pending:
             ctx.message = build_resume_recovery_note(
-                getattr(entry, "resume_reason", None) or "restart_timeout",
-                "",
+                getattr(entry, "resume_reason", None) or "restart_timeout", "",
                 interactive=self._resume_note_interactive(),
             )
         return persist_override, ctx.persist_user_timestamp
@@ -1609,9 +1567,7 @@ class TurnRunner:
         approval blocks the agent thread (mirrors CLI input()); the callback bridges sync→async."""
         from gateway.run import _wrap_current_message_with_observed_context
         from tools.approval import (
-            register_gateway_notify,
-            reset_current_session_key,
-            set_current_session_key,
+            register_gateway_notify, reset_current_session_key, set_current_session_key,
             unregister_gateway_notify,
         )
         ctx = self._ctx
@@ -1769,8 +1725,7 @@ class TurnRunner:
         for extra in (
             (ctx.channel_prompt or "").strip(),
             self._runner._get_system_prompt_for_channel(
-                ctx.source.platform,
-                ctx.source.chat_id or "",
+                ctx.source.platform, ctx.source.chat_id or "",
                 thread_id=getattr(ctx.source, "thread_id", None),
                 parent_id=getattr(ctx.source, "parent_chat_id", None),
             ),
@@ -1788,8 +1743,7 @@ class TurnRunner:
         if "MEDIA:" in final_response:
             return final_response
         media_tags, has_voice_directive = _collect_auto_append_media_tags(
-            result.get("messages", []),
-            history_offset=len(agent_history),
+            result.get("messages", []), history_offset=len(agent_history),
             history_media_paths=history_media_paths,
         )
         if not media_tags:
@@ -1808,8 +1762,7 @@ class TurnRunner:
         is process-global and would misroute approvals across concurrent sessions.
         """
         from gateway.run import (
-            _current_max_iterations,
-            _normalize_empty_agent_response,
+            _current_max_iterations, _normalize_empty_agent_response,
             _sanitize_gateway_final_response,
         )
         ctx = self._ctx
