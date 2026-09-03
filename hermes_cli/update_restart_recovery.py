@@ -110,11 +110,7 @@ def _child_environment() -> dict[str, str]:
     return env
 
 
-def _run_profile_restart(
-    profile: str,
-    *,
-    run: Callable[..., Any],
-) -> bool:
+def _run_profile_restart(profile: str, *, run: Callable[..., Any]) -> bool:
     """Run one profile restart without inheriting the updater's process state."""
     kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, "env": _child_environment()}
     if os.name == "nt":
@@ -157,27 +153,22 @@ def restart_profiles(
     supervisors: Mapping[str, str] | None = None,
     run: Callable[..., Any] = subprocess.run,
 ) -> dict[str, list[str]]:
-    """Restart the supplied profiles and return per-profile terminal results.
-
-    The caller supplies only profiles whose inventory identified a service supervisor.
+    """Restart the supplied profiles (only ones whose inventory identified a service supervisor).
 
     A profile only lands in ``verified`` when its supervisor is systemd and ``systemctl --user is-
     active`` independently confirms the unit after the relaunch command succeeded.
     """
     supervisors = supervisors or {}
-    normalized = sorted({profile for profile in profiles if isinstance(profile, str) and profile})
-    verified: list[str] = []
-    relaunch_attempted: list[str] = []
-    failed: list[str] = []
-    for profile in normalized:
+    result: dict[str, list[str]] = {"verified": [], "relaunch_attempted": [], "failed": []}
+    for profile in sorted({p for p in profiles if isinstance(p, str) and p}):
         if not _run_profile_restart(profile, run=run):
-            failed.append(profile)
-            continue
-        if supervisors.get(profile) == "systemd" and _systemd_verified_active(profile, run=run):
-            verified.append(profile)
+            bucket = "failed"
+        elif supervisors.get(profile) == "systemd" and _systemd_verified_active(profile, run=run):
+            bucket = "verified"
         else:
-            relaunch_attempted.append(profile)
-    return {"verified": verified, "relaunch_attempted": relaunch_attempted, "failed": failed}
+            bucket = "relaunch_attempted"
+        result[bucket].append(profile)
+    return result
 
 
 def _systemctl_scopes() -> list[tuple[str, list[str]]]:
@@ -206,10 +197,8 @@ def _listed_serve_units(scope: list[str], *, run: Callable[..., Any]) -> list[st
     )
     if result is None:
         return []
-    # The glob is a systemd pattern, not a name gate: `hermes-serve*` also
-    # matches the unrelated `hermes-server.service`. Require the exact
-    # base unit or the hyphenated profile family, same shape as the
-    # in-process phase's own name gate.
+    # The glob is a systemd pattern, not a name gate (`hermes-serve*` also matches
+    # `hermes-server.service`): require the exact base unit or the profile family.
     units: list[str] = []
     for line in (getattr(result, "stdout", "") or "").splitlines():
         parts = line.split()
@@ -309,9 +298,8 @@ def restart_serve_units(
     unit and therefore cannot be touched here.
     """
     skipped_qualified, skipped_legacy = _normalized_skips(skip_units)
-    # (scope, base unit) -> replaced?  A unit name can exist in BOTH the user
-    # and the system scope; each is a separate process and each is proven,
-    # reported and accounted for on its own.
+    # (scope, base unit) -> replaced?  The same unit name in the user and the system
+    # scope is two processes; each is proven, reported and accounted for on its own.
     outcomes: dict[tuple[str, str], bool] = {}
     seen: set[tuple[str, str]] = set()
     for scope_label, scope in _systemctl_scopes():
@@ -322,26 +310,15 @@ def restart_serve_units(
                 continue
             seen.add(target)
             if not _unit_is_active(scope, unit, run=run):
-                # Not running: nothing is serving a stale generation from it.
-                continue
+                continue  # not running: nothing serves a stale generation from it
             previous_pid = _unit_main_pid(scope, unit, run=run)
-            if previous_pid <= 0:
-                # Active with no readable main process: a replacement cannot
-                # be observed, so it cannot be claimed. Restarting blind and
-                # reporting success is the failure mode this module exists to
-                # remove.
-                outcomes[target] = False
-                continue
-            result = _run_quiet(
-                run, scope + ["--no-ask-password", "restart", unit], timeout=_UNIT_RESTART_TIMEOUT
-            )
-            if not _succeeded(result):
-                # Includes the unprivileged system-scope case. We do not probe
-                # for sudo here: an unverifiable unit must read as failed so
-                # the update stays explicitly incomplete.
-                outcomes[target] = False
-                continue
-            outcomes[target] = _serve_unit_replaced(scope, unit, previous_pid, run=run, sleep=sleep)
+            # No readable main PID: a replacement can't be observed, so it can't be claimed
+            # (restarting blind and reporting success is the failure mode this module removes).
+            # A failed restart includes the unprivileged system-scope case; no sudo probe —
+            # an unverifiable unit must read as failed so the update stays explicitly incomplete.
+            outcomes[target] = previous_pid > 0 and _succeeded(
+                _run_quiet(run, scope + ["--no-ask-password", "restart", unit], timeout=_UNIT_RESTART_TIMEOUT)
+            ) and _serve_unit_replaced(scope, unit, previous_pid, run=run, sleep=sleep)
     # ``<scope>/<unit>`` is the only identity this module reports for a serve unit.
     return {
         "verified": sorted(f"{scope}/{base}" for (scope, base), ok in outcomes.items() if ok),
