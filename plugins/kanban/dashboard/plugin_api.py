@@ -19,6 +19,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -52,10 +53,8 @@ def _ws_upgrade_authorized(ws: "WebSocket") -> bool:
 
 
 def _normalize_slug_or_400(slug: str) -> Optional[str]:
-    try:
+    with _value_error_400():
         return kanban_db._normalize_board_slug(slug)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _resolve_board(board: Optional[str]) -> Optional[str]:
@@ -121,8 +120,14 @@ def _require_task(conn: sqlite3.Connection, task_id: str) -> kanban_db.Task:
     return _require(kanban_db.get_task, conn, task_id, "task")
 
 
-def _require_run(conn, run_id: int) -> kanban_db.Run:
+def _require_run(conn: sqlite3.Connection, run_id: int) -> kanban_db.Run:
     return _require(kanban_db.get_run, conn, run_id, "run")
+
+
+def _require_ok(ok: bool) -> None:
+    """404 when a kanban_db mutator reports the task vanished mid-request."""
+    if not ok:
+        raise HTTPException(status_code=404, detail="task not found")
 
 
 def _conflict(detail: str) -> HTTPException:
@@ -130,12 +135,15 @@ def _conflict(detail: str) -> HTTPException:
 
 
 @contextmanager
-def _value_error_400() -> Iterator[None]:
-    """Map domain-layer ``ValueError`` (validation refusals) to a 400 response."""
+def _map_errors(status: int, *types: type[BaseException]) -> Iterator[None]:
+    """Map the given exception types to ``HTTPException(status, str(exc))``."""
     try:
         yield
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except types as e:
+        raise HTTPException(status_code=status, detail=str(e))
+
+
+_value_error_400 = partial(_map_errors, 400, ValueError)  # domain-layer validation refusals
 
 
 @contextmanager
@@ -270,18 +278,13 @@ def get_board(
             link_counts.setdefault(row["parent_id"], {"parents": 0, "children": 0})["children"] += 1
             link_counts.setdefault(row["child_id"], {"parents": 0, "children": 0})["parents"] += 1
         comment_counts: dict[str, int] = {
-            r["task_id"]: r["n"] for r in conn.execute("SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id")
-        }
-        # Per parent: children done / total, rendered as "N/M".
-        progress: dict[str, dict[str, int]] = {}
+            r["task_id"]: r["n"] for r in conn.execute("SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id")}
+        progress: dict[str, dict[str, int]] = {}  # per parent: children done / total, rendered as "N/M"
         for row in conn.execute(
-            "SELECT l.parent_id AS pid, t.status AS cstatus FROM task_links l JOIN tasks t ON t.id = l.child_id"
-        ).fetchall():
+            "SELECT l.parent_id AS pid, t.status AS cstatus FROM task_links l JOIN tasks t ON t.id = l.child_id").fetchall():
             p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
             p["total"] += 1
-            if row["cstatus"] == "done":
-                p["done"] += 1
-
+            p["done"] += row["cstatus"] == "done"
         diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
         latest_event_id = conn.execute("SELECT COALESCE(MAX(id), 0) AS m FROM task_events").fetchone()["m"]
         columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
@@ -301,14 +304,11 @@ def get_board(
 
         # Per-column ordering (priority DESC, created_at ASC) comes from list_tasks.
         tenants = [r["tenant"] for r in conn.execute("SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant")]
-        assignees = [
-            r["assignee"] for r in conn.execute(
-                "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND status != 'archived' ORDER BY assignee"
-            )]
+        assignees = [r["assignee"] for r in conn.execute(
+            "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND status != 'archived' ORDER BY assignee")]
         return {
-            "columns": [{"name": name, "tasks": columns[name]} for name in columns],
-            "tenants": tenants, "assignees": assignees,
-            "latest_event_id": int(latest_event_id), "now": int(time.time())}
+            "columns": [{"name": name, "tasks": columns[name]} for name in columns], "tenants": tenants,
+            "assignees": assignees, "latest_event_id": int(latest_event_id), "now": int(time.time())}
 
 
 # --- GET /tasks/:id ---------------------------------------------------------
@@ -340,9 +340,7 @@ def get_task(
             "child_results": [
                 {"id": c.id, "title": c.title, "status": c.status, "latest_summary": child_summaries.get(c.id), "result": c.result}
                 for c in children],
-            "runs": [
-                asdict(r) for r in kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name)
-            ]}
+            "runs": [asdict(r) for r in kanban_db.list_runs(conn, task_id, state_type=run_state_type, state_name=run_state_name)]}
 
 
 # --- POST /tasks ------------------------------------------------------------
@@ -383,7 +381,6 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             try:
                 from hermes_cli.kanban import _check_dispatcher_presence
                 from hermes_constants import get_hermes_home
-
                 running, message = _check_dispatcher_presence(hermes_home=get_hermes_home())
                 if not running and message:
                     body["warning"] = message
@@ -417,9 +414,7 @@ async def upload_task_attachment(
         dest_dir = kanban_db.task_attachments_dir(task_id, board=board)
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_path = _collision_free_path(dest_dir, safe_name)  # foo.pdf → foo (1).pdf …
-
-        # Stream in chunks with a hard size cap so one upload can't fill the disk.
-        total = 0
+        total = 0  # stream in chunks with a hard size cap so one upload can't fill the disk
         try:
             with open(dest_path, "wb") as out:
                 while chunk := await file.read(1024 * 1024):
@@ -428,12 +423,10 @@ async def upload_task_attachment(
                         out.close()
                         dest_path.unlink(missing_ok=True)
                         raise HTTPException(
-                            status_code=413,
-                            detail=f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
+                            status_code=413, detail=f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit")
                     out.write(chunk)
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")
-
         att_id = kanban_db.add_attachment(
             conn, task_id, filename=dest_path.name, stored_path=str(dest_path.resolve()),
             content_type=file.content_type, size=total, uploaded_by=(uploaded_by or "dashboard"))
@@ -586,10 +579,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     if s == "archived":
         ok = kanban_db.archive_task(conn, task_id)
     else:
-        try:
+        with _map_errors(400, _StatusRejected):
             ok = _apply_status(conn, task_id, s, payload, f"unknown status: {s}")
-        except _StatusRejected as e:
-            raise HTTPException(status_code=400, detail=str(e))
         if s == "review" and ok and review_assignee_deferred and not payload.assignee:
             ok = kanban_db.assign_task(conn, task_id, None)
     if ok:
@@ -631,22 +622,15 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         # current implementer before the task is routed to the reviewer.
         review_assignee_deferred = payload.status == "review" and payload.assignee is not None
         if payload.assignee is not None and not review_assignee_deferred:
-            try:
-                ok = kanban_db.assign_task(conn, task_id, payload.assignee or None)
-            except RuntimeError as e:
-                raise _conflict(str(e))
-            if not ok:
-                raise HTTPException(status_code=404, detail="task not found")
+            with _map_errors(409, RuntimeError):
+                _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
         if payload.status is not None:
             _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
             if wanted(payload):
-                try:
+                with _map_errors(400, ValueError, RuntimeError):
                     ok = apply(conn, task_id, payload)
-                except (ValueError, RuntimeError) as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-                if not ok:
-                    raise HTTPException(status_code=404, detail="task not found")
+                _require_ok(ok)
         if payload.priority is not None:
             _set_priority(conn, task_id, payload.priority, board)
         if payload.title is not None or payload.body is not None:
@@ -688,20 +672,12 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
             resume_status = kanban_db._retry_status_for_run(conn, task_id, prev["current_run_id"])
             if resume_status == "review":
                 effective_status = "review" if kanban_db._parents_satisfied(conn, task_id) else "todo"
-        # Never promote to 'ready' unless all parents are done — otherwise the
+        # Never promote to 'ready' unless all parents are done/archived — otherwise the
         # dispatcher spawns a child whose upstream work hasn't completed.
-        if effective_status == "ready":
-            parent_statuses = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,)).fetchall()
-            if parent_statuses and not all(p["status"] in {"done", "archived"} for p in parent_statuses):
-                return False
-
+        if effective_status == "ready" and not kanban_db._parents_satisfied(conn, task_id):
+            return False
         was_running = prev["status"] == "running"
-        reopening_satisfied_parent = (
-            prev["status"] in {"done", "archived"} and effective_status not in {"done", "archived"})
+        reopening_satisfied_parent = prev["status"] in {"done", "archived"} and effective_status not in {"done", "archived"}
         cur = conn.execute(
             "UPDATE tasks SET status = ?, "
             "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
@@ -719,11 +695,10 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
             terminations.append((prev["worker_pid"], prev["claim_lock"]))
         conn.execute(
             "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'status', ?, ?)",
-            (task_id, run_id, json.dumps({"status": effective_status, "requested_status": new_status}), int(time.time())),
-        )
+            (task_id, run_id, json.dumps({"status": effective_status, "requested_status": new_status}), int(time.time())))
         if reopening_satisfied_parent:
-            # Domain-layer invalidation composes via a savepoint inside our txn
-            # and hands back worker terminations to perform post-commit.
+            # Domain-layer invalidation composes via a savepoint inside our txn and hands
+            # back worker terminations to perform post-commit.
             result = kanban_db.invalidate_descendants_for_parent_reopen(conn, task_id, author="dashboard")
             terminations.extend(result["terminations"])
     for pid, claim_lock in terminations:
@@ -780,10 +755,8 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
             entry.update(ok=False, error=f"transition to {s!r} refused")
     if payload.assignee is not None:
         try:
-            ok = (
-                kanban_db.reassign_task(conn, tid, payload.assignee or None, reclaim_first=True)
-                if payload.reclaim_first
-                else kanban_db.assign_task(conn, tid, payload.assignee or None))
+            ok = (kanban_db.reassign_task(conn, tid, payload.assignee or None, reclaim_first=True) if payload.reclaim_first
+                  else kanban_db.assign_task(conn, tid, payload.assignee or None))
             if not ok:
                 entry.update(ok=False, error="assign refused")
         except RuntimeError as e:
@@ -839,16 +812,14 @@ def list_diagnostics(
         if not diags_by_task:
             return {"diagnostics": [], "count": 0}
         ids = list(diags_by_task.keys())
-        rows = {
-            r["id"]: r for r in conn.execute(
-                f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({_placeholders(ids)})", tuple(ids),
-            ).fetchall()}
+        rows = {r["id"]: r for r in conn.execute(
+            f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({_placeholders(ids)})", tuple(ids)).fetchall()}
         out = []
         for tid, dl in diags_by_task.items():
-            r = rows.get(tid)
+            r = rows.get(tid) or {"title": None, "status": None, "assignee": None}
             out.append({
-                "task_id": tid, "task_title": r["title"] if r else None, "task_status": r["status"] if r else None,
-                "task_assignee": r["assignee"] if r else None, "diagnostics": dl})
+                "task_id": tid, "task_title": r["title"], "task_status": r["status"], "task_assignee": r["assignee"],
+                "diagnostics": dl})
         sev_idx = {s: i for i, s in enumerate(kd.SEVERITY_ORDER)}
         out.sort(key=lambda row: (
             -sev_idx.get(row["diagnostics"][0].get("severity"), -1), -(row["diagnostics"][0].get("last_seen_at") or 0)))
