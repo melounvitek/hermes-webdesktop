@@ -37,8 +37,6 @@ class MCPServerHealthMixin:
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._recycled_reason = None
 
-    # -- stdio recycling --
-
     def _stdio_recycle_deadlines(self):
         """``[(deadline, reason), ...]`` for the configured lifetime/idle limits; empty for HTTP
         servers or while an RPC holds the lock."""
@@ -61,8 +59,6 @@ class MCPServerHealthMixin:
         """Mark a stdio session dormant before its transport finishes closing."""
         self._recycled_reason = reason
         self.session = None
-
-    # -- notifications / logs --
 
     def _schedule_tools_refresh(self) -> asyncio.Task:
         """Schedule a background tool refresh (failures logged) and keep it strongly referenced."""
@@ -164,8 +160,6 @@ class MCPServerHealthMixin:
             else:
                 logger.info("MCP server '%s': dynamically refreshed %d tool(s) (no changes)",
                             self.name, len(self._registered_tool_names))
-
-    # -- keepalive / health --
 
     async def _keepalive_probe(self) -> None:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
