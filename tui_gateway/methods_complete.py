@@ -4,7 +4,6 @@ Rebound onto server.py's globals at install time (``method_ctx.bind_module``), s
 bodies reference server globals bare (``_ok``, ``_err``, ``_sessions``, ...).
 """
 
-
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -55,9 +54,8 @@ def _profile_mention_items(prefix: str) -> list[dict]:
             if not name:
                 continue
             seen.add(name.lower())
-            desc = (getattr(p, "description", "") or "").strip()
             if name.lower().startswith(prefix.lower()):
-                out.append(_item(f"@{name}", desc or "agent profile"))
+                out.append(_item(f"@{name}", (getattr(p, "description", "") or "").strip() or "agent profile"))
         if "hermes".startswith(prefix.lower()) and "hermes" not in seen:
             out.append(_item("@hermes", "agent profile (primary)"))
     except Exception:
@@ -76,15 +74,13 @@ def _plugin_reference_items(pfx: str, qval: str) -> list[dict] | None:
         import asyncio
         coro = prov.autocomplete(qval, limit=20)
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            loop = None
-        if loop and loop.is_running():
+            ac = asyncio.run(coro)
+        else:  # already inside a running loop: run the coroutine on a side thread
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 ac = pool.submit(asyncio.run, coro).result()
-        else:
-            ac = asyncio.run(coro)
         return [{"text": f"@{pfx}:{it.text}", "display": it.display, "meta": it.meta} for it in ac]
     except Exception:
         return None
@@ -107,12 +103,10 @@ def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[di
 
     # Seed with root's immediate children: `_list_repo_files` is capped at _FUZZY_CACHE_MAX_FILES
     # and the non-git fallback walk can burn the whole budget on one deep subtree.
-    try:
+    with contextlib.suppress(OSError):
         for entry in os.listdir(root):
             if entry not in _FUZZY_FALLBACK_EXCLUDES:
                 _consider(entry, entry, os.path.isdir(os.path.join(root, entry)))
-    except OSError:
-        pass
     for rel in _list_repo_files(root):
         _consider(rel, os.path.basename(rel), False)
         # Rank each ancestor dir too — a folder with no name-matching file inside is otherwise invisible.
@@ -128,34 +122,27 @@ def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[di
     return [
         _item(
             f"@{'folder' if is_dir else tag}:{rel}{'/' if is_dir else ''}",
-            "dir" if is_dir else os.path.dirname(rel),
-            basename + ("/" if is_dir else ""))
+            "dir" if is_dir else os.path.dirname(rel), basename + ("/" if is_dir else ""))
         for _, rel, basename, is_dir in ranked[:30]]
 
 
 def _at_root_items() -> list[dict]:
     """Completions for a bare ``@``: directive hints, agent profiles, plugin ``@<prefix>:`` providers."""
-    items = [_item(t, m) for t, m in _AT_DIRECTIVE_HINTS]
-    items.extend(_profile_mention_items(""))
-    try:
+    items = [_item(t, m) for t, m in _AT_DIRECTIVE_HINTS] + _profile_mention_items("")
+    with contextlib.suppress(Exception):
         from agent.context_references import get_context_reference_providers
         for pfx, prov in sorted(get_context_reference_providers().items()):
             items.append(_item(f"@{pfx}:", prov.description or f"plugin: {pfx}"))
-    except Exception:
-        pass
     return items
 
 
 def _dir_listing_items(root: str, word: str, path_part: str, prefix_tag: str, is_context: bool) -> list[dict]:
     """Prefix-match entries of the directory ``path_part`` points at (max 30)."""
     expanded = _normalize_completion_path(path_part) if path_part else "."
-    if expanded == "." or not expanded:
-        search_dir, match = ".", ""
-    elif expanded.endswith("/"):
-        search_dir, match = expanded, ""
+    if expanded == "." or not expanded or expanded.endswith("/"):
+        search_dir, match = (expanded or "."), ""
     else:
-        search_dir = os.path.dirname(expanded) or "."
-        match = os.path.basename(expanded)
+        search_dir, match = os.path.dirname(expanded) or ".", os.path.basename(expanded)
     search_dir = search_dir if os.path.isabs(search_dir) else os.path.join(root, search_dir)
     items: list[dict] = []
     if not os.path.isdir(search_dir):
@@ -169,21 +156,16 @@ def _dir_listing_items(root: str, word: str, path_part: str, prefix_tag: str, is
             continue
         full = os.path.join(search_dir, entry)
         is_dir = os.path.isdir(full)
-        # Explicit `@folder:` / `@file:` skip the opposite kind (never rewrite the tag).
-        if prefix_tag and want_dir != is_dir:
+        if prefix_tag and want_dir != is_dir:  # explicit `@folder:`/`@file:` skip the opposite kind
             continue
         rel = os.path.relpath(full, root).replace(os.sep, "/")
         suffix = "/" if is_dir else ""
-        if is_context and prefix_tag:
-            text = f"@{prefix_tag}:{rel}{suffix}"
-        elif is_context:
-            text = f"@{'folder' if is_dir else 'file'}:{rel}{suffix}"
+        if is_context:
+            text = f"@{prefix_tag or ('folder' if is_dir else 'file')}:{rel}{suffix}"
         elif word.startswith("~"):
             text = "~/" + os.path.relpath(full, os.path.expanduser("~")) + suffix
-        elif word.startswith("./"):
-            text = "./" + rel + suffix
         else:
-            text = rel + suffix
+            text = ("./" if word.startswith("./") else "") + rel + suffix
         items.append(_item(text, "dir" if is_dir else "", entry + suffix))
         if len(items) >= 30:
             break
@@ -209,9 +191,7 @@ def _(rid, params: dict) -> dict:
                 if plugin_items is not None:
                     return _ok(rid, {"items": plugin_items})
         # Bare `@folder` lists as soon as the keyword is typed (the static `@folder:` hint is not accepted).
-        if is_context and query in {"file", "folder"}:
-            prefix_tag, path_part = query, ""
-        elif is_context and query.startswith(("file:", "folder:")):
+        if is_context and (query in {"file", "folder"} or query.startswith(("file:", "folder:"))):
             prefix_tag, _, path_part = query.partition(":")
         else:
             prefix_tag, path_part = "", query
@@ -247,8 +227,7 @@ def _(rid, params: dict) -> dict:
         from agent.skill_commands import get_skill_commands
         from agent.skill_bundles import get_skill_bundles
         completer = SlashCommandCompleter(
-            skill_commands_provider=lambda: get_skill_commands(), skill_bundles_provider=lambda: get_skill_bundles()
-        )
+            skill_commands_provider=lambda: get_skill_commands(), skill_bundles_provider=lambda: get_skill_bundles())
         # `kind` reaches the TUI as data (from the providers, not sniffed from ⚡/▣ glyphs):
         # skills/bundles are the only completions for an inline `/skill` typed mid-message.
         skill_names = {key.lstrip("/").lower() for key in (*get_skill_commands(), *get_skill_bundles())}
@@ -258,14 +237,11 @@ def _(rid, params: dict) -> dict:
             # (the raw list trips Ink's row layout into 1-char truncation).
             return [
                 {
-                    "text": c.text,
-                    "display": to_plain_text(c.display) if c.display else c.text,
+                    "text": c.text, "display": to_plain_text(c.display) if c.display else c.text,
                     "meta": to_plain_text(c.display_meta) if c.display_meta else "",
-                    "kind": "skill" if c.text.strip().lstrip("/").lower() in skill_names else "command",
-                }
+                    "kind": "skill" if c.text.strip().lstrip("/").lower() in skill_names else "command"}
                 for c in completer.get_completions(doc, None)]
         items = to_items(Document(text, len(text)))
-
         # Rank + bound while a `/token` is under the cursor (the one stage skills are
         # offered at); an argument stage (`/personality `) keeps its command's order.
         if text.rsplit(" ", 1)[-1].startswith("/"):
@@ -283,7 +259,7 @@ def _(rid, params: dict) -> dict:
         text_lower = text.lower()
         for extra_text, extra_meta in _SLASH_EXTRAS:
             if extra_text.startswith(text_lower) and not any(item["text"] == extra_text for item in items):
-                items.append({"text": extra_text, "display": extra_text, "meta": extra_meta, "kind": "command"})
+                items.append({**_item(extra_text, extra_meta), "kind": "command"})
         details_items = _details_completions(text)
         if details_items is not None:
             return _ok(rid, {"items": details_items, "replace_from": text.rfind(" ") + 1 if " " in text else len(text)})
@@ -318,12 +294,9 @@ def _(rid, params: dict) -> dict:
     from hermes_cli.inventory import build_model_options_payload
     # A spawned agent owns the live provider/model/base_url; empty attributes must
     # NOT clobber disk config (with_overrides is truthy-only).
-    ctx = _model_picker_context(_session_agent(params))
-    payload = build_model_options_payload(
-        ctx, explicit_only=bool(params.get("explicit_only")),
-        include_unconfigured=bool(params.get("include_unconfigured")),
-        refresh=bool(params.get("refresh")))
-    return _ok(rid, payload)
+    return _ok(rid, build_model_options_payload(
+        _model_picker_context(_session_agent(params)), explicit_only=bool(params.get("explicit_only")),
+        include_unconfigured=bool(params.get("include_unconfigured")), refresh=bool(params.get("refresh"))))
 
 
 @method("model.save_key")
@@ -333,8 +306,7 @@ def _(rid, params: dict) -> dict:
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.config import is_managed
     from hermes_cli.inventory import build_models_payload
-    slug = (params.get("slug") or "").strip()
-    api_key = (params.get("api_key") or "").strip()
+    slug, api_key = (params.get("slug") or "").strip(), (params.get("api_key") or "").strip()
     if not slug or not api_key:
         return _err(rid, 4001, "slug and api_key are required")
     if is_managed():
@@ -346,9 +318,8 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4003, f"{pconfig.name} uses {pconfig.auth_type} auth — run `hermes model` to configure")
     if not pconfig.api_key_env_vars:
         return _err(rid, 4004, f"no env var defined for {pconfig.name}")
-    # Unified lifecycle rotates stale config.yaml mirrors of the old key too.
     env_var = pconfig.api_key_env_vars[0]
-    from hermes_cli.credential_lifecycle import save_provider_env_credential
+    from hermes_cli.credential_lifecycle import save_provider_env_credential  # also rotates stale config.yaml mirrors
     save_provider_env_credential(env_var, api_key)
     os.environ[env_var] = api_key  # so the refreshed inventory sees it
     # Shared inventory builder (lock-step with model.options / dashboard); picker_hints carries `authenticated`.
@@ -370,12 +341,10 @@ def _(rid, params: dict) -> dict:
     if not slug:
         return _err(rid, 4001, "slug is required")
     pconfig = PROVIDER_REGISTRY.get(slug)
-    # Remove EVERY env var plus its mirrors (env-seeded pool entries, model cache rows,
-    # value-matched config.yaml copies) or the provider resurrects in the picker after restart.
+    # Remove EVERY env var plus its mirrors or the provider resurrects in the picker after restart.
     env_vars = (pconfig.api_key_env_vars if pconfig else None) or ()
     cleared_env = any([remove_provider_env_credential(ev).get("found") for ev in env_vars])
-    # Full disconnect: removing OAuth grants is intended here, unlike key-only deletes.
-    cleared_auth = clear_provider_auth(slug)
+    cleared_auth = clear_provider_auth(slug)  # full disconnect: OAuth grants go too
     if not cleared_env and not cleared_auth:
         return _err(rid, 4005, f"no credentials found for {slug}")
     return _ok(rid, {"slug": slug, "name": pconfig.name if pconfig else slug, "disconnected": True})
