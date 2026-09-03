@@ -1,8 +1,7 @@
 """Official optional-skill provenance: hub-lock backfill and restore.
 
-Extracted from ``tools.skills_sync``. Profile-scoped paths and patchable
-helpers are resolved through ``_ss()`` at call time so tests and multi-profile
-runtimes that patch ``tools.skills_sync`` globals keep working.
+Profile-scoped paths and patchable helpers are resolved through ``_ss()`` at call
+time so tests and multi-profile runtimes patching ``tools.skills_sync`` keep working.
 """
 
 import json
@@ -18,14 +17,15 @@ logger = logging.getLogger("tools.skills_sync")
 
 
 def _ss():
+    """Live ``tools.skills_sync`` module (imported lazily: it re-exports this module)."""
     from tools import skills_sync
 
     return skills_sync
 
 
 def _content_hash(directory: Path) -> str:
-    """Same hash style the skills hub lock uses; hashing is provenance metadata
-    only, so fall back to the local MD5 if guard deps are unavailable."""
+    """Hub-lock hash style; provenance metadata only, so fall back to the local MD5
+    if guard deps are unavailable."""
     try:
         from tools.skills_guard import content_hash
 
@@ -35,7 +35,7 @@ def _content_hash(directory: Path) -> str:
 
 
 def _safe_rel_install_path(path: Path, base: Path) -> str:
-    """Return a normalized relative POSIX path, rejecting traversal/absolute paths."""
+    """Normalized relative POSIX path; rejects traversal/absolute paths."""
     posix = path.relative_to(base).as_posix()
     pure = PurePosixPath(posix)
     parts = [part for part in pure.parts if part not in {"", "."}]
@@ -66,24 +66,23 @@ def _hub_lock_entries(data: Optional[dict]) -> List[dict]:
 
 
 def _read_hub_install_paths() -> Set[str]:
-    """Install paths recorded in the hub lock, as POSIX strings. Hub-installed skills
-    are owned by the hub, never by bundled sync: rename recovery must not move them even
-    when content matches a bundled origin hash, or the lock's ``install_path`` dangles."""
+    """Hub-lock install paths as POSIX strings. Hub-installed skills are owned by the
+    hub: rename recovery must not move them even when content matches a bundled
+    origin hash, or the lock's ``install_path`` dangles."""
     return {str(e["install_path"]).strip("/") for e in _hub_lock_entries(_load_hub_lock()) if e.get("install_path")}
 
 
 def _write_hub_lock(lock_path: Path, data: dict) -> None:
-    """Atomic write so a crash mid-write can't wipe all provenance (the
-    JSONDecodeError fallback in the reader resets ``installed`` to empty)."""
+    """Atomic: a crash mid-write must not wipe all provenance (the reader's
+    JSONDecodeError fallback resets ``installed`` to empty)."""
     atomic_write_text(lock_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n", tmp_prefix=".lock_")
 
 
 def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterator[Tuple[Path, Path, str]]:
     """Yield ``(skill_md, src, install_path)`` for every safe official optional skill."""
     for skill_md in sorted(optional_dir.rglob("SKILL.md")):
-        if root_relative and is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir):
-            continue
-        if not root_relative and is_excluded_skill_path(skill_md):
+        if (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir) if root_relative
+                else is_excluded_skill_path(skill_md)):
             continue
         try:
             yield skill_md, skill_md.parent, _safe_rel_install_path(skill_md.parent, optional_dir)
@@ -92,9 +91,8 @@ def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterato
 
 
 def _optional_skill_index() -> Dict[str, Tuple[str, str, Path]]:
-    """Official optional skills keyed by BOTH folder name and frontmatter name, so callers
-    may pass either the hub-lock slug or the user-facing name. Values are
-    ``(folder_name, install_path, source_dir)``."""
+    """Official optional skills keyed by BOTH folder name and frontmatter name (hub-lock
+    slug or user-facing name). Values are ``(folder_name, install_path, source_dir)``."""
     ss = _ss()
     optional_dir = ss._get_optional_dir()
     index: Dict[str, Tuple[str, str, Path]] = {}
@@ -109,13 +107,14 @@ def _optional_skill_index() -> Dict[str, Tuple[str, str, Path]]:
 
 def _move_to_restore_backup(path: Path, backup_root: Path) -> str:
     """Move an existing skill directory into a restore backup, preserving rel path."""
-    rel = path.relative_to(_ss()._skills_dir())
+    ss = _ss()
+    rel = path.relative_to(ss._skills_dir())
     target = backup_root / rel
     suffix = 0
     while target.exists():
         suffix += 1
         target = (backup_root / rel).with_name(f"{rel.name}-{suffix}")
-    _ss()._move_dir(path, target)
+    ss._move_dir(path, target)
     return rel.as_posix()
 
 
@@ -133,23 +132,17 @@ def _find_active_copies(folder_name: str, src_frontmatter: str, dest: Path) -> L
 
 def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict:
     """Restore one or all official optional skills from repo source. ``restore=False``
-    only performs exact-match provenance backfill; ``restore=True`` repairs mutated /
-    reorganized skills by backing up matching active copies and copying the official
-    source into its canonical path."""
+    only backfills exact-match provenance; ``restore=True`` also backs up matching
+    active copies and copies the official source into its canonical path."""
     ss = _ss()
-
-    def _fail(message: str) -> dict:
-        return {"ok": False, "message": message, "restored": [], "backfilled": [], "backed_up": []}
-
     index = _optional_skill_index()
-    if not index:
-        return _fail("No official optional skills directory found.")
-    if name in {"all", "*"}:
+    if index and name in {"all", "*"}:
         targets = sorted(set(index.values()), key=lambda item: item[1])
     elif name in index:
         targets = [index[name]]
     else:
-        return _fail(f"Official optional skill not found: {name}")
+        message = f"Official optional skill not found: {name}" if index else "No official optional skills directory found."
+        return {"ok": False, "message": message, "restored": [], "backfilled": [], "backed_up": []}
 
     restored: List[str] = []
     backed_up: List[str] = []
@@ -172,8 +165,7 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     return {
         "ok": True, "message": "Official optional skill repair complete.", "restored": restored,
         "backfilled": _backfill_optional_provenance(quiet=True), "backed_up": backed_up,
-        "backup_dir": str(backup_root) if backed_up else "",
-    }
+        "backup_dir": str(backup_root) if backed_up else ""}
 
 
 def _index_installed_skill_dirs_by_name() -> Dict[str, List[Path]]:
@@ -192,10 +184,9 @@ def _index_installed_skill_dirs_by_name() -> Dict[str, List[Path]]:
 
 
 def _relocated_dest(src_name: str, index: Dict[str, List[Path]]) -> Optional[Tuple[Path, str]]:
-    """The active tree may hold a skill under a DIFFERENT category path than the
-    repo (upstream reorganizes; the installed copy keeps its old location). Fall
-    back to a UNIQUE same-directory-name match — an ambiguous name gives no basis
-    to pick one. Returns ``(dest, install_path)`` or None."""
+    """The active tree may hold a skill under a DIFFERENT category path than the repo
+    (upstream reorganized; the installed copy kept its location). Fall back to a UNIQUE
+    same-directory-name match; ambiguity gives no basis to pick. ``(dest, install_path)`` or None."""
     candidates = index.get(src_name, [])
     if len(candidates) != 1:
         return None
@@ -208,9 +199,9 @@ def _relocated_dest(src_name: str, index: Dict[str, List[Path]]) -> Optional[Tup
 
 
 def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
-    """Mark already-present official optional skills as hub-installed: skills that used
-    to be bundled (or were hand-copied) and now live under optional-skills/ get official
-    provenance when byte-identical to the source. Modified/local skills are left alone."""
+    """Mark already-present official optional skills as hub-installed: formerly bundled
+    (or hand-copied) skills now under optional-skills/ get official provenance when
+    byte-identical to the source. Modified/local skills are left alone."""
     ss = _ss()
     optional_dir = ss._get_optional_dir()
     if not optional_dir.exists():
@@ -250,8 +241,7 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
             "files": _skill_file_list(dest),
             "metadata": {"backfilled_from": "optional-skills"},
             "installed_at": timestamp,
-            "updated_at": timestamp,
-        }
+            "updated_at": timestamp}
         existing_paths.add(install_path)
         backfilled.append(lock_name)
         if not quiet:

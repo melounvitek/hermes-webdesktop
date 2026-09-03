@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""
-Skills Sync -- Manifest-based seeding and updating of bundled skills.
+"""Skills Sync -- manifest-based seeding and updating of bundled skills.
 
-Copies bundled skills from the repo's skills/ directory into ~/.hermes/skills/,
-tracking each synced skill's origin hash in ~/.hermes/skills/.bundled_manifest
-(v2: one "skill_name:origin_hash" line each; v1 plain-name lines auto-migrate).
-
-Update logic: NEW skills are copied and recorded; EXISTING skills update only
-when bundled changed AND the user copy still matches the origin hash (a differing
-user copy is user-customized -> SKIP); skills the user DELETED are not re-added;
-skills REMOVED upstream are cleaned from the manifest.
+Copies repo skills/ into ~/.hermes/skills/, tracking each synced skill's origin
+hash in .bundled_manifest (v2 "name:hash" lines; v1 plain names auto-migrate).
+NEW skills are copied and recorded; EXISTING skills update only when bundled
+changed AND the user copy still matches the origin hash (else user-customized ->
+SKIP); user-DELETED skills are not re-added; upstream-REMOVED ones leave the manifest.
 """
 
 import hashlib
@@ -18,21 +14,21 @@ import os
 import shutil
 import stat
 import sys
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 
-# Force stdout/stderr to UTF-8: on GBK-style Windows locales the default encoding
-# can't represent the glyphs printed here (✓ ↑ →) and raises mid-run; install.ps1
-# also parses this script's stdout as UTF-8 and aborts on a GBK byte stream.
+# Force UTF-8 stdout/stderr: GBK-style Windows locales can't encode the glyphs
+# printed here (✓ ↑ →), and install.ps1 parses this script's stdout as UTF-8.
 for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, TypeError):
-            pass
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, TypeError):
+        pass
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path
+from tools.skill_usage import _read_skill_name, read_suppressed_names  # noqa: F401  (re-exported)
 from utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -41,10 +37,9 @@ HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
 
-# Import-time snapshots backing the call-time accessors below. Long-lived
-# multi-profile runtimes import this module once and later retarget HERMES_HOME
-# via set_hermes_home_override(); frozen constants would then resolve (and for
-# reset_bundled_skill() DELETE) against the wrong profile. The accessors honor
+# Import-time snapshots backing the call-time accessors: long-lived multi-profile
+# runtimes retarget HERMES_HOME after import, and frozen constants would resolve
+# (and for reset_bundled_skill() DELETE) against the wrong profile. Accessors honor
 # an explicitly patched module global and otherwise re-resolve on every call.
 _HERMES_HOME_AT_IMPORT = HERMES_HOME
 _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
@@ -68,9 +63,8 @@ def _manifest_file() -> Path:
     return _live(MANIFEST_FILE, _MANIFEST_FILE_AT_IMPORT, lambda: _skills_dir() / ".bundled_manifest")
 
 
-# Written by `hermes profile create --no-skills` / the installer's `--no-skills`;
-# when present in HERMES_HOME, sync_skills() seeds only the essential skills. Mirrors
-# hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (literal: no CLI import in this module).
+# Written by `hermes profile create --no-skills` / installer `--no-skills`: sync seeds
+# only essential skills. Mirrors hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (no CLI import here).
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 
 
@@ -94,10 +88,7 @@ def _iter_active_skill_mds(sort: bool = False) -> Iterator[Path]:
 def _build_external_skill_index() -> Set[str]:
     """Names (directory and frontmatter) of every skill provided by external_dirs,
     so sync_skills never shadows an externally-delegated skill."""
-    try:
-        from agent.skill_utils import get_external_skills_dirs, _external_dirs_cache_clear
-    except ImportError:
-        return set()
+    from agent.skill_utils import get_external_skills_dirs, _external_dirs_cache_clear
 
     _external_dirs_cache_clear()  # so a config edit (or a test patch) is seen
     external_names: Set[str] = set()
@@ -110,40 +101,22 @@ def _build_external_skill_index() -> Set[str]:
 
 
 def _read_manifest() -> Dict[str, str]:
-    """Read the manifest as ``{skill_name: origin_hash}``; v1 plain-name lines get an
-    empty hash, which triggers migration on the next sync."""
+    """``{skill_name: origin_hash}``; v1 plain-name lines get an empty hash (migrates next sync)."""
     try:
         lines = _manifest_file().read_text(encoding="utf-8").splitlines() if _manifest_file().exists() else []
-    except (OSError, IOError):
+    except OSError:
         return {}
-    result = {}
-    for line in map(str.strip, lines):
-        if line:
-            name, _, hash_val = line.partition(":")
-            result[name.strip()] = hash_val.strip()
-    return result
+    pairs = (line.partition(":") for line in map(str.strip, lines) if line)
+    return {name.strip(): hash_val.strip() for name, _, hash_val in pairs}
 
 
 def _read_suppressed_names() -> set:
-    """Built-in skills the curator pruned — must NOT be re-seeded. Delegates to
-    ``tools.skill_usage`` (source of truth), falling back to reading ``.curator_suppressed``
-    directly if that import is unavailable in a packaged/update context."""
-    try:
-        from tools.skill_usage import read_suppressed_names
-
-        return read_suppressed_names()
-    except Exception:
-        path = _skills_dir() / ".curator_suppressed"
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-        except OSError:
-            return set()
-        return {line.strip() for line in lines if line.strip() and not line.strip().startswith("#")}
+    """Built-in skills the curator pruned — must NOT be re-seeded (tests patch this name)."""
+    return read_suppressed_names()
 
 
 def _write_manifest(entries: Dict[str, str]):
-    """Write the manifest atomically in v2 format, preserving an existing file's
-    permission bits/owner instead of resetting them to mkstemp's 0600."""
+    """Atomic v2 write, preserving an existing file's mode/owner (not mkstemp's 0600)."""
     _manifest_file().parent.mkdir(parents=True, exist_ok=True)
     data = "\n".join(f"{name}:{hash_val}" for name, hash_val in sorted(entries.items())) + "\n"
     try:
@@ -152,40 +125,20 @@ def _write_manifest(entries: Dict[str, str]):
         logger.debug("Failed to write skills manifest %s: %s", _manifest_file(), e, exc_info=True)
 
 
-def _read_skill_name(skill_md: Path, fallback: str) -> str:
-    """Read the name field from SKILL.md YAML frontmatter, falling back to *fallback*."""
-    try:
-        content = skill_md.read_text(encoding="utf-8", errors="replace")[:4000]
-    except OSError:
-        return fallback
-    in_frontmatter = False
-    for stripped in map(str.strip, content.split("\n")):
-        if stripped == "---":
-            if in_frontmatter:
-                break
-            in_frontmatter = True
-        elif in_frontmatter and stripped.startswith("name:"):
-            if value := stripped.split(":", 1)[1].strip().strip("\"'"):
-                return value
-    return fallback
-
-
 def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
-    """``(skill_name, skill_dir)`` for every SKILL.md under the bundled dir. Exclusions
-    are evaluated relative to the bundled tree: the install prefix itself may contain
-    ``venv``/``site-packages``, which once made every wheel install discover zero skills."""
+    """``(skill_name, skill_dir)`` per SKILL.md under the bundled dir. Exclusions are
+    evaluated relative to the bundled tree: the install prefix itself may contain
+    ``venv``/``site-packages`` (which once made wheel installs discover zero skills)."""
     if not bundled_dir.exists():
         return []
     return [
         (_read_skill_name(md, md.parent.name), md.parent)
         for md in bundled_dir.rglob("SKILL.md")
-        if not is_excluded_skill_path(md.relative_to(bundled_dir), root=bundled_dir)
-    ]
+        if not is_excluded_skill_path(md.relative_to(bundled_dir), root=bundled_dir)]
 
 
 def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
-    """Destination in the skills dir preserving category structure
-    (bundled/skills/mlops/axolotl -> ~/.hermes/skills/mlops/axolotl)."""
+    """Destination preserving category structure (bundled/mlops/axolotl -> skills/mlops/axolotl)."""
     return _skills_dir() / skill_dir.relative_to(bundled_dir)
 
 
@@ -197,7 +150,7 @@ def _dir_hash(directory: Path) -> str:
             if fpath.is_file():
                 hasher.update(str(fpath.relative_to(directory)).encode("utf-8"))
                 hasher.update(fpath.read_bytes())
-    except (OSError, IOError):
+    except OSError:
         pass
     return hasher.hexdigest()
 
@@ -226,12 +179,9 @@ def _copy_dir(src: Path, dest: Path) -> None:
 
 def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Optional[str]:
     """Move a bundled skill's stale copy to its new canonical path after an upstream
-    RENAME/RECATEGORIZATION (manifest key still matches, ``dest`` doesn't exist yet;
-    otherwise the skill is misread as user-deleted and the old dir stranded forever).
-
+    RENAME/RECATEGORIZATION (else it is misread as user-deleted and stranded forever).
     Only a copy byte-identical to the origin hash — proof *we* placed it — is moved;
-    user-edited or hub-installed copies are left. Returns the rel source path on move.
-    """
+    user-edited or hub-installed copies stay. Returns the rel source path on move."""
     origin_hash = st.manifest.get(skill_name, "")
     if not origin_hash:
         return None
@@ -249,17 +199,15 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
         if rel in st.hub_paths:  # the hub owns its install paths
             continue
         if _dir_hash(candidate) != origin_hash:
-            # Moving a customized copy would edit the user's work; leaving it
-            # avoids a duplicate-name collision. Warn so they migrate deliberately.
+            # Moving a customized copy would edit the user's work; warn so they migrate deliberately.
             st.say(
                 f"  ⚠ {skill_name}: upstream moved this skill to {_rel_skills_posix(dest)}, but your "
                 f"modified copy at {rel} was kept — it will not receive updates. "
-                f"Run `hermes skills reset {skill_name} --restore` to move to the new location."
-            )
+                f"Run `hermes skills reset {skill_name} --restore` to move to the new location.")
             continue
         try:
             _move_dir(candidate, dest)
-        except (OSError, IOError):
+        except OSError:
             logger.warning("Could not relocate renamed skill %s -> %s", candidate, dest, exc_info=True)
             return None
         logger.info("Relocated renamed bundled skill: %s -> %s", candidate, dest)
@@ -281,8 +229,7 @@ class _SyncState:
     suppressed: List[str] = field(default_factory=list)
     relocated: List[str] = field(default_factory=list)
     shadowed_by_external: List[str] = field(default_factory=list)
-    # Rename-recovery indexes are expensive on host bind mounts: built lazily,
-    # only when a tracked skill is actually missing from its canonical path.
+    # Rename-recovery indexes are expensive on bind mounts: built lazily, only when needed.
     active_index: Optional[Dict[str, List[Path]]] = None
     hub_paths: Set[str] = field(default_factory=set)
 
@@ -300,14 +247,14 @@ def _recover_orphan_backup(dest: Path) -> None:
     try:
         _move_dir(orphan, dest)
         logger.info("Recovered orphaned skill backup: %s", orphan)
-    except (OSError, IOError):
+    except OSError:
         logger.warning("Could not recover orphaned skill backup %s", orphan, exc_info=True)
 
 
 def _defer_to_external(st: _SyncState, skill_name: str, dest: Path, bundled_hash: str) -> None:
     """An external_dirs source provides this skill; a local copy would be a name collision
-    the loader refuses to resolve. Defer for ALL manifest states and self-heal a stale local
-    shadow from an earlier sync — only when byte-identical (a user's own skill differs)."""
+    the loader refuses. Defer for ALL manifest states and remove a stale local shadow from
+    an earlier sync — only when byte-identical (a user's own skill differs)."""
     st.shadowed_by_external.append(skill_name)
     st.skipped += 1
     st.say(f"  ⇢ {skill_name} (deferred to external_dirs, not written to local tree)")
@@ -322,8 +269,8 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
     try:
         if dest.exists():
             # Never overwrite a same-named user skill. Baseline the manifest only when
-            # byte-identical to bundled: recording bundled_hash for a differing copy
-            # would read as "user-modified" forever and block every bundled update.
+            # byte-identical: recording bundled_hash for a differing copy would read as
+            # "user-modified" forever and block every bundled update.
             st.skipped += 1
             if _dir_hash(dest) == bundled_hash:
                 st.manifest[skill_name] = bundled_hash
@@ -337,33 +284,32 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
             st.copied.append(skill_name)
             st.manifest[skill_name] = bundled_hash
             st.say(f"  + {skill_name}")
-    except (OSError, IOError) as e:
-        st.say(f"  ! Failed to copy {skill_name}: {e}")
-        # Not added to manifest — next sync retries.
+    except OSError as e:
+        st.say(f"  ! Failed to copy {skill_name}: {e}")  # not in manifest — next sync retries
 
 
 def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
     """Replace ``dest`` with a fresh copy of ``skill_src`` via a ``.bak`` sibling,
     restoring the original on failure."""
     backup = dest.with_suffix(".bak")
-    if backup.exists():  # a stale .bak would make shutil.move() nest dest INSIDE it; dest is authoritative
+    if backup.exists():  # a stale .bak would make shutil.move() nest dest INSIDE it
         _rmtree_writable(backup)
     shutil.move(str(dest), str(backup))
     try:
         shutil.copytree(skill_src, dest)
-    except (OSError, IOError):
+    except OSError:
         # Clear a partially-written dest so it can't shadow or block the restore.
         if backup.exists() and dest.exists():
             try:
                 _rmtree_writable(dest)
-            except (OSError, IOError):
+            except OSError:
                 logger.warning("Could not clear partial copy %s during restore", dest, exc_info=True)
         if backup.exists() and not dest.exists():
             shutil.move(str(backup), str(dest))
         raise
     try:
         _rmtree_writable(backup)
-    except (OSError, IOError):
+    except OSError:
         logger.debug("Could not remove backup %s", backup, exc_info=True)
 
 
@@ -375,8 +321,7 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
         return
     user_hash = _dir_hash(dest)
     if not origin_hash:
-        # v1 migration: baseline from the user's copy so future syncs can detect edits.
-        # Can't tell user-edit from upstream change — be safe and skip.
+        # v1 migration: baseline from the user's copy (can't tell user-edit from upstream change).
         st.manifest[skill_name] = user_hash
         st.skipped += 1
         return
@@ -387,7 +332,7 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
     # bundled changed and the user copy is pristine -> update
     try:
         _replace_skill_dir(skill_src, dest)
-    except (OSError, IOError) as e:
+    except OSError as e:
         st.say(f"  ! Failed to update {skill_name}: {e}")
         return
     st.manifest[skill_name] = bundled_hash
@@ -405,16 +350,14 @@ def _seed_category_descriptions(bundled_dir: Path, only_dirs: Optional[Set[Path]
         try:
             dest_desc.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(desc_md, dest_desc)
-        except (OSError, IOError) as e:
+        except OSError as e:
             logger.debug("Could not copy %s: %s", desc_md, e)
 
 
 def sync_skills(quiet: bool = False) -> dict:
-    """Sync bundled skills into ~/.hermes/skills/ using the manifest. Returns a dict
-    with keys copied, updated, skipped, user_modified, cleaned, suppressed, relocated,
-    total_bundled, optional_provenance_backfilled, shadowed_by_external, skipped_opt_out."""
-    # Opted-out profiles seed ONLY ESSENTIAL_SKILLS: the system prompt always points at
-    # ``hermes-agent``, so even a Blank Slate profile keeps it.
+    """Sync bundled skills into ~/.hermes/skills/ using the manifest; returns the
+    per-category result dict (see the final return). Opted-out profiles seed ONLY
+    ESSENTIAL_SKILLS: the system prompt always points at ``hermes-agent``."""
     essential_only = (_hermes_home() / NO_BUNDLED_SKILLS_MARKER).exists()
     if essential_only and not quiet:
         print("  (profile opted out of bundled skills via .no-bundled-skills — seeding essential skills only)")
@@ -455,15 +398,13 @@ def sync_skills(quiet: bool = False) -> dict:
             st.skipped += 1  # in manifest but not on disk — user deleted it
 
     # Clean manifest entries for skills removed upstream. Skipped when opted out: bundled_skills
-    # is only the essential set there, so cleaning would drop tracking for every other skill.
+    # is only the essential set there, so cleaning would drop tracking for everything else.
     cleaned = [] if essential_only else sorted(set(st.manifest) - {name for name, _ in bundled_skills})
     for name in cleaned:
         del st.manifest[name]
-
     _seed_category_descriptions(
         bundled_dir,
-        {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None,
-    )
+        {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None)
 
     _write_manifest(st.manifest)
     return {
@@ -477,14 +418,10 @@ def sync_skills(quiet: bool = False) -> dict:
 
 
 def _rmtree_writable(path: Path) -> None:
-    """Remove a directory tree, making read-only entries writable first (Nix/deb/rpm
-    sources keep r-x dirs; unlinking a child needs a writable parent, so chmod both).
-
-    Scope guard: refuses anything not a STRICT child of the active profile's skills
-    root, so a bad path join / missing HERMES_HOME / malicious manifest entry raises
-    a loud ValueError instead of wiping ``~/.hermes``. Callers always pass a skill dir
-    or its ``.bak`` sibling; the skills root itself must never be removed.
-    """
+    """rmtree that first makes read-only entries writable (Nix/deb/rpm keep r-x dirs;
+    unlinking a child needs a writable parent, so chmod both). Scope guard: refuses
+    anything not a STRICT child of the active skills root, so a bad join / missing
+    HERMES_HOME / malicious manifest entry raises instead of wiping ``~/.hermes``."""
     target = Path(path).resolve()
     skills_root = _skills_dir().resolve()
     if skills_root not in target.parents:
@@ -492,10 +429,8 @@ def _rmtree_writable(path: Path) -> None:
 
     def _on_error(func, fpath, exc_info):
         for p in (os.path.dirname(fpath), fpath):
-            try:
+            with suppress(OSError):
                 os.chmod(p, stat.S_IRWXU)
-            except OSError:
-                pass
         func(fpath)
 
     shutil.rmtree(path, onerror=_on_error)
@@ -504,25 +439,22 @@ def _rmtree_writable(path: Path) -> None:
 # Re-exported so ``from tools.skills_sync import X`` / ``patch("tools.skills_sync.X")`` keep working.
 from tools.skills_sync_bundled_ops import (  # noqa: E402,F401
     _is_tracked_user_modification, _read_for_diff, diff_bundled_skill, list_user_modified_bundled_skills,
-    remove_pristine_bundled_skills, reset_bundled_skill, set_bundled_skills_opt_out,
-)
+    remove_pristine_bundled_skills, reset_bundled_skill, set_bundled_skills_opt_out)
 from tools.skills_sync_optional import (  # noqa: E402,F401
     _backfill_optional_provenance, _content_hash, _index_installed_skill_dirs_by_name, _move_to_restore_backup,
     _optional_skill_index, _read_hub_install_paths, _safe_rel_install_path, _skill_file_list,
-    restore_official_optional_skill,
-)
+    restore_official_optional_skill)
 
 
 if __name__ == "__main__":
     print("Syncing bundled skills into ~/.hermes/skills/ ...")
     result = sync_skills(quiet=False)
     parts = [f"{len(result['copied'])} new", f"{len(result['updated'])} updated", f"{result['skipped']} unchanged"]
-    names = result["user_modified"]
-    if names:
+    if names := result["user_modified"]:
         shown = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
         parts.append(f"{len(names)} user-modified (kept): {shown}")
     if result["cleaned"]:
         parts.append(f"{len(result['cleaned'])} cleaned from manifest")
-    if result.get("optional_provenance_backfilled"):
-        parts.append(f"{len(result['optional_provenance_backfilled'])} official optional backfilled")
+    if backfilled := result.get("optional_provenance_backfilled"):
+        parts.append(f"{len(backfilled)} official optional backfilled")
     print(f"\nDone: {', '.join(parts)}. {result['total_bundled']} total bundled.")
