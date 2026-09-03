@@ -32,19 +32,21 @@ def _is_image_part(part: Any) -> bool:
     return isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
 
 
+def _provider_model_key(agent: Any) -> tuple[str, str]:
+    """``(provider.lower(), model)`` as recorded in ``_no_list_tool_content_models``.
+    Module-level so ``MagicMock(spec=AIAgent)`` agents in tests don't swallow it."""
+    return (
+        (getattr(agent, "provider", "") or "").strip().lower(),
+        (getattr(agent, "model", "") or "").strip(),
+    )
+
+
 class VisionMessagePrepMixin:
     """Vision probes + image-part fallbacks for outgoing messages (see module docstring)."""
 
     @staticmethod
     def _content_has_image_parts(content: Any) -> bool:
         return isinstance(content, list) and any(_is_image_part(part) for part in content)
-
-    def _provider_model_key(self) -> tuple[str, str]:
-        """``(provider.lower(), model)`` as recorded in ``_no_list_tool_content_models``."""
-        return (
-            (getattr(self, "provider", "") or "").strip().lower(),
-            (getattr(self, "model", "") or "").strip(),
-        )
 
     # 20 MB base64 ≈ 15 MB decoded — prevents OOM from an oversized data: URL in a shared gateway process.
     _MAX_DATA_URL_BASE64_BYTES = 20 * 1024 * 1024
@@ -53,16 +55,10 @@ class VisionMessagePrepMixin:
     def _materialize_data_url_for_vision(image_url: str) -> tuple[str, Optional[Path]]:
         header, _, data = str(image_url or "").partition(",")
         if len(data) > VisionMessagePrepMixin._MAX_DATA_URL_BASE64_BYTES:
-            logger.warning(
-                "data-URL payload too large (%d bytes), skipping", len(data)
-            )
+            logger.warning("data-URL payload too large (%d bytes), skipping", len(data))
             return "", None
-        mime = "image/jpeg"
-        if header.startswith("data:"):
-            mime_part = header[len("data:"):].split(";", 1)[0].strip()
-            if mime_part.startswith("image/"):
-                mime = mime_part
-        suffix = _DATA_URL_SUFFIXES.get(mime, ".jpg")
+        mime = header[len("data:"):].split(";", 1)[0].strip() if header.startswith("data:") else ""
+        suffix = _DATA_URL_SUFFIXES.get(mime if mime.startswith("image/") else "image/jpeg", ".jpg")
         tmp = tempfile.NamedTemporaryFile(prefix="anthropic_image_", suffix=suffix, delete=False)
         try:
             with tmp:
@@ -75,8 +71,7 @@ class VisionMessagePrepMixin:
             except OSError:
                 pass
             raise
-        path = Path(tmp.name)
-        return str(path), path
+        return tmp.name, Path(tmp.name)
 
     def _describe_image_for_anthropic_fallback(self, image_url: str, role: str) -> str:
         cache_key = hashlib.sha256(str(image_url or "").encode("utf-8")).hexdigest()
@@ -92,17 +87,15 @@ class VisionMessagePrepMixin:
         )
 
         vision_source = str(image_url or "")
+        is_data_url = vision_source.startswith("data:")
         cleanup_path: Optional[Path] = None
-        if vision_source.startswith("data:"):
+        if is_data_url:
             vision_source, cleanup_path = self._materialize_data_url_for_vision(vision_source)
 
-        description = ""
         try:
             from tools.vision_tools import vision_analyze_tool
 
-            result_json = asyncio.run(
-                vision_analyze_tool(image_url=vision_source, user_prompt=analysis_prompt)
-            )
+            result_json = asyncio.run(vision_analyze_tool(image_url=vision_source, user_prompt=analysis_prompt))
             result = json.loads(result_json) if isinstance(result_json, str) else {}
             description = (result.get("analysis") or "").strip()
         except Exception as e:
@@ -115,7 +108,7 @@ class VisionMessagePrepMixin:
                     pass
 
         note = f"[The {role_label} attached an image. Here's what it contains:\n{description or 'Image analysis failed.'}]"
-        if vision_source and not str(image_url or "").startswith("data:"):
+        if vision_source and not is_data_url:
             note += f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
 
         self._anthropic_image_fallback_cache[cache_key] = note
@@ -131,10 +124,9 @@ class VisionMessagePrepMixin:
         try:
             from hermes_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
-            cfg = load_config()
             provider = (getattr(self, "provider", "") or "").strip()
             model = (getattr(self, "model", "") or "").strip()
-            return _lookup_supports_vision(provider, model, cfg) is True
+            return _lookup_supports_vision(provider, model, load_config()) is True
         except Exception:
             return False
 
@@ -146,8 +138,7 @@ class VisionMessagePrepMixin:
         """
         try:
             from providers import get_provider_profile
-            provider = (getattr(self, "provider", "") or "").strip()
-            profile = get_provider_profile(provider)
+            profile = get_provider_profile((getattr(self, "provider", "") or "").strip())
             if profile is not None:
                 return getattr(profile, "supports_vision_tool_messages", True)
         except Exception:
@@ -192,14 +183,11 @@ class VisionMessagePrepMixin:
         mode = api_mode or self.api_mode
         cache = getattr(self, "_transport_cache", None)
         if cache is None:
-            cache = {}
-            self._transport_cache = cache
-        t = cache.get(mode)
-        if t is None:
+            cache = self._transport_cache = {}
+        if cache.get(mode) is None:
             from agent.transports import get_transport
-            t = get_transport(mode)
-            cache[mode] = t
-        return t
+            cache[mode] = get_transport(mode)
+        return cache[mode]
 
     def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
         """Replace native image parts with cached vision_analyze text when the active model lacks vision.
@@ -208,21 +196,16 @@ class VisionMessagePrepMixin:
         handles image parts natively). The text fallback is the historically Anthropic-named preprocessor.
         """
         if not any(
-            isinstance(msg, dict) and self._content_has_image_parts(msg.get("content"))
-            for msg in api_messages
-        ):
-            return api_messages
-
-        if self._model_supports_vision():
+            isinstance(msg, dict) and self._content_has_image_parts(msg.get("content")) for msg in api_messages
+        ) or self._model_supports_vision():
             return api_messages
 
         transformed = copy.deepcopy(api_messages)
         for msg in transformed:
-            if not isinstance(msg, dict):
-                continue
-            msg["content"] = self._preprocess_anthropic_content(
-                msg.get("content"), str(msg.get("role", "user") or "user")
-            )
+            if isinstance(msg, dict):
+                msg["content"] = self._preprocess_anthropic_content(
+                    msg.get("content"), str(msg.get("role", "user") or "user")
+                )
         return transformed
 
     # Same transform for the Anthropic route (callers/tests patch this name independently).
@@ -251,7 +234,7 @@ class VisionMessagePrepMixin:
                     tool_name, getattr(self, "provider", ""),
                 )
                 return _multimodal_text_summary(result)
-            key = self._provider_model_key()
+            key = _provider_model_key(self)
             no_list = getattr(self, "_no_list_tool_content_models", None)
             if no_list and key in no_list:
                 logger.debug(
@@ -297,7 +280,7 @@ class VisionMessagePrepMixin:
 
         if remember_model:
             # Record (provider, model) so we don't relearn this lesson.
-            key = self._provider_model_key()
+            key = _provider_model_key(self)
             if not hasattr(self, "_no_list_tool_content_models"):
                 self._no_list_tool_content_models = set()
             if key[1]:  # only record when we actually have a model id
