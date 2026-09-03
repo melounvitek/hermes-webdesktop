@@ -1093,13 +1093,7 @@ def _declared_capabilities_for_key(key: str) -> list:
     return _declared_capabilities_from_manifest(_read_manifest(Path(entry[4])), entry[0])
 
 
-def _run_capability_consent(
-    console,
-    plugin_id: str,
-    declared: list,
-    *,
-    context: str = "install",
-) -> bool:
+def _run_capability_consent(console, plugin_id: str, declared: list, *, context: str = "install") -> bool:
     """Show the capability consent screen and record the decision; True when granted.
 
     On consent the pending capabilities are granted under
@@ -1190,9 +1184,7 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
             console.print(f"  {cap}: [green]granted[/green] [dim](not declared in manifest)[/dim]")
 
 
-def _resolve_tool_override_grant(
-    console, key: str, allow_tool_override: Optional[bool]
-) -> None:
+def _resolve_tool_override_grant(console, key: str, allow_tool_override: Optional[bool]) -> None:
     """Resolve and persist the ``allow_tool_override`` grant for a plugin."""
     if allow_tool_override is None:
         # Default NO: a blind Enter or a non-interactive stdin denies safely.
@@ -1580,8 +1572,7 @@ def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]
     return changed, new_enabled
 
 
-def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
-                      disabled, categories, console):
+def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
     from hermes_cli.curses_ui import flush_stdin
     chosen = set(plugin_selected)
@@ -1713,8 +1704,7 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
     console.print()
 
 
-def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected,
-                            disabled, categories, console):
+def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected, disabled, categories, console):
     """Text-based fallback for the composite plugins UI."""
     from hermes_cli.colors import Colors, color
     print(color("\n  Plugins", Colors.YELLOW))
@@ -1923,9 +1913,7 @@ def _clear_plugin_bytecode(target: Path) -> int:
     return removed
 
 
-def _run_plugin_git(
-    git_exe: str, target: Path, *args: str, timeout: int = 60
-) -> subprocess.CompletedProcess:
+def _run_plugin_git(git_exe: str, target: Path, *args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     """Run one git command inside a plugin checkout (non-interactive)."""
     return subprocess.run(
         [git_exe, *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
