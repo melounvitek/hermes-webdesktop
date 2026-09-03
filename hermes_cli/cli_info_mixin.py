@@ -27,14 +27,12 @@ _TOOL_PROGRESS_CYCLE = ["off", "new", "all", "verbose"]
 _RELOAD_MCP_CHOICES = [
     ("once", "Approve Once", "reload now"),
     ("always", "Always Approve", "reload now and silence this prompt permanently"),
-    ("cancel", "Cancel", "leave MCP tools unchanged"),
-]
+    ("cancel", "Cancel", "leave MCP tools unchanged")]
 _RELOAD_MCP_DETAIL = (
     "Reloading MCP servers rebuilds the tool set for this session and\n"
     "invalidates the provider prompt cache. The next message will\n"
     "re-send full input tokens (can be expensive on long-context or\n"
-    "high-reasoning models)."
-)
+    "high-reasoning models).")
 
 
 def _ascii_box(title: str, width: int) -> None:
@@ -82,8 +80,7 @@ class CLIInfoMixin:
             # cold get_tool_definitions walk. The agent's REAL tool list is still computed fresh at
             # first message; a background refresh re-verifies the snapshot so drift self-heals.
             from hermes_cli.banner import (
-                compute_toolset_availability, load_banner_snapshot, save_banner_snapshot,
-            )
+                compute_toolset_availability, load_banner_snapshot, save_banner_snapshot)
             try:
                 snapshot = load_banner_snapshot(self.enabled_toolsets)
             except Exception:
@@ -92,8 +89,7 @@ class CLIInfoMixin:
             banner_kw = dict(
                 console=self.console, model=self.model, cwd=cwd,
                 enabled_toolsets=self.enabled_toolsets, session_id=self.session_id,
-                context_length=ctx_len, provider=self.provider,
-            )
+                context_length=ctx_len, provider=self.provider)
 
             if snapshot is not None:
                 self._defer_tool_warnings = True
@@ -103,15 +99,13 @@ class CLIInfoMixin:
                     get_toolset_for_tool=lambda name: toolset_map.get(name),
                     availability=snapshot["availability"],
                     skills_by_category=snapshot.get("skills_by_category"),
-                    **banner_kw,
-                )
+                    **banner_kw)
 
                 def _refresh_banner_snapshot() -> None:
                     try:
                         from model_tools import get_toolset_for_tool
                         tools = get_tool_definitions(
-                            enabled_toolsets=self.enabled_toolsets, quiet_mode=True
-                        )
+                            enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
                         availability = compute_toolset_availability(self.enabled_toolsets)
                         tmap = _toolset_map(tools, availability, get_toolset_for_tool)
                         save_banner_snapshot(tools, self.enabled_toolsets, availability, tmap)
@@ -141,8 +135,7 @@ class CLIInfoMixin:
                 threading.Thread(
                     target=self._show_tool_availability_warnings,
                     name="tool-availability-warnings",
-                    daemon=True,
-                ).start()
+                    daemon=True).start()
             else:
                 self._show_tool_availability_warnings()
 
@@ -152,8 +145,7 @@ class CLIInfoMixin:
             self._console_print()
             self._console_print(
                 f"[yellow]⚠️  Context length is only {ctx_len:,} tokens — "
-                f"this is likely too low for agent use with tools.[/]"
-            )
+                f"this is likely too low for agent use with tools.[/]")
             self._console_print(
                 f"[dim]   Hermes needs at least {MINIMUM_CONTEXT_LENGTH:,} tokens. Tool schemas + system prompt use a large fixed prefix.[/]"
             )
@@ -181,20 +173,17 @@ class CLIInfoMixin:
             self._console_print()
             self._console_print(
                 "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
-                "designed for use with Hermes Agent.[/]"
-            )
+                "designed for use with Hermes Agent.[/]")
             self._console_print(
                 "[dim]   They lack tool-calling capabilities required for agent workflows. "
-                "Consider using an agentic model (Claude, GPT, Gemini, DeepSeek, etc.).[/]"
-            )
+                "Consider using an agentic model (Claude, GPT, Gemini, DeepSeek, etc.).[/]")
             self._console_print("[dim]   Switch with: /model sonnet  or  /model gpt5[/]")
 
         # Project-local skills one-liner: trusted → count; untrusted-with-skills → point at
         # `hermes skills trust`. Never raises.
         try:
             from agent.skill_utils import (
-                get_project_skills_dirs, get_untrusted_project_skills_root, iter_skill_index_files,
-            )
+                get_project_skills_dirs, get_untrusted_project_skills_root, iter_skill_index_files)
             _proj_dirs = get_project_skills_dirs()
             if _proj_dirs:
                 _n = sum(sum(1 for _ in iter_skill_index_files(d, "SKILL.md")) for d in _proj_dirs)
@@ -206,8 +195,7 @@ class CLIInfoMixin:
                     _root, _n = _untrusted
                     self._console_print(
                         f"[yellow]◆ {_n} project skill(s) found in {_root} but not "
-                        f"loaded — run `hermes skills trust` to enable them.[/]"
-                    )
+                        f"loaded — run `hermes skills trust` to enable them.[/]")
         except Exception:
             logger.debug("project skills banner notice failed", exc_info=True)
 
@@ -231,8 +219,7 @@ class CLIInfoMixin:
         to one line; /help skills lists all skill commands; /help <query> filters by substring."""
         from cli import (
             ChatConsole, _BOLD, _DIM, _RST, _accent_hex, _cprint, _ensure_skill_commands,
-            _termux_example_image_path, get_skill_bundles,
-        )
+            _termux_example_image_path, get_skill_bundles)
         from hermes_cli.commands import COMMANDS_BY_CATEGORY, HELP_SESSION_SUBGROUPS
 
         arg = (arg or "").strip()
@@ -240,8 +227,7 @@ class CLIInfoMixin:
 
         def _row(cmd: str, desc: str, width: int = 15) -> None:
             ChatConsole().print(
-                f"    [bold {_accent_hex()}]{cmd:<{width}}[/] [dim]-[/] {_escape(desc)}"
-            )
+                f"    [bold {_accent_hex()}]{cmd:<{width}}[/] [dim]-[/] {_escape(desc)}")
 
         # /help skills — the full list, kept out of the default view so core commands don't
         # scroll off screen.
@@ -300,8 +286,7 @@ class CLIInfoMixin:
         if query:
             matched_skills = [
                 (cmd, info) for cmd, info in sorted(skill_commands.items())
-                if query in cmd.lower() or query in (info.get("description", "").lower())
-            ]
+                if query in cmd.lower() or query in (info.get("description", "").lower())]
             if matched_skills:
                 _cprint(f"\n  ⚡ {_BOLD}Skill Commands{_RST} (matching '{arg}'):")
                 for cmd, info in matched_skills:
@@ -309,8 +294,7 @@ class CLIInfoMixin:
         elif skill_commands:
             _cprint(
                 f"\n  ⚡ {_BOLD}Skill Commands{_RST}: {len(skill_commands)} installed "
-                f"— {_DIM}/help skills{_RST} to list them"
-            )
+                f"— {_DIM}/help skills{_RST} to list them")
 
         _bundles_now = get_skill_bundles()
         if _bundles_now and not query:
@@ -320,8 +304,7 @@ class CLIInfoMixin:
                 desc = info.get("description") or f"Load {skill_count} skills"
                 ChatConsole().print(
                     f"    [bold {_accent_hex()}]{cmd:<22}[/] [dim]-[/] "
-                    f"{_escape(desc)} [dim]({skill_count} skills)[/]"
-                )
+                    f"{_escape(desc)} [dim]({skill_count} skills)[/]")
 
         quick_commands = self.config.get("quick_commands", {})
         if quick_commands and not query:
@@ -437,8 +420,7 @@ class CLIInfoMixin:
         return self._busy_inline_command(text, has_images, ("steer",))
 
     def _should_handle_background_command_inline(
-        self, text: str, has_images: bool = False
-    ) -> bool:
+        self, text: str, has_images: bool = False) -> bool:
         """Return True when /bg or /btw should be dispatched while the agent runs (their
         ``CommandDef`` entries declare ``busy_policy="dispatch"``; the classic CLI honours it here)."""
         return self._busy_inline_command(text, has_images, ("bg", "btw"))
@@ -455,8 +437,7 @@ class CLIInfoMixin:
         from cli import _rich_text_from_ansi
         from hermes_cli.bang_shell import (
             USAGE_HINT, bang_shell_enabled, check_bang_approval, is_bang_command,
-            parse_bang_command, resolve_bang_cwd, run_bang_command,
-        )
+            parse_bang_command, resolve_bang_cwd, run_bang_command)
 
         if not is_bang_command(text):
             return False
@@ -473,16 +454,14 @@ class CLIInfoMixin:
         approval = check_bang_approval(command)
         if not approval.get("approved"):
             message = approval.get("message") or (
-                f"Command denied: {approval.get('description', 'flagged as dangerous')}"
-            )
+                f"Command denied: {approval.get('description', 'flagged as dangerous')}")
             self._console_print(f"[bold red]{_escape(str(message))}[/]")
             return True
 
         exit_code = run_bang_command(
             command,
             cwd=resolve_bang_cwd(getattr(self, "session_id", None)),
-            writer=lambda line: self._console_print(_rich_text_from_ansi(line)),
-        )
+            writer=lambda line: self._console_print(_rich_text_from_ansi(line)))
         if exit_code:
             self._console_print(f"[dim]! exited {exit_code}[/]")
         return True
@@ -506,8 +485,7 @@ class CLIInfoMixin:
                 Platform.TELEGRAM: ("Telegram", "TELEGRAM_BOT_TOKEN"),
                 Platform.DISCORD: ("Discord", "DISCORD_BOT_TOKEN"),
                 Platform.SLACK: ("Slack", "SLACK_BOT_TOKEN"),
-                Platform.WHATSAPP: ("WhatsApp", "WHATSAPP_ENABLED"),
-            }
+                Platform.WHATSAPP: ("WhatsApp", "WHATSAPP_ENABLED")}
             for platform, (name, env_var) in platform_status.items():
                 pconfig = config.platforms.get(platform)
                 if pconfig and pconfig.enabled:
@@ -627,10 +605,8 @@ class CLIInfoMixin:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
             try:
                 result = _pool.submit(
-                    redeem_codex_reset_credit,
-                    base_url=self._agent_or_self("base_url"),
-                    api_key=self._agent_or_self("api_key"),
-                    force=force,
+                    redeem_codex_reset_credit, base_url=self._agent_or_self("base_url"),
+                    api_key=self._agent_or_self("api_key"), force=force,
                 ).result(timeout=45.0)
             except concurrent.futures.TimeoutError:
                 print("  ❌ Timed out talking to the Codex backend — try again shortly.")
@@ -650,8 +626,7 @@ class CLIInfoMixin:
 
         from agent.context_breakdown import (
             compute_context_details, compute_session_context_breakdown,
-            render_context_breakdown_lines,
-        )
+            render_context_breakdown_lines)
         try:
             payload = compute_session_context_breakdown(self.agent, self.conversation_history)
         except Exception as e:
@@ -737,8 +712,7 @@ class CLIInfoMixin:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
                 try:
                     account_snapshot = _pool.submit(
-                        fetch_account_usage, provider,
-                        base_url=self._agent_or_self("base_url"),
+                        fetch_account_usage, provider, base_url=self._agent_or_self("base_url"),
                         api_key=self._agent_or_self("api_key"),
                     ).result(timeout=10.0)
                 except (concurrent.futures.TimeoutError, Exception):
@@ -867,8 +841,7 @@ class CLIInfoMixin:
             choices=_RELOAD_MCP_CHOICES,
             unchanged="MCP tools unchanged.",
             always_msg="🔒 Future /reload-mcp calls will run without confirmation.",
-            once_verb="reloading",
-        )
+            once_verb="reloading")
         if choice is None:
             return
         with self._busy_command(self._slow_command_status(cmd_original)):

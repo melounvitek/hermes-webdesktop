@@ -22,20 +22,17 @@ _TIMED_OUT = object()  # sentinel returned by _poll_modal_queue when the deadlin
 _CONFIRM_ALIASES = {
     "1": "once", "once": "once", "approve": "once", "yes": "once", "y": "once", "ok": "once",
     "2": "always", "always": "always", "remember": "always",
-    "3": "cancel", "cancel": "cancel", "nevermind": "cancel", "no": "cancel", "n": "cancel",
-}
+    "3": "cancel", "cancel": "cancel", "nevermind": "cancel", "no": "cancel", "n": "cancel"}
 
 _APPROVAL_OUTCOME_LABELS = {
     "once": "allowed once",
     "session": "allowed for session",
     "always": "added to allowlist",
-    "deny": "denied",
-}
+    "deny": "denied"}
 
 _CLARIFY_TIMEOUT_REPLY = (
     "The user did not provide a response within the time limit. "
-    "Use your best judgement to make the choice and proceed."
-)
+    "Use your best judgement to make the choice and proceed.")
 
 
 def _approval_gate_on(key: str) -> bool:
@@ -284,12 +281,7 @@ class CLIModalMixin:
                     paint()
 
     def _prompt_text_input_modal(
-        self,
-        *,
-        title: str,
-        detail: str,
-        choices: list[tuple[str, str, str]],
-        timeout: float = 120,
+        self, *, title: str, detail: str, choices: list[tuple[str, str, str]], timeout: float = 120
     ) -> str | None:
         """Slash-command confirmation through the prompt_toolkit composer instead of raw input().
 
@@ -329,8 +321,7 @@ class CLIModalMixin:
                 "detail": detail,
                 "choices": choices,
                 "selected": 0,
-                "response_queue": response_queue,
-            }
+                "response_queue": response_queue}
             self._slash_confirm_deadline = _time.monotonic() + timeout
             self._invalidate()
 
@@ -362,8 +353,7 @@ class CLIModalMixin:
             return _stdin_fallback()
         try:
             result = self._poll_modal_queue(
-                response_queue, "_slash_confirm_deadline", refresh=5.0, paint=self._invalidate,
-            )
+                response_queue, "_slash_confirm_deadline", refresh=5.0, paint=self._invalidate)
             if result is not _TIMED_OUT:
                 _run_on_app_loop(_teardown_modal)
                 return result
@@ -382,10 +372,7 @@ class CLIModalMixin:
         self._invalidate()
 
     def _normalize_slash_confirm_choice(
-        self,
-        raw: str | None,
-        choices: list[tuple[str, str, str]],
-    ) -> str | None:
+        self, raw: str | None, choices: list[tuple[str, str, str]]) -> str | None:
         if raw is None:
             return None
         choice_raw = raw.strip().lower()
@@ -430,8 +417,7 @@ class CLIModalMixin:
             "entries": self._build_command_palette_entries(),
             "filter": "",
             "selected": 0,
-            "_scroll_offset": 0,
-        }
+            "_scroll_offset": 0}
         self._invalidate(min_interval=0.0)
 
     def _close_command_palette(self) -> None:
@@ -516,11 +502,7 @@ class CLIModalMixin:
         return " ".join(kept), len(kept) != len(tokens)
 
     def _confirm_destructive_slash(
-        self,
-        command: str,
-        detail: str,
-        cmd_original: Optional[str] = None,
-    ) -> Optional[str]:
+        self, command: str, detail: str, cmd_original: Optional[str] = None) -> Optional[str]:
         """Confirm a destructive session slash command (``/clear``, ``/new``/``/reset``, ``/undo``).
 
         Returns ``"once"``, ``"always"`` (also persists ``approvals.destructive_slash_confirm:
@@ -538,12 +520,10 @@ class CLIModalMixin:
             choices=[
                 ("once", "Approve Once", "proceed this time only"),
                 ("always", "Always Approve", "proceed and silence this prompt permanently"),
-                ("cancel", "Cancel", "keep current conversation"),
-            ],
+                ("cancel", "Cancel", "keep current conversation")],
             unchanged="Conversation unchanged.",
             always_msg="🔒 Future /clear, /new, /reset, and /undo will run without confirmation.",
-            once_verb="proceeding",
-        )
+            once_verb="proceeding")
 
     def _ring_bell(self, prompt: bool = False, context: str = "", detail: str = "") -> None:
         """Write a terminal bell (\\a) if the matching display.bell_* flag is on.
@@ -567,8 +547,7 @@ class CLIModalMixin:
                 context or ("input needed" if prompt else "turn complete"),
                 prompt=prompt,
                 session_id=getattr(self, "session_id", "") or "",
-                detail=detail,
-            )
+                detail=detail)
         except Exception:
             pass
 
@@ -602,8 +581,7 @@ class CLIModalMixin:
             "selected": 0,
             "multi_select": effective_multi,
             "selected_indices": set() if effective_multi else None,
-            "response_queue": response_queue,
-        }
+            "response_queue": response_queue}
         self._clarify_deadline = None if timeout <= 0 else _time.monotonic() + timeout
         self._clarify_freetext = is_open_ended  # open-ended → straight to freetext
         self._clarify_multi_base = None
@@ -704,8 +682,7 @@ class CLIModalMixin:
             self._clarify_batch_lock(
                 state,
                 json.dumps(selected_choices, ensure_ascii=False),
-                meta={"kind": "multi", "choices": selected_choices, "other_text": ""},
-            )
+                meta={"kind": "multi", "choices": selected_choices, "other_text": ""})
             return
         if selected < len(choices):
             self._clarify_batch_lock(state, choices[selected], meta={"kind": "choice"})
@@ -734,8 +711,7 @@ class CLIModalMixin:
             "choices": [],
             "selected": 0,
             "multi_select": False,
-            "selected_indices": None,
-        }
+            "selected_indices": None}
         self._clarify_state = state
         self._clarify_batch_set_active(state, 0)
         self._clarify_deadline = None if timeout <= 0 else _time.monotonic() + timeout
@@ -799,11 +775,9 @@ class CLIModalMixin:
                     command,
                     allow_permanent=allow_permanent,
                     allow_session=allow_session,
-                    smart_denied=smart_denied,
-                ),
+                    smart_denied=smart_denied),
                 "selected": 0,
-                "response_queue": response_queue,
-            }
+                "response_queue": response_queue}
             self._approval_deadline = _time.monotonic() + timeout
             self._ring_bell(prompt=True, context="approval", detail=command)
             self._paint_now()
@@ -817,8 +791,7 @@ class CLIModalMixin:
                 self._persist_prompt_summary("⚠", "Approval", command, "timed out (no response)")
                 return "timeout"
             self._persist_prompt_summary(
-                "⚠", "Approval", command, _APPROVAL_OUTCOME_LABELS.get(result, str(result)),
-            )
+                "⚠", "Approval", command, _APPROVAL_OUTCOME_LABELS.get(result, str(result)))
             return result
 
     def _approval_choices(self, command: str, *, allow_permanent: bool = True,
@@ -841,8 +814,7 @@ class CLIModalMixin:
         (approve_once/approve_session/always_approve/deny)."""
         verdict = self._approval_callback(
             command=f"computer_use: {summary}",
-            description=f"Allow computer_use to perform `{action}`?",
-        )
+            description=f"Allow computer_use to perform `{action}`?")
         return {
             "once": "approve_once",
             "session": "approve_session",
@@ -919,8 +891,7 @@ class CLIModalMixin:
         if self._clarify_state:
             try:
                 self._clarify_state["response_queue"].put(
-                    "The user cancelled. Use your best judgement to proceed."
-                )
+                    "The user cancelled. Use your best judgement to proceed.")
             except Exception:
                 pass
             self._clarify_state = None
