@@ -7,33 +7,27 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional
 
-from hermes_state_common import (
-    _PREVIEW_ELIGIBLE_SQL,
-    _PREVIEW_RAW_SELECT,
-    _shape_preview,
-    _sql_session_last_active,
-)
+from hermes_state_common import _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _sql_session_last_active
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
 
 
 def _normalize_telegram_topic_profile_name(profile_name: Optional[str] = None) -> str:
-    """Empty/missing → ``"default"`` (single namespace for non-multiplexed
-    gateways).  Multiplexed callers must pass the *routed* profile
-    (``source.profile``), never the process-global active profile."""
+    """Empty/missing → ``"default"`` (single namespace for non-multiplexed gateways).
+    Multiplexed callers must pass the *routed* profile (``source.profile``), never the
+    process-global active profile."""
     name = str(profile_name or "").strip()
     return name if name else "default"
 
 
-# (table, column list, DDL body).  profile_name leads the PK: a private
-# chat_id is the user id, identical across bots sharing one state.db.
+# (table, column list, DDL body). profile_name leads the PK: a private chat_id is the
+# user id, identical across bots sharing one state.db.
 _TOPIC_TABLES = (
     (
         "telegram_dm_topic_mode",
         "profile_name, chat_id, user_id, enabled, activated_at, updated_at, "
-        "has_topics_enabled, allows_users_to_create_topics, "
-        "capability_checked_at, intro_message_id, pinned_message_id",
+        "has_topics_enabled, allows_users_to_create_topics, capability_checked_at, intro_message_id, pinned_message_id",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -51,8 +45,7 @@ _TOPIC_TABLES = (
     ),
     (
         "telegram_dm_topic_bindings",
-        "profile_name, chat_id, thread_id, user_id, session_key, "
-        "session_id, managed_mode, linked_at, updated_at",
+        "profile_name, chat_id, thread_id, user_id, session_key, session_id, managed_mode, linked_at, updated_at",
         """
                     profile_name TEXT NOT NULL DEFAULT 'default',
                     chat_id TEXT NOT NULL,
@@ -68,8 +61,8 @@ _TOPIC_TABLES = (
     ),
 )
 
-# Shared SELECT for the unlinked-session listing; the profile/bindings clauses
-# are spliced in only when the bindings table exists.
+# Shared SELECT for the unlinked-session listing; the profile/bindings clauses are
+# spliced in only when the bindings table exists.
 _UNLINKED_SELECT_HEAD = f"""
                     SELECT s.*,
                         COALESCE(sp.prompt, s.system_prompt)
@@ -102,45 +95,39 @@ _UNLINKED_SCOPE_CLAUSES = """                      AND COALESCE(NULLIF(TRIM(s.pr
 
 
 class SessionTelegramTopicsMixin:
-    """Telegram DM topic-mode tables, bindings and lookups.
-
-    Read paths are read-only and tolerate absent tables (nobody ran ``/topic``)
-    by returning their empty value; only ``enable``/``bind`` run the migration.
-    """
+    """Telegram DM topic-mode tables, bindings and lookups. Read paths tolerate absent
+    tables (nobody ran ``/topic``) by returning their empty value; only
+    ``enable``/``bind`` run the migration."""
 
     def _topic_read_one(self, sql: str, params, default=None):
         """``fetchone`` that treats an unmigrated table as *default*."""
-        try:
-            return self._read_one(sql, params)
-        except sqlite3.OperationalError:
-            return default
+        return self._topic_read(self._read_one, sql, params, default)
 
     def _topic_read_all(self, sql: str, params) -> list:
         """``fetchall`` that treats an unmigrated table as no rows."""
+        return self._topic_read(self._read_all, sql, params, [])
+
+    @staticmethod
+    def _topic_read(reader, sql: str, params, default):
         try:
-            return self._read_all(sql, params)
+            return reader(sql, params)
         except sqlite3.OperationalError:
-            return []
+            return default
 
     def apply_telegram_topic_migration(self) -> None:
-        """Create Telegram DM topic-mode tables on explicit /topic opt-in.
-
-        Deliberately NOT part of startup reconciliation: operators can upgrade
-        and keep the old bot behavior until a user runs /topic.
-
-        Schema versions: v1 initial; v2 session_id FK ON DELETE CASCADE (pruning
-        clears bindings); v3 ``profile_name`` on both tables so multiplexed
-        gateways sharing one state.db isolate topic state per profile.
-        """
+        """Create Telegram DM topic-mode tables on explicit /topic opt-in. Deliberately NOT
+        part of startup reconciliation: operators can upgrade and keep the old bot
+        behavior until a user runs /topic. Schema versions: v1 initial; v2 session_id FK
+        ON DELETE CASCADE (pruning clears bindings); v3 ``profile_name`` on both tables so
+        multiplexed gateways sharing one state.db isolate topic state per profile."""
         def _do(conn):
             for table, columns, ddl in _TOPIC_TABLES:
                 conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({ddl})")
                 have = {row[1] for row in conn.execute(f"PRAGMA table_info('{table}')")}
                 if "profile_name" in have:
                     continue
-                # v1/v2 → v3.  SQLite can't ALTER a PK or FK, so rebuild (this
-                # also supplies v2's ON DELETE CASCADE).  Legacy rows land in
-                # "default" only, never replicated across profiles.
+                # v1/v2 → v3. SQLite can't ALTER a PK or FK, so rebuild (also supplies v2's
+                # ON DELETE CASCADE). Legacy rows land in "default" only.
                 legacy_columns = columns.replace("profile_name, ", "", 1)
                 conn.executescript(
                     f"""
@@ -169,16 +156,11 @@ class SessionTelegramTopicsMixin:
         self._execute_write(_do)
 
     def enable_telegram_topic_mode(
-        self, *, chat_id: str, user_id: str, profile_name: str = "default",
-        has_topics_enabled: Optional[bool] = None,
-        allows_users_to_create_topics: Optional[bool] = None,
+        self, *, chat_id: str, user_id: str, profile_name: str="default", has_topics_enabled: Optional[bool]=None,
+        allows_users_to_create_topics: Optional[bool]=None,
     ) -> None:
-        """Enable Telegram DM topic mode for one private chat/user.
-
-        Owns the explicit topic migration; SessionDB startup must not create
-        these tables.  Multiplexed callers pass the routed ``source.profile``,
-        not the process-global active profile.
-        """
+        """Enable Telegram DM topic mode for one private chat/user. Owns the explicit topic
+        migration; SessionDB startup must not create these tables."""
         self.apply_telegram_topic_migration()
         now = time.time()
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
@@ -208,11 +190,9 @@ class SessionTelegramTopicsMixin:
     def disable_telegram_topic_mode(
         self, *, chat_id: str, profile_name: str = "default", clear_bindings: bool = True
     ) -> None:
-        """Disable Telegram DM topic mode for one private chat.
-
-        ``clear_bindings`` also drops the chat's bindings so a later re-enable
-        starts clean.  Never creates the tables; absent tables are a no-op.
-        """
+        """Disable Telegram DM topic mode for one private chat. ``clear_bindings`` also drops
+        the chat's bindings so a later re-enable starts clean. Never creates the tables;
+        absent tables are a no-op."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
 
         def _do(conn):
@@ -224,17 +204,14 @@ class SessionTelegramTopicsMixin:
                 )
                 if clear_bindings:
                     conn.execute(
-                        "DELETE FROM telegram_dm_topic_bindings "
-                        "WHERE profile_name = ? AND chat_id = ?",
+                        "DELETE FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ?",
                         (profile_name, str(chat_id)),
                     )
             except sqlite3.OperationalError:
                 return
         self._execute_write(_do)
 
-    def is_telegram_topic_mode_enabled(
-        self, *, chat_id: str, user_id: str, profile_name: str = "default"
-    ) -> bool:
+    def is_telegram_topic_mode_enabled(self, *, chat_id: str, user_id: str, profile_name: str = "default") -> bool:
         """Return whether Telegram DM topic mode is enabled for this chat/user."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         row = self._topic_read_one(
@@ -266,9 +243,7 @@ class SessionTelegramTopicsMixin:
         """All bindings for one chat, newest first ([] when the table is absent)."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         rows = self._topic_read_all(
-            "SELECT * FROM telegram_dm_topic_bindings "
-            "WHERE profile_name = ? AND chat_id = ? "
-            "ORDER BY updated_at DESC",
+            "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? ORDER BY updated_at DESC",
             (profile_name, str(chat_id)),
         )
         return [dict(row) for row in rows]
@@ -284,43 +259,34 @@ class SessionTelegramTopicsMixin:
         )
         return dict(row) if row else None
 
-    def delete_telegram_topic_binding(
-        self, *, chat_id: str, thread_id: str, profile_name: str = "default"
-    ) -> int:
-        """Remove the binding row for one (chat, thread) pair.
-
-        Called when the Bot API confirms a topic was deleted externally
-        (``Thread not found`` after the same-thread retry failed); otherwise ``gateway.run._recover_telegram_topic_thread_id`` keeps
-        redirecting inbound messages to the dead topic.  If this removes the
-        chat's *last* binding, ``telegram_dm_topic_mode`` is flipped to
-        ``enabled = 0`` in the same transaction, or a user who disabled topics
-        in the Telegram client (not via ``/topic off``) stays stuck.
-
-        Returns the number of rows deleted; absent binding or unmigrated tables
-        are silent no-ops (never raise from a cleanup hot path).
-        """
+    def delete_telegram_topic_binding(self, *, chat_id: str, thread_id: str, profile_name: str = "default") -> int:
+        """Remove the binding row for one (chat, thread) pair. Called when the Bot API confirms
+        a topic was deleted externally (``Thread not found`` after the same-thread retry
+        failed); otherwise ``gateway.run._recover_telegram_topic_thread_id`` keeps
+        redirecting inbound messages to the dead topic. If this removes the chat's *last*
+        binding, ``telegram_dm_topic_mode`` is flipped to ``enabled = 0`` in the same
+        transaction, or a user who disabled topics in the Telegram client (not via
+        ``/topic off``) stays stuck. Returns the number of rows deleted; absent binding or
+        unmigrated tables are silent no-ops (never raise from a cleanup hot path)."""
         chat_id = str(chat_id)
         thread_id = str(thread_id)
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
-        deleted = {"count": 0}
 
-        def _do(conn):
+        def _do(conn) -> int:
             try:
-                cursor = conn.execute(
+                deleted = conn.execute(
                     """
                     DELETE FROM telegram_dm_topic_bindings
                     WHERE profile_name = ? AND chat_id = ? AND thread_id = ?
                     """,
                     (profile_name, chat_id, thread_id),
-                )
-                deleted["count"] = cursor.rowcount or 0
+                ).rowcount or 0
             except sqlite3.OperationalError:
-                deleted["count"] = 0
-                return
-            if not deleted["count"]:
-                return
-            # Last binding gone → disable topic mode in the same transaction, so
-            # there is no read-after-prune race.
+                return 0
+            if not deleted:
+                return 0
+            # Last binding gone → disable topic mode in the same transaction (no
+            # read-after-prune race).
             try:
                 remaining = conn.execute(
                     """
@@ -331,27 +297,23 @@ class SessionTelegramTopicsMixin:
                 ).fetchone()
                 if remaining is None:
                     conn.execute(
-                        "UPDATE telegram_dm_topic_mode "
-                        "SET enabled = 0, updated_at = ? "
+                        "UPDATE telegram_dm_topic_mode SET enabled = 0, updated_at = ? "
                         "WHERE profile_name = ? AND chat_id = ?",
                         (time.time(), profile_name, chat_id),
                     )
             except sqlite3.OperationalError:
-                # telegram_dm_topic_mode absent — binding prune still stands.
-                pass
+                pass  # telegram_dm_topic_mode absent — binding prune still stands.
+            return deleted
 
-        self._execute_write(_do)
-        return deleted["count"]
+        return self._execute_write(_do)
 
     def bind_telegram_topic(
         self, *, chat_id: str, thread_id: str, user_id: str, session_key: str,
         session_id: str, managed_mode: str = "auto", profile_name: str = "default",
     ) -> None:
-        """Bind one Telegram DM topic thread to one Hermes session.
-
-        A session may be linked to only one topic: rebinding the same pair is
-        idempotent; linking the session to a different topic raises ValueError.
-        """
+        """Bind one Telegram DM topic thread to one Hermes session. A session may be linked to
+        only one topic: rebinding the same pair is idempotent; linking the session to a
+        different topic raises ValueError."""
         self.apply_telegram_topic_migration()
         now = time.time()
         chat_id, thread_id, user_id = str(chat_id), str(thread_id), str(user_id)
@@ -408,12 +370,9 @@ class SessionTelegramTopicsMixin:
     def list_unlinked_telegram_sessions_for_user(
         self, *, chat_id: str, user_id: str, profile_name: str = "default", limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """This user's Telegram sessions not bound to a topic.
-
-        Read-only: if the bindings table is absent, every session is unlinked
-        and the profile-unscoped query is used.  Scoped by ``profile_name`` so
-        multiplexed profiles do not surface each other's sessions.
-        """
+        """This user's Telegram sessions not bound to a topic. Read-only: if the bindings table
+        is absent, every session is unlinked and the profile-unscoped query is used.
+        Scoped by ``profile_name`` so multiplexed profiles do not surface each other."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         with self._read_ctx() as conn:
             try:
@@ -423,12 +382,6 @@ class SessionTelegramTopicsMixin:
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = conn.execute(
-                    _UNLINKED_SELECT_HEAD + _UNLINKED_SELECT_TAIL,
-                    (str(user_id), int(limit)),
+                    _UNLINKED_SELECT_HEAD + _UNLINKED_SELECT_TAIL, (str(user_id), int(limit)),
                 ).fetchall()
-        sessions: List[Dict[str, Any]] = []
-        for row in rows:
-            session = self._session_row_dict(row)
-            session["preview"] = _shape_preview(session.pop("_preview_raw", ""))
-            sessions.append(session)
-        return sessions
+        return [self._rich_row(row) for row in rows]
