@@ -4,8 +4,8 @@ A suggestion is a ready-to-run cron job spec the user accepts (creates the real 
 (latched by ``dedup_key`` so it is never re-offered). Every proposal flows through here regardless
 of source: ``catalog`` (curated starters), ``blueprint`` (skill ``blueprint:`` blocks, see
 ``tools/blueprints.py``), ``usage`` (self-improvement review), ``integration`` (connected account).
-Accepting calls ``cron.jobs.create_job`` with the stored ``job_spec`` — no second job engine; nothing
-auto-creates (consent-first). Storage mirrors ``cron/jobs.py``: ``suggestions.json``, atomic replace, 0600.
+Accepting calls ``cron.jobs.create_job`` with the stored ``job_spec`` — no second job engine;
+nothing auto-creates (consent-first). Storage mirrors ``cron/jobs.py`` (atomic replace, 0600).
 """
 
 from __future__ import annotations
@@ -83,7 +83,8 @@ def _save_raw(suggestions: List[Dict[str, Any]]) -> None:
     fd, tmp_path = tempfile.mkstemp(dir=str(suggestions_file.parent), suffix=".tmp", prefix=".sugg_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"suggestions": suggestions, "updated_at": _hermes_now().isoformat()}, f, indent=2)
+            payload = {"suggestions": suggestions, "updated_at": _hermes_now().isoformat()}
+            json.dump(payload, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, suggestions_file)
@@ -113,9 +114,10 @@ def list_pending() -> List[Dict[str, Any]]:
 def add_suggestion(
     *, title: str, description: str, source: str, job_spec: Dict[str, Any], dedup_key: str,
 ) -> Optional[Dict[str, Any]]:
-    """Register a pending suggestion. Returns the record, or None when skipped: the same ``dedup_key``
-    was already decided on or is still pending (never re-offer, never duplicate), or the pending list
-    is full (``MAX_PENDING``). ``job_spec`` is passed straight to ``cron.jobs.create_job`` on accept."""
+    """Register a pending suggestion. Returns the record, or None when skipped: the same
+    ``dedup_key`` was already decided on or is still pending (never re-offer, never duplicate), or
+    the pending list is full (``MAX_PENDING``). ``job_spec`` is passed straight to
+    ``cron.jobs.create_job`` on accept."""
     if source not in VALID_SOURCES:
         raise ValueError(f"unknown suggestion source: {source!r}")
     if not title.strip() or not dedup_key.strip():
@@ -185,8 +187,8 @@ def dismiss_suggestion(ref: str) -> bool:
 
 def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Accept a suggestion: create the real cron job from its ``job_spec``. Returns the job dict, or
-    None if not found / not pending. ``origin`` (platform/chat) is merged so "origin" delivery routes
-    back to the chat where the user accepted."""
+    None if not found / not pending. ``origin`` (platform/chat) is merged so "origin" delivery
+    routes back to the chat where the user accepted."""
     s = get_suggestion(ref)
     if not s or s.get("status") != _STATUS_PENDING:
         return None
@@ -202,7 +204,7 @@ def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> O
     try:
         job = create_job_with_scheduler_registration(**spec)
     except CronSchedulerRegistrationError:
-        # The job is already durable: resolve the suggestion so a retry cannot create another local copy.
+        # The job is already durable: resolve the suggestion so a retry cannot create a second copy.
         _set_status(s["id"], _STATUS_ACCEPTED)
         raise
     _set_status(s["id"], _STATUS_ACCEPTED)

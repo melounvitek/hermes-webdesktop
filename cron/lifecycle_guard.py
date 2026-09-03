@@ -2,9 +2,9 @@
 
 A cron job that restarts/stops the gateway from inside the gateway (``hermes gateway restart``,
 ``launchctl kickstart ai.hermes.gateway``, ``systemctl restart hermes-gateway``) kills the process,
-the supervisor revives it, auto-resume re-runs the turn: a SIGTERM-respawn loop. ``cron.jobs.create_job``
-rejects such specs on every creation path. Patterns are command-shaped — anchored on concrete command
-identifiers — so they cannot fire on prose. Defence-in-depth layer.
+the supervisor revives it, auto-resume re-runs the turn: a SIGTERM-respawn loop.
+``cron.jobs.create_job`` rejects such specs on every creation path. Patterns are command-shaped —
+anchored on concrete command identifiers — so they cannot fire on prose. Defence-in-depth layer.
 """
 
 from __future__ import annotations
@@ -28,15 +28,17 @@ class GatewayLifecycleBlocked(ValueError):
 # concrete command identifier so it fires only on command-shaped strings, never prose.
 _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
-    # Branch A: destructive `hermes gateway` ops. `start` is excluded: starting from inside a gateway
-    # is benign and a job may legitimately start a sibling profile. The lookbehind keeps `hermes` from
-    # being a path component or word tail (`/docs/hermes gateway restart-notes.md`) while every real
-    # command position (text start, whitespace, `;`/`&`/`|`, `$(`, backtick, U+FFFD) still matches.
+    # Branch A: destructive `hermes gateway` ops. `start` is excluded: starting from inside a
+    # gateway is benign and a job may legitimately start a sibling profile. The lookbehind keeps
+    # `hermes` from being a path component or word tail (`/docs/hermes gateway restart-notes.md`)
+    # while every real command position (text start, whitespace, `;`/`&`/`|`, `$(`, backtick,
+    # U+FFFD) still matches.
     r"(?:(?<![/\w.\-])hermes\s+gateway\s+(?:restart|stop|uninstall)\b)"
     # Branch B: launchctl ops anchored on a hermes-gateway label so unrelated hermes services stay
     # unblocked. `submit`/`bootstrap` register a NEW keepalive job wrapping an arbitrary helper (a
-    # laundered restart); neutral-label submissions are caught by `contains_launchctl_submit_command`.
-    # `bootout`/`remove`/`disable` are the modern/legacy/durable forms of `unload`.
+    # laundered restart); neutral-label submissions are caught by
+    # `contains_launchctl_submit_command`. `bootout`/`remove`/`disable` are the
+    # modern/legacy/durable forms of `unload`.
     r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart|submit|bootstrap|bootout|remove|disable)\b[^\n]*\bhermes[.\-]?gateway)"
     # Branch C: systemctl ops on a hermes-gateway unit.
     r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^\n]*\bhermes[.\-]?gateway)"
@@ -47,18 +49,18 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
 )
 
 # Every branch uses `[^\n]*` between verb and label so matches cannot span unrelated lines. A POSIX
-# backslash-newline continuation is therefore collapsed to a space before matching (as the shell does)
-# rather than loosening `[^\n]*`.
+# backslash-newline continuation is therefore collapsed to a space before matching (as the shell
+# does) rather than loosening `[^\n]*`.
 _SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
-# Python argv-list punctuation (`subprocess.run(["launchctl", "bootout", ...])`) separates exec'd words
-# with brackets/commas. Stripped only for the token-join re-scan, never from raw text.
+# Python argv-list punctuation (`subprocess.run(["launchctl", "bootout", ...])`) separates exec'd
+# words with brackets/commas. Stripped only for the token-join re-scan, never from raw text.
 _ARGV_LIST_PUNCTUATION = re.compile(r"[\[\],]+")
 
-# Branch A2: `hermes -p <profile> gateway restart|stop` (also `--profile <name>` / `--profile=<name>`).
-# The selector breaks Branch A's adjacency. A sibling-profile restart is a legitimate fleet operation,
-# so the profile name is captured and blocked only when it equals the profile running the guard.
-# `start` stays excluded as in Branch A.
+# Branch A2: `hermes -p <profile> gateway restart|stop` (also `--profile <name>` /
+# `--profile=<name>`). The selector breaks Branch A's adjacency. A sibling-profile restart is a
+# legitimate fleet operation, so the profile name is captured and blocked only when it equals the
+# profile running the guard. `start` stays excluded as in Branch A.
 _PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
     r"hermes\s+"
@@ -72,9 +74,9 @@ _PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
 )
 
 # Branch B needs the label AFTER the verb in one `[^\n]*` span; a loop that builds the label in an
-# EARLIER `;`-segment (`label=${item%%:*}; launchctl bootout "gui/$uid/$label"`) leaves only `$label`
-# next to the verb. These verbs act on an EXISTING job, so the hermes-gateway label anchor stays
-# correct, but the check is "verb anywhere AND label anywhere".
+# EARLIER `;`-segment (`label=${item%%:*}; launchctl bootout "gui/$uid/$label"`) leaves only
+# `$label` next to the verb. These verbs act on an EXISTING job, so the hermes-gateway label anchor
+# stays correct, but the check is "verb anywhere AND label anywhere".
 _LAUNCHCTL_LIFECYCLE_VERBS_RE = re.compile(
     r"(?i)\blaunchctl\s+(?:kickstart|unload|load|stop|restart|bootout|kill|disable|remove)\b"
 )
@@ -87,13 +89,14 @@ _MAX_REFERENCED_SCRIPT_BYTES = 1024 * 1024
 _MAX_REFERENCED_SCRIPT_DEPTH = 8
 _CONTROL_CHARS = frozenset(";&|()")
 
-# Directory names directly under `Library` that mark a FileProvider-backed subtree: `Mobile Documents`
-# is iCloud Drive; `CloudStorage` hosts third-party providers (Dropbox, OneDrive, Google Drive, ...).
+# Directory names directly under `Library` that mark a FileProvider-backed subtree: `Mobile
+# Documents` is iCloud Drive; `CloudStorage` hosts third-party providers (Dropbox, OneDrive, Google
+# Drive, ...).
 _CLOUD_PLACEHOLDER_MARKERS = frozenset({"Mobile Documents", "CloudStorage"})
 
 # Executables whose arguments are DATA (search patterns, SQL, log filters) and cannot execute their
-# argument text. Deliberately conservative: no `awk` (system()), no `sed` (`s///e`), no `echo`/`printf`
-# (routinely piped into a shell), no `mysql` (`\\!` and `system` escapes).
+# argument text. Deliberately conservative: no `awk` (system()), no `sed` (`s///e`), no
+# `echo`/`printf` (routinely piped into a shell), no `mysql` (`\\!` and `system` escapes).
 _DATA_SINK_EXECUTABLES = frozenset(
     {"grep", "egrep", "fgrep", "rg", "ag", "ack", "journalctl", "sqlite3", "psql"}
 )
@@ -103,7 +106,7 @@ _UNSAFE_DATA_ARG_MARKERS = ("`", "$(", "<(", ">(", "\\!")
 # sqlite3 dot-commands (`.shell`, `.system`) also disable masking. Dot must be followed by a NAME
 # character so relative paths (`.`, `./x`) stay paths.
 _DOT_COMMAND_ARGUMENT = re.compile(r"^\.[A-Za-z]")
-# A data sink piped into a shell/interpreter can feed matched lines to execution; never mask such a line.
+# A data sink piped into a shell/interpreter can feed matched lines to execution; never mask it.
 _PIPE_TO_INTERPRETER = re.compile(
     r"\|\s*&?\s*(?:sudo\s+)?(?:sh|bash|dash|ksh|zsh|xargs|eval|source)\b"
 )
@@ -114,7 +117,7 @@ _BINARY_SNIFF_BYTES = 4096
 _ReadRemoteScriptFn = Callable[[str], Optional[str]]
 
 # Wrappers that hand execution to their argument tail: the real command sits further right, so a
-# first-token-only guard would let `sudo bash ~/restart.sh` or `sudo launchctl submit ...` walk past.
+# first-token-only guard would let `sudo bash ~/restart.sh` / `sudo launchctl submit ...` walk past.
 _TRANSPARENT_COMMAND_PREFIXES = frozenset({
     "sudo", "doas", "env", "nohup", "setsid", "nice", "ionice", "stdbuf",
     "timeout", "exec", "command", "builtin", "eatmydata",
@@ -136,8 +139,8 @@ _TRANSPARENT_PREFIX_VALUE_OPTIONS = {
     "runuser": {"-u", "--user", "-s", "--shell", "-g", "--group", "-G", "--supp-group"},
     "setpriv": {"--reuid", "--regid", "--groups", "--inh-caps", "--ambient-caps", "--bounding-set",
                 "--selinux-label", "--apparmor-profile"},
-    "systemd-run": {"-u", "--unit", "-p", "--property", "-E", "--setenv", "--slice", "--description",
-                    "--uid", "--gid", "--on-calendar", "--service-type"},
+    "systemd-run": {"-u", "--unit", "-p", "--property", "-E", "--setenv", "--slice",
+                    "--description", "--uid", "--gid", "--on-calendar", "--service-type"},
     "nsenter": {"-t", "--target", "-S", "--setuid", "-G", "--setgid", "-r", "--root", "-w", "--wd"},
     "unshare": {"--map-user", "--map-group", "--setgroups", "-R", "--root", "-w", "--wd"},
 }
@@ -190,8 +193,8 @@ def _current_profile_name() -> Optional[str]:
 
 
 def _named_profile_is_current(named: str) -> bool:
-    """True when *named* is the profile executing the guard. Without a profile identity self-targeting
-    cannot be proven, so nothing is blocked (sibling restarts stay allowed)."""
+    """True when *named* is the profile executing the guard. Without a profile identity
+    self-targeting cannot be proven, so nothing is blocked (sibling restarts stay allowed)."""
     current = _current_profile_name()
     return bool(current) and named.strip().casefold() == current.strip().casefold()
 
@@ -210,14 +213,15 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
 
     Passes, in order: raw-text regex (the only pass that fires on inputs shlex cannot tokenize, e.g.
     Python source); profile-flag form; the same regex on each shell-tokenized segment with quotes/
-    escapes resolved (closes splice bypasses like ``kick"start"`` / ``kick\\start``); order-independent
-    launchctl pass. Single choke point for every recursion level of ``_contains_unsafe_gateway_action``.
+    escapes resolved (closes splice bypasses like ``kick"start"`` / ``kick\\start``);
+    order-independent launchctl pass. Single choke point for every recursion level of
+    ``_contains_unsafe_gateway_action``.
     """
     if not text:
         return False
-    # Provably inert heredoc bodies (quoted delimiter, data-sink consumer like `cat > f <<'EOF'`) are
-    # documentation, not commands. The stripper fails open on ANY ambiguity (unquoted delimiter, shell
-    # consumer, unterminated body), so executable heredocs are still scanned.
+    # Provably inert heredoc bodies (quoted delimiter, data-sink consumer like `cat > f <<'EOF'`)
+    # are documentation, not commands. The stripper fails open on ANY ambiguity (unquoted delimiter,
+    # shell consumer, unterminated body), so executable heredocs are still scanned.
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     text = strip_inert_heredoc_bodies(text)
@@ -241,14 +245,15 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
         stripped = _ARGV_LIST_PUNCTUATION.sub(" ", joined)
         if stripped != joined and _GATEWAY_LIFECYCLE_PATTERN.search(stripped):
             return True
-    # The label may be built in an earlier `;`-segment, so neither pass above sees verb and label together.
+    # The label may be built in an earlier `;`-segment, so no pass above sees verb + label together.
     return _contains_launchctl_gateway_lifecycle(normalized)
 
 
 # --- shell tokenization -----------------------------------------------------------------------
 
 def _split_logical_lines(text: str) -> list[str]:
-    """Split on newlines outside quotes (a quoted newline is data, not a separator); honors escapes."""
+    """Split on newlines outside quotes (a quoted newline is data, not a separator); honors
+    escapes."""
     lines: list[str] = []
     current: list[str] = []
     in_single = in_double = escape = False
@@ -313,9 +318,9 @@ def _iter_command_segments(command: str) -> Iterator[list[str]]:
 
 
 def _executable_name(token: str) -> str:
-    """Command name of an executable token. ``Path(token).name`` is "" for ``.``, ``..`` and ``/``; the
-    POSIX dot-source builtin is spelled ``.``, so fall back to the raw token or ``. ./helper.sh`` would
-    escape the sourced-script scan."""
+    """Command name of an executable token. ``Path(token).name`` is "" for ``.``, ``..`` and ``/``;
+    the POSIX dot-source builtin is spelled ``.``, so fall back to the raw token or ``.
+    ./helper.sh`` would escape the sourced-script scan."""
     return Path(token).name or token
 
 
@@ -367,7 +372,7 @@ def contains_launchctl_submit_command(command: str) -> bool:
     """Detect an executed ``launchctl submit``/``bootstrap``, not quoted text.
 
     Label-independent by design: a NEW job's label is attacker-chosen, so a neutral name defeats any
-    label-anchored regex. Both verbs register a persistent launchd job, never safe inside the gateway.
+    label-anchored regex. Both verbs register a persistent launchd job — never safe in the gateway.
     """
     for segment in _iter_command_segments(command):
         index = _executed_command_index(segment)
@@ -384,8 +389,8 @@ def _mask_data_sink_arguments(text: str) -> str:
     The regex cannot tell an EXECUTED lifecycle command from the same characters as *data* (a grep
     pattern, a SQL literal): every argument of a ``_DATA_SINK_EXECUTABLES`` segment becomes ``arg``
     and a match that survives is a real command. Strictly fail-closed: masking is skipped when the
-    line pipes into a shell/interpreter, any argument carries an execution marker, or the line cannot
-    be tokenized. Masking can only ALLOW what the plain regex would block, never block more.
+    line pipes into a shell/interpreter, any argument carries an execution marker, or the line
+    cannot be tokenized. Masking can only ALLOW what the plain regex would block, never block more.
     """
     lines_out: list[str] = []
     changed = False
@@ -429,7 +434,10 @@ def _lifecycle_command_scan_with_data_exemption(text: str) -> bool:
 
 def _direct_lifecycle_scan(command: str) -> bool:
     """Pure-string direct scans: lifecycle regex (data-exempted) + submit."""
-    return _lifecycle_command_scan_with_data_exemption(command) or contains_launchctl_submit_command(command)
+    return (
+        _lifecycle_command_scan_with_data_exemption(command)
+        or contains_launchctl_submit_command(command)
+    )
 
 
 # --- path handling ----------------------------------------------------------------------------
@@ -500,8 +508,8 @@ def _resolve_script_path(script_path: str) -> Optional[Path]:
     try:
         return get_hermes_home() / "scripts" / raw
     except (RuntimeError, OSError):
-        # get_hermes_home() falls back to Path.home(), which raises when neither HERMES_HOME nor HOME
-        # is resolvable (launchd/systemd) — same ingestion contract: nothing to scan.
+        # get_hermes_home() falls back to Path.home(), which raises when neither HERMES_HOME nor
+        # HOME is resolvable (launchd/systemd) — same ingestion contract: nothing to scan.
         return None
 
 
@@ -562,16 +570,16 @@ def _references_at(segment: list[str], index: int, cwd: Optional[str]) -> Iterat
             yield from _resolved_or_nothing(arguments[arg_index], cwd)
         return
 
-    # A bare "/" is pathlib's division operator in Python sources, not an executable; resolving it hits
-    # the filesystem root and fails the regular-file check, hard-blocking innocent .py scripts.
+    # A bare "/" is pathlib's division operator in Python sources, not an executable; resolving it
+    # hits the filesystem root and fails the regular-file check, hard-blocking innocent .py scripts.
     if executable.strip("/") and ("/" in executable or executable.endswith((".sh", ".bash", ".zsh"))):
         yield from _resolved_or_nothing(executable, cwd)
 
 
 def _iter_referenced_shell_scripts(command: str, *, cwd: Optional[str] = None) -> Iterator[Path]:
-    """Yield scripts executed directly or through a POSIX shell. Each segment is read at the original
-    token AND at the peeled wrapper target — additive on purpose: peeling must never REMOVE a reference
-    (a local ``./timeout`` is a script, not the coreutils wrapper)."""
+    """Yield scripts executed directly or through a POSIX shell. Each segment is read at the
+    original token AND at the peeled wrapper target — additive on purpose: peeling must never REMOVE
+    a reference (a local ``./timeout`` is a script, not the coreutils wrapper)."""
     for segment in _iter_command_segments(command):
         index = _command_token_index(segment)
         if index is None:
@@ -583,12 +591,13 @@ def _iter_referenced_shell_scripts(command: str, *, cwd: Optional[str] = None) -
 
 
 def _iter_shell_command_payloads(command: str) -> Iterator[str]:
-    """Yield code passed through ``sh|bash|... -c`` (and ``su -c`` / ``env -S``) for recursive scanning."""
+    """Yield code passed through ``sh|bash|... -c`` (and ``su -c`` / ``env -S``) for recursive
+    scanning."""
     for segment in _iter_command_segments(command):
         index = _command_token_index(segment)
         if index is None:
             continue
-        # Read at the ORIGINAL token: peeling past `su`/`env` would discard the option carrying the command.
+        # Read at the ORIGINAL token: peeling past `su`/`env` would discard the command option.
         for option in _STRING_COMMAND_OPTIONS.get(_executable_name(segment[index]), ()):
             yield from _iter_option_values(segment, index, option)
         index = _executed_command_index(segment)
@@ -605,9 +614,9 @@ def _iter_shell_command_payloads(command: str) -> Iterator[str]:
 
 def _has_binary_magic(data: bytes) -> bool:
     """True when *data* starts with a known compiled-binary signature. Deliberately narrower than
-    "contains a NUL": ``bash`` still executes a NUL-bearing script, so a padded script must not bypass
-    the scan. A shebang always wins (interpreted, never binary). Extensions are not consulted: a
-    suffixless script must still be scanned and fail closed if oversized."""
+    "contains a NUL": ``bash`` still executes a NUL-bearing script, so a padded script must not
+    bypass the scan. A shebang always wins (interpreted, never binary). Extensions are not
+    consulted: a suffixless script must still be scanned and fail closed if oversized."""
     if data.startswith(b"#!"):
         return False
     return data.startswith(_BINARY_MAGICS)
@@ -617,8 +626,8 @@ def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
     """Return ``(text, unsafe)`` using bounded, regular-file-only reads.
 
     Shared choke point for every local script read, so the cloud-placeholder refusal lives here: a
-    FileProvider path is never opened — not even to check hydration — because an evicted placeholder's
-    ``open()`` can hang preflight. Lexical check covers direct paths; resolved check covers symlinks.
+    FileProvider path is never opened — not even to check hydration — because an evicted
+    placeholder's ``open()`` can hang preflight. Lexical check: direct paths; resolved: symlinks.
     """
     if _on_cloud_path(path):
         return None, True
@@ -635,8 +644,8 @@ def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
             # Directories are not scripts (`fpath=(~/.docker/completions …)` in ~/.zshrc must not
             # block `source ~/.zshrc`). Devices/sockets stay fail-closed.
             return None, not stat.S_ISDIR(metadata.st_mode)
-        # Sniff a small prefix first: compiled binaries are never shell scripts, so skip them WITHOUT
-        # reading the rest or feeding decoded garbage into the recursion.
+        # Sniff a small prefix first: compiled binaries are never shell scripts, so skip them
+        # WITHOUT reading the rest or feeding decoded garbage into the recursion.
         data = os.read(descriptor, _BINARY_SNIFF_BYTES)
         if _has_binary_magic(data):
             return None, False
@@ -675,7 +684,8 @@ def _sanitize_remote_script_text(text: Optional[str]) -> tuple[Optional[str], bo
 
 def _read_script_for_scanning(script_path: str) -> str:
     """Read a cron script with the bounded scanner. Non-regular/oversized inputs fail closed via a
-    lifecycle-shaped sentinel; missing/unreadable paths stay empty so scheduler validation reports them."""
+    lifecycle-shaped sentinel; missing/unreadable paths stay empty so scheduler validation reports
+    them."""
     resolved = _resolve_script_path(script_path)
     if resolved is None:
         return ""
@@ -736,8 +746,8 @@ def contains_gateway_lifecycle_command_or_referenced_script(
 ) -> bool:
     """Detect lifecycle/submit commands, including bounded nested scripts.
 
-    Total by construction: never raises. Direct scans are pure string ops; the referenced-script walk
-    (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
+    Total by construction: never raises. Direct scans are pure string ops; the referenced-script
+    walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
     unexpected failure is logged and treated as "walk found nothing".
     """
     try:
@@ -753,19 +763,20 @@ def contains_gateway_lifecycle_command_or_referenced_script(
         try:
             return _direct_lifecycle_scan(command)
         except Exception:
-            # If even the data-argument masker fails, fall to raw regex + submit scan so the guard stays total.
+            # If even the data-argument masker fails, fall to raw regex + submit scan: stay total.
             return contains_gateway_lifecycle_command(command) or contains_launchctl_submit_command(command)
 
 
 def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None) -> None:
-    """Raise ``GatewayLifecycleBlocked`` if *prompt* or *script* contains a gateway-lifecycle command.
-    The script is read from disk and concatenated with the prompt so a command cannot slip through by
-    being split across the two. Callers let the ``ValueError``-shaped exception propagate."""
+    """Raise ``GatewayLifecycleBlocked`` if *prompt* or *script* contains a gateway-lifecycle
+    command. The script is read from disk and concatenated with the prompt so a command cannot slip
+    through by being split across the two. Callers let the ``ValueError``-shaped exception
+    propagate."""
     combined = prompt or ""
     python_script = False
     if script:
         resolved_script = _resolve_script_path(script)
-        # Attribute the refusal correctly: not a lifecycle command, but a cloud path the guard refuses to open.
+        # Attribute the refusal correctly: not a lifecycle command, but a cloud path never opened.
         if resolved_script is not None and _on_cloud_path(resolved_script):
             raise GatewayLifecycleBlocked(
                 "Blocked: the cron script lives on a cloud-synced path "
@@ -783,7 +794,7 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
     if python_script:
         # Python runs via the interpreter, never a POSIX shell, and the shell reference walk is a
         # false-positive generator on Python sources (pathlib "/" resolves to the filesystem root).
-        # The regex still scans the full text; non-regular/oversized files still fail closed via the sentinel.
+        # The regex still scans the full text; non-regular/oversized files fail closed (sentinel).
         unsafe = _lifecycle_command_scan_with_data_exemption(combined)
     else:
         unsafe = contains_gateway_lifecycle_command_or_referenced_script(

@@ -39,7 +39,8 @@ def _note_tick_failure(exc: BaseException, consecutive_failures: int) -> int:
 
 
 def _profile_entry(entry) -> tuple:
-    """Normalize a ``profile_homes`` entry (``(name, home)`` tuple or bare home) to ``(name, home)``."""
+    """Normalize a ``profile_homes`` entry (``(name, home)`` tuple or bare home) to ``(name,
+    home)``."""
     return entry if isinstance(entry, tuple) else (None, entry)
 
 
@@ -198,8 +199,9 @@ def _misfire_grace_minutes() -> float:
     try:
         from hermes_cli.config import cfg_get, load_config
 
+        config = load_config()
         return float(
-            cfg_get(load_config(), "cron", "misfire_grace_minutes", default=DEFAULT_MISFIRE_GRACE_MINUTES)
+            cfg_get(config, "cron", "misfire_grace_minutes", default=DEFAULT_MISFIRE_GRACE_MINUTES)
         )
     except Exception:
         return float(DEFAULT_MISFIRE_GRACE_MINUTES)
@@ -223,7 +225,9 @@ def fire_overdue_jobs(
     if grace_minutes <= 0:
         return 0
 
-    from cron.jobs import ONESHOT_GRACE_SECONDS, _ensure_aware, _hermes_now, is_job_runnable, load_jobs
+    from cron.jobs import (
+        ONESHOT_GRACE_SECONDS, _ensure_aware, _hermes_now, is_job_runnable, load_jobs,
+    )
 
     if now is None:
         now = _hermes_now()
@@ -356,7 +360,9 @@ class InProcessCronScheduler(CronScheduler):
 
         recovered = self.recover_interrupted()
         if recovered:
-            logger.warning("Marked %d interrupted cron execution(s) unknown after restart", recovered)
+            logger.warning(
+                "Marked %d interrupted cron execution(s) unknown after restart", recovered
+            )
         # Heartbeat before the first sleep so `hermes cron status` sees a live ticker immediately.
         record_ticker_heartbeat()
         # EMFILE backoff: don't hammer the store while fds are exhausted; a clean tick resets it.
@@ -367,7 +373,10 @@ class InProcessCronScheduler(CronScheduler):
                 if can_dispatch is not None and not can_dispatch():
                     logger.debug("Cron dispatch paused while gateway drains existing work")
                 else:
-                    cron_tick(verbose=False, adapters=adapters, loop=loop, sync=False, can_dispatch=can_dispatch)
+                    cron_tick(
+                        verbose=False, adapters=adapters, loop=loop, sync=False,
+                        can_dispatch=can_dispatch,
+                    )
                 ok = True
             except BaseException as e:
                 # BaseException, not Exception: a SystemExit must not silently kill the ticker;
@@ -408,9 +417,9 @@ class InProcessCronScheduler(CronScheduler):
         )
 
         def tick_adapters_for(profile_name):
-            # Deliver via the profile's OWN adapters; NEVER fall back to the default profile's (wrong
-            # bot). A credentialless satellite may ride the PRIMARY adapter only for targets an exact
-            # enabled route maps here; else fail closed (delivery skipped this tick).
+            # Deliver via the profile's OWN adapters; NEVER fall back to the default profile's
+            # (wrong bot). A credentialless satellite may ride the PRIMARY adapter only for targets
+            # an exact enabled route maps here; else fail closed (delivery skipped this tick).
             if profile_name is None or profile_name == default_profile:
                 return adapters
             tick_adapters = (profile_adapters or {}).get(profile_name) or {}
@@ -426,11 +435,14 @@ class InProcessCronScheduler(CronScheduler):
                     recovered = self.recover_interrupted()
                     if recovered:
                         logger.warning(
-                            "Marked %d interrupted cron execution(s) for profile at %s", recovered, home
+                            "Marked %d interrupted cron execution(s) for profile at %s",
+                            recovered, home,
                         )
                     record_ticker_heartbeat()
             except BaseException as e:
-                logger.error("Cron startup recovery error for profile at %s: %s", home, e, exc_info=True)
+                logger.error(
+                    "Cron startup recovery error for profile at %s: %s", home, e, exc_info=True
+                )
 
         consecutive_failures = 0
         while not stop_event.is_set():
@@ -441,7 +453,9 @@ class InProcessCronScheduler(CronScheduler):
             _cycle_exc: BaseException | None = None
             cycle_homes = [_profile_entry(e) for e in _existing_profile_homes(profile_homes)]
             if profile_gate is not None:
-                cycle_homes = [(name, home) for name, home in cycle_homes if profile_gate(name, home)]
+                cycle_homes = [
+                    (name, home) for name, home in cycle_homes if profile_gate(name, home)
+                ]
             try:
                 if can_dispatch is not None and not can_dispatch():
                     logger.debug("Cron dispatch paused while gateway drains existing work")
@@ -459,7 +473,9 @@ class InProcessCronScheduler(CronScheduler):
                             _profile_errors[str(home)] = f"{type(e).__name__}: {e}"
                         except BaseException as e:
                             # THIS profile only; BaseException as in the single-profile loop.
-                            logger.error("Cron tick error for profile at %s: %s", home, e, exc_info=True)
+                            logger.error(
+                                "Cron tick error for profile at %s: %s", home, e, exc_info=True
+                            )
                             _profile_errors[str(home)] = f"{type(e).__name__}: {e}"
                             if _cycle_exc is None or _is_fd_exhaustion(e):
                                 _cycle_exc = e

@@ -3,9 +3,9 @@
 The executions ledger records every attempt; this module groups the *failures* into incidents keyed
 by ``(job_id, error signature)`` so the same job failing with the same error does not re-ping the
 operator every run once acknowledged. Lifecycle: ``detected`` → ``alerted`` → ``closed``. The same
-job + same normalized error resolves to the SAME incident id, so a closed incident stays closed until
-the error text changes and mints a new one. ``alerted`` means a failure ping actually reached the
-operator. Incidents share ``cron/executions.db`` with ``cron.executions`` (one ledger file).
+job + same normalized error resolves to the SAME incident id, so a closed incident stays closed
+until the error text changes and mints a new one. ``alerted`` means a failure ping actually reached
+the operator. Incidents share ``cron/executions.db`` with ``cron.executions`` (one ledger file).
 """
 
 from __future__ import annotations
@@ -140,9 +140,10 @@ def upsert_incident(
     job_id: str, error: str, *, job_name: Optional[str] = None, failure_type: Optional[str] = None,
     output_file: Optional[str] = None,
 ) -> tuple[str, bool]:
-    """Record (or refresh) the incident for ``job_id`` + ``error``; returns ``(incident_id, is_new)``.
-    An existing row for the signature refreshes ``last_seen_at``/``error``/``output_file`` and keeps
-    its state — a ``closed`` incident stays closed. A changed error text mints a new incident."""
+    """Record (or refresh) the incident for ``job_id`` + ``error``; returns ``(incident_id,
+    is_new)``. An existing row for the signature refreshes
+    ``last_seen_at``/``error``/``output_file`` and keeps its state — a ``closed`` incident stays
+    closed. A changed error text mints a new incident."""
     job_id = str(job_id or "")
     sig = _error_signature(job_id, error)
     stored_error = _redact_error(error)
@@ -175,9 +176,9 @@ def upsert_incident(
 
 
 def set_incident_state(incident_id: str, state: str) -> bool:
-    """Transition an incident's lifecycle state; return whether it changed. ``closed`` is terminal for
-    that signature (re-open happens by a changed error minting a NEW incident). Unknown states are
-    rejected (no-op, ``False``)."""
+    """Transition an incident's lifecycle state; return whether it changed. ``closed`` is terminal
+    for that signature (re-open happens by a changed error minting a NEW incident). Unknown states
+    are rejected (no-op, ``False``)."""
     if state not in INCIDENT_STATES:
         return False
     now = _hermes_now().isoformat()

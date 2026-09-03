@@ -1,8 +1,8 @@
 """Profile-local durable audit ledger for cron execution attempts.
 
 The ledger records what is known about each attempt; it is not a retry queue. Interrupted attempts
-become ``unknown`` only after their exact owner process is proved gone. Terminal states are immutable.
-Also hosts the SQLite connection/transaction helpers shared with ``cron.incidents`` / ``cron.notepad``.
+become ``unknown`` only after their exact owner process is proved gone. Terminal states are
+immutable. Also hosts the SQLite ledger helpers shared with ``cron.incidents`` / ``cron.notepad``.
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 
 # Optional test override. Production resolves the path at transaction time so dashboard operations
-# that temporarily enter another profile cannot leak that profile's records into the import-time home.
+# that temporarily enter another profile cannot leak that profile's records into the import-time
+# home.
 EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
 _TERMINAL_STATES = ("completed", "failed", "unknown")
@@ -37,7 +38,9 @@ def open_ledger(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(path, timeout=5)
 
 
-def prepare_ledger(conn: sqlite3.Connection, *, db_label: str, synchronous_full: bool = True) -> None:
+def prepare_ledger(
+    conn: sqlite3.Connection, *, db_label: str, synchronous_full: bool = True
+) -> None:
     """Row factory + busy timeout + WAL (with fallback) + optional ``synchronous=FULL``."""
     from hermes_state import apply_wal_with_fallback
 
@@ -50,12 +53,13 @@ def prepare_ledger(conn: sqlite3.Connection, *, db_label: str, synchronous_full:
 
 @contextmanager
 def ledger_transaction(
-    lock: threading.RLock, connect: Callable[[], sqlite3.Connection],
+    lock: threading.RLock,
+    connect: Callable[[], sqlite3.Connection],
     initialize_schema: Callable[[sqlite3.Connection], None],
 ) -> Iterator[sqlite3.Connection]:
-    """Open a connection, commit/rollback on exit, always close. ``sqlite3.Connection``'s own context
-    manager does NOT close (leaks WAL/SHM fds until GC); schema init runs inside the ``try`` so a
-    PRAGMA/DDL failure after ``connect()`` still closes."""
+    """Open a connection, commit/rollback on exit, always close. ``sqlite3.Connection``'s own
+    context manager does NOT close (leaks WAL/SHM fds until GC); schema init runs inside the
+    ``try`` so a PRAGMA/DDL failure after ``connect()`` still closes."""
     with lock:
         conn = connect()
         try:

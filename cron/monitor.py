@@ -1,12 +1,13 @@
 """Monitor-mode cron support — hash-suppressed change detection.
 
-A monitor job attaches a cheap source (``monitor_script`` / ``monitor_url``) to an LLM cron job. Each
-tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/whitespace normalization —
-scripts must emit stable output) against the hash from the last agent-triggering tick: unchanged →
-agent run suppressed (silent ``no_change`` run); changed/first run → a "MONITOR CHANGE DETECTED"
-block (capped unified diff + new output) is injected into the prompt; source failure → an ERROR,
-never a change, and the stored hash is left untouched. State: ``job["monitor_state"]`` in jobs.json
-(hash + last_changed_at) and ``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
+A monitor job attaches a cheap source (``monitor_script`` / ``monitor_url``) to an LLM cron job.
+Each tick runs the source FIRST and hashes its EXACT output bytes (no timestamp/whitespace
+normalization — scripts must emit stable output) against the hash from the last agent-triggering
+tick: unchanged → agent run suppressed (silent ``no_change`` run); changed/first run → a "MONITOR
+CHANGE DETECTED" block (capped unified diff + new output) is injected into the prompt; source
+failure → an ERROR, never a change, and the stored hash is left untouched. State:
+``job["monitor_state"]`` in jobs.json (hash + last_changed_at) and
+``OUTPUT_DIR/<job_id>/monitor_last_output.txt`` (for the diff).
 """
 
 from __future__ import annotations

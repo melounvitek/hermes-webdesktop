@@ -126,8 +126,8 @@ def list_notes(job_id: str) -> List[Dict[str, Any]]:
 
 
 def clear_notepad(job_id: str) -> int:
-    """Delete every key for one job (called from ``cron.jobs.remove_job``). Returns row count; no-ops
-    without creating the DB when no notepad file exists yet."""
+    """Delete every key for one job (called from ``cron.jobs.remove_job``). Returns row count;
+    no-ops without creating the DB when no notepad file exists yet."""
     if not _current_notepad_file().exists():
         return 0
     with _transaction() as conn:
@@ -138,8 +138,8 @@ def clear_notepad(job_id: str) -> int:
 
 
 def render_notepad_section(job_id: str) -> str:
-    """Render a job's notepad as a prompt section. An empty notepad MUST return '' so jobs that never
-    use the feature get a byte-identical prompt (prompt-cache + drift safety)."""
+    """Render a job's notepad as a prompt section. An empty notepad MUST return '' so jobs that
+    never use the feature get a byte-identical prompt (prompt-cache + drift safety)."""
     try:
         notes = list_notes(job_id)
     except Exception:

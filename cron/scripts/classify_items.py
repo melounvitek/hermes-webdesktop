@@ -4,9 +4,9 @@
 The proactive-monitor pattern: a fetch step (watcher script, inbox dump, feed) produces a JSON list
 of candidate items (stdin or --input-file); one call to the auxiliary ``monitor`` model scores the
 whole batch and ONLY items at/above --threshold are printed. Empty stdout -> the cron job's
-[SILENT]/empty-stdout path suppresses delivery, so quiet intervals never spam. A classifier
-failure exits non-zero (never silently swallowed). Items are opaque objects; a
-title/subject/summary/text field helps, and id/guid/message_id/url is echoed back for upstream dedup.
+[SILENT]/empty-stdout path suppresses delivery, so quiet intervals never spam. A classifier failure
+exits non-zero (never silently swallowed). Items are opaque objects; a title/subject/summary/text
+field helps, and id/guid/message_id/url is echoed back for upstream dedup.
 
 Usage: cat items.json | python classify_items.py --threshold 7 --criteria "Urgent if ..."
 """
@@ -91,7 +91,9 @@ def _parse_scores(content: str, n_items: int) -> Dict[int, Dict[str, Any]]:
     return {
         obj["index"]: obj
         for obj in arr
-        if isinstance(obj, dict) and isinstance(obj.get("index"), int) and 0 <= obj["index"] < n_items
+        if isinstance(obj, dict)
+        and isinstance(obj.get("index"), int)
+        and 0 <= obj["index"] < n_items
     }
 
 
@@ -154,7 +156,10 @@ def main() -> int:
 
     if args.format == "json":
         out = [
-            {"id": _item_id(item, i), "score": s.get("score"), "reason": s.get("reason", ""), "item": item}
+            {
+                "id": _item_id(item, i), "score": s.get("score"),
+                "reason": s.get("reason", ""), "item": item,
+            }
             for (i, item, s) in surfaced
         ]
         print(json.dumps(out, ensure_ascii=False, indent=2))

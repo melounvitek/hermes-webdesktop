@@ -1,8 +1,8 @@
 """Automation Blueprints — one slot-schema definition per automation that every surface renders
 natively: dashboard form (``blueprint_form_schema``), pre-filled ``/blueprint`` slash command
-(``blueprint_slash_command``), agent seed prompt, docs deep-link. ``fill_blueprint`` validates values
-into ``cron.jobs.create_job`` kwargs — there is no second job engine. Users never type raw cron:
-``schedule_template`` fixes the recurrence and only human-friendly parts (time, weekdays) are slots.
+(``blueprint_slash_command``), agent seed prompt, docs deep-link. ``fill_blueprint`` validates
+values into ``cron.jobs.create_job`` kwargs — there is no second job engine. Users never type raw
+cron: ``schedule_template`` fixes the recurrence; only human parts (time, weekdays) are slots.
 """
 
 from __future__ import annotations
@@ -553,7 +553,9 @@ def get_blueprint(key: str) -> Optional[AutomationBlueprint]:
     return _CATALOG_BY_KEY.get(key)
 
 
-def _slot(blueprint: AutomationBlueprint, *names: str, type: Optional[str] = None) -> Optional[BlueprintSlot]:
+def _slot(
+    blueprint: AutomationBlueprint, *names: str, type: Optional[str] = None
+) -> Optional[BlueprintSlot]:
     """First slot matching any of *names* (or *type*), else None."""
     return next((s for s in blueprint.slots if s.name in names or (type and s.type == type)), None)
 
@@ -644,8 +646,8 @@ def _humanize_schedule(blueprint: AutomationBlueprint) -> str:
 
 
 def blueprint_catalog_entry(blueprint: AutomationBlueprint) -> Dict[str, Any]:
-    """Unified serializable shape (docs generator + dashboard API): form schema + ready-to-paste slash
-    command + deep-link URL + human-readable schedule."""
+    """Unified serializable shape (docs generator + dashboard API): form schema + ready-to-paste
+    slash command + deep-link URL + human-readable schedule."""
     return {
         **blueprint_form_schema(blueprint),
         "schedule": blueprint.schedule_template,
