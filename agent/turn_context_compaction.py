@@ -1,12 +1,11 @@
-"""Turn-start compaction for ``build_turn_context``.
+"""Turn-start compaction for ``build_turn_context`` plus the small compression-attempt
+helpers shared with the pre-API / post-tool sites in ``turn_preflight``.
 
 Three passes, in order: idle-triggered compaction (opt-in, wall-clock gap), preflight
 context compression (token threshold), and the uncompressed-session overflow-warning
 re-arm. ``run_turn_start_compaction`` mutates ``agent`` exactly as the inline prologue
-did and returns a ``CompactionOutcome`` with the rebuilt locals.
-
-Predicates and estimators that tests patch on ``agent.turn_context`` are imported
-lazily through that module so the patches keep intercepting."""
+did and returns a ``CompactionOutcome``. Predicates/estimators that tests patch on
+``agent.turn_context`` are imported lazily through that module so patches intercept."""
 
 from __future__ import annotations
 
@@ -38,20 +37,57 @@ class CompactionOutcome:
     blocked: bool = False
 
 
+# ── Helpers shared by every compression-attempt site ──────────────────────────
+
+
 def _clear_overflow_warn(agent: Any) -> None:
-    """Re-arm the context-overflow warning dedup. getattr guard: ``object.__new__``
-    test doubles lack the method."""
+    """Re-arm the context-overflow warning dedup (test doubles may lack the method)."""
     _clear_warn = getattr(agent, "_clear_context_overflow_warn", None)
     if callable(_clear_warn):
         _clear_warn()
 
 
 def _reset_retry_state_after_compaction(agent: Any) -> None:
+    """Give the compacted request a fresh chance: clear retry/empty-response state."""
     agent._empty_content_retries = 0
     agent._thinking_prefill_retries = 0
     agent._last_content_with_tools = None
     agent._last_content_tools_all_housekeeping = False
     agent._mute_post_response = False
+
+
+def _blocked_compress_reason(compressor: Any, tokens: int) -> Optional[str]:
+    """Why an over-threshold request is blocked (``None`` below threshold or when the
+    engine lacks ``should_compress_info`` / raises)."""
+    _info = getattr(compressor, "should_compress_info", None)
+    if not callable(_info):
+        return None
+    try:
+        return _info(tokens)[1]
+    except Exception:
+        return None
+
+
+def _apply_grown_window(agent: Any, compressor: Any, grown: int) -> None:
+    """A managed local runtime granted a bigger window: recalibrate the compressor."""
+    compressor.update_model(
+        agent.model, grown, base_url=getattr(agent, "base_url", "") or "",
+        api_key=getattr(agent, "api_key", "") or "",
+        provider=getattr(agent, "provider", "") or "",
+        api_mode=getattr(agent, "api_mode", "") or "",
+    )
+    agent._buffer_status(
+        f"📈 Context window grown to {grown // 1024}K "
+        f"(local model; conversation continues uncompressed)"
+    )
+
+
+def _refund_api_call(agent: Any, api_call_count: int) -> int:
+    """A pass that never reached the provider refunds the call count and budget."""
+    api_call_count -= 1
+    agent._api_call_count = api_call_count
+    agent.iteration_budget.refund()
+    return api_call_count
 
 
 def _reanchor(agent: Any, messages: List[Any], user_message: Any) -> int:
@@ -62,6 +98,9 @@ def _reanchor(agent: Any, messages: List[Any], user_message: Any) -> int:
     idx = reanchor_current_turn_user_idx(messages, user_message)
     agent._persist_user_message_idx = idx
     return idx
+
+
+# ── Turn-start passes ─────────────────────────────────────────────────────────
 
 
 def run_turn_start_compaction(
@@ -83,10 +122,8 @@ def _idle_compaction(
     agent: Any, out: CompactionOutcome, system_message: Optional[str], user_message: Any,
     effective_task_id: str,
 ) -> None:
-    """Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``).
-
-    Fires on the wall-clock gap since ``_last_activity_ts``, complementing the token
-    gate; a cheap gap check gates the estimate (cf. ``_should_run_preflight_estimate``)."""
+    """Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``): fires on the
+    wall-clock gap since ``_last_activity_ts``; a cheap gap check gates the estimate."""
     from agent import turn_context as _tc
 
     messages = out.messages
@@ -98,12 +135,11 @@ def _idle_compaction(
         return
     _compressor = agent.context_compressor
     # Route-aware pressure: on compacted native-Codex sessions the durable figure
-    # overstates the wire; reuse the preflight estimator (#96995).
+    # overstates the wire, so reuse the preflight estimator.
     _idle_tokens = _tc._preflight_request_tokens(
         agent, messages, out.active_system_prompt or ""
     )
-    # Post-compression target size: don't summarise a thread already below what
-    # compaction would reduce it to.
+    # Don't summarise a thread already below the post-compression target size.
     _idle_floor = int(_compressor.threshold_tokens * _compressor.summary_target_ratio)
     _idle_cooldown = getattr(
         _compressor, "get_active_compression_failure_cooldown", lambda: None
@@ -145,7 +181,7 @@ def _idle_compaction(
 
 def _codex_native_auto_compaction(agent: Any) -> bool:
     """Codex app-server threads are compacted by the codex agent itself; Hermes only
-    initiates compaction in "hermes" mode (#36801)."""
+    initiates compaction in "hermes" mode."""
     return (
         getattr(agent, "api_mode", None) == "codex_app_server"
         and str(
@@ -160,7 +196,7 @@ def _preflight_compression(
     effective_task_id: str,
 ) -> None:
     """Preflight context compression; the cheap pre-check gates the full estimate
-    (see ``_should_run_preflight_estimate`` for the OR semantics, #27405)."""
+    (see ``_should_run_preflight_estimate`` for the OR semantics)."""
     from agent import turn_context as _tc
 
     agent._turn_received_provider_response = False
@@ -168,17 +204,16 @@ def _preflight_compression(
     if not agent.compression_enabled:
         _rearm_uncompressed_overflow_warn(agent, out.messages, out.active_system_prompt)
         return
+    _compressor = agent.context_compressor
     if _tc._review_fork_first_request_pending(agent) or not _tc._should_run_preflight_estimate(
-        out.messages, agent.context_compressor.protect_first_n,
-        agent.context_compressor.protect_last_n, agent.context_compressor.threshold_tokens,
+        out.messages, _compressor.protect_first_n, _compressor.protect_last_n,
+        _compressor.threshold_tokens,
     ):
         return
 
-    messages = out.messages
     _preflight_tokens = _tc._preflight_request_tokens(
-        agent, messages, out.active_system_prompt or ""
+        agent, out.messages, out.active_system_prompt or ""
     )
-    _compressor = agent.context_compressor
     # getattr guard: compressor doubles and plugin engines lack this method — absence
     # means no snapshot and the finalizer's rollback stays disarmed.
     _snapshot_fn = getattr(_compressor, "snapshot_preflight_display_tokens", None)
@@ -188,15 +223,14 @@ def _preflight_compression(
         # snapshot may arm the interrupted-turn rollback.
         if isinstance(_snapshot_val, int) and not isinstance(_snapshot_val, bool):
             agent._turn_preflight_display_snapshot = _snapshot_val
-    _defer_preflight = getattr(
+    _preflight_deferred = getattr(
         _compressor, "should_defer_preflight_to_real_usage", lambda _tokens: False
-    )
-    _preflight_deferred = _defer_preflight(_preflight_tokens)
+    )(_preflight_tokens)
     _codex_native_auto = _codex_native_auto_compaction(agent)
 
     if not _preflight_deferred:
         # Display-only seed: a real provider reading wins and the -1 sentinel stays
-        # protected (#36718). Also feeds the tool-loop gate on usage-less responses.
+        # protected. Also feeds the tool-loop gate on usage-less responses.
         _maybe_seed = getattr(_compressor, "maybe_seed_preflight_display_tokens", None)
         if callable(_maybe_seed):
             _maybe_seed(_preflight_tokens)
@@ -234,14 +268,7 @@ def _preflight_compression(
     else:
         _should_compress_now = _compressor.should_compress(_preflight_tokens)
         if not _should_compress_now:
-            # Over threshold but blocked: ask should_compress_info for the reason to
-            # surface below. getattr guard: doubles/older engines lack it.
-            _info = getattr(_compressor, "should_compress_info", None)
-            if callable(_info):
-                try:
-                    _compress_block_reason = _info(_preflight_tokens)[1]
-                except Exception:
-                    _compress_block_reason = None
+            _compress_block_reason = _blocked_compress_reason(_compressor, _preflight_tokens)
     if _should_compress_now:
         # Managed local runtime: growing the window beats compressing (ladder order;
         # same seam as _maybe_grow_local_window in the loop).
@@ -252,16 +279,7 @@ def _preflight_compression(
         except Exception:
             _grown = None
         if _grown:
-            _compressor.update_model(
-                agent.model, _grown, base_url=getattr(agent, "base_url", "") or "",
-                api_key=getattr(agent, "api_key", "") or "",
-                provider=getattr(agent, "provider", "") or "",
-                api_mode=getattr(agent, "api_mode", "") or "",
-            )
-            agent._buffer_status(
-                f"📈 Context window grown to {_grown // 1024}K "
-                f"(local model; conversation continues uncompressed)"
-            )
+            _apply_grown_window(agent, _compressor, _grown)
             _should_compress_now = _compressor.should_compress(_preflight_tokens)
     if _should_compress_now:
         _run_preflight_passes(
@@ -277,7 +295,7 @@ def _preflight_compression(
         # Sub-threshold and unblocked — re-arm the overflow warning.
         _clear_overflow_warn(agent)
         # Engine maintenance only when NO skip-branch fired: cooldown, deferred
-        # estimate, or codex-native route keep the engine hook unconsulted (#20316).
+        # estimate, or codex-native route keep the engine hook unconsulted.
         if not (_compression_cooldown or _preflight_deferred or _codex_native_auto):
             _engine_preflight_maintenance(
                 agent, out, _compressor, _preflight_tokens, system_message, effective_task_id
@@ -329,8 +347,8 @@ def _run_preflight_passes(
             task_id=effective_task_id,
         )
         if out.messages is _preflight_input and compression_skipped_due_to_lock(agent):
-            # Lock-skip (#69870): another path holds the lock, so this is a DEFER, not
-            # proof of incompressibility — don't arm the blocker; stop passes this turn.
+            # Lock-skip: another path holds the lock, so this is a DEFER, not proof of
+            # incompressibility — don't arm the blocker; stop passes this turn.
             logger.info(
                 "Preflight compression deferred: compression lock "
                 "held by another path (session %s)",
@@ -338,7 +356,7 @@ def _run_preflight_passes(
             )
             break
         # Re-estimate so size-only compression (same rows, fewer tokens) counts as
-        # progress (#39548).
+        # progress.
         _preflight_tokens = _tc._preflight_request_tokens(
             agent, out.messages, out.active_system_prompt or ""
         )
@@ -370,7 +388,7 @@ def _engine_preflight_maintenance(
     agent: Any, out: CompactionOutcome, _compressor: Any, _preflight_tokens: int,
     system_message: Optional[str], effective_task_id: str,
 ) -> None:
-    """Engine-driven sub-threshold preflight maintenance (#20316): engines overriding
+    """Engine-driven sub-threshold preflight maintenance: engines overriding
     ``should_compress_preflight()`` get exactly ONE ``compress()`` pass; a no-op never
     touches ``blocked``."""
     _engine_preflight = getattr(_compressor, "should_compress_preflight", None)
@@ -379,8 +397,7 @@ def _engine_preflight_maintenance(
     try:
         _wants_engine_preflight = bool(_engine_preflight(out.messages))
     except Exception as _preflight_exc:
-        # A buggy engine must never break an otherwise-healthy turn: swallow at debug
-        # level and skip maintenance.
+        # A buggy engine must never break an otherwise-healthy turn.
         logger.debug(
             "should_compress_preflight raised %s; skipping "
             "engine-driven preflight maintenance",
@@ -412,8 +429,8 @@ def _engine_preflight_maintenance(
 def _rearm_uncompressed_overflow_warn(
     agent: Any, messages: List[Any], active_system_prompt: Optional[str]
 ) -> None:
-    """Uncompressed session guard (#89297): the warning fires from the loop's pre-API
-    site; here we only RE-ARM the dedup once back under the window."""
+    """Uncompressed session guard: the warning fires from the loop's pre-API site;
+    here we only RE-ARM the dedup once back under the window."""
     from agent import turn_context as _tc
 
     _ctx_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
@@ -427,18 +444,17 @@ def _rearm_uncompressed_overflow_warn(
         if isinstance(_c, str):
             _raw_chars += len(_c)
         elif _c:
-            # Non-string, non-empty content defeats a char count — force the real
-            # estimate. None/"" contribute nothing.
+            # Non-string, non-empty (multimodal) content defeats a char count — force
+            # the real estimate. None/"" contribute nothing.
             _raw_chars = _ctx_len + 1
             break
-    # Cheap gate: raw text under ~1/4 of the window (4 chars/token) cannot be over it;
-    # non-string (multimodal) content forces the real estimate.
+    # Cheap gate: raw text under ~1/4 of the window (4 chars/token) cannot be over it.
     if _raw_chars <= _ctx_len:
         _clear_overflow_warn(agent)
         return
     # Re-arm with the same route-aware (checkpoint-pruned wire) figure the warn site
     # measures, else a compacted session never clears the dedup and genuine overflow
-    # warnings stay suppressed (#96995/#97602).
+    # warnings stay suppressed.
     _uncompressed_tokens = _tc._preflight_request_tokens(
         agent, messages, active_system_prompt or ""
     )
