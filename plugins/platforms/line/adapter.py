@@ -47,7 +47,6 @@ LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 LINE_LOADING_URL = "https://api.line.me/v2/bot/chat/loading/start"
 LINE_CONTENT_URL_FMT = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 LINE_BOT_INFO_URL = "https://api.line.me/v2/bot/info"
-
 LINE_PER_BUBBLE_CHARS = 5000  # LINE hard limit
 LINE_SAFE_BUBBLE_CHARS = 4500  # conservative chunking limit
 LINE_MAX_MESSAGES_PER_CALL = 5
@@ -56,38 +55,29 @@ WEBHOOK_BODY_MAX_BYTES = 1_048_576  # 1 MiB — webhooks are tiny JSON
 DEFAULT_WEBHOOK_PORT = 8646
 DEFAULT_WEBHOOK_PATH = "/line/webhook"
 DEFAULT_MEDIA_PATH_PREFIX = "/line/media"
-
 # ``None`` → asyncio binds BOTH address families (mirrors gateway/platforms/webhook.py).
 # "0.0.0.0" is unreachable on IPv6-only networks (Fly.io 6PN → 502s); "::" breaks IPv4
 # loopback probes on IPV6_V6ONLY=1 hosts. Pin via ``LINE_HOST`` / ``extra.host``.
 DEFAULT_HOST = None
-
-# Bind hosts LINE's servers could never fetch media from → public URL required.
-_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})
-
+_WILDCARD_HOSTS = frozenset({"0.0.0.0", "::", ""})  # LINE can't fetch media from these → public URL required
 DEFAULT_SLOW_RESPONSE_THRESHOLD = 45.0  # seconds; 0 disables the postback button
 DEFAULT_PENDING_REPLY_TEXT = "🤔 Still thinking. Tap below to fetch the answer when it's ready."
 DEFAULT_BUTTON_LABEL = "Get answer"
 DEFAULT_DELIVERED_TEXT = "Already replied ✅"
 DEFAULT_INTERRUPTED_TEXT = "Run was interrupted before completion."
-
 MEDIA_TOKEN_TTL_SECONDS = 1800  # 30 minutes; LINE caches the URL aggressively
 LINE_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB per LINE docs
 LINE_AV_MAX_BYTES = 200 * 1024 * 1024  # 200 MB for voice/video
-
 # LINE message type → normalized MessageType. LINE audio is recorded voice clips →
 # VOICE (STT path), like Telegram/WhatsApp. Unknown types fall back to TEXT.
 _LINE_MESSAGE_TYPES = {
     "text": MessageType.TEXT, "image": MessageType.PHOTO, "video": MessageType.VIDEO, "audio": MessageType.VOICE,
     "file": MessageType.DOCUMENT, "location": MessageType.LOCATION, "sticker": MessageType.STICKER}
-
 # 1×1 transparent PNG: fallback video preview (LINE requires ``previewImageUrl``).
 _FALLBACK_PNG_PREVIEW = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
     "890000000d49444154789c63000100000005000100377a7ff20000000049454e"
     "44ae426082")
-
-
 # Markdown LINE can't render, applied in order (code blocks first so their content survives).
 _MD_STRIP_RULES: Tuple[Tuple[re.Pattern, Any], ...] = (
     (re.compile(r"```[a-zA-Z0-9_+-]*\n?(.*?)```", re.DOTALL), lambda m: m.group(1).rstrip("\n")),
@@ -111,10 +101,8 @@ def strip_markdown_preserving_urls(text: str) -> str:
 
 def split_for_line(text: str, max_chars: int = LINE_SAFE_BUBBLE_CHARS) -> List[str]:
     """Split into ≤5 LINE bubbles at paragraph/line/word breaks; overflow is ellipsised."""
-    if not text:
-        return []
-    if len(text) <= max_chars:
-        return [text]
+    if not text or len(text) <= max_chars:
+        return [text] if text else []
     chunks: List[str] = []
     remaining = text
     while remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL:
@@ -284,8 +272,8 @@ class _LineClient:
 
     async def fetch_content(self, message_id: str) -> bytes:
         """Download an inbound media message's binary content."""
-        url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
         async with self._session(30.0) as session:
+            url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
             async with session.get(url, headers={"Authorization": f"Bearer {self._token}"}) as resp:
                 if resp.status >= 400:
                     raise RuntimeError(f"LINE content {resp.status}")
@@ -972,24 +960,14 @@ def interactive_setup() -> None:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
-        name="line",
-        label="LINE",
-        adapter_factory=lambda cfg: LineAdapter(cfg),
-        check_fn=check_requirements,
-        validate_config=validate_config,
-        is_connected=is_connected,
-        required_env=["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"],
-        install_hint="pip install aiohttp",
-        setup_fn=interactive_setup,
-        env_enablement_fn=_env_enablement,
-        cron_deliver_env_var="LINE_HOME_CHANNEL",
-        standalone_sender_fn=_standalone_send,
-        allowed_users_env="LINE_ALLOWED_USERS",
+        name="line", label="LINE", adapter_factory=lambda cfg: LineAdapter(cfg), check_fn=check_requirements,
+        validate_config=validate_config, is_connected=is_connected,
+        required_env=["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"], install_hint="pip install aiohttp",
+        setup_fn=interactive_setup, env_enablement_fn=_env_enablement, cron_deliver_env_var="LINE_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send, allowed_users_env="LINE_ALLOWED_USERS",
         allow_all_env="LINE_ALLOW_ALL_USERS",
         max_message_length=LINE_SAFE_BUBBLE_CHARS,  # per-bubble cap is 5000; smart-chunker uses 4500
-        emoji="💚",
-        pii_safe=False,
-        allow_update_command=True,
+        emoji="💚", pii_safe=False, allow_update_command=True,
         platform_hint=(
             "You are chatting via LINE Messaging API. LINE does NOT render "
             "Markdown — text bubbles show ** and # literally. Bare URLs are "

@@ -34,10 +34,7 @@ WS_RETRY_DELAY_INITIAL = 2.0
 WS_RETRY_DELAY_MAX = 60.0
 HEALTH_CHECK_INTERVAL = 30.0
 HEALTH_CHECK_STALE_THRESHOLD = 300.0
-
-# Correlation ID prefix for requests we send so we can ignore our own echoes.
-_CORR_PREFIX = "hermes-"
-
+_CORR_PREFIX = "hermes-"  # marks requests we sent so our own echoes can be ignored
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".opus"}
 _VOICE_TAG_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".opus"}  # MEDIA: tags sent as voice notes
@@ -705,24 +702,14 @@ def interactive_setup() -> None:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
-        name="simplex",
-        label="SimpleX Chat",
-        adapter_factory=lambda cfg: SimplexAdapter(cfg),
-        check_fn=check_requirements,
-        validate_config=validate_config,
-        is_connected=is_connected,
+        name="simplex", label="SimpleX Chat", adapter_factory=lambda cfg: SimplexAdapter(cfg),
+        check_fn=check_requirements, validate_config=validate_config, is_connected=is_connected,
         required_env=["SIMPLEX_WS_URL"],
         install_hint=("pip install websockets   # SimpleX adapter requires the websockets package"),
-        setup_fn=interactive_setup,
-        env_enablement_fn=_env_enablement,
-        cron_deliver_env_var="SIMPLEX_HOME_CHANNEL",
-        standalone_sender_fn=_standalone_send,
-        allowed_users_env="SIMPLEX_ALLOWED_USERS",
-        allow_all_env="SIMPLEX_ALLOW_ALL_USERS",
-        max_message_length=MAX_MESSAGE_LENGTH,
-        emoji="🔒",
-        # SimpleX uses opaque contact IDs only — nothing to redact.
-        pii_safe=True,
+        setup_fn=interactive_setup, env_enablement_fn=_env_enablement, cron_deliver_env_var="SIMPLEX_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send, allowed_users_env="SIMPLEX_ALLOWED_USERS",
+        allow_all_env="SIMPLEX_ALLOW_ALL_USERS", max_message_length=MAX_MESSAGE_LENGTH, emoji="🔒",
+        pii_safe=True,  # SimpleX uses opaque contact IDs only — nothing to redact
         allow_update_command=True,
         platform_hint=(
             "You are chatting via SimpleX Chat, a private decentralised "

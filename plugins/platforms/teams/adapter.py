@@ -42,7 +42,7 @@ def _probe_teams_sdk_available() -> bool:
 
 
 TEAMS_SDK_AVAILABLE = _probe_teams_sdk_available()
-# SDK symbols stay None until check_teams_requirements() binds them.
+# SDK symbols stay None until check_teams_requirements() binds them (via _SDK_IMPORTS below).
 ClientOptions = App = ActivityContext = MessageActivity = ConversationReference = None  # type: ignore[assignment,misc]
 TypingActivityInput = AdaptiveCardInvokeActivity = AdaptiveCardActionCardResponse = None  # type: ignore[assignment,misc]
 AdaptiveCardActionMessageResponse = AdaptiveCardInvokeResponse = InvokeResponse = None  # type: ignore[assignment,misc]
@@ -195,22 +195,20 @@ async def _standalone_send(
         return {"error": "Teams standalone send: TEAMS_CLIENT_ID, TEAMS_CLIENT_SECRET, and TEAMS_TENANT_ID are all required"}
     raw_service_url = os.getenv("TEAMS_SERVICE_URL") or extra.get("service_url", "") or _DEFAULT_TEAMS_SERVICE_URL
     service_url = _validate_teams_service_url(raw_service_url)
-    if service_url is None:
-        return {"error": f"Teams standalone send: TEAMS_SERVICE_URL host is not on the Bot Framework allowlist; "
-                         f"expected one of {sorted(_ALLOWED_TEAMS_SERVICE_HOSTS)}"}
-    if not chat_id:
-        return {"error": "Teams standalone send: chat_id (conversation ID) is required"}
-    if not _TEAMS_CONV_ID_RE.match(chat_id):
-        return {"error": "Teams standalone send: chat_id contains characters outside the Bot Framework conversation ID set"}
-    if not _TEAMS_CONV_ID_RE.match(tenant_id):
-        return {"error": "Teams standalone send: TEAMS_TENANT_ID contains characters outside the expected set"}
+    for failed, error in (
+        (service_url is None, f"TEAMS_SERVICE_URL host is not on the Bot Framework allowlist; "
+                              f"expected one of {sorted(_ALLOWED_TEAMS_SERVICE_HOSTS)}"),
+        (not chat_id, "chat_id (conversation ID) is required"),
+        (not _TEAMS_CONV_ID_RE.match(chat_id or ""), "chat_id contains characters outside the Bot Framework conversation ID set"),
+        (not _TEAMS_CONV_ID_RE.match(tenant_id), "TEAMS_TENANT_ID contains characters outside the expected set"),
+        (not AIOHTTP_AVAILABLE, "aiohttp not installed"),
+    ):
+        if failed:
+            return {"error": f"Teams standalone send: {error}"}
     token_url, token_form = _bf_token_request(tenant_id, client_id, client_secret)
     activities_url = f"{service_url}v3/conversations/{chat_id}/activities"
-    if not AIOHTTP_AVAILABLE:
-        return {"error": "Teams standalone send: aiohttp not installed"}
     try:
         import aiohttp as _aiohttp
-
         # Per-request timeouts so a slow STS endpoint cannot starve the activity POST.
         per_request_timeout = _aiohttp.ClientTimeout(total=15.0)
         async with _aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
@@ -733,17 +731,11 @@ _SETUP_CREDENTIALS = (
     ("Client ID", "TEAMS_CLIENT_ID", {}),
     ("Client secret", "TEAMS_CLIENT_SECRET", {"password": True}),
     ("Tenant ID", "TEAMS_TENANT_ID", {}))
-_SETUP_INTRO = (
-    "You'll need the Teams CLI. If you haven't already:",
-    "  npm install -g @microsoft/teams.cli@preview",
-    "  teams login",
-    "",
-    "Then expose port 3978 publicly (devtunnel / ngrok / cloudflared),",
-    "and create your bot:",
-    '  teams app create --name "Hermes" --endpoint "https://<tunnel>/api/messages"',
-    "",
-    "The CLI will print CLIENT_ID, CLIENT_SECRET, and TENANT_ID. Paste them below.",
-    "")
+_SETUP_INTRO = (  # "" → blank line
+    "You'll need the Teams CLI. If you haven't already:", "  npm install -g @microsoft/teams.cli@preview",
+    "  teams login", "", "Then expose port 3978 publicly (devtunnel / ngrok / cloudflared),", "and create your bot:",
+    '  teams app create --name "Hermes" --endpoint "https://<tunnel>/api/messages"', "",
+    "The CLI will print CLIENT_ID, CLIENT_SECRET, and TENANT_ID. Paste them below.", "")
 
 
 def interactive_setup() -> None:
@@ -755,7 +747,6 @@ def interactive_setup() -> None:
         print_info(f"Teams: already configured (app ID: {existing_id})")
         if not prompt_yes_no("Reconfigure Teams?", False):
             return
-
     for line in _SETUP_INTRO:
         print_info(line) if line else print()
     for label, env_key, prompt_kwargs in _SETUP_CREDENTIALS:
@@ -764,7 +755,6 @@ def interactive_setup() -> None:
             print_warning(f"{label} is required — skipping Teams setup")
             return
         save_env_value(env_key, value.strip())
-
     print()
     print_info("To find your AAD object ID for the allowlist: teams status --verbose")
     if prompt_yes_no("Restrict access to specific users? (recommended)", True):
@@ -777,7 +767,6 @@ def interactive_setup() -> None:
     else:
         save_env_value("TEAMS_ALLOW_ALL_USERS", "true")
         print_warning("⚠️  Open access — anyone who can message the bot can command it.")
-
     print()
     print_success("Teams configuration saved to ~/.hermes/.env")
     print_info("Install the app in Teams:  teams app install --id <teamsAppId>")
@@ -800,24 +789,18 @@ def _install_hint() -> str:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
-        name="teams",
-        label="Microsoft Teams",
-        adapter_factory=lambda cfg: TeamsAdapter(cfg),
+        name="teams", label="Microsoft Teams", adapter_factory=lambda cfg: TeamsAdapter(cfg),
         check_fn=check_requirements,  # PASSIVE probe — never installs
         ensure_deps_fn=check_teams_requirements,  # ACTIVE lazy-installer, run by create_adapter()
-        validate_config=validate_config,
-        is_connected=is_connected,
+        validate_config=validate_config, is_connected=is_connected,
         required_env=["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
-        install_hint=_install_hint(),
-        setup_fn=interactive_setup,
+        install_hint=_install_hint(), setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,  # env-only setups show up in gateway status
         cron_deliver_env_var="TEAMS_HOME_CHANNEL",  # deliver=teams cron home-channel routing
         standalone_sender_fn=_standalone_send,  # out-of-process cron delivery via Bot Framework REST
-        allowed_users_env="TEAMS_ALLOWED_USERS",
-        allow_all_env="TEAMS_ALLOW_ALL_USERS",
+        allowed_users_env="TEAMS_ALLOWED_USERS", allow_all_env="TEAMS_ALLOW_ALL_USERS",
         max_message_length=28000,  # Teams supports up to ~28 KB per message
-        emoji="💼",
-        allow_update_command=True,
+        emoji="💼", allow_update_command=True,
         platform_hint=(
             "You are chatting via Microsoft Teams. Teams renders a subset of "
             "markdown — bold (**text**), italic (*text*), and inline code "
