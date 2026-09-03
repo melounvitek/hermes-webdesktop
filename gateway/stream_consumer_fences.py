@@ -10,20 +10,16 @@ def escape_code_fences_for_display(text: str) -> str:
 
     Reasoning content that quotes code would otherwise break the outer fence.
     """
-    if not isinstance(text, str) or "```" not in text:
-        return text
-    return text.replace("```", "\\`\\`\\`")
+    return text.replace("```", "\\`\\`\\`") if isinstance(text, str) else text
 
 
 def ensure_closed_code_fences(text: str) -> str:
     """Append a closing ``` and/or ` if the text has orphaned code markers.
 
-    Output truncated mid-code-block (token limit, finish_reason="length") would
-    otherwise render everything after the orphan as one code block / inline
-    span.  Trade-off: a spurious close creates a brief empty span at the end,
-    far less harmful than the alternative.  Odd ``` count → append a fence on
-    its own line; then, with complete ```…``` regions stripped, odd ` count →
-    append a backtick.
+    Output truncated mid-code-block (finish_reason="length") would otherwise render
+    everything after the orphan as one code block / inline span; a spurious close is
+    far less harmful.  Odd ``` count → fence on its own line; then, with complete
+    ```…``` regions stripped, odd ` count → a backtick.
     """
     if not isinstance(text, str) or not text:
         return text

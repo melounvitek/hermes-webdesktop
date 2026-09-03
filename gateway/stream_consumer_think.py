@@ -25,6 +25,34 @@ class StreamThinkFilterMixin:
         "</THINKING>", "</thinking>", "</thought>",
     )
 
+    def _at_block_boundary(self, buf: str, idx: int) -> bool:
+        """Tag at ``idx`` starts a block: start of text, or newline + optional whitespace.
+
+        Prose that merely *mentions* a tag must not trigger (mirrors cli.py).
+        """
+        acc_boundary = not self._accumulated or self._accumulated.endswith("\n")
+        if idx == 0:
+            return acc_boundary
+        preceding = buf[:idx]
+        last_nl = preceding.rfind("\n")
+        if last_nl == -1:
+            return acc_boundary and preceding.strip() == ""
+        return preceding[last_nl + 1:].strip() == ""
+
+    def _earliest_open_tag(self, buf: str, lower_buf: str) -> "tuple[int, int]":
+        """(index, length) of the earliest block-boundary opening tag, or (-1, 0)."""
+        best_idx, best_len = -1, 0
+        for tag in self._OPEN_THINK_TAGS:
+            tag_lower = tag.lower()
+            search_start = 0
+            while (idx := lower_buf.find(tag_lower, search_start)) != -1:
+                if self._at_block_boundary(buf, idx):
+                    if best_idx == -1 or idx < best_idx:
+                        best_idx, best_len = idx, len(tag)
+                    break  # first boundary hit for this tag is enough
+                search_start = idx + 1
+        return best_idx, best_len
+
     def _filter_and_accumulate(self, text: str) -> None:
         """Append a delta to the buffer, discarding think blocks.
 
@@ -38,14 +66,11 @@ class StreamThinkFilterMixin:
             # Case-insensitive: models emit <Think>, <THINKING>, …
             lower_buf = buf.lower()
             if self._in_think_block:
-                best_idx = -1
-                best_len = 0
+                best_idx, best_len = -1, 0
                 for tag in self._CLOSE_THINK_TAGS:
                     idx = lower_buf.find(tag.lower())
                     if idx != -1 and (best_idx == -1 or idx < best_idx):
-                        best_idx = idx
-                        best_len = len(tag)
-
+                        best_idx, best_len = idx, len(tag)
                 if best_len:
                     self._in_think_block = False
                     buf = buf[best_idx + best_len:]
@@ -55,60 +80,24 @@ class StreamThinkFilterMixin:
                     self._think_buffer = buf[-max_tag:] if len(buf) > max_tag else buf
                     return
             else:
-                # Earliest opening tag at a block boundary (start of text, or
-                # newline + optional whitespace) — prose that merely *mentions*
-                # a tag must not trigger.
-                best_idx = -1
-                best_len = 0
-                for tag in self._OPEN_THINK_TAGS:
-                    tag_lower = tag.lower()
-                    search_start = 0
-                    while True:
-                        idx = lower_buf.find(tag_lower, search_start)
-                        if idx == -1:
-                            break
-                        # Block-boundary check (mirrors cli.py logic)
-                        if idx == 0:
-                            is_boundary = (
-                                not self._accumulated
-                                or self._accumulated.endswith("\n")
-                            )
-                        else:
-                            preceding = buf[:idx]
-                            last_nl = preceding.rfind("\n")
-                            if last_nl == -1:
-                                is_boundary = (
-                                    (not self._accumulated
-                                     or self._accumulated.endswith("\n"))
-                                    and preceding.strip() == ""
-                                )
-                            else:
-                                is_boundary = preceding[last_nl + 1:].strip() == ""
-
-                        if is_boundary and (best_idx == -1 or idx < best_idx):
-                            best_idx = idx
-                            best_len = len(tag)
-                            break  # first boundary hit for this tag is enough
-                        search_start = idx + 1
-
+                best_idx, best_len = self._earliest_open_tag(buf, lower_buf)
                 if best_len:
                     self._append_accumulated(buf[:best_idx])
                     self._in_think_block = True
                     buf = buf[best_idx + best_len:]
                 else:
                     # Hold back a partial open tag at the tail.
-                    held_back = 0
-                    for tag in self._OPEN_THINK_TAGS:
-                        tag_lower = tag.lower()
-                        for i in range(1, len(tag)):
-                            if lower_buf.endswith(tag_lower[:i]) and i > held_back:
-                                held_back = i
+                    held_back = max(
+                        (i for tag in self._OPEN_THINK_TAGS for i in range(1, len(tag))
+                         if lower_buf.endswith(tag.lower()[:i])),
+                        default=0,
+                    )
                     if held_back:
                         self._append_accumulated(buf[:-held_back])
                         self._think_buffer = buf[-held_back:]
                     else:
-                        # An orphan </think> (thinking-mode toggle dropped the
-                        # open, or incomplete upstream stripping) is noise.
+                        # An orphan </think> (thinking-mode toggle dropped the open, or
+                        # incomplete upstream stripping) is noise.
                         self._append_accumulated(self._strip_orphan_close_tags(buf))
                     return
 
@@ -129,9 +118,8 @@ class StreamThinkFilterMixin:
             if text_lower[i:i + 2] == "</":
                 for tag in cls._CLOSE_THINK_TAGS:
                     tag_lower = tag.lower()
-                    tag_len = len(tag_lower)
-                    if text_lower[i:i + tag_len] == tag_lower:
-                        j = i + tag_len
+                    if text_lower.startswith(tag_lower, i):
+                        j = i + len(tag_lower)
                         while j < len(text) and text[j] in " \t\n\r":
                             j += 1
                         i = j
