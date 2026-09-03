@@ -147,7 +147,13 @@ def _check_directory_structure(should_fix: bool) -> Finding:
     memories_dir = hermes_home / "memories"
     if not memory_on:
         check_info("Built-in memory files disabled by config")
-    elif memories_dir.exists():
+    elif not memories_dir.exists():
+        check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
+        if should_fix:
+            memories_dir.mkdir(parents=True, exist_ok=True)
+            check_ok(f"Created {_DHH}/memories/")
+            f.fixed += 1
+    else:
         check_ok(f"{_DHH}/memories/ directory exists")
         for enabled, fname in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")):
             mem_file = memories_dir / fname
@@ -155,12 +161,6 @@ def _check_directory_structure(should_fix: bool) -> Finding:
                 check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
             elif enabled:
                 check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
-    else:
-        check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
-        if should_fix:
-            memories_dir.mkdir(parents=True, exist_ok=True)
-            check_ok(f"Created {_DHH}/memories/")
-            f.fixed += 1
     return f
 
 
@@ -173,12 +173,22 @@ def _session_count(state_db_path: Path):
         conn.close()
 
 
-def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, *,
-                     ok_label, not_fixed_label: str, failed_issue: str, fix_hint: str) -> None:
-    """Shared --fix path for both state.db corruption classes (FTS write health, malformed schema).
+# Corruption class -> (ok label, not-fixed label, failed issue, fix hint). ``{count}`` = recovered sessions.
+_STATE_DB_REPAIRS = {
+    "fts": ("Repaired state.db FTS write health",
+            "state.db FTS write-health repair did not recover automatically",
+            "state.db FTS write corruption and auto-repair failed — restore from the backup copy beside state.db",
+            "state.db FTS write corruption — run 'hermes doctor --fix' (or 'hermes sessions repair') to rebuild the FTS index"),
+    "schema": ("Repaired state.db schema ({count} sessions recovered)",
+               "state.db schema repair did not recover automatically",
+               "state.db schema malformed and auto-repair failed — restore from the backup copy beside state.db",
+               "state.db schema malformed — run 'hermes doctor --fix' (or 'hermes sessions repair') to recover hidden sessions"),
+}
 
-    ``ok_label`` is a str, or a callable given the recovered session count.
-    """
+
+def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, kind: str) -> None:
+    """Shared --fix path for both state.db corruption classes (FTS write health, malformed schema)."""
+    ok_label, not_fixed_label, failed_issue, fix_hint = _STATE_DB_REPAIRS[kind]
     if not should_fix:
         f.issues.append(fix_hint)
         return
@@ -188,11 +198,11 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, *,
         check_warn(not_fixed_label, f"({report.get('error')}; backup: {report.get('backup_path')})")
         f.issues.append(failed_issue)
         return
-    if callable(ok_label):
+    if "{count}" in ok_label:
         try:
-            ok_label = ok_label(_session_count(state_db_path))
+            ok_label = ok_label.format(count=_session_count(state_db_path))
         except Exception:
-            ok_label = ok_label("?")
+            ok_label = ok_label.format(count="?")
     backup_name = Path(report["backup_path"]).name if report.get("backup_path") else "n/a"
     check_ok(ok_label, f"(strategy: {report.get('strategy')}; backup: {backup_name})")
     f.fixed += 1
@@ -208,15 +218,7 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
         _write_reason = _db_opens_cleanly(state_db_path)
         if _write_reason is not None:
             check_warn(f"{_DHH}/state.db fails a write-health probe (FTS index may be corrupt)", f"({_write_reason})")
-            _repair_state_db(
-                f, should_fix, state_db_path,
-                ok_label="Repaired state.db FTS write health",
-                not_fixed_label="state.db FTS write-health repair did not recover automatically",
-                failed_issue="state.db FTS write corruption and auto-repair failed — "
-                             "restore from the backup copy beside state.db",
-                fix_hint="state.db FTS write corruption — run 'hermes doctor --fix' "
-                         "(or 'hermes sessions repair') to rebuild the FTS index",
-            )
+            _repair_state_db(f, should_fix, state_db_path, "fts")
     except Exception as e:
         from hermes_state import is_malformed_db_error
         if not is_malformed_db_error(e):
@@ -225,15 +227,7 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
         # sqlite_master itself is malformed (e.g. duplicate messages_fts): every statement fails
         # before it runs, so this is NOT a plain FTS rebuild — repair sqlite_master in place (backup first).
         check_warn(f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)", f"({e})")
-        _repair_state_db(
-            f, should_fix, state_db_path,
-            ok_label=lambda count: f"Repaired state.db schema ({count} sessions recovered)",
-            not_fixed_label="state.db schema repair did not recover automatically",
-            failed_issue="state.db schema malformed and auto-repair failed — "
-                         "restore from the backup copy beside state.db",
-            fix_hint="state.db schema malformed — run 'hermes doctor --fix' "
-                     "(or 'hermes sessions repair') to recover hidden sessions",
-        )
+        _repair_state_db(f, should_fix, state_db_path, "schema")
 
 
 def _state_db_stats(issues: list, state_db_path: Path) -> None:
@@ -257,22 +251,20 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
 def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
     """WAL file size (unbounded growth indicates missed checkpoints)."""
     wal_path = state_db_path.parent / "state.db-wal"
-    if not wal_path.exists():
-        return
     try:
-        wal_size = wal_path.stat().st_size
+        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
         if wal_size > 50 * 1024 * 1024:  # 50 MB
             check_warn(f"WAL file is large ({wal_size // (1024*1024)} MB)", "(may indicate missed checkpoints)")
-            if should_fix:
-                import sqlite3
-                conn = sqlite3.connect(str(state_db_path))
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                conn.close()
-                new_size = wal_path.stat().st_size if wal_path.exists() else 0
-                check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
-                f.fixed += 1
-            else:
+            if not should_fix:
                 f.issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
+                return
+            import sqlite3
+            conn = sqlite3.connect(str(state_db_path))
+            conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            conn.close()
+            new_size = wal_path.stat().st_size if wal_path.exists() else 0
+            check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
+            f.fixed += 1
         elif wal_size > 10 * 1024 * 1024:  # 10 MB
             check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
     except Exception:
@@ -377,6 +369,18 @@ _MEMORY_PROVIDER_CHECKS = {
 }
 
 
+def _memory_provider_generic(name: str) -> None:
+    """Generic check for other memory providers (openviking, hindsight, etc.)."""
+    from plugins.memory import load_memory_provider
+    _provider = load_memory_provider(name)
+    if _provider and _provider.is_available():
+        check_ok(f"{name} provider active")
+    elif _provider:
+        check_warn(f"{name} configured but not available", "run: hermes memory status")
+    else:
+        check_warn(f"{name} plugin not found", "run: hermes memory setup")
+
+
 def _check_memory_provider(should_fix: bool) -> Finding:
     from hermes_cli.doctor import HERMES_HOME
     f = Finding()
@@ -384,27 +388,16 @@ def _check_memory_provider(should_fix: bool) -> Finding:
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
         return f
-    if name in _MEMORY_PROVIDER_CHECKS:
-        checker, missing_row, missing_issue, label = _MEMORY_PROVIDER_CHECKS[name]
-        try:
-            checker(f.issues)
-        except ImportError:
-            _fail_and_issue(*missing_row, missing_issue, f.issues)
-        except Exception as _e:
-            check_warn(f"{label} check failed", str(_e))
-        return f
-    # Generic check for other memory providers (openviking, hindsight, etc.)
+    checker, missing_row, missing_issue, label = _MEMORY_PROVIDER_CHECKS.get(name, (None, None, None, name))
     try:
-        from plugins.memory import load_memory_provider
-        _provider = load_memory_provider(name)
-        if _provider and _provider.is_available():
-            check_ok(f"{name} provider active")
-        elif _provider:
-            check_warn(f"{name} configured but not available", "run: hermes memory status")
+        checker(f.issues) if checker else _memory_provider_generic(name)
+    except ImportError as _e:
+        if missing_row is None:
+            check_warn(f"{label} check failed", str(_e))
         else:
-            check_warn(f"{name} plugin not found", "run: hermes memory setup")
+            _fail_and_issue(*missing_row, missing_issue, f.issues)
     except Exception as _e:
-        check_warn(f"{name} check failed", str(_e))
+        check_warn(f"{label} check failed", str(_e))
     return f
 
 
