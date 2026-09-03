@@ -134,19 +134,30 @@ def _clip(text: str, n: int = 120) -> str:
     return text[:n] + ("…" if len(text) > n else "")
 
 
+def _exec_out(rid, output: str) -> dict:
+    """command.dispatch display-only result."""
+    return _ok(rid, {"type": "exec", "output": output})
+
+
 def _capture_run_kwargs(timeout: int) -> dict:
     """subprocess.run kwargs shared by cli.exec / shell.exec / quick commands: captured
     text, UTF-8 + lossy decode (non-UTF-8 child output must not crash the gateway thread
     on locale-mismatched Windows), no stdin, no console flash under the desktop parent."""
     from hermes_cli._subprocess_compat import windows_hide_flags
     return dict(
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        stdin=subprocess.DEVNULL,
-        creationflags=windows_hide_flags())
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+
+
+def _captured_exec(rid, cmd, timeout: int, *, on_result, timeout_err: tuple, fail_code: int, **kw) -> dict:
+    """Run ``cmd`` captured (see ``_capture_run_kwargs``) and hand the CompletedProcess to
+    ``on_result``; TimeoutExpired → ``timeout_err`` (code, message), other errors → ``fail_code``."""
+    try:
+        return on_result(subprocess.run(cmd, cwd=os.getcwd(), **kw, **_capture_run_kwargs(timeout)))
+    except subprocess.TimeoutExpired:
+        return _err(rid, *timeout_err)
+    except Exception as e:
+        return _err(rid, fail_code, str(e))
 
 
 def _toolset_rows(params: dict, *, with_tools: bool) -> list[dict]:
@@ -329,102 +340,119 @@ def _(rid, params: dict) -> dict:
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
 
 
+class _Catalog:
+    """Accumulator for commands.catalog: ``pairs`` (every [key, desc]), ``canon`` (lowercase
+    key/alias → canonical key), ``commands`` (key → desktop meta) and ordered categories."""
+
+    def __init__(self) -> None:
+        self.pairs: list[list[str]] = []
+        self.canon: dict[str, str] = {}
+        self.commands: dict[str, dict[str, str | None]] = {}
+        self.cat_map: dict[str, list[list[str]]] = {}
+        self.cat_order: list[str] = []
+
+    def bucket(self, cat: str) -> list[list[str]]:
+        if cat not in self.cat_map:
+            self.cat_map[cat] = []
+            self.cat_order.append(cat)
+        return self.cat_map[cat]
+
+    def add(self, key: str, desc: str, cat: str) -> None:
+        self.canon[key.lower()] = key
+        self.pairs.append([key, desc])
+        self.bucket(cat).append([key, desc])
+
+
+def _catalog_registry(cat: _Catalog) -> None:
+    from hermes_cli.commands import COMMAND_REGISTRY, _build_description, command_desktop_meta
+    for cmd in COMMAND_REGISTRY:
+        meta = command_desktop_meta(cmd)
+        for key in (cmd.name, *cmd.aliases):
+            cat.commands[f"/{key}"] = dict(meta)
+        if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
+            continue
+        cat.add(f"/{cmd.name}", _build_description(cmd), cmd.category)
+        for a in cmd.aliases:
+            cat.canon[f"/{a}".lower()] = f"/{cmd.name}"
+    for name, desc, category in _TUI_EXTRA:
+        # Registry command/alias wins over a colliding TUI extra (e.g. /compact, /sessions).
+        if name.lower() not in cat.canon:
+            cat.add(name, desc, category)
+
+
+def _catalog_quick_commands(cat: _Catalog) -> None:
+    qcmds = _load_cfg().get("quick_commands", {}) or {}
+    if not (isinstance(qcmds, dict) and qcmds):
+        return
+    cat.bucket("User commands")  # category exists even when every entry is malformed
+    for qname, qc in sorted(qcmds.items()):
+        if not isinstance(qc, dict):
+            continue
+        qtype = qc.get("type", "")
+        default_desc = {
+            "exec": f"exec: {qc.get('command', '')}", "alias": f"alias → {qc.get('target', '')}"
+        }.get(qtype, qtype or "quick command")
+        cat.add(f"/{qname}", _clip(str(qc.get("description") or default_desc)), "User commands")
+
+
+def _catalog_plugin_commands(cat: _Catalog) -> None:
+    from hermes_cli.plugins import get_plugin_commands
+    plugin_cmds = get_plugin_commands() or {}
+    if plugin_cmds:
+        cat.bucket("Plugin commands")
+    for pname, info in sorted(plugin_cmds.items()):
+        key = f"/{pname}"
+        if not isinstance(info, dict) or key.lower() in cat.canon:
+            continue
+        cat.add(key, _clip(str(info.get("description") or "Plugin command")), "Plugin commands")
+        mode = info.get("argument_mode")
+        if mode not in {"options", "text", "mixed"}:
+            mode = "text" if str(info.get("args_hint") or "").strip() else None
+        cat.commands[key] = {"argument_mode": mode, "desktop": None}
+
+
+def _catalog_skills(cat: _Catalog, skills: dict[str, dict]) -> None:
+    """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (usage + origin ride
+    along — not a second RPC — because every catalog consumer also ranks by them)."""
+    from agent.skill_commands import scan_skill_commands
+    usage, origin_of = _skill_usage_lookup()
+    for k, info in sorted(scan_skill_commands().items()):
+        cat.pairs.append([k, _clip(str(info.get("description", "Skill")))])
+        name = str(info.get("name") or k.lstrip("/"))
+        skills[k] = {"usage": usage(name), "origin": origin_of(name)}
+
+
 @method("commands.catalog")
 @_guarded(5020)
 def _(rid, params: dict) -> dict:
-    """Registry-backed slash metadata for the TUI — categorized, no aliases."""
-    from hermes_cli.commands import COMMAND_REGISTRY, SUBCOMMANDS, _build_description, command_desktop_meta
-    all_pairs: list[list[str]] = []
-    canon: dict[str, str] = {}
-    commands: dict[str, dict[str, str | None]] = {}
-    cat_map: dict[str, list[list[str]]] = {}
-    cat_order: list[str] = []
-
-    def bucket(cat: str) -> list[list[str]]:
-        if cat not in cat_map:
-            cat_map[cat] = []
-            cat_order.append(cat)
-        return cat_map[cat]
-
-    def add(key: str, desc: str, rows: list[list[str]]) -> None:
-        canon[key.lower()] = key
-        all_pairs.append([key, desc])
-        rows.append([key, desc])
-    for cmd in COMMAND_REGISTRY:
-        meta = command_desktop_meta(cmd)
-        commands[f"/{cmd.name}"] = dict(meta)
-        for alias in cmd.aliases:
-            commands[f"/{alias}"] = dict(meta)
-        if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
-            continue
-        c = f"/{cmd.name}"
-        add(c, _build_description(cmd), bucket(cmd.category))
-        for a in cmd.aliases:
-            canon[f"/{a}".lower()] = c
-    for name, desc, cat in _TUI_EXTRA:
-        # Registry command/alias wins over a colliding TUI extra (e.g. /compact, /sessions).
-        if name.lower() not in canon:
-            add(name, desc, bucket(cat))
+    """Registry-backed slash metadata for the TUI — categorized, no aliases. Discovery
+    failures land in ``warning`` (skills' message wins, then quick commands', then plugins')."""
+    from hermes_cli.commands import SUBCOMMANDS
+    cat = _Catalog()
+    _catalog_registry(cat)
     warning = ""
     try:
-        qcmds = _load_cfg().get("quick_commands", {}) or {}
-        if isinstance(qcmds, dict) and qcmds:
-            rows = bucket("User commands")
-            for qname, qc in sorted(qcmds.items()):
-                if not isinstance(qc, dict):
-                    continue
-                qtype = qc.get("type", "")
-                default_desc = {
-                    "exec": f"exec: {qc.get('command', '')}",
-                    "alias": f"alias → {qc.get('target', '')}",
-                }.get(qtype, qtype or "quick command")
-                add(f"/{qname}", _clip(str(qc.get("description") or default_desc)), rows)
+        _catalog_quick_commands(cat)
     except Exception as e:
         warning = f"quick_commands discovery unavailable: {e}"
     try:
-        from hermes_cli.plugins import get_plugin_commands
-        plugin_cmds = get_plugin_commands() or {}
-        if plugin_cmds:
-            rows = bucket("Plugin commands")
-            for pname, info in sorted(plugin_cmds.items()):
-                if not isinstance(info, dict):
-                    continue
-                key = f"/{pname}"
-                if key.lower() in canon:
-                    continue
-                add(key, _clip(str(info.get("description") or "Plugin command")), rows)
-                hint = str(info.get("args_hint") or "").strip()
-                mode = info.get("argument_mode")
-                if mode not in {"options", "text", "mixed"}:
-                    mode = "text" if hint else None
-                commands[key] = {"argument_mode": mode, "desktop": None}
+        _catalog_plugin_commands(cat)
     except Exception as e:
-        if not warning:
-            warning = f"plugin command discovery unavailable: {e}"
-    skill_count = 0
+        warning = warning or f"plugin command discovery unavailable: {e}"
     skills: dict[str, dict] = {}
     try:
-        from agent.skill_commands import scan_skill_commands
-
-        # Usage + origin ride along (not a second RPC): every catalog consumer also ranks it.
-        usage, origin_of = _skill_usage_lookup()
-        for k, info in sorted(scan_skill_commands().items()):
-            all_pairs.append([k, _clip(str(info.get("description", "Skill")))])
-            name = str(info.get("name") or k.lstrip("/"))
-            skills[k] = {"usage": usage(name), "origin": origin_of(name)}
-            skill_count += 1
+        _catalog_skills(cat, skills)
     except Exception as e:
         warning = f"skill discovery unavailable: {e}"
-    payload = {
-        "pairs": all_pairs,
+    return _ok(rid, {
+        "pairs": cat.pairs,
         "sub": {k: v[:] for k, v in SUBCOMMANDS.items()},
-        "canon": canon,
-        "commands": commands,
-        "categories": [{"name": cat, "pairs": cat_map[cat]} for cat in cat_order],
+        "canon": cat.canon,
+        "commands": cat.commands,
+        "categories": [{"name": c, "pairs": cat.cat_map[c]} for c in cat.cat_order],
         "skills": skills,
-        "skill_count": skill_count,
-        "warning": warning}
-    return _ok(rid, payload)
+        "skill_count": len(skills),
+        "warning": warning})
 
 
 @method("cli.exec")
@@ -436,20 +464,16 @@ def _(rid, params: dict) -> dict:
     hint = _cli_exec_blocked(argv)
     if hint:
         return _ok(rid, {"blocked": True, "hint": hint, "code": -1, "output": ""})
-    try:
-        r = subprocess.run(
-            [sys.executable, "-m", "hermes_cli.main", *argv],
-            cwd=os.getcwd(),
-            # Can drive the agent → needs provider credentials; tier-1 secrets still stripped.
-            env=hermes_subprocess_env(inherit_credentials=True),
-            **_capture_run_kwargs(min(int(params.get("timeout", 240)), 600)))
-        parts = [r.stdout or "", r.stderr or ""]
-        out = "\n".join(p for p in parts if p).strip() or "(no output)"
+
+    def done(r):
+        out = "\n".join(p for p in (r.stdout or "", r.stderr or "") if p).strip() or "(no output)"
         return _ok(rid, {"blocked": False, "code": r.returncode, "output": out[:48_000]})
-    except subprocess.TimeoutExpired:
-        return _err(rid, 5016, "cli.exec: timeout")
-    except Exception as e:
-        return _err(rid, 5017, str(e))
+
+    # Can drive the agent → needs provider credentials; tier-1 secrets still stripped.
+    return _captured_exec(
+        rid, [sys.executable, "-m", "hermes_cli.main", *argv], min(int(params.get("timeout", 240)), 600),
+        on_result=done, timeout_err=(5016, "cli.exec: timeout"), fail_code=5017,
+        env=hermes_subprocess_env(inherit_credentials=True))
 
 
 @method("command.resolve")
@@ -482,7 +506,7 @@ def _dispatch_quick(rid, params, session, name, arg):
             output = redact_sensitive_text(output)
         if r.returncode != 0:
             return _err(rid, 4018, output or f"quick command failed with exit code {r.returncode}")
-        return _ok(rid, {"type": "exec", "output": output})
+        return _exec_out(rid, output)
     if qc.get("type") == "alias":
         return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
     return None
@@ -544,9 +568,7 @@ def _dispatch_bundle(rid, params, session, name, arg):
     from agent.skill_bundles import build_bundle_invocation_message, get_skill_bundles
     try:
         bundle_result = build_bundle_invocation_message(
-            bundle_key,
-            arg,
-            task_id=session.get("session_key", "") if session else "",
+            bundle_key, arg, task_id=session.get("session_key", "") if session else "",
             platform=_resolve_session_platform())
     except Exception as exc:
         return _err(rid, 4018, f"bundle dispatch failed: {exc}")
@@ -588,19 +610,17 @@ def _cmd_queue(rid, params, session, name, arg):
 
 
 def _cmd_learn(rid, params, session, name, arg):
-    # Submitted as a normal turn; the live agent gathers sources and authors the skill via skill_manage.
+    # Normal turn: the live agent gathers sources and authors the skill via skill_manage.
     from agent.learn_prompt import build_learn_prompt
     return _ok(rid, {"type": "send", "message": build_learn_prompt(arg)})
 
 
 def _cmd_plan(rid, params, session, name, arg):
-    # Normal turn (as /learn); the agent saves the plan under .hermes/plans/ via write_file.
     from agent.plan_prompt import build_plan_prompt
     return _ok(rid, {"type": "send", "message": build_plan_prompt(arg)})
 
 
 def _cmd_init(rid, params, session, name, arg):
-    # Generate-or-update AGENTS.md as a normal turn (as /learn).
     from hermes_cli.init_command import build_init_prompt_for_cwd
     return _ok(rid, {"type": "send", "message": build_init_prompt_for_cwd(extra=arg)})
 
@@ -621,29 +641,22 @@ def _cmd_moa(rid, params, session, name, arg):
         agent = session.get("agent")
         session["moa_one_shot_restore"] = {
             "override": session.get("model_override"),
-            "model": getattr(agent, "model", None) if agent else None,
-            "provider": getattr(agent, "provider", None) if agent else None}
+            "model": getattr(agent, "model", None),
+            "provider": getattr(agent, "provider", None)}
         if agent is not None:
             try:
+                # persist_override=False: turn-scoped, never persist the MoA provider to config.yaml
                 _apply_model_switch(
-                    sid,
-                    session,
-                    f"{preset} --provider moa",
-                    confirm_expensive_model=False,
-                    pin_session_override=True,
-                    persist_override=False,  # turn-scoped: never persist the MoA provider to config.yaml
-                )
+                    sid, session, f"{preset} --provider moa", confirm_expensive_model=False,
+                    pin_session_override=True, persist_override=False)
             except Exception as exc:
                 session.pop("moa_one_shot_restore", None)
                 return _err(rid, 5030, f"moa unavailable: {exc}")
         else:
             # Lazy/fresh session: the override is consumed by the first build.
             session["model_override"] = {
-                "provider": "moa",
-                "model": preset,
-                "base_url": "moa://local",
-                "api_key": "moa-virtual-provider",
-                "api_mode": "chat_completions"}
+                "provider": "moa", "model": preset, "base_url": "moa://local",
+                "api_key": "moa-virtual-provider", "api_mode": "chat_completions"}
         notice = f"MoA one-shot queued with preset {preset}; previous model will be restored after this turn."
         return _ok(rid, {"type": "send", "notice": notice, "message": arg})
     except Exception as exc:
@@ -661,14 +674,14 @@ def _cmd_focus(rid, params, session, name, arg):
         return _err(rid, 4004, "usage: /focus [on|off|status]")
     if action == "status":
         saved = display.get("focus_saved_tool_progress") or _load_tool_progress_mode()
-        return _ok(rid, {"type": "exec", "output": format_focus_status(cur, saved)})
+        return _exec_out(rid, format_focus_status(cur, saved))
     res = _methods["config.set"](
         rid, {"key": "focus", "value": "on" if target else "off", "session_id": params.get("session_id", "")}
     )
     if "error" in res:
         return res
     output = format_focus_toggle_message(bool(target), (res.get("result") or {}).get("tool_progress") or "all")
-    return _ok(rid, {"type": "exec", "output": output})
+    return _exec_out(rid, output)
 
 
 def _cmd_retry(rid, params, session, name, arg):
@@ -709,11 +722,10 @@ def _cmd_steer(rid, params, session, name, arg):
         try:
             if agent.steer(arg):
                 shown = f"{arg[:80]}{'...' if len(arg) > 80 else ''}"
-                return _ok(rid, {"type": "exec", "output": f"⏩ Steer queued — arrives after the next tool call: {shown}"})
+                return _exec_out(rid, f"⏩ Steer queued — arrives after the next tool call: {shown}")
         except Exception:
             pass
-    # No active run: treat as next-turn message.
-    return _ok(rid, {"type": "send", "message": arg})
+    return _ok(rid, {"type": "send", "message": arg})  # no active run: next-turn message
 
 
 def _cmd_goal(rid, params, session, name, arg):
@@ -731,26 +743,26 @@ def _cmd_goal(rid, params, session, name, arg):
     mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
     lower = arg.strip().lower()
     if not arg.strip() or lower == "status":
-        return _ok(rid, {"type": "exec", "output": mgr.status_line()})
+        return _exec_out(rid, mgr.status_line())
     if lower == "pause":
         state = mgr.pause(reason="user-paused")
         out = "No goal set." if state is None else f"⏸ Goal paused: {state.goal}"
-        return _ok(rid, {"type": "exec", "output": out})
+        return _exec_out(rid, out)
     if lower == "resume":
         state = mgr.resume()
         if state is None:
-            return _ok(rid, {"type": "exec", "output": "No goal to resume."})
+            return _exec_out(rid, "No goal to resume.")
         # Resume must restart work: `exec` is display-only, so return a `send` with the
         # continuation prompt; `display` keeps model-facing scaffolding out of the transcript.
         prompt = mgr.next_continuation_prompt()
         if not prompt:
-            return _ok(rid, {"type": "exec", "output": f"▶ Goal resumed: {state.goal}"})
+            return _exec_out(rid, f"▶ Goal resumed: {state.goal}")
         notice = f"▶ Goal resumed: {state.goal}\nContinuing now — taking the next step."
         return _ok(rid, {"type": "send", "notice": notice, "message": prompt, "display": "/goal resume"})
     if lower in {"clear", "stop", "done"}:
         had = mgr.has_goal()
         mgr.clear()
-        return _ok(rid, {"type": "exec", "output": "✓ Goal cleared." if had else "No active goal."})
+        return _exec_out(rid, "✓ Goal cleared." if had else "No active goal.")
 
     # Remaining text = new goal. Client renders `notice`, submits `message`; the post-turn judge takes over.
     try:
@@ -765,7 +777,6 @@ def _cmd_goal(rid, params, session, name, arg):
 
 
 def _cmd_loop(rid, params, session, name, arg):
-    # Recurring in-session wakeups; the notification poller fires due ones while the session is idle.
     sid_key, err = _session_key_or_err(rid, session)
     if err:
         return err
@@ -782,11 +793,10 @@ def _cmd_loop(rid, params, session, name, arg):
                 output += (
                     "\nNote: an active /goal is driving this session — loop "
                     "wakeups defer until the goal finishes, pauses, or parks.")
-    return _ok(rid, {"type": "exec", "output": output})
+    return _exec_out(rid, output)
 
 
 def _cmd_undo(rid, params, session, name, arg):
-    # /undo [N]: back up N user turns, soft-delete truncated rows on disk, prefill the composer.
     if not session:
         return _err(rid, 4001, "no active session to undo")
     if busy := _busy_error(rid, session, "undo"):
@@ -843,7 +853,7 @@ def _cmd_snapshot(rid, params, session, name, arg):
         "/snapshot restore is blocked in the TUI because it changes config/state on disk "
         "while the live agent has cached settings. Run it in the classic CLI, then restart the TUI."
     )
-    return _ok(rid, {"type": "exec", "output": output})
+    return _exec_out(rid, output)
 
 
 def _cmd_compress(rid, params, session, name, arg):
@@ -861,13 +871,12 @@ def _cmd_compress(rid, params, session, name, arg):
         return _ok(rid, payload)
     try:
         output = _compress_live_with_feedback(sid, session, session["agent"], arg, snapshot_kwargs=True)
-        return _ok(rid, {"type": "exec", "output": output})
+        return _exec_out(rid, output)
     except Exception as exc:
         finalize_context_engine_compression_notification(session["agent"], committed=False)
         return _err(rid, 5009, f"compress failed: {exc}")
 
 
-# name → built-in handler (values are rebound onto server globals by bind_module).
 _SLASH_BUILTINS = {
     "queue": _cmd_queue, "q": _cmd_queue, "learn": _cmd_learn, "plan": _cmd_plan, "init": _cmd_init,
     "moa": _cmd_moa, "focus": _cmd_focus, "retry": _cmd_retry, "steer": _cmd_steer, "goal": _cmd_goal,
@@ -1189,9 +1198,7 @@ def _(rid, params: dict) -> dict:
     if action == "add":
         # Optional repeat / continuity / deliver ('bot-chat[:name]'): None keeps each cronjob() default.
         raw = cronjob(
-            action="create",
-            name=jid,
-            schedule=params.get("schedule", ""),
+            action="create", name=jid, schedule=params.get("schedule", ""),
             prompt=params.get("prompt", ""),
             repeat=int(params["repeat"]) if str(params.get("repeat", "")).strip().isdigit() else None,
             continuity=is_truthy_value(params.get("continuity")) if params.get("continuity") is not None else None,
@@ -1236,6 +1243,11 @@ for _rpc, _fn, _keys in (
 del _rpc, _fn, _keys
 
 
+class _QuietConsole:
+    def print(self, *a, **k):
+        pass
+
+
 def _skills_list(rid, params, query):
     from hermes_cli.banner import get_available_skills
     return _ok(rid, {"skills": get_available_skills()})
@@ -1249,11 +1261,7 @@ def _skills_search(rid, params, query):
 
 def _skills_install(rid, params, query):
     from hermes_cli.skills_hub import do_install
-
-    class _Q:
-        def print(self, *a, **k):
-            pass
-    do_install(query, skip_confirm=True, console=_Q())
+    do_install(query, skip_confirm=True, console=_QuietConsole())
     return _ok(rid, {"installed": True, "name": query})
 
 
@@ -1268,21 +1276,20 @@ def _skills_inspect(rid, params, query):
     return _ok(rid, {"info": inspect_skill(query) or {}})
 
 
+_SKILLS_ACTIONS = {
+    "list": _skills_list, "search": _skills_search, "install": _skills_install, "browse": _skills_browse,
+    "inspect": _skills_inspect}
+
+
 @method("skills.manage")
 @_profile_scoped_rpc(5024)
 def _(rid, params: dict) -> dict:
     """list/install use the scoped profile's skills dir; search/browse/inspect hit the shared hub."""
-    action, query = params.get("action", "list"), params.get("query", "")
-    handler = {
-        "list": _skills_list,
-        "search": _skills_search,
-        "install": _skills_install,
-        "browse": _skills_browse,
-        "inspect": _skills_inspect,
-    }.get(action)
+    action = params.get("action", "list")
+    handler = _SKILLS_ACTIONS.get(action)
     if handler is None:
         return _err(rid, 4017, f"unknown skills action: {action}")
-    return handler(rid, params, query)
+    return handler(rid, params, params.get("query", ""))
 
 
 @method("skills.reload")
@@ -1321,14 +1328,13 @@ def _(rid, params: dict) -> dict:
         except Exception:
             requires = []
         transport = getattr(entry, "transport", None)  # TransportSpec → its kind string
-        out.append(
-            {
-                "name": entry.name,
-                "description": getattr(entry, "description", "") or "",
-                "installed": bool(mcp_catalog.is_installed(entry.name)),
-                "enabled": bool(mcp_catalog.is_enabled(entry.name)),
-                "requires": requires,
-                "transport": str(getattr(transport, "kind", "") or transport or "stdio")})
+        out.append({
+            "name": entry.name,
+            "description": getattr(entry, "description", "") or "",
+            "installed": bool(mcp_catalog.is_installed(entry.name)),
+            "enabled": bool(mcp_catalog.is_enabled(entry.name)),
+            "requires": requires,
+            "transport": str(getattr(transport, "kind", "") or transport or "stdio")})
     return _ok(rid, {"servers": out})
 
 
@@ -1357,11 +1363,8 @@ def _(rid, params: dict) -> dict:
     server_config: dict = dict(raw_cfg) if isinstance(raw_cfg, dict) else {}
     if preset:  # fills url/command/args when omitted; mutates server_config in place
         _apply_mcp_preset(
-            name,
-            preset_name=preset,
-            url=server_config.get("url"),
-            command=server_config.get("command"),
-            cmd_args=list(server_config.get("args") or []),
+            name, preset_name=preset, url=server_config.get("url"),
+            command=server_config.get("command"), cmd_args=list(server_config.get("args") or []),
             server_config=server_config)
     if not server_config.get("url") and not server_config.get("command"):
         return _err(rid, 4063, "config must specify a 'url' (http) or 'command' (stdio), or a valid 'preset'")
@@ -1402,10 +1405,8 @@ def _(rid, params: dict) -> dict:
     else:
         save_env_value(env_var, str(value))
         env_block = entry.get("env")
-        if not isinstance(env_block, dict):
-            env_block = {}
+        entry["env"] = env_block = env_block if isinstance(env_block, dict) else {}
         env_block[env_var] = f"${{{env_var}}}"
-        entry["env"] = env_block
     cfg = load_config()
     cfg.setdefault("mcp_servers", {})[name] = entry
     save_config(cfg)
@@ -1489,15 +1490,18 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"ok": True, "session_id": result["session_id"], "auth_url": result["auth_url"], "flow": result["flow"]})
 
 
+def _oauth_flow_ids(params: dict) -> tuple[str, str]:
+    """(session_id, name) as stripped strings."""
+    return str(params.get("session_id") or "").strip(), str(params.get("name") or "").strip()
+
+
 @method("mcp.servers.oauth.poll")
 @_profile_scoped_rpc(5024, required=_NAME_SESSION, catch_resolve=False)
 def _(rid, params: dict) -> dict:
     """Poll a flow → ``{ok, status: pending|approved|error, error_message?, auth_url?, tools?}``.
     On ``approved`` tokens persist for that server/profile (profile scope applies here too)."""
     from tui_gateway import mcp_oauth_sessions
-    name = str(params.get("name") or "").strip()
-    session_id = str(params.get("session_id") or "").strip()
-    result = mcp_oauth_sessions.poll_flow(session_id, name)
+    result = mcp_oauth_sessions.poll_flow(*_oauth_flow_ids(params))
     return _ok(rid, {"ok": True, **result})
 
 
@@ -1507,15 +1511,9 @@ def _(rid, params: dict) -> dict:
     """Relay a client-captured redirect (``code``/``state``/``error``) into a flow started with
     ``client_redirect_uri``. ``{ok: true}`` once accepted (state verified), else ``{ok: false, error_message}``."""
     from tui_gateway import mcp_oauth_sessions
-    name = str(params.get("name") or "").strip()
-    session_id = str(params.get("session_id") or "").strip()
-    result = mcp_oauth_sessions.deliver_callback_flow(
-        session_id,
-        name,
-        code=str(params.get("code") or "") or None,
-        state=str(params.get("state") or "") or None,
-        error=str(params.get("error") or "") or None)
-    return _ok(rid, result)
+    code, state, error = (str(params.get(k) or "") or None for k in ("code", "state", "error"))
+    session_id, name = _oauth_flow_ids(params)
+    return _ok(rid, mcp_oauth_sessions.deliver_callback_flow(session_id, name, code=code, state=state, error=error))
 
 
 # ─── Plugins ─────────────────────────────────────────────────────────────────
@@ -1523,12 +1521,8 @@ def _(rid, params: dict) -> dict:
 
 def _plugin_rows() -> list[dict]:
     from hermes_cli.plugins_cmd import (
-        _bundled_default_on,
-        _discover_all_plugins,
-        _get_disabled_set,
-        _get_enabled_set,
-        _is_portable_plugin_dir,
-        _plugin_status)
+        _bundled_default_on, _discover_all_plugins, _get_disabled_set, _get_enabled_set,
+        _is_portable_plugin_dir, _plugin_status)
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
     out = []
@@ -1538,16 +1532,11 @@ def _plugin_rows() -> list[dict]:
         # truthful default instead of "not enabled" (reads as OFF).
         if status == "not enabled" and source == "bundled" and _bundled_default_on(_dir):
             status = "enabled"
-        out.append(
-            {
-                "name": name,
-                "key": key,  # canonical registry key (``image_gen/fal``): names collide across category dirs
-                "version": str(version or ""),
-                "description": desc or "",
-                "source": source,
-                "status": status,
-                "portable": _is_portable_plugin_dir(_dir),  # Agent Plugins v1 package vs native Hermes plugin
-            })
+        # key = canonical registry key (``image_gen/fal``; names collide across category dirs);
+        # portable = Agent Plugins v1 package vs native Hermes plugin.
+        out.append({
+            "name": name, "key": key, "version": str(version or ""), "description": desc or "",
+            "source": source, "status": status, "portable": _is_portable_plugin_dir(_dir)})
     return out
 
 
@@ -1582,6 +1571,9 @@ def _plugins_install(rid, params):
     return _ok(rid, result)
 
 
+_PLUGINS_ACTIONS = {"list": _plugins_list, "toggle": _plugins_toggle, "install": _plugins_install}
+
+
 @method("plugins.manage")
 @_profile_scoped_rpc(5026, catch_resolve=False)
 def _(rid, params: dict) -> dict:
@@ -1591,7 +1583,7 @@ def _(rid, params: dict) -> dict:
       - ``install`` → git-clone ``identifier``/``repo`` into ~/.hermes/plugins/ (``force``, ``enable`` default True)
     Optional ``profile`` scopes HERMES_HOME (mcp.servers.* contract)."""
     action = params.get("action", "list")
-    handler = {"list": _plugins_list, "toggle": _plugins_toggle, "install": _plugins_install}.get(action)
+    handler = _PLUGINS_ACTIONS.get(action)
     if handler is None:
         return _err(rid, 4017, f"unknown plugins action: {action}")
     return handler(rid, params)
@@ -1612,13 +1604,9 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4005, f"blocked: {desc}. Use the agent for dangerous commands.")
     except ImportError:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
-    try:
-        r = subprocess.run(cmd, shell=True, cwd=os.getcwd(), **_capture_run_kwargs(30))
-        return _ok(rid, {"stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:], "code": r.returncode})
-    except subprocess.TimeoutExpired:
-        return _err(rid, 5002, "command timed out (30s)")
-    except Exception as e:
-        return _err(rid, 5003, str(e))
+    return _captured_exec(
+        rid, cmd, 30, shell=True, fail_code=5003, timeout_err=(5002, "command timed out (30s)"),
+        on_result=lambda r: _ok(rid, {"stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:], "code": r.returncode}))
 
 
 def register(server) -> None:

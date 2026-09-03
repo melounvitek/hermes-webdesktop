@@ -16,9 +16,6 @@ _registry = HandlerRegistry()
 
 # ── Live-session slash output ────────────────────────────────────────
 
-_LIVE_SESSION_DIRECT_COMMANDS = frozenset(
-    {"clear", "compress", "effort", "history", "models", "prompt", "rename", "review", "status", "usage"}
-)
 # Answered from the live session ONLY when the agent lives on a compute host.
 _ISOLATED_SESSION_READ_COMMANDS = frozenset({"context", "tools", "help"})
 
@@ -26,7 +23,7 @@ _NO_AGENT_USAGE = "(._.) No active agent -- send a message first."
 _NO_AGENT = "No active agent -- send a message first."
 
 
-def _format_live_review_output(session: Optional[dict], arg: str) -> str:
+def _format_live_review_output(sid: str, session: Optional[dict], arg: str) -> str:
     """Dispatch /review against the live session's agent.
 
     The reviewer subagent runs on the async delegation rail; the TUI notification
@@ -57,7 +54,7 @@ def _format_live_review_output(session: Optional[dict], arg: str) -> str:
     return format_dispatch_note(result, arg or "")
 
 
-def _format_live_usage_output(session: dict) -> str:
+def _format_live_usage_output(sid: str, session: dict, arg: str) -> str:
     agent = session.get("agent")
     usage = _session_usage_snapshot(session)
     if agent is None and not usage:
@@ -105,7 +102,7 @@ def _live_session_messages(session: dict) -> Optional[list]:
     return None
 
 
-def _format_live_history_output(session: dict) -> str:
+def _format_live_history_output(sid: str, session: dict, arg: str) -> str:
     with session["history_lock"]:
         history = list(session.get("history", []))
     db_history = _live_session_messages(session)
@@ -123,7 +120,7 @@ def _format_live_history_output(session: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_live_prompt_output(session: dict) -> str:
+def _format_live_prompt_output(sid: str, session: dict, arg: str) -> str:
     agent = session.get("agent")
     mirror = _metadata_mirror(session)
     if agent is None and "system_prompt" not in mirror:
@@ -138,7 +135,7 @@ def _format_live_prompt_output(session: dict) -> str:
     return f"Current system prompt:\n{prompt}"
 
 
-def _format_live_context_output(session: dict) -> str:
+def _format_live_context_output(sid: str, session: dict, arg: str) -> str:
     try:
         messages = _history_to_messages(_live_session_messages(session) or [])
     except Exception:
@@ -173,7 +170,7 @@ def _format_live_context_output(session: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_live_tools_output(session: dict) -> str:
+def _format_live_tools_output(sid: str, session: dict, arg: str) -> str:
     info = _session_info(session.get("agent"), session)
     groups = info.get("tools") if isinstance(info, dict) else {}
     if not isinstance(groups, dict) or not groups:
@@ -184,7 +181,7 @@ def _format_live_tools_output(session: dict) -> str:
     return "Available tools ({}):\n{}".format(len(names), "\n".join(f"  {name}" for name in names))
 
 
-def _format_live_help_output() -> str:
+def _format_live_help_output(sid: str, session: dict, arg: str) -> str:
     try:
         from hermes_cli.commands import COMMANDS_BY_CATEGORY
         lines = ["Available commands:", ""]
@@ -205,29 +202,33 @@ def _format_live_model_output(session: dict) -> str:
     return f"Current model: {model}" if model else "Current model: (unknown)"
 
 
-def _format_live_status_output(sid: str) -> str:
+def _format_live_status_output(sid: str, session: dict, arg: str) -> str:
     response = _methods["session.status"]("status", {"session_id": sid})
     if response.get("error"):
         return str(response["error"].get("message") or "status unavailable")
     return str(response.get("result", {}).get("output") or "")
 
 
-# name → (reply when there is no session, formatter(sid, session, arg)). A None
-# no-session reply means the formatter handles a missing session itself.
+def _format_live_compress_output(sid: str, session: dict, arg: str) -> str:
+    return _mirror_slash_side_effects(sid, session, f"/compress {arg}".strip())
+
+
+# name → (reply when there is no session, formatter(sid, session, arg) or a fixed reply).
+# A None no-session reply means the formatter handles a missing session itself.
 _LIVE_SLASH_OUTPUT = {
-    "compress": ("no active session for /compress", lambda sid, s, a: _mirror_slash_side_effects(sid, s, f"/compress {a}".strip())),
-    "usage": (_NO_AGENT_USAGE, lambda sid, s, a: _format_live_usage_output(s)),
-    "review": (None, lambda sid, s, a: _format_live_review_output(s, a)),
-    "history": ("No conversation history yet.", lambda sid, s, a: _format_live_history_output(s)),
-    "prompt": (_NO_AGENT, lambda sid, s, a: _format_live_prompt_output(s)),
-    "status": (None, lambda sid, s, a: _format_live_status_output(sid)),
-    "context": ("Conversation is empty (no messages yet).", lambda sid, s, a: _format_live_context_output(s)),
-    "tools": ("No tools available.", lambda sid, s, a: _format_live_tools_output(s)),
-    "help": (None, lambda sid, s, a: _format_live_help_output()),
-    "clear": (None, lambda sid, s, a: "Screen clear is terminal-only; desktop/TUI chat left unchanged."),
-    "models": (None, lambda sid, s, a: "Use /model to view or switch the current model; desktop users can also open the model picker."),
-    "rename": (None, lambda sid, s, a: "Use /title <name> to rename this session."),
-    "effort": (None, lambda sid, s, a: "Use /reasoning <effort> to change reasoning effort.")}
+    "compress": ("no active session for /compress", _format_live_compress_output),
+    "usage": (_NO_AGENT_USAGE, _format_live_usage_output),
+    "review": (None, _format_live_review_output),
+    "history": ("No conversation history yet.", _format_live_history_output),
+    "prompt": (_NO_AGENT, _format_live_prompt_output),
+    "status": (None, _format_live_status_output),
+    "context": ("Conversation is empty (no messages yet).", _format_live_context_output),
+    "tools": ("No tools available.", _format_live_tools_output),
+    "help": (None, _format_live_help_output),
+    "clear": (None, "Screen clear is terminal-only; desktop/TUI chat left unchanged."),
+    "models": (None, "Use /model to view or switch the current model; desktop users can also open the model picker."),
+    "rename": (None, "Use /title <name> to rename this session."),
+    "effort": (None, "Use /reasoning <effort> to change reasoning effort.")}
 
 
 def _live_slash_command_output(sid: str, session: Optional[dict], name: str, arg: str) -> Optional[str]:
@@ -236,10 +237,7 @@ def _live_slash_command_output(sid: str, session: Optional[dict], name: str, arg
     arg = arg or ""
     if name == "model" and not arg.strip():
         return _format_live_model_output(session or {})
-    if name in _ISOLATED_SESSION_READ_COMMANDS:
-        if not (session is not None and _session_uses_compute_host(session)):
-            return None
-    elif name not in _LIVE_SESSION_DIRECT_COMMANDS:
+    if name in _ISOLATED_SESSION_READ_COMMANDS and not (session is not None and _session_uses_compute_host(session)):
         return None
     entry = _LIVE_SLASH_OUTPUT.get(name)
     if entry is None:
@@ -247,7 +245,7 @@ def _live_slash_command_output(sid: str, session: Optional[dict], name: str, arg
     no_session_reply, fmt = entry
     if session is None and no_session_reply is not None:
         return no_session_reply
-    return fmt(sid, session, arg)
+    return fmt(sid, session, arg) if callable(fmt) else fmt
 
 
 # ── Side-effect mirroring ────────────────────────────────────────────

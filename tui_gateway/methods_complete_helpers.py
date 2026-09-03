@@ -135,14 +135,6 @@ def _abs_completion_prefix_exists(path_part: str) -> bool:
         return False
 
 
-def _details_completion_item(value: str, meta: str = "") -> dict:
-    return {"text": value, "display": value, "meta": meta}
-
-
-def _details_root_completion_item(value: str, meta: str, needs_leading_space: bool) -> dict:
-    return _details_completion_item(f" {value}" if needs_leading_space else value, meta)
-
-
 _DETAILS_SECTIONS = ("thinking", "tools", "subagents", "activity")
 _DETAILS_MODES = ("hidden", "collapsed", "expanded")
 
@@ -154,39 +146,34 @@ def _details_root_meta(candidate: str) -> str:
 
 
 def _details_completions(text: str) -> list[dict] | None:
+    """Argument completions for ``/details [section] [mode]``; None when ``text`` is not that command."""
     if not text.lower().startswith("/details"):
         return None
     stripped = text.strip()
     if stripped and not "/details".startswith(stripped.lower().split()[0]):
         return None
-    body = text[len("/details") :]
-    if body.startswith(" "):
-        body = body[1:]
+    body = text[len("/details") :].removeprefix(" ")
     parts = body.split()
-    has_trailing_space = text.endswith(" ")
-    sections, modes = _DETAILS_SECTIONS, _DETAILS_MODES
-    root_candidates = (*modes, "cycle", *sections)
-    if not body or (len(parts) == 0 and has_trailing_space):
-        return [_details_root_completion_item(c, _details_root_meta(c), not has_trailing_space) for c in root_candidates]
-    if len(parts) == 1 and not has_trailing_space:
+    trailing = text.endswith(" ")
+    root_candidates = (*_DETAILS_MODES, "cycle", *_DETAILS_SECTIONS)
+    if not body or (not parts and trailing):
+        lead = "" if trailing else " "
+        return [_item(f"{lead}{c}", _details_root_meta(c)) for c in root_candidates]
+    if len(parts) == 1 and not trailing:
         prefix = parts[0].lower()
-        return [
-            _details_completion_item(c, _details_root_meta(c))
-            for c in root_candidates
-            if c.startswith(prefix) and c != prefix]
+        return [_item(c, _details_root_meta(c)) for c in root_candidates if c.startswith(prefix) and c != prefix]
     section = parts[0].lower() if parts else ""
-    if section not in sections:
+    if section not in _DETAILS_SECTIONS:
         return []
 
     def section_meta(candidate: str) -> str:
         return f"clear {section} override" if candidate == "reset" else f"set {section}"
-    if len(parts) == 1 and has_trailing_space:
-        return [_details_completion_item(c, section_meta(c)) for c in (*modes, "reset")]
-    if len(parts) == 2 and not has_trailing_space:
+    mode_candidates = (*_DETAILS_MODES, "reset")
+    if len(parts) == 1:  # trailing space after the section
+        return [_item(c, section_meta(c)) for c in mode_candidates]
+    if len(parts) == 2 and not trailing:
         prefix = parts[1].lower()
-        return [
-            _details_completion_item(c, section_meta(c)) for c in (*modes, "reset") if c.startswith(prefix) and c != prefix
-        ]
+        return [_item(c, section_meta(c)) for c in mode_candidates if c.startswith(prefix) and c != prefix]
     return []
 
 
