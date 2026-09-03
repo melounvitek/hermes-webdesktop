@@ -214,17 +214,18 @@ _STALE_LIB_MODULE_PREFIXES = ("urllib3.", "botocore.", "boto3.")
 
 def _stale_error_types() -> tuple:
     """botocore + urllib3 transport-failure exception classes (best-effort import)."""
+    import importlib
+
     types: list = []
-    try:
-        from botocore.exceptions import ConnectionError as BotoConnectionError, HTTPClientError
-        types += [BotoConnectionError, HTTPClientError]
-    except ImportError:  # pragma: no cover — botocore always present with boto3
-        pass
-    try:
-        from urllib3.exceptions import ConnectionError as Urllib3ConnectionError, NewConnectionError, ProtocolError
-        types += [ProtocolError, NewConnectionError, Urllib3ConnectionError]
-    except ImportError:  # pragma: no cover
-        pass
+    for module, names in (
+        ("botocore.exceptions", ("ConnectionError", "HTTPClientError")),
+        ("urllib3.exceptions", ("ProtocolError", "NewConnectionError", "ConnectionError")),
+    ):
+        try:
+            mod = importlib.import_module(module)
+        except ImportError:  # pragma: no cover — both present with boto3
+            continue
+        types += [getattr(mod, name) for name in names]
     return tuple(types)
 
 
@@ -458,13 +459,12 @@ def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
             return kwargs
-        cleaned_messages = []
-        changed = False
-        for msg in messages:
-            content = _without_cache_points(msg.get("content") if isinstance(msg, dict) else None)
-            changed = changed or content is not None
-            cleaned_messages.append(msg if content is None else {**msg, "content": content})
-        return {**kwargs, "messages": cleaned_messages} if changed else kwargs
+        cleaned_contents = [_without_cache_points(msg.get("content") if isinstance(msg, dict) else None) for msg in messages]
+        if all(content is None for content in cleaned_contents):
+            return kwargs
+        return {**kwargs, "messages": [
+            msg if content is None else {**msg, "content": content} for msg, content in zip(messages, cleaned_contents)
+        ]}
     return kwargs
 
 
@@ -769,11 +769,10 @@ class _ResponseParts:
             reasoning_details=self.reasoning_details or None,
             bedrock_content_blocks=ordered_blocks or None,
         )
-        input_tokens = usage_data.get("inputTokens", 0)
         cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
         cache_write_tokens = usage_data.get("cacheWriteInputTokens", 0)
         output_tokens = usage_data.get("outputTokens", 0)
-        prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+        prompt_tokens = usage_data.get("inputTokens", 0) + cache_read_tokens + cache_write_tokens
         usage = SimpleNamespace(
             prompt_tokens=prompt_tokens,
             completion_tokens=output_tokens,
@@ -899,11 +898,7 @@ def stream_converse_with_callbacks(
             if "toolUse" in start:
                 has_tool_use = True
                 flush_text()
-                current_tool = {
-                    "toolUseId": start["toolUse"].get("toolUseId", ""),
-                    "name": start["toolUse"].get("name", ""),
-                    "input_json": "",
-                }
+                current_tool = {"toolUseId": start["toolUse"].get("toolUseId", ""), "name": start["toolUse"].get("name", ""), "input_json": ""}
                 stream_blocks[current_block_index] = _tool_use_block(current_tool["toolUseId"], current_tool["name"], {})
                 if on_tool_start:
                     on_tool_start(current_tool["name"])
@@ -917,9 +912,8 @@ def stream_converse_with_callbacks(
                 current_text_buffer.append(text)
                 if on_text_delta and not has_tool_use:
                     on_text_delta(text)
-            elif "toolUse" in delta:
-                if current_tool is not None:
-                    current_tool["input_json"] += delta["toolUse"].get("input", "")
+            elif "toolUse" in delta and current_tool is not None:
+                current_tool["input_json"] += delta["toolUse"].get("input", "")
             elif "reasoningContent" in delta:
                 on_reasoning(delta["reasoningContent"])
 
@@ -1065,6 +1059,13 @@ def reset_discovery_cache():
     _discovery_cache.clear()
 
 
+def _model_entry(model_id: str, name: Any, provider: str, input_mods: list, output_mods: list) -> Dict[str, Any]:
+    return {
+        "id": model_id, "name": (name or model_id).strip(), "provider": provider,
+        "input_modalities": input_mods, "output_modalities": output_mods, "streaming": True,
+    }
+
+
 def _list_foundation_models(client, filter_set: set, models: List[Dict[str, Any]]) -> None:
     """Append active, streaming-capable, text-output foundation models (optionally provider-filtered)."""
     for summary in client.list_foundation_models().get("modelSummaries", []):
@@ -1083,14 +1084,10 @@ def _list_foundation_models(client, filter_set: set, models: List[Dict[str, Any]
             or "TEXT" not in output_mods
         ):
             continue
-        models.append({
-            "id": model_id,
-            "name": (summary.get("modelName") or model_id).strip(),
-            "provider": (summary.get("providerName") or "").strip(),
-            "input_modalities": summary.get("inputModalities", []),
-            "output_modalities": output_mods,
-            "streaming": True,
-        })
+        models.append(_model_entry(
+            model_id, summary.get("modelName"), (summary.get("providerName") or "").strip(),
+            summary.get("inputModalities", []), output_mods,
+        ))
 
 
 def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any]]) -> None:
@@ -1113,14 +1110,7 @@ def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any
             _extract_provider_from_arn(m.get("modelArn", "")).lower() in filter_set for m in profile.get("models", [])
         ):
             continue
-        models.append({
-            "id": profile_id,
-            "name": (profile.get("inferenceProfileName") or profile_id).strip(),
-            "provider": "inference-profile",
-            "input_modalities": ["TEXT"],
-            "output_modalities": ["TEXT"],
-            "streaming": True,
-        })
+        models.append(_model_entry(profile_id, profile.get("inferenceProfileName"), "inference-profile", ["TEXT"], ["TEXT"]))
         seen_ids.add(profile_id.lower())
 
 
@@ -1177,40 +1167,28 @@ BEDROCK_CONTEXT_LENGTHS: Dict[str, int] = {
     # Sonnet 4.5 / Sonnet 4 lost their 1M beta and are 200K; Haiku 4.5 is 200K.
     # The 1M entries must match agent/model_metadata.py DEFAULT_CONTEXT_LENGTHS
     # or context compresses early.
-    "anthropic.claude-fable-5":      1_000_000,
-    "anthropic.claude-fable":        1_000_000,
-    "anthropic.claude-sonnet-5":     1_000_000,
-    "anthropic.claude-opus-4-8":     1_000_000,
-    "anthropic.claude-opus-4-7":     1_000_000,
-    "anthropic.claude-opus-4-6":     1_000_000,
-    "anthropic.claude-sonnet-4-6":   1_000_000,
-    "anthropic.claude-sonnet-4-5":   200_000,
-    "anthropic.claude-haiku-4-5":    200_000,
-    "anthropic.claude-opus-4":       200_000,
-    "anthropic.claude-sonnet-4":     200_000,
-    "anthropic.claude-3-5-sonnet":   200_000,
-    "anthropic.claude-3-5-haiku":    200_000,
-    "anthropic.claude-3-opus":       200_000,
-    "anthropic.claude-3-sonnet":     200_000,
-    "anthropic.claude-3-haiku":      200_000,
+    **dict.fromkeys((
+        "anthropic.claude-fable-5", "anthropic.claude-fable", "anthropic.claude-sonnet-5",
+        "anthropic.claude-opus-4-8", "anthropic.claude-opus-4-7", "anthropic.claude-opus-4-6",
+        "anthropic.claude-sonnet-4-6",
+    ), 1_000_000),
+    **dict.fromkeys((
+        "anthropic.claude-sonnet-4-5", "anthropic.claude-haiku-4-5", "anthropic.claude-opus-4",
+        "anthropic.claude-sonnet-4", "anthropic.claude-3-5-sonnet", "anthropic.claude-3-5-haiku",
+        "anthropic.claude-3-opus", "anthropic.claude-3-sonnet", "anthropic.claude-3-haiku",
+    ), 200_000),
     # Amazon Nova
-    "amazon.nova-pro":               300_000,
-    "amazon.nova-lite":              300_000,
-    "amazon.nova-micro":             128_000,
-    # Meta Llama
-    "meta.llama4-maverick":          128_000,
-    "meta.llama4-scout":             128_000,
-    "meta.llama3-3-70b-instruct":    128_000,
-    # Mistral
-    "mistral.mistral-large":         128_000,
-    # DeepSeek
-    "deepseek.v3":                   128_000,
+    "amazon.nova-pro": 300_000,
+    "amazon.nova-lite": 300_000,
+    "amazon.nova-micro": 128_000,
+    # Meta Llama / Mistral / DeepSeek
+    **dict.fromkeys((
+        "meta.llama4-maverick", "meta.llama4-scout", "meta.llama3-3-70b-instruct",
+        "mistral.mistral-large", "deepseek.v3",
+    ), 128_000),
     # OpenAI on Bedrock (Mantle/Responses route)
     # https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards-openai.html
-    "openai.gpt-5.5":                272_000,
-    "openai.gpt-5.6-sol":            272_000,
-    "openai.gpt-5.6-terra":          272_000,
-    "openai.gpt-5.6-luna":           272_000,
+    **dict.fromkeys(BEDROCK_OPENAI_RESPONSES_MODEL_IDS, 272_000),
 }
 
 # Default for unknown Bedrock models
