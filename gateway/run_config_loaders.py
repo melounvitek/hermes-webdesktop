@@ -1,4 +1,4 @@
-"""Config/env loaders for runtime knobs (busy modes, reasoning, service tier, timeouts, fallback) for GatewayRunner.
+"""Config/env loaders (busy modes, reasoning, service tier, timeouts, fallback) for GatewayRunner.
 
 Split out of ``gateway/run.py``; bound onto ``GatewayRunner`` via the MRO.
 ``gateway.run`` internals are imported lazily inside method bodies (import cycle),
@@ -11,19 +11,16 @@ import json
 import logging
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from gateway.config import Platform
 from gateway.restart import (
-    DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
-    DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT,
-    DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT,
-    DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
-    DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT,
-    parse_cron_drain_timeout,
-    parse_restart_after_turn_timeout,
-    parse_restart_drain_timeout,
+    DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT,
+    DEFAULT_GATEWAY_RESTART_AFTER_TURN_TIMEOUT, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+    DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT, parse_cron_drain_timeout,
+    parse_restart_after_turn_timeout, parse_restart_drain_timeout,
     parse_signal_interrupt_grace_timeout,
 )
 from gateway.session import SessionSource
@@ -42,7 +39,7 @@ _BUSY_INPUT_MODES = {"interrupt", "queue", "steer"}
 
 
 class GatewayConfigLoadersMixin:
-    """Config/env loaders for runtime knobs (busy modes, reasoning, service tier, timeouts, fallback) for GatewayRunner."""
+    """Config/env loaders (busy modes, reasoning, service tier, timeouts, fallback) for GatewayRunner."""
 
     @staticmethod
     def _cfg_str(section: str, key: str) -> str:
@@ -66,9 +63,9 @@ class GatewayConfigLoadersMixin:
         file_path = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "")
         if not file_path:
             cfg = _load_gateway_runtime_config()
-            file_path = str(cfg.get("prefill_messages_file", "") or "")
-            if not file_path:
-                file_path = str(cfg_get(cfg, "agent", "prefill_messages_file", default="") or "")
+            file_path = str(
+                cfg.get("prefill_messages_file", "") or cfg_get(cfg, "agent", "prefill_messages_file", default="") or ""
+            )
         if not file_path:
             return []
         path = Path(file_path).expanduser()
@@ -90,7 +87,7 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _load_ephemeral_system_prompt() -> str:
-        """HERMES_EPHEMERAL_SYSTEM_PROMPT env var first, then ``display.personality`` / ``agent.system_prompt``."""
+        """HERMES_EPHEMERAL_SYSTEM_PROMPT env first, then ``display.personality`` / ``agent.system_prompt``."""
         from gateway.run import _load_gateway_runtime_config
         prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
         if prompt:
@@ -106,13 +103,8 @@ class GatewayConfigLoadersMixin:
         return _get_channel_override(config, platform, chat_id, thread_id=thread_id, parent_id=parent_id)
 
     def _resolve_model_for_channel(
-        self,
-        platform: Platform,
-        chat_id: str,
-        *,
-        user_config: Optional[dict] = None,
-        thread_id: Optional[str] = None,
-        parent_id: Optional[str] = None,
+        self, platform: Platform, chat_id: str, *, user_config: Optional[dict] = None,
+        thread_id: Optional[str] = None, parent_id: Optional[str] = None,
     ) -> str:
         """Resolve model for this channel: channel_overrides else global default.
 
@@ -129,11 +121,7 @@ class GatewayConfigLoadersMixin:
         )
 
     def _get_system_prompt_for_channel(
-        self,
-        platform: Platform,
-        chat_id: str,
-        *,
-        thread_id: Optional[str] = None,
+        self, platform: Platform, chat_id: str, *, thread_id: Optional[str] = None,
         parent_id: Optional[str] = None,
     ) -> str:
         """Ephemeral system prompt for this channel/thread.
@@ -161,9 +149,8 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _parse_reasoning_command_args(raw_args: str) -> tuple[str, bool]:
-        """Parse `/reasoning` args into `(value, persist_global)`; `--global` anywhere persists to config.yaml."""
+        """Parse `/reasoning` args into `(value, persist_global)`; `--global` anywhere persists to config."""
         import shlex
-
         text = str(raw_args or "").strip().replace("—", "--")
         if not text:
             return "", False
@@ -175,10 +162,7 @@ class GatewayConfigLoadersMixin:
         return value.strip().lower(), "--global" in tokens
 
     def _resolve_session_reasoning_config(
-        self,
-        *,
-        source: Optional[SessionSource] = None,
-        session_key: Optional[str] = None,
+        self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
         model: str = "",
     ) -> dict | None:
         """Session ``/reasoning --session`` > per-model ``agent.reasoning_overrides`` > global.
@@ -227,7 +211,7 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_service_tier(cls) -> str | None:
-        """``agent.service_tier``: "fast"/"priority"/"on" => "priority"; "normal"/"off" disable; None when unset/unknown."""
+        """``agent.service_tier``: fast/priority/on => "priority"; normal/off => None; None when unset/unknown."""
         raw = cls._cfg_str("agent", "service_tier")
         value = raw.lower()
         if not value or value in {"normal", "default", "standard", "off", "none"}:
@@ -281,8 +265,7 @@ class GatewayConfigLoadersMixin:
     def _snapshot_profile_busy_modes(self, profile_name: str, config: dict) -> None:
         """Cache a routed profile's busy policy for this gateway lifetime."""
         input_mode, text_mode = self._busy_modes_from_config(
-            config,
-            fallback_input=getattr(self, "_busy_input_mode", "interrupt"),
+            config, fallback_input=getattr(self, "_busy_input_mode", "interrupt"),
             fallback_text=getattr(self, "_busy_text_mode", "interrupt"),
         )
         self.__dict__.setdefault("_busy_input_modes_by_profile", {})[profile_name] = input_mode
@@ -301,7 +284,7 @@ class GatewayConfigLoadersMixin:
         return name or None
 
     def _effective_busy_mode(self, source: SessionSource, attr: str) -> str:
-        """Busy mode from the routed profile's startup snapshot (``attr`` = ``_busy_input_mode`` / ``_busy_text_mode``)."""
+        """Busy mode from the routed profile snapshot (``attr``: ``_busy_input_mode`` / ``_busy_text_mode``)."""
         fallback = getattr(self, attr, "interrupt")
         profile_name = self._busy_profile_name_for_source(source)
         if not profile_name:
@@ -317,22 +300,25 @@ class GatewayConfigLoadersMixin:
         """Resolve legacy busy text mode from the routed profile snapshot."""
         return self._effective_busy_mode(source, "_busy_text_mode")
 
+    @staticmethod
+    def _warn_unparsable_timeout(cfg_key: str, raw: object, default: float) -> None:
+        """Warn when a supplied timeout value is not a number (the parser already fell back to ``default``)."""
+        try:
+            float(raw)
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s '%s', using default %.0fs", cfg_key, raw, default)
+
     @classmethod
     def _load_restart_drain_timeout(cls) -> float:
         """Graceful gateway restart/stop drain timeout in seconds."""
         raw = cls._env_or_cfg_str("HERMES_RESTART_DRAIN_TIMEOUT", "agent", "restart_drain_timeout")
         value = parse_restart_drain_timeout(raw)
         if raw and value == DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT:
-            try:
-                float(raw)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "Invalid restart_drain_timeout '%s', using default %.0fs", raw, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
-                )
+            cls._warn_unparsable_timeout("restart_drain_timeout", raw, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT)
         return value
 
-    @staticmethod
-    def _load_env_or_agent_cfg_timeout(env_var: str, cfg_key: str, parse, default: float) -> float:
+    @classmethod
+    def _load_env_or_agent_cfg_timeout(cls, env_var: str, cfg_key: str, parse, default: float) -> float:
         """Env var (non-empty) else ``agent.<cfg_key>``; warn once when a supplied value fails to parse.
 
         ``0`` is a valid value; the parser falls back to ``default`` on garbage."""
@@ -344,10 +330,7 @@ class GatewayConfigLoadersMixin:
             raw = cfg_get(_load_gateway_runtime_config(), "agent", cfg_key, default=None)
         value = parse(raw)
         if raw is not None and str(raw).strip() != "":
-            try:
-                float(raw)
-            except (TypeError, ValueError):
-                logger.warning("Invalid %s '%s', using default %.0fs", cfg_key, raw, default)
+            cls._warn_unparsable_timeout(cfg_key, raw, default)
         return value
 
     @classmethod
@@ -366,20 +349,16 @@ class GatewayConfigLoadersMixin:
             parse_cron_drain_timeout, DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
         )
 
-    @staticmethod
-    def _load_signal_interrupt_grace_timeout() -> float:
-        """``gateway.signal_interrupt_grace_timeout``: the unexpected-signal post-interrupt grace in seconds."""
+    @classmethod
+    def _load_signal_interrupt_grace_timeout(cls) -> float:
+        """``gateway.signal_interrupt_grace_timeout``: unexpected-signal post-interrupt grace in seconds."""
         from gateway.run import _load_gateway_runtime_config
         raw = cfg_get(_load_gateway_runtime_config(), "gateway", "signal_interrupt_grace_timeout", default=None)
         value = parse_signal_interrupt_grace_timeout(raw)
         if raw is not None and raw != "":
-            try:
-                float(raw)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "Invalid signal_interrupt_grace_timeout '%s', using default %.0fs",
-                    raw, DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT,
-                )
+            cls._warn_unparsable_timeout(
+                "signal_interrupt_grace_timeout", raw, DEFAULT_GATEWAY_SIGNAL_INTERRUPT_GRACE_TIMEOUT
+            )
         return value
 
     def _post_interrupt_grace_timeout(self) -> float:
@@ -417,7 +396,7 @@ class GatewayConfigLoadersMixin:
 
     @staticmethod
     def _load_fallback_model() -> list | None:
-        """Fallback provider chain: ``fallback_providers`` (kept first) merged with legacy ``fallback_model``."""
+        """Fallback chain: ``fallback_providers`` (kept first) merged with legacy ``fallback_model``."""
         from gateway.run import _load_gateway_runtime_config
         try:
             # Canonical gateway loader (fail-open): managed overlay + ${VAR} expansion apply here too.
@@ -443,22 +422,16 @@ class GatewayConfigLoadersMixin:
             # loader would return {} on a torn mid-edit write and WIPE the last known-good chain.
             # The overlay/expansion below fixes the managed-scope/${VAR} drift without losing that.
             cfg = read_user_config_raw(cfg_path)
-            try:
+            with suppress(Exception):
                 from hermes_cli import managed_scope
                 cfg = managed_scope.apply_managed_overlay(cfg)
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 from hermes_cli.config import _expand_env_vars
                 expanded = _expand_env_vars(cfg)
                 if isinstance(expanded, dict):
                     cfg = expanded
-            except Exception:
-                pass
         except Exception:
-            logger.debug(
-                "fallback_providers refresh: config.yaml read failed; keeping last known-good chain", exc_info=True,
-            )
+            logger.debug("fallback_providers refresh: config.yaml read failed; keeping last known-good chain", exc_info=True)
             return self._fallback_model
         self._fallback_model = get_fallback_chain(cfg) or None
         return self._fallback_model
