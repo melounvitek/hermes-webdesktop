@@ -1,19 +1,9 @@
-"""``hermes worktree`` — audit and reclaim accumulated git worktrees/branches.
-
-hermes worktree list # audit: verdict + reason per tree hermes worktree prune # reap safe trees +
-merged branches hermes worktree prune --dry-run # show the plan, change nothing hermes worktree
-prune --trees-only / --branches-only
-"""
+"""``hermes worktree`` — audit (``list``) and reclaim (``prune [--dry-run] [--trees-only |
+--branches-only]``) accumulated git worktrees/branches."""
 
 from __future__ import annotations
 
 from typing import Optional
-
-
-def _repo_root() -> Optional[str]:
-    import cli as _cli
-
-    return _cli._git_repo_root()
 
 
 def _fmt_size(size_mb: Optional[int]) -> str:
@@ -34,8 +24,7 @@ def _list(worktree_gc, repo_root: str, args) -> int:
         print(f"{r.name[:32]:32} {r.age_days:>5.1f}d {_fmt_size(r.size_mb):>6} {r.verdict:13} {r.reason}")
     print(
         f"\n{len(records)} tree(s), {_fmt_size(total_mb)} total — "
-        f"{_fmt_size(reapable_mb)} reclaimable now via `hermes worktree prune`."
-    )
+        f"{_fmt_size(reapable_mb)} reclaimable now via `hermes worktree prune`.")
     deletable = [b for b in worktree_gc.audit_branches(repo_root) if b.verdict == "delete"]
     if deletable:
         print(f"{len(deletable)} local branch(es) fully merged/patch-equivalent upstream would also be deleted.")
@@ -72,7 +61,10 @@ _ACTIONS = {"list": _list, "prune": _prune}
 def cmd_worktree(args) -> int:
     from hermes_cli import worktree_gc
 
-    repo_root = getattr(args, "repo", None) or _repo_root()
+    repo_root = getattr(args, "repo", None)
+    if not repo_root:
+        import cli as _cli
+        repo_root = _cli._git_repo_root()
     if not repo_root:
         print("Not inside a git repository (or pass --repo <path>).")
         return 1
