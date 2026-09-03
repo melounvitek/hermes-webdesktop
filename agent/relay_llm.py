@@ -268,17 +268,13 @@ class ManagedLlmStream(Iterator[Any]):
     """Synchronous view of one Relay-managed provider stream, driven from the worker thread."""
 
     final_response: Any = None
-    output_modified = False
+    output_modified = _closed = _provider_completed = False
     _loop: asyncio.AbstractEventLoop | None = None
-    _stream: Any = None
-    _raw_stream_resource: Any = None
-    _closed = False
+    _stream = _raw_stream_resource = None
     _runtime_lease: relay_runtime.RelayOperationLease | None = None
-    _close_error: BaseException | None = None
-    _callback_error: BaseException | None = None
+    _close_error = _callback_error = None  # BaseException | None
     _logical: _LogicalCall | None = None
     _logical_response_model_name: str | None = None
-    _provider_completed = False
 
     def __init__(
         self, request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any], *, session_id: str,

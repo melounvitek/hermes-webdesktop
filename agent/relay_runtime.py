@@ -197,16 +197,14 @@ class RelayOperationLease:
     def run_in_session(self, session: RelaySession, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run cleanup while this lease still owns the runtime lifetime."""
         with self._lock:
-            runtime = self._runtime
-            if runtime is None:
+            if self._runtime is None:
                 raise RuntimeError("Hermes Relay operation lease is released")
-            return runtime._run_in_session_untracked(session, callback, *args, **kwargs)
+            return self._runtime._run_in_session_untracked(session, callback, *args, **kwargs)
 
     def release(self) -> None:
         """Release this lease exactly once."""
         with self._lock:
-            runtime = self._runtime
-            self._runtime = None
+            runtime, self._runtime = self._runtime, None
         if runtime is not None:
             runtime._end_operation()
 
@@ -348,8 +346,7 @@ class RelayRuntime:
         self._sessions: dict[str, RelaySession] = {}
         self._subagent_parents: dict[str, str] = {}
         self._subagent_parent_handles: dict[str, Any] = {}
-        self._closing = False
-        self._shutdown_started = False
+        self._closing = self._shutdown_started = False
         self._shutdown_complete = threading.Event()
         self._operations_idle = threading.Event()
         self._operations_idle.set()
@@ -734,8 +731,7 @@ class RelayRuntime:
         with self._sessions_lock:
             if self._shutdown_started:
                 return
-            self._shutdown_started = True
-            self._closing = True
+            self._shutdown_started = self._closing = True
             has_active_operations = self._active_operations > 0
         if not has_active_operations:
             self._finish_shutdown()
@@ -788,13 +784,8 @@ class NoopRelayRuntime:
         pass
 
     release_managed_execution = retain_managed_execution
-
-    @staticmethod
-    def managed_execution_enabled() -> bool:
-        return False
-
-    def shutdown(self) -> None:
-        """No resources are allocated on unsupported platforms."""
+    managed_execution_enabled = staticmethod(lambda: False)
+    shutdown = staticmethod(lambda: None)  # no resources are allocated on unsupported platforms
 
 
 RelayHost = RelayRuntime | NoopRelayRuntime
