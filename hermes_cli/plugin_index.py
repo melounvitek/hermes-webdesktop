@@ -201,11 +201,8 @@ def _score_entry(entry: PluginIndexEntry, term: str) -> float:
         return 100.0
     ratio = difflib.SequenceMatcher(None, term, name).ratio()  # typo tolerance on the name
     signals = (
-        (term in name, 80.0),
-        (term in tags, 70.0),
-        (any(term in t for t in tags), 55.0),
-        (term in entry.description.lower(), 50.0),
-        (term in entry.author.lower(), 40.0),
+        (term in name, 80.0), (term in tags, 70.0), (any(term in t for t in tags), 55.0),
+        (term in entry.description.lower(), 50.0), (term in entry.author.lower(), 40.0),
         (ratio >= 0.6, ratio * 60.0),
     )
     return max((points for hit, points in signals if hit), default=0.0)

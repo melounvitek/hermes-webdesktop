@@ -191,9 +191,8 @@ def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[st
 
     save_config(config)
     logger.info(
-        "capability_consent plugin=%s granted=%s declared_hash=%s",
-        plugin_id, ",".join(entry[GRANTED_KEY]) or "(none)",
-        entry[CONSENT_KEY]["hash"][:12],
+        "capability_consent plugin=%s granted=%s declared_hash=%s", plugin_id,
+        ",".join(entry[GRANTED_KEY]) or "(none)", entry[CONSENT_KEY]["hash"][:12],
     )
 
 

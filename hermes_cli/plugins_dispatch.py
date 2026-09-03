@@ -22,7 +22,6 @@ from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION
 
 logger = logging.getLogger("hermes_cli.plugins")
 
-
 # Allowlist of agent-turn hot-path hooks bounded by plugins.hook_callback_timeout (fail-open:
 # abandon without join — joining reintroduced a shutdown hang). Unlisted hooks run synchronously.
 # Intentionally unbounded: on_session_finalize/reset (last-chance flush — abandon can lose state);
@@ -33,7 +32,6 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "pre_llm_call", "post_llm_call", "pre_api_request", "post_api_request", "api_request_error",
     "pre_verify", "on_session_start", "on_session_end",
 }
-
 
 # Policy hooks: timeout / still-running must fail closed (block the tool).
 _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS: Set[str] = {"pre_tool_call"}
@@ -192,8 +190,7 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Hook '%s' callback %s raised: %s", hook_name,
-                    getattr(cb, "__name__", repr(cb)), exc,
+                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc,
                 )
         return results
 
@@ -235,9 +232,7 @@ class PluginDispatchMixin:
                         self._hook_running_callbacks.pop(callback_key, None)
                 done.set()
 
-        thread = threading.Thread(
-            target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True,
-        )
+        thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         thread.start()
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
@@ -245,8 +240,7 @@ class PluginDispatchMixin:
                     time.monotonic() + self._hook_timeout_suppression_seconds
                 )
             logger.warning(
-                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name,
-                timeout,
+                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout,
             )
             return _HOOK_SKIPPED
         if "exc" in failure:
@@ -464,7 +458,6 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Middleware '%s' callback %s raised: %s", kind,
-                    getattr(cb, "__name__", repr(cb)), exc,
+                    "Middleware '%s' callback %s raised: %s", kind, getattr(cb, "__name__", repr(cb)), exc,
                 )
         return results

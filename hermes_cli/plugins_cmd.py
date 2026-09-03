@@ -177,9 +177,7 @@ def _sanitize_plugin_name(name: str, plugins_dir: Path, *, allow_subdir: bool = 
     if not name:
         raise ValueError("Plugin name must not be empty.")
     if name in {".", ".."}:
-        raise ValueError(
-            f"Invalid plugin name '{name}': must not reference the plugins directory itself."
-        )
+        raise ValueError(f"Invalid plugin name '{name}': must not reference the plugins directory itself.")
     for bad in ("\\", "..") if allow_subdir else ("/", "\\", ".."):
         if bad in name:
             raise ValueError(f"Invalid plugin name '{name}': must not contain '{bad}'.")
@@ -187,13 +185,9 @@ def _sanitize_plugin_name(name: str, plugins_dir: Path, *, allow_subdir: bool = 
     target = (plugins_dir / name).resolve()
     plugins_resolved = plugins_dir.resolve()
     if target == plugins_resolved:
-        raise ValueError(
-            f"Invalid plugin name '{name}': resolves to the plugins directory itself."
-        )
+        raise ValueError(f"Invalid plugin name '{name}': resolves to the plugins directory itself.")
     if plugins_resolved not in target.parents:
-        raise ValueError(
-            f"Invalid plugin name '{name}': resolves outside the plugins directory."
-        )
+        raise ValueError(f"Invalid plugin name '{name}': resolves outside the plugins directory.")
     return target
 
 
@@ -250,9 +244,7 @@ def _resolve_subdir_within(clone_root: Path, subdir: str) -> Path:
     if candidate != clone_root and clone_root not in candidate.parents:
         raise PluginOperationError(f"Plugin subdirectory '{subdir}' escapes the repository.")
     if not candidate.exists():
-        raise PluginOperationError(
-            f"Plugin subdirectory '{subdir}' does not exist in the repository.",
-        )
+        raise PluginOperationError(f"Plugin subdirectory '{subdir}' does not exist in the repository.")
     if not candidate.is_dir():
         raise PluginOperationError(f"Plugin subdirectory '{subdir}' is not a directory.")
     return candidate
@@ -471,9 +463,7 @@ def _write_install_metadata(metadata: dict[str, dict[str, object]]) -> None:
     """Atomically replace the profile-local plugin install metadata sidecar."""
     path = _install_metadata_path()
     atomic_write_text(
-        path,
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-        tmp_prefix=f"{path.name}.tmp-",
+        path, json.dumps(metadata, indent=2, sort_keys=True) + "\n", tmp_prefix=f"{path.name}.tmp-",
     )
 
 
@@ -801,9 +791,7 @@ def cmd_install(
         console.print()
         console.print("[yellow]⚠ Security scan flagged this plugin:[/yellow]")
         console.print(format_scan_report(scan_result))
-        return _is_tty() and _ask_yes(
-            "  Install anyway? Only continue if you trust the source. [y/N]: "
-        )
+        return _is_tty() and _ask_yes("  Install anyway? Only continue if you trust the source. [y/N]: ")
 
     try:
         target, installed_manifest, installed_name = _install_plugin_core(
@@ -1589,8 +1577,7 @@ def _configure_category_spec(spec) -> bool:
     """Launch the radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row. Returns True if changed."""
     title, default_label, default_name, current, discover, save = spec
     return _configure_provider_category(
-        f"{title} (select one)", f"{default_label} (default)", default_name,
-        current(), discover(), save,
+        f"{title} (select one)", f"{default_label} (default)", default_name, current(), discover(), save,
     )
 
 
@@ -1892,11 +1879,8 @@ def dashboard_install_plugin(identifier: str, *, force: bool, enable: bool) -> d
             for f in (exc.scan_result.findings if exc.scan_result is not None else ())
         ]
         return {
-            "ok": False,
-            "error": str(exc),
-            "scan_blocked": True,
-            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"),
-            "scan_findings": findings,
+            "ok": False, "error": str(exc), "scan_blocked": True,
+            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"), "scan_findings": findings,
         }
     except PluginOperationError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1905,12 +1889,9 @@ def dashboard_install_plugin(identifier: str, *, force: bool, enable: bool) -> d
         _set_plugin_enabled(installed_name, enable=True)
     ap = target / "after-install.md"
     return {
-        "ok": True,
-        "plugin_name": installed_name,
-        "warnings": warnings,
+        "ok": True, "plugin_name": installed_name, "warnings": warnings,
         "missing_env": [s["name"] for s in _missing_env_specs(installed_manifest)],
-        "after_install_path": str(ap) if ap.exists() else None,
-        "enabled": enable,
+        "after_install_path": str(ap) if ap.exists() else None, "enabled": enable,
     }
 
 
@@ -2055,13 +2036,8 @@ def _run_plugin_git(
 ) -> subprocess.CompletedProcess:
     """Run one git command inside a plugin checkout (non-interactive)."""
     return subprocess.run(
-        [git_exe, *args],
-        capture_output=True,
-        text=True, encoding='utf-8', errors='replace',
-        timeout=timeout,
-        cwd=str(target),
-        stdin=subprocess.DEVNULL,
-        env=noninteractive_git_env(),
+        [git_exe, *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
+        cwd=str(target), stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
     )
 
 
@@ -2094,9 +2070,8 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
         if status.returncode == 0 and status.stdout.strip():
             pre_stash = _stash_ref(git_exe, target)
             push = _run_plugin_git(
-                git_exe, target,
-                "stash", "push", "--include-untracked",
-                "-m", "hermes-plugin-update-autostash",
+                git_exe, target, "stash", "push", "--include-untracked", "-m",
+                "hermes-plugin-update-autostash",
             )
             post_stash = _stash_ref(git_exe, target)
             stash_created = bool(post_stash) and post_stash != pre_stash

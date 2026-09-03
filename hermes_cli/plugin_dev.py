@@ -85,9 +85,7 @@ def _doctor_runtime(plugin_path: Path):
         if not loaded.enabled:
             raise _DoctorLoadError("Plugin registration did not enable the runtime record")
         yield SimpleNamespace(
-            manifest=manifest,
-            manager=manager,
-            registered_tools=tuple(sorted(loaded.tools_registered)),
+            manifest=manifest, manager=manager, registered_tools=tuple(sorted(loaded.tools_registered)),
             registered_hooks=tuple(loaded.hooks_registered),
         )
     finally:
@@ -358,9 +356,4 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
     return report
 
 
-__all__ = [
-    "DoctorFinding",
-    "DoctorReport",
-    "doctor_plugin",
-    "resolve_plugin_path",
-]
+__all__ = ["DoctorFinding", "DoctorReport", "doctor_plugin", "resolve_plugin_path"]

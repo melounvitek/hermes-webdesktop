@@ -18,9 +18,7 @@ logger = logging.getLogger(__name__)
 _EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 # Secret-shaped keys are refused in config seeds and stripped from exports; packs declare secrets
 # via each plugin's ``requires_env``, which prompts at install time.
-_SECRET_KEY_RE = re.compile(
-    r"(?i)(token|secret|passw(or)?d|api[_-]?key|private[_-]?key|credential|auth)"
-)
+_SECRET_KEY_RE = re.compile(r"(?i)(token|secret|passw(or)?d|api[_-]?key|private[_-]?key|credential|auth)")
 # plugins.entries.<id> keys a pack may never set (consent state; allow_* gates are also refused).
 _RESERVED_ENTRY_KEYS = frozenset({"granted_capabilities", "capabilities_consent"})
 _MAX_PACK_BYTES = 1 * 1024 * 1024  # a pack is a small manifest, not a payload
@@ -160,13 +158,9 @@ def parse_pack(text: str, *, source: str = "<pack>") -> PluginPack:
         raise PackError(f"Pack {source} 'skills' must be a list of skill ids.")
 
     return PluginPack(
-        name=name.strip(),
-        description=str(meta.get("description") or ""),
-        author=str(meta.get("author") or ""),
-        version=str(meta.get("version") or ""),
-        plugins=entries,
-        config=config,
-        skills=[str(s).strip() for s in skills_raw if str(s).strip()],
+        name=name.strip(), description=str(meta.get("description") or ""),
+        author=str(meta.get("author") or ""), version=str(meta.get("version") or ""), plugins=entries,
+        config=config, skills=[str(s).strip() for s in skills_raw if str(s).strip()],
     )
 
 
@@ -197,9 +191,7 @@ def _parse_pack_entry(item: Any, label: str) -> PackPluginEntry:
     if subdir is not None and (not isinstance(subdir, str) or not subdir.strip("/")):
         raise PackError(f"Pack plugin entry {label} has an invalid 'subdir'.")
     return PackPluginEntry(
-        ref=ref.strip().lower(),
-        name=entry_name,
-        repo=entry_repo,
+        ref=ref.strip().lower(), name=entry_name, repo=entry_repo,
         subdir=subdir.strip("/") if isinstance(subdir, str) else None,
     )
 
@@ -439,9 +431,7 @@ def install_pack_plugins(
 # Export
 # ---------------------------------------------------------------------------
 
-_GITHUB_HTTPS_RE = re.compile(
-    r"^https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+?)(?:\.git)?$"
-)
+_GITHUB_HTTPS_RE = re.compile(r"^https://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s#]+?)(?:\.git)?$")
 
 
 def _source_to_repo_subdir(source: str) -> tuple[Optional[str], Optional[str]]:
@@ -486,9 +476,7 @@ def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack"
 
     metadata = _read_install_metadata()
     enabled = _get_enabled_set()
-    installed = sorted(
-        d.name for d in _plugins_dir().iterdir() if d.is_dir() and not d.name.startswith(".")
-    )
+    installed = sorted(d.name for d in _plugins_dir().iterdir() if d.is_dir() and not d.name.startswith("."))
     if enabled_only:
         installed = [n for n in installed if n in enabled]
 
