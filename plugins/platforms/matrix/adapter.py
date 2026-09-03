@@ -352,8 +352,6 @@ def _resolve_max_message_length(config) -> int:
     return max(500, min(value, MATRIX_MAX_MESSAGE_LENGTH_CEILING))
 
 
-MAX_MESSAGE_LENGTH = DEFAULT_MAX_MESSAGE_LENGTH  # back-compat alias for importers of the module constant
-
 # E2EE store dir is resolved per adapter in connect() (``_resolve_store_dir``), NOT at module scope:
 # the multiplex gateway imports this once and a module constant would collide every profile's Olm
 # identity in one crypto.db.

@@ -713,36 +713,3 @@ def print_credential_summary(emit: Any = print) -> None:
         "  my number           : " + (phone if phone else "✗ missing (run `hermes photon setup --phone ...`)"),
         "  assigned number     : " + (assigned if assigned else "✗ missing (run `hermes photon setup`)")]
     emit("\n".join(rows))
-
-
-def credential_summary() -> Dict[str, str]:
-    """Return a fully pre-formatted credential status dict (no raw secrets)."""
-    def _present_token() -> str:
-        return (
-            "✓ stored" if load_photon_token()
-            else "✗ missing (run `hermes photon setup`)"
-        )
-
-    def _present_project_id() -> str:
-        sid, _sec = load_project_credentials()
-        return sid or "✗ missing"
-
-    def _present_secret() -> str:
-        _sid, sec = load_project_credentials()
-        return "✓ stored" if sec else "✗ missing"
-
-    def _present_phone() -> str:
-        phone, _assigned = load_user_numbers()
-        return phone or "✗ missing (run `hermes photon setup --phone ...`)"
-
-    def _present_assigned_phone() -> str:
-        _phone, assigned = load_user_numbers()
-        return assigned or "✗ missing (run `hermes photon setup`)"
-
-    return {
-        "device_token": _present_token(),
-        "project_id": _present_project_id(),
-        "project_key": _present_secret(),
-        "phone_number": _present_phone(),
-        "assigned_phone_number": _present_assigned_phone(),
-    }

@@ -54,7 +54,6 @@ _AUTH_METHOD_RE = re.compile(r"\b(dmarc|dkim|spf)\s*=\s*([a-z]+)", re.IGNORECASE
 _AUTH_PROP_RE = re.compile(r"\b(header\.from|header\.d|smtp\.mailfrom|smtp\.from|envelope-from)\s*=\s*([^\s;]+)", re.IGNORECASE)
 
 
-# Backwards-compatible alias for the name used by the original #59076 hunks.
 def _esecret_int(name: str, default: int) -> int:
     """Scope-aware integer read."""
     return coerce_port(str(_get_secret(name, "")).strip() or default, default)

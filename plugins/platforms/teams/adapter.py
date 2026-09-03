@@ -58,7 +58,6 @@ from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult, cache_image_from_url, cache_media_bytes_async,
 )
 from gateway.platforms._shared import coerce_port, get_scoped_secret as _get_scoped_secret
-from plugins.platforms.teams.summary_writer import TeamsSummaryWriter  # noqa: F401 — re-exported for teams_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +250,7 @@ _SDK_IMPORTS = {
     "microsoft_teams.cards": ("AdaptiveCard", "ExecuteAction", "TextBlock")}
 
 
-# Keep the old name as an alias so existing test imports don't break. NOTE: ``check_requirements`` is the
+# NOTE: ``check_requirements`` is the
 # PASSIVE probe (registry ``check_fn``, status / unit tests) — it must never trigger a pip install.
 # ``check_teams_requirements`` is the ACTIVE lazy-installer, registered as ``ensure_deps_fn``: the
 # registry's ``create_adapter()`` runs it when the passive probe fails, right before the gateway connects

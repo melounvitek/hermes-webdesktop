@@ -37,10 +37,6 @@ def _get_async_client() -> Any:
     return _client("_async_parallel_client", "AsyncParallel")
 
 
-# Names re-exported by tools.web_tools for existing tests/callers.
-_get_parallel_client, _get_async_parallel_client = _get_sync_client, _get_async_client
-
-
 def _resolve_search_mode() -> str:
     mode = os.getenv("PARALLEL_SEARCH_MODE", "agentic").lower().strip()
     return mode if mode in {"fast", "one-shot", "agentic"} else "agentic"

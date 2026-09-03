@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 from agent.secret_scope import is_multiplex_active
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
-from .cards import card_spec_to_cards_v2, format_message as _format_message  # noqa: F401  (re-exported)
+from .cards import card_spec_to_cards_v2, format_message as _format_message
 
 
 def _adc_would_borrow_foreign_credentials() -> bool:
