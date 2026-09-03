@@ -237,44 +237,31 @@ def _resolve_child_credential_pool(
     Custom endpoints all collapse to ``provider="custom"``, so they are matched
     by endpoint identity (the ``custom:<name>`` pool key) — sharing the parent's
     pool across different custom endpoints would overwrite the child's delegated
-    base_url on lease.
+    base_url on lease. An unregistered custom endpoint (no custom_providers
+    entry) keeps the child's fixed credential rather than inherit the parent's.
     """
     parent_pool = getattr(parent_agent, "_credential_pool", None)
     if not effective_provider:
         return parent_pool
     parent_provider = getattr(parent_agent, "provider", None) or ""
-
-    if effective_provider == "custom":
-        try:
+    try:
+        if effective_provider == "custom":
             from agent.credential_pool import get_custom_provider_pool_key
             child_key = get_custom_provider_pool_key(effective_base_url)
             if child_key is None:
-                # Unregistered endpoint (no custom_providers entry): keep the
-                # child's fixed credential rather than inherit the parent's.
                 return None
             parent_key = get_custom_provider_pool_key(getattr(parent_agent, "base_url", None))
-            if (
-                parent_pool is not None
-                and parent_provider == "custom"
-                and parent_key is not None
-                and parent_key == child_key
-            ):
+            if parent_pool is not None and parent_provider == "custom" and parent_key is not None and parent_key == child_key:
                 return parent_pool
             return _loaded_pool(child_key)
-        except Exception as exc:
-            logger.debug(
-                "Could not resolve custom credential pool for child endpoint '%s': %s",
-                effective_base_url,
-                exc,
-            )
-        return None
-
-    if parent_pool is not None and effective_provider == parent_provider:
-        return parent_pool
-    try:
+        if parent_pool is not None and effective_provider == parent_provider:
+            return parent_pool
         return _loaded_pool(effective_provider)
     except Exception as exc:
-        logger.debug("Could not load credential pool for child provider '%s': %s", effective_provider, exc)
+        if effective_provider == "custom":
+            logger.debug("Could not resolve custom credential pool for child endpoint '%s': %s", effective_base_url, exc)
+        else:
+            logger.debug("Could not load credential pool for child provider '%s': %s", effective_provider, exc)
     return None
 
 def _merge_request_overrides(runtime_overrides, explicit_overrides):
@@ -312,26 +299,27 @@ _EXPLICIT_API_MODES = frozenset({"chat_completions", "codex_responses", "anthrop
 def _require_pinned_command(command: Optional[str], message: str) -> None:
     """A pinned ACP transport command must exist on PATH — refuse loudly rather
     than let the child silently fall back to another transport."""
-    if not command:
-        return
     import shutil as _shutil
-    if not _shutil.which(command):
+    if command and not _shutil.which(command):
         raise ValueError(message)
 
-def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
+def _credential_bundle(model, provider, base_url, api_key, api_mode, request_overrides, max_output_tokens, **extra) -> dict:
+    """The child credential dict every branch of ``_resolve_delegation_credentials`` returns."""
+    return {
+        "model": model, "provider": provider, "base_url": base_url, "api_key": api_key, "api_mode": api_mode,
+        "request_overrides": request_overrides, "max_output_tokens": max_output_tokens, **extra,
+    }
+
+def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
-    configured_model, configured_provider, configured_base_url, configured_api_key, configured_api_mode = (
-        cfg_values["model"], cfg_values["provider"], cfg_values["base_url"],
-        cfg_values["api_key"], cfg_values["api_mode"],
-    )
     # Shared URL-based api_mode detector so Anthropic-compatible direct
     # endpoints (/anthropic suffix: Azure AI Foundry, MiniMax, Zhipu, LiteLLM)
     # get the Messages transport instead of 404ing on chat_completions.
     from hermes_cli.runtime_provider import _detect_api_mode_for_url
-    base_lower = configured_base_url.lower()
-    host = base_url_hostname(configured_base_url)
+    base_lower = v["base_url"].lower()
+    host = base_url_hostname(v["base_url"])
     provider = "custom"
-    api_mode = _detect_api_mode_for_url(configured_base_url) or "chat_completions"
+    api_mode = _detect_api_mode_for_url(v["base_url"]) or "chat_completions"
     if host == "chatgpt.com" and "/backend-api/codex" in base_lower:
         provider, api_mode = "openai-codex", "codex_responses"
     elif host == "api.anthropic.com":
@@ -339,43 +327,36 @@ def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -
     elif "api.kimi.com/coding" in base_lower:
         api_mode = "anthropic_messages"
     # Explicit delegation.api_mode always wins over the URL heuristic.
-    if configured_api_mode in _EXPLICIT_API_MODES:
-        api_mode = configured_api_mode
+    if v["api_mode"] in _EXPLICIT_API_MODES:
+        api_mode = v["api_mode"]
 
     # provider configured ALONGSIDE base_url: pull that provider's request
     # personality (request_overrides / max_output_tokens) onto the explicit
     # endpoint. Best-effort — a resolution failure only skips the overrides.
-    request_overrides = None
-    max_output_tokens = None
-    if configured_provider:
+    request_overrides = max_output_tokens = None
+    if v["provider"]:
         try:
             from hermes_cli.runtime_provider import resolve_runtime_provider
-            runtime = resolve_runtime_provider(requested=configured_provider, target_model=configured_model)
+            runtime = resolve_runtime_provider(requested=v["provider"], target_model=v["model"])
             request_overrides = dict(runtime.get("request_overrides") or {}) or None
             max_output_tokens = runtime.get("max_output_tokens")
         except Exception as exc:
             logger.debug(
-                "delegation.base_url: runtime resolution for provider '%s' "
-                "failed; proceeding without request_overrides: %s",
-                configured_provider,
-                exc,
+                "delegation.base_url: runtime resolution for provider '%s' failed; proceeding without request_overrides: %s",
+                v["provider"], exc,
             )
-    return {
-        "model": configured_model,
-        "provider": provider,
-        "base_url": configured_base_url,
-        "api_key": configured_api_key,  # None → inherited from parent in _build_child_agent
-        "api_mode": api_mode,
-        "request_overrides": _merge_request_overrides(request_overrides, explicit_request_overrides),
-        "max_output_tokens": max_output_tokens,
-    }
+    # api_key None → inherited from parent in _build_child_agent
+    return _credential_bundle(
+        v["model"], provider, v["base_url"], v["api_key"], api_mode,
+        _merge_request_overrides(request_overrides, explicit_request_overrides), max_output_tokens,
+    )
 
-def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
+def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
     """``delegation.provider`` branch: full bundle via the runtime provider system."""
-    configured_model, configured_provider = cfg_values["model"], cfg_values["provider"]
+    configured_provider = v["provider"]
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-        runtime = resolve_runtime_provider(requested=configured_provider, target_model=configured_model)
+        runtime = resolve_runtime_provider(requested=configured_provider, target_model=v["model"])
     except Exception as exc:
         raise ValueError(
             f"Cannot resolve delegation provider '{configured_provider}': {exc}. "
@@ -396,18 +377,13 @@ def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) 
         f"'{pinned_command}' command, which was not found on PATH. "
         f"Install it or choose a different delegation provider.",
     )
-    return {
-        "model": configured_model or runtime.get("model") or None,
-        "provider": configured_provider if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM else runtime.get("provider"),
-        "base_url": runtime.get("base_url"),
-        "api_key": api_key,
-        "api_mode": runtime.get("api_mode"),
-        "request_overrides": _merge_request_overrides(runtime.get("request_overrides"), explicit_request_overrides)
-        or {},
-        "max_output_tokens": runtime.get("max_output_tokens"),
-        "command": runtime.get("command"),
-        "args": list(runtime.get("args") or []),
-    }
+    return _credential_bundle(
+        v["model"] or runtime.get("model") or None,
+        configured_provider if runtime.get("provider") == _RUNTIME_PROVIDER_CUSTOM else runtime.get("provider"),
+        runtime.get("base_url"), api_key, runtime.get("api_mode"),
+        _merge_request_overrides(runtime.get("request_overrides"), explicit_request_overrides) or {},
+        runtime.get("max_output_tokens"), command=pinned_command, args=list(runtime.get("args") or []),
+    )
 
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Resolve the child credential bundle from the ``delegation`` config section.
@@ -421,28 +397,17 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """
     values = {k: str(cfg.get(k) or "").strip() or None for k in ("model", "provider", "base_url", "api_key")}
     values["api_mode"] = str(cfg.get("api_mode") or "").strip().lower() or None
-    explicit_request_overrides = (
-        cfg.get("request_overrides")
-        if isinstance(cfg.get("request_overrides"), dict)
-        else None
-    )
+    explicit_request_overrides = cfg.get("request_overrides") if isinstance(cfg.get("request_overrides"), dict) else None
     is_native_sdk_provider = (values["provider"] or "").strip().lower() in _NATIVE_SDK_PROVIDERS
 
     if values["base_url"] and not is_native_sdk_provider:
         return _direct_endpoint_credentials(values, explicit_request_overrides)
     if not values["provider"]:
         # Pure inherit; explicit request_overrides still merge OVER the parent's.
-        return {
-            "model": values["model"],
-            "provider": None,
-            "base_url": None,
-            "api_key": None,
-            "api_mode": None,
-            "request_overrides": _merge_request_overrides(
-                getattr(parent_agent, "request_overrides", None), explicit_request_overrides,
-            ),
-            "max_output_tokens": None,
-        }
+        return _credential_bundle(
+            values["model"], None, None, None, None,
+            _merge_request_overrides(getattr(parent_agent, "request_overrides", None), explicit_request_overrides), None,
+        )
     return _runtime_provider_credentials(values, explicit_request_overrides)
 
 def _load_config() -> dict:
@@ -537,10 +502,10 @@ def _resolve_child_runtime(
         if delegation_effort or delegation_effort is False:
             from hermes_constants import parse_reasoning_effort
             parsed = parse_reasoning_effort(delegation_effort)
-            if parsed is not None:
-                child_reasoning = parsed
-            else:
+            if parsed is None:
                 logger.warning("Unknown delegation.reasoning_effort '%s', inheriting parent level", delegation_effort)
+            else:
+                child_reasoning = parsed
     except Exception as exc:
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
@@ -564,9 +529,7 @@ def _resolve_child_runtime(
         kwargs[attr] = pinned_default if override_provider else getattr(parent_agent, attr, pinned_default)
     if not override_provider:
         kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
-    child_max_tokens = (
-        override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
-    )
+    child_max_tokens = override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
     if isinstance(child_max_tokens, int):
         kwargs["max_tokens"] = child_max_tokens
     return kwargs
