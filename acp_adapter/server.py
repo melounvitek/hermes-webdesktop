@@ -566,21 +566,22 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             if not await self._send(state.session_id, update, fail_msg="Failed to replay ACP history for session %s"):
                 return
 
-    async def _replay_history_guarded(self, state: SessionState, verb: str) -> None:
-        """Per ACP spec, load/resume must stream history via ``session/update`` BEFORE
-        responding (Codex/Claude Code/OpenCode/Zed rely on this; deferring via ``call_soon``
-        broke them). Best-effort: a corrupt message must not turn the load into an error."""
-        try:
-            await self._replay_session_history(state)
-        except Exception:
-            logger.warning(
-                f"ACP history replay raised during session/{verb} for %s — "
-                f"{verb} will still succeed, partial transcript may be missing", state.session_id, exc_info=True,
-            )
+    async def _session_response_fields(self, state: SessionState, replay_verb: str | None = None) -> dict[str, Any]:
+        """``models``/``modes``/``field_meta`` for session responses, after an optional history replay;
+        schedules command advertisement + usage refresh.
 
-    def _session_response_fields(self, state: SessionState) -> dict[str, Any]:
-        """``models``/``modes``/``field_meta`` for session responses; schedules command
-        advertisement + usage refresh."""
+        Per ACP spec, load/resume must stream history via ``session/update`` BEFORE responding
+        (Codex/Claude Code/OpenCode/Zed rely on this; deferring via ``call_soon`` broke them).
+        Best-effort: a corrupt message must not turn the load into an error."""
+        if replay_verb:
+            try:
+                await self._replay_session_history(state)
+            except Exception:
+                logger.warning(
+                    f"ACP history replay raised during session/{replay_verb} for %s — "
+                    f"{replay_verb} will still succeed, partial transcript may be missing",
+                    state.session_id, exc_info=True,
+                )
         self._schedule_available_commands_update(state.session_id)
         self._schedule_soon(lambda: self._send_usage_update(state))
         return {
@@ -589,12 +590,15 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             "field_meta": self._provenance_meta(state.session_id, getattr(state.agent, "session_id", state.session_id)),
         }
 
-    async def new_session(self, cwd: str, mcp_servers: list | None = None, **kwargs: Any) -> NewSessionResponse:
-        state = self.session_manager.create_session(cwd=cwd)
+    async def _attach_session_mcp(self, state: SessionState, mcp_servers: list | None, log: str, *log_args) -> None:
         await self._register_session_mcp_servers(state, mcp_servers)
         self._schedule_mcp_late_refresh(state)
-        logger.info("New session %s (cwd=%s)", state.session_id, cwd)
-        return NewSessionResponse(session_id=state.session_id, **self._session_response_fields(state))
+        logger.info(log, *log_args)
+
+    async def new_session(self, cwd: str, mcp_servers: list | None = None, **kwargs: Any) -> NewSessionResponse:
+        state = self.session_manager.create_session(cwd=cwd)
+        await self._attach_session_mcp(state, mcp_servers, "New session %s (cwd=%s)", state.session_id, cwd)
+        return NewSessionResponse(session_id=state.session_id, **await self._session_response_fields(state))
 
     async def load_session(
         self, cwd: str, session_id: str, mcp_servers: list | None = None, **kwargs: Any
@@ -603,11 +607,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if state is None:
             logger.warning("load_session: session %s not found", session_id)
             return None
-        await self._register_session_mcp_servers(state, mcp_servers)
-        self._schedule_mcp_late_refresh(state)
-        logger.info("Loaded session %s", session_id)
-        await self._replay_history_guarded(state, "load")
-        return LoadSessionResponse(**self._session_response_fields(state))
+        await self._attach_session_mcp(state, mcp_servers, "Loaded session %s", session_id)
+        return LoadSessionResponse(**await self._session_response_fields(state, "load"))
 
     async def resume_session(
         self, cwd: str, session_id: str, mcp_servers: list | None = None, **kwargs: Any
@@ -616,11 +617,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if state is None:
             logger.warning("resume_session: session %s not found, creating new", session_id)
             state = self.session_manager.create_session(cwd=cwd)
-        await self._register_session_mcp_servers(state, mcp_servers)
-        self._schedule_mcp_late_refresh(state)
-        logger.info("Resumed session %s", state.session_id)
-        await self._replay_history_guarded(state, "resume")
-        return ResumeSessionResponse(**self._session_response_fields(state))
+        await self._attach_session_mcp(state, mcp_servers, "Resumed session %s", state.session_id)
+        return ResumeSessionResponse(**await self._session_response_fields(state, "resume"))
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self.session_manager.get_session(session_id)
