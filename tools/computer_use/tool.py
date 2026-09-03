@@ -133,10 +133,15 @@ def _new_backend(permission_mode: str) -> ComputerUseBackend:
         raise RuntimeError(f"Unknown HERMES_COMPUTER_USE_BACKEND={backend_name!r}")
     return _NoopBackend()  # pragma: no cover
 
-def _install_backend(sid: str, backend: ComputerUseBackend, permission_mode: str) -> None:
-    """Record a backend in the session caches. Caller holds ``_backend_lock``."""
+def _install_backend(sid: str, backend: ComputerUseBackend, permission_mode: str) -> ComputerUseBackend:
+    """Record a backend in the session caches (the empty session also mirrors it onto the ``_backend`` hook).
+    Caller holds ``_backend_lock``."""
+    global _backend
     _backends[sid], _backend_permission_modes[sid] = backend, permission_mode
     _backend_call_locks[sid] = threading.RLock()
+    if sid == "":
+        _backend = backend
+    return backend
 
 def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[threading.RLock]]:
     """Remove one session's cache entries, plus the ``_backend`` injection hook when it aliases the empty session
@@ -149,14 +154,19 @@ def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[thr
         _backend = None if _backend is backend else _backend
     return backend, call_lock
 
-def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock]) -> None:
+def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock],
+                  on_error: Optional[Callable[[Exception], None]] = None) -> None:
     """Stop under the session call lock (if any) so an in-flight action finishes first. Never called under
-    ``_backend_lock`` (unrelated sessions stay free). Raises."""
-    with call_lock if call_lock is not None else contextlib.nullcontext():
-        backend.stop()
+    ``_backend_lock`` (unrelated sessions stay free). Raises unless ``on_error`` absorbs the failure."""
+    try:
+        with call_lock if call_lock is not None else contextlib.nullcontext():
+            backend.stop()
+    except Exception as e:
+        if on_error is None:
+            raise
+        on_error(e)
 
 def _get_backend(session_id: str = "") -> ComputerUseBackend:
-    global _backend
     sid = str(session_id or "")
     while True:
         with _backend_lock:
@@ -164,20 +174,15 @@ def _get_backend(session_id: str = "") -> ComputerUseBackend:
             permission_mode = _cua_permission_mode(sid)
             if sid == "" and _backend is not None and sid not in _backends:
                 _install_backend(sid, _backend, permission_mode)  # fold the injection hook into the cache
-            cached = _backends.get(sid)
-            if cached is None:
+            if (cached := _backends.get(sid)) is None:
                 backend = _new_backend(permission_mode)
                 backend.start()  # under the cache lock: one backend per session; a concurrent toggle releases it
-                _install_backend(sid, backend, permission_mode)
-                if sid == "":
-                    _backend = backend
-                return backend
+                return _install_backend(sid, backend, permission_mode)
             if _backend_permission_modes.get(sid, "standard") == permission_mode:
                 return cached
             # Cua's mode is immutable after daemon startup: a /yolo toggle replaces only this session's backend.
             _, stale_lock = _detach_locked(sid)  # stopped outside the cache lock; the loop re-reads the mode first
-        with contextlib.suppress(Exception):
-            _stop_backend(cached, stale_lock)
+        _stop_backend(cached, stale_lock, lambda e: None)
 
 def release_computer_use_session(session_id: str) -> bool:
     """Release one session-owned backend (lifecycle seam for hosts/plugins); idempotent, True iff one was released.
@@ -190,10 +195,8 @@ def release_computer_use_session(session_id: str) -> bool:
         _session_auto_approve.pop(sid, None), _always_allow.pop(sid, None)
     if backend is None:
         return False
-    try:
-        _stop_backend(backend, call_lock)
-    except Exception:
-        logger.debug("computer_use backend release failed for session %s", sid, exc_info=True)
+    _stop_backend(backend, call_lock,
+                  lambda e: logger.debug("computer_use backend release failed for session %s", sid, exc_info=True))
     return True
 
 def _shutdown_backend_atexit() -> None:
@@ -210,10 +213,7 @@ def _shutdown_backend_atexit() -> None:
     with _approval_lock:
         _session_auto_approve.clear(), _always_allow.clear(), _escalation_warned.clear()
     for backend, call_lock in unique.values():
-        try:
-            _stop_backend(backend, call_lock)
-        except Exception as e:
-            logger.debug("cua-driver atexit teardown failed: %s", e)
+        _stop_backend(backend, call_lock, lambda e: logger.debug("cua-driver atexit teardown failed: %s", e))
 
 atexit.register(_shutdown_backend_atexit)
 
@@ -353,9 +353,9 @@ def _do_capture(backend, action, args, **_):
     if mode not in {"som", "vision", "ax"}:
         return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
     # pid/window_id forwarded only when given so older backends keep their defaults.
-    given = args.get("pid") is not None or args.get("window_id") is not None
-    target = {"pid": args.get("pid"), "window_id": args.get("window_id")} if given else {}
-    return _capture_response(backend.capture(mode=mode, app=args.get("app"), **target))
+    target = {k: args.get(k) for k in ("pid", "window_id")}
+    return _capture_response(backend.capture(mode=mode, app=args.get("app"),
+                                             **(target if any(v is not None for v in target.values()) else {})))
 
 def _do_focus_app(backend, action, args, **_):
     if not args.get("app"):
@@ -659,10 +659,9 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         resp["text_summary"] = prefix + resp["text_summary"]
         resp["action_result"] = payload
         return resp
-    try:  # text capture: merge the action payload in
+    data = {"capture": resp}  # text capture: merge the action payload in
+    with contextlib.suppress(TypeError, json.JSONDecodeError):
         data = json.loads(resp)
-    except (TypeError, json.JSONDecodeError):
-        data = {"capture": resp}
     return json.dumps({**data, **payload})
 
 
@@ -750,12 +749,10 @@ def _should_route_through_aux_vision() -> bool:
         from tools.computer_use.vision_routing import should_route_capture_to_aux_vision
         stage = "config read"
         provider, model = _read_main_provider() or "", _read_main_model() or ""
-        cache_key = (str(provider), str(model))
-        if (cached := _AUX_VISION_ROUTE_CACHE.get(cache_key)) is not None:
+        if (cached := _AUX_VISION_ROUTE_CACHE.get(key := (str(provider), str(model)))) is not None:
             return cached
         stage = "decision"
-        decision = bool(should_route_capture_to_aux_vision(provider, model, load_config()))
-        _AUX_VISION_ROUTE_CACHE[cache_key] = decision
+        _AUX_VISION_ROUTE_CACHE[key] = decision = bool(should_route_capture_to_aux_vision(provider, model, load_config()))
         return decision
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: aux-vision routing %s failed: %s", stage, exc)
