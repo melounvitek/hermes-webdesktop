@@ -710,7 +710,7 @@ def reserve_peer_room(
     if expiry <= timestamp:
         raise HostedRoomError("peer room reservation must expire in the future")
     values = _reservation_claims(claims)
-    room_id, _member_id, target_profile, gateway_id, epoch = values
+    room_id, _, target_profile, gateway_id, epoch = values
     with _transaction(db_path, immediate=True) as conn:
         conn.execute("DELETE FROM hosted_room_peer_reservations WHERE expires_at<=?", (timestamp,))
         authority_rows = conn.execute(
@@ -822,11 +822,10 @@ def _adopt_legacy_room(
     """Claim a 'legacy'-authority room for a real gateway with a fenced claim event."""
     target_epoch = int(existing["authority_epoch"]) + 1
     seq = int(existing["next_seq"])
-    actor_json = _system_actor_json("authority-control")
-    payload_json = _claim_payload_json("legacy", authority_gateway_id, target_epoch)
     claim_bytes = _insert_event(
-        conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed", actor_json, target_epoch,
-        payload_json, now, allow_control=True)
+        conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed",
+        _system_actor_json("authority-control"), target_epoch,
+        _claim_payload_json("legacy", authority_gateway_id, target_epoch), now, allow_control=True)
     _fenced_update(conn, """UPDATE hosted_rooms
             SET members_json=?, authority_gateway_id=?, authority_epoch=?,
                 next_seq=next_seq+1, revision=revision+1, event_bytes=event_bytes+?, updated_at=?
@@ -869,8 +868,8 @@ def create_room(
             if existing["authority_gateway_id"] != authority_gateway_id:
                 raise RoomConflictError("room_id already belongs to a different authority")
             return _room_from_row(existing, idempotent=True)
-        active_rooms = int(conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0])
-        if active_rooms >= MAX_ACTIVE_ROOMS:
+        active = conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0]
+        if int(active) >= MAX_ACTIVE_ROOMS:
             raise HostedRoomError("This host has too many active Group Chats. Delete one and try again.")
         conn.execute(
             f"""INSERT INTO hosted_rooms ({_ROOM_COLUMNS_WITH_BYTES})
@@ -923,8 +922,7 @@ def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now:
         conn.execute(_INSERT_EVENT, (
             room_id, seq, event_id, "room.renamed", actor_json, int(room["authority_epoch"]), payload_json, now))
         updated = conn.execute(_SELECT_ROOM, (room_id,)).fetchone()
-        event = _load_event(conn, room_id, event_id)
-    return {**_room_from_row(updated), "event": _event_from_row(event)}
+        return {**_room_from_row(updated), "event": _event_from_row(_load_event(conn, room_id, event_id))}
 
 
 def append_event(
