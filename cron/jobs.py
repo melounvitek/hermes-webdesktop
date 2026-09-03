@@ -172,8 +172,7 @@ def _job_running_in_this_process(job_id: str) -> bool:
     """True when the scheduler in THIS process is still running ``job_id``.
 
     The run_claim TTL alone cannot distinguish "claiming tick died" from "alive but slow"; the
-    in-process running set settles the single-gateway case. Lazy import: scheduler imports us.
-    """
+    in-process running set settles the single-gateway case. Lazy import: scheduler imports us."""
     try:
         from cron.scheduler import get_running_job_ids
         return job_id in get_running_job_ids()
@@ -195,8 +194,7 @@ def _acquire_flock(lock_fd, timeout: float) -> Optional[bool]:
 
     A blocking flock(LOCK_EX) has NO timeout and is taken while holding the in-process lock, so a
     wedged sibling process would freeze EVERY cron function here forever. Poll LOCK_NB against a
-    deadline instead; the caller decides the degraded mode on timeout.
-    """
+    deadline instead; the caller decides the degraded mode on timeout."""
     if fcntl is not None:
         deadline = time.monotonic() + timeout
         while True:
@@ -234,8 +232,7 @@ def _jobs_lock():
     (gateway vs. CLI writes — otherwise a `cron pause` could be clobbered and keep firing). Sections
     are short (field updates only). Nested calls in one thread reuse the held lock. Without a flock
     backend, or on flock timeout (logged loudly), it degrades to in-process-only locking: a briefly
-    torn cross-process write beats a dead scheduler.
-    """
+    torn cross-process write beats a dead scheduler."""
     depth = getattr(_jobs_lock_state, "depth", 0)
     if depth:
         _jobs_lock_state.depth = depth + 1
@@ -511,8 +508,7 @@ def _is_recoverable_error_job(job: Dict[str, Any]) -> bool:
     ``state=error`` is set ONLY when ``compute_next_run()`` fails for a cron/interval job (croniter
     missing, malformed schedule); such a job still has future occurrences once the issue resolves,
     so treating it as terminal would block due-scan self-heal, pre-advance, dispatch claim and
-    ``resume_job`` — wedging it forever. ``is_terminal_job()`` alone means "truly done".
-    """
+    ``resume_job`` — wedging it forever. ``is_terminal_job()`` alone means "truly done"."""
     return (
         job.get("state") == "error"
         and (job.get("schedule") or {}).get("kind") in {"cron", "interval"}
@@ -1012,8 +1008,7 @@ def _classify_stale_cron_next_run(
     ``timezone_migration``: only the offset representation changed (legacy UTC rows normalized into
     the profile tz); treating it as an edit would skip a due, never-fired occurrence. Discriminator:
     a stored instant whose OWN wall clock is a legal occurrence, when normalization moved the wall
-    clock, is a migration. When offsets agree a genuine expr edit can never be misread as one.
-    """
+    clock, is a migration. When offsets agree a genuine expr edit can never be misread as one."""
     if _cron_next_run_matches_expr(schedule, next_run_dt):
         return STALE_CRON_MATCH
     wall_clock_shifted = raw_next_run_dt.replace(tzinfo=None) != next_run_dt.replace(tzinfo=None)
@@ -1076,8 +1071,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
             logger.warning(
                 "Cannot compute next run for cron schedule %r: 'croniter' is "
                 "not installed. croniter is a core dependency as of v0.9.x; "
-                "reinstall hermes-agent or run 'pip install croniter' in your "
-                "runtime env.",
+                "reinstall hermes-agent or run 'pip install croniter' in your runtime env.",
                 expr)
             return None
         return croniter(expr, base_time).get_next(datetime).isoformat()
@@ -1645,8 +1639,7 @@ def create_job(
     delivered verbatim, requires ``script``). context_from: job id(s) whose latest output is
     injected. workdir: absolute cwd for tools/scripts. monitor_script/monitor_url: cheap monitor
     source run FIRST each tick; unchanged output suppresses the agent run (mutually exclusive,
-    incompatible with ``no_agent``). reasoning_effort: per-job pin; capability NOT validated.
-    """
+    incompatible with ``no_agent``). reasoning_effort: per-job pin; capability NOT validated."""
     parsed_schedule = parse_schedule(schedule)
     repeat = normalize_repeat_value(repeat)
     if parsed_schedule["kind"] == "once" and repeat is None:
@@ -2130,13 +2123,11 @@ def _advance_after_run(job: Dict[str, Any], now: str) -> None:
         job["state"] = "error"
         if not job.get("last_error"):
             job["last_error"] = (
-                "Failed to compute next run for recurring "
-                "schedule (is the 'croniter' package "
+                "Failed to compute next run for recurring schedule (is the 'croniter' package "
                 "installed in the gateway's Python env?)")
         logger.error(
             "Job '%s' (%s) could not compute next_run_at; "
-            "leaving enabled and marking state=error so the "
-            "job is not silently disabled.",
+            "leaving enabled and marking state=error so the job is not silently disabled.",
             job.get("name", job.get("id", "?")), kind)
     else:
         _complete_job_record(job)  # one-shot: terminal completion
@@ -2164,8 +2155,7 @@ def mark_job_run(
             claim = job.get("fire_claim")
             if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:
                 logger.warning(
-                    "mark_job_run: job_id %s fire claim owner changed; "
-                    "discarding stale completion",
+                    "mark_job_run: job_id %s fire claim owner changed; discarding stale completion",
                     job_id)
                 return False
         now = _hermes_now().isoformat()
@@ -2327,8 +2317,7 @@ def advance_next_runs(job_ids) -> int:
 
     One-shot/unknown ids are skipped as in the per-job form. Returns the count advanced. Crash
     semantics: persisted once at the end, so a crash mid-batch re-fires the whole set on restart
-    (at-least-once burst) rather than a prefix — acceptable given the sub-10ms window.
-    """
+    (at-least-once burst) rather than a prefix — acceptable given the sub-10ms window."""
     ids = set(job_ids)
     if not ids:
         return 0
@@ -2451,8 +2440,7 @@ def _sweep_completed_oneshots(
 
     Removed ids go into *removed_ids* so save_jobs's shrink-merge guard allows the delete. Only
     ``kind == "once"`` records in state "completed" are candidates; age is measured from
-    ``last_run_at``, and a record without a parseable one is kept (never guess into deletion).
-    """
+    ``last_run_at``, and a record without a parseable one is kept (never guess into deletion)."""
     retention_days = _completed_oneshot_retention_days()
     if retention_days <= 0:
         return False
@@ -2475,8 +2463,7 @@ def _sweep_completed_oneshots(
             if removed_ids is not None and rid:
                 removed_ids.add(str(rid))
             logger.info(
-                "Job '%s': pruning completed one-shot record "
-                "(finished %s, retention %.1f days)",
+                "Job '%s': pruning completed one-shot record (finished %s, retention %.1f days)",
                 rj.get("name", rj.get("id", "?")), last_run, retention_days)
         except Exception:
             logger.debug(
@@ -2492,8 +2479,7 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     A recurring job more than one period stale (gateway down, or a previous run overran the
     interval) has its backlog collapsed — next_run_at fast-forwards so nothing burst-fires — but
     still fires ONCE now, avoiding the perpetual-defer loop for runs longer than interval + grace.
-    That catch-up fire flows through mark_job_run, so it consumes one ``repeat.times`` run.
-    """
+    That catch-up fire flows through mark_job_run, so it consumes one ``repeat.times`` run."""
     with _jobs_lock():
         return _get_due_jobs_locked()
 
@@ -2599,8 +2585,7 @@ def _repair_timezone_shifted_cron(
     next_run_at is an absolute instant but the expr means local wall clock, so a TZ change can make
     it look due hours early. If the stored wall clock is still in the future, recompute so we fire
     at the intended local time. True when re-anchored (caller skips this tick). TRADE-OFF: a DST
-    offset change meeting the same conditions SKIPS the pending occurrence; accepted as rare.
-    """
+    offset change meeting the same conditions SKIPS the pending occurrence; accepted as rare."""
     if not (
         next_run_dt <= scan.now
         and _timezone_offset_mismatch(raw_next_run_dt, scan.now)
@@ -2627,8 +2612,7 @@ def _rearm_stale_error_recurring(
     Such a job errored, mark_job_run parked next_run_at in the future, and nothing re-dispatched it
     (the in-memory stale-claim sweep cannot see it). Interval jobs re-arm to now (always a legal
     fire); cron jobs re-arm to the next LEGAL occurrence, since re-arming to now would fire at times
-    the expression excludes. A correctly-parked cron value is left as-is.
-    """
+    the expression excludes. A correctly-parked cron value is left as-is."""
     if not (
         kind in ("cron", "interval")
         and next_run_dt > scan.now
@@ -2647,8 +2631,7 @@ def _rearm_stale_error_recurring(
     logger.warning(
         "cron.persisted_error.recovered job='%s' id=%s — recurring "
         "job wedged in stale last_status=error without re-firing for "
-        "a full cadence; re-arming next_run_at to %s so it "
-        "re-dispatches without force-run/resume",
+        "a full cadence; re-arming next_run_at to %s so it re-dispatches without force-run/resume",
         job.get("name", jid), jid, recovered_next)
     _record_persisted_error_recovery(job, next_run)
     job["next_run_at"] = recovered_next
@@ -2666,15 +2649,13 @@ def _reanchor_stale_cron(
     the current expr, so this converges). An offset-representation migration also moves a legacy
     instant off the lattice, and re-anchoring THAT swallowed a due occurrence — so classify, and let
     the migration case fall through to fire ONCE (at-most-once holds: nothing re-reads the legacy
-    instant after advance/mark_job_run rewrites it).
-    """
+    instant after advance/mark_job_run rewrites it)."""
     stale_class = _classify_stale_cron_next_run(schedule, raw_next_run_dt, next_run_dt)
     if stale_class == STALE_CRON_EXPR_EDIT:
         new_next = compute_next_run(schedule, scan.now.isoformat())
         logger.info(
             "Job '%s' next_run_at %s does not match its current "
-            "cron expression %r (direct jobs.json edit?); "
-            "re-anchoring to %s without firing.",
+            "cron expression %r (direct jobs.json edit?); re-anchoring to %s without firing.",
             job.get("name", job.get("id", "?")), next_run, schedule.get("expr"), new_next)
         if new_next:
             scan.persist(job["id"], next_run_at=new_next)
@@ -2684,8 +2665,7 @@ def _reanchor_stale_cron(
             "cron.timezone_migration.catch_up job='%s' id=%s expr=%r "
             "stored=%s normalized=%s — stored next_run_at carries a "
             "pre-migration UTC offset (%s, now %s) and is a legal "
-            "occurrence at its own wall clock; firing the due run "
-            "instead of re-anchoring past it.",
+            "occurrence at its own wall clock; firing the due run instead of re-anchoring past it.",
             job.get("name", job.get("id", "?")), job.get("id"), schedule.get("expr"), next_run,
             next_run_dt.isoformat(), raw_next_run_dt.utcoffset(), scan.now.utcoffset())
         _record_timezone_migration_catchup(job, raw_next_run_dt, next_run_dt)
@@ -2709,8 +2689,7 @@ def _fast_forward_missed_recurring(
         return
     logger.info(
         "Job '%s' missed its scheduled time (%s, grace=%ds). "
-        "Running now; next run provisionally set to: %s "
-        "(re-anchored on completion)",
+        "Running now; next run provisionally set to: %s (re-anchored on completion)",
         job.get("name", job.get("id", "?")), next_run, grace, new_next)
     scan.persist(job["id"], next_run_at=new_next)
     record_catch_up_occurrence()
@@ -2724,8 +2703,7 @@ def _retire_expired_oneshot(
     A one-shot beyond the grace window must never fire (create/update/resume reject such schedules
     and recovery never revives them; only the due scan used to dispatch them hours late). With no
     claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
-    still in flight elsewhere — skip but keep the record so its mark_job_run can land.
-    """
+    still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
     if (scan.now - next_run_dt).total_seconds() <= ONESHOT_GRACE_SECONDS:
         return False
     if not (job.get("run_claim") or job.get("fire_claim")):
@@ -2739,8 +2717,7 @@ def _oneshot_dispatch_limit_reached(job: Dict[str, Any], scan: _DueScan) -> bool
 
     A finite one-shot claimed via claim_dispatch() whose tick died before mark_job_run has
     completed >= times while still looking due. Remove it instead of re-firing — unless THIS
-    process is still running it (a run outliving the run_claim TTL is slow, not stale).
-    """
+    process is still running it (a run outliving the run_claim TTL is slow, not stale)."""
     repeat = job.get("repeat") or {}
     times = repeat.get("times")
     completed = repeat.get("completed", 0)
@@ -2972,8 +2949,7 @@ def rewrite_skill_refs(
     and skips missing skills). Consolidated names are replaced by their umbrella target without
     duplication, pruned names are dropped, ordering is preserved, and the legacy ``skill`` field is
     realigned. Returns ``{"rewrites": [{job_id, job_name, before, after, mapped, dropped}, ...],
-    "jobs_updated": N, "jobs_scanned": M}``. Load/save exceptions propagate (the curator wraps).
-    """
+    "jobs_updated": N, "jobs_scanned": M}``. Load/save exceptions propagate (the curator wraps)."""
     consolidated = dict(consolidated or {})
     # A skill listed in both wins as "consolidated" — it has a target, the more useful outcome.
     pruned_set = set(pruned or []) - set(consolidated.keys())
