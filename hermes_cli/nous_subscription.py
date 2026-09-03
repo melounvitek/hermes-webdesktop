@@ -558,9 +558,7 @@ def apply_nous_managed_defaults(
     return changed
 
 
-# ---------------------------------------------------------------------------
-# Tool Gateway offer — single Y/n prompt after model selection
-# ---------------------------------------------------------------------------
+# Tool Gateway offer — per-tool checklist after model selection
 
 
 def _get_gateway_direct_credentials() -> Dict[str, bool]:
@@ -689,9 +687,7 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     return changed
 
 
-# ---------------------------------------------------------------------------
 # Inline Nous Portal login for the Tool Gateway picker (`hermes tools`)
-# ---------------------------------------------------------------------------
 
 
 def ensure_nous_portal_access(*, capability: str = "the Nous Tool Gateway", coverage_category: Optional[str] = None) -> bool:

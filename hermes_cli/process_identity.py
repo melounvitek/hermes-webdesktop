@@ -38,10 +38,6 @@ _JOB_HANDLE = None
 _LEDGER_LOCK = threading.Lock()
 
 
-# ---------------------------------------------------------------------------
-# Install identity
-# ---------------------------------------------------------------------------
-
 def install_id(project_root: Optional[Path] = None) -> str:
     """Stable 12-hex identifier for THIS install (derived from its path)."""
     if project_root is None:
@@ -68,9 +64,8 @@ def _process_create_time(pid: Optional[int] = None) -> Optional[float]:
         return None
 
 
-# ---------------------------------------------------------------------------
 # Layer 1 — spawn tags
-# ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class SpawnTag:
@@ -107,14 +102,11 @@ def parse_spawn_tag(raw: object) -> Optional[SpawnTag]:
         create = None if create_s == "-" else float(create_s)
     except ValueError:
         return None
-    if pid <= 0:
-        return None
-    return SpawnTag(install=install, purpose=purpose, spawner_pid=pid, spawner_create=create)
+    return SpawnTag(install, purpose, pid, create) if pid > 0 else None
 
 
-# ---------------------------------------------------------------------------
 # Layer 2 — spawn ledger
-# ---------------------------------------------------------------------------
+
 
 @dataclass
 class LedgerEntry:
@@ -368,9 +360,8 @@ def reap_orphaned_mcp_helpers(*, project_root: Optional[Path] = None, kill_fn=No
     return reaped
 
 
-# ---------------------------------------------------------------------------
 # Layer 3 — Windows job-object self-attach
-# ---------------------------------------------------------------------------
+
 
 def attach_self_to_kill_on_close_job() -> bool:
     """Place this process in a job that dies (whole tree) when we die. Windows-only, idempotent.

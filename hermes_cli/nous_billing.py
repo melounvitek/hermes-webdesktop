@@ -22,9 +22,7 @@ DEFAULT_PORTAL_BASE_URL = "https://portal.nousresearch.com"
 DEFAULT_TIMEOUT = 15.0
 
 
-# =============================================================================
-# Typed errors
-# =============================================================================
+# --- Typed errors ---
 
 
 class BillingError(Exception):
@@ -97,9 +95,7 @@ class BillingUpgradeCapExceeded(BillingTransient):
     """
 
 
-# =============================================================================
-# Base-URL + auth resolution
-# =============================================================================
+# --- Base-URL + auth resolution ---
 
 
 def resolve_portal_base_url(state: Optional[dict[str, Any]] = None) -> str:
@@ -180,9 +176,7 @@ def _resolve_token_and_base(*, use_cache: bool = True) -> tuple[str, str]:
     return resolved
 
 
-# =============================================================================
-# HTTP plumbing
-# =============================================================================
+# --- HTTP plumbing ---
 
 
 def _retry_after_seconds(headers: Any) -> Optional[int]:
@@ -287,9 +281,7 @@ def _request(
         raise BillingError("Could not reach Nous Portal: timed out", error="network_error") from exc
 
 
-# =============================================================================
-# Endpoints
-# =============================================================================
+# --- Endpoints ---
 
 
 def _require_str(value: Any, message: str, error: str) -> str:
@@ -342,9 +334,7 @@ def get_subscription_state(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any
     return _request("GET", "/api/billing/subscription", timeout=timeout)
 
 
-# =============================================================================
-# Subscription change — preview + the pending-change resource + upgrade
-# =============================================================================
+# --- Subscription change — preview + the pending-change resource + upgrade ---
 # Chargeless lane: preview (quote only) and PUT/DELETE pending-change (schedule/clear a downgrade
 # or cancellation, effective at period end). The ONE money route: POST upgrade (prorate + charge
 # + flip the plan in one Stripe op). All require ``billing:manage`` (403 insufficient_scope ->
