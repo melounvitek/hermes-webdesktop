@@ -1,12 +1,8 @@
 """OSV malware check for MCP extension packages.
 
-Before launching an MCP server via npx/uvx, queries the OSV (Open Source
-Vulnerabilities) API to check if the package has any known malware advisories
-(MAL-* IDs).  Regular CVEs are ignored — only confirmed malware is blocked.
-
-The API is free, public, and maintained by Google.  Typical latency is ~300ms.
-Fail-open: network errors allow the package to proceed.
-
+Before launching an MCP server via npx/uvx, queries Google's free public OSV API for
+known malware advisories (MAL-* IDs). Regular CVEs are ignored — only confirmed malware
+is blocked. Fail-open: network errors allow the package to proceed (~300ms typical).
 Inspired by Block/goose's extension malware check.
 """
 
@@ -60,17 +56,11 @@ def _cache_put(key, result: Optional[str]) -> None:
         _cache[key] = (time.monotonic() + _CACHE_TTL_S, result)
 
 
-def check_package_for_malware(
-    command: str, args: list
-) -> Optional[str]:
-    """Check if an MCP server package has known malware advisories.
+def check_package_for_malware(command: str, args: list) -> Optional[str]:
+    """Check an MCP server package (inferred from ``command``/``args``) for MAL-* advisories.
 
-    Inspects the *command* (e.g. ``npx``, ``uvx``) and *args* to infer the
-    package name and ecosystem.  Queries the OSV API for MAL-* advisories.
-
-    Returns:
-        An error message string if malware is found, or None if clean/unknown.
-        Returns None (allow) on network errors or unrecognized commands.
+    Returns a BLOCKED message when malware is found, else None — including on network
+    errors and unrecognized commands (fail-open).
     """
     ecosystem = _infer_ecosystem(command)
     if not ecosystem:
@@ -88,22 +78,15 @@ def check_package_for_malware(
     try:
         malware = _query_osv(package, ecosystem, version)
     except Exception as exc:
-        # Fail-open: network errors, timeouts, parse failures → allow.
-        # Deliberately NOT cached — see _CACHE_TTL_S comment.
+        # Fail-open; deliberately NOT cached — see _CACHE_TTL_S comment.
         logger.debug("OSV check failed for %s/%s (allowing): %s", ecosystem, package, exc)
         return None
 
+    result = None
     if malware:
         ids = ", ".join(m["id"] for m in malware[:3])
-        summaries = "; ".join(
-            m.get("summary", m["id"])[:100] for m in malware[:3]
-        )
-        result = (
-            f"BLOCKED: Package '{package}' ({ecosystem}) has known malware "
-            f"advisories: {ids}. Details: {summaries}"
-        )
-    else:
-        result = None
+        summaries = "; ".join(m.get("summary", m["id"])[:100] for m in malware[:3])
+        result = f"BLOCKED: Package '{package}' ({ecosystem}) has known malware advisories: {ids}. Details: {summaries}"
     _cache_put(cache_key, result)
     return result
 
@@ -115,26 +98,17 @@ _ECOSYSTEM_BY_COMMAND = {
 
 
 def _infer_ecosystem(command: str) -> Optional[str]:
-    """Infer package ecosystem from the command name."""
     return _ECOSYSTEM_BY_COMMAND.get(os.path.basename(command).lower())
 
 
-def _parse_package_from_args(
-    args: list, ecosystem: str
-) -> Tuple[Optional[str], Optional[str]]:
-    """Extract package name and optional version from command args.
-
-    Returns (package_name, version) or (None, None) if not parseable.
-    """
-    if not args:
-        return None, None
-
+def _parse_package_from_args(args: list, ecosystem: str) -> Tuple[Optional[str], Optional[str]]:
+    """Extract (package_name, version) from command args, or (None, None) if not parseable."""
     # Skip flags to find the package token. Honor npx's explicit install target
     # (--package=NAME / --package NAME / -p NAME), which names a package distinct
     # from the executed binary; otherwise the first bare positional is used.
     package_token = None
     take_next = False
-    for arg in args:
+    for arg in args or ():
         if not isinstance(arg, str):
             continue
         if take_next:
@@ -160,54 +134,34 @@ def _parse_package_from_args(
 def _parse_npm_package(token: str) -> Tuple[Optional[str], Optional[str]]:
     """Parse npm package: @scope/name@version or name@version."""
     if token.startswith("@"):
-        # Scoped: @scope/name@version
         match = re.match(r"^(@[^/]+/[^@]+)(?:@(.+))?$", token)
-        if match:
-            return match.group(1), match.group(2)
-        return token, None
-    # Unscoped: name@version
+        return (match.group(1), match.group(2)) if match else (token, None)
     if "@" in token:
-        parts = token.rsplit("@", 1)
-        name = parts[0]
-        version = parts[1] if len(parts) > 1 and parts[1] != "latest" else None
-        return name, version
+        name, version = token.rsplit("@", 1)
+        return name, version if version != "latest" else None
     return token, None
 
 
 def _parse_pypi_package(token: str) -> Tuple[Optional[str], Optional[str]]:
     """Parse PyPI package: name==version or name[extras]==version."""
-    # Strip extras: name[extra1,extra2]==version
     match = re.match(r"^([a-zA-Z0-9._-]+)(?:\[[^\]]*\])?(?:==(.+))?$", token)
-    if match:
-        return match.group(1), match.group(2)
-    return token, None
+    return (match.group(1), match.group(2)) if match else (token, None)
 
 
 _PACKAGE_PARSERS = {"npm": _parse_npm_package, "PyPI": _parse_pypi_package}
 
 
-def _query_osv(
-    package: str, ecosystem: str, version: Optional[str] = None
-) -> list:
-    """Query the OSV API for MAL-* advisories. Returns list of malware vulns."""
+def _query_osv(package: str, ecosystem: str, version: Optional[str] = None) -> list:
+    """Query the OSV API; return only MAL-* advisories (regular CVEs ignored)."""
     payload = {"package": {"name": package, "ecosystem": ecosystem}}
     if version:
         payload["version"] = version
-
-    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         _OSV_ENDPOINT,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "hermes-agent-osv-check/1.0",
-        },
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "hermes-agent-osv-check/1.0"},
         method="POST",
     )
-
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         result = json.loads(resp.read())
-
-    vulns = result.get("vulns", [])
-    # Only malware advisories — ignore regular CVEs
-    return [v for v in vulns if v.get("id", "").startswith("MAL-")]
+    return [v for v in result.get("vulns", []) if v.get("id", "").startswith("MAL-")]
