@@ -91,8 +91,7 @@ _EXTRACT_CATEGORIES = ((_PREF_PATTERNS, "user_pref"), (_DECISION_PATTERNS, "proj
 
 def _load_plugin_config() -> dict:
     try:
-        # Canonical loader: honors the managed-scope overlay + ${VAR} expansion.
-        from hermes_cli.config import load_config_readonly
+        from hermes_cli.config import load_config_readonly  # canonical: managed-scope overlay + ${VAR} expansion
         return cfg_get(load_config_readonly(), "plugins", "hermes-memory-store", default={}) or {}
     except Exception:
         return {}
@@ -120,8 +119,7 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
-        self._store = None
-        self._retriever = None
+        self._store = self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
 
     @property
@@ -210,8 +208,7 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        # is_truthy_value: the config schema declares auto_extract as a string enum
-        # ("false"/"true"); plain truthiness would treat "false" as enabled.
+        # is_truthy_value: auto_extract is a string enum ("false"/"true"); plain truthiness would treat "false" as on.
         if is_truthy_value(self._config.get("auto_extract", False)) and self._store and messages:
             self._auto_extract_facts(messages)
 
@@ -224,8 +221,8 @@ class HolographicMemoryProvider(MemoryProvider):
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
-        # Release the shared SQLite connection on the caller's thread: leaving it to GC keeps
-        # the connection (and its write lock) alive on a long-running gateway. close() is idempotent.
+        # Close on the caller's thread: leaving the shared connection (and its write lock) to GC keeps it
+        # alive on a long-running gateway. close() is idempotent and refcount-guarded.
         if self._store is not None:
             try:
                 self._store.close()
@@ -234,26 +231,12 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
 
-    # -- Tool handlers: KeyError from args[...] / Exception -> tool_error in handle_tool_call. ---
-    # Argument coercion order (and therefore which error surfaces first) mirrors the call order.
+    # Tool handlers (self, args) -> str. KeyError from args[...] / Exception -> tool_error in handle_tool_call;
+    # argument coercion order (and therefore which error surfaces first) mirrors the underlying call order.
 
     def _entity_query(self, method: str, a: dict) -> str:
         """'probe' / 'related': single-entity retriever queries."""
         return _results(getattr(self._retriever, method)(a["entity"], category=a.get("category"), limit=_limit(a)))
-
-    def _act_reason(self, a: dict) -> str:
-        entities = a.get("entities", [])
-        if not entities:
-            return tool_error("reason requires 'entities' list")
-        return _results(self._retriever.reason(entities, category=a.get("category"), limit=_limit(a)))
-
-    def _act_update(self, a: dict) -> str:
-        updated = self._store.update_fact(
-            int(a["fact_id"]), content=a.get("content"),
-            trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
-            tags=a.get("tags"), category=a.get("category"),
-        )
-        return json.dumps({"updated": updated})
 
     _TOOL_HANDLERS = {
         "fact_store": _tool_handler({
@@ -263,9 +246,12 @@ class HolographicMemoryProvider(MemoryProvider):
                 a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
             "probe": lambda self, a: self._entity_query("probe", a),
             "related": lambda self, a: self._entity_query("related", a),
-            "reason": _act_reason,
+            "reason": lambda self, a: _results(self._retriever.reason(a["entities"], category=a.get("category"), limit=_limit(a)))
+            if a.get("entities") else tool_error("reason requires 'entities' list"),
             "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
-            "update": _act_update,
+            "update": lambda self, a: json.dumps({"updated": self._store.update_fact(
+                int(a["fact_id"]), content=a.get("content"), trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
+                tags=a.get("tags"), category=a.get("category"))}),
             "remove": lambda self, a: json.dumps({"removed": self._store.remove_fact(int(a["fact_id"]))}),
             "list": lambda self, a: _results(self._store.list_facts(
                 category=a.get("category"), min_trust=float(a.get("min_trust", 0.0)), limit=_limit(a)), key="facts"),
@@ -282,15 +268,11 @@ class HolographicMemoryProvider(MemoryProvider):
         # Local import: the compressor module is heavier than this plugin and only needed here.
         from agent.context_compressor import _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER, is_compaction_summary_message
 
-        content = msg.get("content", "")
+        content, pre = msg.get("content", ""), ""
         if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
-            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
-            if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                pre = pre[len(_MERGED_PRIOR_CONTEXT_HEADER):]
-            if pre.strip():
-                content = pre.strip()
-            elif is_compaction_summary_message(msg):
-                return None
+            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0].removeprefix(_MERGED_PRIOR_CONTEXT_HEADER).strip()
+        if pre:
+            content = pre
         elif is_compaction_summary_message(msg):
             return None
         return content if isinstance(content, str) and len(content) >= 10 else None

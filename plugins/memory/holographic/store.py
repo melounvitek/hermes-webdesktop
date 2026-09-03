@@ -182,9 +182,8 @@ class MemoryStore:
             assignments = ", ".join(["updated_at = CURRENT_TIMESTAMP"] + [f"{col} = ?" for col in changes])
             self._write(f"UPDATE facts SET {assignments} WHERE fact_id = ?", [*changes.values(), fact_id])
             if content is not None:  # re-extract entities and recompute the HRR vector
-                self._conn.execute("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
+                self._write("DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,))
                 self._link_entities(fact_id, content)
-                self._conn.commit()
                 self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category or self._one("SELECT category FROM facts WHERE fact_id = ?", (fact_id,))["category"])
             return True

@@ -20,8 +20,7 @@ _FACT_COLUMNS = (
     "fact_id, content, category, tags, trust_score, "
     "retrieval_count, helpful_count, created_at, updated_at"
 )
-_ROLE_ENTITY = "__hrr_role_entity__"
-_ROLE_CONTENT = "__hrr_role_content__"
+_ROLE_ENTITY, _ROLE_CONTENT = hrr.ROLE_ENTITY, hrr.ROLE_CONTENT
 _PUNCT = ".,;:!?\"'()[]{}#@<>"
 _FTS_OPERATORS = str.maketrans("", "", '"()*^:-+')
 # Stopwords dropped before FTS5 OR-expansion: short English function words that
@@ -202,10 +201,8 @@ class FactRetriever:
             results = [dict(row) for row in self.store._conn.execute(sql, params).fetchall()]
         except Exception:
             return []  # FTS5 MATCH can fail on malformed queries
-        if not results:
-            return []
-        # FTS5 rank is negative (lower = better); normalize |rank| / max to [0, 1]
-        max_rank = max(max(abs(f["fts_rank_raw"]) for f in results), 1e-6)  # avoid div by zero
+        # FTS5 rank is negative (lower = better); normalize |rank| / max to [0, 1] (1e-6 floor avoids div by zero)
+        max_rank = max([abs(f["fts_rank_raw"]) for f in results] + [1e-6])
         for fact in results:
             fact["fts_rank"] = abs(fact.pop("fts_rank_raw")) / max_rank
         return results

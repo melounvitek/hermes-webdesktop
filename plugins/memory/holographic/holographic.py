@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _TWO_PI = 2.0 * math.pi
 _FLOAT32_BLOB_PREFIX = b"HRR1"
 _F32, _F64 = 4, 8  # itemsizes of np.float32 / np.float64
+ROLE_CONTENT, ROLE_ENTITY = "__hrr_role_content__", "__hrr_role_entity__"  # role atoms used by encode_fact
 
 
 def _require_numpy() -> None:
@@ -77,7 +78,7 @@ def encode_fact(content: str, entities: list[str], dim: int = 1024) -> "np.ndarr
     """bundle(bind(text, ROLE_CONTENT), bind(entity_i, ROLE_ENTITY)...), so
     unbind(fact, bind(entity, ROLE_ENTITY)) ≈ content_vector."""
     _require_numpy()
-    role_content, role_entity = encode_atom("__hrr_role_content__", dim), encode_atom("__hrr_role_entity__", dim)
+    role_content, role_entity = encode_atom(ROLE_CONTENT, dim), encode_atom(ROLE_ENTITY, dim)
     return bundle(bind(encode_text(content, dim), role_content),
                   *[bind(encode_atom(entity.lower(), dim), role_entity) for entity in entities])
 
@@ -89,8 +90,7 @@ def phases_to_bytes(phases: "np.ndarray", dim: int | None = None) -> bytes:
     so we write legacy float64 there to keep ``bytes_to_phases`` unambiguous.
     """
     _require_numpy()
-    if dim is None:
-        dim = int(phases.shape[0])
+    dim = int(phases.shape[0]) if dim is None else dim
     if len(_FLOAT32_BLOB_PREFIX) + dim * _F32 == dim * _F64:
         return np.asarray(phases, dtype=np.float64).tobytes()
     return _FLOAT32_BLOB_PREFIX + np.asarray(phases, dtype=np.float32).tobytes()
@@ -108,13 +108,10 @@ def bytes_to_phases(data: bytes, dim: int | None = None) -> "np.ndarray":
     f32 = lambda payload: np.frombuffer(payload, dtype=np.float32).astype(np.float64)  # noqa: E731
     f64 = lambda payload: np.frombuffer(payload, dtype=np.float64).copy()  # noqa: E731
     if dim is None:
-        if prefixed:
-            if (len(data) - plen) % _F32 != 0:
-                raise ValueError(f"HRR float32 vector blob has invalid payload byte length: {len(data) - plen}")
-            return f32(data[plen:])
-        if len(data) % _F64 != 0:
-            raise ValueError(f"HRR legacy vector blob has invalid byte length: {len(data)}")
-        return f64(data)
+        payload, size, what = (data[plen:], _F32, "float32 vector blob has invalid payload") if prefixed else (data, _F64, "legacy vector blob has invalid")
+        if len(payload) % size != 0:
+            raise ValueError(f"HRR {what} byte length: {len(payload)}")
+        return f32(payload) if prefixed else f64(payload)
     float32_blob_bytes, float64_bytes = plen + dim * _F32, dim * _F64
     collides = float32_blob_bytes == float64_bytes
     if not collides and prefixed and len(data) == float32_blob_bytes:
