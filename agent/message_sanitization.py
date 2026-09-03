@@ -26,9 +26,7 @@ _MESSAGE_CORE_KEYS = frozenset({"content", "name", "tool_calls", "role"})
 
 def _sanitize_surrogates(text: str) -> str:
     """Replace lone surrogate code points with U+FFFD; no-op when none present."""
-    if _SURROGATE_RE.search(text):
-        return _SURROGATE_RE.sub('\ufffd', text)
-    return text
+    return _SURROGATE_RE.sub('\ufffd', text)
 
 
 def _strip_non_ascii(text: str) -> str:
@@ -39,12 +37,11 @@ def _strip_non_ascii(text: str) -> str:
 def _fix_str_field(container: Any, key: Any, fix: Callable[[str], str]) -> bool:
     """Apply ``fix`` to ``container[key]`` if it is a str; True if it changed."""
     value = container.get(key) if isinstance(container, dict) else container[key]
-    if isinstance(value, str):
-        fixed = fix(value)
-        if fixed != value:
-            container[key] = fixed
-            return True
-    return False
+    fixed = fix(value) if isinstance(value, str) else value
+    if fixed == value:
+        return False
+    container[key] = fixed
+    return True
 
 
 def _sanitize_structure(payload: Any, fix: Callable[[str], str]) -> bool:
@@ -74,25 +71,17 @@ def _sanitize_messages(messages: list, fix: Callable[[str], str], *, deep: bool)
         if not isinstance(msg, dict):
             continue
         content = msg.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict):
-                    found |= _fix_str_field(part, "text", fix)
-        else:
-            found |= _fix_str_field(msg, "content", fix)
-        found |= _fix_str_field(msg, "name", fix)
+        parts = [(p, "text") for p in content if isinstance(p, dict)] if isinstance(content, list) else None
+        fields = parts if parts is not None else [(msg, "content")]
+        fields.append((msg, "name"))
         tool_calls = msg.get("tool_calls")
         for tc in tool_calls if isinstance(tool_calls, list) else ():
-            if not isinstance(tc, dict):
-                continue
-            fn = tc.get("function")
-            fn_fields = [(fn, "name"), (fn, "arguments")] if isinstance(fn, dict) else []
-            for container, key in [(tc, "id")] + fn_fields:
-                if deep or key == "arguments":
-                    found |= _fix_str_field(container, key, fix)
-        for key, value in list(msg.items()):
-            if key in _MESSAGE_CORE_KEYS:
-                continue
+            fn = tc.get("function") if isinstance(tc, dict) else None
+            fields += [(tc, "id")] if deep and isinstance(tc, dict) else []
+            fields += ([(fn, "name")] if deep else []) + [(fn, "arguments")] if isinstance(fn, dict) else []
+        for container, key in fields:
+            found |= _fix_str_field(container, key, fix)
+        for key, value in [kv for kv in msg.items() if kv[0] not in _MESSAGE_CORE_KEYS]:
             if isinstance(value, str):
                 found |= _fix_str_field(msg, key, fix)
             elif deep and isinstance(value, (dict, list)):
@@ -169,14 +158,12 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     fixed += '}' * max(0, fixed.count('{') - fixed.count('}'))
     fixed += ']' * max(0, fixed.count('[') - fixed.count(']'))
     for _ in range(50):
-        if _loads_ok(fixed):
-            break
-        if (fixed.endswith('}') and fixed.count('}') > fixed.count('{')) or (
-            fixed.endswith(']') and fixed.count(']') > fixed.count('[')
+        if _loads_ok(fixed) or not (
+            (fixed.endswith('}') and fixed.count('}') > fixed.count('{'))
+            or (fixed.endswith(']') and fixed.count(']') > fixed.count('['))
         ):
-            fixed = fixed[:-1]
-        else:
             break
+        fixed = fixed[:-1]
 
     if _loads_ok(fixed):
         logger.warning("Repaired malformed tool_call arguments for %s: %s → %s", tool_name, raw_stripped[:80], fixed[:80])
@@ -216,12 +203,9 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
 
 
 def serialized_messages_bytes(messages: list) -> int:
-    """Exact serialized byte size of the ``messages`` payload (HTTP 413 recovery).
-
-    A 413 is a BYTE-size error, but the token estimator prices images at a flat cost, so
-    it cannot score recovery from an image-dominated 413. Non-serializable values fall
-    back to ``str()`` so a malformed message can never crash recovery.
-    """
+    """Exact serialized byte size of ``messages`` (HTTP 413 is a BYTE-size error the token
+    estimator, pricing images flat, cannot score). Non-serializable values fall back to
+    ``str()`` so a malformed message can never crash recovery."""
     if not isinstance(messages, list) or not messages:
         return 0
     try:
@@ -236,19 +220,16 @@ _IMAGE_PART_TYPES = {"image_url", "image", "input_image"}
 def _strip_images_from_messages(messages: list) -> bool:
     """Remove image content parts from all messages in-place (server rejected images).
 
-    ``tool`` messages and assistant messages carrying ``tool_calls`` whose content was
-    entirely images get a placeholder, NOT deleted (deleting orphans the paired
-    ``tool_call_id`` → HTTP 400); other now-empty messages are dropped. Rewritten messages
-    lose their ``api_content`` sidecar (it carries the images being removed).
+    ``tool`` / ``tool_calls`` messages left empty get a placeholder, NOT deleted (deleting
+    orphans the paired ``tool_call_id`` → HTTP 400); other now-empty messages are dropped.
+    Rewritten messages lose their ``api_content`` sidecar (it carries the removed images).
     """
     from agent.turn_context import drop_stale_api_content
 
     found = False
     to_delete = []
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
+        content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list):
             continue
         new_parts = [p for p in content if not (isinstance(p, dict) and p.get("type") in _IMAGE_PART_TYPES)]
@@ -326,10 +307,7 @@ def _tc_field(tc: Any, key: str) -> Any:
 
 
 def _tc_set(tc: Any, key: str, value: Any) -> None:
-    if isinstance(tc, dict):
-        tc[key] = value
-    else:
-        setattr(tc, key, value)
+    tc.__setitem__(key, value) if isinstance(tc, dict) else setattr(tc, key, value)
 
 
 def deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
@@ -344,10 +322,8 @@ def _expand_tool_id_variants(values: tuple[Any, ...]) -> frozenset[str]:
     variants: set[str] = set()
     for raw in values:
         value = raw.strip() if isinstance(raw, str) else ""
-        if not value:
-            continue
-        variants.add(value)
-        if "|" in value:
+        if value:
+            variants.add(value)
             variants.update(p for p in (part.strip() for part in value.split("|")) if p)
     return frozenset(variants)
 
@@ -379,10 +355,10 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
     """Ensure every tool call in one assistant turn has a distinct id.
 
     Some providers reuse one id across a batch; the pre-API sanitizer then keeps only the
-    first call/result pair per id and strict providers reject duplicates. First occurrence
-    keeps its id; later collisions get a deterministic ``<id>_d<n>`` suffix (never uuid4 —
-    cache-prefix stability). Mutates entries in place (SDK models / SimpleNamespace /
-    dicts). Blank ids are left for the deterministic fallback in ``build_assistant_message``.
+    first call/result pair per id and strict providers reject duplicates. Later collisions
+    get a deterministic ``<id>_d<n>`` suffix (never uuid4 — cache-prefix stability). Mutates
+    entries (SDK models / SimpleNamespace / dicts) in place. Blank ids are left for the
+    deterministic fallback in ``build_assistant_message``.
     """
     seen: set = set()
     for tc in tool_calls or []:
@@ -391,23 +367,17 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
         raw = raw.strip() if isinstance(raw, str) else ""
         # Composite Responses ids ("call_x|fc_y") collide on the call half — the pairing key.
         cid = raw.split("|", 1)[0]
-        if not cid:
+        if not cid or cid not in seen:
+            seen.update((cid,) if cid else ())
             continue
-        if cid not in seen:
-            seen.add(cid)
-            continue
-        n = 2
-        while f"{cid}_d{n}" in seen:
-            n += 1
-        new_id = f"{cid}_d{n}"
+        # range is bounded: at most len(seen) suffixes can already be taken.
+        new_id = next(f"{cid}_d{n}" for n in range(2, len(seen) + 3) if f"{cid}_d{n}" not in seen)
         seen.add(new_id)
 
-        def _renamed(value):
-            # Keep a composite id's response-item half so the provider's fc_/item id survives.
-            return f"{new_id}|{value.split('|', 1)[1]}" if isinstance(value, str) and "|" in value else new_id
-
         try:
-            _tc_set(tc, "id", _renamed(_tc_field(tc, "id")))
+            # Keep a composite id's response-item half so the provider's fc_/item id survives.
+            old = _tc_field(tc, "id")
+            _tc_set(tc, "id", f"{new_id}|{old.split('|', 1)[1]}" if isinstance(old, str) and "|" in old else new_id)
             if _tc_field(tc, "call_id"):
                 _tc_set(tc, "call_id", new_id)
         except Exception:
@@ -415,22 +385,17 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
             continue
         _fn_name = _tc_field(_tc_field(tc, "function"), "name") or "?"
         logger.warning(
-            "Model reused tool call id %s within one turn; renamed the "
-            "duplicate to %s (tool=%s) to keep call/result pairing "
-            "lossless.", cid, new_id, _fn_name,
+            "Model reused tool call id %s within one turn; renamed the duplicate to %s (tool=%s) to keep "
+            "call/result pairing lossless.", cid, new_id, _fn_name,
         )
     return tool_calls
 
 
 # -- reasoning_content policy: single owner of strip-vs-re-pad; adapters keep only SYNTAX --
-#   require-side (echo-back enforced; replays 400 without the field):
-#     kimi     — provider kimi-coding/kimi-coding-cn, or host api.kimi.com / moonshot.ai /
-#                moonshot.cn. Host-driven on purpose: aggregators re-exporting kimi reject it.
-#     deepseek — provider "deepseek", model contains "deepseek", or host api.deepseek.com.
-#                V4 rejects empty-string pads → " " single space.
-#     mimo     — provider "xiaomi", model contains "mimo", or host *.xiaomimimo.com.
-#   strict side (field rejected 400/422 "Extra inputs are not permitted"): everyone else —
-#     Mistral, Cerebras, Groq, SambaNova, … Strip the key entirely, even a one-space pad.
+# Require side (echo-back enforced; replays 400 without the field): the families below. Kimi
+# is host-driven on purpose (aggregators re-exporting kimi reject it); DeepSeek V4 rejects
+# empty-string pads → " ". Strict side (400/422 "Extra inputs are not permitted"): everyone
+# else — Mistral, Cerebras, Groq, SambaNova, … Strip the key entirely, even a one-space pad.
 
 _REASONING_ECHO_RULES: tuple = (
     # (family, exact providers (raw), exact providers (lowered), model substrings (lowered), hosts)
@@ -449,20 +414,16 @@ def matches_reasoning_echo_family(family: str, provider: Any, model: Any, base_u
     _, raw_providers, lowered_providers, model_subs, hosts = _REASONING_ECHO_RULE_BY_FAMILY[family]
     model_lower = (model or "").lower()
     return (
-        provider in raw_providers
-        or (provider or "").lower() in lowered_providers
-        or any(sub in model_lower for sub in model_subs)
-        or any(base_url_host_matches(base_url, host) for host in hosts)
+        provider in raw_providers or (provider or "").lower() in lowered_providers
+        or any(sub in model_lower for sub in model_subs) or any(base_url_host_matches(base_url, host) for host in hosts)
     )
 
 
 def reasoning_echo_family(provider: Any, model: Any, base_url: Any) -> "str | None":
     """``"kimi"`` / ``"deepseek"`` / ``"mimo"`` (first match in table order) when the
     endpoint enforces reasoning_content echo-back, else ``None`` (strip side)."""
-    return next(
-        (rule[0] for rule in _REASONING_ECHO_RULES if matches_reasoning_echo_family(rule[0], provider, model, base_url)),
-        None,
-    )
+    families = (rule[0] for rule in _REASONING_ECHO_RULES)
+    return next((f for f in families if matches_reasoning_echo_family(f, provider, model, base_url)), None)
 
 
 def needs_reasoning_echo(provider: Any, model: Any, base_url: Any) -> bool:
@@ -471,14 +432,12 @@ def needs_reasoning_echo(provider: Any, model: Any, base_url: Any) -> bool:
 
 
 def stale_thinking_reaches_wire(api_mode: Any, provider: Any, model: Any, base_url: Any) -> bool:
-    """True when stale assistant ``reasoning``/``reasoning_content`` text is actually replayed
-    on the wire for the active route.
+    """True when stale assistant reasoning text is actually replayed on the wire for the route.
 
     The single wire-truth predicate the compaction TRIGGER estimator and the tail-budget
     walks must share: if they disagree, a reasoning-heavy session can look over-threshold
     to preflight yet fully tail-protected to the walk — an infinite compaction loop.
-    ``codex_responses`` never reads the text keys (continuity rides the encrypted sidecar);
-    echo-back families replay stored ``reasoning_content`` verbatim; everyone else strips.
+    ``codex_responses`` never reads the text keys (continuity rides the encrypted sidecar).
     """
     return (api_mode or "") != "codex_responses" and needs_reasoning_echo(provider, model, base_url)
 
@@ -494,41 +453,37 @@ def apply_reasoning_content_policy(source_msg: dict, api_msg: dict, needs_thinki
         # non-string value (None after compaction): never pass null to the API.
         api_msg.pop("reasoning_content", None)
         return
-    existing = source_msg.get("reasoning_content")
+    existing, reasoning = source_msg.get("reasoning_content"), source_msg.get("reasoning")
     if isinstance(existing, str):
         # Explicit value: preserve verbatim, upgrading legacy "" to " " (DeepSeek V4 400s on "").
         api_msg["reasoning_content"] = existing or " "
-        return
-    reasoning = source_msg.get("reasoning")
-    if isinstance(reasoning, str) and reasoning and not source_msg.get("tool_calls"):
+    elif isinstance(reasoning, str) and reasoning and not source_msg.get("tool_calls"):
         # Healthy session: promote internal 'reasoning' → 'reasoning_content'.
         api_msg["reasoning_content"] = reasoning
-        return
-    # tool_calls + 'reasoning' but no 'reasoning_content' means the reasoning came from
-    # ANOTHER provider (DeepSeek's own build pins reasoning_content for tool-call turns):
-    # pad without leaking foreign CoT. No reasoning at all: every assistant turn still needs
-    # the field; " " (not "") because DeepSeek V4 rejects empty string.
-    api_msg["reasoning_content"] = " "
+    else:
+        # tool_calls + 'reasoning' but no 'reasoning_content' means the reasoning came from
+        # ANOTHER provider (DeepSeek's own build pins reasoning_content for tool-call turns):
+        # pad without leaking foreign CoT. No reasoning at all: every assistant turn still needs
+        # the field; " " (not "") because DeepSeek V4 rejects empty string.
+        api_msg["reasoning_content"] = " "
 
 
 def reapply_reasoning_echo(api_messages: list, needs_thinking_pad: bool) -> int:
     """Re-pad (or strip) assistant turns' reasoning_content for the ACTIVE provider.
 
-    ``api_messages`` is built once under the primary provider; a mid-conversation
-    fallback can switch providers, so baked-in fields must be reconciled: TO a
-    require-side provider re-applies the pad (else 400), TO a strict provider strips it
-    (else 422). Idempotent. Returns the number of assistant turns changed.
+    ``api_messages`` is built once under the primary provider; a mid-conversation fallback
+    can switch providers, so baked-in fields must be reconciled: TO a require-side provider
+    re-applies the pad (else 400), TO a strict one strips it (else 422). Idempotent.
+    Returns the number of assistant turns changed.
     """
     changed = 0
     for api_msg in api_messages:
         if api_msg.get("role") != "assistant":
             continue
         if needs_thinking_pad:
-            if api_msg.get("reasoning_content"):
-                continue
-            apply_reasoning_content_policy(api_msg, api_msg, needs_thinking_pad)
-            if api_msg.get("reasoning_content"):
-                changed += 1
+            if not api_msg.get("reasoning_content"):
+                apply_reasoning_content_policy(api_msg, api_msg, needs_thinking_pad)
+                changed += 1 if api_msg.get("reasoning_content") else 0
         elif "reasoning_content" in api_msg:
             api_msg.pop("reasoning_content", None)
             changed += 1
