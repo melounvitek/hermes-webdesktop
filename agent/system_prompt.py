@@ -18,24 +18,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.prompt_builder import (
-    DEFAULT_AGENT_IDENTITY,
-    EXECUTION_GUIDANCE_MODELS,
-    GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
-    HERMES_AGENT_HELP_GUIDANCE,
-    HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS,
-    KANBAN_GUIDANCE,
-    MEMORY_GUIDANCE,
-    USER_PROFILE_GUIDANCE,
-    PARALLEL_TOOL_CALL_GUIDANCE,
-    PLATFORM_HINTS,
-    SESSION_SEARCH_GUIDANCE,
-    SKILLS_GUIDANCE,
-    STEER_CHANNEL_NOTE,
-    TASK_COMPLETION_GUIDANCE,
-    TELEGRAM_RICH_MESSAGES_HINT,
-    TOOL_USE_ENFORCEMENT_GUIDANCE,
-    TOOL_USE_ENFORCEMENT_MODELS,
-    drain_truncation_warnings,
+    DEFAULT_AGENT_IDENTITY, EXECUTION_GUIDANCE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
+    HERMES_AGENT_HELP_GUIDANCE, HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS, KANBAN_GUIDANCE, MEMORY_GUIDANCE,
+    USER_PROFILE_GUIDANCE, PARALLEL_TOOL_CALL_GUIDANCE, PLATFORM_HINTS, SESSION_SEARCH_GUIDANCE,
+    SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
+    TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
 from hermes_constants import get_default_hermes_root, get_hermes_home
@@ -112,21 +99,26 @@ def _plugin_session_info(agent: Any) -> Dict[str, str]:
         cwd = str(resolve_context_cwd() or "")
     except Exception:
         cwd = ""
-    try:
-        # Prefer the agent's own home: ambient get_active_profile_name()
-        # misreports on threads that lost the HERMES_HOME ContextVar.
-        _home = _agent_home(agent)
-        if _home is not None:
-            profile_name = _profile_name_for_home(_home)
-        else:
-            from hermes_cli.profiles import get_active_profile_name
-
-            profile_name = str(get_active_profile_name() or "default")
-    except Exception:
-        profile_name = "default"
     info = {k: str(getattr(agent, k, None) or "") for k in ("session_id", "model", "provider", "platform")}
-    info.update(profile_name=profile_name, cwd=cwd)
+    info.update(profile_name=_active_profile_name(agent, _ambient_plugin_profile_name), cwd=cwd)
     return info
+
+
+def _ambient_plugin_profile_name() -> str:
+    from hermes_cli.profiles import get_active_profile_name
+
+    return str(get_active_profile_name() or "default")
+
+
+def _active_profile_name(agent: Any, ambient) -> str:
+    """Profile name from the agent's OWN home, else *ambient()*; "default" on any
+    failure. Ambient resolution misreports on threads that lost the HERMES_HOME
+    ContextVar, which is why the agent's home is preferred."""
+    try:
+        home = _agent_home(agent)
+        return _profile_name_for_home(home) if home is not None else ambient()
+    except Exception:
+        return "default"
 
 
 def _frozen_plugin_prompt_sections(agent: Any) -> tuple:
@@ -160,11 +152,8 @@ def _restore_plugin_prompt_sections(prompt: str) -> tuple:
     exact canonical container emitted by core is accepted — user/project text
     may resemble a frame."""
     from hermes_cli.plugins import (
-        MAX_SYSTEM_PROMPT_SECTION_CHARS,
-        PLUGIN_SECTIONS_END,
-        PLUGIN_SECTIONS_START,
-        RenderedPluginSystemPromptSection,
-        format_system_prompt_sections,
+        MAX_SYSTEM_PROMPT_SECTION_CHARS, PLUGIN_SECTIONS_END, PLUGIN_SECTIONS_START,
+        RenderedPluginSystemPromptSection, format_system_prompt_sections,
     )
 
     start = prompt.rfind(PLUGIN_SECTIONS_START)
@@ -212,16 +201,11 @@ def _session_start_like(agent: Any, now: Any) -> Any:
     """
     from datetime import datetime
 
-    try:
-        machine_local_tz = datetime.now().astimezone().tzinfo
-    except (ValueError, OSError):
-        machine_local_tz = None
-
     def _to_display_tz(dt: Any) -> Any:
-        if machine_local_tz is not None and dt.tzinfo is None:
+        if dt.tzinfo is None:
             try:
-                dt = dt.replace(tzinfo=machine_local_tz)
-            except ValueError:
+                dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            except (ValueError, OSError):
                 pass
         if getattr(now, "tzinfo", None) is not None and dt.tzinfo is not None:
             try:
@@ -243,11 +227,8 @@ def _session_start_like(agent: Any, now: Any) -> Any:
                 return _to_display_tz(datetime.strptime(f"{m.group(1)}_{m.group(2)}", "%Y%m%d_%H%M%S"))
             except ValueError:
                 pass
-
     session_start = getattr(agent, "session_start", None)
-    if hasattr(session_start, "astimezone"):
-        return _to_display_tz(session_start)
-    return now
+    return _to_display_tz(session_start) if hasattr(session_start, "astimezone") else now
 
 
 def _agent_home(agent: Any) -> Optional[Path]:
@@ -266,11 +247,9 @@ def _agent_home(agent: Any) -> Optional[Path]:
         pass
     try:
         db_path = getattr(getattr(agent, "_session_db", None), "db_path", None)
-        if db_path:
-            return Path(db_path).parent
+        return Path(db_path).parent if db_path else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _agent_skills_dir(agent: Any) -> Optional[Path]:
@@ -287,8 +266,7 @@ def _profile_name_for_home(home: Path) -> str:
     try:
         from hermes_constants import get_default_hermes_root
 
-        root = get_default_hermes_root()
-        rel = home.resolve().relative_to((root / "profiles").resolve())
+        rel = home.resolve().relative_to((get_default_hermes_root() / "profiles").resolve())
         return rel.parts[0] if rel.parts else "default"
     except (ValueError, OSError):
         return "default"
@@ -296,28 +274,28 @@ def _profile_name_for_home(home: Path) -> str:
 
 def _tool_guidance_block(agent: Any) -> Optional[str]:
     """Tool-aware behavioral guidance, injected only when the tools are loaded."""
-    tool_guidance = []
+    names = agent.valid_tool_names
     # With both memory stores disabled no store is built, so the full guidance
     # would steer the model at a tool that always answers "Memory is not
     # available"; with only USER.md enabled the narrower block is used.
-    names = agent.valid_tool_names
+    memory_guidance = None
     if "memory" in names:
         if getattr(agent, "_memory_enabled", True):
-            tool_guidance.append(MEMORY_GUIDANCE)
+            memory_guidance = MEMORY_GUIDANCE
         elif getattr(agent, "_user_profile_enabled", True):
-            tool_guidance.append(USER_PROFILE_GUIDANCE)
-    if "session_search" in names:
-        tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-    if "skill_manage" in names:
-        tool_guidance.append(SKILLS_GUIDANCE)
+            memory_guidance = USER_PROFILE_GUIDANCE
     # Kanban lifecycle: resolved once at __init__ (_kanban_worker_guidance);
     # the kanban_show fallback covers code paths that bypass agent_init.
     _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-    if _kanban_guidance:
-        tool_guidance.append(_kanban_guidance)
-    elif _kanban_guidance is None and "kanban_show" in names:
-        tool_guidance.append(KANBAN_GUIDANCE)
-    return " ".join(tool_guidance) if tool_guidance else None
+    if _kanban_guidance is None and "kanban_show" in names:
+        _kanban_guidance = KANBAN_GUIDANCE
+    tool_guidance = [
+        memory_guidance,
+        SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
+        SKILLS_GUIDANCE if "skill_manage" in names else None,
+        _kanban_guidance,
+    ]
+    return " ".join(g for g in tool_guidance if g) or None
 
 
 def _skills_prompt(agent: Any, _r: Any) -> str:
@@ -365,20 +343,19 @@ def _bot_mode_parts(agent: Any) -> List[str]:
     return parts
 
 
+def _ambient_file_safety_profile_name() -> str:
+    from agent.file_safety import _resolve_active_profile_name
+
+    return _resolve_active_profile_name()
+
+
 def _active_profile_line(agent: Any) -> str:
     """Name the running profile so the agent doesn't conflate ``~/.hermes/skills``
     (default) with ``~/.hermes/profiles/<active>/skills``.  Resolved from the
     agent's OWN home first (a build thread that lost the ContextVar would
     otherwise print "default" for a bot profile)."""
     _agent_home_path = _agent_home(agent)
-    try:
-        if _agent_home_path is not None:
-            active_profile = _profile_name_for_home(_agent_home_path)
-        else:
-            from agent.file_safety import _resolve_active_profile_name
-            active_profile = _resolve_active_profile_name()
-    except Exception:
-        active_profile = "default"
+    active_profile = _active_profile_name(agent, _ambient_file_safety_profile_name)
     if active_profile == "default":
         # With an explicit agent home, the default profile's data lives at the
         # ROOT (get_hermes_home() on a bound profile session is the PROFILE dir).
