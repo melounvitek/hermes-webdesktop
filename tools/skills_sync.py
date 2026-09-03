@@ -257,8 +257,7 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
     try:
         if dest.exists():
             # Never overwrite a same-named user skill. Baseline the manifest only when
-            # byte-identical: recording bundled_hash for a differing copy would read as
-            # "user-modified" forever and block every bundled update.
+            # byte-identical: a differing copy's bundled_hash reads as "user-modified" forever.
             st.skipped += 1
             if _dir_hash(dest) == bundled_hash:
                 st.manifest[skill_name] = bundled_hash
@@ -284,8 +283,7 @@ def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
     try:
         shutil.copytree(skill_src, dest)
     except OSError:
-        # Clear a partially-written dest so it can't shadow or block the restore.
-        if backup.exists():
+        if backup.exists():  # clear a partially-written dest so it can't shadow/block the restore
             if dest.exists():
                 try:
                     _rmtree_writable(dest)

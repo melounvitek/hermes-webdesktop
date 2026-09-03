@@ -81,8 +81,7 @@ def _skill_lookup_path_error(name: str) -> Optional[str]:
     from tools.path_security import has_traversal_component
     if not isinstance(name, str):
         return "Skill name must be a string."
-    candidate = name.strip()
-    win = PureWindowsPath(candidate)
+    win = PureWindowsPath(candidate := name.strip())
     if PurePosixPath(candidate).is_absolute() or win.is_absolute() or win.drive:
         return "Skill name must be a relative path within the skills directory."
     if has_traversal_component(candidate):
@@ -110,8 +109,7 @@ def set_secret_capture_callback(callback) -> None:
 
 
 def _skill_utils_delegate(attr: str):
-    """Lazy call-time delegate to ``agent.skill_utils.<attr>`` (re-export; patches on either
-    module are honored)."""
+    """Lazy call-time delegate to ``agent.skill_utils.<attr>`` (re-export; patches honored)."""
     def _delegate(*args):
         from agent import skill_utils
         return getattr(skill_utils, attr)(*args)
@@ -127,8 +125,7 @@ _get_disabled_skill_names = _skill_utils_delegate("get_disabled_skill_names")
 
 
 def check_skills_requirements() -> bool:
-    """Skills are always available -- the directory is created on first use if needed."""
-    return True
+    return True  # always available: the directory is created on first use
 
 
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
@@ -167,19 +164,17 @@ def _get_session_platform() -> str:
 
 
 def _is_skill_disabled(name: str, platform: str = None) -> bool:
-    """Disabled in config? Platform precedence: explicit arg, ``HERMES_PLATFORM``,
-    session ``HERMES_SESSION_PLATFORM``. A globally-disabled skill stays disabled on
-    every platform (keep in sync with agent.skill_utils.get_disabled_skill_names)."""
+    """Disabled in config? Platform precedence: explicit arg, ``HERMES_PLATFORM``, session
+    ``HERMES_SESSION_PLATFORM``. A globally-disabled skill stays disabled on every platform
+    (keep in sync with agent.skill_utils.get_disabled_skill_names)."""
     try:
         from hermes_cli.config import load_config
         skills_cfg = load_config().get("skills", {})
         resolved_platform = platform or os.getenv("HERMES_PLATFORM") or _get_session_platform()
-        global_disabled = skills_cfg.get("disabled", [])
         platform_disabled = (
             cfg_get(skills_cfg, "platform_disabled", resolved_platform) if resolved_platform else None)
-        if platform_disabled is not None:
-            return name in platform_disabled or name in global_disabled
-        return name in global_disabled
+        in_platform = platform_disabled is not None and name in platform_disabled
+        return in_platform or name in skills_cfg.get("disabled", [])
     except Exception:
         return False
 
@@ -191,7 +186,7 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
     project_dirs = list(get_project_skills_dirs())
     active_skills_dir = _skills_dir()
     all_dirs = project_dirs + ([active_skills_dir] if active_skills_dir.exists() else [])
-    all_dirs.extend(get_external_skills_dirs())
+    all_dirs += get_external_skills_dirs()
     return project_dirs, all_dirs, active_skills_dir
 
 
@@ -305,12 +300,12 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
             plugin_skill_md = pm.find_plugin_skill(name)
         except Exception as exc:
             logger.debug("Failed lazy memory-provider skill load for %s: %s", namespace, exc)
+    if plugin_skill_md is not None and not plugin_skill_md.exists():
+        pm.remove_plugin_skill(name)  # stale registry entry — file deleted out of band
+        return _fail(
+            f"Skill '{name}' file no longer exists at {plugin_skill_md}. The registry entry "
+            f"has been cleaned up — try again after the plugin is reloaded."), None
     if plugin_skill_md is not None:
-        if not plugin_skill_md.exists():
-            pm.remove_plugin_skill(name)  # stale registry entry — file deleted out of band
-            return _fail(
-                f"Skill '{name}' file no longer exists at {plugin_skill_md}. The registry entry "
-                f"has been cleaned up — try again after the plugin is reloaded."), None
         return _serve_plugin_skill(
             plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id), None
     if available := pm.list_plugin_skills(namespace):  # plugin exists but this specific skill is missing
@@ -562,10 +557,8 @@ def skill_view(
             return _fail(f"Skill '{resolved_name}' is disabled. Enable it with `hermes skills` or inspect the files directly on disk.")
         if file_path and skill_dir:
             return _serve_skill_file(
-                skill_dir, file_path, name,
-                hint="Use a relative path within the skill directory",
-                list_available=True, mark_read=True)
-
+                skill_dir, file_path, name, list_available=True, mark_read=True,
+                hint="Use a relative path within the skill directory")
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
         metadata = frontmatter.get("metadata")
         hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
