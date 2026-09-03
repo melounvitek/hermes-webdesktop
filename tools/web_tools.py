@@ -13,44 +13,18 @@ import json
 import logging
 import os
 from typing import List, Any, Optional
-import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
-
-# Vendor helpers re-exported so external code and test patches of ``tools.web_tools.<name>`` keep working.
-from plugins.web.firecrawl.provider import (  # noqa: F401 — backward-compat names
-    Firecrawl, _firecrawl_backend_help_suffix, _get_firecrawl_client, _get_firecrawl_gateway_url,
-    _is_tool_gateway_ready, check_firecrawl_api_key,
-)
-from plugins.web.tavily.provider import (  # noqa: F401 — backward-compat names
-    _normalize_tavily_documents, _normalize_tavily_search_results, _tavily_request,
-)
-from plugins.web.parallel.provider import _get_async_parallel_client, _get_parallel_client  # noqa: F401
-from plugins.web.exa.provider import _get_exa_client  # noqa: F401
-
 # Per-vendor client cache slots; plugins read/write these via tools.web_tools (tests reset them to None).
 _firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
+from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecrawl_api_key
 from tools.debug_helpers import DebugSession
-from tools.managed_tool_gateway import (  # noqa: F401 — backward-compat names for tests
-    build_vendor_gateway_url, resolve_managed_tool_gateway,
-    peek_nous_access_token as _peek_nous_access_token, read_nous_access_token as _read_nous_access_token,
-)
-from tools.tool_backend_helpers import (  # noqa: F401 — first three are backward-compat re-exports
-    managed_nous_tools_enabled, nous_tool_gateway_unavailable_message, prefers_gateway,
-    NOUS_MANAGED_PROVIDER, selection_exists,
-)
+from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, selection_exists
 from tools.url_safety import async_is_safe_url
-from tools.web_tools_rescue import (  # noqa: F401 — re-exported (tests patch tools.web_tools.<name>)
-    _keyless_rescue_enabled, _policy_blocked_result, _rescue_eligible, _rescue_extract, _rescue_search,
-)
-from tools.web_tools_truncate import (  # noqa: F401 — re-exported (tests + web_result_cache import these)
-    DEFAULT_EXTRACT_CHAR_LIMIT, MAX_STORED_TEXT_CHARS, _clamp_char_limit, _effective_char_limit,
-    _get_extract_char_limit, _store_full_text, _trim_results, _truncate_results, _truncate_with_footer,
-    convert_base64_images_to_links,
-)
-from tools.web_tools_extract import (  # noqa: F401 — re-exported
-    _EXTRACT_BACKENDS_HINT, _NO_RESULT_ERROR, _disabled_plugin_error, _extract_error_json, _extract_safe_urls,
-    _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry, _strict_selection_error,
-    _validate_extract_urls, _web_extract_url,
+from tools.web_tools_rescue import _rescue_eligible, _rescue_search
+from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
+from tools.web_tools_extract import (
+    _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
+    _strict_selection_error, _validate_extract_urls,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,9 +211,7 @@ def _is_backend_available(backend: str) -> bool:
 
 # ─── Firecrawl Client ──────────────────────────────────────────────────────── After PR #25182, the
 # firecrawl client, lazy SDK proxy, dual-auth config resolution, response normalizers, and
-# check_firecrawl_api_key() all live in plugins.web.firecrawl.provider and are re-exported at the top of
-# this module so external callers (integration tests, tool-registry gating) and unit tests that patch
-# tools.web_tools.<name> continue to work.
+# check_firecrawl_api_key() all live in plugins.web.firecrawl.provider.
 def _web_requires_env() -> list[str]:
     """Tool-registry metadata env vars for the web backends. Gateway vars are always listed: gating them
     on ``managed_nous_tools_enabled()`` cost a synchronous portal HTTP refresh at every CLI startup.
