@@ -6,6 +6,7 @@ the command inside their sandbox through the environment interface.
 """
 
 import codecs
+from contextlib import suppress
 import json
 import logging
 import os
@@ -95,9 +96,8 @@ def _worker_memory_max_bytes() -> int:
                 "expected an integer representing at least %d MiB",
                 override, _MIN_WORKER_MEMORY_MAX_BYTES // (1024 * 1024),
             )
-
     candidates: List[int] = []
-    try:
+    with suppress(OSError, ValueError):
         for line in Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines():
             if line.startswith("0::"):
                 relative = line.partition("::")[2].lstrip("/")
@@ -105,14 +105,9 @@ def _worker_memory_max_bytes() -> int:
                 if raw_limit.isdigit() and int(raw_limit) >= _MIN_WORKER_MEMORY_MAX_BYTES:
                     candidates.append(int(raw_limit))
                 break
-    except (OSError, ValueError):
-        pass
-    try:
+    with suppress(OSError, ValueError, TypeError):
         physical_bytes = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
         candidates.append(min(_WORKER_MEMORY_MAX_CAP_BYTES, max(_MIN_WORKER_MEMORY_MAX_BYTES, physical_bytes // 2)))
-    except (OSError, ValueError, TypeError):
-        pass
-
     safe_bound = min(candidates) if candidates else _DEFAULT_WORKER_MEMORY_MAX_BYTES
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
@@ -337,8 +332,7 @@ _WATCHER_ROUTE_KEYS = ("platform", "chat_id", "user_id", "user_name", "thread_id
 _CHECKPOINT_FIELDS = (
     "command", "pid", "pid_scope", "host_start_time", "systemd_unit", "cwd",
     "started_at", "task_id", "owner_task_id", "session_key",
-    "watcher_platform", "watcher_chat_id", "watcher_user_id", "watcher_user_name",
-    "watcher_thread_id", "watcher_message_id", "watcher_interval",
+    *(f"watcher_{k}" for k in _WATCHER_ROUTE_KEYS), "watcher_interval",
     "parent_session_id", "notify_on_complete", "watch_patterns",
 )
 _CHECKPOINT_DEFAULTS = {
@@ -400,6 +394,7 @@ class ProcessRegistry:
         self.on_close = None
 
     @staticmethod
+
     def _clean_shell_noise(text: str) -> str:
         """Strip shell startup warnings from the beginning of output."""
         lines = text.split("\n")
@@ -412,10 +407,8 @@ class ProcessRegistry:
         sink = self.on_output
         if sink is None or not chunk:
             return
-        try:
+        with suppress(Exception):
             sink(session, chunk)
-        except Exception:
-            pass
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
         """Scan a freshly-read chunk for watch patterns and queue notifications.
@@ -513,6 +506,7 @@ class ProcessRegistry:
         })
 
     @staticmethod
+
     def _watch_event_base(session: ProcessSession) -> dict:
         """Session identity + watcher routing fields shared by every watch event."""
         return {
@@ -525,6 +519,7 @@ class ProcessRegistry:
         }
 
     @staticmethod
+
     def _global_watch_event(type_: str, message: str, **extra) -> dict:
         """Unaddressed (all-sessions) watch breaker event."""
         return {
@@ -584,6 +579,7 @@ class ProcessRegistry:
         return admit
 
     @staticmethod
+
     def _is_host_pid_alive(pid: Optional[int]) -> bool:
         """Best-effort liveness check for host-visible PIDs."""
         if not pid:
@@ -594,6 +590,7 @@ class ProcessRegistry:
         return _pid_exists(pid)
 
     @staticmethod
+
     def _safe_host_start_time(pid: Optional[int]) -> Optional[int]:
         """Kernel start ticks for a host PID, or None when unavailable."""
         if not pid:
@@ -605,6 +602,7 @@ class ProcessRegistry:
             return None
 
     @classmethod
+
     def _host_pid_is_ours(cls, pid: Optional[int], expected_start: Optional[int]) -> bool:
         """True only if ``pid`` is alive AND still the process we spawned.
 
@@ -635,6 +633,7 @@ class ProcessRegistry:
         return session
 
     @staticmethod
+
     def _proc_alive(proc) -> bool:
         """True if a psutil.Process is running and not a zombie (already dead, just unreaped)."""
         try:
@@ -646,6 +645,7 @@ class ProcessRegistry:
             return False
 
     @staticmethod
+
     def _config_value(section: str, key: str, fallback):
         """``config.yaml`` value for ``section.key``, else the DEFAULT_CONFIG value.
 
@@ -658,6 +658,7 @@ class ProcessRegistry:
         return DEFAULT_CONFIG[section][key] if val is None else val
 
     @staticmethod
+
     def _daemon_term_grace_seconds() -> float:
         """Grace (s) between SIGTERM and escalated SIGKILL, floored at 0 (0 disables
         escalation): ``terminal.daemon_term_grace_seconds``; 2.0 if config is unreadable."""
@@ -667,6 +668,7 @@ class ProcessRegistry:
             return 2.0
 
     @classmethod
+
     def _terminate_host_pid(cls, pid: int, expected_start: Optional[int] = None) -> None:
         """Terminate a host-visible PID and its descendants.
 
@@ -687,10 +689,8 @@ class ProcessRegistry:
             return
 
         def _sigterm_quietly():
-            try:
+            with suppress(OSError, ProcessLookupError, PermissionError):
                 os.kill(pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError, PermissionError):
-                pass
 
         if _IS_WINDOWS:
             try:
@@ -719,10 +719,8 @@ class ProcessRegistry:
             targets = []
         targets.append(parent)
         for proc in targets:
-            try:
+            with suppress(gone):
                 proc.terminate()
-            except gone:
-                pass
         # Escalate to SIGKILL for anything that ignored SIGTERM within the grace window.
         # ``psutil.wait_procs``' gone/alive partition is deliberately NOT trusted: it
         # reaps via ``Process.wait()`` and mis-partitions across zombie transitions in a
@@ -735,16 +733,15 @@ class ProcessRegistry:
         while time.monotonic() < deadline and any(cls._proc_alive(_p) for _p in targets):
             time.sleep(0.05)
         for proc in targets:
-            try:
+            with suppress(gone):
                 if cls._proc_alive(proc):
                     proc.kill()  # SIGKILL on POSIX
                     logger.info("Escalated to SIGKILL for pid %d (ignored SIGTERM within %.1fs grace)", proc.pid, grace)
-            except gone:
-                pass
 
     # ----- Spawn -----
 
     @staticmethod
+
     def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
         return ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
@@ -753,6 +750,7 @@ class ProcessRegistry:
         )
 
     @staticmethod
+
     def _env_temp_dir(env: Any) -> str:
         """Return the writable sandbox temp dir for env-backed background tasks."""
         get_temp_dir = getattr(env, "get_temp_dir", None)
@@ -785,6 +783,7 @@ class ProcessRegistry:
         return argv
 
     @staticmethod
+
     def _spawn_env(env_vars: dict) -> dict:
         """Sanitized child env; PYTHONUNBUFFERED so tqdm/datasets-style buffering
         doesn't hide progress from process(action="poll")."""
@@ -879,7 +878,7 @@ class ProcessRegistry:
         except Exception:
             # Post-Popen setup failed — kill the orphaned subprocess (and any setsid
             # descendants) before re-raising so nothing leaks untracked.
-            try:
+            with suppress(Exception):
                 if session.systemd_unit:
                     # Scope teardown is the authoritative cleanup for the worker cgroup
                     # (never killpg here); the wrapper PID is terminated as fallback.
@@ -893,12 +892,8 @@ class ProcessRegistry:
                         proc.kill()
                 else:
                     proc.kill()
-            except Exception:
-                pass
-            try:
+            with suppress(Exception):
                 proc.wait(timeout=5)
-            except Exception:
-                pass
             raise
         return session
 
@@ -1027,12 +1022,10 @@ class ProcessRegistry:
     def _finish_reader(self, session, decoder, append, label, wait, exit_code) -> None:
         """Reader-thread teardown: flush the decoder (a truncated multibyte tail becomes
         one U+FFFD instead of vanishing), reap the child (no zombies), record the exit."""
-        try:
+        with suppress(Exception):
             tail = decoder.decode(b"", final=True)
             if tail:
                 append(tail)
-        except Exception:
-            pass
         try:
             wait()
         except Exception as e:
@@ -1158,10 +1151,8 @@ class ProcessRegistry:
             session = self._running.get(session_id) or self._finished.get(session_id)
         if session is None:
             return False
-        try:
+        with suppress(Exception):
             self._refresh_detached_session(session)
-        except Exception:
-            pass
         if session.exited:
             return False
         return not (session.watch_patterns and not session._watch_disabled and session._watch_hits > 0)
@@ -1216,11 +1207,9 @@ class ProcessRegistry:
                     if remaining <= 0:
                         break
                     # Reconcile first so orphaned-pipe and detached exits fire the event.
-                    try:
+                    with suppress(Exception):
                         self._reconcile_local_exit(session)
                         self._refresh_detached_session(session)
-                    except Exception:
-                        pass
                     if session.exited:
                         break
                     session._completion_event.wait(min(remaining, interval))
@@ -1239,6 +1228,7 @@ class ProcessRegistry:
         return result
 
     @staticmethod
+
     def _oneshot_completion_wait_seconds() -> float:
         """Linger (s) for one-shot exits with pending notify_on_complete processes:
         ``terminal.oneshot_completion_wait_seconds`` (0 disables), 600 if unreadable."""
@@ -1254,6 +1244,7 @@ class ProcessRegistry:
         return session_id in self._completion_consumed or (skip_poll_observed and session_id in self._poll_observed)
 
     @staticmethod
+
     def _surface_child_process_notifications() -> bool:
         """``delegation.surface_child_process_notifications``; False on any config
         error — never crash the drain loop."""
@@ -1263,6 +1254,7 @@ class ProcessRegistry:
             return False
 
     @staticmethod
+
     def _owns_event(evt: dict, session_key: str, owns_event, is_async_delegation: bool) -> bool:
         """Routing verdict for one drained event (see drain_notifications); False = requeue."""
         evt_session_key = str(evt.get("session_key") or "")
@@ -1401,10 +1393,8 @@ class ProcessRegistry:
                 except (BlockingIOError, OSError, ValueError):
                     pass
                 finally:
-                    try:
+                    with suppress(Exception):
                         fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-                    except Exception:
-                        pass
             except Exception as e:
                 logger.debug("Non-blocking drain failed for %s: %s", session.id, e)
         if drained:
@@ -1419,6 +1409,7 @@ class ProcessRegistry:
         self._move_to_finished(session)
 
     @staticmethod
+
     def _status_head(session: ProcessSession) -> dict:
         return {
             "session_id": session.id,
@@ -1557,6 +1548,7 @@ class ProcessRegistry:
         return result
 
     @staticmethod
+
     def _exit_snapshot(session: ProcessSession, status: str) -> dict:
         """Result dict for an exited session: exit metadata + last 2000 chars of output."""
         return {
@@ -1682,6 +1674,7 @@ class ProcessRegistry:
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""
+
         def via_pty(pty):
             # pywinpty expects str on Windows; ptyprocess expects bytes on POSIX.
             if _IS_WINDOWS:
@@ -1737,6 +1730,7 @@ class ProcessRegistry:
 
     def close_stdin(self, session_id: str) -> dict:
         """Close a running process's stdin / send EOF without killing the process."""
+
         def via_pty(pty):
             pty.sendeof()
             return {"status": "ok", "message": "EOF sent"}
@@ -1845,12 +1839,11 @@ class ProcessRegistry:
                 s for s in self._running.values()
                 if (task_id is None or s.task_id == task_id) and s.id not in exclude_ids and not s.exited
             ]
-        killed = 0
-        for session in targets:
-            result = self.kill_process(session.id, source=source, consume_output=consume_output)
-            if result.get("status") in {"killed", "already_exited"}:
-                killed += 1
-        return killed
+        return sum(
+            self.kill_process(s.id, source=source, consume_output=consume_output).get("status")
+            in {"killed", "already_exited"}
+            for s in targets
+        )
 
     # ----- Cleanup / Pruning -----
 
