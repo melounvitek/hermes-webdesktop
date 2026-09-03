@@ -46,17 +46,13 @@ _WRAPPER_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
         "-C", "--chdir", "-c", "--close-from", "-g", "--group", "-h", "--host",
         "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user"}),
     "env": frozenset({"-a", "--argv0", "-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
-    "command": _NO_OPTIONS,
-    "builtin": _NO_OPTIONS,
+    "command": _NO_OPTIONS, "builtin": _NO_OPTIONS, "nohup": _NO_OPTIONS, "setsid": _NO_OPTIONS,
     "exec": frozenset({"-a"}),
-    "nohup": _NO_OPTIONS,
-    "setsid": _NO_OPTIONS,
     "time": frozenset({"-f", "--format", "-o", "--output"})}
 _MAX_RECURSION = 4
 # git global options that consume the next argument (-C/--work-tree/-c are acted on).
 _GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({
-    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path",
-})
+    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path"})
 
 
 @dataclass
@@ -117,8 +113,7 @@ def _shell_words_at(command: str, start: int) -> list[str]:
 
 
 def _consume_options(
-    words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS,
-) -> int:
+    words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS) -> int:
     """Index of the first positional at/after ``start`` (``--`` ends options)."""
     index = start
     while index < len(words):
@@ -163,40 +158,27 @@ def _scope_keys(command: str, starts: list[int]) -> dict[int, tuple[int, ...]]:
             context = contexts[-1]
             quote = context.quote
             char = command[cursor]
+            nested = len(contexts) > 1
 
             if quote == "'":
                 if char == "'":
                     context.quote = None
+            elif char == "\\" and cursor + 1 < start:
                 cursor += 1
-                continue
-            # Unquoted or inside double quotes: substitutions still open scopes.
-            if char == "\\" and cursor + 1 < start:
-                cursor += 2
-                continue
-            if quote == '"':
-                if char == '"':
-                    context.quote = None
-                    cursor += 1
-                    continue
-            elif char in {"'", '"'}:
+            elif quote == '"' and char == '"':
+                context.quote = None
+            elif quote is None and char in {"'", '"'}:
                 context.quote = char
-                cursor += 1
-                continue
-            if command.startswith("$(", cursor):
+            # Unquoted or inside double quotes: substitutions still open scopes.
+            elif command.startswith("$(", cursor):
                 contexts.append(_ShellContext("$(", cursor))
-                cursor += 2
-                continue
-            if quote is None:
-                if char == "(":
-                    contexts.append(_ShellContext("(", cursor))
-                    cursor += 1
-                    continue
-                if char == ")" and len(contexts) > 1 and contexts[-1].kind in {"(", "$("}:
-                    contexts.pop()
-                    cursor += 1
-                    continue
-            if char == "`":
-                if quote is None and len(contexts) > 1 and contexts[-1].kind == "`":
+                cursor += 1
+            elif quote is None and char == "(":
+                contexts.append(_ShellContext("(", cursor))
+            elif quote is None and char == ")" and nested and contexts[-1].kind in {"(", "$("}:
+                contexts.pop()
+            elif char == "`":
+                if quote is None and nested and contexts[-1].kind == "`":
                     contexts.pop()
                 else:
                     contexts.append(_ShellContext("`", cursor))
@@ -232,14 +214,11 @@ def _cd_target(executable: str, args: list[str], cwd: Path) -> Path | None:
 
 
 def _shell_script_arg(args: list[str]) -> str | None:
-    """Return the script string owned by a shell's ``-c``, if present.
-
-    approval.py's ``_bash_exec_payload`` parses bash's real option grammar
-    (``-o pipefail -c '<script>'`` hides ``-c`` behind an operand). When it finds
-    no ``-c``, fall back to a permissive positional scan: zsh/dash/ksh option
-    letters (``zsh -yc``) fall outside bash's alphabet and would otherwise make
-    this block-guard fail open.
-    """
+    """Return the script string owned by a shell's ``-c``, if present. approval.py's
+    ``_bash_exec_payload`` parses bash's real option grammar (``-o pipefail -c '<script>'``
+    hides ``-c`` behind an operand); when it finds no ``-c``, fall back to a permissive
+    positional scan, since zsh/dash/ksh option letters (``zsh -yc``) fall outside bash's
+    alphabet and would otherwise make this block-guard fail open."""
     has_c, payload = _bash_exec_payload(args)
     if has_c:
         return payload
@@ -261,17 +240,12 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
         char = line[index]
         if quote:
             if char == "\\" and quote == '"' and index + 1 < len(line):
-                index += 2
-                continue
-            if char == quote:
+                index += 1  # skip the escaped character too
+            elif char == quote:
                 quote = None
-            index += 1
-            continue
-        if char in {"'", '"'}:
+        elif char in {"'", '"'}:
             quote = char
-            index += 1
-            continue
-        if not line.startswith("<<", index) or line.startswith("<<<", index):
+        if quote or not line.startswith("<<", index) or line.startswith("<<<", index):
             index += 1
             continue
 
@@ -318,9 +292,7 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
 
 def _mask_heredocs(command: str) -> tuple[str, list[str]]:
     """Blank heredoc bodies; return (masked command, bodies a bare shell would execute).
-
-    Unterminated heredocs run to end of input and are still reported.
-    """
+    Unterminated heredocs run to end of input and are still reported."""
     output: list[str] = []
     pending: list[_Heredoc] = []
     finished: list[_Heredoc] = []
@@ -409,8 +381,7 @@ def _stash_mutates(args: list[str]) -> bool:
 def _clean_mutates(args: list[str]) -> bool:
     return not any(
         arg == "--dry-run" or (not arg.startswith("--") and _has_short_flag(arg, "n"))
-        for arg in args
-    )
+        for arg in args)
 
 
 def _restore_mutates(args: list[str]) -> bool:
@@ -435,9 +406,7 @@ def _mutates_worktree(subcommand: str, args: list[str]) -> bool:
 def _inspect_git_worktree(args: list[str], cwd: Path, root: Path) -> str | None:
     """Block `worktree remove|move` aimed at the running root, from any directory."""
     action_index = _consume_options(args, 0)
-    if action_index >= len(args):
-        return None
-    action = args[action_index].lower()
+    action = args[action_index].lower() if action_index < len(args) else None
     if action not in _WORKTREE_TARGET_ACTIONS:
         return None
     target_index = _consume_options(args, action_index + 1)
@@ -458,12 +427,10 @@ def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
 
 
 def _inspect_git(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     target, subcommand, sub_args, inline_aliases = _git_target_and_subcommand(
-        args, current_dir, env,
-    )
+        args, current_dir, env)
     if subcommand is None:
         return None
     # `worktree` names its victim as an argument, so the cwd check does not apply.
@@ -491,8 +458,7 @@ def _inspect_git(
 
 
 def _inspect_github_cli(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     if not _is_within(current_dir, root):
         return None
@@ -503,8 +469,7 @@ def _inspect_github_cli(
 
 
 def _inspect_shell(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
-    depth: int,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int
 ) -> str | None:
     script = _shell_script_arg(args)
     return _find_mutation(script, current_dir, root, depth + 1) if script else None
@@ -566,13 +531,10 @@ def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str |
 
 
 def guard_active() -> bool:
-    """Whether the self-repo git guard applies on this platform.
-
-    Windows-only: NTFS locks loaded .py/.pyd files, so overwriting the live checkout
-    can corrupt the running process. On POSIX, open handles keep the old inode alive;
-    the mixed-module hazard is limited to later lazy imports — not worth blocking
-    every git workflow for.
-    """
+    """Whether the self-repo git guard applies on this platform. Windows-only: NTFS locks
+    loaded .py/.pyd files, so overwriting the live checkout can corrupt the running
+    process. On POSIX open handles keep the old inode alive; the mixed-module hazard is
+    limited to later lazy imports — not worth blocking every git workflow for."""
     return os.name == "nt"
 
 
@@ -601,8 +563,7 @@ def _block_message(operation: str, root: Path) -> str:
         f"({root}) and can mix module versions in this running process. "
         f"Use a separate worktree or a shared clone on real disk, e.g. "
         f"`git clone --shared {root} {scratch}/<task>` — avoid /tmp for "
-        "clones that install node/python deps: /tmp is usually RAM-backed "
-        "tmpfs and a few dependency installs can fill it and ENOSPC other "
-        "work. Delete the clone when the branch is pushed. To change this "
-        "checkout, stop Hermes, run the command externally, then restart "
+        "clones that install node/python deps: /tmp is usually RAM-backed tmpfs and a few "
+        "dependency installs can fill it and ENOSPC other work. Delete the clone when the branch "
+        "is pushed. To change this checkout, stop Hermes, run the command externally, then restart "
         "Hermes.")

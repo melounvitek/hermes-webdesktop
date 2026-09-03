@@ -39,11 +39,9 @@ def sanitize_property_key(key: str) -> str:
 
 
 def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
-    """Return {original_key: conforming_key} for one properties dict (identity entries omitted).
-
+    """{original_key: conforming_key} for one properties dict (identity entries omitted).
     Deterministic (insertion order, numeric suffixes on collision) so the model-visible
-    schema and the dispatch-time reverse map from the registry's original schema agree.
-    """
+    schema and the dispatch-time reverse map from the registry's original schema agree."""
     renames: dict[str, str] = {}
     taken = {k for k in props if _PROP_KEY_RE.match(k)}
     for key in props:
@@ -64,11 +62,8 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
 
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
-    """Map sanitized property keys in model-emitted args back to wire names.
-
-    ``params_schema`` is the ORIGINAL (unsanitized) registry schema. Recurses into
-    object values and array items; unknown keys pass through untouched.
-    """
+    """Map sanitized property keys in model-emitted args back to wire names. ``params_schema``
+    is the ORIGINAL registry schema; recurses into objects/array items; unknown keys pass."""
     if not isinstance(params_schema, dict) or not isinstance(args, dict):
         return args
     props = params_schema.get("properties")
@@ -112,12 +107,10 @@ def _sanitize_single_tool(tool: dict) -> dict:
     top = _sanitize_node(params, path=name)
     # Guarantee the top level is an object with properties.
     if not isinstance(top, dict):
-        top = _empty_object()
-    else:
-        if top.get("type") != "object":
-            top["type"] = "object"
-        if not isinstance(top.get("properties"), dict):
-            top["properties"] = {}
+        top = {}
+    top["type"] = "object"
+    if not isinstance(top.get("properties"), dict):
+        top["properties"] = {}
     # Collapse nullable unions the recursive pass leaves intact (it only handles the
     # array-form ``type: [X, "null"]``); keep ``nullable: true`` so runtime coercion
     # (``model_tools._schema_allows_null``) still maps a model-emitted ``"null"`` to None.
@@ -148,11 +141,9 @@ _TOP_LEVEL_FORBIDDEN_KEYS = ("allOf", "anyOf", "oneOf", "enum", "not")
 
 
 def _strip_top_level_combinators(params: dict, *, path: str = "<tool>") -> dict:
-    """Drop combinators from the TOP level only (Codex rejects them there).
-
-    They are usually conditional-required hints; dropping them does not change which
-    argument values are valid (handlers re-validate). Nested combinators are preserved.
-    """
+    """Drop combinators from the TOP level only (Codex rejects them there). They are usually
+    conditional-required hints, so validity is unchanged (handlers re-validate); nested
+    combinators are preserved."""
     if not isinstance(params, dict):
         return params
     out = dict(params)
@@ -191,15 +182,13 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
     """
     if isinstance(schema, list):
         return [
-            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema
-        ]
+            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema]
     if not isinstance(schema, dict):
         return schema
 
     stripped = {
         k: strip_nullable_unions(v, keep_nullable_hint=keep_nullable_hint)
-        for k, v in schema.items()
-    }
+        for k, v in schema.items()}
     for key in _UNION_KEYS:
         variants = stripped.get(key)
         if not isinstance(variants, list):
@@ -215,16 +204,12 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
 
 
 _CONST_PRIMITIVE_TYPES: dict[type, str] = {
-    bool: "boolean", int: "integer", float: "number", str: "string",
-}
+    bool: "boolean", int: "integer", float: "number", str: "string"}
 
 
 def _const_branch_type(branch: Any) -> str | None:
-    """JSON-Schema primitive type of a pure ``const`` branch, else None.
-
-    Qualifies when the dict carries a primitive ``const`` and any declared ``type``
-    matches it; ``title``/``description`` are allowed, any other keyword disqualifies.
-    """
+    """JSON-Schema primitive type of a pure ``const`` branch, else None: a primitive ``const``
+    whose declared ``type`` (if any) matches; only ``title``/``description`` may accompany it."""
     if not isinstance(branch, dict) or "const" not in branch:
         return None
     if set(branch) - {"const", "type", "title", "description"}:
@@ -269,9 +254,7 @@ def collapse_const_unions(schema: Any) -> Any:
         if len(branch_types) != 1 or None in branch_types:
             continue
         replacement: dict = {
-            "type": branch_types.pop(),
-            "enum": [item["const"] for item in const_branches],
-        }
+            "type": branch_types.pop(), "enum": [item["const"] for item in const_branches]}
         if null_branches:
             replacement["nullable"] = True
         _carry_union_meta(out, replacement, skip_default_on_ref=False)
@@ -286,12 +269,10 @@ _NON_SCHEMA_LIST_KEYS = frozenset({"required", "enum", "examples", "dependentReq
 
 
 def _normalize_type_array(value: list, out: dict) -> None:
-    """Normalize a ``type: [...]`` array into *out* (llama.cpp and Gemini-via-OpenAI reject arrays).
-
-    Per the AI-SDK behavior: one non-null type → ``type: X`` (+ ``nullable`` if ``null``
-    present); several → ``anyOf`` of single-type schemas so EVERY branch survives; none →
-    ``null`` or the object fallback. Ported from anomalyco/opencode#31877.
-    """
+    """Normalize a ``type: [...]`` array into *out* (llama.cpp and Gemini-via-OpenAI reject
+    arrays). Per AI-SDK: one non-null type → ``type: X`` (+ ``nullable`` if ``null`` present);
+    several → ``anyOf`` of single-type schemas so EVERY branch survives; none → ``null`` or
+    the object fallback. Ported from anomalyco/opencode#31877."""
     has_null = "null" in value
     non_null = [t for t in value if isinstance(t, str) and t != "null"]
     if len(non_null) == 1:
@@ -317,8 +298,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
     if isinstance(node, str):
         if node in _BARE_TYPE_NAMES:
             logger.debug(
-                "schema_sanitizer[%s]: replacing bare-string schema %r "
-                "with {'type': %r}",
+                "schema_sanitizer[%s]: replacing bare-string schema %r with {'type': %r}",
                 path, node, node)
             return _empty_object() if node == "object" else {"type": node}
         logger.debug(
@@ -381,37 +361,35 @@ def _sanitize_node(node: Any, path: str) -> Any:
 _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 
 
-def _reactive_strip(
-    tools: list[dict], strip_node: Callable[[dict], int], log_msg: str,
-) -> tuple[list[dict], int]:
-    """Apply *strip_node* (returns keywords removed) to every dict node of each tool's parameters.
+def _dict_nodes(node: Any):
+    """Pre-order walk yielding every dict node; each is yielded before its values are visited,
+    so a consumer may mutate it in place."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _dict_nodes(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _dict_nodes(item)
 
-    Handles OpenAI format (``{"function": {"parameters": ...}}``) and Responses format
-    (``{"name": ..., "parameters": ...}``). Returns ``(tools, stripped_count)`` — same list.
-    """
+
+def _reactive_strip(
+    tools: list[dict], strip_node: Callable[[dict], int], log_msg: str) -> tuple[list[dict], int]:
+    """Apply *strip_node* (returns keywords removed) to every dict node of each tool's
+    parameters, in place. Handles OpenAI (``{"function": {"parameters": ..}}``) and Responses
+    (``{"name": .., "parameters": ..}``) formats. Returns ``(tools, stripped_count)``."""
     if not tools:
         return tools, 0
     stripped = 0
-
-    def _walk(node: Any) -> None:
-        nonlocal stripped
-        if isinstance(node, dict):
-            stripped += strip_node(node)
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
     for tool in tools:
         if not isinstance(tool, dict):
             continue
         fn = tool.get("function")
-        if isinstance(fn, dict) and isinstance(fn.get("parameters"), dict):
-            _walk(fn["parameters"])
-        elif isinstance(tool.get("parameters"), dict):
-            _walk(tool["parameters"])
-
+        params = fn.get("parameters") if isinstance(fn, dict) else None
+        if not isinstance(params, dict):
+            params = tool.get("parameters")
+        if isinstance(params, dict):
+            stripped += sum(strip_node(node) for node in _dict_nodes(params))
     if stripped:
         logger.info(log_msg, stripped)
     return tools, stripped
@@ -441,12 +419,9 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
 
 
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
-    """Strip ``enum`` keywords whose string values contain ``/``, in place.
-
-    xAI's Responses/chat endpoints compile schemas to a grammar that rejects ``/`` in
-    enum values (HTTP 400 before any token) — typically MCP enums of HuggingFace model
-    IDs. The constraint is a prompting hint only; the model still sees the description.
-    """
+    """Strip ``enum`` keywords whose string values contain ``/``, in place. xAI compiles
+    schemas to a grammar that rejects ``/`` in enum values (HTTP 400 before any token) —
+    typically MCP enums of HuggingFace model IDs. The constraint is a prompting hint only."""
     def _strip(node: dict) -> int:
         enum_val = node.get("enum")
         if isinstance(enum_val, list) and any(isinstance(v, str) and "/" in v for v in enum_val):

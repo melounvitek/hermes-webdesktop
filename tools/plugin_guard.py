@@ -18,16 +18,14 @@ from typing import Iterator, List, Optional, Tuple
 
 from tools.skills_guard import (
     Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
-    scan_file,
-)
+    scan_file)
 
 PLUGIN_SCANNER_VERSION = "plugin-guard-v1"
 
 # Never scanned: VCS internals, caches, vendored envs.
 EXCLUDED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
-}
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox"}
 
 # Code files, where "reads an env secret" / "HTTP call with a key" is the normal
 # documented plugin pattern (requires_env).
@@ -55,16 +53,14 @@ CODE_EXEMPT_PATTERN_IDS = {
     # and base64-encode credentials (HTTP Basic auth).
     "agent_config_mod",
     "agent_config_contract",
-    "encoded_exfil",
-}
+    "encoded_exfil"}
 
 # Plugin severity remaps: a bundled binary is warn-tier (repos occasionally vendor
 # one legitimately); a mere ``~/.hermes/.env`` mention is how READMEs tell users where
 # keys go (READING it still trips ``read_secrets_file``, critical); ``curl | sh``
 # install instructions are common in READMEs — caution, not an unoverridable block.
 SEVERITY_REMAP = {
-    "binary_file": "high", "hermes_env_access": "medium", "curl_pipe_shell": "high"
-}
+    "binary_file": "high", "hermes_env_access": "medium", "curl_pipe_shell": "high"}
 
 # Structural limits — plugins are real codebases, far larger than skills.
 MAX_PLUGIN_FILE_COUNT = 400
@@ -169,17 +165,14 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     result = ScanResult(
         skill_name=plugin_dir.name, source=source or plugin_dir.name, trust_level="community",
         verdict=verdict, findings=all_findings, scanned_at=datetime.now(timezone.utc).isoformat(),
-        summary=summary,
-    )
+        summary=summary)
     result.scan_provenance = {
-        "scanner_version": PLUGIN_SCANNER_VERSION, "verdict": verdict, "source": result.source
-    }
+        "scanner_version": PLUGIN_SCANNER_VERSION, "verdict": verdict, "source": result.source}
     return result
 
 
 def should_allow_plugin_install(
-    result: ScanResult, force: bool = False,
-) -> Tuple[Optional[bool], str]:
+    result: ScanResult, force: bool = False) -> Tuple[Optional[bool], str]:
     """Map a verdict to ``(allowed, reason)``: True installs, None asks to confirm, False blocks."""
     n = len(result.findings)
     if result.verdict == "safe":
@@ -190,10 +183,8 @@ def should_allow_plugin_install(
         return None, f"Requires confirmation (caution verdict, {n} findings)"
     return False, (
         f"Blocked (dangerous verdict, {n} findings). "
-        f"--force does not override a dangerous verdict."
-    )
+        f"--force does not override a dangerous verdict.")
 
 
 __all__ = [
-    "scan_plugin", "should_allow_plugin_install", "format_scan_report", "PLUGIN_SCANNER_VERSION"
-]
+    "scan_plugin", "should_allow_plugin_install", "format_scan_report", "PLUGIN_SCANNER_VERSION"]
