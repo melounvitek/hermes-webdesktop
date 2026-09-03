@@ -78,6 +78,14 @@ def _build_sha() -> str:
     return _check_output(["git", "rev-parse", "HEAD"], cwd=str(_repo_root())) or "unknown"
 
 
+def _call_logged(cb: Callable[[dict], None], frame: dict, failure: str) -> None:
+    """Invoke a host-frame callback; a raising callback is logged, never propagated."""
+    try:
+        cb(frame)
+    except Exception:
+        logger.exception(failure)
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -307,23 +315,17 @@ class HostSupervisor:
             with contextlib.suppress(queue.Full):
                 q.put_nowait(frame)
             return
-        if late is None:
-            return
-        try:
-            late[1](frame)
-        except Exception:
-            logger.exception(
-                "compute host late control ack handler failed (request_id=%s)", request_id)
+        if late is not None:
+            _call_logged(
+                late[1], frame,
+                f"compute host late control ack handler failed (request_id={request_id})")
 
     def _spawn_locked(self, *, reason: str) -> None:
         if self._stopped_respawning:
             raise RuntimeError("compute host respawn disabled after crash loop")
         self._hello_event.clear()
         self._hello = {}
-        env = hermes_subprocess_env(inherit_credentials=True)
-        env.update(os.environ)
-        if self.env:
-            env.update(self.env)
+        env = {**hermes_subprocess_env(inherit_credentials=True), **os.environ, **(self.env or {})}
         env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] = str(self.heartbeat_secs)
         root = str(_repo_root())
         env.setdefault("PYTHONPATH", root)
@@ -437,10 +439,7 @@ class HostSupervisor:
         with self._lock:
             pending = self._pending_turns.pop(request_id, None)
         if pending is not None and pending[1] is not None:
-            try:
-                pending[1](frame)
-            except Exception:
-                logger.exception("compute host turn completion callback failed")
+            _call_logged(pending[1], frame, "compute host turn completion callback failed")
 
     def _wait_for_exit(self, proc: subprocess.Popen[str]) -> None:
         code = proc.wait()
@@ -464,20 +463,16 @@ class HostSupervisor:
                 "jsonrpc": "2.0", "method": "event",
                 "params": {"type": "error", "session_id": sid, "payload": dict(failure)}})
             if cb is not None:
-                try:
-                    cb({"type": "turn.error", "sid": sid, "request_id": request_id, **failure})
-                except Exception:
-                    logger.exception("compute host error callback failed")
+                frame = {"type": "turn.error", "sid": sid, "request_id": request_id, **failure}
+                _call_logged(cb, frame, "compute host error callback failed")
         # A crashed host never emits the late acks timed-out control waiters still
         # expect; fail them too so the client's "still running" notice can't hang.
         with self._lock:
             late = self._late_control_handlers
             self._late_control_handlers = {}
         for request_id, (_registered_at, handler) in late.items():
-            try:
-                handler({"type": "control.error", "request_id": request_id, **failure})
-            except Exception:
-                logger.exception("compute host late control error handler failed")
+            frame = {"type": "control.error", "request_id": request_id, **failure}
+            _call_logged(handler, frame, "compute host late control error handler failed")
 
     def _maybe_respawn_after_crash(self) -> None:
         now = time.monotonic()

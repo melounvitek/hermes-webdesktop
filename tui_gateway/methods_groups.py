@@ -8,6 +8,7 @@ helpers reach them through keyword defaults. ``_room_method`` is the shared enve
 
 from .method_ctx import HandlerRegistry
 
+import contextlib
 import importlib
 import os
 import threading
@@ -112,14 +113,11 @@ def _api_server_key(profile: str | None = None) -> str:
         # An explicit routed profile is authoritative. Never borrow the
         # process/default profile's API key on a multiplexed gateway.
         return str(build_profile_secret_scope(home).get("API_SERVER_KEY") or "").strip()
-    try:
+    scoped = ""
+    with contextlib.suppress(Exception):
         from agent.secret_scope import get_secret
         scoped = (get_secret("API_SERVER_KEY", "") or "").strip()
-        if scoped:
-            return scoped
-    except Exception:
-        pass
-    return (os.getenv("API_SERVER_KEY") or "").strip()
+    return scoped or (os.getenv("API_SERVER_KEY") or "").strip()
 
 
 def _profile_execution_policy(profile: str) -> dict:
@@ -154,8 +152,7 @@ def _room_link_run_storage_durable() -> bool:
         with _run_store_lock:
             store = getattr(_bound_server, "_run_idempotency_store", None)
             if store is None:
-                store = RunIdempotencyStore()
-                _bound_server._run_idempotency_store = store
+                store = _bound_server._run_idempotency_store = RunIdempotencyStore()
     return bool(getattr(store, "durable", False))
 
 
@@ -172,6 +169,14 @@ def _grant_expiry(claims: dict) -> float:
     return float(claims.get("status_expires_at", claims["expires_at"]))
 
 
+def _room_error_class(replica_only: bool) -> type:
+    if replica_only:
+        from gateway.hosted_room_replicas import ReplicaError
+        return ReplicaError
+    from gateway.hosted_rooms import HostedRoomError
+    return HostedRoomError
+
+
 def _room_method(
     name: str, *, code: int, room_code: int | None = None, replica_only: bool = False,
     with_reason: bool = True, service_code: int | None = None,
@@ -183,6 +188,7 @@ def _room_method(
     ``HostedRoomError`` (only ``ReplicaError`` when ``replica_only``) to a 4xxx client
     error with ``{"reason"}`` data when ``with_reason``; anything else maps to ``code``.
     """
+    error_class = _room_error_class  # closure cell: handlers run under server.py globals
 
     def dec(fn):
         def handler(rid, params: dict) -> dict:
@@ -198,16 +204,9 @@ def _room_method(
             try:
                 return fn(*args)
             except Exception as exc:
-                if room_code is not None:
-                    from gateway.hosted_rooms import HostedRoomError
-                    klass = HostedRoomError
-                    if replica_only:
-                        from gateway.hosted_room_replicas import ReplicaError
-                        klass = ReplicaError
-                    if isinstance(exc, klass):
-                        reason = getattr(exc, "reason", None) if with_reason else None
-                        data = {"reason": reason} if reason else None
-                        return _err(rid, room_code, str(exc), data)
+                if room_code is not None and isinstance(exc, error_class(replica_only)):
+                    reason = getattr(exc, "reason", None) if with_reason else None
+                    return _err(rid, room_code, str(exc), {"reason": reason} if reason else None)
                 return _err(rid, code, str(exc))
         handler.__doc__ = fn.__doc__
         return method(name)(handler)
@@ -328,25 +327,22 @@ def _(rid, params: dict, service) -> dict:
     member_id = str(params.get("member_id") or "")
     home_install_id = local_authority_gateway_id()
     home_room = room_state(service.db_path, room_id=room_id)
+    expected_scope = {
+        "room_id": room_id, "home_install_id": home_install_id,
+        "authority_gateway_id": home_room.get("authority_gateway_id"),
+        "member_id": member_id, "target_profile": target_profile}
     if (
-        probe.get("room_id") != room_id
-        or probe.get("home_install_id") != home_install_id
-        or probe.get("authority_gateway_id") != home_room.get("authority_gateway_id")
-        or int(probe.get("authority_epoch") or 0) != int(home_room.get("authority_epoch") or 0)
-        or probe.get("member_id") != member_id
-        or probe.get("target_profile") != target_profile):
+        any(probe.get(key) != value for key, value in expected_scope.items())
+        or int(probe.get("authority_epoch") or 0) != int(home_room.get("authority_epoch") or 0)):
         raise ValueError("room grant scope does not match this route")
     route = PeerMemberRoute(
-        home_install_id=home_install_id,
-        member_id=member_id,
-        target_install_id=catalog.installation_id,
-        target_profile=target_profile,
+        home_install_id=home_install_id, member_id=member_id,
+        target_install_id=catalog.installation_id, target_profile=target_profile,
         capability_digest=catalog.catalog_digest,
         execution_policy_digest=catalog.execution_policy.policy_digest,
         cancellation_scope_id=str(
             params.get("cancellation_scope_id") or f"cancel-{params.get('room_id') or ''}"),
-        trace_id=str(params.get("trace_id") or f"trace-{os.urandom(16).hex()}"),
-        grant=grant)
+        trace_id=str(params.get("trace_id") or f"trace-{os.urandom(16).hex()}"), grant=grant)
     service.register_peer_route(
         room_id=room_id, member_id=member_id, route=route, client=client, target_url=target_url,
         catalog=catalog)
@@ -481,8 +477,7 @@ def _(rid, params: dict, service) -> dict:
 
 def _passthrough(
     name: str, module: str, fn_name: str, doc: str, *, code: int, room_code: int,
-    params: tuple, replica_only: bool = False, wrap: str | None = None,
-) -> None:
+    params: tuple, replica_only: bool = False, wrap: str | None = None) -> None:
     """Register a method whose result is ``module.fn(db_path, **params)`` verbatim (or under
     key ``wrap``). ``params`` items are ``key`` (-> ``params.get(key)``) or
     ``(key, extractor(params))``."""
@@ -490,8 +485,8 @@ def _passthrough(
     @_room_method(
         name, code=code, room_code=room_code, replica_only=replica_only,
         with_reason=not replica_only, db=True)
-    def handler(rid, params_in: dict, db_path) -> dict:
-        fn = getattr(importlib.import_module(module), fn_name)
+    def handler(rid, params_in: dict, db_path, _import=importlib.import_module) -> dict:
+        fn = getattr(_import(module), fn_name)
         kwargs = {}
         for spec in params:
             if isinstance(spec, str):

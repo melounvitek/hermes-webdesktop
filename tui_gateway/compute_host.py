@@ -47,6 +47,11 @@ class _HostTransport:
 _FLUSH_RESERVE_SECS = 1.0
 
 
+# Fallback control.error text when a routed server method returns an error without a message.
+_CONTROL_FAILURES = {
+    "session.save": "session save failed", "session.compress": "session compression failed"}
+
+
 class ComputeHost:
     # frame ``type`` -> handler method name (resolved per call so instance
     # monkeypatches of a handler still take effect).
@@ -113,11 +118,7 @@ class ComputeHost:
         deadline = time.monotonic() + budget - min(_FLUSH_RESERVE_SECS, budget / 2.0)
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            with self._turn_futures_lock:
-                pending = [f for f in self._turn_futures if not f.done()]
-            if not pending:
+            if remaining <= 0 or not self._live_turns():
                 break
             # Bounded by ``remaining``: a flat sleep would overshoot the deadline and
             # eat the reserve it protects (all of it for small ``wait``).
@@ -217,6 +218,7 @@ class ComputeHost:
             from tui_gateway import server
             session = self._ensure_server_session(server, frame)
             text = frame.get("text") if "text" in frame else frame.get("prompt", "")
+            inflight = frame.get("text") if "text" in frame else frame.get("prompt")
             with session["history_lock"]:
                 queued_gen = frame.get("queued_prompt_generation")
                 current_gen = int(session.get("_queued_prompt_generation", 0))
@@ -226,11 +228,8 @@ class ComputeHost:
                 if session.get("running"):
                     self._reply("turn.error", sid, request_id, message="session busy")
                     return
-                session["running"] = True
-                session["_turn_cancel_requested"] = False
-                session["last_active"] = time.time()
-                server._start_inflight_turn(
-                    session, frame.get("text") if "text" in frame else frame.get("prompt"))
+                session.update(running=True, _turn_cancel_requested=False, last_active=time.time())
+                server._start_inflight_turn(session, inflight)
             self._reply("turn.started", sid, request_id, started_ns=now_ns())
             with contextlib.suppress(Exception):
                 server._ensure_session_db_row(session)
@@ -371,17 +370,6 @@ class ComputeHost:
 
         def _error(message: str) -> None:
             self._reply("control.error", sid, request_id, message=message)
-
-        def _ack(**extra: Any) -> None:
-            self._reply("control.ack", sid, request_id, route_name=route_name, **extra)
-
-        def _call_method(name: str, params: dict[str, Any], failure: str) -> dict | None:
-            """Run a server method; emit control.error and return None on error."""
-            response = server._methods[name](request_id, params)
-            if "error" in response:
-                _error(str(response["error"].get("message") or failure))
-                return None
-            return response
         try:
             from tui_gateway import server
             route = MUTATOR_ROUTE_TABLE.get(route_name)
@@ -398,33 +386,11 @@ class ComputeHost:
             if route_name == "reload.mcp":
                 self._handle_reload_mcp({**frame, "type": "reload_mcp"})
                 return
-            if route_name == "session.save":
-                response = _call_method("session.save", {"session_id": sid}, "session save failed")
-                if response is not None:
-                    _ack(result=response.get("result") or {})
-                return
-            if route_name == "session.compress":
-                focus_topic = str(frame.get("command") or "").removeprefix("/compress").strip()
-                params = {"session_id": sid}
-                if focus_topic:
-                    params["focus_topic"] = focus_topic
-                response = _call_method("session.compress", params, "session compression failed")
-                if response is None:
-                    return
-                with session["history_lock"]:
-                    meta = _history_meta(session)
-                _ack(
-                    result=response.get("result") or {}, **meta,
-                    session_info=server._session_info(session.get("agent"), session))
-                return
-            command = str(frame.get("command") or "")
-            output = server._mirror_slash_side_effects(sid, session, command) if command else ""
-            with session["history_lock"]:
-                messages = server._history_to_messages(list(session.get("history") or []))
-                meta = _history_meta(session)
-            _ack(
-                output=output, **meta, messages=messages,
-                session_info=server._session_info(session.get("agent"), session))
+            ack = self._control_ack(server, frame, session)
+            if "error" in ack:
+                _error(ack["error"])
+            else:
+                self._reply("control.ack", sid, request_id, route_name=route_name, **ack)
         except Exception as exc:
             if route_name in {"session.compress", "slash.compress"}:
                 # The compress mirror defers the context-engine boundary notification until
@@ -435,20 +401,51 @@ class ComputeHost:
                 with contextlib.suppress(Exception):
                     from tui_gateway import server as _server
                     from agent.conversation_compression import (
-                        finalize_context_engine_compression_notification)
+                        finalize_context_engine_compression_notification as _finalize)
                     _agent = (_server._sessions.get(sid) or {}).get("agent")
                     if _agent is not None:
-                        finalize_context_engine_compression_notification(_agent, committed=False)
+                        _finalize(_agent, committed=False)
             _error(str(exc))
+
+    def _control_ack(self, server: Any, frame: dict[str, Any], session: dict) -> dict:
+        """control.ack payload for one classified route, or ``{"error": message}``."""
+        sid = str(frame.get("sid") or "")
+        route_name = str(frame.get("route_name") or "")
+        command = str(frame.get("command") or "")
+        if route_name in {"session.save", "session.compress"}:
+            params = {"session_id": sid}
+            if route_name == "session.compress":
+                focus_topic = command.removeprefix("/compress").strip()
+                if focus_topic:
+                    params["focus_topic"] = focus_topic
+            response = server._methods[route_name](frame.get("request_id"), params)
+            if "error" in response:
+                failure = _CONTROL_FAILURES[route_name]
+                return {"error": str(response["error"].get("message") or failure)}
+            ack = {"result": response.get("result") or {}}
+            if route_name == "session.save":
+                return ack
+            with session["history_lock"]:
+                ack.update(_history_meta(session))
+        else:
+            output = server._mirror_slash_side_effects(sid, session, command) if command else ""
+            with session["history_lock"]:
+                messages = server._history_to_messages(list(session.get("history") or []))
+                ack = {"output": output, **_history_meta(session), "messages": messages}
+        ack["session_info"] = server._session_info(session.get("agent"), session)
+        return ack
 
     def _bump_progress(self) -> None:
         with self._progress_lock:
             self._progress_counter += 1
 
+    def _live_turns(self) -> list[concurrent.futures.Future]:
+        with self._turn_futures_lock:
+            return [f for f in self._turn_futures if not f.done()]
+
     def _heartbeat_loop(self) -> None:
         while not self._closed.wait(self._heartbeat_secs):
-            with self._turn_futures_lock:
-                active_turns = sum(1 for f in self._turn_futures if not f.done())
+            active_turns = len(self._live_turns())
             with self._progress_lock:
                 counter = self._progress_counter
             self.emit({

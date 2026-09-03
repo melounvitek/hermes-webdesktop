@@ -11,7 +11,6 @@ from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
 
-
 _compute_host_supervisor = None
 _compute_host_supervisor_lock = threading.Lock()
 # Cap on how long session.compress blocks its RPC on the compute host. Must stay
