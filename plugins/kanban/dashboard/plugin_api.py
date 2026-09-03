@@ -1638,47 +1638,64 @@ def _ws_board(raw: Optional[str]) -> Optional[str]:
         return None
 
 
+class _EventTail:
+    """Per-socket ``task_events`` tailer. One SQLite connection, used/closed only on a
+    dedicated single-thread executor (connections are thread-affine); reusing it avoids
+    churning WAL/SHM sidecars while an idle dashboard polls."""
+
+    def __init__(self, board: Optional[str]) -> None:
+        self._board = board
+        self._conn: Optional[sqlite3.Connection] = None
+        self._executor: Optional[ThreadPoolExecutor] = None
+
+    def _fetch(self, cursor: int) -> tuple[int, list[dict]]:
+        if self._conn is None:
+            self._conn = kanban_db.connect(board=self._board)
+        rows = self._conn.execute(
+            "SELECT id, task_id, run_id, kind, payload, created_at "
+            "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT 200",
+            (cursor,)).fetchall()
+        out: list[dict] = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else None
+            except Exception:
+                payload = None
+            out.append({**dict(r), "payload": payload})
+        return (rows[-1]["id"] if rows else cursor), out
+
+    def _close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    async def poll(self, cursor: int) -> tuple[int, list[dict]]:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kanban-events")
+        return await asyncio.get_running_loop().run_in_executor(self._executor, self._fetch, cursor)
+
+    async def shutdown(self) -> None:
+        if self._executor is None:
+            return
+        try:
+            await asyncio.get_running_loop().run_in_executor(self._executor, self._close)
+        except Exception as exc:
+            log.warning("Kanban event stream connection cleanup failed: %s", exc)
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+
+
 @router.websocket("/events")
 async def stream_events(ws: WebSocket):
     if not _ws_upgrade_authorized(ws):
         await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
         return
     await ws.accept()
-
-    # One SQLite connection per socket, used/closed only on a dedicated worker thread
-    # (connections are thread-affine); reuse avoids churning WAL/SHM sidecars while idle.
-    event_conn: Optional[sqlite3.Connection] = None
-    event_executor: Optional[ThreadPoolExecutor] = None
-
-    def _close_event_conn() -> None:
-        nonlocal event_conn
-        if event_conn is not None:
-            event_conn.close()
-            event_conn = None
-
+    # Board is pinned at the handshake; the UI opens a new WS on board change
+    # rather than reconciling two cursors mid-stream.
+    tail = _EventTail(_ws_board(ws.query_params.get("board")))
+    cursor = _int_param(ws, "since")
     try:
-        cursor = _int_param(ws, "since")
-        # Board is pinned at the handshake; the UI opens a new WS on board change
-        # rather than reconciling two cursors mid-stream.
-        ws_board = _ws_board(ws.query_params.get("board"))
-
-        def _fetch_new(cursor_val: int) -> tuple[int, list[dict]]:
-            nonlocal event_conn
-            if event_conn is None:
-                event_conn = kanban_db.connect(board=ws_board)
-            rows = event_conn.execute(
-                "SELECT id, task_id, run_id, kind, payload, created_at "
-                "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT 200",
-                (cursor_val,)).fetchall()
-            out: list[dict] = []
-            for r in rows:
-                try:
-                    payload = json.loads(r["payload"]) if r["payload"] else None
-                except Exception:
-                    payload = None
-                out.append({**dict(r), "payload": payload})
-            return (rows[-1]["id"] if rows else cursor_val), out
-
         while True:
             # Race receive() against the poll interval so a disconnect is detected even when no
             # events flow (else idle boards leak poll tasks). Other client messages are ignored.
@@ -1688,9 +1705,7 @@ async def stream_events(ws: WebSocket):
                     return
             except asyncio.TimeoutError:
                 pass  # no client message — poll the DB
-            if event_executor is None:
-                event_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kanban-events")
-            cursor, events = await asyncio.get_running_loop().run_in_executor(event_executor, _fetch_new, cursor)
+            cursor, events = await tail.poll(cursor)
             if events:
                 await ws.send_json({"events": events, "cursor": cursor})
     except WebSocketDisconnect:
@@ -1704,10 +1719,4 @@ async def stream_events(ws: WebSocket):
         except Exception:
             pass
     finally:
-        if event_executor is not None:
-            try:
-                await asyncio.get_running_loop().run_in_executor(event_executor, _close_event_conn)
-            except Exception as exc:
-                log.warning("Kanban event stream connection cleanup failed: %s", exc)
-            finally:
-                event_executor.shutdown(wait=True, cancel_futures=True)
+        await tail.shutdown()
