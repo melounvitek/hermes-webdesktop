@@ -2280,7 +2280,8 @@ class BasePlatformAdapter(ABC):
     def _get_ephemeral_system_ttl_default(self) -> int:
         """Default :class:`EphemeralReply` TTL from ``display.ephemeral_system_ttl``
         (``0`` = no auto-delete); non-fatal if config is unreadable."""
-        return _or_default(lambda: int(_config_section("display").get("ephemeral_system_ttl", 0)), 0)
+        return _or_default(
+            lambda: int(_config_section("display").get("ephemeral_system_ttl", 0)), 0)
 
     def _schedule_ephemeral_delete(self, chat_id: str, message_id: str, ttl_seconds: int) -> None:
         """Spawn a detached task that deletes ``message_id`` after ``ttl_seconds``; best-effort
@@ -2949,8 +2950,9 @@ class BasePlatformAdapter(ABC):
         except Exception:
             logger.debug("[%s] Failed to resolve live adapter for final delivery", self.name)
             return self
-        is_peer = isinstance(live_adapter, BasePlatformAdapter) and live_adapter.platform == self.platform
-        return live_adapter if is_peer else self
+        if isinstance(live_adapter, BasePlatformAdapter) and live_adapter.platform == self.platform:
+            return live_adapter
+        return self
 
     async def _send_with_retry(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Any = None,
@@ -3736,7 +3738,8 @@ class BasePlatformAdapter(ABC):
         live for concurrent inbound; ownership moves so stale-lock detection works."""
         self._clear_session_guard(session_key)
         self._track_session_task(
-            session_key, asyncio.create_task(self._process_message_background(pending_event, session_key)))
+            session_key,
+            asyncio.create_task(self._process_message_background(pending_event, session_key)))
 
     def _clear_session_guard(self, session_key: str) -> None:
         """Clear (not delete) the session's interrupt Event so the guard stays live for inbound."""
@@ -3808,8 +3811,9 @@ class BasePlatformAdapter(ABC):
             platform=self.platform, chat_id=str(chat_id), chat_name=chat_name, chat_type=chat_type,
             user_id=_opt(user_id), user_name=user_name, thread_id=_opt(thread_id),
             chat_topic=(chat_topic or "").strip() or None, user_id_alt=user_id_alt,
-            chat_id_alt=chat_id_alt, is_bot=is_bot, scope_id=_opt(scope_id), guild_id=_opt(guild_id),
-            parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
+            chat_id_alt=chat_id_alt, is_bot=is_bot, scope_id=_opt(scope_id),
+            guild_id=_opt(guild_id), parent_chat_id=_opt(parent_chat_id),
+            message_id=_opt(message_id))
         profile, profile_route_rejected = None, False  # profile from configured routes, if any
         if self.gateway_runner is not None:
             from gateway.profile_routing import ProfileRouteRejected
