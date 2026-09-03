@@ -38,9 +38,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import (
-    BasePlatformAdapter, MessageEvent, MessageType, SendResult, merge_pending_message_event,
-)
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult, merge_pending_message_event
 from gateway.session import build_session_key
 from gateway.platforms._shared import profile_scoped as _profile_scoped
 
@@ -79,10 +77,8 @@ _RAFT_PROMPT_TURN_IDS: set[str] = set()
 
 
 def _resolve_raft_profile() -> str:
-    """Scope-aware ``RAFT_PROFILE`` slug: a secondary multiplex profile configures Raft only via
-    its own ``.env`` (carried by the secret scope) — raw ``os.environ`` would return the DEFAULT
-    profile's bridged value. Unscoped (default profile startup) ``get_secret()`` would raise, so
-    that path keeps the plain env read."""
+    """Scope-aware ``RAFT_PROFILE``: a secondary multiplex profile configures Raft only via its own ``.env``
+    (secret scope) — ``os.environ`` would return the DEFAULT profile's value. Unscoped ``get_secret()`` raises."""
     if _profile_scoped():
         try:
             from agent.secret_scope import get_secret
@@ -329,8 +325,7 @@ def _on_post_llm_call(**kwargs: Any) -> None:
 @_raft_hook
 def _on_session_end(**kwargs: Any) -> None:
     if kwargs.get("interrupted") or kwargs.get("completed") is False:
-        error_class = "interrupted" if kwargs.get("interrupted") else "incomplete"
-        _emit("Stop", kwargs, status="error", error_class=error_class)
+        _emit("Stop", kwargs, status="error", error_class="interrupted" if kwargs.get("interrupted") else "incomplete")
     _forget_raft_context(kwargs.get("session_id"), kwargs.get("turn_id"))
 
 
@@ -461,10 +456,13 @@ class RaftAdapter(BasePlatformAdapter):
             {"status": "ok", "platform": "raft", "runtimeSession": self._runtime_session, "activity": activity}
         )
 
+    def _authorized(self, request: "web.Request") -> bool:
+        return self._validate_bridge_token(request.headers.get(BRIDGE_TOKEN_HEADER, ""))
+
     async def _read_bridge_body(self, request: "web.Request", *, text: bool) -> tuple[Any, Optional["web.Response"]]:
         """Auth + size-capped body read for wake/activity -> ``(body, None)`` or ``(None, error)``.
         ``text=True``: ``request.text()``, utf-8 length check, exception text in the 400 body; else raw bytes."""
-        if not self._validate_bridge_token(request.headers.get(BRIDGE_TOKEN_HEADER, "")):
+        if not self._authorized(request):
             return None, _error_response("unauthorized", 401)
         if (request.content_length or 0) > self._max_body_bytes:
             return None, _error_response("payload_too_large", 413)
@@ -529,7 +527,7 @@ class RaftAdapter(BasePlatformAdapter):
         return web.json_response({"ok": True}, status=202)
 
     async def _handle_activity_drain(self, request: "web.Request") -> "web.Response":
-        if not self._validate_bridge_token(request.headers.get(BRIDGE_TOKEN_HEADER, "")):
+        if not self._authorized(request):
             return _error_response("unauthorized", 401)
         try:
             max_events = int(request.query.get("max", "200"))
@@ -608,7 +606,7 @@ def register(ctx) -> None:
     ctx.register_platform(
         name="raft",
         label="Raft",
-        adapter_factory=lambda cfg: RaftAdapter(cfg),
+        adapter_factory=RaftAdapter,
         check_fn=check_raft_requirements,
         is_connected=_is_connected,
         required_env=["RAFT_PROFILE"],
