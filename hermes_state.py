@@ -36,26 +36,21 @@ from agent.context_compressor import (  # noqa: F401  (re-exported; tests import
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
-from hermes_state_common import (  # noqa: F401  (re-exported for back-compat)
-    AUTO_VACUUM_MIN_FREELIST_RATIO, _BRANCH_CHILD_SQL, _COMPRESSION_CHILD_SQL, _FTS_CJK_TRIGGERS,
-    _FTS_TRIGGERS, _LISTABLE_CHILD_SQL, _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT,
-    _RECOVERABLE_END_REASONS, _RECOVERABLE_END_REASONS_SQL, is_automatic_end_reason,
-    _RESET_END_REASONS, _RESET_END_REASONS_SQL, _ephemeral_child_sql, _legacy_reset_child_sql,
-    _shape_preview, _sql_session_last_active, _sql_session_last_active_by_id,
-    escape_like as _escape_like, DEFERRED_INDEX_SQL, FTS_CJK_STALE_KEY, FTS_REBUILD_DEFERRAL_KEY,
-    FTS_SQL, FTS_STALE_KEY, FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL,
-    LEGACY_FTS_TRIGRAM_SQL, MAX_FTS5_QUERY_CHARS, SCHEMA_SQL, SCHEMA_VERSION, _PREVIEW_CONTENT_SQL,
-    _PREVIEW_HEAD_CHARS, _PREVIEW_MAX_CHARS, _PREVIEW_SCAFFOLD_WINDOW, _PREVIEW_SCAFFOLDED_SQL,
-    _acquire_db_flock, _clear_lock_holder_record, _describe_lock_holder, _read_lock_holder_record,
-    is_advisory_lock_contention, stat_db_file_identity as _stat_db_file_identity,
+from hermes_state_common import (  # noqa: F401  (re-exported; tests import from hermes_state)
+    AUTO_VACUUM_MIN_FREELIST_RATIO, _FTS_CJK_TRIGGERS, _FTS_TRIGGERS, _LISTABLE_CHILD_SQL,
+    _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS,
+    _RECOVERABLE_END_REASONS_SQL, _RESET_END_REASONS, _legacy_reset_child_sql, _shape_preview,
+    _sql_session_last_active, _sql_session_last_active_by_id, escape_like as _escape_like,
+    FTS_CJK_STALE_KEY, FTS_REBUILD_DEFERRAL_KEY, FTS_SQL, FTS_STALE_KEY, FTS_STORAGE_VERSION,
+    FTS_TRIGRAM_SQL, LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL, SCHEMA_VERSION,
+    stat_db_file_identity as _stat_db_file_identity,
 )
 from hermes_state_portability import SessionPortabilityMixin
-from hermes_state_telegram import SessionTelegramTopicsMixin, _normalize_telegram_topic_profile_name  # noqa: F401  (re-exported for back-compat)
+from hermes_state_telegram import SessionTelegramTopicsMixin
 from hermes_state_schema import SessionSchemaMixin
 from hermes_state_dbfile import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    _HEADER_PROBE_FDS, _HEADER_PROBE_LOCK, _HERMES_CMDLINE_MARKERS, _RETIRED_HEADER_PROBE_FDS,
     _canonical_sqlite_path, _concrete_state_db_holder_pids, _connect_tracked_db,
-    _is_inactive_orphan_desktop_holder, _looks_like_hermes, _pread_db_header, _read_proc_cmdline,
+    _is_inactive_orphan_desktop_holder, _looks_like_hermes, _read_proc_cmdline,
     _read_sqlite_application_id, _stat_sqlite_sidecar_identity, _watched_sqlite_sidecar_paths,
     collect_state_db_stats, count_db_holders, is_zeroed_state_db,
     iter_deleted_sqlite_sidecar_holders, quarantine_cross_process_lock, quarantine_zeroed_state_db,
@@ -63,33 +58,24 @@ from hermes_state_dbfile import (  # noqa: F401  (re-exported; tests patch herme
 )
 from hermes_state_messages import SessionMessagesMixin
 from hermes_state_wal import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    WalUnsupportedError, _SYNCHRONOUS_FULL, _SYNCHRONOUS_LEVELS, _SYNCHRONOUS_NAMES,
-    _WAL_INCOMPAT_MARKERS, _WAL_SIZE_LIMIT_BYTES, _apply_delete_for_wal_reset_bug,
-    _apply_macos_checkpoint_barrier, _apply_synchronous_pragma, _apply_wal_size_limit,
-    _database_has_content, _delete_overridden_warned_lock, _delete_overridden_warned_paths,
-    _enforce_macos_synchronous_full, _journal_upgrade_warned_lock, _journal_upgrade_warned_paths,
-    _log_configured_delete_overridden_once, _log_journal_mode_upgrade_once, _log_wal_fallback_once,
-    _log_wal_reset_bug_once, _on_disk_journal_mode, _set_journal_mode_no_wait,
-    _wal_fallback_warned_lock, _wal_fallback_warned_paths, _wal_reset_bug_warned_lock,
-    _wal_reset_bug_warned_paths, _wal_reset_repair_hint, apply_database_pragmas,
-    apply_wal_with_fallback, is_sqlite_wal_reset_vulnerable, resolve_journal_mode,
-    resolve_synchronous_level, sqlite_source_id,
+    WalUnsupportedError, _WAL_INCOMPAT_MARKERS, _apply_macos_checkpoint_barrier,
+    _apply_synchronous_pragma, _database_has_content, _delete_overridden_warned_paths,
+    _enforce_macos_synchronous_full, _journal_upgrade_warned_paths, _on_disk_journal_mode,
+    _wal_fallback_warned_paths, _wal_reset_bug_warned_paths, _wal_reset_repair_hint,
+    apply_database_pragmas, apply_wal_with_fallback, is_sqlite_wal_reset_vulnerable,
+    resolve_journal_mode, resolve_synchronous_level, sqlite_source_id,
 )
 from hermes_state_repair import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    _DB_SIDECAR_SUFFIXES, _FINGERPRINT_SAMPLE_BYTES, _FINGERPRINT_VOLATILE_HEADER_RANGES,
-    _MAX_MALFORMED_BACKUPS, _MAX_PERSISTENT_REPAIR_ATTEMPTS, _REPAIR_BACKUP_FREE_FRACTION,
-    _REPAIR_BACKUP_MIN_FREE_BYTES, _REPAIR_LOCK_POLL_SECONDS,
+    _MAX_MALFORMED_BACKUPS, _MAX_PERSISTENT_REPAIR_ATTEMPTS, _REPAIR_BACKUP_MIN_FREE_BYTES,
     _REPAIR_SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SECOND, _backup_content_identity, _backup_db_file,
-    _bump_schema_cookie, _claim_repair_attempt, _connect_repair_durable, _copy_database_snapshot,
-    _cross_process_repair_lock, _db_fingerprint, _db_opens_cleanly, _exclusive_repair_db_guard,
-    _existing_malformed_backups, _live_writer_holds_db, _mask_volatile_header,
-    _persistent_repair_attempts_exhausted, _persistent_repair_exhausted_error,
-    _probe_journal_mode_for_repair, _prune_malformed_backups, _read_repair_ledger,
-    _reapply_durability_barriers, _record_repair_outcome, _release_auto_maintenance_lock,
-    _repair_backup_headroom_bytes, _repair_failure_consumes_attempt, _repair_ledger_path,
+    _claim_repair_attempt, _connect_repair_durable, _copy_database_snapshot,
+    _cross_process_repair_lock, _db_fingerprint, _db_opens_cleanly, _existing_malformed_backups,
+    _live_writer_holds_db, _persistent_repair_attempts_exhausted, _probe_journal_mode_for_repair,
+    _prune_malformed_backups, _read_repair_ledger, _record_repair_outcome,
+    _release_auto_maintenance_lock, _repair_backup_headroom_bytes, _repair_ledger_path,
     _repair_scratch_space_error, _repair_snapshot_timeout_seconds, _repair_state_db_schema_locked,
-    _restore_journal_mode_after_repair, _run_repair_strategies, _try_acquire_auto_maintenance_lock,
-    _unlink_db_triple, apply_durability_barriers, preflight_db_writability, repair_state_db_schema,
+    _run_repair_strategies, _try_acquire_auto_maintenance_lock, _unlink_db_triple,
+    apply_durability_barriers, preflight_db_writability, repair_state_db_schema,
 )
 from hermes_state_titles import SessionTitlesMixin
 from hermes_state_usage import SessionUsageMixin
@@ -1243,7 +1229,7 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
 # get_shared_session_db(); CLI one-shots, recovery flows and read-only
 # cross-profile opens use SessionDB() directly with their own close().
 from hermes_state_registry import (  # noqa: F401  (re-export)
-    close_shared_session_dbs, get_shared_session_db, release_or_close, release_shared_session_db,
+    close_shared_session_dbs, get_shared_session_db, release_or_close,
 )
 
 # Lifecycle statuses surfaced by session pickers; classified from the final
