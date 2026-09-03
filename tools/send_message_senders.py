@@ -14,23 +14,19 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".m2a", ".wav", ".m4a", ".flac"}
 _VOICE_EXTS = {".ogg", ".opus"}
-# Telegram's Bot API sendAudio only accepts MP3 / M4A. Other audio
-# formats either route through sendVoice (Opus/OGG) or fall back to
-# document delivery.
+# Telegram's sendAudio only accepts MP3 / M4A; other audio goes via sendVoice
+# (Opus/OGG) or falls back to document delivery.
 _TELEGRAM_SEND_AUDIO_EXTS = {".mp3", ".m4a"}
 
-# Extensions that carry a native caption on the media bubble itself
-# (photo/video/document). Voice/audio notes are excluded: a caption on a
-# voice note reads as a separate label rather than a bubble caption, and the
-# established convention is to keep the accompanying text as its own message.
+# Extensions that carry a native caption on the media bubble (photo/video/document).
+# Voice/audio notes are excluded: a caption on a voice note reads as a separate label,
+# so the accompanying text stays its own message.
 _CAPTIONABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS | {
     ".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".zip",
 }
 
-# Per-platform native caption length limits (characters). Text longer than
-# the limit can't ride on the media bubble and stays a separate body message.
-# Telegram's photo/video caption cap is 1024; WhatsApp and Discord are far
-# more generous, so a conservative shared ceiling keeps behavior predictable.
+# Native caption length limits (characters). Telegram's photo/video cap is 1024;
+# WhatsApp/Discord are far more generous, so one conservative shared ceiling.
 _TELEGRAM_CAPTION_LIMIT = 1024
 _DEFAULT_CAPTION_LIMIT = 4096
 
@@ -38,16 +34,15 @@ _DEFAULT_CAPTION_LIMIT = 4096
 def _media_caption_split(text, media_files, *, max_caption_len):
     """Decide whether the accompanying text rides on the media bubble.
 
-    Single chokepoint for ``MEDIA:<path> caption`` across every sender.
-    Returns ``(caption, "")`` — text becomes the native caption, no separate
-    body message — only for exactly one media file of a captionable kind
-    (image/video/document, not a voice/audio note) whose text fits
-    ``max_caption_len``. Otherwise ``(None, text)``: text goes as a separate
-    message (multi-file caption→file association is ambiguous).
+    Single chokepoint for ``MEDIA:<path> caption`` across every sender. Returns
+    ``(caption, "")`` — text becomes the native caption, no separate body — only for
+    exactly one captionable file (not a voice/audio note) whose text fits
+    ``max_caption_len``. Otherwise ``(None, text)``: text goes as a separate message
+    (multi-file caption→file association is ambiguous).
 
-    Length is measured in codepoints: never under-counts Telegram's UTF-16
-    units for BMP text, so over-counting only fails safe. The Telegram sender
-    re-checks the *formatted* caption since escaping inflates it.
+    Length is measured in codepoints: never under-counts Telegram's UTF-16 units for
+    BMP text, so over-counting only fails safe. The Telegram sender re-checks the
+    *formatted* caption since escaping inflates it.
     """
     stripped = (text or "").strip()
     media = media_files or []
@@ -59,6 +54,8 @@ def _media_caption_split(text, media_files, *, max_caption_len):
     if len(stripped) > max_caption_len:
         return None, text
     return stripped, ""
+
+
 _URL_SECRET_QUERY_RE = re.compile(
     r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)",
     re.IGNORECASE,
@@ -73,13 +70,20 @@ def _sanitize_error_text(text) -> str:
     """Redact secrets from error text before surfacing it to users/models."""
     redacted = redact_sensitive_text(text)
     redacted = _URL_SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", redacted)
-    redacted = _GENERIC_SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
-    return redacted
+    return _GENERIC_SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
 
 
 def _error(message: str) -> dict:
     """Build a standardized error payload with redacted content."""
     return {"error": _sanitize_error_text(message)}
+
+
+def _success(platform: str, chat_id, warnings=None, **fields) -> dict:
+    """Standard success payload; ``warnings`` is only included when non-empty."""
+    result = {"success": True, "platform": platform, "chat_id": chat_id, **fields}
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def _display_chat_id(platform_name: str, chat_id: str) -> str:
@@ -88,6 +92,8 @@ def _display_chat_id(platform_name: str, chat_id: str) -> str:
         return "group:***"
     return chat_id
 
+
+_NO_DELIVERABLE = "No deliverable text or media remained after processing MEDIA tags"
 
 _TELEGRAM_TRANSIENT_MARKERS = (
     "bad gateway", "502", "too many requests", "429",
@@ -125,10 +131,7 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
                 raise
             logger.warning(
                 "Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
-                attempt + 1,
-                attempts,
-                delay,
-                _sanitize_error_text(exc),
+                attempt + 1, attempts, delay, _sanitize_error_text(exc),
             )
             await asyncio.sleep(delay)
 
@@ -205,10 +208,12 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
     """Send one formatted text chunk with the adapter-matching fallbacks:
     thread-not-found -> retry without ``message_thread_id`` (dropped from
     ``text_kwargs`` for later chunks too); parse failure -> plain text."""
-    try:
+    async def send(text, mode):
         return await _send_telegram_message_with_retry(
-            bot, chat_id=chat_id, text=chunk, parse_mode=parse_mode, **text_kwargs
-        )
+            bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
+
+    try:
+        return await send(chunk, parse_mode)
     except Exception as md_error:
         if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
             logger.warning(
@@ -216,20 +221,14 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
                 text_kwargs.get("message_thread_id"),
             )
             text_kwargs.pop("message_thread_id", None)
-            return await _send_telegram_message_with_retry(
-                bot, chat_id=chat_id, text=chunk, parse_mode=parse_mode, **text_kwargs
-            )
+            return await send(chunk, parse_mode)
         err_text = str(md_error).lower()
         if "parse" in err_text or "markdown" in err_text or "html" in err_text:
             logger.warning(
                 "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
-                parse_mode,
-                _sanitize_error_text(md_error),
+                parse_mode, _sanitize_error_text(md_error),
             )
-            plain = chunk if has_html else _strip_mdv2_safe(chunk)
-            return await _send_telegram_message_with_retry(
-                bot, chat_id=chat_id, text=plain, parse_mode=None, **text_kwargs
-            )
+            return await send(chunk if has_html else _strip_mdv2_safe(chunk), None)
         raise
 
 
@@ -288,10 +287,10 @@ async def _telegram_send_one_media(
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
     """Send via Telegram Bot API (one-shot, no polling needed).
 
-    Markdown is converted to MarkdownV2 via the gateway adapter's
-    ``format_message`` so bold/links/headers render; a message that already
-    contains HTML tags skips that and is sent with ``parse_mode='HTML'``.
-    Parse failures fall back to plain text so the message still delivers.
+    Markdown is converted to MarkdownV2 via the gateway adapter's ``format_message``
+    so bold/links/headers render; a message that already contains HTML tags skips
+    that and is sent with ``parse_mode='HTML'``. Parse failures fall back to plain
+    text so the message still delivers.
     """
     try:
         from telegram.constants import ParseMode
@@ -324,35 +323,30 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         last_msg = None
         warnings = []
 
-        # MEDIA caption: a single captionable file + short text rides on the
-        # bubble as its *formatted* caption. Formatting can inflate a raw
-        # <1024 string past Telegram's 1024 cap, so re-check in UTF-16 units
-        # and fall back to a separate body message.
+        # MEDIA caption: a single captionable file + short text rides on the bubble as
+        # its *formatted* caption. Formatting can inflate a raw <1024 string past
+        # Telegram's cap, so re-check in UTF-16 units and fall back to a separate body.
         _tg_caption = None
         from gateway.platforms.base import BasePlatformAdapter, utf16_len
-        _cap, _ = _media_caption_split(
-            message, media_files, max_caption_len=_TELEGRAM_CAPTION_LIMIT
-        )
+        _cap, _ = _media_caption_split(message, media_files, max_caption_len=_TELEGRAM_CAPTION_LIMIT)
         if _cap is not None and utf16_len(formatted) <= _TELEGRAM_CAPTION_LIMIT:
             _tg_caption = formatted
             formatted = ""  # suppress the separate text send below
 
         if formatted.strip():
-            # Chunk *after* formatting, in UTF-16 units: MarkdownV2/HTML
-            # escaping inflates text, so a raw-<4096 message can exceed the
-            # limit once formatted and be rejected as "Message is too long".
+            # Chunk *after* formatting, in UTF-16 units: MarkdownV2/HTML escaping inflates
+            # text, so a raw-<4096 message can exceed the limit once formatted.
             for chunk in BasePlatformAdapter.truncate_message(formatted, 4096, len_fn=utf16_len):
                 last_msg = await _telegram_send_text_chunk(
-                    bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs
-                )
+                    bot, int_chat_id, chunk, send_parse_mode, _has_html, text_kwargs)
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
                 warning = f"Media file not found, skipping: {media_path}"
                 logger.warning(warning)
                 warnings.append(warning)
-                # Caption mode suppressed the text send; if the file it was
-                # meant to caption is gone, deliver the words on their own.
+                # Caption mode suppressed the text send; if the file it was meant to
+                # caption is gone, deliver the words on their own.
                 if _tg_caption is not None and last_msg is None:
                     try:
                         last_msg = await _send_telegram_message_with_retry(
@@ -379,20 +373,10 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 warnings.append(warning)
 
         if last_msg is None:
-            error = "No deliverable text or media remained after processing MEDIA tags"
             if warnings:
-                return {"error": error, "warnings": warnings}
-            return {"error": error}
-
-        result = {
-            "success": True,
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "message_id": str(last_msg.message_id),
-        }
-        if warnings:
-            result["warnings"] = warnings
-        return result
+                return {"error": _NO_DELIVERABLE, "warnings": warnings}
+            return {"error": _NO_DELIVERABLE}
+        return _success("telegram", chat_id, warnings, message_id=str(last_msg.message_id))
     except ImportError:
         return {"error": "python-telegram-bot not installed. Run: pip install python-telegram-bot"}
     except Exception as e:
@@ -505,6 +489,55 @@ async def _resolve_slack_user_target(token, chat_id):
         return None, _error(f"Slack DM resolution failed: {e}")
 
 
+async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, batch_message):
+    """Send one Signal batch under the scheduler with rate-limit retries.
+    Returns None on success, False when retries were exhausted (batch lost),
+    or an error dict for a non-rate-limit RPC error."""
+    n = len(att_batch)
+    for attempt in range(1, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS + 1):
+        try:
+            await scheduler.acquire(n)
+            _rpc_t0 = time.monotonic()
+            data = await post(att_batch, batch_message)
+            _rpc_duration = time.monotonic() - _rpc_t0
+            if "error" not in data:
+                await scheduler.report_rpc_duration(_rpc_duration, n)
+                return None
+
+            err = data["error"]
+            if not rl._is_signal_rate_limit_error(err):
+                return _error(f"Signal RPC error on batch {idx + 1}/{n_batches}: {err}")
+
+            server_retry_after = rl._extract_retry_after_seconds(err)
+            scheduler.feedback(server_retry_after, n)
+            retry_after_label = f"{server_retry_after:.0f}s" if server_retry_after else "unknown"
+
+            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
+                logger.error(
+                    "Signal: rate-limit retries exhausted on batch %d/%d "
+                    "(%d attachments lost, server retry_after=%s)",
+                    idx + 1, n_batches, n, retry_after_label,
+                )
+                return False
+            logger.warning(
+                "Signal: rate-limited on batch %d/%d "
+                "(attempt %d/%d, server retry_after=%s); "
+                "scheduler will pace the retry",
+                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, retry_after_label,
+            )
+        except Exception as e:
+            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
+                logger.error(
+                    "Signal: send error on batch %d/%d after %d attempts: %s",
+                    idx + 1, n_batches, attempt, str(e)
+                )
+                return False
+            logger.warning(
+                "Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
+                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, str(e)
+            )
+
+
 async def _send_signal(extra, chat_id, message, media_files=None):
     """Send via signal-cli JSON-RPC, text and/or attachments.
 
@@ -517,16 +550,7 @@ async def _send_signal(extra, chat_id, message, media_files=None):
     except ImportError:
         return {"error": "httpx not installed"}
 
-    from gateway.platforms.signal_rate_limit import (
-        SIGNAL_BATCH_PACING_NOTICE_THRESHOLD,
-        SIGNAL_MAX_ATTACHMENTS_PER_MSG,
-        SIGNAL_RATE_LIMIT_MAX_ATTEMPTS,
-        _extract_retry_after_seconds,
-        _format_wait,
-        _is_signal_rate_limit_error,
-        _signal_send_timeout,
-        get_scheduler,
-    )
+    from gateway.platforms import signal_rate_limit as rl
     from gateway.platforms.signal_format import markdown_to_signal
 
     try:
@@ -545,13 +569,11 @@ async def _send_signal(extra, chat_id, message, media_files=None):
 
         # No attachments still means one (text-only) batch; with attachments
         # the text rides on batch #0 so it isn't repeated per batch.
-        if attachment_paths:
-            att_batches = [
-                attachment_paths[i:i + SIGNAL_MAX_ATTACHMENTS_PER_MSG]
-                for i in range(0, len(attachment_paths), SIGNAL_MAX_ATTACHMENTS_PER_MSG)
-            ]
-        else:
-            att_batches = [[]]
+        per_batch = rl.SIGNAL_MAX_ATTACHMENTS_PER_MSG
+        att_batches = [
+            attachment_paths[i:i + per_batch] for i in range(0, len(attachment_paths), per_batch)
+        ] or [[]]
+        n_batches = len(att_batches)
 
         plain_text, text_styles = markdown_to_signal(message)
 
@@ -582,83 +604,38 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                     params["textStyles"] = text_styles
             if batch_attachments:
                 params["attachments"] = batch_attachments
-            timeout = _signal_send_timeout(len(batch_attachments) if batch_attachments else 0)
+            timeout = rl._signal_send_timeout(len(batch_attachments) if batch_attachments else 0)
             resp = await _rpc_send(params, id_prefix="send", timeout=timeout)
             resp.raise_for_status()
             return resp.json()
 
-        async def _send_inline_notice(text: str) -> None:
-            """Best-effort one-shot RPC for a user-facing pacing notice."""
-            try:
-                await _rpc_send(_rpc_params(text), id_prefix="notice", timeout=30.0)
-            except Exception as _e:
-                logger.warning("Signal: inline notice failed: %s", _e)
-
-        scheduler = get_scheduler()
+        scheduler = rl.get_scheduler()
         logger.info(
             "send_message Signal: scheduler state=%s, %d attachment(s) in %d batch(es)",
-            scheduler.state(), len(attachment_paths), len(att_batches),
+            scheduler.state(), len(attachment_paths), n_batches,
         )
         failed_batches: list[int] = []
         for idx, att_batch in enumerate(att_batches):
             n = len(att_batch)
             if n > 0:
                 estimated = scheduler.estimate_wait(n)
-                if estimated >= SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
-                    await _send_inline_notice(
-                        f"(More images coming — pausing ~{_format_wait(estimated)} "
-                        f"for Signal rate limit, batch {idx + 1}/{len(att_batches)}.)"
+                if estimated >= rl.SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
+                    # Best-effort one-shot RPC for a user-facing pacing notice.
+                    notice = (
+                        f"(More images coming — pausing ~{rl._format_wait(estimated)} "
+                        f"for Signal rate limit, batch {idx + 1}/{n_batches}.)"
                     )
+                    try:
+                        await _rpc_send(_rpc_params(notice), id_prefix="notice", timeout=30.0)
+                    except Exception as _e:
+                        logger.warning("Signal: inline notice failed: %s", _e)
 
-            batch_message = plain_text if idx == 0 else ""
-
-            for attempt in range(1, SIGNAL_RATE_LIMIT_MAX_ATTEMPTS + 1):
-                try:
-                    await scheduler.acquire(n)
-                    _rpc_t0 = time.monotonic()
-                    data = await _post(att_batch, batch_message)
-                    _rpc_duration = time.monotonic() - _rpc_t0
-                    if "error" not in data:
-                        await scheduler.report_rpc_duration(_rpc_duration, n)
-                        break
-
-                    err = data["error"]
-
-                    if not _is_signal_rate_limit_error(err):
-                        return _error(f"Signal RPC error on batch {idx + 1}/{len(att_batches)}: {err}")
-
-                    server_retry_after = _extract_retry_after_seconds(err)
-                    scheduler.feedback(server_retry_after, n)
-
-                    if attempt >= SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                        failed_batches.append(idx + 1)
-                        logger.error(
-                            "Signal: rate-limit retries exhausted on batch %d/%d "
-                            "(%d attachments lost, server retry_after=%s)",
-                            idx + 1, len(att_batches), n,
-                            f"{server_retry_after:.0f}s" if server_retry_after else "unknown",
-                        )
-                        break
-                    logger.warning(
-                        "Signal: rate-limited on batch %d/%d "
-                        "(attempt %d/%d, server retry_after=%s); "
-                        "scheduler will pace the retry",
-                        idx + 1, len(att_batches),
-                        attempt, SIGNAL_RATE_LIMIT_MAX_ATTEMPTS,
-                        f"{server_retry_after:.0f}s" if server_retry_after else "unknown",
-                    )
-                except Exception as e:
-                    if attempt >= SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                        failed_batches.append(idx + 1)
-                        logger.error(
-                            "Signal: send error on batch %d/%d after %d attempts: %s",
-                            idx + 1, len(att_batches), attempt, str(e)
-                        )
-                        break
-                    logger.warning(
-                        "Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
-                        idx + 1, len(att_batches), attempt, SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, str(e)
-                    )
+            outcome = await _signal_send_batch(
+                _post, scheduler, rl, idx, n_batches, att_batch, plain_text if idx == 0 else "")
+            if outcome is False:
+                failed_batches.append(idx + 1)
+            elif outcome is not None:
+                return outcome
 
         warnings = []
         if len(attachment_paths) < len(valid_media):
@@ -669,16 +646,13 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                 f"(#{', #'.join(str(b) for b in failed_batches)})"
             )
 
-        if failed_batches and len(failed_batches) == len(att_batches):
+        if failed_batches and len(failed_batches) == n_batches:
             return _error(
-                f"Signal: every batch ({len(att_batches)}) hit rate limit; "
+                f"Signal: every batch ({n_batches}) hit rate limit; "
                 f"no attachments delivered"
             )
 
-        result = {"success": True, "platform": "signal", "chat_id": _display_chat_id("signal", chat_id)}
-        if warnings:
-            result["warnings"] = warnings
-        return result
+        return _success("signal", _display_chat_id("signal", chat_id), warnings)
     except Exception as e:
         return _error(f"Signal send failed: {e}")
 
@@ -686,10 +660,10 @@ async def _send_signal(extra, chat_id, message, media_files=None):
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Send via the Matrix adapter so native media uploads are preserved.
 
-    Prefer the live gateway adapter: one persistent olm/megolm session for all
-    sends. Ephemeral per-send connects re-init E2EE and claim one-time keys,
-    which under bursts exhausts recipient OTKs and silently drops messages —
-    so the ephemeral connect/disconnect path is only for standalone/cron.
+    Prefer the live gateway adapter: one persistent olm/megolm session for all sends.
+    Ephemeral per-send connects re-init E2EE and claim one-time keys, which under
+    bursts exhausts recipient OTKs and silently drops messages — so the ephemeral
+    connect/disconnect path is only for standalone/cron.
     """
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
@@ -713,9 +687,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     if live_adapter is not None:
         # Owned by the gateway — must NOT be disconnected; return before the
         # ephemeral adapter (and its ``finally`` disconnect) exists.
-        return await _matrix_send_core(
-            live_adapter, chat_id, message, media_files, metadata
-        )
+        return await _matrix_send_core(live_adapter, chat_id, message, media_files, metadata)
 
     # --- Fallback: ephemeral adapter (standalone / cron context) ---
     try:
@@ -728,9 +700,7 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
         connected = await adapter.connect()
         if not connected:
             return _error("Matrix connect failed")
-        return await _matrix_send_core(
-            adapter, chat_id, message, media_files, metadata
-        )
+        return await _matrix_send_core(adapter, chat_id, message, media_files, metadata)
     except Exception as e:
         return _error(f"Matrix send failed: {e}")
     finally:
@@ -768,14 +738,8 @@ async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
             return _error(f"Matrix media send failed: {last_result.error}")
 
     if last_result is None:
-        return {"error": "No deliverable text or media remained after processing MEDIA tags"}
-
-    return {
-        "success": True,
-        "platform": "matrix",
-        "chat_id": chat_id,
-        "message_id": last_result.message_id,
-    }
+        return {"error": _NO_DELIVERABLE}
+    return _success("matrix", chat_id, message_id=last_result.message_id)
 
 
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
@@ -789,11 +753,8 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
 
     try:
         return await send_weixin_direct(
-            extra=pconfig.extra,
-            token=pconfig.token,
-            chat_id=chat_id,
-            message=message,
-            media_files=media_files,
+            extra=pconfig.extra, token=pconfig.token, chat_id=chat_id,
+            message=message, media_files=media_files,
         )
     except Exception as e:
         return _error(f"Weixin send failed: {e}")
@@ -810,8 +771,7 @@ async def _send_bluebubbles(extra, chat_id, message):
 
     try:
         from gateway.config import PlatformConfig
-        pconfig = PlatformConfig(extra=extra)
-        adapter = BlueBubblesAdapter(pconfig)
+        adapter = BlueBubblesAdapter(PlatformConfig(extra=extra))
         connected = await adapter.connect()
         if not connected:
             return _error("BlueBubbles: failed to connect to server")
@@ -819,7 +779,7 @@ async def _send_bluebubbles(extra, chat_id, message):
             result = await adapter.send(chat_id, message)
             if not result.success:
                 return _error(f"BlueBubbles send failed: {result.error}")
-            return {"success": True, "platform": "bluebubbles", "chat_id": chat_id, "message_id": result.message_id}
+            return _success("bluebubbles", chat_id, message_id=result.message_id)
         finally:
             await adapter.disconnect()
     except Exception as e:
@@ -846,20 +806,18 @@ async def _send_qqbot(pconfig, chat_id, message):
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # Step 1: Get access token
             token_resp = await client.post(
                 "https://bots.qq.com/app/getAppAccessToken",
                 json={"appId": str(appid), "clientSecret": str(secret)},
             )
             if token_resp.status_code != 200:
                 return _error(f"QQBot token request failed: {token_resp.status_code}")
-            token_data = token_resp.json()
-            access_token = token_data.get("access_token")
+            access_token = token_resp.json().get("access_token")
             if not access_token:
                 return _error("QQBot: no access_token in response")
 
-            # Step 2: QQ Bot API has separate endpoints for guild channels, C2C
-            # (private) and groups; try them in that order, first 2xx wins.
+            # QQ Bot API has separate endpoints for guild channels, C2C (private)
+            # and groups; try them in that order, first 2xx wins.
             headers = {
                 "Authorization": f"QQBot {access_token}",
                 "Content-Type": "application/json",
@@ -874,8 +832,7 @@ async def _send_qqbot(pconfig, chat_id, message):
             for kind, url in endpoints:
                 resp = await client.post(url, json=payload, headers=headers)
                 if resp.status_code in {200, 201}:
-                    return {"success": True, "platform": "qqbot", "chat_id": chat_id,
-                            "message_id": resp.json().get("id")}
+                    return _success("qqbot", chat_id, message_id=resp.json().get("id"))
                 statuses.append(f"{kind}={resp.status_code}")
             return _error(f"QQBot send failed: {' '.join(statuses)}")
     except Exception as e:
