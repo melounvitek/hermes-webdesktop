@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import urlparse
 
@@ -34,9 +34,8 @@ def _probe_teams_sdk_available() -> bool:
     Sibling packages share the namespace, so probe the parent first — ``find_spec`` of the child
     raises on 3.11+ if the parent is absent."""
     try:
-        if importlib.util.find_spec("microsoft_teams") is None:
-            return False
-        return importlib.util.find_spec("microsoft_teams.apps") is not None
+        find_spec = importlib.util.find_spec
+        return find_spec("microsoft_teams") is not None and find_spec("microsoft_teams.apps") is not None
     except (ValueError, ModuleNotFoundError, ImportError):
         return "microsoft_teams.apps" in sys.modules  # test stubs may lack ``__spec__``
 
@@ -490,9 +489,7 @@ class TeamsAdapter(BasePlatformAdapter):
         att_name = getattr(att, "name", None) or ""
         # Skip non-file payloads: Teams mirrors the message body as a text/html attachment,
         # and cards arrive as application/vnd.microsoft.card.*
-        if content_type in ("text/html", "text/plain") and not content_url:
-            return None
-        if content_type.startswith("application/vnd.microsoft.card"):
+        if (content_type in ("text/html", "text/plain") and not content_url) or content_type.startswith("application/vnd.microsoft.card"):
             return None
         if content_type == "application/vnd.microsoft.teams.file.download.info":
             # Consent-free download: content carries a pre-authed SharePoint downloadUrl + file type.
@@ -660,12 +657,9 @@ class TeamsAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=last_message_id)
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        if not self._app:
-            return
-        try:
-            await self._app.send(chat_id, TypingActivityInput())
-        except Exception:
-            pass
+        if self._app:
+            with suppress(Exception):
+                await self._app.send(chat_id, TypingActivityInput())
 
     async def _send_media_attachment(
         self, chat_id: str, source: str, default_mime: str, caption: Optional[str] = None, media_label: str = "media"

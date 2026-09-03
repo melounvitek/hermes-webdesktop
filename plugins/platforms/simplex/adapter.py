@@ -11,6 +11,7 @@ HERMES_SIMPLEX_TEXT_BATCH_DELAY (quiet seconds, default 0.8, merging rapid-fire 
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".opus"}
 _VOICE_TAG_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".opus"}  # MEDIA: tags sent as voice notes
 _TEXT_BEARING_TYPES = ("text", "file", "image", "voice", "link", "video")
+_THUMB_URI_PREFIX = "data:image/jpg;base64,"
 _MEDIA_KIND_PRECEDENCE = (("audio/", MessageType.VOICE), ("image/", MessageType.PHOTO))  # first match wins
 
 
@@ -84,10 +86,8 @@ def _send_cmd(chat_id: str, items: list) -> str:
 async def _cancel_task(task: Optional[asyncio.Task]) -> None:
     if task:
         task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 class SimplexAdapter(BasePlatformAdapter):
@@ -155,10 +155,8 @@ class SimplexAdapter(BasePlatformAdapter):
         await _cancel_task(self._ws_task)
         await _cancel_task(self._health_task)
         if self._ws:
-            try:
+            with contextlib.suppress(Exception):
                 await self._ws.close()
-            except Exception:
-                pass
             self._ws = None
         for pending in (self._pending_text_batch_tasks.values(), self._pending_responses.values()):
             for item in list(pending):
@@ -503,25 +501,23 @@ class SimplexAdapter(BasePlatformAdapter):
         import subprocess
         import tempfile
         p = Path(file_path)
-        png_path = file_path
-        thumb_uri = ""
         needs_png = p.suffix.lower() not in (".png", ".jpg", ".jpeg")
+        png_path = str(p.with_suffix(".png")) if needs_png else file_path
+        thumb_uri = ""
         try:
             from PIL import Image
             import io
             img = Image.open(file_path)
             if needs_png:
-                png_path = str(p.with_suffix(".png"))
                 img.save(png_path, "PNG")
             thumb = img.copy()
             thumb.thumbnail((128, 128))
             buf = io.BytesIO()
             thumb.save(buf, "JPEG", quality=70)
-            thumb_uri = "data:image/jpg;base64," + base64.b64encode(buf.getvalue()).decode()
+            thumb_uri = _THUMB_URI_PREFIX + base64.b64encode(buf.getvalue()).decode()
         except ImportError:
             try:
                 if needs_png:
-                    png_path = str(p.with_suffix(".png"))
                     subprocess.run(["convert", file_path, png_path],
                                    check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -529,7 +525,7 @@ class SimplexAdapter(BasePlatformAdapter):
                 subprocess.run(["convert", file_path, "-resize", "128x128", "-quality", "70", tmp_path],
                                check=True, capture_output=True, timeout=30)
                 with open(tmp_path, "rb") as f:
-                    thumb_uri = "data:image/jpg;base64," + base64.b64encode(f.read()).decode()
+                    thumb_uri = _THUMB_URI_PREFIX + base64.b64encode(f.read()).decode()
                 os.remove(tmp_path)
             except (FileNotFoundError, subprocess.SubprocessError) as exc:
                 logger.warning("SimpleX: image conversion unavailable: %s", exc)

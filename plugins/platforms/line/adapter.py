@@ -105,24 +105,18 @@ def split_for_line(text: str, max_chars: int = LINE_SAFE_BUBBLE_CHARS) -> List[s
         return [text] if text else []
     chunks: List[str] = []
     remaining = text
-    while remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL:
-        if len(remaining) <= max_chars:
-            chunks.append(remaining)
-            remaining = ""
-            break
-        for sep in ("\n\n", "\n", " "):  # prefer paragraph, then line, then word breaks
-            cut = remaining.rfind(sep, 0, max_chars)
-            if cut >= int(max_chars * 0.5):
-                break
+    while remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL and len(remaining) > max_chars:
+        # Prefer paragraph, then line, then word breaks past the half-way mark; else a hard cut.
+        cuts = [remaining.rfind(sep, 0, max_chars) for sep in ("\n\n", "\n", " ")]
+        cut = next((c for c in cuts if c >= int(max_chars * 0.5)), cuts[-1])
         if cut <= 0:
             cut = max_chars
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
-    if remaining:  # budget exhausted → ellipsis on the last bubble
-        tail = chunks[-1]
-        if len(tail) > max_chars - 1:
-            tail = tail[: max_chars - 1]
-        chunks[-1] = tail.rstrip() + "…"
+    if remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL:
+        chunks.append(remaining)
+    elif remaining:  # budget exhausted → ellipsis on the last bubble
+        chunks[-1] = chunks[-1][: max_chars - 1].rstrip() + "…"
     return chunks
 
 
@@ -349,6 +343,7 @@ _OUTBOUND_MEDIA = {
 
 # Inbound media kinds → cached file extension.
 _INBOUND_MEDIA_EXT = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
+_INBOUND_AV_CACHERS = {"audio": cache_audio_from_bytes, "video": cache_video_from_bytes}
 _LIFECYCLE_EVENTS = frozenset({"follow", "unfollow", "join", "leave"})
 
 
@@ -610,9 +605,8 @@ class LineAdapter(BasePlatformAdapter):
         try:
             if msg_type == "image":
                 return cache_image_from_bytes(data, ext=ext), "image/jpeg"
-            if msg_type in ("audio", "video"):
-                cache_fn = cache_audio_from_bytes if msg_type == "audio" else cache_video_from_bytes
-                return cache_fn(data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
+            if msg_type in _INBOUND_AV_CACHERS:
+                return _INBOUND_AV_CACHERS[msg_type](data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
             document_name = filename or f"line_file{ext}"
             mime = mimetypes.guess_type(document_name)[0] or "application/octet-stream"
             return cache_document_from_bytes(data, document_name), mime
