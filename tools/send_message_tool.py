@@ -93,16 +93,14 @@ def _handle_react(args, remove=False):
         except Exception:
             home = None
         if not home:
-            return tool_error(
-                f"No chat specified and no home channel set for {platform_name}. "
-                f"Use '{platform_name}:chat_id'.")
+            return tool_error(f"No chat specified and no home channel set for {platform_name}. "
+                              f"Use '{platform_name}:chat_id'.")
         chat_id = home.chat_id
 
     _, adapter = _live_adapter(platform)
     if adapter is None:
-        return tool_error(
-            f"Reactions require a live {platform_name} adapter in the running "
-            "gateway (not available from cron/standalone contexts).")
+        return tool_error(f"Reactions require a live {platform_name} adapter in the running "
+                          "gateway (not available from cron/standalone contexts).")
     react_fn = getattr(adapter, "remove_reaction" if remove else "add_reaction", None)
     if not callable(react_fn):
         return tool_error(f"Platform '{platform_name}' does not support message reactions.")
@@ -211,9 +209,8 @@ def _resolve_platform_config(platform_name, config):
     if not pconfig or not pconfig.enabled:
         pconfig = _weixin_env_pconfig() if platform_name == "weixin" else None
         if pconfig is None:
-            return None, None, None, (
-                f"Platform '{platform_name}' is not configured. Set up credentials in "
-                "~/.hermes/config.yaml or environment variables.")
+            return None, None, None, (f"Platform '{platform_name}' is not configured. Set up credentials in "
+                                      "~/.hermes/config.yaml or environment variables.")
     return platform, pconfig, entry, None
 
 
@@ -227,10 +224,9 @@ def _home_chat_id(config, platform, platform_name):
     if wx_home:
         return wx_home, None
     home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(platform_name, f"{platform_name.upper()}_HOME_CHANNEL")
-    return None, (
-        f"No home channel set for {platform_name} to determine where to send the message. "
-        f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
-        f"or set a home channel via: hermes config set {home_env} <channel_id>")
+    return None, (f"No home channel set for {platform_name} to determine where to send the message. "
+                  f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
+                  f"or set a home channel via: hermes config set {home_env} <channel_id>")
 
 
 def _slack_dm_chat_id(pconfig, chat_id):
@@ -250,9 +246,8 @@ def _mirror_sent_message(platform_name, chat_id, mirror_text, thread_id):
         from gateway.mirror import mirror_to_session
         from gateway.session_context import get_session_env
         return bool(mirror_to_session(
-            platform_name, chat_id, mirror_text,
+            platform_name, chat_id, mirror_text, thread_id=thread_id,
             source_label=get_session_env("HERMES_SESSION_PLATFORM", "cli"),
-            thread_id=thread_id,
             user_id=get_session_env("HERMES_SESSION_USER_ID", "") or None))
     except Exception:
         return False
@@ -298,8 +293,7 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
         return None
     target_label = f"{platform_name}:{chat_id}" + (f":{thread_id}" if thread_id is not None else "")
     return {
-        "success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target",
-        "target": target_label,
+        "success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target", "target": target_label,
         "note": (
             f"Skipped send_message to {target_label}. This cron job will already auto-deliver "
             "its final response to that same target. Put the intended user-facing content in "

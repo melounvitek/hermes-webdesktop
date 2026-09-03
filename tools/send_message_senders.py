@@ -14,17 +14,14 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".m2a", ".wav", ".m4a", ".flac"}
 _VOICE_EXTS = {".ogg", ".opus"}
-# Telegram's sendAudio only accepts MP3 / M4A; other audio goes via sendVoice
-# (Opus/OGG) or falls back to document delivery.
+# Telegram's sendAudio only accepts MP3 / M4A; other audio goes via sendVoice (Opus/OGG) or document.
 _TELEGRAM_SEND_AUDIO_EXTS = {".mp3", ".m4a"}
 
-# Extensions that carry a native caption on the media bubble (photo/video/document).
-# Voice/audio notes are excluded: a caption on a voice note reads as a separate label,
-# so the accompanying text stays its own message.
+# Extensions carrying a native caption on the media bubble. Voice/audio notes are excluded:
+# a caption on a voice note reads as a separate label, so the text stays its own message.
 _CAPTIONABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS | {".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".zip"}
 
-# Native caption length limits (characters). Telegram's photo/video cap is 1024;
-# WhatsApp/Discord are far more generous, so one conservative shared ceiling.
+# Native caption limits (chars): Telegram caps photo/video at 1024; one conservative shared ceiling elsewhere.
 _TELEGRAM_CAPTION_LIMIT = 1024
 _DEFAULT_CAPTION_LIMIT = 4096
 
@@ -49,8 +46,7 @@ def _media_caption_split(text, media_files, *, max_caption_len):
 
 
 _URL_SECRET_QUERY_RE = re.compile(
-    r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)",
-    re.IGNORECASE)
+    r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)", re.IGNORECASE)
 _GENERIC_SECRET_ASSIGN_RE = re.compile(
     r"\b(access_token|api[_-]?key|auth[_-]?token|signature|sig)\s*=\s*([^\s,;]+)", re.IGNORECASE)
 
@@ -308,9 +304,8 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
-                warning = f"Media file not found, skipping: {media_path}"
-                logger.warning(warning)
-                warnings.append(warning)
+                warnings.append(f"Media file not found, skipping: {media_path}")
+                logger.warning(warnings[-1])
                 # Caption mode suppressed the text send; if the file it was meant to
                 # caption is gone, deliver the words on their own.
                 if _tg_caption is not None and last_msg is None:
@@ -320,20 +315,17 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                             parse_mode=send_parse_mode, **text_kwargs)
                         _tg_caption = None  # delivered — don't re-caption a later file
                     except Exception as _cap_err:
-                        logger.warning(
-                            "Telegram caption-fallback send failed for missing media: %s",
-                            _sanitize_error_text(_cap_err))
+                        logger.warning("Telegram caption-fallback send failed for missing media: %s",
+                                       _sanitize_error_text(_cap_err))
                 continue
-
             try:
                 last_msg = await _telegram_send_one_media(
                     bot, int_chat_id, media_path, is_voice,
                     caption=_tg_caption, parse_mode=send_parse_mode, has_html=_has_html,
                     thread_kwargs=thread_kwargs, force_document=force_document)
             except Exception as e:
-                warning = _sanitize_error_text(f"Failed to send media {media_path}: {e}")
-                logger.error(warning)
-                warnings.append(warning)
+                warnings.append(_sanitize_error_text(f"Failed to send media {media_path}: {e}"))
+                logger.error(warnings[-1])
 
         if last_msg is None:
             return {"error": _NO_DELIVERABLE, **({"warnings": warnings} if warnings else {})}
@@ -441,9 +433,8 @@ async def _resolve_slack_user_target(token, chat_id):
             user_id = chat_id[len("user:"):]
             opened = await post_api(session, "conversations.open", {"users": user_id})
             if not opened.get("ok"):
-                return None, _error(
-                    f"Slack conversations.open error: {opened.get('error', 'unknown')}. "
-                    "Check bot permissions (im:write).")
+                return None, _error(f"Slack conversations.open error: {opened.get('error', 'unknown')}. "
+                                    "Check bot permissions (im:write).")
             dm_id = (opened.get("channel") or {}).get("id")
             if not dm_id:
                 return None, _error("Slack conversations.open did not return a DM channel ID")
@@ -587,11 +578,9 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
     from gateway.config import Platform
-    _, live_adapter = _live_adapter(
-        Platform.MATRIX,
-        lookup_failed_warning=(
-            "Matrix: live gateway adapter lookup failed; falling back to an "
-            "ephemeral connect (may re-init E2EE per send)"))
+    _, live_adapter = _live_adapter(Platform.MATRIX, lookup_failed_warning=(
+        "Matrix: live gateway adapter lookup failed; falling back to an "
+        "ephemeral connect (may re-init E2EE per send)"))
     if live_adapter is not None:
         # Owned by the gateway — must NOT be disconnected; return before the
         # ephemeral adapter (and its ``finally`` disconnect) exists.
@@ -649,9 +638,8 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
         return {"error": "Weixin adapter not available."}
 
     try:
-        return await send_weixin_direct(
-            extra=pconfig.extra, token=pconfig.token, chat_id=chat_id,
-            message=message, media_files=media_files)
+        return await send_weixin_direct(extra=pconfig.extra, token=pconfig.token, chat_id=chat_id,
+                                        message=message, media_files=media_files)
     except Exception as e:
         return _error(f"Weixin send failed: {e}")
 
@@ -698,9 +686,8 @@ async def _send_qqbot(pconfig, chat_id, message):
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            token_resp = await client.post(
-                "https://bots.qq.com/app/getAppAccessToken",
-                json={"appId": str(appid), "clientSecret": str(secret)})
+            token_resp = await client.post("https://bots.qq.com/app/getAppAccessToken",
+                                           json={"appId": str(appid), "clientSecret": str(secret)})
             if token_resp.status_code != 200:
                 return _error(f"QQBot token request failed: {token_resp.status_code}")
             access_token = token_resp.json().get("access_token")
@@ -735,9 +722,7 @@ async def _send_yuanbao(chat_id, message, media_files=None):
 
     adapter = get_active_adapter()
     if adapter is None:
-        return _error(
-            "Yuanbao adapter is not running. "
-            "Start the gateway with yuanbao platform enabled first.")
+        return _error("Yuanbao adapter is not running. Start the gateway with yuanbao platform enabled first.")
 
     try:
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
