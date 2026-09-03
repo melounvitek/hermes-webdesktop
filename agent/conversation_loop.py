@@ -83,13 +83,11 @@ from utils import base_url_host_matches
 logger = logging.getLogger(__name__)
 
 
-# Scaffold marker used by _apply_active_turn_redirect and the ghost-row filter
-# in the api_messages loop. Module-level so both sites can never drift.
+# Shared by _apply_active_turn_redirect and the api_messages ghost-row filter so both sites cannot drift.
 _INTERRUPT_SCAFFOLD_MARKER = "[This response was interrupted by a user correction.]"
 
 
-# One-time wrap-up notice appended when a wall-clock run budget crosses 80%
-# (agent.run_budget_seconds / --run-budget): stop new work, deliver current state.
+# One-time wrap-up notice appended when a wall-clock run budget (--run-budget) crosses 80%.
 RUN_BUDGET_WRAPUP_NOTICE = (
     "[SYSTEM NOTICE — run time budget nearly exhausted] "
     "Run time budget nearly exhausted. Stop new discovery/verification work "
@@ -104,11 +102,10 @@ def _midturn_request_pressure_tokens(
     effective_system: str,
     approx_tokens: int,
 ) -> int:
-    """Token figure the mid-turn pre-API compression guard compares.
-
-    Returns the pruned native-Responses estimate when native compaction eligibility is
-    proven (the generic estimate overstates the wire on compacted sessions, #96995),
-    else the generic message+tools figure. System prompt is counted exactly once."""
+    """Token figure the mid-turn pre-API compression guard compares: the pruned
+    native-Responses estimate when native compaction eligibility is proven (the generic
+    estimate overstates the wire on compacted sessions, #96995), else messages+tools.
+    The system prompt is counted exactly once."""
     try:
         from agent.codex_responses_adapter import (
             estimate_native_responses_preflight_tokens,
@@ -149,8 +146,7 @@ def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) 
     """Inject the one-time wall-clock wrap-up notice when past 80% of budget.
 
     Appends to the NEWEST ``role:"tool"`` message (cache-safe, like /steer); latches
-    ``_run_budget_wrapup_injected`` only on a successful append. Returns True when
-    injected. Dormant unless ``run_budget_seconds`` + ``_run_budget_started_at`` set."""
+    ``_run_budget_wrapup_injected`` only on a successful append."""
     budget = getattr(agent, "run_budget_seconds", None)
     started = getattr(agent, "_run_budget_started_at", None)
     if (
@@ -166,19 +162,15 @@ def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) 
             existing = msg.get("content", "")
             if isinstance(existing, str):
                 msg["content"] = existing + f"\n\n{RUN_BUDGET_WRAPUP_NOTICE}"
-            else:
-                # Multimodal content blocks — append a text block.
+            else:  # multimodal content blocks — append a text block
                 try:
-                    blocks = list(existing) if existing else []
-                    blocks.append({"type": "text", "text": RUN_BUDGET_WRAPUP_NOTICE})
-                    msg["content"] = blocks
+                    msg["content"] = [*(existing or []), {"type": "text", "text": RUN_BUDGET_WRAPUP_NOTICE}]
                 except Exception:
                     return False
             agent._run_budget_wrapup_injected = True
             logger.info(
                 "Run budget wrap-up notice injected (budget=%.0fs, elapsed=%.0fs)",
-                float(budget),
-                time.time() - started,
+                float(budget), time.time() - started,
             )
             return True
     return False
@@ -187,10 +179,8 @@ def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) 
 def _restore_user_after_reference_handoff(
     messages: List[Dict[str, Any]], user_message: Any
 ) -> bool:
-    """Re-append this turn's real user ask when compaction left only a handoff.
-
-    Returns True when a restore append happened; only decides whether a restorable
-    ask exists (#80622)."""
+    """Re-append this turn's real user ask when compaction left only a handoff (#80622).
+    Returns True when a restore append happened."""
     if isinstance(user_message, str):
         restorable = bool(user_message.strip())
     else:
@@ -217,15 +207,14 @@ def _should_skip_model_call_for_reference_handoff(
     )
 
 
-# Fallback final_response for the sole-handoff skip (#80622). Not a replay of the
-# last assistant text: finalize_turn appends final_response as a fresh assistant row.
+# Fallback final_response for the sole-handoff skip (#80622); finalize_turn appends it as a
+# fresh assistant row, so it must not replay the last assistant text.
 _HANDOFF_SKIP_FINAL_RESPONSE = (
     "Context was compacted. The previous response is complete — "
     "awaiting your next message."
 )
 
-# Terminal final_response when compression hit its host timeout while the request
-# was still oversized; resending would only bounce off the overflow error (#98722).
+# Terminal final_response when compression timed out while the request was still oversized (#98722).
 _COMPRESSION_TIMEOUT_FINAL_RESPONSE = (
     "Context compression timed out without reducing this conversation. "
     "No messages were dropped. Start a fresh session with /new, or check "
@@ -233,8 +222,7 @@ _COMPRESSION_TIMEOUT_FINAL_RESPONSE = (
 )
 
 
-# Stable prefix of the local interrupt status string; surfaces (ACP, TUI) match on
-# it to treat the text as cancellation metadata rather than assistant prose.
+# Stable prefix ACP/TUI match on to treat the text as cancellation metadata, not assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
 
 
@@ -245,10 +233,9 @@ def _should_rearm_compression_budget(
     prompt_tokens: int,
     threshold_tokens: int,
 ) -> bool:
-    """Return True after a provider proves a completed compaction worked.
-
-    Rough estimates cannot rearm the anti-thrash budget; require the completed-
-    compaction latch and a positive normalized prompt count below the threshold."""
+    """True once a provider proves a completed compaction worked: rough estimates cannot
+    rearm the anti-thrash budget, only the completed-compaction latch plus a positive
+    normalized prompt count below the threshold."""
     return bool(
         compression_attempts
         and completed_compaction_pending
@@ -276,11 +263,8 @@ _MAX_OUTER_LOOP_ERRORS = 8
 
 
 def _is_interpreter_shutdown_error(exc: Exception) -> bool:
-    """Check if *exc* is a fatal interpreter-shutdown failure.
-
-    Delegates to ``tools.interpreter_shutdown`` (one text-matching site for the
-    shutdown-race bug class) but keeps the RuntimeError type gate: a ValueError
-    carrying similar text must not match (#93269)."""
+    """True for a fatal interpreter-shutdown RuntimeError. The RuntimeError type gate
+    stays here: a ValueError carrying similar text must not match (#93269)."""
     if isinstance(exc, RuntimeError):
         from tools.interpreter_shutdown import interpreter_shutting_down
 
@@ -289,10 +273,9 @@ def _is_interpreter_shutdown_error(exc: Exception) -> bool:
 
 
 def _moa_client_consumes_prepared_request(client: Any) -> bool:
-    """True when ``client`` is the in-process MoA facade.
-
-    Only ``MoAChatCompletions`` exposes ``prepare()``; other clients raise TypeError on
-    ``_moa_prepared_request`` even while ``agent.provider`` stays ``"moa"``."""
+    """True when ``client`` is the in-process MoA facade (only ``MoAChatCompletions`` exposes
+    ``prepare()``; other clients raise TypeError on ``_moa_prepared_request`` even while
+    ``agent.provider`` stays ``"moa"``)."""
     completions = getattr(getattr(client, "chat", None), "completions", None)
     return callable(getattr(completions, "prepare", None))
 
@@ -308,10 +291,8 @@ def _join_truncated_parts(parts: List[str]) -> str:
 
 
 def _moa_reference_metrics_for_hook(agent: Any) -> Any:
-    """Per-advisor metrics for post_api_request, or None off the MoA path.
-
-    MoA returns only the aggregator response, so a plugin sees one generation for
-    the whole fan-out; this carries the per-slot advisor spend across the hook boundary."""
+    """Per-advisor metrics for post_api_request, or None off the MoA path (a plugin only
+    sees the aggregator generation; this carries the per-slot advisor spend)."""
     client = getattr(agent, "client", None)
     getter = getattr(client, "last_reference_metrics", None)
     if not callable(getter):
@@ -337,56 +318,36 @@ def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text
 
     checkpoint_parts = [_INTERRUPT_SCAFFOLD_MARKER]
     if visible:
-        checkpoint_parts.extend(
-            ["Visible response before the interruption:", visible]
-        )
+        checkpoint_parts += ["Visible response before the interruption:", visible]
     checkpoint = "\n\n".join(checkpoint_parts)
-    correction = (
-        "[Context from the interrupted assistant response]\n"
-        f"{checkpoint}\n\n"
-        f"{text}"
-    )
+    correction = f"[Context from the interrupted assistant response]\n{checkpoint}\n\n{text}"
 
     # The live tail is normally user or tool, so an assistant placeholder + correction
-    # keeps strict alternation; if the tail is already assistant, fold the checkpoint
-    # into the user correction instead of creating assistant→assistant.
-    if messages and messages[-1].get("role") == "assistant":
-        # Transcript shows the user's own words; the provider replays the
-        # scaffolded form so it still sees the interrupted context.
-        append_message(
-            messages,
-            {"role": "user", "content": text, "api_content": correction},
-        )
-    else:
-        # Placeholder preserves role alternation only. Scaffold bytes must never land
-        # here: api_content is substituted back into content on replay (#81841).
-        placeholder: Dict[str, Any] = {
-            "role": "assistant",
-            "content": visible or "",
-        }
+    # keeps strict alternation; if the tail is already assistant, the checkpoint is folded
+    # into the user correction instead of creating assistant→assistant. The placeholder
+    # preserves alternation only — scaffold bytes must never land in it, since api_content
+    # is substituted back into content on replay (#81841).
+    if not (messages and messages[-1].get("role") == "assistant"):
+        placeholder: Dict[str, Any] = {"role": "assistant", "content": visible or ""}
         if not visible:
             placeholder["display_kind"] = "hidden"
-            # Hidden row, but a non-empty neutral api_content so the pre-call
-            # sanitizer does not re-heal it every call (#88955). Never
-            # _INTERRUPT_SCAFFOLD_MARKER: as assistant text the model echoes it (#81841)
+            # Hidden row, but a non-empty neutral api_content so the pre-call sanitizer
+            # does not re-heal it every call (#88955). Never _INTERRUPT_SCAFFOLD_MARKER:
+            # as assistant text the model echoes it (#81841).
             from agent.agent_runtime_helpers import _INTERRUPTED_PLACEHOLDER
 
             placeholder["api_content"] = _INTERRUPTED_PLACEHOLDER
         append_message(messages, placeholder)
-        append_message(
-            messages,
-            {"role": "user", "content": text, "api_content": correction},
-        )
+    # Transcript shows the user's own words; the provider replays the scaffolded form.
+    append_message(messages, {"role": "user", "content": text, "api_content": correction})
 
     agent._current_streamed_assistant_text = ""
     agent._stream_needs_break = True
 
 
 def _is_copilot_provider(agent: Any) -> bool:
-    """Delegate to ``AIAgent._is_copilot_provider`` (single owner of the check).
-
-    ``agent.provider`` may hold the aliases ``github-copilot`` / ``github``; a bare
-    ``provider == "copilot"`` gate would skip credential recovery for them."""
+    """Delegate to ``AIAgent._is_copilot_provider``; the fallback keeps the ``github-copilot`` /
+    ``github`` aliases so credential recovery is not skipped for them."""
     try:
         return bool(agent._is_copilot_provider())
     except Exception:
@@ -398,11 +359,9 @@ def _is_copilot_provider(agent: Any) -> bool:
 
 
 def _is_stale_copilot_credential_error(status_code: Optional[int], error_message: str) -> bool:
-    """Detect a Copilot 400 that is really a STALE / DEGRADED credential.
-
-    Matches status 400 AND ``model_not_available_for_integrator`` or
-    ``model_not_supported`` / "the requested model is not supported", so a wrong model
-    name never triggers the single-shot re-exchange. Caller enforces scoping/guard."""
+    """Detect a Copilot 400 that is really a STALE / DEGRADED credential (status 400 AND an
+    integrator/model-not-supported marker, so a wrong model name never triggers the
+    single-shot re-exchange). Caller enforces scoping/guard."""
     lowered = (error_message or "").lower()
     if status_code != 400 and "error code: 400" not in lowered:
         return False
@@ -455,10 +414,8 @@ def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str
 
 def _maybe_grow_local_window(agent: Any, compressor: Any,
                              request_tokens: int) -> Optional[int]:
-    """Try growing the managed local model's context window before compressing.
-
-    Returns the new window when the ladder granted one, else None (hold / at native /
-    not a managed local session). Cheap for non-local providers: one compare."""
+    """Grow a managed local model's context window before compressing; returns the new
+    window when the ladder granted one, else None."""
     provider = (getattr(agent, "provider", "") or "").strip().lower()
     if provider not in ("llamacpp", "llama.cpp", "llama-cpp", "custom"):
         return None
@@ -483,8 +440,7 @@ def _maybe_grow_local_window(agent: Any, compressor: Any,
 
 
 def _ra():
-    """Lazy ``run_agent`` reference so patches on ``run_agent.handle_function_call`` /
-    ``run_agent._set_interrupt`` / ``run_agent.OpenAI`` reach this code path."""
+    """Lazy ``run_agent`` reference so patches on ``run_agent.*`` reach this code path."""
     import run_agent
     return run_agent
 
@@ -520,10 +476,8 @@ def _print_nous_entitlement_guidance(agent, capability: str) -> bool:
 
 
 def _system_prompt_for_hooks(api_kwargs: Any, request_messages: Any) -> Any:
-    """System prompt as actually sent to the provider, for observability hooks.
-
-    Checks ``system`` (Anthropic), ``instructions`` (Responses/Codex), then
-    ``messages[0]``. Returns None when the request carries no system prompt."""
+    """System prompt as sent to the provider (``system`` / ``instructions`` / ``messages[0]``)
+    for observability hooks; None when the request carries none."""
     system_prompt = api_kwargs.get("system")
     if system_prompt is None:
         system_prompt = api_kwargs.get("instructions")
@@ -554,47 +508,42 @@ def _billing_or_entitlement_message(
     provider_label = (provider or "").strip() or "the selected provider"
     model_label = (model or "").strip() or "the selected model"
 
-    # Anthropic Pro/Max OAuth surfaces exhaustion of the "extra usage" bucket as a hard
-    # 400; point at the settings page and cycle reset — "add credits" does not apply.
+    # Anthropic Pro/Max OAuth surfaces "extra usage" exhaustion as a hard 400 — "add credits"
+    # does not apply. ``unverified`` (#82154): the same 400 is returned for a server-side
+    # content-filter rejection, so hedge and name the other cause.
     if (provider or "").strip().lower() == "anthropic":
-        # ``unverified`` (#82154): the "out of extra usage" 400 is also returned for a
-        # server-side content-filter rejection, so hedge and name the other cause.
+        switch = (
+            "You can also switch to an Anthropic API key or another provider with "
+            "/model <model> --provider <provider>."
+        )
         if unverified:
             lines = [
-                (
-                    f"{provider_label} reported that your Claude subscription usage may be "
-                    f"exhausted for {model_label} (included quota + extra-usage credits) — "
-                    "but this specific error is not proof of a billing problem."
-                ),
+                f"{provider_label} reported that your Claude subscription usage may be "
+                f"exhausted for {model_label} (included quota + extra-usage credits) — "
+                "but this specific error is not proof of a billing problem.",
                 "If https://claude.ai/settings/usage still shows quota remaining, this is "
                 "probably NOT a billing problem: on a Claude subscription (OAuth) token "
                 "Anthropic returns this same message when its content filter rejects part "
                 "of the request — typically a phrase in the system prompt.",
                 "If usage really is exhausted: wait for the billing cycle to reset, or add "
                 "extra usage at https://claude.ai/settings/usage",
-                "You can also switch to an Anthropic API key or another provider with "
-                "/model <model> --provider <provider>.",
-                # The exhaustion latch replays the stored error without issuing
-                # a request, so a real fix looks like it didn't work.
+                switch,
+                # The exhaustion latch replays the stored error without a request.
                 "Retry with a fresh credential state: `hermes auth reset anthropic`. Until "
                 "that cooldown clears, this error can be replayed from cache without "
                 "contacting the API.",
             ]
         else:
             lines = [
-                (
-                    f"{provider_label} reported that your Claude subscription usage is "
-                    f"exhausted for {model_label} (included quota + extra-usage credits)."
-                ),
+                f"{provider_label} reported that your Claude subscription usage is "
+                f"exhausted for {model_label} (included quota + extra-usage credits).",
                 "Options: wait for the billing cycle to reset, or add extra usage at "
                 "https://claude.ai/settings/usage",
-                "You can also switch to an Anthropic API key or another provider with "
-                "/model <model> --provider <provider>.",
+                switch,
             ]
         return "\n".join(lines)
 
-    # Provider-agnostic billing URL so every text surface (CLI, gateway, TUI) shows the
-    # same actionable link, not just OpenRouter.
+    # Provider-agnostic billing URL so every text surface shows the same actionable link.
     try:
         from agent.billing_links import build_billing_block
 
@@ -606,10 +555,8 @@ def _billing_or_entitlement_message(
         billing_url = None
 
     lines = [
-        (
-            f"{provider_label} reported that billing, credits, or account "
-            f"entitlement is exhausted for {model_label}."
-        ),
+        f"{provider_label} reported that billing, credits, or account "
+        f"entitlement is exhausted for {model_label}.",
         "Add credits or update billing with that provider, then retry.",
     ]
     if billing_url:
@@ -631,17 +578,13 @@ def _billing_block_dict(
     except Exception:
         return None
     if block is not None and unverified:
-        # Carry the classifier's ambiguity into the structured descriptor so
-        # every surface rendering the block can hedge too (#82154).
-        block["unverified"] = True
+        block["unverified"] = True  # every surface rendering the block can hedge too (#82154)
     return block
 
 
 def _billing_terminal_label(summary: str, unverified: bool) -> str:
-    """Terminal-failure prefix for a billing-classified error.
-
-    ``unverified`` (#82154): the Anthropic "out of extra usage" 400 can be a
-    content-filter rejection, so the line must not assert exhaustion as fact."""
+    """Terminal-failure prefix for a billing-classified error; ``unverified`` (#82154) must
+    not assert exhaustion as fact."""
     if unverified:
         return (
             "Provider reported usage/credit exhaustion (unverified — the same "
@@ -661,10 +604,8 @@ def _billing_failure_result(
     model: str,
     guidance: Optional[str] = None,
 ) -> dict:
-    """Structured terminal result for a billing-classified failure.
-
-    Single construction point so label, guidance, structured block and ambiguity flag
-    stay consistent across the non-retryable abort and max-retries paths (#82154)."""
+    """Structured terminal result for a billing-classified failure — the single construction
+    point for the non-retryable abort and max-retries paths (#82154)."""
     unverified = bool(getattr(classified, "billing_unverified", False))
     if guidance is None:
         guidance = _billing_or_entitlement_message(
@@ -685,11 +626,8 @@ def _billing_failure_result(
         "failed": True,
         "error": summary,
         "failure_reason": classified.reason.value,
-        # Classifier's own retry verdict so UI (agent/error_surface.py) shows Retry
-        # only when a re-run can differ, not re-derived from a second taxonomy.
+        # Classifier's own retry verdict so the UI shows Retry only when a re-run can differ.
         "failure_retryable": bool(classified.retryable),
-        # The billing verdict may rest on an ambiguous body (#82154) — carry
-        # that through the structured result, not just the prose.
         "billing_unverified": unverified,
         "billing_block": _billing_block_dict(
             provider, base_url, model, guidance, unverified=unverified
@@ -782,13 +720,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             session_row = agent._session_db.get_session(agent.session_id)
             if session_row is not None:
                 raw_prompt = session_row.get("system_prompt")
-                if raw_prompt is None:
-                    stored_state = "null"
-                elif raw_prompt == "":
-                    stored_state = "empty"
-                else:
-                    stored_prompt = raw_prompt
-                    stored_state = "present"
+                stored_state = "null" if raw_prompt is None else ("empty" if raw_prompt == "" else "present")
+                stored_prompt = raw_prompt or None
         except Exception as exc:
             logger.warning(
                 "Session DB get_session failed for system-prompt restore "
@@ -905,10 +838,8 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted runtime-identity lines are stale."""
 
     def line_value(label: str) -> str:
-        """Last matching line wins.
-
-        Safe ONLY for fields in the volatile tier at the END of the prompt; embedded
-        project context could shadow earlier fields — see ``host_info_value``."""
+        """Last matching line wins — safe ONLY for volatile-tier fields at the END of the
+        prompt (embedded project context could shadow earlier fields; see ``host_info_value``)."""
         prefix = f"{label}:"
         value = ""
         for line in prompt.splitlines():
@@ -917,10 +848,8 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
         return value
 
     def host_info_value(label: str) -> str:
-        """Read a field from the prompt's own host-info block.
-
-        Anchors on the FIRST ``User home directory:`` line so a user's ``AGENTS.md`` row
-        cannot match; a false mismatch would rebuild the prompt every turn."""
+        """Read a field from the prompt's own host-info block, anchored on the FIRST ``User
+        home directory:`` line so a user's ``AGENTS.md`` row cannot force a rebuild every turn."""
         prefix = f"{label}:"
         lines = prompt.splitlines()
         for idx, line in enumerate(lines):
@@ -948,9 +877,8 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     return not (stored_platform and current_platform and stored_platform != current_platform)
 
 
-# Named constants for the _get_continuation_prompt variants so
-# _is_synthetic_compression_user_turn can recognize them by content after a crash
-# persists one; SessionDB projection strips the _length_continuation_nudge tag.
+# Named so _is_synthetic_compression_user_turn can recognize a crash-persisted nudge by
+# content (SessionDB projection strips the _length_continuation_nudge tag).
 _LENGTH_CONTINUATION_NETWORK_STUB = (
     "[System: The previous response was cut off by a "
     "network error mid-stream. Continue exactly where "
@@ -962,8 +890,7 @@ _LENGTH_CONTINUATION_OUTPUT_LIMIT = (
     "length limit. Continue exactly where you left off. Do not "
     "restart or repeat prior text. Finish the answer directly.]"
 )
-# The dropped-tools variant interpolates tool names, so
-# _is_synthetic_compression_user_turn matches this prefix with str.startswith.
+# The dropped-tools variant interpolates tool names; matched by prefix.
 _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX = "[System: Your previous tool call "
 
 
@@ -989,8 +916,8 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
         return _LENGTH_CONTINUATION_OUTPUT_LIMIT
 
 
-# Nudge for Codex/Responses turns that returned only internal reasoning: a bare retry
-# would be byte-identical (nothing replayable emitted), so the model repeats it.
+# Codex/Responses turns that returned only internal reasoning: a bare retry would be
+# byte-identical, so the model repeats it.
 _CODEX_INCOMPLETE_NUDGE = (
     "[System: Your previous response contained only internal reasoning and "
     "never produced a visible answer or tool call. Do not keep thinking. "
@@ -999,23 +926,21 @@ _CODEX_INCOMPLETE_NUDGE = (
 )
 
 
-# Re-prompt after an acknowledgment-only Codex/Responses reply; named so
-# _is_synthetic_compression_user_turn can recognize it like _CODEX_INCOMPLETE_NUDGE.
+# Re-prompt after an acknowledgment-only Codex/Responses reply.
 _CODEX_ACK_CONTINUATION_NUDGE = (
     "[System: Continue now. Execute the required tool calls and only "
     "send your final answer after completing the task.]"
 )
 
-# Re-prompt for finish_reason="tool_calls" with empty tool_calls. Named like
-# _CODEX_ACK_CONTINUATION_NUDGE: an interrupt mid-retry can persist it.
+# Re-prompt for finish_reason="tool_calls" with empty tool_calls (an interrupt mid-retry can persist it).
 _DROPPED_TOOLCALL_NUDGE_CONTENT = (
     "Your previous turn indicated a tool call but none was "
     "included. Do not narrate a plan or restate intent — issue "
     "the actual tool call now to continue the task."
 )
 
-# Re-prompt for an empty response after tool calls (#9400). Named because its
-# _empty_recovery_synthetic metadata flag does not survive SessionDB projection.
+# Re-prompt for an empty response after tool calls (#9400); the metadata flag does not
+# survive SessionDB projection, so it is matched by content.
 _EMPTY_TOOL_RESPONSE_NUDGE = (
     "You just executed tool calls but returned an "
     "empty response. Please process the tool "
@@ -1023,30 +948,26 @@ _EMPTY_TOOL_RESPONSE_NUDGE = (
 )
 
 
-# Shared recovery trailer for both content-policy refusal paths (HTTP-200
-# content_filter and the content_policy_blocked exception) so guidance cannot drift.
+# Shared trailer for both content-policy refusal paths so guidance cannot drift.
 _CONTENT_POLICY_RECOVERY_HINT = (
     "Try rephrasing the request, narrowing the context, or "
     "adding a fallback provider with `hermes fallback add`."
 )
 
 
-# Memo for send-path tool-call argument canonicalization, which re-runs on every
-# historical call each iteration. Sound: canonicalization is pure and deterministic;
-# malformed strings raise before being stored, so the repair fallback is never memoized.
+# Memo for send-path tool-call argument canonicalization (re-run on every historical call
+# each iteration). Sound because canonicalization is pure; malformed strings raise before
+# being stored, so the repair fallback is never memoized. The byte budget exists because
+# argument strings can run 100KB+, so a count bound alone does not bound memory.
 _CANON_ARGS_CACHE: Dict[str, str] = {}
 _CANON_ARGS_CACHE_MAX = 4096
-# Count bound alone does not bound MEMORY: argument strings can run 100KB+, so a byte
-# budget bounds the worst case while keeping the memo effective for ~0.5-2KB args.
 _CANON_ARGS_CACHE_MAX_BYTES = 32 * 1024 * 1024
 _canon_args_cache_bytes = 0
 
 
 def _canonicalize_tool_call_arguments(arg_str: str) -> str:
-    """Return the canonical wire form of a tool-call arguments JSON string.
-
-    Raises whatever ``json.loads`` raises on malformed input; the caller falls back to
-    ``_repair_tool_call_arguments``."""
+    """Canonical wire form of a tool-call arguments JSON string; raises on malformed input
+    (the caller falls back to ``_repair_tool_call_arguments``)."""
     global _canon_args_cache_bytes
     cached = _CANON_ARGS_CACHE.get(arg_str)
     if cached is not None:
@@ -1070,11 +991,9 @@ def _canonicalize_tool_call_arguments(arg_str: str) -> str:
 
 
 def _clone_message_for_send(msg):
-    """Structural clone of a history message for the per-call API copy.
-
-    Clones every dict/list recursively while sharing immutable leaves, so in-place
-    send-path rewrites can never reach the persisted transcript (#80498). Cheaper than
-    copy.deepcopy; messages are JSON-shaped and acyclic, tuples are shared as leaves."""
+    """Structural clone (dicts/lists recursively, immutable leaves shared) of a history
+    message for the per-call API copy, so send-path rewrites never reach the persisted
+    transcript (#80498). Cheaper than deepcopy: messages are JSON-shaped and acyclic."""
     if isinstance(msg, dict):
         return {
             k: _clone_message_for_send(v) if isinstance(v, (dict, list)) else v
@@ -1089,10 +1008,8 @@ def _clone_message_for_send(msg):
 
 
 def _canonicalize_api_tool_calls(api_messages) -> None:
-    """Canonicalize tool-call argument JSON on the send-path message copy.
-
-    Rewrites ``tool_calls`` in place (copy-on-write for the dicts it touches; persisted
-    history untouched). The memo bounds parse/serialize to one per UNIQUE string."""
+    """Canonicalize tool-call argument JSON on the send-path copy (copy-on-write for the
+    dicts it touches; persisted history untouched)."""
     for am in api_messages:
         tcs = am.get("tool_calls")
         if not tcs:
@@ -1114,11 +1031,9 @@ def _canonicalize_api_tool_calls(api_messages) -> None:
 
 
 def _invalid_tool_name_error_content(name: str, valid_tool_names) -> str:
-    """Error-result content for a tool call whose name isn't a real tool.
-
-    A blank name is a model echoing tool-call syntax seen in data, not a typo (#47967);
-    dumping the catalog feeds that loop, so send a terse error instead. A nonempty wrong
-    name still gets the catalog so the model can self-correct."""
+    """Error content for an unknown tool name. A blank name is a model echoing tool-call
+    syntax seen in data (#47967) — dumping the catalog feeds that loop, so it gets a terse
+    error; a nonempty wrong name still gets the catalog to self-correct."""
     if not (name or "").strip():
         return (
             "Tool call rejected: the tool name was empty. "
@@ -1139,10 +1054,8 @@ def _content_policy_blocked_result(
     final_response: str,
     error_detail: str,
 ) -> Dict[str, Any]:
-    """Build the terminal turn result for a content-policy block.
-
-    Refusals are deterministic for the unchanged prompt, so no retry; both the HTTP-200
-    and exception paths return this shape with a ``content_policy_blocked:`` error."""
+    """Terminal turn result for a content-policy block (deterministic for the unchanged
+    prompt, so no retry); shared by the HTTP-200 and exception paths."""
     return {
         "final_response": final_response,
         "messages": messages,
@@ -1153,15 +1066,29 @@ def _content_policy_blocked_result(
     }
 
 
+def _partial_turn_result(
+    final_response: str, messages: List[Dict], api_call_count: int, **flags: Any
+) -> Dict[str, Any]:
+    """Incomplete-turn result whose ``error`` mirrors ``final_response``; ``flags`` add the
+    recovery-contract keys (``failed``, ``compression_deferred``, ...)."""
+    return {
+        "final_response": final_response,
+        "messages": messages,
+        "completed": False,
+        "api_calls": api_call_count,
+        "error": final_response,
+        "partial": True,
+        **flags,
+    }
+
+
 def _compression_deferred_result(
     agent,
     messages: List[Dict],
     api_call_count: int,
     reason: str = "lock",
 ) -> Dict[str, Any]:
-    """Build the soft turn result for a transiently-deferred compression.
-
-    Both ``reason="lock"`` and ``reason="transient_block"`` must end as
+    """Soft turn result for a transiently-deferred compression. Both reasons must end as
     ``compression_deferred``, never ``compression_exhausted`` — the gateway wipes the
     session on exhaustion (#9893/#35809). ``failed`` stays False; the turn persists."""
     session = agent.session_id or "none"
@@ -1193,17 +1120,10 @@ def _compression_deferred_result(
         agent._flush_status_buffer()
     except Exception:
         pass
-    return {
-        "final_response": _final,
-        "messages": messages,
-        "completed": False,
-        "api_calls": api_call_count,
-        "error": _final,
-        "partial": True,
-        "failed": False,
-        "compression_deferred": True,
-        "session_id": agent.session_id,
-    }
+    return _partial_turn_result(
+        _final, messages, api_call_count,
+        failed=False, compression_deferred=True, session_id=agent.session_id,
+    )
 
 
 def _provider_overflow_exhausted_result(
@@ -1224,29 +1144,19 @@ def _provider_overflow_exhausted_result(
         f"{request_pressure_tokens:,}",
     )
     agent._persist_session(messages, conversation_history)
-    final_response = (
+    return _partial_turn_result(
         "Context length exceeded: compression could not reduce the rebuilt "
-        "request below the safe threshold."
+        "request below the safe threshold.",
+        messages, api_call_count,
+        failed=True, compression_exhausted=True,
+        turn_exit_reason="context_compression_exhausted",
     )
-    return {
-        "final_response": final_response,
-        "messages": messages,
-        "completed": False,
-        "api_calls": api_call_count,
-        "error": final_response,
-        "partial": True,
-        "failed": True,
-        "compression_exhausted": True,
-        "turn_exit_reason": "context_compression_exhausted",
-    }
 
 
 def _rewrite_system_content_blocks(system_message: dict, effective: str) -> bool:
-    """Rewrite a cache-decorated system message in place, keeping its blocks.
-
-    Assigning a bare string over the ``[static prefix, volatile tail]`` block list drops
-    both cache_control breakpoints. Only the LAST ``Model:``/``Provider:`` lines change.
-    Returns False when the shape cannot be safely patched."""
+    """Rewrite a cache-decorated system message in place, keeping its blocks (a bare string
+    over the ``[static prefix, volatile tail]`` list would drop both cache_control
+    breakpoints). Returns False when the shape cannot be safely patched."""
     content = system_message.get("content")
     if not isinstance(content, list) or not content:
         return False
@@ -1268,11 +1178,8 @@ def _rewrite_system_content_blocks(system_message: dict, effective: str) -> bool
 
 
 def _sync_failover_system_message(agent, api_messages, active_system_prompt):
-    """Refresh the in-flight system message after a provider failover.
-
-    ``try_activate_fallback`` rewrites the identity lines on ``_cached_system_prompt``,
-    but this call block's ``api_messages`` were built pre-failover and are reused each
-    retry. Mutates ``api_messages[0]`` in place; returns the new ``active_system_prompt``."""
+    """Refresh the in-flight system message after a provider failover: ``api_messages`` were
+    built pre-failover and are reused each retry. Returns the new ``active_system_prompt``."""
     sp = getattr(agent, "_cached_system_prompt", None)
     if not isinstance(sp, str) or not sp:
         return active_system_prompt
@@ -1286,10 +1193,9 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
 
 
 def _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry):
-    """After ``_try_activate_fallback`` succeeded: sync the system message to the new
-    provider and arm ``restart_with_rebuilt_messages`` (re-issue against the fallback,
-    refunding the stalled attempt). Callers also reset ``retry_count`` /
-    ``compression_attempts`` to 0 and ``break`` the retry loop."""
+    """After a successful fallback activation: sync the system message and arm
+    ``restart_with_rebuilt_messages``. Callers also zero ``retry_count`` /
+    ``compression_attempts`` and ``break`` the retry loop."""
     active_system_prompt = _sync_failover_system_message(
         agent, api_messages, active_system_prompt)
     _retry.primary_recovery_attempted = False
@@ -1298,11 +1204,9 @@ def _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry):
 
 
 def _ensure_cached_system_prompt_static(agent, system_message=None) -> None:
-    """Rebuild ``_cached_system_prompt_static`` when caching becomes active (#72626).
-
-    Sessions restored under a cache-off primary skip the static-prefix rebuild; a later
-    failover to a cache-on provider would otherwise silently fall back to the legacy
-    system-plus-3 layout. Wraps ``reconstruct_static_prefix`` (memoizes failures)."""
+    """Rebuild ``_cached_system_prompt_static`` when caching becomes active (#72626): sessions
+    restored under a cache-off primary would otherwise fall back to the legacy layout after
+    failover to a cache-on provider."""
     from agent.system_prompt import reconstruct_static_prefix
 
     reconstruct_static_prefix(
@@ -1314,9 +1218,7 @@ def _peel_moa_guidance(
     messages: List[Dict[str, Any]],
     guidance: Any,
 ) -> List[Dict[str, Any]]:
-    """Remove MoA reference guidance attached by ``_attach_reference_guidance``.
-
-    Kept adjacent to the attach so the forward/inverse shapes evolve together."""
+    """Remove MoA reference guidance attached by ``_attach_reference_guidance``."""
     from agent.moa_loop import peel_reference_guidance
 
     return peel_reference_guidance(messages, guidance)
@@ -1330,11 +1232,8 @@ def _redecorate_prompt_cache_for_provider(
     moa_prepared: Optional[Dict[str, Any]] = None,
     tools_for_api: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]] | tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Strip and re-apply cache_control for the *current* provider policy.
-
-    Decoration runs once per call block for the primary provider, but failover
-    ``continue`` paths reuse ``api_messages`` (#72626), so reshape at the top of each
-    retry from the mutated in-flight request. MoA guidance is peeled and rebased."""
+    """Strip and re-apply cache_control for the *current* provider policy — failover
+    ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
     messages: List[Dict[str, Any]] = [
         dict(m) if isinstance(m, dict) else m for m in (api_messages or [])
     ]
@@ -1362,9 +1261,7 @@ def _redecorate_prompt_cache_for_provider(
         _ensure_cached_system_prompt_static(agent, system_message=system_message)
         static = getattr(agent, "_cached_system_prompt_static", None)
         direct_tool_cache = getattr(
-            agent,
-            "_direct_native_anthropic_tool_cache_capability",
-            lambda: False,
+            agent, "_direct_native_anthropic_tool_cache_capability", lambda: False
         )()
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
 
@@ -1419,10 +1316,8 @@ def _apply_context_engine_selection(
     *,
     logger: Any,
 ) -> List[Dict[str, Any]]:
-    """Run the optional per-turn ``ContextEngine.select_context()`` hook.
-
-    Returns the (possibly replaced) request list. Fail-open: a missing hook, exception,
-    or invalid return yields ``api_messages`` unchanged; history is never mutated."""
+    """Run the optional per-turn ``ContextEngine.select_context()`` hook, fail-open: any
+    exception or invalid return yields ``api_messages`` unchanged; history is never mutated."""
     engine = getattr(agent, "context_compressor", None)
     if not _engine_overrides_hook(engine, "select_context"):
         return api_messages
@@ -1430,14 +1325,17 @@ def _apply_context_engine_selection(
     session_label = getattr(agent, "session_id", None) or "-"
     # Structural clones: the engine must not be able to write through nested
     # containers into persisted history; only the request list is acted on (#80498).
-    _conv_copy = [_clone_message_for_send(m) for m in conversation_messages] \
-        if conversation_messages is not None else None
-    _incoming_copy = _clone_message_for_send(incoming_message) if isinstance(incoming_message, dict) else incoming_message
     try:
         selected = engine.select_context(
             api_messages,
-            conversation_messages=_conv_copy,
-            incoming_message=_incoming_copy,
+            conversation_messages=(
+                [_clone_message_for_send(m) for m in conversation_messages]
+                if conversation_messages is not None else None
+            ),
+            incoming_message=(
+                _clone_message_for_send(incoming_message)
+                if isinstance(incoming_message, dict) else incoming_message
+            ),
             budget_tokens=getattr(engine, "context_length", 0) or 0,
         )
     except Exception:
@@ -1455,7 +1353,6 @@ def _apply_context_engine_selection(
     # buggy engine would otherwise replace the request instead of failing open.
     if isinstance(selected, list) and selected and all(isinstance(m, dict) for m in selected):
         return selected
-
     logger.warning(
         "Context engine select_context returned an invalid value "
         "(not a non-empty list of dicts); ignoring (session=%s)",
@@ -1472,10 +1369,8 @@ def _notify_context_engine_turn_complete(
     logger: Any,
     **meta: Any,
 ) -> None:
-    """Notify the active context engine that a user turn has finished.
-
-    Fail-open: a missing/no-op hook or any exception is swallowed. ``messages`` is
-    passed as a copy so the engine cannot mutate the persisted transcript."""
+    """Notify the active context engine that a user turn has finished (fail-open; the engine
+    gets a copy so it cannot mutate the persisted transcript)."""
     engine = getattr(agent, "context_compressor", None)
     if not _engine_overrides_hook(engine, "on_turn_complete"):
         return
@@ -1496,10 +1391,8 @@ def _notify_context_engine_turn_complete(
 
 
 def _decode_inline_moa_turn(user_message, persist_user_message):
-    """Decode a MoA preset encoded into ``user_message`` (``hermes_cli.moa_config``).
-
-    Returns ``(user_message, moa_config, persist_user_message)``; unchanged with
-    ``moa_config=None`` when nothing is encoded or decoding fails."""
+    """Decode a MoA preset encoded into ``user_message``; returns ``(user_message,
+    moa_config, persist_user_message)``, unchanged with ``moa_config=None`` otherwise."""
     try:
         from hermes_cli.moa_config import decode_moa_turn
 
@@ -1514,34 +1407,24 @@ def _decode_inline_moa_turn(user_message, persist_user_message):
 
 
 def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any]:
-    """Typed recovery result when turn-start preflight compression timed out (#98424):
-    no provider call was sent. Surfaces hide raw exception text, which would bury the
-    actionable guidance and skip the compression_exhausted recovery contract."""
+    """Typed recovery result when turn-start preflight compression timed out (#98424): no
+    provider call was sent, and surfaces would otherwise hide the actionable guidance."""
     logger.warning(
         "Turn-start preflight compression timed out — ending turn with "
         "typed recovery result: %s",
         exc,
     )
-    # Clear the tripwire slot note_turn_start registered; the early return skips the
-    # persist funnel that clears it. The user row is deliberately NOT persisted:
-    # the gateway skips persistence for compression_exhausted results (#7100).
+    # Clear the tripwire slot note_turn_start registered (the early return skips the persist
+    # funnel). The user row is deliberately NOT persisted (#7100).
     from agent.agent_runtime_helpers import note_turn_persisted
 
     note_turn_persisted(agent)
     # Not _COMPRESSION_TIMEOUT_FINAL_RESPONSE — that describes a different state
     # (compression ran, could not reduce); the exception text carries the guidance.
-    _final_response = str(exc)
-    return {
-        "final_response": _final_response,
-        "messages": list(conversation_history or []),
-        "completed": False,
-        "api_calls": 0,
-        "error": _final_response,
-        "partial": True,
-        "failed": True,
-        "compression_exhausted": True,
-        "turn_exit_reason": "context_compression_timeout",
-    }
+    return _partial_turn_result(
+        str(exc), list(conversation_history or []), 0,
+        failed=True, compression_exhausted=True, turn_exit_reason="context_compression_timeout",
+    )
 
 
 @dataclass
