@@ -472,12 +472,8 @@ def _exempt_explicit_platform_native(default_off: Set[str], platform: str, *, ex
     Default-off toolsets restricted to a platform (``discord`` on discord) are its native tools: off for
     unconfigured platforms as a security opt-in, but once the user explicitly saves a toolset list, stripping
     them silently would defeat that configuration."""
-    if not explicitly_configured:
-        return
-    for ts in list(default_off):
-        allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts)
-        if allowed is not None and platform in allowed:
-            default_off.discard(ts)
+    if explicitly_configured:
+        default_off -= {ts for ts in default_off if platform in (_TOOLSET_PLATFORM_RESTRICTIONS.get(ts) or ())}
 
 
 #: Toolsets young enough that absence from a saved ``platform_toolsets`` list means "never offered", not
@@ -502,9 +498,7 @@ def _enable_recently_shipped_toolsets(enabled_toolsets: Set[str], config: dict, 
     default_ts = _platform_default_toolset(platform)
     composite_tools = None
     for ts_key in sorted(_RECENTLY_SHIPPED_TOOLSETS):
-        if ts_key in enabled_toolsets or ts_key in declined:
-            continue
-        if not _toolset_allowed_for_platform(ts_key, platform):
+        if ts_key in enabled_toolsets or ts_key in declined or not _toolset_allowed_for_platform(ts_key, platform):
             continue
         # Only enable where staying on the composite would have enabled it anyway; deliberately narrow
         # composites (hermes-acp, hermes-webhook) stay narrow.
@@ -524,11 +518,10 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
 
     enabled = set()
     for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-        if not _toolset_allowed_for_platform(ts_key, platform):
-            continue
-        ts_tools = set(resolve_toolset(ts_key, include_registry=False))
-        if ts_tools and ts_tools.issubset(tool_names):
-            enabled.add(ts_key)
+        if _toolset_allowed_for_platform(ts_key, platform):
+            ts_tools = set(resolve_toolset(ts_key, include_registry=False))
+            if ts_tools and ts_tools <= tool_names:
+                enabled.add(ts_key)
     return enabled
 
 
@@ -566,10 +559,10 @@ def _explicit_toolsets(
     from toolsets import resolve_toolset, TOOLSETS
 
     enabled = {ts for ts in toolset_names if ts in explicit_known_keys and _toolset_allowed_for_platform(ts, platform)}
-    composite_tools: Set[str] = set()
-    for ts_name in toolset_names:
-        if ts_name not in explicit_known_keys and ts_name in TOOLSETS:
-            composite_tools.update(resolve_toolset(ts_name))
+    composite_tools = {
+        t for ts_name in toolset_names if ts_name not in explicit_known_keys and ts_name in TOOLSETS
+        for t in resolve_toolset(ts_name)
+    }
     if composite_tools:
         enabled |= _configurable_subset_of(composite_tools, platform) - _default_off_toolsets(platform, explicitly_configured)
     _enable_recently_shipped_toolsets(enabled, config, platform)
@@ -583,9 +576,7 @@ def _composite_toolsets(toolset_names: List[str], platform: str, explicitly_conf
     default-off subtraction. Only runs while no explicit list is saved — a saved list is authoritative."""
     from toolsets import resolve_toolset
 
-    all_tool_names: Set[str] = set()
-    for ts_name in toolset_names:
-        all_tool_names.update(resolve_toolset(ts_name))
+    all_tool_names = {t for ts_name in toolset_names for t in resolve_toolset(ts_name)}
     enabled = _configurable_subset_of(all_tool_names, platform)
     default_off = _default_off_toolsets(platform, explicitly_configured)
     if _toolset_allowed_for_platform("x_search", platform) and _xai_credentials_present():
@@ -649,7 +640,7 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
 
     # agent.disabled_toolsets is a global suppression list and runs LAST so it overrides everything above. It
     # may arrive as a JSON-array string ("['memory']") from `hermes config set` or a JSON-mode editor save.
-    disabled_toolsets = (config.get("agent") or {}).get("disabled_toolsets") or []
+    disabled_toolsets = (config.get("agent") or {}).get("disabled_toolsets")
     if disabled_toolsets:
         from agent.skill_utils import parse_config_string_list
         enabled_toolsets -= {name.strip() for name in parse_config_string_list(disabled_toolsets) if name.strip()}
@@ -667,14 +658,9 @@ def _recover_platform_native_toolsets(enabled_toolsets: Set[str], platform: str,
     from toolsets import resolve_toolset, TOOLSETS
 
     platform_tool_universe = set(resolve_toolset(_platform_default_toolset(platform)))
-    configurable_tool_universe = set()
-    for ts_key, _, _ in CONFIGURABLE_TOOLSETS:
-        configurable_tool_universe.update(resolve_toolset(ts_key))
-    claimed = set()
-    for ts_key in enabled_toolsets:
-        claimed.update(resolve_toolset(ts_key))
-    skip = skip | {k for k in TOOLSETS if k.startswith("hermes-")}
-    skip |= set(_DEFAULT_OFF_TOOLSETS) - {platform}
+    configurable_tool_universe = {t for ts_key, _, _ in CONFIGURABLE_TOOLSETS for t in resolve_toolset(ts_key)}
+    claimed = {t for ts_key in enabled_toolsets for t in resolve_toolset(ts_key)}
+    skip = skip | {k for k in TOOLSETS if k.startswith("hermes-")} | (set(_DEFAULT_OFF_TOOLSETS) - {platform})
     for ts_key, ts_def in TOOLSETS.items():
         # Posture toolsets (``coding``) are session-level selections made by agent/coding_context.py, not
         # per-platform capabilities to recover.
@@ -683,11 +669,9 @@ def _recover_platform_native_toolsets(enabled_toolsets: Set[str], platform: str,
         # Static membership: a registry-added tool absent from the platform composite must not block recovery
         # of a non-configurable toolset whose authored tools the composite lists.
         ts_tools = set(resolve_toolset(ts_key, include_registry=False))
-        if not ts_tools or not ts_tools.issubset(platform_tool_universe):
+        if not ts_tools or not ts_tools <= platform_tool_universe or ts_tools <= configurable_tool_universe:
             continue
-        if ts_tools.issubset(configurable_tool_universe):
-            continue
-        if not ts_tools.issubset(claimed):
+        if not ts_tools <= claimed:
             enabled_toolsets.add(ts_key)
             claimed.update(ts_tools)
 
@@ -735,19 +719,14 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # hand-edited config.yaml) can't turn on `discord` for Telegram.
     enabled_toolset_keys = {ts for ts in enabled_toolset_keys if _toolset_allowed_for_platform(ts, platform)}
     plugin_keys = _get_plugin_toolset_keys()
-    configurable_keys = _configurable_keys() | plugin_keys
-    # Platform defaults (hermes-cli, ...) resolve to ALL tools; preserving one would silently override the
-    # user's unchecked selections on the next read.
-    platform_default_keys = _platform_default_keys()
+    # Preserve only existing entries that are neither configurable nor platform defaults (i.e. MCP server
+    # names): platform defaults (hermes-cli, ...) resolve to ALL tools and would silently override the user's
+    # unchecked selections on the next read. Saving from the picker is consent to clear the "no_mcp" sentinel
+    # (no checkbox for it; users who once set it by hand could otherwise never re-enable MCP via the UI).
+    drop = _configurable_keys() | plugin_keys | _platform_default_keys() | {"no_mcp"}
     existing_toolsets = cfg_get(config, "platform_toolsets", platform, default=[])
-    # Preserve only entries that are neither configurable nor platform defaults (MCP server names).
-    preserved_entries = {
-        str(entry) for entry in (existing_toolsets if isinstance(existing_toolsets, list) else [])
-        if str(entry) not in configurable_keys and str(entry) not in platform_default_keys
-    }
-    # Saving from the picker is consent to clear the "no_mcp" sentinel: the picker has no checkbox for it,
-    # so users who once set it by hand could otherwise never re-enable MCP via the UI.
-    preserved_entries.discard("no_mcp")
+    preserved_entries = {str(e) for e in (existing_toolsets if isinstance(existing_toolsets, list) else [])
+                         if str(e) not in drop}
     config["platform_toolsets"][platform] = sorted(enabled_toolset_keys | preserved_entries)
     # Record which plugin toolsets this platform "knows" (distinguishes "new plugin, default enabled" from
     # "user disabled it"). _cfg_section normalizes a present-but-null key that setdefault alone would not replace.
@@ -797,10 +776,7 @@ def _toolset_has_keys(
     # Provider-aware categories first: a no-key provider (Local Browser, Edge TTS) counts as configured.
     cat = TOOL_CATEGORIES.get(ts_key)
     if cat:
-        return any(
-            _provider_env_ready(provider)
-            for provider in _visible_providers(cat, config, force_fresh=force_fresh, features=features)
-        )
+        return any(_provider_env_ready(p) for p in _visible_providers(cat, config, force_fresh=force_fresh, features=features))
     return all(get_env_value(var) for var, _ in TOOLSET_ENV_REQUIREMENTS.get(ts_key, []))
 
 
@@ -991,14 +967,11 @@ def _print_tools_summary(config: dict, enabled_platforms: List[str]) -> None:
     total = len(_get_effective_configurable_toolsets())
     print(color("⚕ Tool Summary", Colors.CYAN, Colors.BOLD))
     print()
-    summary = _platform_toolset_summary(config, enabled_platforms)
-    for pkey in enabled_platforms:
-        enabled = summary.get(pkey, set())
+    for pkey, enabled in _platform_toolset_summary(config, enabled_platforms).items():
         print(color(f"  {PLATFORMS[pkey]['label']}", Colors.BOLD) + color(f"  ({len(enabled)}/{total})", Colors.DIM))
-        if enabled:
-            for ts_key in sorted(enabled):
-                print(color(f"    ✓ {_toolset_label(ts_key)}", Colors.GREEN))
-        else:
+        for ts_key in sorted(enabled):
+            print(color(f"    ✓ {_toolset_label(ts_key)}", Colors.GREEN))
+        if not enabled:
             print(color("    (none enabled)", Colors.DIM))
     print()
 
