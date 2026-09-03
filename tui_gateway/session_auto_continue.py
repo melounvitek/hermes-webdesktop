@@ -240,11 +240,10 @@ def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: 
 
 
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False) -> dict | None:
-    """Apply ``display.busy_input_mode`` to a prompt that lands mid-turn instead of rejecting it (rejection
-    made clients busy-retry and silently drop sends). ``interrupt`` (default) → redirect the live turn,
-    falling back to hard interrupt + queue for older agents; ``queue`` → queue only; ``steer`` → inject
-    after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
-    after" message must NEVER become a live-turn correction, even if the drain loses the settle race."""
+    """Apply ``display.busy_input_mode`` to a mid-turn prompt instead of rejecting it (rejection made
+    clients busy-retry and drop sends): ``interrupt`` (default) → redirect, falling back to hard interrupt
+    + queue; ``queue`` → queue only; ``steer`` → inject after the current atomic action. ``queued=True``
+    (client queue drain) forces queue mode: a "run after" message must NEVER become a live correction."""
     mode = "queue" if queued else _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
@@ -364,10 +363,9 @@ def _inflight_snapshot(session: dict) -> dict | None:
 def _emit_terminal_turn_error(
     sid: str, session: dict, error: Any, error_surface: Optional[dict] = None, *, retire_marker: bool = True
 ) -> None:
-    """Close a failed turn with the same ``status: "error"`` ``message.complete`` frame as
-    ``_run_prompt_submit``'s returned-error path, retaining the turn (``_fail_inflight_turn``) so a client
-    that missed the frame recovers it from ``session.resume``'s ``inflight``. ``error_surface`` ({layer,
-    code, retryable}) is classified here from an exception when the caller doesn't know the layer."""
+    """Close a failed turn with the same ``status: "error"`` ``message.complete`` frame as the returned-error
+    path, retaining the turn so a client that missed the frame recovers it from ``session.resume``'s
+    ``inflight``. ``error_surface`` ({layer, code, retryable}) is classified from an exception if absent."""
     agent = session.get("agent")
     if error_surface is None and isinstance(error, BaseException):
         with contextlib.suppress(Exception):

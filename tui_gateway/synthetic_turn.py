@@ -1,16 +1,10 @@
-"""Synthetic GIL-heavy turn driver for the AC-4 isolation certify harness.
-
-The regime under test is interpreter-wide GIL starvation: concurrent heavy agent turns run compute in
-threads of the SERVING process and starve the event loop that flushes WebSocket frames (loop thread
-parked in ``take_gil`` — NOT blocked on I/O). To certify the isolation fix without spending real
-tokens the turn driver must reproduce THAT: sustained pure-Python CPU holding the GIL. A network/
-sleep stub is WRONG — it releases the GIL during I/O, so a green off it is fake.
-
-Test seam: dead unless ``HERMES_ISO_CERTIFY_SYNTH_TURN=1``. When armed, ``server._make_agent`` returns
-a :class:`SyntheticHeavyAgent` on both the in-process ``_pool`` path (isolation OFF) and the compute-
-host child path (isolation ON), so the isolation boundary is the only variable. Per-turn intensity
-rides in the prompt text as a JSON object; any other prompt falls back to env / built-in defaults.
-"""
+"""Synthetic GIL-heavy turn driver for the AC-4 isolation certify harness. The regime under test is
+interpreter-wide GIL starvation (serving-process turn threads park the WebSocket loop in ``take_gil``),
+so the driver must hold the GIL with sustained pure-Python CPU — a network/sleep stub releases the GIL
+and a green off it is fake. Test seam: dead unless ``HERMES_ISO_CERTIFY_SYNTH_TURN=1``; when armed,
+``server._make_agent`` returns a :class:`SyntheticHeavyAgent` on both the in-process and compute-host
+paths, so the isolation boundary is the only variable. Per-turn intensity rides in the prompt text as
+a JSON object; any other prompt falls back to env / built-in defaults."""
 
 from __future__ import annotations
 
@@ -24,12 +18,11 @@ from typing import Any, Callable, Optional
 from tui_gateway._env import env_float as _env_float, env_int as _env_int
 
 
-# Per-turn intensity spec: (key, caster, default source). ``chunk`` is pure-Python ops per
-# interrupt-check chunk (small enough that an interrupt lands within ms, large enough to stay hot on
-# the GIL); ``delta_interval_s`` is the streamed-delta cadence (each delta is a loop wakeup
-# marshalling a frame); ``tokens_per_delta`` drives the 100K+-token heavy-turn proxy; ``sleep_s`` is
-# an optional per-chunk sleep for a mixed regime (0 = pure burn; --dry-run uses a short duration, NOT
-# a sleep, so it still exercises the real seam).
+# Per-turn intensity spec: (key, caster, default source). ``chunk`` = pure-Python ops per interrupt
+# check (ms-level interrupt latency, still hot on the GIL); ``delta_interval_s`` = streamed-delta
+# cadence (each delta is a loop wakeup marshalling a frame); ``tokens_per_delta`` drives the 100K+-token
+# heavy-turn proxy; ``sleep_s`` = optional per-chunk sleep for a mixed regime (0 = pure burn; --dry-run
+# shortens duration instead, so it still exercises the real seam).
 _SPEC_FIELDS = (
     ("duration_s", float, lambda: _env_float("HERMES_ISO_CERTIFY_DURATION_S", 8.0)),
     ("chunk", int, lambda: _env_int("HERMES_ISO_CERTIFY_CHUNK", 20_000)),

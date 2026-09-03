@@ -3,11 +3,10 @@
 Protocol: reads JSON lines from stdin {id, command}, writes {id, ok, output|error} to stdout.
 """
 
-# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory from shadowing Hermes's
-# own top-level modules. This worker is spawned as ``-m tui_gateway.slash_worker`` and inherits the
-# user's CWD, so the ``import cli`` below would otherwise resolve ``utils`` to a colliding local
-# package and crash the child in a retry loop. ``hermes_bootstrap`` lives at the repo root (no
-# collision risk), so importing it before the guard runs is safe.
+# Stop a ``utils/`` (or ``proxy/``, ``ui/``) package in the launch directory from shadowing Hermes's own
+# top-level modules: this worker is spawned as ``-m tui_gateway.slash_worker`` with the user's CWD, so
+# ``import cli`` would otherwise resolve ``utils`` to a colliding local package and crash the child in a
+# retry loop. ``hermes_bootstrap`` lives at the repo root (no collision risk), so importing it first is safe.
 import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
@@ -126,9 +125,8 @@ def main():
             _reply(id=rid, ok=False, error=str(e))
         finally:
             _in_flight.clear()
-            # Workers persist for the TUI session: release allocator pages at the command boundary
-            # like other long-lived gateway processes (trim_memory's shared cooldown coalesces
-            # nearby activity).
+            # Workers persist for the TUI session: release allocator pages at the command boundary like
+            # other long-lived gateway processes (trim_memory's shared cooldown coalesces nearby activity).
             try:
                 from hermes_cli.mem_trim import trim_memory
                 trim_memory(reason="slash worker command completion")

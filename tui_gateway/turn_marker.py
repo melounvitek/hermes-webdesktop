@@ -1,14 +1,10 @@
-"""Durable interrupted-turn markers for the desktop/TUI auto-continue path.
-
-A running turn's progress lives only in process memory (the agent flushes to SQLite at turn end),
-so an app/backend/machine death mid-turn leaves no durable trace of the interrupted prompt. A marker
-is written when a turn starts and cleared when it concludes (success, handled error, or interrupt),
-so only a process death leaves one behind; ``session.resume`` reads it to decide whether to
-auto-continue (``_maybe_schedule_auto_continue``). Markers are stored per ``HERMES_HOME`` (profile
-sessions keep state in their own profile dir); writes prune entries older than ``_MAX_AGE_SECS`` and
-cap the count so a crash streak can't grow the file unboundedly. Every function is best-effort —
-marker bookkeeping must never break a turn — so I/O errors degrade to "no marker" instead of raising.
-"""
+"""Durable interrupted-turn markers for the desktop/TUI auto-continue path. A running turn's progress
+lives only in process memory (the agent flushes to SQLite at turn end), so a marker is written at turn
+start and cleared on any conclusion — only a process death leaves one behind, and ``session.resume``
+reads it (``_maybe_schedule_auto_continue``). Stored per ``HERMES_HOME`` (profile-aware); writes prune
+entries older than ``_MAX_AGE_SECS`` and cap the count so a crash streak can't grow the file. Every
+function is best-effort — marker bookkeeping must never break a turn — so I/O errors degrade to "no
+marker" instead of raising."""
 
 from __future__ import annotations
 
@@ -88,10 +84,8 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
 
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0) -> None:
-    """Persist the marker for a turn that is about to run.
-    ``attempts`` counts how many auto-continues led to this run: 0 for a user-initiated turn, N for
-    the Nth automatic re-run — the crash-loop breaker reads it back on the next resume.
-    """
+    """Persist the marker for a turn that is about to run. ``attempts`` = how many auto-continues led to
+    this run (0 for a user-initiated turn); the crash-loop breaker reads it back on the next resume."""
     if not session_key or not prompt:
         return
     now = time.time()

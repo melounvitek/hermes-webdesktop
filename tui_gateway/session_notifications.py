@@ -78,10 +78,9 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
 
 
 def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool:
-    """True iff *this* session PROVABLY owns ``evt``: positive mirror of
-    ``_notification_event_belongs_elsewhere`` minus its orphan-adoption fallback (UI origin is this
-    live session, or ``session_key`` raw/compression-resolved matches). Fail-closed gate for every
-    addressed notification — "not provably elsewhere" is NOT enough."""
+    """True iff *this* session PROVABLY owns ``evt`` (UI origin is this live session, or ``session_key``
+    raw/compression-resolved matches) — the fail-closed gate for every addressed notification, without
+    ``_notification_event_belongs_elsewhere``'s orphan-adoption fallback."""
     if session.get("_finalized"):
         return False
     if str(evt.get("origin_ui_session_id") or "") == str(sid or ""):
@@ -384,11 +383,10 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
 
 
 def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> bool:
-    """Route one dequeued event: foreign (another live session owns it) → back on the queue, or onto
-    ``deferred`` during the shutdown drain; unowned (addressed but unprovable — never adopt an orphan)
-    → dropped, except delegation payloads deferred for a resume; ours (or ownerless legacy, kept
-    process-global) → status.update once, then an agent turn if idle. Returns False when the drain
-    must stop (session busy)."""
+    """Route one dequeued event: foreign (another live session owns it) → requeued, or onto ``deferred``
+    during the shutdown drain; unowned (addressed but unprovable — never adopt an orphan) → dropped, except
+    delegation payloads deferred for a resume; ours (or ownerless legacy, kept process-global) →
+    status.update once, then an agent turn if idle. False = the drain must stop (session busy)."""
     queue = registry.completion_queue
     evt_type, is_delegation = evt.get("type", "completion"), evt.get("type") == "async_delegation"
     if _notification_event_belongs_elsewhere(sid, session, evt):
@@ -495,10 +493,9 @@ _desktop_ui_wired = False
 
 
 def _wire_desktop_sinks() -> None:
-    """Idempotently wire process-registry and desktop-tool sinks to renderer events: background-process
-    output (`agent.terminal.output`) and `terminal.close` (drops a tab without killing the process) route
-    to the window owning the process by process id; desktop-only tools (open_preview, focus_pane, …) pass
-    the turn's ``HERMES_UI_SESSION_ID`` as ``sid``. `_emit` is `_stdout_lock`-guarded (thread-safe)."""
+    """Idempotently wire process-registry and desktop-tool sinks to renderer events: `agent.terminal.output`
+    and `terminal.close` (drops a tab without killing the process) route to the window owning the process;
+    desktop-only tools pass the turn's ``HERMES_UI_SESSION_ID`` as ``sid``. `_emit` is thread-safe."""
     global _desktop_ui_wired
     from tools.process_registry import process_registry
 
@@ -554,10 +551,9 @@ def _hud_surface_note(session: dict) -> str:
 
 
 def _prepend_note(run_message: Any, note: str) -> Any:
-    """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone. Everything the model must
-    know about the turn that the user did not type (interrupted reply, reactions, surface) arrives this
-    way; persist_user_message keeps the clean prompt, so no scaffolding reaches the transcript, and
-    annotating the NEW turn never rewrites a sent message — cached prefix survives."""
+    """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone: everything the model must
+    know that the user did not type (interrupted reply, reactions, surface) arrives this way, so no
+    scaffolding reaches the transcript and no sent message is rewritten — the cached prefix survives."""
     if not note:
         return run_message
     if isinstance(run_message, str):

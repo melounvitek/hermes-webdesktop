@@ -65,11 +65,9 @@ _COMPRESSION_INT_KEYS = (
 
 
 def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
-    """Update a live session's compressor in place from current config.yaml (agent object, session
-    identity, history and callbacks preserved). Every adopted key has UNSET semantics: a removed key
-    restores the normalized default (or model-derived value) through the construction path's own
-    derivation (ctor signature defaults, Codex autoraise, deferred context-length re-inference) —
-    acting only on PRESENT keys would leave stale values active forever."""
+    """Update a live session's compressor in place from config.yaml. Every adopted key has UNSET semantics:
+    a removed key restores the normalized default (or model-derived value) through the construction
+    path's own derivation — acting only on PRESENT keys would leave stale values active forever."""
     cfg = cfg if isinstance(cfg, dict) else {}
     compression = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
@@ -187,11 +185,9 @@ def _compress_session_history(
     session: dict, focus_topic: str | None = None, approx_tokens: int | None = None,
     before_messages: list | None = None, history_version: int | None = None,
 ) -> tuple[int, dict]:
-    """Single choke point for all manual-compress routes (session.compress RPC, command.dispatch
-    /compress|/compact, slash-exec mirror). ``focus_topic`` is the RAW argument string after
-    ``/compress``, parsed HERE (not per-route) so boundary forms (``here [N]``, ``up to here``,
-    ``--keep N``) trigger a partial compress on EVERY route — otherwise "/compress here 3" would run a
-    FULL compress focused on the literal text "here 3"."""
+    """Single choke point for all manual-compress routes. ``focus_topic`` is the RAW argument string after
+    ``/compress``, parsed HERE (not per-route) so boundary forms (``here [N]``, ``up to here``, ``--keep N``)
+    trigger a partial compress on EVERY route instead of a FULL compress focused on the literal text."""
     from agent.conversation_compression import finalize_context_engine_compression_notification
     from agent.model_metadata import estimate_request_tokens_rough
     from hermes_cli.partial_compress import (
@@ -217,10 +213,8 @@ def _compress_session_history(
         approx_tokens = estimate_request_tokens_rough(
             history, system_prompt=getattr(agent, "_cached_system_prompt", "") or "", tools=getattr(agent, "tools", None) or None
         )
-    # system_message=None: _compress_context rebuilds the system prompt via _build_system_prompt(None);
-    # passing the cached prompt (already holding the identity block) appends the identity twice.
-    # force=True: every caller is a manual /compress path, which bypasses the summary-failure
-    # cooldown like the CLI and gateway handlers. Partial compress has no focus topic (exclusive modes).
+    # system_message=None: passing the cached prompt (already holding the identity block) would append the
+    # identity twice. force=True: manual /compress bypasses the summary-failure cooldown like CLI/gateway.
     try:
         compressed, _ = agent._compress_context(
             head, None, approx_tokens=approx_tokens, focus_topic=focus_topic or None, force=True,
@@ -252,11 +246,10 @@ def _compress_session_history(
 def _sync_session_key_after_compress(
     sid: str, session: dict, *, clear_pending_title: bool = True, restart_slash_worker: bool = True
 ) -> None:
-    """Re-anchor the gateway-side ``session_key`` when _compress_context rotates ``agent.session_id`` to
-    a SessionDB continuation; otherwise approval routing, slash worker init, DB title/history lookups
-    and yolo state keep targeting the ended parent. ``clear_pending_title``: True for manual /compress
-    (title belongs to the old session), False for post-turn auto-compression. ``restart_slash_worker``:
-    False only when the caller manages the worker (it holds the stale key)."""
+    """Re-anchor the gateway-side ``session_key`` when _compress_context rotates ``agent.session_id``;
+    otherwise approval routing, slash worker, DB lookups and yolo state keep targeting the ended parent.
+    ``clear_pending_title``: True for manual /compress (title belongs to the old session), False for
+    post-turn auto-compression. ``restart_slash_worker``: False only when the caller manages the worker."""
     agent = session.get("agent")
     new_session_id = getattr(agent, "session_id", None) or ""
     old_key = session.get("session_key", "") or ""
