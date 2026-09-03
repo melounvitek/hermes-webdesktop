@@ -2,25 +2,29 @@
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass, field
 
 from hermes_cli.colors import Colors, color
 
 
-def check_ok(text: str, detail: str = ""):
-    print(f"  {color('✓', Colors.GREEN)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+def _mark(glyph: str, col: str):
+    return lambda text, detail="": print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 
-def check_warn(text: str, detail: str = ""):
-    print(f"  {color('⚠', Colors.YELLOW)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-
-
-def check_fail(text: str, detail: str = ""):
-    print(f"  {color('✗', Colors.RED)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
+check_ok, check_warn, check_fail = _mark("✓", Colors.GREEN), _mark("⚠", Colors.YELLOW), _mark("✗", Colors.RED)
 
 
 def check_info(text: str):
     print(f"    {color('→', Colors.CYAN)} {text}")
+
+
+def check_bool(cond, ok, bad, *, fail: bool = False):
+    """``check_ok(*ok)`` when *cond* else ``check_warn(*bad)`` (``check_fail`` with fail=True); returns bool(cond).
+    *ok* / *bad* are a text string or a ``(text, detail)`` tuple."""
+    args = ok if cond else bad
+    (check_ok if cond else (check_fail if fail else check_warn))(*((args,) if isinstance(args, str) else args))
+    return bool(cond)
 
 
 def _section(title: str) -> None:
@@ -47,3 +51,38 @@ class Finding:
         self.issues.extend(other.issues)
         self.manual_issues.extend(other.manual_issues)
         self.fixed += other.fixed
+
+
+def doctor_check(on_error: str | None = None, detail: str = ""):
+    """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
+
+    *on_error* None: exceptions propagate (as they always did for that check). Otherwise the check is
+    best-effort: a crash prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing for
+    ``""``) and the partial Finding is still returned, so issues recorded before the crash survive.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def check(should_fix: bool) -> Finding:
+            f = Finding()
+            try:
+                fn(should_fix, f)
+            except Exception as e:
+                if on_error is None:
+                    raise
+                if on_error:
+                    check_warn(on_error.format(e=e), detail.format(e=e))
+            return f
+        return check
+    return deco
+
+
+def ensure_dir(f: Finding, should_fix: bool, path, exists_msg: str, created_msg: str, missing_msg: str) -> None:
+    """ok when *path* exists; with --fix create it (counts as fixed); else warn "(will be created on first use)"."""
+    if path.exists():
+        check_ok(exists_msg)
+    elif should_fix:
+        path.mkdir(parents=True, exist_ok=True)
+        check_ok(created_msg)
+        f.fixed += 1
+    else:
+        check_warn(missing_msg, "(will be created on first use)")
