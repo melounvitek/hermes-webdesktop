@@ -22,18 +22,3 @@ from hermes_startup_watchdog import (  # noqa: F401
     resolve_startup_watchdog_timeout,
     startup_watchdog_disabled,
 )
-
-__all__ = [
-    "DEFAULT_STARTUP_WATCHDOG_TIMEOUT_S",
-    "ENV_STARTUP_WATCHDOG",
-    "ENV_STARTUP_WATCHDOG_TIMEOUT_S",
-    "SERVICE_RESTART_EXIT_CODE",
-    "StartupWatchdogHandle",
-    "arm_startup_watchdog",
-    "disarm_startup_watchdog",
-    "get_startup_watchdog_dump_path",
-    "kick_startup_watchdog",
-    "report_startup_progress",
-    "resolve_startup_watchdog_timeout",
-    "startup_watchdog_disabled",
-]

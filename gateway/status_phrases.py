@@ -54,7 +54,9 @@ def _clean_phrase_list(value: Any) -> list[str]:
     return cleaned
 
 
-def _merge_phrase_mapping(catalog: dict[str, list[str]], section: Mapping[str, Any], *, inherited_mode: str | None = None) -> None:
+def _merge_phrase_mapping(
+    catalog: dict[str, list[str]], section: Mapping[str, Any], *, inherited_mode: str | None = None
+) -> None:
     replace = str(section.get("mode") or inherited_mode or "append").strip().lower() == "replace"
     phrase_map = section.get("phrases") if isinstance(section.get("phrases"), Mapping) else section
     for surface in _STATUS_SURFACES:
@@ -72,23 +74,20 @@ def _merge_phrase_file(catalog: dict[str, list[str]], path: Path, *, inherited_m
         _merge_phrase_mapping(catalog, loaded, inherited_mode=inherited_mode)
 
 
-def _relative_path_under(base_dir: Path, raw_path: Any) -> Path | None:
+def _iter_phrase_files(base_dir: Path, raw_path: Any) -> list[Path]:
+    """YAML files under ``base_dir/raw_path``; [] for absolute / ``..`` / escaping paths."""
     raw = str(raw_path or "").strip()
     if not raw:
-        return None
+        return []
     candidate = Path(raw).expanduser()
     if candidate.is_absolute() or ".." in candidate.parts:
-        return None
+        return []
     base = base_dir.resolve()
-    resolved = (base / candidate).resolve()
+    path = (base / candidate).resolve()
     try:
-        resolved.relative_to(base)
+        path.relative_to(base)
     except ValueError:
-        return None
-    return resolved
-
-
-def _iter_phrase_files(path: Path) -> list[Path]:
+        return []
     if path.is_file() and path.suffix.lower() in _YAML_SUFFIXES:
         return [path]
     if path.is_dir():
@@ -96,27 +95,24 @@ def _iter_phrase_files(path: Path) -> list[Path]:
     return []
 
 
-def _merge_phrase_paths(catalog: dict[str, list[str]], paths: Any, *, base_dir: Path, inherited_mode: str | None = None) -> None:
+def _merge_phrase_paths(
+    catalog: dict[str, list[str]], paths: Any, *, base_dir: Path, inherited_mode: str | None = None
+) -> None:
     if paths is None:
         return
     for raw_path in paths if isinstance(paths, list) else [paths]:
-        resolved = _relative_path_under(base_dir, raw_path)
-        if resolved is not None:
-            for phrase_file in _iter_phrase_files(resolved):
-                _merge_phrase_file(catalog, phrase_file, inherited_mode=inherited_mode)
+        for phrase_file in _iter_phrase_files(base_dir, raw_path):
+            _merge_phrase_file(catalog, phrase_file, inherited_mode=inherited_mode)
 
 
 def _copy_catalog(catalog: Mapping[str, list[str]]) -> dict[str, list[str]]:
     return {surface: list(phrases) for surface, phrases in catalog.items()}
 
 
-def _load_builtin_catalog() -> dict[str, list[str]]:
-    catalog = _copy_catalog(_FALLBACK_PHRASES)
-    _merge_phrase_file(catalog, Path(__file__).resolve().parent / "assets" / "status_phrases.yaml", inherited_mode="replace")
-    return catalog
-
-
-_DEFAULT_PHRASES: dict[str, list[str]] = _load_builtin_catalog()
+_DEFAULT_PHRASES: dict[str, list[str]] = _copy_catalog(_FALLBACK_PHRASES)
+_merge_phrase_file(
+    _DEFAULT_PHRASES, Path(__file__).resolve().parent / "assets" / "status_phrases.yaml", inherited_mode="replace"
+)
 
 
 def _merge_phrase_config(catalog: dict[str, list[str]], section: Any, *, base_dir: Path) -> None:
@@ -129,7 +125,9 @@ def _merge_phrase_config(catalog: dict[str, list[str]], section: Any, *, base_di
     _merge_phrase_mapping(catalog, section)
 
 
-def resolve_status_phrase_catalog(user_config: Mapping[str, Any] | None, platform_key: str | None = None) -> dict[str, list[str]]:
+def resolve_status_phrase_catalog(
+    user_config: Mapping[str, Any] | None, platform_key: str | None = None
+) -> dict[str, list[str]]:
     """Resolve built-in + user-configured generic status phrases.
 
     Resolution order mirrors gateway display settings: built-ins, conventional

@@ -1,30 +1,16 @@
 """Wake an existing agent session from a background completion event.
 
-Two delivery strategies, selected by the adapter's ``supports_async_delivery``
-capability flag:
-
-* Push-capable adapters (telegram, discord, plugin platforms, ...): inject a
-  synthetic ``MessageEvent(internal=True)`` through ``adapter.handle_message``.
-
-* Stateless request/response adapters (the API server,
-  ``supports_async_delivery = False``): ``handle_message`` would run the wake
-  under a ``build_session_key()``-derived key that never matches the raw
-  ``X-Hermes-Session-Id`` key real turns run under, landing in an invisible
-  parallel session. Instead we self-POST ``/v1/chat/completions`` on the
-  in-pod API server with the raw session id header — the exact entry point
-  real turns use — so the wake resumes the REAL session with full history.
-
-Async-delegation completions are the exception on the stateless path: after
-the parent turn ends the CLIENT owns the next turn, so a completion must never
-be self-POSTed as a new ``role=user`` prompt (that starts an unauthorized agent
-turn that can cross a pending human-confirmation gate). Instead
-``persist_delegation_delivery`` writes it into the session transcript as a
-durable DELIVERY row (``role=user`` + ``display_kind="async_delegation_complete"``,
-the shape the TUI/desktop pollers use) so pollers see it immediately and the
-next REAL client turn carries it as context, without any model turn running.
-
-Failures RAISE (after bounded retries on transient errors) so callers can
-rewind cursors / retry instead of silently losing the event.
+Delivery is selected by the adapter's ``supports_async_delivery`` flag. Push-capable
+adapters get a synthetic ``MessageEvent(internal=True)`` via ``handle_message``.
+Stateless adapters (API server) would run that under a ``build_session_key()`` key
+that never matches the raw ``X-Hermes-Session-Id`` real turns use (invisible parallel
+session), so we self-POST ``/v1/chat/completions`` with the raw session id header and
+resume the REAL session. Async-delegation completions are the exception there: the
+CLIENT owns the next turn, so a completion is never self-POSTed as a new ``role=user``
+prompt (it could cross a pending human-confirmation gate); ``persist_delegation_delivery``
+writes a durable DELIVERY row (``display_kind="async_delegation_complete"``, the shape the
+TUI/desktop pollers read) instead. Failures RAISE (after bounded retries on transient
+errors) so callers can rewind cursors / retry instead of silently losing the event.
 """
 
 from __future__ import annotations
@@ -123,12 +109,10 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
         )
     await asyncio.to_thread(
         db.append_message, session_id, "user", content=text,
-        display_kind="async_delegation_complete",
-        display_metadata=_delegation_display_metadata(evt or {}),
+        display_kind="async_delegation_complete", display_metadata=_delegation_display_metadata(evt or {}),
     )
     logger.info(
-        "async delegation completion persisted as delivery row for api_server session %s (no wake turn)",
-        session_id,
+        "async delegation completion persisted as delivery row for api_server session %s (no wake turn)", session_id
     )
 
 
@@ -180,8 +164,8 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
                         logger.warning("%s; attempt %d/%d", last_err, attempt + 1, attempts)
                         continue
                     if resp.status >= 400:
-                        body = (await resp.text())[:300]
                         # Non-transient (auth/validation) — fail immediately.
+                        body = (await resp.text())[:300]
                         raise RuntimeError(
                             f"wake self-post failed for session {session_id}: HTTP {resp.status}: {body}"
                         )
@@ -194,7 +178,6 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
                 "wake self-post transient failure for session %s (attempt %d/%d): %s",
                 session_id, attempt + 1, attempts, exc,
             )
-            continue
     raise RuntimeError(
         f"wake self-post gave up for session {session_id} after {attempts} attempts: {last_err}"
     ) from last_err

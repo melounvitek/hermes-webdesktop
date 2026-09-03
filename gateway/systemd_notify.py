@@ -10,14 +10,20 @@ import socket
 from typing import Optional
 
 
+def _notify_socket() -> str:
+    """``NOTIFY_SOCKET`` address, or "" when systemd did not configure one / no AF_UNIX."""
+    address = os.environ.get("NOTIFY_SOCKET", "").strip()
+    return address if address and hasattr(socket, "AF_UNIX") else ""
+
+
 def notify(message: str) -> bool:
     """Send one nonblocking sd_notify datagram when systemd configured it.
 
     Failures are non-fatal: a missing socket or an older platform must never
     prevent the gateway from starting.
     """
-    address = os.environ.get("NOTIFY_SOCKET", "").strip()
-    if not address or not isinstance(message, str) or not message or not hasattr(socket, "AF_UNIX"):
+    address = _notify_socket()
+    if not address or not isinstance(message, str) or not message:
         return False
     try:
         payload = message.encode("utf-8")
@@ -34,11 +40,7 @@ def notify(message: str) -> bool:
 
 def watchdog_interval_seconds() -> Optional[float]:
     """Return systemd's configured watchdog interval in seconds."""
-    if not os.environ.get("NOTIFY_SOCKET", "").strip() or not hasattr(socket, "AF_UNIX"):
-        return None
-    raw = os.environ.get("WATCHDOG_USEC", "").strip()
-    if not raw:
-        return None
+    raw = os.environ.get("WATCHDOG_USEC", "").strip() if _notify_socket() else ""
     try:
         interval = float(raw) / 1_000_000.0
     except (TypeError, ValueError):
@@ -72,8 +74,6 @@ class SystemdWatchdog:
 
     def _lag_tolerance(self) -> float:
         default = max(0.1, (self.interval_seconds or 0.0) * 0.25)
-        if self._lag_tolerance_seconds is None:
-            return default
         try:
             value = float(self._lag_tolerance_seconds)
         except (TypeError, ValueError):
@@ -90,9 +90,7 @@ class SystemdWatchdog:
             asyncio.get_running_loop()
         except RuntimeError:
             return False
-        self._stopping = False
-        self._unhealthy = False
-        self._stopping_notified = False
+        self._stopping = self._unhealthy = self._stopping_notified = False
         self._task = asyncio.create_task(self._run(), name="hermes-systemd-watchdog")
         return True
 
@@ -119,10 +117,9 @@ class SystemdWatchdog:
         return True
 
     async def _run(self) -> None:
-        interval = self.interval_seconds
-        if interval is None:
+        if self.interval_seconds is None:
             return
-        cadence = max(0.01, interval / 2.0)
+        cadence = max(0.01, self.interval_seconds / 2.0)
         loop = asyncio.get_running_loop()
         scheduled_at = loop.time() + cadence
         with contextlib.suppress(asyncio.CancelledError):

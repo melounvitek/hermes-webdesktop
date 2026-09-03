@@ -54,28 +54,20 @@ def _env_cwd() -> str:
     return terminal_env("TERMINAL_CWD", "")
 
 
-def _apply_footer_section(resolved: dict[str, Any], section: Any) -> None:
-    if not isinstance(section, dict):
-        return
-    if "enabled" in section:
-        resolved["enabled"] = bool(section.get("enabled"))
-    if isinstance(section.get("fields"), list) and section["fields"]:
-        resolved["fields"] = [str(f) for f in section["fields"]]
-
-
-def resolve_footer_config(
-    user_config: dict[str, Any] | None,
-    platform_key: str | None = None,
-) -> dict[str, Any]:
+def resolve_footer_config(user_config: dict[str, Any] | None, platform_key: str | None = None) -> dict[str, Any]:
     """Resolve effective footer config: defaults (enabled=False) <
     ``display.runtime_footer`` < ``display.platforms.<platform_key>.runtime_footer``."""
     resolved = {"enabled": False, "fields": list(_DEFAULT_FIELDS)}
     cfg = (user_config or {}).get("display") or {}
-    _apply_footer_section(resolved, cfg.get("runtime_footer"))
-    if platform_key:
-        plat_cfg = (cfg.get("platforms") or {}).get(platform_key)
-        if isinstance(plat_cfg, dict):
-            _apply_footer_section(resolved, plat_cfg.get("runtime_footer"))
+    plat_cfg = (cfg.get("platforms") or {}).get(platform_key) if platform_key else None
+    sections = [cfg.get("runtime_footer"), plat_cfg.get("runtime_footer") if isinstance(plat_cfg, dict) else None]
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if "enabled" in section:
+            resolved["enabled"] = bool(section.get("enabled"))
+        if isinstance(section.get("fields"), list) and section["fields"]:
+            resolved["fields"] = [str(f) for f in section["fields"]]
     return resolved
 
 
@@ -88,12 +80,6 @@ def _format_latency(seconds: float) -> str:
         return f"{total}s"
     m, sec = divmod(total, 60)
     return f"{m}m{sec:02d}s"
-
-
-def _context_pct(context_tokens: int, context_length: Optional[int]) -> str:
-    if context_length and context_length > 0 and context_tokens >= 0:
-        return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
-    return ""
 
 
 def format_runtime_footer(
@@ -110,9 +96,14 @@ def format_runtime_footer(
     Fields whose data is missing (and unknown field names) are skipped silently —
     a partial footer beats ``?%`` or empty slots.
     """
+    def context_pct() -> str:
+        if context_length and context_length > 0 and context_tokens >= 0:
+            return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
+        return ""
+
     renderers = {
         "model": lambda: _model_short(model),
-        "context_pct": lambda: _context_pct(context_tokens, context_length),
+        "context_pct": context_pct,
         # Skipped when the caller did not measure (None) or the value is negative.
         "latency": lambda: _format_latency(turn_seconds) if turn_seconds is not None and turn_seconds >= 0 else "",
         "cwd": lambda: _home_relative_cwd(cwd or _env_cwd()),
@@ -142,10 +133,6 @@ def build_footer_line(
     if not cfg.get("enabled"):
         return ""
     return format_runtime_footer(
-        model=model,
-        context_tokens=context_tokens,
-        context_length=context_length,
-        cwd=cwd,
-        turn_seconds=turn_seconds,
-        fields=cfg.get("fields") or _DEFAULT_FIELDS,
+        model=model, context_tokens=context_tokens, context_length=context_length,
+        cwd=cwd, turn_seconds=turn_seconds, fields=cfg.get("fields") or _DEFAULT_FIELDS,
     )

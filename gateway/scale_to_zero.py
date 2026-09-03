@@ -51,21 +51,18 @@ FLY_API_SOCKET = "/.fly/api"
 
 # config.yaml default (behavioural setting -> config, not env). Short is safe
 # because real work always blocks the suspend and resume is sub-second; longer
-# windows just bill idle RAM. Raise per-instance via
-# gateway.scale_to_zero.idle_timeout_minutes.
+# windows just bill idle RAM. Raise via gateway.scale_to_zero.idle_timeout_minutes.
 DEFAULT_IDLE_TIMEOUT_MINUTES = 2
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
 # Dashboard-client liveness marker. The dashboard process (tui_gateway/ws.py, a
-# DIFFERENT process on hosted instances) touches this on every /api/ws connect
-# and inbound frame (clients ping every 15s). The gateway folds the mtime into
-# its inbound clock so an open client holds the box awake like a chat message
-# does (and gets the same idle_timeout grace after it disconnects) — otherwise
-# the box suspends under the client, whose reconnect re-pokes
-# the wake URL and the instance flaps every ~60s. Deliberately NO staleness
-# cutoff: the mtime is a real inbound timestamp and is_idle already decides
-# whether it is recent enough.
+# DIFFERENT process on hosted instances) touches this on every /api/ws connect and
+# inbound frame (clients ping every 15s). The gateway folds the mtime into its
+# inbound clock so an open client holds the box awake like a chat message does —
+# otherwise the box suspends under the client, whose reconnect re-pokes the wake
+# URL and the instance flaps every ~60s. Deliberately NO staleness cutoff: the
+# mtime is a real inbound timestamp and is_idle decides whether it is recent enough.
 DASHBOARD_CLIENT_HEARTBEAT_REL = os.path.join("state", "dashboard_clients.heartbeat")
 
 
@@ -90,9 +87,7 @@ def parse_idle_timeout_seconds(
         minutes = float(cfg_value)
     except (TypeError, ValueError):
         minutes = float(default_minutes)
-    if minutes <= 0:
-        minutes = float(default_minutes)
-    return minutes * 60.0
+    return (float(default_minutes) if minutes <= 0 else minutes) * 60.0
 
 
 def messaging_is_relay_only_or_absent(platforms: Iterable[Any]) -> bool:
@@ -101,21 +96,12 @@ def messaging_is_relay_only_or_absent(platforms: Iterable[Any]) -> bool:
     A directly-connected platform holds a live socket and cannot scale to zero.
     Compared by ``.value``/name so this module stays enum-import-free.
     """
-    names = {_platform_name(p) for p in platforms}
+    names = {str(getattr(p, "value", p)).strip().lower() for p in platforms}
     names.discard("relay")
     return not names
 
 
-def _platform_name(platform: Any) -> str:
-    return str(getattr(platform, "value", platform)).strip().lower()
-
-
-def should_arm(
-    *,
-    enabled: bool,
-    relay_only_or_absent: bool,
-    wake_url: Optional[str],
-) -> bool:
+def should_arm(*, enabled: bool, relay_only_or_absent: bool, wake_url: Optional[str]) -> bool:
     """Start the idle watcher only if ALL hold: flag on, relay-only/absent messaging,
     wakeUrl registered (a suspended instance with no wake target is a black hole).
     Any unmet -> the watcher never starts (no idle timer, no dormancy), so a
@@ -139,9 +125,7 @@ def is_idle(
     mid-cron-job suspend hole. Callers that cannot read a work source must fail
     AWAKE (pass a positive sentinel), never fail to 0.
     """
-    if active_work_count > 0 or has_live_background_work:
-        return False
-    return seconds_since_last_inbound >= idle_timeout_seconds
+    return active_work_count <= 0 and not has_live_background_work and seconds_since_last_inbound >= idle_timeout_seconds
 
 
 def dashboard_client_heartbeat_path(hermes_home: Optional[os.PathLike | str] = None):
@@ -168,9 +152,7 @@ def touch_dashboard_client_heartbeat(path: Optional[os.PathLike | str] = None) -
 
 
 def dashboard_client_last_seen(
-    path: Optional[os.PathLike | str] = None,
-    *,
-    now: Optional[float] = None,
+    path: Optional[os.PathLike | str] = None, *, now: Optional[float] = None
 ) -> Optional[float]:
     """Epoch seconds a dashboard client last sent a WS frame, or None if never.
 
@@ -197,18 +179,11 @@ def self_suspend_available(environ: Optional[dict] = None) -> bool:
     the platform owns the freeze, so the gateway stays connected until it lands.
     """
     return bool(
-        _env_str(environ, FLY_APP_NAME_ENV)
-        and _env_str(environ, FLY_MACHINE_ID_ENV)
-        and os.path.exists(FLY_API_SOCKET)
+        _env_str(environ, FLY_APP_NAME_ENV) and _env_str(environ, FLY_MACHINE_ID_ENV) and os.path.exists(FLY_API_SOCKET)
     )
 
 
-def suspend_self(
-    environ: Optional[dict] = None,
-    *,
-    socket_path: str = FLY_API_SOCKET,
-    timeout: float = 10.0,
-) -> bool:
+def suspend_self(environ: Optional[dict] = None, *, socket_path: str = FLY_API_SOCKET, timeout: float = 10.0) -> bool:
     """POST /v1/apps/{app}/machines/{id}/suspend on the local flaps socket.
 
     No token needed — the socket is the credential. Returns True when flaps
@@ -224,10 +199,7 @@ def suspend_self(
         return False
     request = (
         f"POST /v1/apps/{app}/machines/{machine_id}/suspend HTTP/1.1\r\n"
-        "Host: flaps\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: close\r\n"
-        "\r\n"
+        "Host: flaps\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     )
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -250,9 +222,5 @@ def suspend_self(
         logger.info("scale-to-zero: machine suspend accepted by flaps (%s)", status_line)
     else:
         body = response.split(b"\r\n\r\n", 1)[-1][:500].decode("utf-8", "replace")
-        logger.warning(
-            "scale-to-zero: flaps suspend rejected: %s %s",
-            status_line,
-            json.dumps(body)[:500],
-        )
+        logger.warning("scale-to-zero: flaps suspend rejected: %s %s", status_line, json.dumps(body)[:500])
     return ok
