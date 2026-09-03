@@ -332,53 +332,54 @@ def _cmd_export(db, args):
             return print("--dry-run requires at least one filter.")
         return [_redact(s) for s in db.export_all(source=None)]
     if getattr(args, "only", None):
-        return _export_only(args, _collect_sessions)
+        return _export_flat("only", args, _collect_sessions)
     if args.format == "trace":
         return _export_trace(db, args, filters)
-    if args.format in ("html", "jsonl"):
-        return (_export_html if args.format == "html" else _export_jsonl)(args, _collect_sessions)
+    if args.format in _FLAT_EXPORTERS:
+        return _export_flat(args.format, args, _collect_sessions)
     return _export_markdown(db, args, filters, _redact)
 
 
-def _export_only(args, collect):
+def _render_only(args, sessions):
     """--only user-prompts: one prompt record per line (jsonl) or headed sections (md)."""
-    if args.format not in ("jsonl", "md"):
-        print("--only user-prompts supports --format jsonl or md.")
-        return
     from hermes_cli.session_export import export_record_count, render_sessions_export
-    sessions = collect()
-    if sessions is None:
-        return
     rendered = render_sessions_export(sessions, fmt="markdown" if args.format == "md" else "jsonl", only=args.only)
     count, noun = export_record_count(sessions, only=args.only)
-    _write_output(args.output, rendered, f"Exported {count} {noun}{'' if count == 1 else 's'} to {args.output}")
+    return rendered, f"Exported {count} {noun}{'' if count == 1 else 's'} to {args.output}"
 
 
-def _export_html(args, collect):
+def _render_html(args, sessions):
     """One self-contained file (single session, or multi-session with sidebar)."""
-    if not args.output or args.output == "-":
-        print("HTML export requires an output file path.")
-        return
     from hermes_cli.session_export_html import generate_html_export, generate_multi_session_html_export
-    sessions = collect()
-    if sessions is None:
-        return
     single = len(sessions) == 1
     content = generate_html_export(sessions[0]) if single else generate_multi_session_html_export(sessions)
-    noun = "session" if single else "sessions"
-    _write_output(args.output, content, f"Exported {len(sessions)} {noun} to {args.output} (HTML)")
+    return content, f"Exported {len(sessions)} {'session' if single else 'sessions'} to {args.output} (HTML)"
 
 
-def _export_jsonl(args, collect):
-    if not args.output:
-        print("JSONL export requires an output path (use - for stdout).")
+def _render_jsonl(args, sessions):
+    lines = "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in sessions)
+    return lines, f"Exported {len(sessions)} {'session' if args.session_id else 'sessions'} to {args.output}"
+
+
+#: kind -> (usage error when the --output/--format combination is unusable, renderer)
+_FLAT_EXPORTERS = {
+    "only": (
+        lambda a: a.format not in ("jsonl", "md"), "--only user-prompts supports --format jsonl or md.", _render_only
+    ),
+    "html": (lambda a: not a.output or a.output == "-", "HTML export requires an output file path.", _render_html),
+    "jsonl": (lambda a: not a.output, "JSONL export requires an output path (use - for stdout).", _render_jsonl),
+}
+
+
+def _export_flat(kind, args, collect):
+    """Single-file export: validate the output target, collect sessions, render, write."""
+    unusable, message, render = _FLAT_EXPORTERS[kind]
+    if unusable(args):
+        print(message)
         return
     sessions = collect()
-    if sessions is None:
-        return
-    lines = "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in sessions)
-    noun = "session" if args.session_id else "sessions"
-    _write_output(args.output, lines, f"Exported {len(sessions)} {noun} to {args.output}")
+    if sessions is not None:
+        _write_output(args.output, *render(args, sessions))
 
 
 def _export_trace(db, args, filters):
