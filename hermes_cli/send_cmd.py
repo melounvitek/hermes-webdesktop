@@ -45,8 +45,7 @@ def _read_message_body(positional: Optional[str], file_path: Optional[str]) -> O
                 f'  hermes send --to telegram "optional caption MEDIA:{file_path}"\n'
                 "Add [[as_document]] to deliver an image as an uncompressed file:\n"
                 f'  hermes send --to telegram "[[as_document]] MEDIA:{file_path}"',
-                _USAGE_EXIT,
-            )
+                _USAGE_EXIT)
         except OSError as exc:
             _fail(f"hermes send: cannot read {file_path}: {exc}", _USAGE_EXIT)
 
@@ -110,8 +109,7 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         if not filtered:
             return _fail(
                 f"hermes send: no targets found for platform '{platform_filter}'. "
-                f"Configured: {', '.join(sorted(platforms)) or '(none)'}"
-            )
+                f"Configured: {', '.join(sorted(platforms)) or '(none)'}")
         platforms = filtered
 
     if json_mode:
@@ -230,16 +228,14 @@ def cmd_send(args: argparse.Namespace) -> None:
             "  hermes send --to telegram \"hello\"\n"
             "  hermes send --to discord:#ops --file report.md\n"
             "  hermes send --list      # list available targets",
-            _USAGE_EXIT,
-        )
+            _USAGE_EXIT)
 
     message = _read_message_body(getattr(args, "message", None), getattr(args, "file", None))
     if message is None or not message.strip():
         _fail(
             "hermes send: no message provided. Pass text as a positional "
             "argument, use --file PATH, or pipe data via stdin.",
-            _USAGE_EXIT,
-        )
+            _USAGE_EXIT)
 
     # Optional subject line: a consistent header for alerting scripts.
     subject = getattr(args, "subject", None)
@@ -310,8 +306,7 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "\n"
             "Exit codes: 0 ok, 1 delivery/backend error, 2 usage error."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+        formatter_class=argparse.RawDescriptionHelpFormatter)
 
     for flags, kwargs in _SEND_ARGUMENTS:
         parser.add_argument(*flags, **kwargs)

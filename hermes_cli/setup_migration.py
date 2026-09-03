@@ -217,8 +217,7 @@ def _print_migration_preview(report: dict):
             if status == "migrated":  # collect warnings for high-impact items
                 kind_lower, dest_lower = kind.lower(), str(item.get("destination", "")).lower()
                 warnings_shown.update(
-                    w for kw, w in _HIGH_IMPACT_KIND_KEYWORDS.items() if kw in kind_lower or kw in dest_lower
-                )
+                    w for kw, w in _HIGH_IMPACT_KIND_KEYWORDS.items() if kw in kind_lower or kw in dest_lower)
         print()
 
     if warnings_shown:

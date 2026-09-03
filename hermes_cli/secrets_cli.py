@@ -123,8 +123,7 @@ def _missing_noninteractive_flags(args: argparse.Namespace) -> list[str]:
     provided = {
         "--access-token": args.access_token,
         "--server-url": (args.server_url or "").strip() or os.environ.get("BWS_SERVER_URL", ""),
-        "--project-id": args.project_id,
-    }
+        "--project-id": args.project_id}
     return [flag for flag, value in provided.items() if not (value and value.strip())]
 
 
@@ -169,8 +168,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         "  Secrets Manager → Machine accounts → [your account] →\n"
         "  Access tokens → Create access token\n\n"
         "Copy the token (starts with [cyan]0.[/cyan]…) — it cannot be retrieved later.",
-        border_style="cyan",
-    ))
+        border_style="cyan"))
 
     binary = _setup_binary(bw, console)
     if binary is None:
@@ -186,8 +184,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "    hermes secrets bitwarden setup \\\n"
                 "      --access-token '0.xxx' \\\n"
                 "      --server-url 'https://vault.bitwarden.com' \\\n"
-                "      --project-id 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'"
-            )
+                "      --project-id 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'")
             return 1
 
     cfg = load_config()
@@ -214,8 +211,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     _step(console, 4 if project_given else 5, "Test fetch")
     try:
         secrets, warnings = bw.fetch_bitwarden_secrets(
-            access_token=token, project_id=project_id, binary=binary, use_cache=False, server_url=server_url,
-        )
+            access_token=token, project_id=project_id, binary=binary, use_cache=False, server_url=server_url)
     except Exception as exc:  # noqa: BLE001
         console.print(f"  [red]✗ Fetch failed: {exc}[/red]")
         return 1
@@ -267,8 +263,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     token = os.environ.get(token_env, "").strip()
     binary = bw.find_bws(install_if_missing=False)
     token_validation, validation_messages = _token_validation_status(
-        enabled=enabled, binary=binary, token=token, server_url=server_url,
-    )
+        enabled=enabled, binary=binary, token=token, server_url=server_url)
 
     print_status_panel(console, "Bitwarden Secrets Manager", (
         ("Enabled", _yn(enabled)),
@@ -328,8 +323,7 @@ def cmd_token(args: argparse.Namespace) -> int:
             console.print(
                 f"[yellow]Warning: configured project {project_id} is not visible "
                 "to this machine account.  Grant it access in the Bitwarden web "
-                "app or re-run `hermes secrets bitwarden setup` to pick a different project.[/yellow]"
-            )
+                "app or re-run `hermes secrets bitwarden setup` to pick a different project.[/yellow]")
         return True
 
     return rotate_token(
@@ -347,8 +341,7 @@ def cmd_token(args: argparse.Namespace) -> int:
             "[yellow]Note: the Bitwarden integration is currently disabled — "
             "run `hermes secrets bitwarden setup` (or set "
             "secrets.bitwarden.enabled: true) to turn it on.[/yellow]"
-        ),
-    )
+        ))
 
 
 def cmd_sync(args: argparse.Namespace) -> int:
@@ -414,8 +407,7 @@ def cmd_disable(args: argparse.Namespace) -> int:
         "[green]Disabled.[/green]  Bitwarden secrets will NOT be pulled on the next "
         "Hermes invocation.\n"
         "  Your access token is left in .env — remove it manually if you also want "
-        "to revoke the credential.",
-    )
+        "to revoke the credential.")
 
 
 def cmd_install(args: argparse.Namespace) -> int:
@@ -481,8 +473,7 @@ def _list_projects(
     try:
         res = subprocess.run(
             [str(binary), "project", "list", "--output", "json"],
-            env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15,
-        )
+            env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15)
     except (OSError, subprocess.TimeoutExpired) as exc:
         console.print(f"  [red]Couldn't list projects: {exc}[/red]")
         return None

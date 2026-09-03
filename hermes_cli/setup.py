@@ -224,8 +224,7 @@ def _run_setup_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
                     previous_index = max(0, section_index - 1)
                     target_prompt = max(0, len(answers_by_section.get(previous_index, [])) - 1)
                 replay_by_section[previous_index] = copy.deepcopy(
-                    answers_by_section.get(previous_index, [])[:target_prompt]
-                )
+                    answers_by_section.get(previous_index, [])[:target_prompt])
                 print()
                 if previous_index == section_index:
                     print_info(f"Returning to the previous choice in {label}...")
@@ -717,8 +716,7 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
         _step("model", "Model & Provider", lambda: setup_model_provider(config)),
         _step("terminal", "Terminal Backend", lambda: setup_terminal_backend(config)),
         ("Messaging Platforms", _gateway_step),
-        _step("tools", "Tools", lambda: setup_tools(config, first_install=not is_existing)),
-    ])
+        _step("tools", "Tools", lambda: setup_tools(config, first_install=not is_existing))])
 
 
 # First-time mode picker: (menu label, runner) — a None runner falls through to Full Setup.

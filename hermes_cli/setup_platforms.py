@@ -282,8 +282,7 @@ def _warn_missing_home_channels() -> None:
     from hermes_cli.setup import get_env_value, _info, print_warning
     missing_home = [
         plat for plat, token_var, home_vars in _HOME_CHANNEL_CHECKS
-        if get_env_value(token_var) and not any(get_env_value(v) for v in home_vars)
-    ]
+        if get_env_value(token_var) and not any(get_env_value(v) for v in home_vars)]
     if not missing_home:
         return
     print()
