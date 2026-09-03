@@ -190,6 +190,7 @@ def release_computer_use_session(session_id: str) -> bool:
                   lambda e: logger.debug("computer_use backend release failed for session %s", sid, exc_info=True))
     return True
 
+@atexit.register
 def _shutdown_backend_atexit() -> None:
     """Stop all cached backends so cua-driver subprocesses don't outlive us. atexit only, no signal handlers: a
     ``SystemExit`` from a prompt_toolkit key binding corrupts its coroutine state and makes the process unkillable.
@@ -205,8 +206,6 @@ def _shutdown_backend_atexit() -> None:
         _session_auto_approve.clear(), _always_allow.clear(), _escalation_warned.clear()
     for backend, call_lock in unique.values():
         _stop_backend(backend, call_lock, lambda e: logger.debug("cua-driver atexit teardown failed: %s", e))
-
-atexit.register(_shutdown_backend_atexit)
 
 def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cached backend and per-session state
     _shutdown_backend_atexit()
@@ -353,8 +352,7 @@ _ACTIONS: Dict[str, _ActionSpec] = {
                                                              f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
     "scroll": _input(_do_scroll, summarize=lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
     "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
-                   summarize=lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
-                                                  + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
+                   summarize=lambda a, args, fg: f"type {args.get('text', '')[:60]!r}" + ("..." if len(args.get("text", "")) > 60 else "") + fg),
     "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
                   summarize=lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
     "set_value": _input(lambda backend, action, args, **_: (
@@ -460,13 +458,10 @@ def _element_to_dict(e: UIElement) -> Dict[str, Any]:
             **({"label_truncated": True} if len(e.label) > _MAX_ELEMENT_LABEL_CHARS else {})}
 
 def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str]:
-    out: List[str] = []
-    for e in elements[:max_lines]:
-        where = "@ bounds-unknown (click by element index)" if _bounds_unknown(e.bounds) else f"@ {e.bounds}"
-        out.append(f"  #{e.index} {e.role} {e.label.replace(chr(10), ' ')[:60]!r} {where}" + (f" [{e.app}]" if e.app else ""))
-    if len(elements) > max_lines:
-        out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
-    return out
+    out = [f"  #{e.index} {e.role} {e.label.replace(chr(10), ' ')[:60]!r} "
+           + ("@ bounds-unknown (click by element index)" if _bounds_unknown(e.bounds) else f"@ {e.bounds}")
+           + (f" [{e.app}]" if e.app else "") for e in elements[:max_lines]]
+    return out + ([f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)"] if len(elements) > max_lines else [])
 
 def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
                   ) -> Tuple[Optional[float], Optional[str]]:
@@ -546,8 +541,7 @@ def _text_capture_payload(v: SimpleNamespace, summary: str, extra: Optional[Dict
 def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
     v = _capture_view(cap, max_elements)
     lines = _capture_summary_lines(v)
-    summary = "\n".join(lines)  # multimodal/aux paths use this; text paths append notes and rebuild
-    extra = None
+    summary, extra = "\n".join(lines), None  # multimodal/aux paths use this; text paths append notes and rebuild
     if v.has_image:
         # Hand the screenshot to auxiliary.vision (text-only result) when the main model may not consume images
         # natively; returning the multimodal envelope unconditionally tripped HTTP 404/400 at the provider.
@@ -702,10 +696,9 @@ _VISION_PROMPT = ("Describe what is visible in this desktop application screensh
                   "about. Do not invent details that are not actually visible.\n\nAX/SOM index for "
                   "cross-reference:\n")
 
-def _route_capture_through_aux_vision(
-    cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
-    truncated_elements: int = 0, elements_file: Optional[str] = None, screenshot_path: Optional[str] = None,
-) -> Optional[str]:
+def _route_capture_through_aux_vision(cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
+                                      truncated_elements: int = 0, elements_file: Optional[str] = None,
+                                      screenshot_path: Optional[str] = None) -> Optional[str]:
     """Pre-analyse the capture via ``vision_analyze_tool`` (temp file under ``$HERMES_HOME/cache/vision/``) and merge
     the description with the AX/SOM summary into one text payload. JSON, or None on any failure."""
     if not cap.png_b64:
