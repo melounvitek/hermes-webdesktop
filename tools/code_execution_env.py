@@ -22,14 +22,12 @@ _IS_WINDOWS = platform.system() == "Windows"
 # The broad "HERMES_" prefix is deliberately NOT safe — it leaked config vars
 # without a secret substring (HERMES_BASE_URL, HERMES_KANBAN_DB, *_WEBHOOK).
 # HERMES_RPC_SOCKET / HERMES_RPC_DIR / TZ / HOME are injected after scrubbing.
-_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
-                      "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM", "TMPDIR", "TMP", "TEMP", "SHELL",
+                      "LOGNAME", "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
 # "PASS" is intentionally absent: it false-positives on BYPASS_CACHE /
 # COMPASS_DIR / PASSENGER_HOST while PASSWORD/PASSWD already cover credentials.
-_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH", "DSN", "WEBHOOK",
-                      "CREDS", "BEARER", "APIKEY")
+_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH", "DSN",
+                      "WEBHOOK", "CREDS", "BEARER", "APIKEY")
 
 # Non-secret runtime-location flags that repo-root modules a sandbox script
 # imports may read at import time. HERMES_DELEGATED_CHILD_CONTEXT must ride

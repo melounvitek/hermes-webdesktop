@@ -623,13 +623,11 @@ def execute_in_session_kernel(
             )
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:  # pragma: no cover - defensive parity with per-call
+            from tools.code_execution_tool import _error_result
             logger.error("session kernel failed: %s: %s", type(exc).__name__, exc, exc_info=True)
             _REGISTRY.discard(key, kernel)
-            return json.dumps({
-                "status": "error", "error": str(exc),
-                "tool_calls_made": kernel.tool_call_counter[0],
-                "duration_seconds": round(time.monotonic() - exec_start, 2),
-            }, ensure_ascii=False)
+            return _error_result(str(exc), tool_calls_made=kernel.tool_call_counter[0],
+                                 duration=round(time.monotonic() - exec_start, 2))
         finally:
             # The cell has settled on every path: its tool authority retires with it, so
             # nothing the cell left running can dispatch under it.

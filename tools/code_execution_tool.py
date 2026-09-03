@@ -83,21 +83,16 @@ def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
     metadata: Dict[str, Any] = {
         "stdout_truncated": True, "stdout_bytes_captured": MAX_STDOUT_BYTES,
         "stdout_bytes_total": total, "stdout_bytes_omitted": omitted,
-        "warning": (
-            "execute_code stdout was truncated; the script did run, but only "
-            "the captured head/tail output is included. Re-run only with "
-            "narrower output if the omitted data is required."
-        ),
+        "warning": ("execute_code stdout was truncated; the script did run, but only "
+                    "the captured head/tail output is included. Re-run only with "
+                    "narrower output if the omitted data is required."),
     }
     spill_path = _spill_full_stdout(stdout_text)
     if spill_path:
         metadata["stdout_spill_path"] = spill_path
-        metadata["warning"] = (
-            "execute_code stdout was truncated (head/tail shown); the "
-            f"script did run. FULL output saved to {spill_path} — page it "
-            f'with read_file(path="{spill_path}", offset=...) instead of '
-            "re-running."
-        )
+        metadata["warning"] = ("execute_code stdout was truncated (head/tail shown); the "
+                               f"script did run. FULL output saved to {spill_path} — page it "
+                               f'with read_file(path="{spill_path}", offset=...) instead of re-running.')
     return text, metadata
 
 
@@ -468,12 +463,10 @@ def _get_or_create_env(task_id: str):
         container_config = None
         if _is_container_backend(env_type):
             container_config = {
-                "container_cpu": config.get("container_cpu", 1),
-                "container_memory": config.get("container_memory", 5120),
+                "container_cpu": config.get("container_cpu", 1), "container_memory": config.get("container_memory", 5120),
                 "container_disk": config.get("container_disk", 51200),
                 "container_persistent": config.get("container_persistent", True),
-                "vercel_runtime": config.get("vercel_runtime", ""),
-                "docker_volumes": config.get("docker_volumes", []),
+                "vercel_runtime": config.get("vercel_runtime", ""), "docker_volumes": config.get("docker_volumes", []),
                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                 "docker_network": config.get("docker_network", True),
             }
@@ -680,12 +673,8 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
     try:
         py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
         if "OK" not in py_check.get("output", ""):
-            return json.dumps({
-                "status": "error",
-                "error": (f"Python 3 is not available in the {env_type} terminal "
-                          "environment. Install Python to use execute_code with remote backends."),
-                "tool_calls_made": 0, "duration_seconds": 0,
-            })
+            return _error_result(f"Python 3 is not available in the {env_type} terminal "
+                                 "environment. Install Python to use execute_code with remote backends.")
         # Session-kernel path: one persistent kernel per owner on the
         # run-to-completion transport. Spawn failure falls OPEN to the per-call
         # path below so a degraded remote host never blocks execution.
@@ -729,25 +718,19 @@ def execute_code(
     first (ignored on per-call paths).
     """
     if not SANDBOX_AVAILABLE:
-        return tool_error(
-            "execute_code sandbox is unavailable in this environment. "
-            "Use normal tool calls (terminal, read_file, write_file, ...) instead."
-        )
+        return tool_error("execute_code sandbox is unavailable in this environment. "
+                          "Use normal tool calls (terminal, read_file, write_file, ...) instead.")
     # Fail closed under a terminal-policy refusal scope: the routed profile's terminal
     # policy is unresolved, so refuse rather than inherit the launch process's ambient policy.
     try:
         from tools.terminal_scope import enforce_no_refusal
         enforce_no_refusal()
     except Exception as refusal:
-        return tool_error(
-            f"execute_code refused: {refusal} "
-            "(profile terminal policy unresolved; fix the profile's config.yaml / .env and retry)"
-        )
+        return tool_error(f"execute_code refused: {refusal} "
+                          "(profile terminal policy unresolved; fix the profile's config.yaml / .env and retry)")
     if not code or not code.strip():
-        return tool_error(
-            "No code provided. execute_code requires a non-empty 'code' "
-            "parameter containing Python source. To run shell commands, use terminal(command=...) instead."
-        )
+        return tool_error("No code provided. execute_code requires a non-empty 'code' "
+                          "parameter containing Python source. To run shell commands, use terminal(command=...) instead.")
     # Hard-block gateway-lifecycle commands (mirrors the terminal_tool guard — otherwise
     # `os.system("launchctl bootout ...")` here bypasses it and SIGTERMs the gateway mid-task).
     # Gated on PID-file ownership, not the inherited env marker.
@@ -933,20 +916,12 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         "parameters": {
             "type": "object",
             "properties": {
-                "code": {
-                    "type": "string",
-                    "description": (
-                        "Python code to execute. Import tools with "
-                        f"`from hermes_tools import {import_str}` "
-                        "and print your final result to stdout."
-                    ),
-                },
-                "reset": {
-                    "type": "boolean",
-                    "description": (
-                        "Discard the kernel's persistent state and start fresh before running this code."
-                    ),
-                },
+                "code": {"type": "string", "description": (
+                    "Python code to execute. Import tools with "
+                    f"`from hermes_tools import {import_str}` "
+                    "and print your final result to stdout.")},
+                "reset": {"type": "boolean", "description": (
+                    "Discard the kernel's persistent state and start fresh before running this code.")},
             },
             "required": ["code"],
         },
@@ -962,17 +937,13 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
     actionable error before dispatching to ``execute_code``."""
     if "code" not in args and "command" in args:
         logger.warning("execute_code received 'command' instead of the required 'code' argument")
-        return tool_error(
-            "execute_code received a 'command' parameter, but it requires "
-            "Python source in 'code'. Use terminal(command=...) for shell "
-            "commands; for Python, retry as execute_code(code=...)."
-        )
+        return tool_error("execute_code received a 'command' parameter, but it requires "
+                          "Python source in 'code'. Use terminal(command=...) for shell "
+                          "commands; for Python, retry as execute_code(code=...).")
     code = args.get("code", "")
     if code is not None and not isinstance(code, str):
-        return tool_error(
-            f"execute_code received a {type(code).__name__} in 'code', but it "
-            "requires Python source as a string. Retry as execute_code(code=\"...\")."
-        )
+        return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
+                          "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
                         enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
 
