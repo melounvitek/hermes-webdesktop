@@ -67,9 +67,7 @@ CODE_EXEMPT_PATTERN_IDS = {
 # keys go (READING it still trips ``read_secrets_file``, critical); ``curl | sh``
 # install instructions are common in READMEs — caution, not an unoverridable block.
 SEVERITY_REMAP = {
-    "binary_file": "high",
-    "hermes_env_access": "medium",
-    "curl_pipe_shell": "high",
+    "binary_file": "high", "hermes_env_access": "medium", "curl_pipe_shell": "high"
 }
 
 # Structural limits — plugins are real codebases, far larger than skills.
@@ -182,9 +180,7 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
         summary=summary,
     )
     result.scan_provenance = {
-        "scanner_version": PLUGIN_SCANNER_VERSION,
-        "verdict": verdict,
-        "source": result.source,
+        "scanner_version": PLUGIN_SCANNER_VERSION, "verdict": verdict, "source": result.source
     }
     return result
 
@@ -205,8 +201,5 @@ def should_allow_plugin_install(result: ScanResult, force: bool = False) -> Tupl
 
 
 __all__ = [
-    "scan_plugin",
-    "should_allow_plugin_install",
-    "format_scan_report",
-    "PLUGIN_SCANNER_VERSION",
+    "scan_plugin", "should_allow_plugin_install", "format_scan_report", "PLUGIN_SCANNER_VERSION"
 ]
