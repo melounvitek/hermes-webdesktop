@@ -110,10 +110,9 @@ class WhatsAppBehaviorMixin:
         return {str(part).strip() for part in parts if str(part).strip()}
 
     def _select_dm_allowlist(self, extra: Dict[str, Any], env_keys, read_env) -> Any:
-        """Pick the raw DM allowlist by key *presence*: ``allow_from``/``allowFrom`` in
-        config (an explicit empty list stays authoritative), then the first truthy
-        env carrier. Records the winning source in ``_dm_allowlist_source`` so live
-        DM checks keep the same precedence."""
+        """Pick the raw DM allowlist by key *presence*: ``allow_from``/``allowFrom`` in config (an
+        explicit empty list stays authoritative), then the first truthy env carrier. Records the
+        winning source in ``_dm_allowlist_source`` so live DM checks keep the same precedence."""
         for key in ("allow_from", "allowFrom"):
             if key in extra:
                 self._dm_allowlist_source = "config"
@@ -126,13 +125,10 @@ class WhatsAppBehaviorMixin:
         return None
 
     def _live_dm_allow_from(self) -> set[str]:
-        """Allowlist currently enforced for DM intake / strict DM auth.
-
-        Env-seeded adapters re-read the same key so pairing approve/revoke takes
-        effect without restart; a removed key (sole-entry revoke) means empty, not
-        the construction snapshot. Config-seeded adapters keep the in-memory set
-        (pairing revoke purges it in place) — a stale env value must not broaden access.
-        """
+        """Allowlist currently enforced for DM intake / strict DM auth. Env-seeded adapters re-read
+        the same key so pairing approve/revoke takes effect without restart; a removed key (sole-entry
+        revoke) means empty, not the construction snapshot. Config-seeded adapters keep the in-memory
+        set (pairing revoke purges it in place) — a stale env value must not broaden access."""
         source = getattr(self, "_dm_allowlist_source", None)
         if isinstance(source, str) and source != "config":
             return self._coerce_allow_list(os.environ[source]) if source in os.environ else set()
@@ -163,12 +159,9 @@ class WhatsAppBehaviorMixin:
 
     @staticmethod
     def _matches_whatsapp_allowlist(candidate: str, allow_from) -> bool:
-        """Match a WhatsApp identifier against an allowlist across phone/LID forms.
-
-        Inbound senders arrive as ``<id>@lid`` while allowlists hold phone numbers
-        (or vice versa), so resolve both sides through the bridge's lid-mapping
-        files via ``gateway.whatsapp_identity``.
-        """
+        """Match a WhatsApp identifier against an allowlist across phone/LID forms. Inbound senders
+        arrive as ``<id>@lid`` while allowlists hold phone numbers (or vice versa), so resolve both
+        sides through the bridge's lid-mapping files via ``gateway.whatsapp_identity``."""
         if not allow_from:
             return False
         if candidate in allow_from:
@@ -223,10 +216,7 @@ class WhatsAppBehaviorMixin:
         if isinstance(patterns, str):
             patterns = [patterns]
         if not isinstance(patterns, list):
-            logger.warning(
-                "[%s] whatsapp mention_patterns must be a list or string; got %s",
-                self.name, type(patterns).__name__,
-            )
+            logger.warning("[%s] whatsapp mention_patterns must be a list or string; got %s", self.name, type(patterns).__name__)
             return []
         compiled = []
         for pattern in patterns:
@@ -261,10 +251,8 @@ class WhatsAppBehaviorMixin:
         )
 
     def _message_matches_mention_patterns(self, data: Dict[str, Any]) -> bool:
-        if not self._mention_patterns:
-            return False
         body = str(data.get("body") or "")
-        return any(pattern.search(body) for pattern in self._mention_patterns)
+        return any(pattern.search(body) for pattern in self._mention_patterns or ())
 
     def _clean_bot_mention_text(self, text: str, data: Dict[str, Any]) -> str:
         if not text:
