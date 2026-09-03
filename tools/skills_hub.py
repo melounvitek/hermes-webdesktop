@@ -66,12 +66,12 @@ logger = logging.getLogger(__name__)
 INDEX_CACHE_TTL = 3600  # 1 hour
 
 
-def _path_resolver(name: str, default):
-    """Resolver for a hub path: a test-injected real module attribute
+def _path_resolver(name: str, parent: str, leaf: str):
+    """Resolver for hub path ``<parent>/<leaf>``: a test-injected real module attribute
     (patch.object/monkeypatch on SKILLS_DIR etc.) wins over live resolution."""
     def resolve() -> Path:
         forced = globals().get(name)
-        return Path(forced) if forced is not None else default()
+        return Path(forced) if forced is not None else _DYNAMIC_PATH_RESOLVERS[parent]() / leaf
     resolve.__name__ = f"_{name.lower()}"
     return resolve
 
@@ -80,24 +80,17 @@ def _hermes_home() -> Path:
     return get_hermes_home()
 
 
-_skills_dir = _path_resolver("SKILLS_DIR", lambda: _hermes_home() / "skills")
-_hub_dir = _path_resolver("HUB_DIR", lambda: _skills_dir() / ".hub")
-_lock_file = _path_resolver("LOCK_FILE", lambda: _hub_dir() / "lock.json")
-_quarantine_dir = _path_resolver("QUARANTINE_DIR", lambda: _hub_dir() / "quarantine")
-_audit_log = _path_resolver("AUDIT_LOG", lambda: _hub_dir() / "audit.log")
-_taps_file = _path_resolver("TAPS_FILE", lambda: _hub_dir() / "taps.json")
-_index_cache_dir = _path_resolver("INDEX_CACHE_DIR", lambda: _hub_dir() / "index-cache")
-
-_DYNAMIC_PATH_RESOLVERS = {
-    "HERMES_HOME": _hermes_home,
-    "SKILLS_DIR": _skills_dir,
-    "HUB_DIR": _hub_dir,
-    "LOCK_FILE": _lock_file,
-    "QUARANTINE_DIR": _quarantine_dir,
-    "AUDIT_LOG": _audit_log,
-    "TAPS_FILE": _taps_file,
-    "INDEX_CACHE_DIR": _index_cache_dir,
-}
+_skills_dir = _path_resolver("SKILLS_DIR", "HERMES_HOME", "skills")
+_hub_dir = _path_resolver("HUB_DIR", "SKILLS_DIR", ".hub")
+_lock_file = _path_resolver("LOCK_FILE", "HUB_DIR", "lock.json")
+_quarantine_dir = _path_resolver("QUARANTINE_DIR", "HUB_DIR", "quarantine")
+_audit_log = _path_resolver("AUDIT_LOG", "HUB_DIR", "audit.log")
+_taps_file = _path_resolver("TAPS_FILE", "HUB_DIR", "taps.json")
+_index_cache_dir = _path_resolver("INDEX_CACHE_DIR", "HUB_DIR", "index-cache")
+_DYNAMIC_PATH_RESOLVERS = {"HERMES_HOME": _hermes_home, **{
+    r.__name__[1:].upper(): r
+    for r in (_skills_dir, _hub_dir, _lock_file, _quarantine_dir, _audit_log, _taps_file, _index_cache_dir)
+}}
 
 
 def __getattr__(name: str):
@@ -170,8 +163,6 @@ def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response
 
 def _read_json_if_fresh(path: Path, ttl: float) -> Optional[Any]:
     """Parsed JSON from ``path`` when it exists and is younger than ``ttl`` seconds."""
-    if not path.exists():
-        return None
     try:
         if time.time() - path.stat().st_mtime > ttl:
             return None
@@ -208,19 +199,16 @@ def _write_index_cache(key: str, data: Any) -> None:
 # ---------------------------------------------------------------------------
 
 class _JsonStateFile:
-    """A JSON file under the hub dir with a fixed empty shape."""
+    """A JSON file under the hub dir with a fixed empty shape (``EMPTY``, deep-copied
+    on every miss/corrupt read); ``DEFAULT_PATH`` is the hub path resolver."""
 
     EMPTY: dict = {}
+    DEFAULT_PATH: Any = None
 
     def __init__(self, path: Optional[Path] = None):
-        self.path = path if path is not None else self._default_path()
-
-    def _default_path(self) -> Path:
-        raise NotImplementedError
+        self.path = path if path is not None else type(self).DEFAULT_PATH()
 
     def _read(self) -> dict:
-        if not self.path.exists():
-            return json.loads(json.dumps(self.EMPTY))
         try:
             return json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -235,9 +223,7 @@ class HubLockFile(_JsonStateFile):
     """skills/.hub/lock.json — provenance of installed hub skills."""
 
     EMPTY = {"version": 1, "installed": {}}
-
-    def _default_path(self) -> Path:
-        return _lock_file()
+    DEFAULT_PATH = staticmethod(_lock_file)
 
     def load(self) -> dict:
         return self._read()
@@ -295,9 +281,7 @@ class TapsManager(_JsonStateFile):
     """skills/.hub/taps.json — custom GitHub repo sources."""
 
     EMPTY = {"taps": []}
-
-    def _default_path(self) -> Path:
-        return _taps_file()
+    DEFAULT_PATH = staticmethod(_taps_file)
 
     def load(self) -> List[dict]:
         return self._read().get("taps", [])
@@ -323,8 +307,7 @@ class TapsManager(_JsonStateFile):
         self.save(new_taps)
         return True
 
-    def list_taps(self) -> List[dict]:
-        return self.load()
+    list_taps = load
 
 
 def append_audit_log(action: str, skill_name: str, source: str,
@@ -359,14 +342,4 @@ def ensure_hub_dirs() -> None:
     ):
         if not path.exists():
             path.write_text(initial, encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# Hermes centralized index (data source for HermesIndexSource)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Source router + parallel search
-# ---------------------------------------------------------------------------
 
