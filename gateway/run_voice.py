@@ -67,10 +67,10 @@ class GatewayVoiceMixin:
         if not isinstance(data, dict):
             return {}
         items = {str(k): m for k, m in data.items() if m in _VOICE_MODES}
-        for chat_id in (k for k in items if ":" not in k):  # legacy unprefixed key: warn and skip
+        for key in (k for k in items if ":" not in k):  # legacy unprefixed key: warn and skip
             logger.warning(
                 "Skipping legacy unprefixed voice mode key %r during migration. "
-                "Re-enable voice mode on that chat to rebuild the prefixed key.", chat_id,
+                "Re-enable voice mode on that chat to rebuild the prefixed key.", key,
             )
         return {k: m for k, m in items.items() if ":" in k}
 
@@ -324,9 +324,8 @@ class GatewayVoiceMixin:
         is_voice_input = event.message_type == MessageType.VOICE
         adapter = self._adapter_for_source(event.source)
         adapter_auto_tts = False
-        if adapter and hasattr(adapter, "_should_auto_tts_for_chat"):
-            with suppress(Exception):
-                adapter_auto_tts = bool(adapter._should_auto_tts_for_chat(chat_id))
+        with suppress(Exception):  # adapters without the probe read as False
+            adapter_auto_tts = bool(adapter._should_auto_tts_for_chat(chat_id))
         # ``voice.auto_tts`` (synced into the adapter at startup) is the fallback only when the
         # chat has no explicit mode; the chat-level all/voice_only/off choice takes precedence.
         if not (
@@ -419,7 +418,8 @@ class GatewayVoiceMixin:
             for path in audio_paths:
                 await play(guild_id, path)
             return
-        if not callable(send_voice := getattr(adapter, "send_voice", None)):
+        send_voice = getattr(adapter, "send_voice", None)
+        if not callable(send_voice):
             return
         reply_anchor = self._reply_anchor_for_event(event)
         # Mark the auto voice reply notify-worthy (mirrors the final-text path in platforms/base.py)
