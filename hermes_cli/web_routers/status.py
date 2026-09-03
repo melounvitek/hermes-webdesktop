@@ -58,6 +58,14 @@ _GATEWAY_HEALTH_ROUTE_TIMEOUT = 1.0
 _HEALTHY_PLATFORM_STATES = {"connected", "running", "ok"}
 
 
+def _safe_call(mod, fn_name: str, default):
+    try:
+        fn = getattr(mod, fn_name, None)
+        return fn() if callable(fn) else default
+    except Exception:
+        return default
+
+
 def _count_status_active_sessions() -> int:
     """Best-effort status garnish. Opens read-only (via the shared stale-schema heal) so
     /api/status never routinely writes to state.db while another Hermes process uses it."""
@@ -95,20 +103,15 @@ async def get_ssh_ownership(request: Request):
     _require_token(request)
     if not _SSH_OWNER_NONCE:
         raise HTTPException(status_code=404, detail="SSH ownership is not active")
-    return {
-        "ok": True,
-        "sshOwnerNonce": _SSH_OWNER_NONCE,
-        "protocolVersion": 1,
-        "runtimeIntact": _ssh_runtime_intact()}
+    return {"ok": True, "sshOwnerNonce": _SSH_OWNER_NONCE, "protocolVersion": 1,
+            "runtimeIntact": _ssh_runtime_intact()}
 
 
 @router.get("/api/health")
 async def get_health():
     """Lightweight process liveness for desktop/backend readiness probes."""
-    return {
-        "ok": True,
-        "version": __version__,
-        "auth_required": bool(getattr(app.state, "auth_required", False))}
+    return {"ok": True, "version": __version__,
+            "auth_required": bool(getattr(app.state, "auth_required", False))}
 
 
 # Profile segment mirrors hermes_cli.profiles._PROFILE_ID_RE. Platform segment mirrors the
@@ -197,10 +200,8 @@ def _project_gateway_platforms(gateway_platforms: dict, configured: "set[str] | 
     entries are the diagnosis (credential collisions, auth failures) that the single
     exit_reason string can't express, so they are kept — upstream writer-identity/freshness
     filtering already dropped other processes' entries."""
-    platforms = {
-        key: _public_platform_entry(value)
-        for key, value in gateway_platforms.items()
-        if _status_platform_key_allowed(key, configured)}
+    platforms = {key: _public_platform_entry(value) for key, value in gateway_platforms.items()
+                 if _status_platform_key_allowed(key, configured)}
     if gateway_running:
         return platforms
     if gateway_state == "startup_failed":
@@ -326,15 +327,11 @@ async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
         components["storage"] = {"status": storage_check.get("status", "degraded")}
     except Exception:
         components["storage"] = {"status": "degraded"}
-    platform_states = [
-        str(value.get("state") or value.get("status") or "").lower()
-        for value in gateway_platforms.values()
-        if isinstance(value, dict)]
+    platform_states = [str(value.get("state") or value.get("status") or "").lower()
+                       for value in gateway_platforms.values() if isinstance(value, dict)]
     connected = sum(1 for state in platform_states if state in _HEALTHY_PLATFORM_STATES)
-    components["platforms"] = {
-        "status": "ok" if connected == len(platform_states) else "degraded",
-        "configured": len(gateway_platforms),
-        "connected": connected}
+    components["platforms"] = {"status": "ok" if connected == len(platform_states) else "degraded",
+                               "configured": len(gateway_platforms), "connected": connected}
     return components
 
 
@@ -411,13 +408,10 @@ async def get_status(profile: Optional[str] = None):
         auth = _auth_gate_status()
 
         status = {
-            "version": __version__,
-            "release_date": __release_date__,
-            "config_version": current_ver,
-            "latest_config_version": latest_ver,
+            "version": __version__, "release_date": __release_date__,
+            "config_version": current_ver, "latest_config_version": latest_ver,
             "can_update_hermes": not _dashboard_local_update_managed_externally(),
-            "gateway_running": gateway_running,
-            "gateway_state": gateway_state,
+            "gateway_running": gateway_running, "gateway_state": gateway_state,
             "gateway_platforms": gateway["gateway_platforms"],
             "gateway_exit_reason": gateway["gateway_exit_reason"],
             "gateway_updated_at": gateway["gateway_updated_at"],
@@ -427,10 +421,8 @@ async def get_status(profile: Optional[str] = None):
                 active_agents=active_agents),
             "gateway_drainable": derive_gateway_drainable(
                 gateway_running=gateway_running, gateway_state=gateway_state),
-            "restart_drain_timeout": restart_drain_timeout,
-            "active_sessions": active_sessions,
-            **auth,
-            "nous_session_valid": _nous_session_validity()}
+            "restart_drain_timeout": restart_drain_timeout, "active_sessions": active_sessions,
+            **auth, "nous_session_valid": _nous_session_validity()}
 
         # Stable per-install identity (first call may touch disk). Omitted (not null) when
         # unpersistable so older-client behavior and the no-identity fallback stay identical.
@@ -455,12 +447,9 @@ async def get_status(profile: Optional[str] = None):
         # reaches this endpoint — surface them only on a loopback / ``--insecure`` bind.
         if not auth["auth_required"]:
             status.update({
-                "hermes_home": str(get_hermes_home()),
-                "config_path": str(get_config_path()),
-                "env_path": str(get_env_path()),
-                "gateway_pid": gateway["gateway_pid"],
-                "gateway_health_url": _GATEWAY_HEALTH_URL,
-                "gateways": topology["gateways"]})
+                "hermes_home": str(get_hermes_home()), "config_path": str(get_config_path()),
+                "env_path": str(get_env_path()), "gateway_pid": gateway["gateway_pid"],
+                "gateway_health_url": _GATEWAY_HEALTH_URL, "gateways": topology["gateways"]})
 
         return status
     finally:
@@ -478,12 +467,10 @@ async def get_system_stats():
         **_display_system_platform(
             system=_platform.system(), release=_platform.release(), version=_platform.version(),
             platform_label=_platform.platform()),
-        "arch": _platform.machine(),
-        "hostname": _platform.node(),
+        "arch": _platform.machine(), "hostname": _platform.node(),
         "python_version": _platform.python_version(),
         "python_impl": _platform.python_implementation(),
-        "hermes_version": __version__,
-        "cpu_count": os.cpu_count()}
+        "hermes_version": __version__, "cpu_count": os.cpu_count()}
 
     def _disk():
         du = psutil.disk_usage(str(get_hermes_home()))
@@ -536,10 +523,7 @@ async def get_curator_status():
         from agent import curator
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Curator unavailable: {exc}")
-    try:
-        state = curator.load_state()
-    except Exception:
-        state = {}
+    state = _safe_call(curator, "load_state", {})
     return {
         "enabled": _safe_call(curator, "is_enabled", True),
         "paused": _safe_call(curator, "is_paused", False),
@@ -619,14 +603,6 @@ async def update_learning_node(body: LearningNodeEdit):
         body.profile, lambda: edit_node(body.id, body.content), 400, "edit failed")
 
 
-def _safe_call(mod, fn_name: str, default):
-    try:
-        fn = getattr(mod, fn_name, None)
-        return fn() if callable(fn) else default
-    except Exception:
-        return default
-
-
 # Portal — Nous Portal auth + Tool Gateway routing status (read-only).
 
 
@@ -667,8 +643,7 @@ def _get_portal_status_sync():
 
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
     return {
-        "logged_in": bool(auth.get("logged_in")),
-        "portal_url": auth.get("portal_base_url"),
+        "logged_in": bool(auth.get("logged_in")), "portal_url": auth.get("portal_base_url"),
         "inference_url": auth.get("inference_base_url"),
         "provider": str((model_cfg or {}).get("provider") or ""),
         "subscription_url": "https://portal.nousresearch.com/manage-subscription",
@@ -710,12 +685,8 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
         _log.exception("debug share failed")
         raise HTTPException(status_code=500, detail=f"Failed: {exc}")
 
-    return {
-        "ok": True,
-        "urls": result.urls,
-        "failures": result.failures,
-        "redacted": result.redacted,
-        "auto_delete_seconds": result.auto_delete_seconds}
+    return {"ok": True, "urls": result.urls, "failures": result.failures,
+            "redacted": result.redacted, "auto_delete_seconds": result.auto_delete_seconds}
 
 
 @logs_router.get("/api/logs")
@@ -741,10 +712,8 @@ async def get_logs(
     if component and component.lower() != "all":
         comp_prefixes = COMPONENT_PREFIXES.get(component)
         if comp_prefixes is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown component: {component}. "
-                       f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}")
+            raise HTTPException(status_code=400, detail=f"Unknown component: {component}. "
+                                f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}")
     result = _read_tail(
         log_path, min(lines, 500) if not search else 2000,
         has_filters=bool(min_level or comp_prefixes or search),

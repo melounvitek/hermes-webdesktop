@@ -106,13 +106,11 @@ def _parse_model_ids(resp: "Any") -> List[str]:
 def _fallback_profile_entry(profiles_mod, name: str, home: Path, *, is_default: bool,
                             has_env: bool, gateway_running: Callable[[], bool]) -> Dict[str, Any]:
     model, provider = _safe(lambda: profiles_mod._read_config_model(home), (None, None))
-
-    def meta(key, default):
-        return _safe(lambda: profiles_mod.read_profile_meta(home).get(key, default), default)
-
+    meta = lambda key, default: _safe(  # noqa: E731
+        lambda: profiles_mod.read_profile_meta(home).get(key, default), default)
     return {
-        "name": name, "path": str(home), "is_default": is_default,
-        "model": model, "provider": provider, "has_env": has_env,
+        "name": name, "path": str(home), "is_default": is_default, "model": model,
+        "provider": provider, "has_env": has_env,
         "skill_count": _safe(lambda: profiles_mod._count_skills(home), 0),
         "gateway_running": _safe(gateway_running, False),
         "description": meta("description", ""), "description_auto": meta("description_auto", False),
@@ -386,10 +384,8 @@ def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
         else:
             profile_dir = _resolve_profile_dir(profile.strip())
             lock = HubLockFile(profile_dir / "skills" / ".hub" / "lock.json")
-        return {
-            entry["identifier"]: {"name": entry.get("name"),
-                                  "trust_level": entry.get("trust_level"),
-                                  "scan_verdict": entry.get("scan_verdict")}
-            for entry in lock.list_installed() if entry.get("identifier")}
+        keys = ("name", "trust_level", "scan_verdict")
+        return {entry["identifier"]: {k: entry.get(k) for k in keys}
+                for entry in lock.list_installed() if entry.get("identifier")}
     except Exception:
         return {}
