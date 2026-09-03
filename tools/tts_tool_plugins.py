@@ -1,10 +1,9 @@
 """Plugin-registered TTS providers for ``tools.tts_tool``.
 
-Routes ``tts.provider: <name>`` values that are neither built-in nor a
-``type: command`` entry to a :class:`agent.tts_provider.TTSProvider`
-registered by a plugin. Discovery goes through
-``hermes_cli.plugins._ensure_plugins_discovered`` (imported lazily so the
-tool module stays importable without the plugin machinery).
+Routes ``tts.provider: <name>`` values that are neither built-in nor a ``type: command``
+entry to a :class:`agent.tts_provider.TTSProvider` registered by a plugin. Discovery goes
+through ``hermes_cli.plugins._ensure_plugins_discovered`` (imported lazily so the tool
+module stays importable without the plugin machinery).
 """
 
 from __future__ import annotations
@@ -23,13 +22,9 @@ logger = logging.getLogger("tools.tts_tool")
 
 
 def _lookup_plugin_provider(key: str, *, discover: bool = True, retry: bool = False):
-    """The registered ``TTSProvider`` named *key*, or None.
-
-    ``discover`` runs plugin discovery first; ``retry`` re-discovers with
-    ``force=True`` on a miss (long-lived sessions may have discovered plugins
-    before this one was installed/enabled). Raises on registry/discovery
-    failure — callers decide whether that is fatal.
-    """
+    """The registered ``TTSProvider`` named *key*, or None. ``discover`` runs plugin discovery first;
+    ``retry`` re-discovers with ``force=True`` on a miss (a long-lived session may predate the
+    plugin's install). Raises on registry/discovery failure — callers decide if fatal."""
     from agent.tts_registry import get_provider
 
     if discover:
@@ -43,25 +38,12 @@ def _lookup_plugin_provider(key: str, *, discover: bool = True, retry: bool = Fa
     return plugin_provider
 
 
-def _dispatch_to_plugin_provider(
-    text: str,
-    output_path: str,
-    provider: str,
-    tts_config: Dict[str, Any],
-) -> Optional[str]:
+def _dispatch_to_plugin_provider(text: str, output_path: str, provider: str, tts_config: Dict[str, Any]) -> Optional[str]:
     """Route to a plugin-registered TTS provider; None means "fall through".
 
-    Invariants enforced here even though the caller checks them too, so a
-    caller refactor can't silently break them:
-
-    1. Built-in names never reach the plugin registry.
-    2. A same-named ``type: command`` provider wins over a plugin.
-    3. Dispatch fires only for a registered :class:`TTSProvider` whose name
-       equals the configured value; unknown names return None.
-
-    Plugin exceptions propagate — the outer ``text_to_speech_tool`` converts
-    them to the standard error envelope.
-    """
+    Invariants re-checked here so a caller refactor can't break them: built-in names never reach
+    the registry; a same-named ``type: command`` provider wins; only an exact registered name
+    dispatches. Plugin exceptions propagate to ``text_to_speech_tool``'s error envelope."""
     if not provider:
         return None
     key = provider.lower().strip()
@@ -77,8 +59,8 @@ def _dispatch_to_plugin_provider(
     if plugin_provider is None:
         return None
 
-    # voice/model/speed/format are optional per the TTSProvider.synthesize
-    # contract; providers fall back to their own defaults on None.
+    # voice/model/speed/format are optional per the TTSProvider.synthesize contract;
+    # providers fall back to their own defaults on None.
     cfg = tts_config if isinstance(tts_config, dict) else {}
     voice = cfg.get("voice")
     model = cfg.get("model")
@@ -87,8 +69,7 @@ def _dispatch_to_plugin_provider(
 
     logger.info("Generating speech with plugin TTS provider '%s'...", key)
     written = plugin_provider.synthesize(
-        text,
-        output_path,
+        text, output_path,
         voice=voice if isinstance(voice, str) and voice else None,
         model=model if isinstance(model, str) and model else None,
         speed=float(speed) if isinstance(speed, (int, float)) else None,
@@ -99,10 +80,7 @@ def _dispatch_to_plugin_provider(
 
 
 def _plugin_provider_is_voice_compatible(provider: str) -> bool:
-    """True when the registered plugin provider opts into voice-bubble delivery.
-
-    Any registry/property failure means False (safe default, like command providers).
-    """
+    """True when the registered plugin provider opts into voice-bubble delivery (any failure -> False)."""
     if not provider:
         return False
     key = provider.lower().strip()
@@ -110,9 +88,7 @@ def _plugin_provider_is_voice_compatible(provider: str) -> bool:
         return False
     try:
         plugin_provider = _lookup_plugin_provider(key, discover=False)
-        if plugin_provider is None:
-            return False
-        return bool(plugin_provider.voice_compatible)
+        return plugin_provider is not None and bool(plugin_provider.voice_compatible)
     except Exception as exc:  # noqa: BLE001
         logger.debug("tts plugin voice_compatible check failed for '%s': %s", key, exc)
         return False
