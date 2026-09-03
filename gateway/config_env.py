@@ -244,8 +244,7 @@ def _ReplyMode(platform: Platform, env: str):
 # --- platform-unique branches ------------------------------------------------
 
 def _telegram_fallback_ips(config: GatewayConfig) -> None:
-    ips = getenv("TELEGRAM_FALLBACK_IPS")
-    if ips:
+    if ips := getenv("TELEGRAM_FALLBACK_IPS"):
         config.platforms.setdefault(Platform.TELEGRAM, PlatformConfig()).extra["fallback_ips"] = _csv_list(ips)
 
 
@@ -265,8 +264,7 @@ def _whatsapp(config: GatewayConfig) -> None:
 
 def _slack_home(config: GatewayConfig) -> None:
     """SLACK_HOME_CHANNEL creates a disabled Slack entry if needed; user_id/scope_id provenance survives an unchanged chat_id."""
-    slack_home = getenv("SLACK_HOME_CHANNEL")
-    if not slack_home:
+    if not (slack_home := getenv("SLACK_HOME_CHANNEL")):
         return
     slack_config = config.platforms.setdefault(Platform.SLACK, PlatformConfig(enabled=False))
     existing_home = slack_config.home_channel
@@ -281,10 +279,7 @@ def _slack_home(config: GatewayConfig) -> None:
 
 def _matrix_e2ee(config: GatewayConfig, matrix_config: PlatformConfig) -> None:
     mode = getenv("MATRIX_E2EE_MODE").strip().lower()
-    matrix_config.extra["encryption"] = (
-        mode in ("required", "require", "optional", "prefer", "preferred")
-        or is_truthy_value(getenv("MATRIX_ENCRYPTION"))
-    )
+    matrix_config.extra["encryption"] = mode in ("required", "require", "optional", "prefer", "preferred") or is_truthy_value(getenv("MATRIX_ENCRYPTION"))
     if mode:
         matrix_config.extra["e2ee_mode"] = mode
     _env_extras(matrix_config.extra, (("device_id", "MATRIX_DEVICE_ID"),))
@@ -348,8 +343,7 @@ def _qq_home(config: GatewayConfig, qq_config: PlatformConfig) -> None:
 
 def _session_settings(config: GatewayConfig) -> None:
     for env, attr in (("SESSION_IDLE_MINUTES", "idle_minutes"), ("SESSION_RESET_HOUR", "at_hour")):
-        raw = getenv(env)
-        if raw:
+        if raw := getenv(env):
             with contextlib.suppress(ValueError):
                 setattr(config.default_reset_policy, attr, int(raw))
 
@@ -485,7 +479,6 @@ def _relay(config: GatewayConfig) -> None:
 def _scrub_explicit_markers(config: GatewayConfig) -> None:
     for platform_config in config.platforms.values():
         platform_config.extra.pop("_enabled_explicit", None)
-
 
 # Order is significant: a home channel only attaches to a platform that already exists (Telegram's
 # reply mode may create the entry first; Discord reads home first). Relay disabling runs after the

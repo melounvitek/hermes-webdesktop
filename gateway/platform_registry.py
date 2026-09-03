@@ -138,9 +138,7 @@ class PlatformRegistry:
         return entry, loader
 
     def _prune_scope(self, scope: Optional[str]) -> None:
-        if scope is None:
-            return
-        for maps in (self._scoped_entries, self._scoped_deferred):
+        for maps in (self._scoped_entries, self._scoped_deferred) if scope is not None else ():
             if not maps.get(scope):
                 maps.pop(scope, None)
 

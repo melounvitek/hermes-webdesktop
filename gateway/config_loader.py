@@ -176,10 +176,8 @@ def platform_section(yaml_cfg: dict, name: str, gateway_platforms: Any) -> tuple
     section = yaml_cfg.get(name)
     toplevel = isinstance(section, dict)
     if not toplevel:
-        for src in (gateway_platforms, yaml_cfg.get("platforms")):
-            if isinstance(src, dict) and isinstance(src.get(name), dict):
-                section = src[name]
-                break
+        nested = (src[name] for src in (gateway_platforms, yaml_cfg.get("platforms")) if isinstance(src, dict) and isinstance(src.get(name), dict))
+        section = next(nested, section)
     return section, toplevel
 
 

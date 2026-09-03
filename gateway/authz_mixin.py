@@ -325,9 +325,7 @@ class GatewayAuthorizationMixin:
         """Per-profile PairingStore for a source, else the global ``self.pairing_store``."""
         per_profile = getattr(self, "pairing_stores", None) or {}
         profile = getattr(source, "profile", None)
-        if profile and profile in per_profile:
-            return per_profile[profile]
-        return getattr(self, "pairing_store", None)
+        return per_profile[profile] if profile and profile in per_profile else getattr(self, "pairing_store", None)
 
     def _adapter_extra_for_source(self, source) -> dict:
         return _adapter_config_extra(self._adapter_for_source(source))
@@ -396,7 +394,7 @@ class GatewayAuthorizationMixin:
                 resolved_ids = resolver()
         if not isinstance(resolved_ids, (set, frozenset, list, tuple)):
             return set()
-        return {str(entry).strip() for entry in resolved_ids if isinstance(entry, (str, int)) and str(entry).strip()}
+        return {s for e in resolved_ids if isinstance(e, (str, int)) and (s := str(e).strip())}
 
     def _chat_scoped_grant(self, source, adapter_profile, is_group: bool, allow_adapter_delegation: bool) -> bool:
         """Grants that need no ``user_id`` (checked before the no-user-id guard)."""

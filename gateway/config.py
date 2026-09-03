@@ -166,11 +166,8 @@ def _coerce_dict(value: Any) -> Dict[str, Any]:
 
 def _normalize_choice(value: Any, choices: set, default: str) -> str:
     """Lower-cased *value* when it is one of *choices*, else *default*."""
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in choices:
-            return normalized
-    return default
+    normalized = value.strip().lower() if isinstance(value, str) else None
+    return normalized if normalized in choices else default
 
 
 def _dict_slot(container: dict, key: str) -> dict:
@@ -192,8 +189,7 @@ def _getenv(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def _getenv_str(name: str, default: str = "") -> str:
-    val = _getenv(name, default)
-    return val if val is not None else default
+    return val if (val := _getenv(name, default)) is not None else default
 
 
 _Platform__bundled_plugin_names: Optional[set] = None  # cached outside the enum: never a member
@@ -235,17 +231,15 @@ class Platform(Enum):
         value = value.strip().lower()
         if value in cls._value2member_map_:
             return cls._value2member_map_[value]
-
         global _Platform__bundled_plugin_names
         if _Platform__bundled_plugin_names is None:
             _Platform__bundled_plugin_names = cls._scan_bundled_plugin_platforms()
-        if value in _Platform__bundled_plugin_names:
-            return cls._add_pseudo_member(value)
-        with contextlib.suppress(Exception):
-            from gateway.platform_registry import platform_registry
-            if platform_registry.is_registered(value):
-                return cls._add_pseudo_member(value)
-        return None
+        registered = value in _Platform__bundled_plugin_names
+        if not registered:
+            with contextlib.suppress(Exception):
+                from gateway.platform_registry import platform_registry
+                registered = platform_registry.is_registered(value)
+        return cls._add_pseudo_member(value) if registered else None
 
     @classmethod
     def _add_pseudo_member(cls, value: str) -> "Platform":
@@ -306,9 +300,8 @@ class HomeChannel:
     scope_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        result = {"platform": self.platform.value, "chat_id": self.chat_id, "name": self.name}
-        result.update({k: v for k in ("thread_id", "user_id", "scope_id") if (v := getattr(self, k))})
-        return result
+        optional = {k: v for k in ("thread_id", "user_id", "scope_id") if (v := getattr(self, k))}
+        return {"platform": self.platform.value, "chat_id": self.chat_id, "name": self.name, **optional}
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HomeChannel":
@@ -319,7 +312,6 @@ class HomeChannel:
 def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> None:
     """Persist a logical home without falsely enabling a Relay-fronted adapter."""
     from hermes_cli.config import load_config, save_config
-
     config = load_config()
     platform_config = _dict_slot(_dict_slot(config, "platforms"), home.platform.value)
     if enabled_if_new:
@@ -502,9 +494,9 @@ def _has_usable_api_server_key(key: object) -> bool:
         return False
     try:
         from hermes_cli.auth import has_usable_secret
+        return has_usable_secret(key, min_length=16)
     except ImportError:
         return len(str(key).strip()) >= 16
-    return has_usable_secret(key, min_length=16)
 
 
 def _needs_extra(*keys: str) -> Callable[[PlatformConfig], bool]:
@@ -624,8 +616,7 @@ class GatewayConfig:
         return False
 
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
-        config = self.platforms.get(platform)
-        return config.home_channel if config else None
+        return self.platforms[platform].home_channel if self.platforms.get(platform) else None
 
     def get_reset_policy(self, platform: Optional[Platform] = None, session_type: Optional[str] = None) -> SessionResetPolicy:
         """Priority: platform override > type override > default."""

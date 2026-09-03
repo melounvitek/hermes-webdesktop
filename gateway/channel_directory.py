@@ -76,16 +76,13 @@ def _apply_channel_aliases(platforms: Dict[str, Any]) -> None:
         for chat_id, friendly in id_map.items():
             if not isinstance(friendly, str) or not friendly.strip():
                 continue
-            chat_id = str(chat_id)
-            friendly = friendly.strip()
+            chat_id, friendly = str(chat_id), friendly.strip()
             matches = [e for e in entries if isinstance(e, dict) and e.get("id") == chat_id]
             for e in matches:
                 e["name"] = friendly
             if not matches:
-                entries.append({
-                    "id": chat_id, "name": friendly,
-                    "type": "group" if chat_id.endswith("@g.us") else "dm", "thread_id": None,
-                })
+                entries.append({"id": chat_id, "name": friendly, "thread_id": None,
+                                "type": "group" if chat_id.endswith("@g.us") else "dm"})
 
 
 def _normalize_channel_query(value: str) -> str:
