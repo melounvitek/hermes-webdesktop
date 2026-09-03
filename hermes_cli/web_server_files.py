@@ -1,8 +1,7 @@
-"""Managed-files policy for the dashboard file browser: root resolution, path canonicalisation/containment, entry metadata.
+"""Managed-files policy for the dashboard file browser: root resolution, path containment, entry metadata.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``, which re-imports every externally used
+name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
 """
 
 import mimetypes
@@ -93,19 +92,12 @@ def _default_hermes_root_is_opt_data() -> bool:
 
 
 def _dashboard_local_update_managed_externally() -> bool:
-    """Return true when the dashboard should not offer ``hermes update``.
+    """True when the dashboard should not offer ``hermes update``.
 
-    Containerized dashboards are updated by the outer launcher/image, not by an
-    in-browser local update action. Keep this dashboard capability separate
-    from install-method detection: manual git/pip installs inside containers can
-    still behave like their actual install method in the CLI.
-
-    However, when the install method is ``git`` (a bind-mounted checkout inside
-    a container — e.g. the hermes-webui image sharing the Hermes source tree),
-    the dashboard's ``hermes update`` button is the correct update path and
-    should not be suppressed. Other containerized install methods remain
-    externally managed unless their apply path is proven safe inside the
-    running container filesystem.
+    Containerized dashboards are updated by the outer launcher/image — except a
+    ``git`` install (bind-mounted checkout, e.g. the hermes-webui image), where
+    the update button is the correct path. pip stays blocked in containers: its
+    apply path mutates the running container filesystem.
     """
     from hermes_cli.web_server import PROJECT_ROOT, detect_install_method
     if _default_hermes_root_is_opt_data():
@@ -117,14 +109,8 @@ def _dashboard_local_update_managed_externally() -> bool:
             return False
     except Exception:
         return False
-    # We are inside a container, but the install may still be self-managed.
-    # If the install method is git, the dashboard update button works against
-    # the mounted checkout and should be offered. Keep pip blocked inside
-    # containers: its apply path mutates the running container filesystem and
-    # is not the bind-mounted checkout case this gate is meant to recover.
     try:
-        method = detect_install_method(PROJECT_ROOT)
-        if method == "git":
+        if detect_install_method(PROJECT_ROOT) == "git":
             return False
     except Exception:
         pass
@@ -137,11 +123,9 @@ def _managed_files_policy(request: Request, *, create_root: bool = True) -> Mana
         root = _ensure_managed_root(raw_forced_root) if create_root else _canonical_path(Path(raw_forced_root))
         return ManagedFilesPolicy(default_path=root, locked_root=root, can_change_path=False)
 
-    # Remote/OAuth access does not imply a hosted container. Users can expose a
-    # local dashboard through the auth gate (for example a macOS launchd install)
-    # and still expect the Files page to browse their local home directory. Lock
-    # to /opt/data only when the installation's Hermes root is actually /opt/data
-    # (the container/hosted layout) or when HERMES_DASHBOARD_FILES_ROOT is set.
+    # Remote/OAuth access does not imply a hosted container (a gated macOS launchd
+    # install still browses its home). Lock to /opt/data only when the Hermes
+    # root actually IS /opt/data or HERMES_DASHBOARD_FILES_ROOT is set.
     if _default_hermes_root_is_opt_data():
         root = _ensure_managed_root(_HOSTED_MANAGED_FILES_ROOT) if create_root else _HOSTED_MANAGED_FILES_ROOT
         return ManagedFilesPolicy(default_path=root, locked_root=root, can_change_path=False)
@@ -151,10 +135,7 @@ def _managed_files_policy(request: Request, *, create_root: bool = True) -> Mana
 
 
 def _resolve_managed_path(
-    raw_path: str | None,
-    request: Request,
-    *,
-    for_write: bool = False,
+    raw_path: str | None, request: Request, *, for_write: bool = False
 ) -> tuple[ManagedFilesPolicy, Path, str]:
     policy = _managed_files_policy(request)
     text = _path_text(raw_path)
@@ -190,11 +171,7 @@ def _resolve_managed_path(
 
 def _managed_response_meta(policy: ManagedFilesPolicy) -> Dict[str, Any]:
     locked_root = str(policy.locked_root) if policy.locked_root is not None else None
-    return {
-        "root": locked_root,
-        "locked_root": locked_root,
-        "can_change_path": policy.can_change_path,
-    }
+    return {"root": locked_root, "locked_root": locked_root, "can_change_path": policy.can_change_path}
 
 
 def _managed_file_entry(policy: ManagedFilesPolicy, target: Path) -> Dict[str, Any]:

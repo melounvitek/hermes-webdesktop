@@ -1,8 +1,7 @@
-"""Serve-process lifecycle helpers: parent start markers and death watchdog, port-conflict preflight, ready-file/sentinel announcement, browser auto-open, forwarded-IP resolution.
+"""Serve-process lifecycle: parent death watchdog, port-conflict preflight, READY announcement, browser open, trusted proxies.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``, which re-imports every externally used
+name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
 """
 
 import logging
@@ -27,8 +26,8 @@ _log = logging.getLogger("hermes_cli.web_server")
 def _process_start_marker(pid: int) -> str:
     """Return a cross-runtime marker for the current incarnation of ``pid``.
 
-    ``ProcessLookupError`` means the process is absent. Other failures are left
-    distinct so callers can fail safe rather than killing a healthy backend.
+    ``ProcessLookupError`` means the process is absent; other failures stay
+    distinct so callers fail safe rather than killing a healthy backend.
     """
     if sys.platform == "linux":
         try:
@@ -36,8 +35,8 @@ def _process_start_marker(pid: int) -> str:
         except FileNotFoundError as exc:
             raise ProcessLookupError(pid) from exc
 
-        # The command in field 2 may contain spaces or parentheses. Splitting
-        # after its final ')' leaves field 3 at index zero and field 22 at 19.
+        # Field 2 (comm) may contain spaces/parens; split after its final ')'
+        # so field 3 is index 0 and field 22 (starttime) is index 19.
         fields = stat_line.rsplit(")", 1)[1].strip().split()
         if len(fields) < 20 or not fields[19].isdigit():
             raise OSError(f"invalid /proc stat data for PID {pid}")
@@ -51,13 +50,7 @@ def _process_start_marker(pid: int) -> str:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.GetProcessTimes.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-            ctypes.POINTER(wintypes.FILETIME),
-        ]
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
         kernel32.GetProcessTimes.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
@@ -68,32 +61,19 @@ def _process_start_marker(pid: int) -> str:
                 raise ProcessLookupError(pid)
             raise OSError(error, f"OpenProcess failed for PID {pid}")
 
-        creation = wintypes.FILETIME()
-        exit_time = wintypes.FILETIME()
-        kernel = wintypes.FILETIME()
-        user = wintypes.FILETIME()
+        creation, exit_time, kernel, user = (wintypes.FILETIME() for _ in range(4))
         try:
             if not kernel32.GetProcessTimes(
-                handle,
-                ctypes.byref(creation),
-                ctypes.byref(exit_time),
-                ctypes.byref(kernel),
-                ctypes.byref(user),
+                handle, ctypes.byref(creation), ctypes.byref(exit_time), ctypes.byref(kernel), ctypes.byref(user)
             ):
-                error = ctypes.get_last_error()
-                raise OSError(error, f"GetProcessTimes failed for PID {pid}")
+                raise OSError(ctypes.get_last_error(), f"GetProcessTimes failed for PID {pid}")
         finally:
             kernel32.CloseHandle(handle)
 
         filetime = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
         return f"win:{filetime + 504911232000000000}"
 
-    result = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "lstart="],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, check=False)
     marker = result.stdout.strip()
     if result.returncode == 0 and marker:
         return f"ps:{marker}"
@@ -112,12 +92,11 @@ def _valid_parent_start_marker(marker: str) -> bool:
 
 
 def _parent_start_markers_match(actual: str, expected: str) -> bool:
-    """Compare parent markers across Desktop protocol generations.
+    """Compare parent markers across Desktop generations.
 
-    Older Windows Desktop builds send .NET ticks (``win:``). New builds use
-    Electron's native process creation time in Unix milliseconds (``winms:``)
-    so startup does not need to launch PowerShell. The backend still reads the
-    exact FILETIME and normalizes it only when the expected marker is ``winms``.
+    Old Windows Desktop sends .NET ticks (``win:``); new builds send Electron's
+    creation time in Unix ms (``winms:``) to avoid launching PowerShell. The
+    backend reads the exact FILETIME and normalizes only for ``winms``.
     """
     if actual == expected:
         return True
@@ -138,32 +117,18 @@ def _parent_start_markers_match(actual: str, expected: str) -> bool:
 def _warm_gateway_module() -> None:
     """Pre-import heavy modules so the event loop is not stalled on first use.
 
-    On a cold Windows install, importing these module chains triggers .pyc
-    compilation and Defender real-time scans that can stall the event loop
-    for 15-30s. The original fix (pre-#60800) only warmed
-    ``hermes_cli.gateway``. But the first WS connection and its initial
-    RPC burst (``setup.status``, ``setup.runtime_check``,
-    ``gateway.ready``→``resolve_skin``) pull in several *other* heavy
-    chains that were still imported on the loop thread, contributing to
-    the ~14s cold-start stall (#60800). Warm them all here so the cost
-    is paid in a worker thread while the server socket is already open.
+    Cold Windows installs pay .pyc compilation + Defender scans (15-30s) on
+    these chains; the first WS RPC burst (setup.status, setup.runtime_check,
+    gateway.ready→resolve_skin, model.options) pulled them in on the loop
+    thread (#60800). Warm them all off-loop while the socket is already open.
     """
     for mod in (
         "hermes_cli.gateway",
-        # setup.status / setup.runtime_check resolve provider auth state,
-        # which imports copilot_auth (→ subprocess module) and scans
-        # credential files. First import is noticeably slow on Windows.
-        "hermes_cli.auth",
+        "hermes_cli.auth",  # provider auth state → copilot_auth → subprocess
         "hermes_cli.copilot_auth",
         "hermes_cli.runtime_provider",
-        # resolve_skin() reads config + initialises the skin engine.
-        # Even though handle_ws now calls it via asyncio.to_thread
-        # (see tui_gateway/ws.py), warming it here avoids the first-call
-        # import cost inside that thread.
-        "hermes_cli.skin_engine",
-        # model.options / picker context — parses provider catalogs and
-        # the models.dev cache on first use.
-        "hermes_cli.inventory",
+        "hermes_cli.skin_engine",  # resolve_skin() config + skin engine init
+        "hermes_cli.inventory",  # provider catalogs + models.dev cache
         "hermes_cli.model_switch",
     ):
         try:
@@ -184,12 +149,9 @@ def _resolve_restart_drain_timeout() -> float:
 def _eager_reconcile_own_session_db() -> None:
     """One writable open of this process's own state.db at startup.
 
-    ``SessionDB.__init__`` runs ``_init_schema`` → ``_reconcile_columns``,
-    bringing a store left behind by `hermes update` current before the
-    dashboard's first session-list poll, with the open-time lock patience
-    (jittered retries) absorbing transient contention. Never raises: a
-    store this cannot fix is still served through the read-probe heal in
-    :func:`_open_session_db_at_path`, which retries on every poll.
+    ``SessionDB.__init__`` runs ``_init_schema`` → ``_reconcile_columns`` with
+    open-time lock patience. Never raises: an unfixable store still gets the
+    per-poll read-probe heal in :func:`_open_session_db_at_path`.
     """
     try:
         from hermes_state import SessionDB, _default_db_path
@@ -203,25 +165,17 @@ def _eager_reconcile_own_session_db() -> None:
 
 
 def _read_bound_port(server: "uvicorn.Server", fallback: int) -> int:
-    """Read the OS-assigned port from a live uvicorn server socket.
-
-    After ``server.startup()`` the socket is bound.  Returns the actual
-    port so ephemeral (port-0) discovery works without a pre-bind TOCTOU.
-    Falls back to *fallback* if the socket list is empty (shouldn't happen
-    but guards against uvicorn internals changing).
-    """
+    """Read the OS-assigned port from the live uvicorn socket (ephemeral port-0 discovery)."""
     if server.servers and server.servers[0].sockets:
         return server.servers[0].sockets[0].getsockname()[1]
     return fallback
 
 
 def _write_dashboard_ready_file(actual_port: int) -> None:
-    """Optionally publish the dashboard port through an atomic ready file.
+    """Publish the port through an atomic ready file when ``HERMES_DESKTOP_READY_FILE`` is set.
 
-    Windows Desktop can launch dashboard backends with ``pythonw.exe`` to avoid
-    console flashes. That path cannot rely on stdout for the port announcement,
-    so Electron passes ``HERMES_DESKTOP_READY_FILE`` and waits for this JSON.
-    Normal CLI/dashboard launches still use the stdout READY line below.
+    Windows Desktop launches via ``pythonw.exe`` (no console flash) cannot use
+    stdout for the port announcement, so Electron waits for this JSON instead.
     """
     target = os.environ.get("HERMES_DESKTOP_READY_FILE")
     if not target:
@@ -233,12 +187,7 @@ def _write_dashboard_ready_file(actual_port: int) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps({"port": int(actual_port)}, separators=(",", ":"))
         with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=str(path.parent),
-            prefix=f"{path.name}.",
-            suffix=".tmp",
-            delete=False,
+            "w", encoding="utf-8", dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp", delete=False
         ) as fh:
             fh.write(payload)
             fh.flush()
@@ -254,26 +203,18 @@ def _write_dashboard_ready_file(actual_port: int) -> None:
         _log.warning("Failed to write dashboard ready file %r: %s", target, exc)
 
 
-def _maybe_open_browser(
-    host: str, actual_port: int, open_browser: bool, initial_profile: str
-) -> None:
+def _maybe_open_browser(host: str, actual_port: int, open_browser: bool, initial_profile: str) -> None:
     """Open the dashboard URL in the user's browser if appropriate.
 
-    Skips on headless Linux (no ``DISPLAY`` / ``WAYLAND_DISPLAY``) to avoid
-    TUI browsers (links, lynx) that would SIGHUP the server process.
-    Maps ``0.0.0.0`` / ``::`` binds to ``127.0.0.1`` so the browser opens
-    a reachable URL.
+    Skips headless Linux (no DISPLAY/WAYLAND_DISPLAY) so a TUI browser can't
+    SIGHUP the server; maps ``0.0.0.0``/``::`` binds to ``127.0.0.1``.
     """
     if not open_browser:
         return
 
     import webbrowser
 
-    _has_display = (
-        sys.platform != "linux"
-        or bool(os.environ.get("DISPLAY"))
-        or bool(os.environ.get("WAYLAND_DISPLAY"))
-    )
+    _has_display = sys.platform != "linux" or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     if not _has_display:
         _log.debug(
             "Skipping browser-open: no DISPLAY or WAYLAND_DISPLAY detected "
@@ -306,23 +247,15 @@ def _is_serve_orphaned(
 ) -> bool:
     """True when the exact Desktop process that owns this backend is gone.
 
-    ``HERMES_PARENT_PID`` is the Electron Desktop PID, not necessarily this
-    Python process's immediate PPID. On Windows the venv ``hermes.exe`` launcher
-    introduces one or more shim processes, so comparing ``os.getppid()`` to the
-    Electron PID incorrectly treats a healthy backend as orphaned and exits 0.
-
-    New Desktop versions also provide the owner's process-start marker. This
-    prevents a recycled PID from keeping an orphan alive. Older versions remain
-    compatible through the PID-only probe. Any inconclusive probe failure is
-    fail-safe: keep serving rather than killing a backend whose owner could not
-    be conclusively shown to be dead.
+    ``HERMES_PARENT_PID`` is the Electron PID, not necessarily our PPID (the
+    Windows ``hermes.exe`` launcher adds shims), so never compare getppid().
+    The start marker (newer Desktops) defeats PID recycling; PID-only probing
+    stays for older ones. Any inconclusive failure keeps serving (fail-safe).
     """
     try:
         if expected_start_marker is not None:
             probe = process_start_marker or _process_start_marker
-            return not _parent_start_markers_match(
-                probe(int(desktop_pid)), expected_start_marker
-            )
+            return not _parent_start_markers_match(probe(int(desktop_pid)), expected_start_marker)
 
         if pid_exists is None:
             from gateway.status import _pid_exists
@@ -338,11 +271,9 @@ def _is_serve_orphaned(
 def _start_parent_death_watchdog() -> None:
     """Exit when the exact desktop parent that spawned this backend dies.
 
-    The desktop passes its PID and, in newer versions, its process-start marker
-    plus a per-spawn nonce. The marker distinguishes a live owner from PID reuse;
-    the nonce makes partial/mixed-version identity plumbing fail safe. Legacy
-    Desktop versions that provide only ``HERMES_PARENT_PID`` retain PID-only
-    tracking.
+    Desktop passes its PID and, in newer versions, a start marker (defeats PID
+    reuse) plus a per-spawn nonce (makes mixed-version plumbing fail safe:
+    marker without nonce or vice versa disables the watchdog).
     """
     raw_pid = os.environ.get("HERMES_PARENT_PID")
     start_marker = os.environ.get("HERMES_PARENT_START_MARKER")
@@ -356,14 +287,9 @@ def _start_parent_death_watchdog() -> None:
         return
 
     has_marker = start_marker is not None
-    has_nonce = nonce is not None
-    if has_marker != has_nonce:
+    if has_marker != (nonce is not None):
         return
-    if has_marker and (
-        not _valid_parent_start_marker(start_marker or "")
-        or not nonce
-        or nonce != nonce.strip()
-    ):
+    if has_marker and (not _valid_parent_start_marker(start_marker or "") or not nonce or nonce != nonce.strip()):
         return
 
     try:
@@ -379,22 +305,12 @@ def _start_parent_death_watchdog() -> None:
     threading.Thread(target=_loop, daemon=True, name="serve-parent-watchdog").start()
 
 
-# ── Port-conflict sentinel (#93608) ─────────────────────────────────────────
-# When the requested port is already bound, uvicorn's ``bind_socket()``
-# catches the OSError itself and does ``logger.error(exc); sys.exit(1)`` — a
-# bare ERROR line plus the same exit 1 as any real backend crash. The desktop
-# spawn (and any script wrapping ``hermes serve``) cannot tell "port occupied"
-# from "backend broken". So we probe the exact bind before handing the socket
-# to uvicorn and, on conflict, emit ONE machine-readable stdout sentinel plus
-# a human hint, then exit with a distinct code.
-#
-# 75 == BSD ``EX_TEMPFAIL`` (sysexits.h) — the codebase's existing convention
-# for "transient environmental condition, not a code failure" (see
-# gateway/restart.py and kanban_db.py's quota-wall sentinel).
+# Port-conflict sentinel (#93608): uvicorn's bind_socket() turns EADDRINUSE into
+# a bare ERROR + exit 1, indistinguishable from a crash for the Desktop spawn.
+# We probe the exact bind first and emit ONE machine-readable stdout line plus a
+# distinct exit code. 75 == BSD EX_TEMPFAIL, the codebase's "transient
+# environmental condition" convention (gateway/restart.py, kanban_db.py).
 PORT_IN_USE_EXIT_CODE = 75
-
-# One line, stable format, parsed by machines — mirrors the shape of the
-# HERMES_BACKEND_READY sentinel (which is NOT changed by any of this).
 _PORT_IN_USE_SENTINEL = "BACKEND_PORT_IN_USE port={port}"
 
 
@@ -402,19 +318,16 @@ def _is_addr_in_use_error(exc: OSError) -> bool:
     """True when ``exc`` is the platform's address-in-use bind failure."""
     import errno
 
-    codes = {errno.EADDRINUSE, 98, 48, 10048}  # POSIX, Linux, macOS, WinSock
-    if exc.errno in codes:
-        return True
-    return getattr(exc, "winerror", None) == 10048  # WSAEADDRINUSE
+    # POSIX, Linux, macOS, WinSock; WSAEADDRINUSE also surfaces as winerror.
+    return exc.errno in {errno.EADDRINUSE, 98, 48, 10048} or getattr(exc, "winerror", None) == 10048
 
 
 def _port_bind_conflict(host: str, port: int) -> bool:
     """Probe whether binding ``host:port`` would fail with EADDRINUSE.
 
-    ``port == 0`` (ephemeral) can never conflict — the kernel picks a free
-    port — so the probe is skipped and ``--port 0`` behaves exactly as
-    before. Any probe error other than address-in-use returns ``False`` so
-    uvicorn surfaces it with its normal diagnostics (bad host, EACCES, …).
+    ``port == 0`` (ephemeral) never conflicts, so it is skipped. Any probe
+    error other than address-in-use returns ``False`` so uvicorn surfaces it
+    with its normal diagnostics (bad host, EACCES, …).
     """
     if not port:
         return False
@@ -426,21 +339,15 @@ def _port_bind_conflict(host: str, port: int) -> bool:
     except OSError:
         return False
     try:
-        import sys as _sys_mod
-
         _exclusive = getattr(_socket, "SO_EXCLUSIVEADDRUSE", None)
-        if _sys_mod.platform == "win32" and _exclusive is not None:
-            # Windows: SO_REUSEADDR means "bind over anyone" — a probe (or
-            # uvicorn bind) with it SUCCEEDS on top of a live LISTEN socket,
-            # so it can never detect a conflict. SO_EXCLUSIVEADDRUSE makes
-            # the probe fail with WSAEADDRINUSE exactly when another socket
-            # holds the port (the reporter's 10048 shape in #93608).
+        if sys.platform == "win32" and _exclusive is not None:
+            # Windows SO_REUSEADDR binds over a live LISTEN socket and can never
+            # detect a conflict; SO_EXCLUSIVEADDRUSE fails with 10048 exactly
+            # when another socket holds the port (#93608).
             probe.setsockopt(_socket.SOL_SOCKET, _exclusive, 1)
         else:
-            # POSIX: match uvicorn's bind flags (uvicorn/config.py
-            # bind_socket) so the probe conflicts exactly when uvicorn's own
-            # bind would: SO_REUSEADDR lets TIME_WAIT remnants pass while a
-            # live LISTEN socket still fails.
+            # Match uvicorn's own bind flags so the probe conflicts exactly when
+            # its bind would: TIME_WAIT remnants pass, a live LISTEN fails.
             probe.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         probe.bind((host, port))
     except OSError as exc:
@@ -455,20 +362,11 @@ def _port_bind_conflict(host: str, port: int) -> bool:
 def _write_machine_sentinel_line(line: str) -> None:
     """Write a machine-parsed sentinel line to the REAL stdout (fd 1).
 
-    The serve startup path imports ``tui_gateway.server`` (flush-on-SIGTERM
-    handlers, #94724) which redirects ``sys.stdout`` to ``sys.stderr`` at
-    import time to keep stray prints off the JSON-RPC protocol stream. Any
-    machine-readable sentinel printed after that import via ``print()`` lands
-    on stderr — invisible to consumers that parse the child's stdout pipe
-    (the Desktop spawn, scripts). fd 1 is untouched by the Python-level
-    redirect, so write there.
-
-    Best-effort by design: if fd 1 is unwritable (closed; invalid under
-    pythonw.exe), fall back to ``print()`` for human visibility only — the
-    redirected stream can't reach stdout-parsing consumers, and pythonw
-    Desktop spawns rely on ``_write_dashboard_ready_file()`` (the
-    HERMES_DESKTOP_READY_FILE channel) for port discovery instead. Never
-    raises: a sentinel-delivery failure must not kill a healthy serve.
+    ``tui_gateway.server`` redirects ``sys.stdout`` to stderr at import (#94724),
+    so a ``print()`` sentinel never reaches the Desktop's stdout pipe; fd 1 is
+    untouched. If fd 1 is unwritable (pythonw.exe) fall back to ``print()`` for
+    humans only — pythonw spawns discover the port via the ready file. Never
+    raises.
     """
     try:
         os.write(1, (line + "\n").encode())
@@ -496,12 +394,10 @@ _DEFAULT_DASHBOARD_FORWARDED_ALLOW_IPS = ("127.0.0.1", "::1")
 
 
 def _dashboard_forwarded_allow_ips(dashboard_config: dict[str, Any]) -> list[str]:
-    """Return the bounded proxy addresses uvicorn may trust.
+    """Return the bounded proxy addresses uvicorn may trust: loopback plus valid config entries.
 
-    Uvicorn's default trusts loopback. Preserve that behavior and extend it
-    only with explicit IP addresses or CIDR networks from config. Invalid or
-    unbounded entries fail closed instead of turning arbitrary client-supplied
-    forwarding headers into request metadata.
+    Invalid or unbounded (/0, '*') ``dashboard.trusted_proxies`` entries fail
+    closed so client-supplied forwarding headers never become request metadata.
     """
     configured = dashboard_config.get("trusted_proxies", [])
     if configured in (None, ""):
