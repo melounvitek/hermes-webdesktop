@@ -271,12 +271,6 @@ def _load_yaml_manifest(manifest_file: Path):
         return yaml.safe_load(f) or {}
 
 
-def _read_portable_manifest(plugin_dir: Path) -> dict:
-    """Validated Agent Plugins v1 ``plugin.json`` manifest (diagnostics dropped); raises on failure."""
-    from hermes_cli.agent_plugins import read_agent_plugin_manifest
-    return read_agent_plugin_manifest(plugin_dir)[0]
-
-
 def _read_manifest(plugin_dir: Path) -> dict:
     """Read a native or portable manifest, preferring native YAML."""
     manifest_file = _native_manifest_file(plugin_dir)
@@ -284,7 +278,8 @@ def _read_manifest(plugin_dir: Path) -> dict:
         if not _has_portable_manifest(plugin_dir):
             return {}
         try:
-            return _read_portable_manifest(plugin_dir)
+            from hermes_cli.agent_plugins import read_agent_plugin_manifest
+            return read_agent_plugin_manifest(plugin_dir)[0]
         except Exception as e:
             logger.warning("Failed to read plugin.json in %s: %s", plugin_dir, e)
             return {}
@@ -794,7 +789,12 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None)
     ok, output = _git_pull_plugin_dir(target)
     if not ok:
         raise PluginOperationError(output)
-    _record_pulled_revision(target, metadata, install_record)
+    # Store the new HEAD in the plugin's install-metadata record (if it has one).
+    git_exe = _resolve_git_executable() if install_record else None
+    if git_exe:
+        install_record["revision"] = _git_head_revision(target, git_exe)
+        metadata[target.name] = install_record
+        _write_install_metadata(metadata)
     return output
 
 
@@ -861,15 +861,6 @@ def _post_pull_housekeeping(target: Path, console) -> None:
     """After ``git pull``: drop stale ``__pycache__`` and copy any new ``.example`` files."""
     _clear_plugin_bytecode(target)
     _copy_example_files(target, console)
-
-
-def _record_pulled_revision(target: Path, metadata: dict, install_record: dict) -> None:
-    """After a pull, store the new HEAD in the plugin's install-metadata record (if it has one)."""
-    git_exe = _resolve_git_executable() if install_record else None
-    if git_exe:
-        install_record["revision"] = _git_head_revision(target, git_exe)
-        metadata[target.name] = install_record
-        _write_install_metadata(metadata)
 
 
 def _remove_plugin_core(target: Path) -> None:
@@ -1221,7 +1212,8 @@ def _read_manifest_info(d: Path, prefix: str):
         if not _has_portable_manifest(d):
             return None
         try:
-            manifest = _read_portable_manifest(d)
+            from hermes_cli.agent_plugins import read_agent_plugin_manifest
+            manifest = read_agent_plugin_manifest(d)[0]
             name = manifest["name"]
         except Exception:
             return None
@@ -1290,22 +1282,16 @@ def _discover_all_plugins() -> list:
     seen: dict = {}
     # memory/, context_engine/ and model-providers/ load through dedicated registries, not the
     # PluginManager opt-in surface, so listing them as toggleable plugins would mislead.
-    from hermes_cli.plugins import get_bundled_plugins_dir
+    from hermes_cli.plugins import discover_entrypoint_manifests, get_bundled_plugins_dir
     for base, source, skip in (
         (get_bundled_plugins_dir(), "bundled", {"memory", "context_engine", "model-providers"}),
         (_plugins_dir(), "user", set()),
     ):
         _scan_level(base, source, skip, "", 0, seen)
-    for name, version, description, path in _discover_entrypoint_plugins():
-        seen[name] = (name, version, description, "entrypoint", path, name)
+    # Entry-point plugins are installed as Python packages, so they have no plugin directory.
+    for m in discover_entrypoint_manifests():
+        seen[m.name] = (m.name, m.version, m.description, "entrypoint", m.path, m.name)
     return list(seen.values())
-
-
-def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
-    """``(name, version, summary, target)`` for ``hermes_agent.plugins`` entry points — installed
-    as Python packages, so they have no plugin directory."""
-    from hermes_cli.plugins import discover_entrypoint_manifests
-    return [(m.name, m.version, m.description, m.path) for m in discover_entrypoint_manifests()]
 
 
 def _plugin_status(name: str, enabled: set, disabled: set, key: str = "") -> str:
@@ -1423,25 +1409,6 @@ _save_memory_provider = functools.partial(_write_config_value, "memory", "provid
 _save_context_engine = functools.partial(_write_config_value, "context", "engine")
 
 
-def _configure_provider_category(
-    title: str, default_label: str, default_name: str, current: str, choices, save
-) -> bool:
-    """Radio picker: the built-in default first, then *choices*; a current value not among
-    them is appended as ``(not found)``. Calls *save* and returns True when the choice changed."""
-    from hermes_cli.curses_ui import curses_radiolist
-    names = [default_name] + [name for name, _desc in choices]
-    items = [default_label] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
-    if current not in names:
-        names.append(current)
-        items.append(f"{current} (not found)")
-    selected = max(i for i, name in enumerate(names) if name == current)
-    new_value = names[curses_radiolist(title=title, items=items, selected=selected)]
-    if new_value == current:
-        return False
-    save(new_value)
-    return True
-
-
 # (title, default label, default name, current-value reader, discovery fn, saver) per provider
 # category. Readers/savers are looked up at call time so module-level patching still applies.
 _PROVIDER_CATEGORY_SPECS = (
@@ -1453,18 +1420,29 @@ _PROVIDER_CATEGORY_SPECS = (
 
 
 def _configure_category_spec(spec) -> bool:
-    """Launch the radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row. Returns True if changed."""
+    """Radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row: the built-in default first, then the
+    discovered choices; a current value not among them is appended as ``(not found)``. Saves and
+    returns True when the choice changed."""
+    from hermes_cli.curses_ui import curses_radiolist
     title, default_label, default_name, current, discover, save = spec
-    return _configure_provider_category(
-        f"{title} (select one)", f"{default_label} (default)", default_name, current(), discover(), save)
+    current = current()
+    choices = discover()
+    names = [default_name] + [name for name, _desc in choices]
+    items = [f"{default_label} (default)"] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
+    if current not in names:
+        names.append(current)
+        items.append(f"{current} (not found)")
+    selected = max(i for i, name in enumerate(names) if name == current)
+    new_value = names[curses_radiolist(title=f"{title} (select one)", items=items, selected=selected)]
+    if new_value == current:
+        return False
+    save(new_value)
+    return True
 
 
 def _provider_categories() -> list:
     """``[(title, current_label, configure_fn), ...]`` rows for the composite UI."""
-    return [
-        (spec[0], spec[3]() or spec[1], functools.partial(_configure_category_spec, spec))
-        for spec in _PROVIDER_CATEGORY_SPECS
-    ]
+    return [(s[0], s[3]() or s[1], functools.partial(_configure_category_spec, s)) for s in _PROVIDER_CATEGORY_SPECS]
 
 
 # ── Composite plugins UI ────────────────────────────────────────────────────────────────────
@@ -1556,7 +1534,7 @@ def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]
 
 def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
-    from hermes_cli.curses_ui import flush_stdin
+    from hermes_cli.curses_ui import _addnstr, flush_stdin
     chosen = set(plugin_selected)
     n_plugins = len(plugin_keys)
     n_categories = len(categories)
@@ -1576,10 +1554,12 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
         return base | curses.color_pair(pair) if curses.has_colors() else base
 
     def _put(stdscr, y, x, text, max_x, attr):
-        try:
-            stdscr.addnstr(y, x, text, max_x - 1, attr)
-        except curses.error:
-            pass
+        _addnstr(stdscr, y, x, text, max_x - 1, attr)
+
+    def _row(text, idx, cursor, pair):
+        """One navigable body row: arrow marker + bold color when *idx* is the cursor."""
+        arrow = "\u2192" if idx == cursor else " "
+        return (f" {arrow} {text}", _attr(curses.A_BOLD, pair) if idx == cursor else curses.A_NORMAL)
 
     def _configure_category(ci):
         """Leave curses, run the category's picker, refresh its row, re-enter curses."""
@@ -1604,17 +1584,12 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
             lines.append(("  General Plugins", _attr(curses.A_BOLD, 2)))
             for i in range(scroll_offset, min(n_plugins, scroll_offset + max(visible_rows, 0))):
                 check = "\u2713" if i in chosen else " "
-                arrow = "\u2192" if i == cursor else " "
-                attr = _attr(curses.A_BOLD, 1) if i == cursor else curses.A_NORMAL
-                lines.append((f" {arrow} [{check}] {plugin_labels[i]}", attr))
+                lines.append(_row(f"[{check}] {plugin_labels[i]}", i, cursor, 1))
         lines.append(("", curses.A_NORMAL))
         if n_categories > 0:
             lines.append(("  Provider Plugins", _attr(curses.A_BOLD, 2)))
             for ci, (cat_name, cat_current, _cat_fn) in enumerate(categories):
-                cat_idx = n_plugins + ci
-                arrow = "\u2192" if cat_idx == cursor else " "
-                attr = _attr(curses.A_BOLD, 3) if cat_idx == cursor else curses.A_NORMAL
-                lines.append((f" {arrow}   {cat_name:<24} \u25b8 {cat_current}", attr))
+                lines.append(_row(f"  {cat_name:<24} \u25b8 {cat_current}", n_plugins + ci, cursor, 3))
         return lines
 
     def _draw(stdscr):
@@ -1731,23 +1706,21 @@ def dashboard_install_plugin(identifier: str, *, force: bool, enable: bool) -> d
     """Non-interactive install for the web dashboard. Returns a JSON-serializable dict."""
     warnings: list[str] = []
     try:
-        insecure = _resolve_git_url(identifier)[0].startswith(("http://", "file://"))
+        if _resolve_git_url(identifier)[0].startswith(("http://", "file://")):
+            warnings.append("Insecure URL scheme; prefer https:// or git@ for production installs.")
     except ValueError:
-        insecure = False
-    if insecure:
-        warnings.append("Insecure URL scheme; prefer https:// or git@ for production installs.")
-
+        pass
     try:
         target, installed_manifest, installed_name = _install_plugin_core(identifier, force=force)
     except PluginScanBlocked as exc:
         fields = ("pattern_id", "severity", "category", "file", "line", "description")
-        findings = [
-            {k: getattr(f, k) for k in fields}
-            for f in (exc.scan_result.findings if exc.scan_result is not None else ())
-        ]
         return {
             "ok": False, "error": str(exc), "scan_blocked": True,
-            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"), "scan_findings": findings,
+            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"),
+            "scan_findings": [
+                {k: getattr(f, k) for k in fields}
+                for f in (exc.scan_result.findings if exc.scan_result is not None else ())
+            ],
         }
     except PluginOperationError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1788,10 +1761,10 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
     def _from_manifest_on_disk() -> Optional[str]:
         from hermes_cli.plugins import get_bundled_plugins_dir
         for base in (get_bundled_plugins_dir(), _plugins_dir()):
-            if base.is_dir() and (base / name).is_dir():
-                toolset = _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
-                if toolset:
-                    return toolset
+            if base.is_dir() and (base / name).is_dir() and (
+                toolset := _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
+            ):
+                return toolset
         return None
 
     for lookup in (_from_loaded_plugin, _from_manifest_on_disk):
@@ -1835,11 +1808,9 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     """Enable or disable a plugin in ``config.yaml`` (runtime allow/deny lists)."""
     if _resolve_plugin_key(name) is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
-
     en = _get_enabled_set()
     dis = _get_disabled_set()
-    already = (name in en and name not in dis) if enabled else (name not in en and name in dis)
-    if already:
+    if ((name in en and name not in dis) if enabled else (name not in en and name in dis)):
         return {"ok": True, "name": name, "unchanged": True}
     _set_plugin_enabled(name, enable=enabled)
     _toggle_plugin_toolset(name, enable=enabled)
@@ -1848,9 +1819,8 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
 
 def _user_installed_plugin_dir(name: str) -> Optional[Path]:
     """Resolved path under ``~/.hermes/plugins/<name>`` if it exists."""
-    plugins_dir = _plugins_dir()
     try:
-        target = _sanitize_plugin_name(name, plugins_dir, allow_subdir=True)
+        target = _sanitize_plugin_name(name, _plugins_dir(), allow_subdir=True)
     except ValueError:
         return None
     return target if target.is_dir() else None
@@ -1882,12 +1852,13 @@ def _clear_plugin_bytecode(target: Path) -> int:
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
-            if cache_dir.is_dir():
-                try:
-                    shutil.rmtree(cache_dir)
-                    removed += 1
-                except OSError:
-                    pass
+            if not cache_dir.is_dir():
+                continue
+            try:
+                shutil.rmtree(cache_dir)
+                removed += 1
+            except OSError:
+                pass
     except OSError:
         pass
     return removed
@@ -1917,6 +1888,29 @@ def _reapply_stash(git_exe: str, target: Path) -> bool:
     return True
 
 
+def _autostash_dirty_tree(git_exe: str, target: Path) -> tuple[bool, str]:
+    """Stash local edits before a pull. Returns ``(stash_created, error)``; a non-empty error means
+    the tree is dirty but nothing was saved, so the pull must not run."""
+    status = _run_plugin_git(git_exe, target, "status", "--porcelain")
+    if status.returncode != 0 or not status.stdout.strip():
+        return False, ""
+    pre_stash = _stash_ref(git_exe, target)
+    push = _run_plugin_git(
+        git_exe, target, "stash", "push", "--include-untracked", "-m", "hermes-plugin-update-autostash")
+    post_stash = _stash_ref(git_exe, target)
+    if not post_stash or post_stash == pre_stash:
+        err = _safe_git_error(push)
+        return False, (
+            "Local changes in the plugin checkout could not be "
+            "stashed; update aborted before touching the checkout."
+            + (f"\n{err}" if err else ""))
+    if push.returncode != 0:
+        # Saved-but-couldn't-clean (undeletable untracked files): the stash entry is complete;
+        # reset tracked mods so the pull isn't blocked by a still-dirty tree.
+        _run_plugin_git(git_exe, target, "reset", "--hard", "HEAD")
+    return True, ""
+
+
 def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     """``git pull --ff-only`` a plugin checkout, autostashing local edits (users patch installed
     plugins in place, and a plain ff-only pull would then refuse forever)."""
@@ -1924,30 +1918,10 @@ def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     if not git_exe:
         return False, "git is not installed or not in PATH."
     try:
-        status = _run_plugin_git(git_exe, target, "status", "--porcelain")
-        stash_created = False
-        if status.returncode == 0 and status.stdout.strip():
-            pre_stash = _stash_ref(git_exe, target)
-            push = _run_plugin_git(
-                git_exe, target, "stash", "push", "--include-untracked", "-m",
-                "hermes-plugin-update-autostash")
-            post_stash = _stash_ref(git_exe, target)
-            stash_created = bool(post_stash) and post_stash != pre_stash
-            if not stash_created:
-                # Nothing was saved — do not risk the pull clobbering edits.
-                err = _safe_git_error(push)
-                return False, (
-                    "Local changes in the plugin checkout could not be "
-                    "stashed; update aborted before touching the checkout."
-                    + (f"\n{err}" if err else ""))
-            if push.returncode != 0:
-                # Saved-but-couldn't-clean (undeletable untracked files):
-                # the stash entry is complete; reset tracked mods so the
-                # pull isn't blocked by a still-dirty tree.
-                _run_plugin_git(git_exe, target, "reset", "--hard", "HEAD")
-
+        stash_created, err = _autostash_dirty_tree(git_exe, target)
+        if err:
+            return False, err
         result = _run_plugin_git(git_exe, target, "pull", "--ff-only")
-
         if result.returncode != 0:
             err = _safe_git_error(result) or "git pull failed."
             if not stash_created:
