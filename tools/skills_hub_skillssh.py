@@ -1,16 +1,13 @@
 """Skills Hub skills.sh adapter: catalog discovery via skills.sh, content via GitHub."""
 
 import hashlib
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
-import httpx
-
-from tools.skills_hub_github import GitHubAuth, GitHubSource
+from tools.skills_hub_github import GitHubAuth, GitHubSource, _split_repo_id
 from tools.skills_hub_models import (
-    SkillBundle, SkillMeta, SkillSource, _cache_metas, _cached_metas, hub,
+    SkillBundle, SkillMeta, SkillSource, _cache_metas, _cached_metas, _get_json, _get_text, _memo_json,
 )
 
 logger = logging.getLogger("tools.skills_hub")
@@ -18,10 +15,6 @@ logger = logging.getLogger("tools.skills_hub")
 
 def _strip_html(value: str) -> str:
     return re.sub(r'<[^>]+>', '', value)
-
-
-def _dedupe_keep_order(items: List[str]) -> List[str]:
-    return list(dict.fromkeys(items))
 
 
 class SkillsShSource(SkillSource):
@@ -64,12 +57,11 @@ class SkillsShSource(SkillSource):
 
     _strip_html = staticmethod(_strip_html)
 
+    SOURCE_ID = "skills-sh"
+
     def __init__(self, auth: GitHubAuth):
         self.auth = auth
         self.github = GitHubSource(auth=auth)
-
-    def source_id(self) -> str:
-        return "skills-sh"
 
     def trust_level_for(self, identifier: str) -> str:
         return self.github.trust_level_for(self._normalize_identifier(identifier))
@@ -101,14 +93,9 @@ class SkillsShSource(SkillSource):
         if cached is not None:
             return cached[:limit]
 
-        try:
-            resp = httpx.get(self.SEARCH_URL, params={"q": query, "limit": limit}, timeout=20)
-            if resp.status_code != 200:
-                return []
-            data = resp.json()
-        except (httpx.HTTPError, json.JSONDecodeError):
+        data = _get_json(self.SEARCH_URL, params={"q": query, "limit": limit})
+        if data is None:
             return []
-
         items = data.get("skills", []) if isinstance(data, dict) else []
         if not isinstance(items, list):
             return []
@@ -152,18 +139,11 @@ class SkillsShSource(SkillSource):
             return cached[:limit] if limit > 0 else cached
 
         # Step 1: sitemap index -> per-skill sitemap URLs.
-        try:
-            resp = httpx.get(self.SITEMAP_INDEX_URL, timeout=20, follow_redirects=True,
-                             headers=self._SITEMAP_HEADERS)
-            if resp.status_code != 200:
-                return self._featured_skills(limit)
-            skill_sitemap_urls = [
-                m.group(1).strip() for m in self._SITEMAP_LOC_RE.finditer(resp.text)
-                if "sitemap-skills" in m.group(1)
-            ]
-        except httpx.HTTPError:
-            return self._featured_skills(limit)
-
+        index_xml = _get_text(self.SITEMAP_INDEX_URL, follow_redirects=True, headers=self._SITEMAP_HEADERS)
+        skill_sitemap_urls = [
+            m.group(1).strip() for m in self._SITEMAP_LOC_RE.finditer(index_xml or "")
+            if "sitemap-skills" in m.group(1)
+        ]
         if not skill_sitemap_urls:
             return self._featured_skills(limit)
 
@@ -171,14 +151,8 @@ class SkillsShSource(SkillSource):
         seen: set[str] = set()
         results: List[SkillMeta] = []
         for sitemap_url in skill_sitemap_urls:
-            try:
-                resp = httpx.get(sitemap_url, timeout=30, follow_redirects=True,
-                                 headers=self._SITEMAP_HEADERS)
-                if resp.status_code != 200:
-                    continue
-            except httpx.HTTPError:
-                continue
-            for loc_match in self._SITEMAP_LOC_RE.finditer(resp.text):
+            xml = _get_text(sitemap_url, timeout=30, follow_redirects=True, headers=self._SITEMAP_HEADERS)
+            for loc_match in self._SITEMAP_LOC_RE.finditer(xml or ""):
                 m = self._SITEMAP_SKILL_RE.match(loc_match.group(1).strip())
                 if not m:
                     continue
@@ -206,27 +180,25 @@ class SkillsShSource(SkillSource):
         if cached is not None:
             return cached[:limit]
 
-        try:
-            resp = httpx.get(self.BASE_URL, timeout=20)
-            if resp.status_code != 200:
-                return []
-        except httpx.HTTPError:
+        html = _get_text(self.BASE_URL)
+        if html is None:
             return []
 
         seen: set[str] = set()
         results: List[SkillMeta] = []
-        for match in self._SKILL_LINK_RE.finditer(resp.text):
+        for match in self._SKILL_LINK_RE.finditer(html):
             canonical = match.group("id")
             if canonical in seen:
                 continue
             seen.add(canonical)
-            parts = canonical.split("/", 2)
-            if len(parts) < 3:
+            split = _split_repo_id(canonical)
+            if split is None:
                 continue
+            repo, skill_path = split
             results.append(self._meta(
-                canonical, name=parts[2].split("/")[-1],
-                description=f"Featured on skills.sh from {parts[0]}/{parts[1]}",
-                path=parts[2],
+                canonical, name=skill_path.split("/")[-1],
+                description=f"Featured on skills.sh from {repo}",
+                path=skill_path,
             ))
             if len(results) >= limit:
                 break
@@ -246,12 +218,10 @@ class SkillsShSource(SkillSource):
                 return None
             canonical = f"{repo}/{skill_path}"
 
-        parts = canonical.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(canonical)
+        if split is None:
             return None
-
-        repo = f"{parts[0]}/{parts[1]}"
-        skill_path = parts[2]
+        repo, skill_path = split
         installs = item.get("installs")
         installs_label = f" · {int(installs):,} installs" if isinstance(installs, int) else ""
 
@@ -264,30 +234,20 @@ class SkillsShSource(SkillSource):
         )
 
     def _fetch_detail_page(self, identifier: str) -> Optional[dict]:
-        cache_key = f"skills_sh_detail_{hashlib.md5(identifier.encode()).hexdigest()}"
-        cached = hub()._read_index_cache(cache_key)
-        if isinstance(cached, dict):
-            return cached
+        def compute():
+            html = _get_text(f"{self.BASE_URL}/{identifier}")
+            return None if html is None else self._parse_detail_page(identifier, html) or None
 
-        try:
-            resp = httpx.get(f"{self.BASE_URL}/{identifier}", timeout=20)
-            if resp.status_code != 200:
-                return None
-        except httpx.HTTPError:
-            return None
-
-        detail = self._parse_detail_page(identifier, resp.text)
-        if detail:
-            hub()._write_index_cache(cache_key, detail)
-        return detail
+        return _memo_json(
+            f"skills_sh_detail_{hashlib.md5(identifier.encode()).hexdigest()}", compute,
+            valid=lambda c: isinstance(c, dict),
+        )
 
     def _parse_detail_page(self, identifier: str, html: str) -> Optional[dict]:
-        parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(identifier)
+        if split is None:
             return None
-
-        repo = f"{parts[0]}/{parts[1]}"
-        install_skill = parts[2]
+        repo, install_skill = split
 
         install_command = None
         install_match = self._INSTALL_CMD_RE.search(html)
@@ -309,13 +269,12 @@ class SkillsShSource(SkillSource):
         }
 
     def _discover_identifier(self, identifier: str, detail: Optional[dict] = None) -> Optional[str]:
-        parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(identifier)
+        if split is None:
             return None
-
-        default_repo = f"{parts[0]}/{parts[1]}"
+        default_repo, skill_path = split
         repo = detail.get("repo", default_repo) if isinstance(detail, dict) else default_repo
-        skill_token = parts[2].split("/")[-1]
+        skill_token = skill_path.split("/")[-1]
         tokens = [skill_token]
         if isinstance(detail, dict):
             tokens.extend([
@@ -347,24 +306,20 @@ class SkillsShSource(SkillSource):
 
         # Fallback: scan repo root for directories that might contain skills.
         try:
-            resp = httpx.get(f"https://api.github.com/repos/{repo}/contents/",
-                             headers=self.github.auth.get_headers(),
-                             timeout=15, follow_redirects=True)
-            if resp.status_code == 200:
-                entries = resp.json()
-                if isinstance(entries, list):
-                    for entry in entries:
-                        if entry.get("type") != "dir":
-                            continue
-                        dir_name = entry["name"]
-                        if dir_name.startswith((".", "_")) or dir_name in {"skills", ".agents", ".claude"}:
-                            continue
-                        meta = self.github.inspect(f"{repo}/{dir_name}/{skill_token}")
-                        if meta:
-                            return meta.identifier
-                        found = _match_in(dir_name + "/")
-                        if found:
-                            return found
+            entries = _get_json(f"https://api.github.com/repos/{repo}/contents/",
+                                headers=self.github.auth.get_headers(), timeout=15, follow_redirects=True)
+            for entry in entries if isinstance(entries, list) else []:
+                if entry.get("type") != "dir":
+                    continue
+                dir_name = entry["name"]
+                if dir_name.startswith((".", "_")) or dir_name in {"skills", ".agents", ".claude"}:
+                    continue
+                meta = self.github.inspect(f"{repo}/{dir_name}/{skill_token}")
+                if meta:
+                    return meta.identifier
+                found = _match_in(dir_name + "/")
+                if found:
+                    return found
         except Exception:
             pass
 
@@ -454,10 +409,9 @@ class SkillsShSource(SkillSource):
 
     def _detail_to_metadata(self, canonical: str, detail: Optional[dict]) -> Dict[str, Any]:
         parts = canonical.split("/", 2)
-        repo = f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else ""
         metadata = {"detail_url": f"{self.BASE_URL}/{canonical}"}
-        if repo:
-            metadata["repo_url"] = f"https://github.com/{repo}"
+        if len(parts) >= 2:
+            metadata["repo_url"] = f"https://github.com/{parts[0]}/{parts[1]}"
         if isinstance(detail, dict):
             for key in ("weekly_installs", "install_command", "repo_url", "detail_url", "security_audits"):
                 value = detail.get(key)
@@ -491,15 +445,14 @@ class SkillsShSource(SkillSource):
 
     @classmethod
     def _candidate_identifiers(cls, identifier: str) -> List[str]:
-        parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(identifier)
+        if split is None:
             return [identifier]
-
-        repo = f"{parts[0]}/{parts[1]}"
-        skill_path = parts[2].lstrip("/")
-        return _dedupe_keep_order(
+        repo, skill_path = split
+        skill_path = skill_path.lstrip("/")
+        return list(dict.fromkeys(
             [f"{repo}/{skill_path}"] + [f"{repo}/{base}{skill_path}" for base in cls._STANDARD_BASE_PATHS]
-        )
+        ))
 
     @staticmethod
     def _wrap_identifier(identifier: str) -> str:
