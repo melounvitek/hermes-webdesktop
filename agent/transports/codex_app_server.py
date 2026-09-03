@@ -9,6 +9,7 @@ Opt-in runtime gated behind ``model.openai_runtime == "codex_app_server"``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -117,20 +118,16 @@ class CodexAppServerClient:
         if self._closed:
             return
         self._closed = True
-        try:
+        with contextlib.suppress(Exception):
             if self._proc.stdin and not self._proc.stdin.closed:
                 self._proc.stdin.close()
-        except Exception:
-            pass
         try:
             self._proc.terminate()
             self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
+            with contextlib.suppress(Exception):
                 self._proc.kill()
                 self._proc.wait(timeout=1.0)
-            except Exception:
-                pass
 
     def __enter__(self) -> "CodexAppServerClient":
         return self
@@ -234,21 +231,17 @@ class CodexAppServerClient:
             with self._pending_lock:
                 pending = self._pending.pop(msg["id"], None)
             if pending is not None:
-                try:
+                with contextlib.suppress(queue.Full):  # pragma: no cover - defensive
                     pending.put_nowait(msg)
-                except queue.Full:  # pragma: no cover - defensive
-                    pass
         elif "method" in msg:  # server-initiated request (has id) or notification
             (self._server_requests if "id" in msg else self._notifications).put(msg)
 
     def _read_stderr(self) -> None:
         if self._proc.stderr is None:
             return
-        try:
+        with contextlib.suppress(Exception):  # pragma: no cover
             for line in iter(self._proc.stderr.readline, b""):
                 self._append_stderr(line.decode("utf-8", "replace").rstrip())
-        except Exception:  # pragma: no cover
-            pass
 
 
 def parse_codex_version(output: str) -> Optional[tuple[int, int, int]]:
@@ -275,7 +268,7 @@ def check_codex_binary(
     version = parse_codex_version(proc.stdout)
     if version is None:
         return False, f"could not parse codex version from: {proc.stdout!r}"
-    have, need = ".".join(map(str, version)), ".".join(map(str, min_version))
+    have = ".".join(map(str, version))
     if version < min_version:
-        return False, f"codex {have} is older than required {need}. Run: npm i -g @openai/codex"
+        return False, f"codex {have} is older than required {'.'.join(map(str, min_version))}. Run: npm i -g @openai/codex"
     return True, have

@@ -157,36 +157,27 @@ def get_vertex_credentials(credentials_path: Optional[str] = None) -> Tuple[Opti
     try:
         cached = _creds_cache.get(cache_key)
         if cached is None:
-            loaded = _load_credentials(resolved_path, sa_raw)
-            if loaded is None:
+            cached = _load_credentials(resolved_path, sa_raw)
+            if cached is None:
                 return None, None
-            creds, project_id = loaded
-            _creds_cache[cache_key] = (creds, project_id)
+            _creds_cache[cache_key] = cached
             # A rotation leaves the old signature's entry behind; keep at most
             # one Credentials per file so stale identities can't be reused.
             for k in [k for k in _creds_cache if k != cache_key and k[0] == cache_key[0]]:
                 _creds_cache.pop(k, None)
-        else:
-            creds, project_id = cached
-
+        creds, project_id = cached
         if _needs_refresh(creds):
             creds.refresh(google.auth.transport.requests.Request())
-
-        override_project = _resolve_project_override()
-        return creds.token, override_project or project_id
+        return creds.token, _resolve_project_override() or project_id
     except Exception as e:
         logger.error(f"Failed to resolve Vertex AI credentials: {e}")
         _creds_cache.pop(cache_key, None)
-
-        # If ADC failed (e.g. expired refresh token), try the SA file before
-        # giving up — it may have been added after startup. Keyed on the
-        # resolved path being absent (this attempt was ADC), not on the cache key.
-        if not resolved_path:
-            sa_path = _resolve_credentials_path(credentials_path)
-            if sa_path:
-                logger.info("ADC failed, retrying with service account: %s", sa_path)
-                return get_vertex_credentials(sa_path)
-
+        # If ADC failed (e.g. expired refresh token), try the SA file before giving
+        # up — it may have been added after startup. Keyed on this attempt being ADC.
+        sa_path = None if resolved_path else _resolve_credentials_path(credentials_path)
+        if sa_path:
+            logger.info("ADC failed, retrying with service account: %s", sa_path)
+            return get_vertex_credentials(sa_path)
         return None, None
 
 

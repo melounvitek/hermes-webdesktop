@@ -9,6 +9,7 @@ reader threads feed queues that this adapter polls, like the chat_completions lo
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
@@ -207,10 +208,8 @@ class CodexAppServerSession:
         with self._active_turn_lock:
             self._active_turn_id = None
         if self._client is not None:
-            try:
+            with contextlib.suppress(Exception):  # pragma: no cover - best-effort cleanup
                 self._client.close()
-            except Exception:  # pragma: no cover - best-effort cleanup
-                pass
         self._client = None
         self._thread_id = None
 
@@ -310,8 +309,7 @@ class CodexAppServerSession:
                 self._on_event(note)
             except Exception:  # pragma: no cover - display callback
                 logger.debug("on_event callback raised", exc_info=True)
-        _apply_token_usage_notification(result, note)
-        _apply_compaction_notification(result, note)
+        _apply_accounting_notification(result, note)
         self._track_pending_file_change(note)
         projection = projector.project(note)
         if projection.messages:
@@ -647,34 +645,29 @@ def _summarize_file_changes(raw_changes: list) -> str:
     return f"{counts}: {preview}" if preview else counts
 
 
-def _apply_token_usage_notification(result: TurnResult, note: dict) -> None:
-    """Capture token usage (codex emits it as thread/tokenUsage/updated, not on turn/completed)."""
-    if not isinstance(note, dict) or note.get("method") != "thread/tokenUsage/updated":
-        return
-    token_usage = (note.get("params") or {}).get("tokenUsage") or {}
-    if not isinstance(token_usage, dict):
-        return
-    last, window = token_usage.get("last"), token_usage.get("modelContextWindow")
-    if isinstance(last, dict):
-        result.token_usage_last = dict(last)
-    if isinstance(window, int) and window > 0:
-        result.model_context_window = window
-
-
-def _apply_compaction_notification(result: TurnResult, note: dict) -> None:
-    """Capture compaction boundaries: a contextCompaction item (recent) or deprecated thread/compacted (older)."""
+def _apply_accounting_notification(result: TurnResult, note: dict) -> None:
+    """Capture token usage (thread/tokenUsage/updated, not turn/completed) and compaction
+    boundaries (a contextCompaction item on recent builds, deprecated thread/compacted on older)."""
     if not isinstance(note, dict):
         return
     method = note.get("method") or ""
     params = note.get("params") or {}
     if not isinstance(params, dict):
         return
-    item = params.get("item") if method in {"item/started", "item/completed"} else None
-    if method != "thread/compacted" and not (isinstance(item, dict) and item.get("type") == "contextCompaction"):
+    if method == "thread/tokenUsage/updated":
+        token_usage = params.get("tokenUsage") or {}
+        if isinstance(token_usage, dict):
+            last, window = token_usage.get("last"), token_usage.get("modelContextWindow")
+            if isinstance(last, dict):
+                result.token_usage_last = dict(last)
+            if isinstance(window, int) and window > 0:
+                result.model_context_window = window
         return
-    result.compacted = True
-    result.thread_id = params.get("threadId") or result.thread_id
-    result.turn_id = params.get("turnId") or result.turn_id
+    item = params.get("item") if method in {"item/started", "item/completed"} else None
+    if method == "thread/compacted" or (isinstance(item, dict) and item.get("type") == "contextCompaction"):
+        result.compacted = True
+        result.thread_id = params.get("threadId") or result.thread_id
+        result.turn_id = params.get("turnId") or result.turn_id
 
 
 # Hermes approval choice -> codex decision (app-server-protocol v2). "deny" and

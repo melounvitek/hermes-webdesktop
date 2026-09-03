@@ -176,6 +176,19 @@ def _model_consumes_thought_signature(model: Any) -> bool:
     return "gemini" in m or "gemma" in m
 
 
+def _dump_extra_content(extra: Any) -> Any:
+    """Plain-dict form of a pydantic ``extra_content``; older pydantic lacks ``warnings=``, so retry without it."""
+    if hasattr(extra, "model_dump"):
+        for dump_kwargs in ({"warnings": False}, {}):
+            try:
+                return extra.model_dump(**dump_kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                break
+    return extra
+
+
 def _swap_developer_role(sanitized: list, model_lower: str) -> list:
     """GPT-5/Codex models take a ``developer`` role instead of ``system``."""
     if (
@@ -461,25 +474,13 @@ class ChatCompletionsTransport(ProviderTransport):
                 elif function_name in _alias_map:
                     function_name = _alias_map[function_name]
                 function_arguments = getattr(tc_function, "arguments", None)
-                tc_provider_data: dict[str, Any] = {}
                 extra = getattr(tc, "extra_content", None)
                 if extra is None and hasattr(tc, "model_extra"):
                     extra = (tc.model_extra if isinstance(tc.model_extra, dict) else {}).get("extra_content")
-                if extra is not None:
-                    if hasattr(extra, "model_dump"):
-                        for dump_kwargs in ({"warnings": False}, {}):
-                            try:
-                                extra = extra.model_dump(**dump_kwargs)
-                                break
-                            except TypeError:
-                                continue  # older pydantic: retry without ``warnings``
-                            except Exception:
-                                break
-                    tc_provider_data["extra_content"] = extra
                 tool_calls.append(ToolCall(
                     id=getattr(tc, "id", None), name=function_name,
                     arguments=function_arguments if function_arguments is not None else "{}",
-                    provider_data=tc_provider_data or None,
+                    provider_data=None if extra is None else {"extra_content": _dump_extra_content(extra)},
                 ))
 
         usage = Usage.from_openai(response.usage) if hasattr(response, "usage") and response.usage else None
