@@ -1,10 +1,9 @@
 """Shared FAL.ai SDK plumbing: lazy import, managed-gateway sync client, small helpers.
 
 Stateful pieces (cache globals, ``_managed_fal_client*``, ``_submit_fal_request``)
-intentionally stay on :mod:`tools.image_generation_tool`: it is the patch target
-for the test suites and for ``plugins/image_gen/fal/``'s ``_it`` indirection, so
-moving the caches here would silently defeat
-``monkeypatch.setattr(image_tool, "_managed_fal_client", None)``.
+intentionally stay on :mod:`tools.image_generation_tool`: it is the patch target for the
+test suites and for ``plugins/image_gen/fal/``'s ``_it`` indirection, so moving the caches
+here would silently defeat ``monkeypatch.setattr(image_tool, "_managed_fal_client", None)``.
 """
 
 from __future__ import annotations
@@ -16,9 +15,8 @@ from urllib.parse import urlencode
 def import_fal_client() -> Any:
     """Import ``fal_client`` (via ``lazy_deps`` when available); raises ImportError if unavailable.
 
-    Not imported at cold start (it cost ~64 ms per CLI invocation). Callers
-    cache the result on their own module global so tests can monkeypatch that
-    module's ``fal_client`` attribute and have it stick for its call sites.
+    Not imported at cold start (~64 ms per CLI invocation). Callers cache the result on their
+    own module global so tests can monkeypatch that module's ``fal_client`` attribute.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -46,26 +44,25 @@ def _extract_http_status(exc: BaseException) -> Optional[int]:
         if isinstance(status, int):
             return status
     status = getattr(exc, "status_code", None)
-    if isinstance(status, int):
-        return status
-    return None
+    return status if isinstance(status, int) else None
+
+
+def _require(value: Any, what: str) -> Any:
+    if value is None:
+        raise RuntimeError(f"{what} is required for managed FAL gateway mode")
+    return value
 
 
 class _ManagedFalSyncClient:
     """Per-instance wrapper driving a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives.
 
-    Carries its own ``fal_client`` reference instead of a module global so the
-    caller decides which module's (possibly test-patched) ``fal_client`` is used.
+    Carries its own ``fal_client`` reference instead of a module global so the caller decides
+    which module's (possibly test-patched) ``fal_client`` is used.
     """
 
     def __init__(self, fal_client: Any, *, key: str, queue_run_origin: str):
-        sync_client_class = getattr(fal_client, "SyncClient", None)
-        if sync_client_class is None:
-            raise RuntimeError("fal_client.SyncClient is required for managed FAL gateway mode")
-
-        client_module = getattr(fal_client, "client", None)
-        if client_module is None:
-            raise RuntimeError("fal_client.client is required for managed FAL gateway mode")
+        sync_client_class = _require(getattr(fal_client, "SyncClient", None), "fal_client.SyncClient")
+        client_module = _require(getattr(fal_client, "client", None), "fal_client.client")
 
         self._queue_url_format = _normalize_fal_queue_url_format(queue_run_origin)
         self._sync_client = sync_client_class(key=key)
@@ -77,12 +74,10 @@ class _ManagedFalSyncClient:
         self._add_priority_header = getattr(client_module, "add_priority_header", None)
         self._add_timeout_header = getattr(client_module, "add_timeout_header", None)
 
-        if self._http_client is None:
-            raise RuntimeError("fal_client.SyncClient._client is required for managed FAL gateway mode")
+        _require(self._http_client, "fal_client.SyncClient._client")
         if self._maybe_retry_request is None or self._raise_for_status is None:
             raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
-        if self._request_handle_class is None:
-            raise RuntimeError("fal_client.client.SyncRequestHandle is required for managed FAL gateway mode")
+        _require(self._request_handle_class, "fal_client.client.SyncRequestHandle")
 
     def submit(
         self,
@@ -115,20 +110,13 @@ class _ManagedFalSyncClient:
             self._add_timeout_header(start_timeout, request_headers)
 
         response = self._maybe_retry_request(
-            self._http_client,
-            "POST",
-            url,
-            json=arguments,
-            timeout=getattr(self._sync_client, "default_timeout", 120.0),
-            headers=request_headers,
+            self._http_client, "POST", url, json=arguments,
+            timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers,
         )
         self._raise_for_status(response)
 
         data = response.json()
         return self._request_handle_class(
-            request_id=data["request_id"],
-            response_url=data["response_url"],
-            status_url=data["status_url"],
-            cancel_url=data["cancel_url"],
-            client=self._http_client,
+            request_id=data["request_id"], response_url=data["response_url"],
+            status_url=data["status_url"], cancel_url=data["cancel_url"], client=self._http_client,
         )
