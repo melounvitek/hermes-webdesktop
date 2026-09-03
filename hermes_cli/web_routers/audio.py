@@ -34,7 +34,6 @@ _ws_auth_ok = late("_ws_auth_ok")
 _ws_request_is_allowed = late("_ws_request_is_allowed")
 load_env = late("load_env")
 
-
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -216,10 +215,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
 
     request = urllib.request.Request(
         "https://api.elevenlabs.io/v1/voices",
-        headers={
-            "Accept": "application/json",
-            "xi-api-key": api_key,
-        },
+        headers={"Accept": "application/json", "xi-api-key": api_key},
     )
 
     try:
@@ -237,9 +233,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
         # most once until the error signature changes.
         if exc.code in (401, 403):
             if _voice_list_error_logged_once(f"http-{exc.code}"):
-                _log.info(
-                    "ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc
-                )
+                _log.info("ElevenLabs voices unavailable: %s — check ELEVENLABS_API_KEY", exc)
             return {"available": False, "voices": [], "error": "unauthorized"}
         if _voice_list_error_logged_once(f"http-{exc.code}"):
             _log.warning("ElevenLabs voice list failed: %s", exc)

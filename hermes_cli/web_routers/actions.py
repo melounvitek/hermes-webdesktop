@@ -53,9 +53,7 @@ _ACTION_LOG_TAIL_MAX_BYTES = 256 * 1024
 _ACTION_LOG_TAIL_INITIAL_CHUNK_BYTES = 8 * 1024
 _ACTION_LOG_TAIL_MAX_CHUNK_BYTES = 64 * 1024
 
-_UPDATE_ACTION_COMPLETED_RE = re.compile(
-    r"^=== hermes-update completed ([0-9a-f]{32}) ===$"
-)
+_UPDATE_ACTION_COMPLETED_RE = re.compile(r"^=== hermes-update completed ([0-9a-f]{32}) ===$")
 
 _MANAGED_EXTERNALLY_MESSAGE = (
     "Hermes updates are managed outside this dashboard in "
@@ -158,11 +156,7 @@ async def restart_gateway(profile: Optional[str] = None):
     """Kick off a ``hermes gateway restart`` in the background."""
     with http_failure("Failed to spawn gateway restart", 500, "Failed to restart gateway"):
         proc, _reused = _spawn_gateway_restart(profile)
-    return {
-        "ok": True,
-        "pid": proc.pid,
-        "name": "gateway-restart",
-    }
+    return {"ok": True, "pid": proc.pid, "name": "gateway-restart"}
 
 
 @router.post("/api/gateway/drain")
@@ -214,8 +208,7 @@ async def gateway_drain(request: Request):
         suppress_notification=bool((body or {}).get("suppress_notification", False)),
     )
     _log.info(
-        "Gateway drain BEGIN requested by %s (suppress_notification=%s)",
-        principal,
+        "Gateway drain BEGIN requested by %s (suppress_notification=%s)", principal,
         payload["suppress_notification"],
     )
     return {
@@ -287,19 +280,12 @@ async def update_hermes():
     action_id = secrets.token_hex(16)
     try:
         proc = _spawn_hermes_action(
-            ["update"],
-            "hermes-update",
-            env_overrides={"HERMES_ACTION_ID": action_id},
+            ["update"], "hermes-update", env_overrides={"HERMES_ACTION_ID": action_id},
         )
     except Exception as exc:
         _log.exception("Failed to spawn hermes update")
         raise HTTPException(status_code=500, detail=f"Failed to start update: {exc}")
-    return {
-        "ok": True,
-        "pid": proc.pid,
-        "name": "hermes-update",
-        "action_id": action_id,
-    }
+    return {"ok": True, "pid": proc.pid, "name": "hermes-update", "action_id": action_id}
 
 
 def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
@@ -392,9 +378,7 @@ async def check_hermes_update(force: bool = False):
         payload["message"] = format_docker_update_message()
         return payload
     if install_method == "apt":
-        payload["message"] = (
-            "Hermes is managed by Termux APT; run `pkg upgrade hermes-agent`."
-        )
+        payload["message"] = "Hermes is managed by Termux APT; run `pkg upgrade hermes-agent`."
         return payload
 
     # banner.check_for_updates() handles git / nix-revision paths and caches

@@ -46,7 +46,6 @@ save_env_value = late("save_env_value")
 _dependency_importable = late("_dependency_importable")
 load_env = late("load_env")
 
-
 # Sentinel: remove this key so it falls back to the host or built-in default.
 _UNSET: Any = object()
 
@@ -491,12 +490,7 @@ def _install_memory_provider_setup(name: str) -> Dict[str, Any]:
 
     ok = all(result["status"] not in {"failed"} for result in results)
     statuses = {row["name"]: row for row in _discover_memory_provider_statuses()}
-    return {
-        "ok": ok,
-        "provider": name,
-        "results": results,
-        "status": statuses.get(name),
-    }
+    return {"ok": ok, "provider": name, "results": results, "status": statuses.get(name)}
 
 
 def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
