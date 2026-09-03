@@ -9,11 +9,9 @@ import base64
 import json
 from typing import Any, Callable, Dict, Optional
 
-# httpx is imported lazily: it costs ~30ms and hermes_cli.auth is on the interactive-CLI startup path
-# (credential_pool -> auxiliary_client -> cli_commands_mixin) where no request is made before first
-# use. The proxy resolves to the real module on first attribute access; ``from __future__ import
-# annotations`` keeps ``httpx.Client`` annotations unevaluated and TYPE_CHECKING gives static
-# checkers the real module.
+# httpx is imported lazily (~30ms) because hermes_cli.auth is on the interactive-CLI startup path
+# (credential_pool -> auxiliary_client -> cli_commands_mixin). The proxy resolves on first attribute
+# access; ``from __future__ import annotations`` keeps ``httpx.Client`` annotations unevaluated.
 import importlib as _importlib
 from typing import TYPE_CHECKING
 
@@ -36,8 +34,8 @@ else:
         def __getattr__(self, name):
             return getattr(self._resolve(), name)
 
-        # Forward set/del to the real module so monkeypatch.setattr("hermes_cli.auth.httpx.Client",
-        # ...) keeps working in tests.
+        # set/del forward to the real module so monkeypatch.setattr("hermes_cli.auth.httpx.Client")
+        # keeps working in tests.
         def __setattr__(self, name, value):
             setattr(self._resolve(), name, value)
 
