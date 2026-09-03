@@ -157,7 +157,6 @@ def connect_closing(db_path: Optional[Path] = None):
 
 # --- Dataclasses -------------------------------------------------------------
 
-
 @dataclass
 class ProjectFolder:
     path: str
@@ -212,7 +211,6 @@ def _load_project(conn: sqlite3.Connection, row: sqlite3.Row) -> Project:
 
 # --- CRUD --------------------------------------------------------------------
 
-
 def _unique_slug(conn: sqlite3.Connection, candidate: str) -> str:
     """Return ``candidate`` or ``candidate-2``, ``-3`` ... if taken."""
     n = 1
@@ -245,17 +243,9 @@ def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archive
 
 
 def create_project(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    slug: Optional[str] = None,
-    folders: Optional[Iterable[str]] = None,
-    primary_path: Optional[str] = None,
-    description: Optional[str] = None,
-    icon: Optional[str] = None,
-    color: Optional[str] = None,
-    board_slug: Optional[str] = None,
-    allow_duplicate_path: bool = False,
+    conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
+    primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
+    color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
 ) -> str:
     """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
     is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
@@ -288,11 +278,11 @@ def create_project(
             )
 
     with write_txn(conn):
-        unique = _unique_slug(conn, slug_candidate)
         conn.execute(
             "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (pid, unique, name, description, icon, color, normalize_slug(board_slug) if board_slug else None, primary, now),
+            (pid, _unique_slug(conn, slug_candidate), name, description, icon, color,
+             normalize_slug(board_slug) if board_slug else None, primary, now),
         )
         for path in folder_paths:
             conn.execute(
@@ -309,21 +299,16 @@ def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False) -
 
 def get_project(conn: sqlite3.Connection, id_or_slug: str) -> Optional[Project]:
     """Look up a project by id first, then by slug."""
-    row = conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
-    if row is None:
-        row = conn.execute("SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)).fetchone()
+    row = (
+        conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
+        or conn.execute("SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)).fetchone()
+    )
     return None if row is None else _load_project(conn, row)
 
 
 def update_project(
-    conn: sqlite3.Connection,
-    project_id: str,
-    *,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    icon: Optional[str] = None,
-    color: Optional[str] = None,
-    board_slug: Optional[str] = None,
+    conn: sqlite3.Connection, project_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
+    icon: Optional[str] = None, color: Optional[str] = None, board_slug: Optional[str] = None,
 ) -> bool:
     """Patch top-level project fields; only provided (non-None) fields change. ``icon``, ``color`` and
     ``board_slug`` take ``""`` to clear (store NULL) — ``None`` leaves the field untouched."""
@@ -406,10 +391,7 @@ def _set_primary_locked(conn: sqlite3.Connection, project_id: str, path: str) ->
 def set_primary(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
     norm = _normalize_path(path)
     with write_txn(conn):
-        exists = conn.execute(
-            "SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)
-        ).fetchone()
-        if exists is None:
+        if conn.execute("SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)).fetchone() is None:
             return False
         _set_primary_locked(conn, project_id, norm)
     return True
@@ -488,12 +470,8 @@ def clear_discovered_repos(conn: sqlite3.Connection, *, policy_key: Optional[str
 
 # --- Discovered repos (filesystem scan cache) --------------------------------
 
-
 def record_discovered_repos(
-    conn: sqlite3.Connection,
-    repos: Iterable[tuple[str, Optional[str]]],
-    *,
-    replace: bool = False,
+    conn: sqlite3.Connection, repos: Iterable[tuple[str, Optional[str]]], *, replace: bool = False,
     policy_key: Optional[str] = None,
 ) -> int:
     """Persist scanned ``(root, label)`` repo roots (normalized; label falls back to basename) and
@@ -527,7 +505,6 @@ def list_discovered_repos(conn: sqlite3.Connection) -> List[dict]:
 
 
 # --- Resolution + naming -----------------------------------------------------
-
 
 def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
     """Return the project owning ``path``: a folder owns it when equal or an ancestor, and the longest
