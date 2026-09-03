@@ -3916,79 +3916,60 @@ class GatewayRunner(
 
     def _init_lifecycle_state(self) -> None:
         """Initialise run/exit/restart flags, per-session state, and completion-delivery bookkeeping."""
-        self._running = False
+        self._running = self._exit_cleanly = self._exit_with_failure = self._draining = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
-        self._exit_cleanly = False
-        self._exit_with_failure = False
         self._exit_reason: Optional[str] = None
         self._exit_code: Optional[int] = None
-        self._draining = False
         self._profile_failed_platforms: Dict[str, Dict[Platform, asyncio.Task]] = {}
         self._systemd_watchdog = None
-        # External (NAS-driven) drain state, distinct from the shutdown ``_draining`` flag: set by
-        # ``_drain_control_watcher`` when ``.drain_request.json`` exists — NEW turns refused, but the
-        # process stays up and removing the marker reverts to ``running``. ``_draining`` is one-way.
+        # External (NAS-driven) drain state, distinct from the one-way shutdown ``_draining`` flag: set by
+        # ``_drain_control_watcher`` while ``.drain_request.json`` exists — NEW turns refused, but the
+        # process stays up and removing the marker reverts to ``running``.
         self._external_drain_active = False
-        self._restart_requested = False
-        # Set by shutdown_signal_handler when SIGTERM/SIGINT arrived WITHOUT a planned-stop/takeover
-        # marker (container SIGTERM, OOM-killer, bare `kill`); _stop_impl must NOT persist
-        # gateway_state=stopped for an unexpected signal, or container_boot won't auto-start next boot.
-        self._signal_initiated_shutdown = False
-        self._restart_task_started = False
-        self._restart_detached = False
-        self._restart_via_service = False
-        self._detached_restart_helper_started = False
+        # ``_signal_initiated_shutdown``: SIGTERM/SIGINT arrived WITHOUT a planned-stop/takeover marker
+        # (container SIGTERM, OOM-killer, bare `kill`); _stop_impl must NOT persist gateway_state=stopped
+        # for it, or container_boot won't auto-start next boot.
+        self._restart_requested = self._signal_initiated_shutdown = self._restart_task_started = False
+        self._restart_detached = self._restart_via_service = self._detached_restart_helper_started = False
         self._restart_command_source: Optional[SessionSource] = None
-        # Monotonic-ish wall clock of when this GatewayRunner was constructed. Used by the /restart
-        # redelivery guard to bound the window where a missing dedup marker means a stale redelivery.
+        # Construction wall clock: bounds the /restart redelivery guard's window where a missing dedup
+        # marker means a stale redelivery.
         self._startup_time: float = time.time()
-        # True when this process booted from a chat-originated /restart (.restart_notify.json existed
-        # on boot). One-shot signal consumed by _is_stale_restart_redelivery so the marker-missing
-        # fallback suppresses a /restart only when we KNOW we just restarted — never on a fresh boot.
+        # True when this process booted from a chat-originated /restart (.restart_notify.json existed on
+        # boot). One-shot signal for _is_stale_restart_redelivery: the marker-missing fallback suppresses
+        # a /restart only when we KNOW we just restarted — never on a fresh boot.
         self._booted_from_restart: bool = False
         self._stop_task: Optional[asyncio.Task] = None
         self._restart_task: Optional[asyncio.Task] = None
         self._executor_lock = threading.Lock()
         self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
-        # Set on gateway stop so the recreate-on-shutdown path can't resurrect
-        # the pool during a real shutdown.
+        # Set on gateway stop so the recreate-on-shutdown path can't resurrect the pool.
         self._executor_closing = False
-        # ALL per-session state (turn / conversation / persistent scopes) lives in one container —
-        # see gateway/session_state.py. Access via self._session_state(key) (get-or-create) or
-        # self._peek_session_state(key) (read-only).
+        # ALL per-session state (turn / conversation / persistent scopes) lives in one container — see
+        # gateway/session_state.py; access via _session_state(key) (get-or-create) / _peek_session_state.
         self._sessions: Dict[str, SessionState] = {}
-        # Per-SESSION_ID turn lease: serializes the [load history → run → flush] region when two
-        # ROUTING KEYS resolve to one session_id (switch_session's many-to-one mapping). The
-        # routing-key guards above cannot see that overlap.
+        # Per-SESSION_ID turn lease: serializes [load history → run → flush] when two ROUTING KEYS resolve
+        # to one session_id (switch_session's many-to-one mapping), which routing-key guards cannot see.
         self._turn_leases = SessionTurnLeaseRegistry()
-        # Turn-lease tokens live on SessionState.turn.lease_token/.lease_generation; the generation
-        # check means a stale unwind can never free a newer turn's lease. pending_command_text is
-        # runner-level queued interrupt text (distinct from adapter-level _pending_messages).
-        # last_resolved_model backs a config read that transiently returns "" (else model="" → every
-        # call HTTP 400); "*" is the process-wide fallback. queued_events is /queue overflow, promoted
-        # one per drain FIFO; cleared on /new and /reset, kept across /model. The run-generation
-        # counter is monotonic and NEVER reset. Stall-notified keys clear when pending clears /
-        # activity resumes / conversation boundary (gateway.session_stall).
+        # Stall-notified keys clear when pending clears / activity resumes / conversation boundary.
         self._session_stall_notified: Dict[str, bool] = {}
-        # Startup restore gate: while restart-interrupted sessions are being auto-resumed, real
-        # inbound messages are queued instead of competing with the synthetic resume turns for the
-        # same session. The queued events drain only after all startup resume tasks have finished.
+        # Startup restore gate: while restart-interrupted sessions auto-resume, real inbound messages
+        # queue instead of competing with the synthetic resume turns; drained after all resume tasks end.
         self._startup_restore_in_progress = False
-        # Set by start_gateway() only for an explicit ``--replace`` launch.
-        # _connect_initial_adapter_with_timeout scopes it to each adapter's
-        # cold-start connect and removes it before any reconnect can run.
-        self._platform_lock_takeover_on_start = False
         self._startup_restore_queue: List[MessageEvent] = []
         self._startup_restore_tasks: List[asyncio.Task] = []
-        # LRU cache of live SessionSources keyed by session_key. Used by fallback routing paths
-        # (shutdown notifications, synthetic background-process events) when the persisted origin is
-        # missing and _parse_session_key can't recover thread_id. Capped so it cannot grow unbounded.
+        # Set by start_gateway() only for an explicit ``--replace`` launch; scoped to each adapter's
+        # cold-start connect and removed before any reconnect can run.
+        self._platform_lock_takeover_on_start = False
+        # LRU of live SessionSources by session_key for fallback routing (shutdown notifications, synthetic
+        # background-process events) when the persisted origin is missing and _parse_session_key can't
+        # recover thread_id. Capped.
         self._session_sources: "OrderedDict[str, SessionSource]" = OrderedDict()
         self._session_sources_max = 512
-        # Completion delivery is intentionally lifecycle-scoped: it closes duplicate queue/watcher
-        # races inside one gateway without pretending adapter send + persistence write are exactly-once
-        # across a crash. Durable async-delegation replay state stays owned by tools.async_delegation.
+        # Completion delivery is lifecycle-scoped: it closes duplicate queue/watcher races inside one
+        # gateway without pretending adapter send + persistence write are exactly-once across a crash.
+        # Durable async-delegation replay state stays owned by tools.async_delegation.
         self._completion_delivery_lock = threading.Lock()
         self._completion_deliveries_inflight: set[tuple[str, str, object]] = set()
         self._completion_deliveries_delivered: "OrderedDict[tuple[str, str, object], None]" = OrderedDict()
@@ -4003,29 +3984,26 @@ class GatewayRunner(
 
     def _init_runtime_caches(self) -> None:
         """Agent cache, profile identity, Teams runtime, failed-platform tracking, slash-confirm counter."""
-        # Cache AIAgent instances per session to preserve prompt caching (a fresh agent per message
-        # rebuilds the system prompt and breaks the prefix cache, ~10x cost on Anthropic). Value:
-        # (AIAgent, config_signature_str). OrderedDict for LRU eviction in _enforce_agent_cache_cap();
-        # hard cap _AGENT_CACHE_MAX_SIZE, idle TTL from _session_expiry_watcher().
+        # AIAgent per session preserves prompt caching (a fresh agent per message rebuilds the system
+        # prompt and breaks the prefix cache, ~10x cost on Anthropic). Value: (AIAgent, config_signature).
+        # LRU eviction in _enforce_agent_cache_cap() (cap _AGENT_CACHE_MAX_SIZE), idle TTL from
+        # _session_expiry_watcher().
         self._agent_cache: "OrderedDict[str, tuple]" = OrderedDict()
         self._agent_cache_lock = threading.Lock()
-
-        self._kanban_notifier_profile = self._active_profile_name()
         # Launch-time identity of the profile that owns ``self.adapters``; ``_authorization_adapter``
         # compares against this rather than the per-turn ``_active_profile_name()``.
-        self._primary_profile_name = self._kanban_notifier_profile
+        self._primary_profile_name = self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
         self._teams_pipeline_runtime_error: Optional[str] = None
         # Platforms that failed to connect, for background reconnection:
         # Platform -> {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
-        # Strong refs to detached fatal-error handler tasks (see
-        # _handle_adapter_fatal_error) so the event loop can't GC them mid-run.
+        # Strong refs to detached fatal-error handler tasks (_handle_adapter_fatal_error) so the loop
+        # can't GC them mid-run.
         self._fatal_handler_tasks: set = set()
-        # Slash-confirm state lives in tools.slash_confirm (module-level), so platform adapters can
-        # resolve callbacks without a backref to this runner. Keep a local counter for confirm_id
-        # generation so IDs stay compact (button callback_data has a 64-byte cap on some platforms).
+        # Slash-confirm state lives in tools.slash_confirm (module-level) so adapters resolve callbacks
+        # without a runner backref; local counter keeps confirm_ids compact (64-byte callback_data caps).
         import itertools
         self._slash_confirm_counter = itertools.count(1)
 
@@ -4129,41 +4107,32 @@ class GatewayRunner(
 
     def _init_registries_and_clocks(self) -> None:
         """Pairing stores, hook registry, voice modes, background-task set, liveness and idle clocks."""
-        # DM pairing store for code-based user authorization. ``pairing_store`` is the global/default
-        # store (``hermes pairing`` CLI, callers without profile context); ``pairing_stores`` is the
-        # per-profile map ``authz_mixin._is_user_authorized`` routes through (one whitelist/profile).
+        # ``pairing_store`` is the global/default store (``hermes pairing`` CLI, callers without profile
+        # context); ``pairing_stores`` is the per-profile map ``authz_mixin._is_user_authorized`` routes
+        # through (one whitelist per profile).
         from gateway.pairing import PairingStore
+        from gateway.hooks import HookRegistry
         self.pairing_store = PairingStore()
         self.pairing_stores: Dict[str, "PairingStore"] = {}
-
-        # Event hook system
-        from gateway.hooks import HookRegistry
         self.hooks = HookRegistry()
-
         # Per-chat voice reply mode: "off" | "voice_only" | "all"
         self._voice_mode: Dict[str, str] = self._load_voice_modes()
-        # Recent voice transcripts per (guild,user): the voice capture / STT pipeline can emit the
-        # same utterance twice, which would otherwise produce a second delayed reply.
+        # Recent voice transcripts per (guild,user): the voice capture / STT pipeline can emit the same
+        # utterance twice, which would otherwise produce a second delayed reply.
         self._recent_voice_transcripts: Dict[tuple[int, int], List[tuple[float, str]]] = {}
-
-        # Track background tasks to prevent garbage collection mid-execution
+        # Background tasks kept referenced so they are not garbage-collected mid-execution.
         self._background_tasks: set = set()
-
-        # Event-loop liveness heartbeat: rewritten every 30s while the loop dispatches; supervisors
-        # use the file mtime / updated_at to tell "process alive" from "loop frozen".
+        # Event-loop liveness heartbeat: rewritten every 30s while the loop dispatches; supervisors use
+        # the file mtime / updated_at to tell "process alive" from "loop frozen".
         self._gateway_started_at: float = time.time()
         self._loop_heartbeat_task: Optional[asyncio.Task] = None
-        self._loop_floor_timer_handle = None
-        self._loop_liveness_watchdog = None
-
-        # scale-to-zero: gateway-scoped "last inbound seen" clock (only a per-agent _last_activity_ts
-        # exists otherwise). Stamped in _handle_message (the single inbound chokepoint), seeded to
-        # "now" so a fresh gateway isn't idle from epoch; read by the scale-to-zero watcher.
+        self._loop_floor_timer_handle = self._loop_liveness_watchdog = None
+        # scale-to-zero: gateway-scoped "last inbound seen" clock, stamped in _handle_message (the single
+        # inbound chokepoint) and seeded to "now" so a fresh gateway isn't idle from epoch.
         self._last_inbound_at: float = time.time()
-        # Set after a wake (re-arm cooldown, 0.F) so we don't immediately re-go
-        # dormant before the drained backlog has a chance to update the clock.
+        # Re-arm cooldown after a wake so we don't go dormant again before the drained backlog updates
+        # the clock; and a one-shot latch so the "platform owns the suspend" notice logs once.
         self._scale_to_zero_cooldown_until: float = 0.0
-        # One-shot: log the "platform owns the suspend" notice once, not per tick.
         self._scale_to_zero_no_suspend_logged: bool = False
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
