@@ -229,8 +229,7 @@ def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
         sys.stdout.flush()
         return ""
     finally:
-        if "HERMES_SPINNER_PAUSE" in os.environ:
-            del os.environ["HERMES_SPINNER_PAUSE"]
+        os.environ.pop("HERMES_SPINNER_PAUSE", None)
 
 
 def _looks_like_env_assignment(token: str) -> bool:
@@ -400,8 +399,8 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     if sudo_count == 0:
         return command, None
 
-    # Scope-aware read: under multiplex the process env may hold another profile's
-    # SUDO_PASSWORD; unscoped callers (UnscopedSecretError) keep the os.environ read.
+    # Scope-aware read: under multiplex the process env may hold another profile's SUDO_PASSWORD;
+    # unscoped callers (UnscopedSecretError) keep the os.environ read.
     try:
         from agent.secret_scope import get_secret
         _configured_password = get_secret("SUDO_PASSWORD")
