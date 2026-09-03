@@ -446,7 +446,6 @@ def _check_e2ee_deps() -> bool:
 
 
 def _normalize_e2ee_mode(value: Any) -> str:
-    """Normalize Matrix E2EE mode to off/optional/required."""
     raw = str(value or "").strip().lower()
     if raw in ("required", "require", "true", "1", "yes", "on"):
         return "required"
@@ -848,7 +847,6 @@ class MatrixAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _extract_server_ed25519(device_keys_obj: Any) -> Optional[str]:
-        """Extract the ed25519 identity key from a DeviceKeys object."""
         for kid, kval in (getattr(device_keys_obj, "keys", {}) or {}).items():
             if str(kid).startswith("ed25519:"):
                 return str(kval)
@@ -1204,7 +1202,6 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.warning("Matrix: initial sync error: %s", exc)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        """Connect to the Matrix homeserver and start syncing."""
         self._device_id_unverified = False
         if self._client is not None:
             try:
@@ -1252,7 +1249,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return True
 
     async def disconnect(self) -> None:
-        """Disconnect from Matrix."""
         self._closing = True
         if self._sync_task and not self._sync_task.done():
             self._sync_task.cancel()
@@ -1283,7 +1279,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Send a message to a Matrix room."""
         if not content:
             return SendResult(success=True)
         last_event_id = None
@@ -1313,12 +1308,10 @@ class MatrixAdapter(BasePlatformAdapter):
         return str(event_id)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Return room name and type (dm/group)."""
         identity = await self._resolve_room_identity(chat_id)
         return {"name": identity.display_name, "type": "dm" if identity.chat_type == "dm" else "group"}
 
     def get_diagnostics(self) -> Dict[str, Any]:
-        """Return redacted Matrix readiness/status diagnostics."""
         now = time.time()
         token_present = bool(self._access_token)
         user_id = self._user_id or getattr(self._client, "mxid", "") or ""
@@ -1350,15 +1343,12 @@ class MatrixAdapter(BasePlatformAdapter):
                 await self._client.set_typing(RoomID(chat_id), timeout=timeout)
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        """Send a typing indicator."""
         await self._set_typing(chat_id, 30000)
 
     async def stop_typing(self, chat_id: str) -> None:
-        """Clear the typing indicator."""
         await self._set_typing(chat_id, 0)
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *, finalize: bool = False) -> SendResult:
-        """Edit an existing message (via m.replace)."""
         formatted = self.format_message(content)
         new_content = self._build_text_message_content(formatted)
         msg_content: Dict[str, Any] = {"msgtype": "m.text", "body": f"* {formatted}", "m.new_content": new_content}
@@ -1373,7 +1363,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_image(
         self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Download an image URL and upload it to Matrix."""
         from tools.url_safety import is_safe_url
         if not is_safe_url(image_url):
             logger.warning("Matrix: blocked unsafe image URL (SSRF protection)")
@@ -1452,13 +1441,11 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_image_file(
         self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Upload a local image file to Matrix."""
         return await self._send_local_file(chat_id, image_path, "m.image", caption, reply_to, metadata=metadata)
 
     async def send_multiple_images(
         self, chat_id: str, images: list[tuple[str, str]], metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0) -> None:
-        """Send multiple Matrix images as one ordered logical batch."""
         if not images:
             return
         from urllib.parse import unquote as _unquote
@@ -1478,7 +1465,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_document(
         self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None,
         reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Upload a local file as a document."""
         return await self._send_local_file(chat_id, file_path, "m.file", caption, reply_to, file_name, metadata)
 
     async def send_voice(
@@ -1503,7 +1489,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_video(
         self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Upload a video file."""
         return await self._send_local_file(chat_id, video_path, "m.video", caption, reply_to, metadata=metadata)
 
     # Template attrs for the shared _format_exec_approval core (header + fence + reason only;
@@ -1536,7 +1521,6 @@ class MatrixAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
         metadata: Optional[dict] = None, allow_permanent: bool = True, allow_session: bool = True,
         smart_denied: bool = False) -> SendResult:
-        """Send a reaction-based exec approval prompt for Matrix."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
         if smart_denied:
@@ -1574,7 +1558,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def send_model_picker(
         self, chat_id: str, providers: list, current_model: str, current_provider: str, session_key: str,
         on_model_selected, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Send a Matrix reaction-based model picker."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
         flat_choices = [
@@ -1640,7 +1623,6 @@ class MatrixAdapter(BasePlatformAdapter):
         self, room_id: str, data: bytes, filename: str, content_type: str, msgtype: str,
         caption: Optional[str] = None, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
         is_voice: bool = False, voice_metadata: Optional[Dict[str, Any]] = None) -> SendResult:
-        """Upload bytes to Matrix and send as a media message."""
         if len(data) > self._max_media_bytes:
             return self._media_too_large(len(data))
         upload_data = data
@@ -1703,7 +1685,6 @@ class MatrixAdapter(BasePlatformAdapter):
         self, room_id: str, file_path: str, msgtype: str, caption: Optional[str] = None,
         reply_to: Optional[str] = None, file_name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
         is_voice: bool = False) -> SendResult:
-        """Read a local file and upload it."""
         p = Path(file_path).expanduser()
         if not p.exists():
             # file_path is host-local; never echo it into chat.
@@ -1725,7 +1706,6 @@ class MatrixAdapter(BasePlatformAdapter):
             caption, reply_to, metadata, is_voice, voice_metadata)
 
     async def _sync_loop(self) -> None:
-        """Continuously sync with the homeserver."""
         client = self._client
         next_batch = await client.sync_store.get_next_batch()  # resume from the initial sync
         while not self._closing:
@@ -1843,7 +1823,6 @@ class MatrixAdapter(BasePlatformAdapter):
             self._clock_skew_warned = True
 
     async def _on_room_message(self, event: Any) -> None:
-        """Handle incoming room message events (text, media)."""
         room_id = str(getattr(event, "room_id", ""))
         sender = str(getattr(event, "sender", ""))
         # DEBUG-level proof the callback fires at all (silent-inbound troubleshooting).
@@ -1988,7 +1967,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _handle_text_message(
         self, room_id: str, sender: str, event_id: str, event_ts: float, source_content: dict,
         relates_to: dict) -> None:
-        """Process a text message event."""
         body = source_content.get("body", "") or ""
         if not body:
             return
@@ -2004,7 +1982,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _handle_media_message(
         self, room_id: str, sender: str, event_id: str, event_ts: float, source_content: dict,
         relates_to: dict, msgtype: str) -> None:
-        """Process a media message event (image, audio, video, file)."""
         body = source_content.get("body", "") or ""
         url = source_content.get("url", "")
         if url and not str(url).startswith("mxc://"):
@@ -2105,7 +2082,6 @@ class MatrixAdapter(BasePlatformAdapter):
         self._schedule_invite_join(room_id, is_direct=is_direct and bool(inviter), inviter=inviter)
 
     async def _join_room_by_id(self, room_id: str) -> bool:
-        """Join a room by ID and refresh local caches on success."""
         if not room_id or room_id in self._joined_rooms:
             return bool(room_id)
         try:
@@ -2168,7 +2144,6 @@ class MatrixAdapter(BasePlatformAdapter):
             return None
 
     async def _redact_reaction(self, room_id: str, reaction_event_id: str, reason: str = "") -> bool:
-        """Remove a reaction by redacting its event."""
         return await self.redact_message(room_id, reaction_event_id, reason)
 
     def _schedule_reaction_redaction(self, room_id: str, reaction_event_id: str, reason: str = "") -> None:
@@ -2189,7 +2164,6 @@ class MatrixAdapter(BasePlatformAdapter):
         task.add_done_callback(self._reaction_redaction_tasks.discard)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add eyes reaction when the agent starts processing a message."""
         msg_id, room_id = event.message_id, event.source.chat_id
         if self._reactions_enabled and msg_id and room_id:
             reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
@@ -2197,7 +2171,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 self._pending_reactions[(room_id, msg_id)] = reaction_event_id
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Replace eyes with checkmark (success) or cross (failure)."""
         msg_id, room_id = event.message_id, event.source.chat_id
         if not self._reactions_enabled or not msg_id or not room_id or outcome == ProcessingOutcome.CANCELLED:
             return
@@ -2207,7 +2180,6 @@ class MatrixAdapter(BasePlatformAdapter):
         await self._send_reaction(room_id, msg_id, "\u2705" if outcome == ProcessingOutcome.SUCCESS else "\u274c")
 
     async def _on_reaction(self, event: Any) -> None:
-        """Handle incoming reaction events."""
         sender = str(getattr(event, "sender", ""))
         if self._is_self_sender(sender):
             return
@@ -2370,7 +2342,6 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.debug("Matrix: scheduled bot reaction redaction %s (%s)", emoji, evt_id)
 
     async def _redact_bot_model_picker_reactions(self, room_id: str, prompt: Any) -> None:
-        """Redact the bot's seeded model picker reactions."""
         for emoji, evt_id in prompt.bot_reaction_events.items():
             try:
                 await self.redact_message(room_id, evt_id, "model picker resolved")
@@ -2396,7 +2367,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 self._pending_text_batch_tasks.pop(key, None)
 
     def _background_read_receipt(self, room_id: str, event_id: str) -> None:
-        """Fire-and-forget read receipt with error logging."""
 
         async def _send() -> None:
             try:
@@ -2406,7 +2376,6 @@ class MatrixAdapter(BasePlatformAdapter):
         asyncio.ensure_future(_send())
 
     async def send_read_receipt(self, room_id: str, event_id: str) -> bool:
-        """Send a read receipt (m.read) for an event."""
         if not self._client:
             return False
         try:
@@ -2439,7 +2408,6 @@ class MatrixAdapter(BasePlatformAdapter):
             return False
 
     async def redact_message(self, room_id: str, event_id: str, reason: str = "") -> bool:
-        """Redact (delete) a message or event from a room."""
         return await self._client_op(
             lambda: self._client.redact(RoomID(room_id), EventID(event_id), reason=reason or None),
             ("Matrix: redacted %s in %s", event_id, room_id), "Matrix: redact error: %s")
@@ -2447,7 +2415,6 @@ class MatrixAdapter(BasePlatformAdapter):
     async def create_room(
         self, name: str = "", topic: str = "", invite: Optional[list] = None, is_direct: bool = False,
         preset: str = "private_chat") -> Optional[str]:
-        """Create a new Matrix room."""
         if not self._client:
             return None
         if preset == "public_chat" and not _env_truthy("MATRIX_ALLOW_PUBLIC_ROOMS"):
@@ -2469,7 +2436,6 @@ class MatrixAdapter(BasePlatformAdapter):
             return None
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
-        """Invite a user to a room."""
         return await self._client_op(
             lambda: self._client.invite_user(RoomID(room_id), UserID(user_id)),
             ("Matrix: invited %s to %s", user_id, room_id), "Matrix: invite error: %s")
@@ -2477,7 +2443,6 @@ class MatrixAdapter(BasePlatformAdapter):
     _VALID_PRESENCE_STATES = frozenset(("online", "offline", "unavailable"))
 
     async def set_presence(self, state: str = "online", status_msg: str = "") -> bool:
-        """Set the bot's presence status."""
         if not self._client:
             return False
         if state not in self._VALID_PRESENCE_STATES:
@@ -2568,7 +2533,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return identity
 
     async def _is_dm_room(self, room_id: str) -> bool:
-        """Check if a room is a DM."""
         return (await self._resolve_room_identity(room_id)).chat_type == "dm"
 
     async def _fetch_m_direct(self, *, log_failure: bool = False, require_dict: bool = False):
@@ -2584,7 +2548,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return resp if isinstance(resp, dict) else None
 
     async def _refresh_dm_cache(self) -> None:
-        """Refresh the DM room cache from m.direct account data."""
         if not self._client:
             return
         dm_data = await self._fetch_m_direct(log_failure=True)
@@ -2646,7 +2609,6 @@ class MatrixAdapter(BasePlatformAdapter):
             msg_content["m.relates_to"] = relates_to
 
     def _extract_outbound_mentions(self, text: str) -> list[str]:
-        """Return unique Matrix user IDs mentioned in outbound text."""
         protected, _ = self._protect_outbound_mention_regions(text)
         return list(dict.fromkeys(m.group(1) for m in _OUTBOUND_MENTION_RE.finditer(protected)))
 
@@ -2725,7 +2687,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return user_id
 
     def _mxc_to_http(self, mxc_url: str) -> str:
-        """Convert mxc://server/media_id to an HTTP download URL."""
         if not mxc_url.startswith("mxc://"):
             return mxc_url
         return f"{self._homeserver}/_matrix/client/v1/media/download/{mxc_url[6:]}"
@@ -2747,7 +2708,6 @@ class MatrixAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _sanitize_link_url(url: str) -> str:
-        """Sanitize a URL for use in an href attribute."""
         stripped = url.strip()
         if ":" in stripped and stripped.split(":", 1)[0].lower().strip() in {"javascript", "data", "vbscript"}:
             return ""
@@ -2981,7 +2941,6 @@ def _build_adapter(config):
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
         name="matrix", label="Matrix", adapter_factory=_build_adapter, check_fn=matrix_deps_present,
         ensure_deps_fn=ensure_matrix_deps, is_connected=_is_connected,
