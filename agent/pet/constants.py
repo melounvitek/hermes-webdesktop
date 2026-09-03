@@ -76,7 +76,7 @@ STATE_ROWS: list[str] = CODEX_STATE_ROWS
 # Canonical Hermes names -> accepted row-name aliases in descending preference.
 _CODEX_NAMES = {"wave": "waving", "jump": "jumping", "run": "running"}
 STATE_ALIASES: dict[str, tuple[str, ...]] = {
-    s.value: (s.value, _CODEX_NAMES[s.value]) if s.value in _CODEX_NAMES else (s.value,) for s in PetState
+    s: (s, _CODEX_NAMES[s]) if s in _CODEX_NAMES else (s,) for s in ("idle", "wave", "jump", "run", "failed", "review", "waiting")
 }
 
 
