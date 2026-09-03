@@ -339,8 +339,7 @@ def _install_sidecar() -> int:
 
 _COMMANDS = {
     "setup": _cmd_setup, "status": _cmd_status, "install-sidecar": lambda _args: _install_sidecar(),
-    "telemetry": _cmd_telemetry,
-}
+    "telemetry": _cmd_telemetry}
 
 
 def gateway_setup() -> None:

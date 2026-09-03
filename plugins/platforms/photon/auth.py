@@ -531,8 +531,7 @@ def find_project_by_name(token: str, name: str) -> Optional[Dict[str, Any]]:
 
 
 def create_project(
-    token: str, *, name: str = DEFAULT_PROJECT_NAME, location: str = "United States",
-) -> Dict[str, Any]:
+    token: str, *, name: str = DEFAULT_PROJECT_NAME, location: str = "United States") -> Dict[str, Any]:
     """POST ``/api/projects`` and return the project (Spectrum is always provisioned;
     the request carries no ``spectrum`` flag)."""
     body: Dict[str, Any] = {"name": name, "location": location, "template": False, "observability": False}
@@ -587,8 +586,7 @@ def find_user_by_phone(project_id: str, project_secret: str, phone_number: str) 
 
 def create_user(
     project_id: str, project_secret: str, *, phone_number: str, first_name: Optional[str] = None,
-    last_name: Optional[str] = None, email: Optional[str] = None, send_invite: bool = False,
-) -> Dict[str, Any]:
+    last_name: Optional[str] = None, email: Optional[str] = None, send_invite: bool = False) -> Dict[str, Any]:
     """POST Spectrum Cloud ``/projects/{id}/users/`` and return the user."""
     _require_httpx(" user creation")
     if not E164_RE.match(phone_number):
@@ -737,6 +735,5 @@ def print_credential_summary(emit: Any = print) -> None:
         "  project id          : " + (sid if sid else "✗ missing"),
         "  project secret      : " + ("✓ stored" if sec else "✗ missing"),
         "  my number           : " + (phone if phone else "✗ missing (run `hermes photon setup --phone ...`)"),
-        "  assigned number     : " + (assigned if assigned else "✗ missing (run `hermes photon setup`)"),
-    ]
+        "  assigned number     : " + (assigned if assigned else "✗ missing (run `hermes photon setup`)")]
     emit("\n".join(rows))
