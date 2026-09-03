@@ -36,13 +36,12 @@ def _oauth_block(name: str, status: dict, hint: str, rows) -> None:
     ``rows`` are ``(label, status_key, formatter, gate)``: a detail prints when the raw value is
     truthy and ``gate`` is None or equals the logged-in state (False = only while logged out).
     """
-    from hermes_cli.status import _detail, _row
     logged_in = bool(status.get("logged_in"))
-    _row(name, logged_in, "logged in" if logged_in else f"not logged in (run: {hint})")
+    _status._row(name, logged_in, "logged in" if logged_in else f"not logged in (run: {hint})")
     for label, key, fmt, gate in rows:
         raw = status.get(key)
         if raw and (gate is None or gate == logged_in):
-            _detail(label, fmt(raw) if fmt else raw)
+            _status._detail(label, fmt(raw) if fmt else raw)
 
 
 # Values may be a single env var name (str) or a tuple of alternates (first found wins).
@@ -100,20 +99,18 @@ _APIKEY_PROVIDERS = {
 
 
 def _render_api_keys(ctx):
-    from hermes_cli.status import _first_env_value, _row, _section, redact_key
-    _section("API Keys")
+    _status._section("API Keys")
     for name, env_ref in _API_KEYS.items():
-        value = _first_env_value(env_ref)
-        _row(name, bool(value), redact_key(value))
+        value = _status._first_env_value(env_ref)
+        _status._row(name, bool(value), _status.redact_key(value))
     # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     from hermes_cli.auth import get_anthropic_key
     anthropic_value = get_anthropic_key()
-    _row("Anthropic", bool(anthropic_value), redact_key(anthropic_value))
+    _status._row("Anthropic", bool(anthropic_value), _status.redact_key(anthropic_value))
 
 
 def _render_auth_providers(ctx):
-    from hermes_cli.status import _detail, _row, _section
-    _section("Auth Providers")
+    _status._section("Auth Providers")
     import hermes_cli.auth as auth
     try:
         # Read-only display: the refresh-free snapshot, so `hermes status` never performs an OAuth
@@ -141,7 +138,7 @@ def _render_auth_providers(ctx):
         nous_status.get("inference_credential_present") or (info and info.inference_credential_present)
     )
     nous_error = nous_status.get("error")
-    _row("Nous Portal", logged_in,
+    _status._row("Nous Portal", logged_in,
          "logged in" if logged_in else "not logged in (Nous inference key configured)" if inference
          else "not logged in (run: hermes portal)")
     portal_url = nous_status.get("portal_base_url") or "(unknown)"
@@ -157,17 +154,17 @@ def _render_auth_providers(ctx):
          logged_in or nous_status.get("has_refresh_token")),
         ("Error:", nous_error, nous_error)):
         if show:
-            _detail(label, value)
+            _status._detail(label, value)
     for name, getter, hint, rows in _OAUTH_BLOCKS:
         _oauth_block(name, statuses.get(getter, {}), hint, rows)
 
 
 def _render_nous_gateway(ctx):
-    from hermes_cli.status import _section, check_mark
     if managed_nous_tools_enabled():
         features = get_nous_subscription_features(ctx.config)
-        _section("Nous Tool Gateway")
-        print("  Nous Portal   ✓ managed tools available" if features.nous_auth_present else "  Nous Portal   ✗ not logged in")
+        _status._section("Nous Tool Gateway")
+        print("  Nous Portal   ✓ managed tools available" if features.nous_auth_present
+              else "  Nous Portal   ✗ not logged in")
         for f in features.items():
             if f.managed_by_nous:
                 state = "active via Nous subscription"
@@ -179,11 +176,12 @@ def _render_nous_gateway(ctx):
                 state = "available via subscription (optional)"
             else:
                 state = "not configured"
-            print(f"  {f.label:<15} {check_mark(f.available or f.active or f.managed_by_nous)} {state}")
+            mark = _status.check_mark(f.available or f.active or f.managed_by_nous)
+            print(f"  {f.label:<15} {mark} {state}")
     elif ctx.nous_logged_in or ctx.nous_inference_present:
         # Nous OAuth without entitlement, or an opaque inference key without Portal account
         # information, cannot enable the Tool Gateway.
-        _section("Nous Tool Gateway")
+        _status._section("Nous Tool Gateway")
         message = format_nous_portal_entitlement_message(
             ctx.nous_account_info, capability="managed web, image, TTS, STT, browser, and Modal tools"
         )
@@ -192,22 +190,27 @@ def _render_nous_gateway(ctx):
 
 
 def _render_apikey_providers(ctx):
-    from hermes_cli.status import _effective_provider_label, _first_env_value, _section, check_mark, get_env_value
-    _section("API-Key Providers")
+    _status._section("API-Key Providers")
     for pname, env_vars in _APIKEY_PROVIDERS.items():
-        configured = bool(_first_env_value(env_vars))
-        print(f"  {pname:<16} {check_mark(configured)} {'configured' if configured else 'not configured (run: hermes model)'}")
+        configured = bool(_status._first_env_value(env_vars))
+        state = "configured" if configured else "not configured (run: hermes model)"
+        print(f"  {pname:<16} {_status.check_mark(configured)} {state}")
 
     # LM Studio reachability: probe only when it is the active provider so users with foreign
     # configs see no noise. Auth rejection vs. a silent empty list is the common support case.
-    if _effective_provider_label() == "LM Studio":
+    if _status._effective_provider_label() == "LM Studio":
         from hermes_cli.models import probe_lmstudio_models
         model_cfg = ctx.config.get("model")
-        base = (model_cfg.get("base_url") if isinstance(model_cfg, dict) else None) or get_env_value("LM_BASE_URL") or "http://127.0.0.1:1234/v1"
+        base = ((model_cfg.get("base_url") if isinstance(model_cfg, dict) else None)
+                or _status.get_env_value("LM_BASE_URL") or "http://127.0.0.1:1234/v1")
         try:
-            models = probe_lmstudio_models(api_key=get_env_value("LM_API_KEY") or "", base_url=base, timeout=1.5)
+            models = probe_lmstudio_models(api_key=_status.get_env_value("LM_API_KEY") or "",
+                                           base_url=base, timeout=1.5)
             ok = models is not None
             msg = f"reachable ({len(models)} model(s)) at {base}" if ok else f"unreachable at {base}"
         except AuthError:
             ok, msg = False, "auth rejected — set LM_API_KEY"
-        print(f"  {'LM Studio':<16} {check_mark(ok)} {msg}")
+        print(f"  {'LM Studio':<16} {_status.check_mark(ok)} {msg}")
+
+
+import hermes_cli.status as _status  # noqa: E402  (bottom: hermes_cli.status imports this module)
