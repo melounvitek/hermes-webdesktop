@@ -147,7 +147,8 @@ def _memory_cards() -> list[dict[str, Any]]:
     return cards
 
 
-def _tokenize(text: str) -> set[str]: return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}  # noqa: E704
+def _tokenize(text: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", text.lower()) if len(t) >= 3}
 
 
 def _memory_skill_edges(memory_cards: list[dict[str, Any]], skills: list[SkillNode]) -> list[tuple[str, str]]:
