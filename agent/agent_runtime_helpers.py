@@ -1053,6 +1053,21 @@ def _build_anthropic_client_from_runtime(agent, rt: Dict[str, Any]) -> None:
     agent.client = None
 
 
+def _rebuild_primary_client(agent, rt: Dict[str, Any], *, reason: str) -> None:
+    """Rebuild the primary client from a ``_primary_runtime`` snapshot (MoA facade / native Anthropic / OpenAI wire)."""
+    if (agent.provider or "").strip().lower() == "moa":
+        # MoA has empty client_kwargs; rebuild via the shared facade factory so the
+        # reference_callback relay survives recovery.
+        from agent.moa_loop import build_moa_facade
+
+        agent.client = build_moa_facade(agent, agent.model)
+        agent._anthropic_client = None
+    elif agent.api_mode == "anthropic_messages":
+        _build_anthropic_client_from_runtime(agent, rt)
+    else:
+        agent.client = agent._create_openai_client(dict(rt["client_kwargs"]), reason=reason, shared=True)
+
+
 def try_recover_primary_transport(
     agent, api_error: Exception, *, retry_count: int, max_retries: int,
 ) -> bool:
@@ -1062,12 +1077,9 @@ def try_recover_primary_transport(
     """
     if agent._fallback_activated:
         return False
-
     error_type = type(api_error).__name__
     if error_type not in _TRANSIENT_TRANSPORT_ERRORS:
         return False
-
-    # Skip for aggregator providers — they manage their own retry infra
     if agent._is_openrouter_url():
         return False
     provider_lower = (agent.provider or "").strip().lower()
@@ -1078,36 +1090,26 @@ def try_recover_primary_transport(
         and getattr(agent, "api_mode", None) != "anthropic_messages"
     ):
         return False
-
     try:
-        # Never hard-close the shared client here (#70773): stale streaming workers may
-        # still be unwinding on the old pool; _retire_shared_openai_client defers FD release to GC.
+        # Never hard-close the shared client here: stale streaming workers may still be
+        # unwinding on the old pool; _retire_shared_openai_client defers FD release to GC.
         if getattr(agent, "client", None) is not None:
             try:
-                agent._retire_shared_openai_client(
-                    agent.client, reason="primary_recovery",
-                )
+                agent._retire_shared_openai_client(agent.client, reason="primary_recovery")
             except Exception:
                 pass
-
         rt = agent._primary_runtime
         _apply_primary_runtime_fields(agent, rt)
-
         if agent.api_mode == "anthropic_messages":
             _build_anthropic_client_from_runtime(agent, rt)
         elif (agent.provider or "").strip().lower() == "moa":
-            # MoA has empty client_kwargs; rebuild via the shared facade factory so the
-            # reference_callback relay survives recovery (#53802).
             from agent.moa_loop import build_moa_facade
 
             agent.client = build_moa_facade(agent, agent.model)
         else:
             agent.client = agent._create_openai_client(
-                dict(rt["client_kwargs"]),
-                reason="primary_recovery",
-                shared=True,
+                dict(rt["client_kwargs"]), reason="primary_recovery", shared=True
             )
-
         wait_time = min(3 + retry_count, 8)
         agent._vprint(
             f"{agent.log_prefix}🔁 Transient {error_type} on {agent.provider} — "
@@ -1204,48 +1206,19 @@ def drop_thinking_only_and_merge_users(
 
 
 
-def restore_primary_runtime(agent) -> bool:
-    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped.
+def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base_url, matches_primary, load_primary_pool):
+    """Reset-aware gate: skip a guaranteed-to-fail restore while the primary pool reports a future reset.
 
-    Needed for long-lived CLI agents and the gateway's cached agents (``_agent_cache``).
+    Fails open on any error/None. Returns ``(blocked, prefetched_pool, prefetched)`` so the
+    rebind step can reuse the loaded pool (one auth.json read at most).
     """
-    if not agent._fallback_activated:
-        # Reset the index even without activation: a failed _try_activate_fallback() can strand
-        # _fallback_index past the chain end and silently block future fallbacks (#20465).
-        agent._fallback_index = 0
-        return False
-
-    if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
-        return False  # primary still in rate-limit cooldown, stay on fallback
-
-    # Reset-aware gate: when the credential pool reports a reset time still in the future
-    # (subscription windows), skip the guaranteed-to-fail restore (saves two cache invalidations
-    # per turn). Fails open on any error/None. The loaded primary pool is handed to the
-    # rebind block below via ``prefetched_primary_pool`` so it loads at most once.
-    rt = agent._primary_runtime
-    primary_provider = str((rt or {}).get("provider") or "").strip().lower()
-    primary_runtime_base_url = str((rt or {}).get("base_url") or "")
-
-    def _matches_primary(candidate) -> bool:
-        return credential_pool_matches_provider(
-            candidate, primary_provider, base_url=primary_runtime_base_url
-        )
-
-    def _load_primary_pool():
-        """Load the primary provider's pool; None when absent or provider-mismatched."""
-        from agent.credential_pool import load_pool
-
-        key = resolve_runtime_pool_key(primary_provider, primary_runtime_base_url)
-        loaded = load_pool(key) if key else None
-        return loaded if loaded is not None and _matches_primary(loaded) else None
-
-    prefetched_primary_pool = None
-    primary_pool_prefetched = False
+    prefetched_pool = None
+    prefetched = False
     try:
         pool = getattr(agent, "_credential_pool", None)
-        if not _matches_primary(pool):
-            prefetched_primary_pool = pool = _load_primary_pool()
-            primary_pool_prefetched = True
+        if not matches_primary(pool):
+            prefetched_pool = pool = load_primary_pool()
+            prefetched = True
         next_at = getattr(pool, "next_available_at", lambda: None)()
         if next_at is not None and next_at > time.time():
             if not getattr(agent, "_restore_wait_logged", False):
@@ -1258,72 +1231,131 @@ def restore_primary_runtime(agent) -> bool:
                     agent.provider,
                     agent.model,
                 )
-            return False
+            return True, prefetched_pool, prefetched
     except Exception:
-        logger.debug(
-            "Reset-aware restore gate failed; falling back to per-turn retry",
-            exc_info=True,
+        logger.debug("Reset-aware restore gate failed; falling back to per-turn retry", exc_info=True)
+    return False, prefetched_pool, prefetched
+
+
+def _restore_runtime_capabilities(agent, rt: Dict[str, Any]) -> None:
+    if "runtime_capabilities" in rt:
+        raw = rt["runtime_capabilities"]
+        if not isinstance(raw, dict):
+            logger.warning("Ignoring malformed runtime capabilities snapshot")
+        else:
+            agent.runtime_capabilities = dict(raw)
+    elif "capabilities" in rt:
+        # Snapshots written by the initial capability propagation patch.
+        raw = rt["capabilities"]
+        if isinstance(raw, dict):
+            agent.runtime_capabilities = dict(raw)
+
+
+def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, load_primary_pool, prefetched_pool, prefetched) -> None:
+    """Rebind and re-select the primary credential pool after a fallback turn.
+
+    A cross-provider fallback attaches the fallback's pool; leaving it would trip the
+    provider-mismatch guard on the next 401/429. Reload the primary pool, else clear it.
+    The snapshot api_key may be stale after pool rotation; re-select the pool's current
+    best entry, keeping the snapshot key when no usable entry exists.
+    """
+    pool = getattr(agent, "_credential_pool", None)
+    pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
+    if pool is not None and pool_provider and not matches_primary(pool):
+        agent._credential_pool = None
+        agent._credential_pool_entry_id = None
+        try:
+            # Reuse the pool the reset-aware gate already loaded (avoids a second auth.json read).
+            agent._credential_pool = prefetched_pool if prefetched else load_primary_pool()
+        except Exception as exc:
+            logger.warning(
+                "Restore could not reload primary credential pool for %s: %s", primary_provider, exc
+            )
+    agent._credential_pool_entry_id = None
+    pool = getattr(agent, "_credential_pool", None)
+    if pool is None or not pool.has_available():
+        return
+    entry = pool.select()
+    if entry is None:
+        return
+    entry_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+    if not entry_key:
+        return
+    if matches_primary(entry):
+        # _swap_credential rebuilds the client and reapplies base-url-scoped headers.
+        agent._swap_credential(entry)
+        logger.info(
+            "Restore re-selected pool entry %s (%s)",
+            getattr(entry, "id", "?"), getattr(entry, "label", "?"),
         )
+    else:
+        logger.info(
+            "Restore skipped pool entry %s (%s): provider %s does not match primary provider %s",
+            getattr(entry, "id", "?"),
+            getattr(entry, "label", "?"),
+            str(getattr(entry, "provider", "") or "").strip().lower() or "?",
+            primary_provider or "?",
+        )
+
+
+def restore_primary_runtime(agent) -> bool:
+    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped.
+
+    Needed for long-lived CLI agents and the gateway's cached agents (``_agent_cache``).
+    """
+    if not agent._fallback_activated:
+        # Reset the index even without activation: a failed _try_activate_fallback() can strand
+        # _fallback_index past the chain end and silently block future fallbacks.
+        agent._fallback_index = 0
+        return False
+    if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
+        return False  # primary still in rate-limit cooldown, stay on fallback
+
+    rt = agent._primary_runtime
+    primary_provider = str((rt or {}).get("provider") or "").strip().lower()
+    primary_runtime_base_url = str((rt or {}).get("base_url") or "")
+
+    def _matches_primary(candidate) -> bool:
+        return credential_pool_matches_provider(candidate, primary_provider, base_url=primary_runtime_base_url)
+
+    def _load_primary_pool():
+        """Load the primary provider's pool; None when absent or provider-mismatched."""
+        from agent.credential_pool import load_pool
+
+        key = resolve_runtime_pool_key(primary_provider, primary_runtime_base_url)
+        loaded = load_pool(key) if key else None
+        return loaded if loaded is not None and _matches_primary(loaded) else None
+
+    blocked, prefetched_pool, prefetched = _primary_reset_gate_blocks(
+        agent, rt, primary_provider, primary_runtime_base_url, _matches_primary, _load_primary_pool
+    )
+    if blocked:
+        return False
     agent._restore_wait_logged = False
 
     fallback_route = getattr(agent, "_provider_fallback_route", None)
-    if (
-        isinstance(fallback_route, (list, tuple))
-        and len(fallback_route) == 2
-    ):
+    if isinstance(fallback_route, (list, tuple)) and len(fallback_route) == 2:
         previous_model = str(fallback_route[0] or "unknown")
         previous_provider = str(fallback_route[1] or "unknown")
     else:
         previous_model = str(getattr(agent, "model", "") or "unknown")
         previous_provider = str(getattr(agent, "provider", "") or "unknown")
-    provider_fallback_active = bool(
-        getattr(agent, "_provider_fallback_active", False)
-    )
+    provider_fallback_active = bool(getattr(agent, "_provider_fallback_active", False))
     try:
-        # ── Core runtime state ──
         _apply_primary_runtime_fields(agent, rt)
-        if "runtime_capabilities" in rt:
-            raw_capabilities = rt["runtime_capabilities"]
-            if not isinstance(raw_capabilities, dict):
-                logger.warning("Ignoring malformed runtime capabilities snapshot")
-            else:
-                agent.runtime_capabilities = dict(raw_capabilities)
-        elif "capabilities" in rt:
-            # Read snapshots written by the initial capability propagation patch.
-            raw_capabilities = rt["capabilities"]
-            if isinstance(raw_capabilities, dict):
-                agent.runtime_capabilities = dict(raw_capabilities)
+        _restore_runtime_capabilities(agent, rt)
         agent._use_prompt_caching = rt["use_prompt_caching"]
         # Default to native layout for snapshots predating the native-vs-proxy split.
         agent._use_native_cache_layout = rt.get(
             "use_native_cache_layout",
             agent.api_mode == "anthropic_messages" and agent.provider == "anthropic",
         )
-        # An operator cache disable (_cache_disabled) must survive snapshot restoration (#33555).
+        # An operator cache disable (_cache_disabled) must survive snapshot restoration.
         if getattr(agent, "_cache_disabled", False):
             agent._use_prompt_caching = False
             agent._use_native_cache_layout = False
-
-        # ── Rebuild client for the primary provider ──
-        if agent.provider == "moa":
-            # MoA has no real OpenAI client kwargs; rebuild via the shared facade factory so the
-            # reference_callback relay stays wired (#53802).
-            from agent.moa_loop import build_moa_facade
-
-            agent.client = build_moa_facade(agent, agent.model)
-            agent._anthropic_client = None
-        elif agent.api_mode == "anthropic_messages":
-            _build_anthropic_client_from_runtime(agent, rt)
-        else:
-            agent.client = agent._create_openai_client(
-                dict(rt["client_kwargs"]),
-                reason="restore_primary",
-                shared=True,
-            )
-
-        # ── Restore context engine state ──
-        cc = agent.context_compressor
-        cc.update_model(
+        _rebuild_primary_client(agent, rt, reason="restore_primary")
+        agent.context_compressor.update_model(
             model=rt["compressor_model"],
             context_length=rt["compressor_context_length"],
             base_url=rt["compressor_base_url"],
@@ -1331,79 +1363,23 @@ def restore_primary_runtime(agent) -> bool:
             provider=rt["compressor_provider"],
             api_mode=rt.get("compressor_api_mode", ""),
         )
-
-        # ── Rebind and re-select the primary credential pool ──
-        # A cross-provider fallback attaches the fallback's pool; leaving it would trip the
-        # provider-mismatch guard on the next 401/429. Reload the primary pool, else clear it.
-        pool = getattr(agent, "_credential_pool", None)
-        pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
-        if pool is not None and pool_provider and not _matches_primary(pool):
-            agent._credential_pool = None
-            agent._credential_pool_entry_id = None
-            try:
-                # Reuse the pool the reset-aware gate already loaded (avoids a second auth.json read).
-                agent._credential_pool = (
-                    prefetched_primary_pool if primary_pool_prefetched else _load_primary_pool()
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Restore could not reload primary credential pool for %s: %s",
-                    primary_provider,
-                    exc,
-                )
-
-        # The snapshot api_key may be stale after pool rotation; re-select the pool's current
-        # best entry, keeping the snapshot key when no usable entry exists (#25205).
-        agent._credential_pool_entry_id = None
-        pool = getattr(agent, "_credential_pool", None)
-        if pool is not None and pool.has_available():
-            entry = pool.select()
-            if entry is not None:
-                entry_provider = str(getattr(entry, "provider", "") or "").strip().lower()
-                entry_key = (
-                    getattr(entry, "runtime_api_key", None)
-                    or getattr(entry, "access_token", "")
-                )
-                if entry_key and _matches_primary(entry):
-                    # _swap_credential rebuilds the client and reapplies base-url-scoped headers (#33163).
-                    agent._swap_credential(entry)
-                    logger.info(
-                        "Restore re-selected pool entry %s (%s)",
-                        getattr(entry, "id", "?"),
-                        getattr(entry, "label", "?"),
-                    )
-                elif entry_key:
-                    logger.info(
-                        "Restore skipped pool entry %s (%s): provider %s does not match primary provider %s",
-                        getattr(entry, "id", "?"),
-                        getattr(entry, "label", "?"),
-                        entry_provider or "?",
-                        primary_provider or "?",
-                    )
-
-        # ── Restore reasoning_config if saved (older snapshots keep the current value) ──
+        _rebind_primary_credential_pool(
+            agent, primary_provider, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
+        )
+        # Older snapshots have no reasoning_config; keep the current value.
         saved_reasoning = rt.get("reasoning_config")
         if saved_reasoning is not None:
             agent.reasoning_config = dict(saved_reasoning)
-
-        # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
-        agent._rate_limit_backoff_count = 0  # reset exponential backoff counter
-
-        # Reset the stale-call circuit breaker (#58962): its streak measured the fallback provider.
-        from agent.chat_completion_helpers import _reset_stale_streak
+        agent._rate_limit_backoff_count = 0
+        # Reset the stale-call circuit breaker: its streak measured the fallback provider.
+        from agent.chat_completion_helpers import _reset_stale_streak, rewrite_prompt_model_identity
         _reset_stale_streak(agent)
-
-        # Undo the fallback's identity rewrite so the prompt is
-        # byte-identical to the stored copy again (prefix cache match).
-        from agent.chat_completion_helpers import rewrite_prompt_model_identity
+        # Undo the fallback's identity rewrite so the prompt is byte-identical to the
+        # stored copy again (prefix cache match).
         rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
-
-        logger.info(
-            "Primary runtime restored for new turn: %s (%s)",
-            agent.model, agent.provider,
-        )
+        logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
         if provider_fallback_active:
@@ -1413,8 +1389,7 @@ def restore_primary_runtime(agent) -> bool:
                     f"fallback {previous_model} via {previous_provider} is no longer active."
                 )
             except Exception:
-                # Notification surfaces are best-effort and must never undo a
-                # successful runtime restoration.
+                # Notification surfaces are best-effort and must never undo a successful restore.
                 pass
         return True
     except Exception as e:
