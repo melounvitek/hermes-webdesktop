@@ -106,8 +106,7 @@ def build_review_task(snapshot: List[Dict[str, str]], user_prompt: str = "", loa
         "--- Recent conversation (oldest first) ---",
     ]
     for message in snapshot:
-        label = "USER" if message["role"] == "user" else "PRIMARY AGENT"
-        lines += [f"[{label}]", message["text"], ""]
+        lines += [f"[{'USER' if message['role'] == 'user' else 'PRIMARY AGENT'}]", message["text"], ""]
     lines.append("--- End of conversation excerpt ---")
     if loaded_skills:
         skill_list = ", ".join(loaded_skills)
@@ -135,11 +134,10 @@ def _load_review_credentials_cfg() -> Optional[Dict[str, Any]]:
     and no model/base_url) so the reviewer inherits the parent's credentials."""
     try:
         from hermes_cli.config import load_config_readonly
-
         review = (load_config_readonly().get("auxiliary") or {}).get("review") or {}
-        if not isinstance(review, dict):
-            return None
     except Exception:
+        return None
+    if not isinstance(review, dict):
         return None
 
     cfg = {k: str(review.get(k) or "").strip() for k in ("provider", "model", "base_url", "api_key", "api_mode")}
@@ -156,17 +154,13 @@ def start_review(parent_agent, messages: List[Dict[str, Any]], user_prompt: str 
     when there is nothing to review or the dispatch is rejected/errored."""
     if parent_agent is None:
         raise ValueError("No active agent — send a message first.")
-
     snapshot = snapshot_recent_messages(messages)
     if not snapshot:
         raise ValueError("Nothing to review yet — the conversation is empty.")
-
-    loaded_skills = collect_parent_loaded_skills(parent_agent, messages)
-    goal, context = build_review_task(snapshot, user_prompt, loaded_skills)
+    goal, context = build_review_task(snapshot, user_prompt, collect_parent_loaded_skills(parent_agent, messages))
     credentials_cfg = _load_review_credentials_cfg()
 
     from tools.delegate_tool import delegate_task
-
     raw = delegate_task(goal=goal, context=context, background=True, parent_agent=parent_agent, credentials_cfg=credentials_cfg)
     try:
         result = json.loads(raw)

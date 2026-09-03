@@ -80,8 +80,6 @@ class ReviewIdleQueue:
         self._now: Callable[[], float] = time.monotonic
         self._server_idle: Callable[[], bool] = _managed_server_idle
 
-    # ── turn liveness (this process) ────────────────────────────
-
     def note_turn_started(self) -> None:
         with self._lock:
             self._live_turns += 1
@@ -93,8 +91,6 @@ class ReviewIdleQueue:
             if self._live_turns == 0:
                 self._quiet_since = self._now()
         self._wake.set()
-
-    # ── queue ────────────────────────────────────────────────────
 
     def enqueue(self, agent: Any, session_key: str, kwargs: Dict[str, Any]) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review, keeping the ORIGINAL
@@ -110,8 +106,6 @@ class ReviewIdleQueue:
     def pending_count(self) -> int:
         with self._lock:
             return len(self._pending)
-
-    # ── dispatcher ───────────────────────────────────────────────
 
     def _ensure_thread(self) -> None:
         with self._lock:
@@ -193,8 +187,7 @@ def _managed_server_idle() -> bool:
             return True
 
         def _get(path: str) -> Any:
-            req = urllib.request.Request(f"{base}{path}", headers=headers)
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}{path}", headers=headers), timeout=3) as r:
                 return json.loads(r.read())
 
         loaded = [m["id"] for m in _get("/models").get("data", [])

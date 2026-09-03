@@ -59,10 +59,7 @@ def trim_snapshot_for_fork(history: Optional[List[Dict[str, Any]]]) -> List[Dict
     return msgs
 
 
-def render_history_for_side_question(
-    history: Optional[List[Dict[str, Any]]],
-    char_budget: int = _TRANSCRIPT_CHAR_BUDGET,
-) -> str:
+def render_history_for_side_question(history: Optional[List[Dict[str, Any]]], char_budget: int = _TRANSCRIPT_CHAR_BUDGET) -> str:
     """Plain-text transcript for the fallback path: newest-biased fit to ``char_budget``,
     tool calls summarized by name, tool results truncated, system prompt skipped."""
     lines: List[str] = []
@@ -95,11 +92,9 @@ def _side_question_task_config() -> Dict[str, Any]:
     """Return ``auxiliary.side_question`` from config (or ``{}``)."""
     try:
         from hermes_cli.config import load_config_readonly
-
-        cfg = load_config_readonly()
+        aux = load_config_readonly().get("auxiliary")
     except Exception:
         return {}
-    aux = cfg.get("auxiliary")
     task = aux.get(SIDE_QUESTION_TASK) if isinstance(aux, dict) else None
     return task if isinstance(task, dict) else {}
 
@@ -118,18 +113,12 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     fork, _rt, routed = build_cache_parity_fork(parent_agent, _side_question_task_config(),
                                                 max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question")
     try:
-        set_thread_tool_whitelist(
-            set(),
-            deny_msg_fmt=(
-                "Side question (/btw) denied tool call: {tool_name}. "
-                "Tools are disabled here — answer directly from the conversation context."
-            ),
-        )
+        set_thread_tool_whitelist(set(), deny_msg_fmt=(
+            "Side question (/btw) denied tool call: {tool_name}. "
+            "Tools are disabled here — answer directly from the conversation context."))
         snapshot = trim_snapshot_for_fork(history)
-        result = fork.run_conversation(
-            user_message=f"{_FORK_PROMPT}\n\nSide question: {question}",
-            conversation_history=_digest_history(snapshot) if routed else snapshot,
-        )
+        result = fork.run_conversation(user_message=f"{_FORK_PROMPT}\n\nSide question: {question}",
+                                       conversation_history=_digest_history(snapshot) if routed else snapshot)
         answer = (result or {}).get("final_response", "") or ""
         if not answer and result and result.get("error"):
             raise RuntimeError(str(result["error"]))
@@ -137,11 +126,8 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     finally:
         clear_thread_tool_whitelist()
         # Attribute the fork's usage to the parent session; teardown never raises.
-        for step in (
-            lambda: _record_review_usage_to_parent(parent_agent, _snapshot_review_usage(fork)),
-            fork.shutdown_memory_provider,
-            fork.close,
-        ):
+        for step in (lambda: _record_review_usage_to_parent(parent_agent, _snapshot_review_usage(fork)),
+                     fork.shutdown_memory_provider, fork.close):
             try:
                 step()
             except Exception:
@@ -160,13 +146,8 @@ def _answer_via_oneshot(question: str, history: Optional[List[Dict[str, Any]]], 
 
 
 def answer_side_question(
-    question: str,
-    history: Optional[List[Dict[str, Any]]],
-    *,
-    parent_agent: Any = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    max_tokens: int = 2048,
-    temperature: Optional[float] = 0.3,
+    question: str, history: Optional[List[Dict[str, Any]]], *, parent_agent: Any = None,
+    main_runtime: Optional[Dict[str, Any]] = None, max_tokens: int = 2048, temperature: Optional[float] = 0.3,
     timeout: float = 180.0,
 ) -> str:
     """Fork when ``parent_agent`` is live, else (or on empty answer / failure) the one-shot
