@@ -1,52 +1,31 @@
 """FAL image model catalog + upscaler constants for ``tools.image_generation_tool``.
 
-Each entry declares how to translate the unified inputs (prompt + aspect_ratio)
-into the model's native payload. ``size_style`` picks the family:
-``"image_size_preset"`` (FAL preset enum), ``"aspect_ratio"`` (ratio enum),
-``"gpt_literal"`` (literal "WxH" strings). ``supports`` / ``edit_supports`` are
-whitelists — keys outside them are stripped so models never receive rejected
-parameters. ``upscale`` (Clarity Upscaler chained after generation) is False
-everywhere: Clarity redraws content (creativity 0.35) and degraded text/CJK/
-faces when default-on, so upscaling is strictly per-call opt-in.
-Pricing strings are as-of-commit and allowed to drift.
+Each entry translates the unified inputs (prompt + aspect_ratio) into the model's native
+payload. ``size_style``: ``"image_size_preset"`` (FAL preset enum), ``"aspect_ratio"`` (ratio
+enum), ``"gpt_literal"`` (literal "WxH"). ``supports`` / ``edit_supports`` are whitelists —
+other keys are stripped so models never receive rejected parameters. ``upscale`` is False
+everywhere: Clarity redraws content (creativity 0.35) and degraded text/CJK/faces when
+default-on, so upscaling is strictly per-call opt-in. Pricing strings may drift.
 """
 
 from typing import Any, Dict, Optional
 
-_PRESET_SIZES = {
-    "landscape": "landscape_16_9",
-    "square": "square_hd",
-    "portrait": "portrait_16_9",
-}
+_PRESET_SIZES = {"landscape": "landscape_16_9", "square": "square_hd", "portrait": "portrait_16_9"}
 _ASPECT_SIZES = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
 _DEFAULT_SIZES = {"image_size_preset": _PRESET_SIZES, "aspect_ratio": _ASPECT_SIZES}
 
 
 def _model(
-    display: str,
-    speed: str,
-    strengths: str,
-    price: str,
-    *,
-    style: str = "image_size_preset",
-    sizes: Optional[Dict[str, Any]] = None,
-    defaults: Dict[str, Any],
-    supports: set,
-    edit_endpoint: Optional[str] = None,
-    edit_supports: Optional[set] = None,
+    display: str, speed: str, strengths: str, price: str, *, style: str = "image_size_preset",
+    sizes: Optional[Dict[str, Any]] = None, defaults: Dict[str, Any], supports: set,
+    edit_endpoint: Optional[str] = None, edit_supports: Optional[set] = None,
     max_reference_images: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build one catalog entry; edit keys are present only for edit-capable models."""
     entry: Dict[str, Any] = {
-        "display": display,
-        "speed": speed,
-        "strengths": strengths,
-        "price": price,
-        "size_style": style,
-        "sizes": sizes if sizes is not None else _DEFAULT_SIZES[style],
-        "defaults": defaults,
-        "supports": supports,
-        "upscale": False,
+        "display": display, "speed": speed, "strengths": strengths, "price": price,
+        "size_style": style, "sizes": sizes if sizes is not None else _DEFAULT_SIZES[style],
+        "defaults": defaults, "supports": supports, "upscale": False,
     }
     if edit_endpoint:
         entry["edit_endpoint"] = edit_endpoint
