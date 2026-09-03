@@ -124,7 +124,7 @@ def _check_api_connectivity(should_fix: bool) -> Finding:
     print("\r" + " " * 70 + "\r", end="")
     for r in results:
         for glyph, label, detail in r.lines:
-            print(f"  {glyph} {label} {detail}" if detail else f"  {glyph} {label}")
+            print(f"  {glyph} {label}" + (f" {detail}" if detail else ""))
         if r.issues and not _has_healthy_oauth_fallback_for_apikey_provider(r.label):
             f.issues.extend(r.issues)
     return f

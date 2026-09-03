@@ -14,19 +14,17 @@ from hermes_cli.doctor import _section, check_fail, check_info, check_ok, check_
 
 DEFAULT_PROBE_TIMEOUT = 10.0
 
-# Metadata-only endpoints. None of these spend generation credits.
-FIRECRAWL_HEALTH_URL = "https://api.firecrawl.dev/v2/team/credit-usage"
-FAL_MODELS_URL = "https://fal.ai/api/models?page=1"
-OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
-GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models"
-ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v1/voices"
-
+# Metadata-only endpoints (none spend generation credits): name -> (url, env var, auth scheme).
+_KEYED_PROBES = {
+    "Firecrawl": ("https://api.firecrawl.dev/v2/team/credit-usage", "FIRECRAWL_API_KEY", "Bearer"),
+    "FAL": ("https://fal.ai/api/models?page=1", "FAL_KEY", "Key"),
+}
 # TTS/STT providers that never touch the network (nothing to probe).
 _LOCAL_AUDIO_PROVIDERS = {"", "local", "edge", "neutts", "kittentts", "piper"}
 _AUDIO_PROBES = {
-    "openai": (OPENAI_MODELS_URL, "OPENAI_API_KEY", "Bearer"),
-    "groq": (GROQ_MODELS_URL, "GROQ_API_KEY", "Bearer"),
-    "elevenlabs": (ELEVENLABS_VOICES_URL, "ELEVENLABS_API_KEY", "xi"),
+    "openai": ("https://api.openai.com/v1/models", "OPENAI_API_KEY", "Bearer"),
+    "groq": ("https://api.groq.com/openai/v1/models", "GROQ_API_KEY", "Bearer"),
+    "elevenlabs": ("https://api.elevenlabs.io/v1/voices", "ELEVENLABS_API_KEY", "xi"),
 }
 
 
@@ -89,11 +87,8 @@ def _browser_available() -> bool:
 
 
 def _launch_browser_probe(timeout: float) -> tuple:
-    """Launch a browser, open about:blank, close. Returns (ok, detail).
-
-    Uses Playwright directly (what agent-browser drives underneath) so the probe owns the full
-    lifecycle and always cleans up.
-    """
+    """Launch a browser, open about:blank, close. Returns (ok, detail). Uses Playwright directly (what
+    agent-browser drives underneath) so the probe owns the full lifecycle and always cleans up."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -191,11 +186,8 @@ def _run_one(name: str, fn: Callable[[], ProbeResult], issues: List[str]) -> Pro
 
 
 def run_live_checks(issues: List[str]) -> List[ProbeResult]:
-    """Run one bounded, read-only probe per configured tool backend.
-
-    Sequential by design (bounded, predictable output ordering). Appends a remediation line to
-    ``issues`` for each failed probe. Skipped backends never fail and never append issues.
-    """
+    """Run one bounded, read-only probe per configured tool backend — sequential by design (predictable output
+    ordering). Appends a remediation line to ``issues`` per failed probe; skipped backends never append."""
     config = _load_config()
     try:
         timeout = float((config.get("doctor") or {}).get("live_probe_timeout", DEFAULT_PROBE_TIMEOUT))
@@ -205,10 +197,10 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
 
     _section("Live Backend Probes (opt-in, real calls)")
     results: List[ProbeResult] = [
-        _run_one("Firecrawl", lambda: _keyed_probe("Firecrawl", FIRECRAWL_HEALTH_URL, "FIRECRAWL_API_KEY", "Bearer", timeout), issues),
-        _run_one("FAL", lambda: _keyed_probe("FAL", FAL_MODELS_URL, "FAL_KEY", "Key", timeout), issues),
-        _run_one("Browser", lambda: _probe_browser(timeout), issues),
+        _run_one(name, lambda n=name, spec=spec: _keyed_probe(n, *spec, timeout), issues)
+        for name, spec in _KEYED_PROBES.items()
     ]
+    results.append(_run_one("Browser", lambda: _probe_browser(timeout), issues))
 
     servers = config.get("mcp_servers") or {}
     if isinstance(servers, dict) and servers:
@@ -232,11 +224,8 @@ def run_live_checks(issues: List[str]) -> List[ProbeResult]:
 
 
 def maybe_run_live_checks(args, issues: List[str]):
-    """Entry point called from ``run_doctor`` after the static checks.
-
-    No-ops (returns None) unless the user explicitly passed ``--live``. A crash anywhere in the live
-    subsystem must never break doctor.
-    """
+    """Called from ``run_doctor`` after the static checks; no-op (None) unless ``--live`` was passed.
+    A crash anywhere in the live subsystem must never break doctor."""
     if not getattr(args, "live", False):
         return None
     try:

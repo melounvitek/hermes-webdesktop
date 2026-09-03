@@ -1,13 +1,13 @@
 """API connectivity probes for ``hermes doctor`` (split out of ``doctor.py``).
 
-Every probe is a pure function: takes its inputs, makes one HTTP/SDK call and
-returns a ``ProbeResult`` carrying the row(s) to print and issue strings to
-append. No printing inside workers — the caller prints in submission order.
+Every probe is a pure function: one HTTP/SDK call returning a ``ProbeResult`` with the row(s) to
+print and issue strings to append. No printing inside workers — the caller prints in submission order.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import functools
 import os
 import sys
 from typing import NamedTuple
@@ -40,9 +40,8 @@ def _skip(name: str) -> ProbeResult:
 
 
 def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool:
-    """True when a failed direct API-key probe is non-blocking because the same
-    provider family's OAuth runtime path is already healthy: the failed row is
-    still shown, but not promoted into the final blocking summary."""
+    """True when a failed direct API-key probe is non-blocking because the same provider family's OAuth
+    runtime path is already healthy: the failed row is still shown, but not promoted into the summary."""
     normalized = (provider_label or "").strip().lower()
     getter = {"minimax": "get_minimax_oauth_auth_status", "xai": "get_xai_oauth_auth_status"}.get(normalized)
     if not getter:
@@ -84,18 +83,14 @@ def _build_apikey_providers_list() -> list:
         ("OpenCode Go",      ("OPENCODE_GO_API_KEY",),                       None,                                  "OPENCODE_GO_BASE_URL", False),
     ]
     _known_names = {t[0] for t in _static}
-    # Canonical profile names of the static rows, so profiles without a
-    # display_name don't duplicate providers already listed above.
-    _known_canonical = {
-        "zai", "kimi-coding", "stepfun", "kimi-coding-cn", "arcee", "gmi", "deepseek",
-        "huggingface", "nvidia", "alibaba", "minimax", "minimax-cn", "ai-gateway",
-        "kilocode", "opencode-zen", "opencode-go",
-    }
-    # Providers with a dedicated health check (custom headers/auth). Skip their
-    # pluggable profiles so the generic Bearer-auth loop doesn't run a duplicate,
-    # broken check (e.g. Anthropic native API requires x-api-key, not Bearer).
+    # Providers with a dedicated health check (custom headers/auth): skip their pluggable profiles so
+    # the generic Bearer loop doesn't run a duplicate, broken check (Anthropic needs x-api-key).
     _dedicated_canonical = {"anthropic", "openrouter", "bedrock"}
-    _known_canonical.update(_dedicated_canonical)
+    # Canonical profile names of the static rows, so profiles without a display_name don't duplicate.
+    _known_canonical = {
+        "zai", "kimi-coding", "stepfun", "kimi-coding-cn", "arcee", "gmi", "deepseek", "huggingface", "nvidia",
+        "alibaba", "minimax", "minimax-cn", "ai-gateway", "kilocode", "opencode-zen", "opencode-go",
+    } | _dedicated_canonical
     try:
         from providers import list_providers
         from providers.base import ProviderProfile as _PP
@@ -126,6 +121,18 @@ def _build_apikey_providers_list() -> list:
     return _static
 
 
+# HTTP status -> (detail, issue) for the OpenRouter probe; anything else is a generic HTTP failure.
+_OPENROUTER_STATUS = {
+    401: ("(invalid API key)", "Check OPENROUTER_API_KEY in .env"),
+    402: ("(out of credits — payment required)",
+          "OpenRouter account has insufficient credits. "
+          "Fix: run 'hermes config set model.provider <provider>' "
+          "to switch providers, or fund your OpenRouter account "
+          "at https://openrouter.ai/settings/credits"),
+    429: ("(rate limited)", "OpenRouter rate limit hit — consider switching to a different provider or waiting"),
+}
+
+
 def _probe_openrouter() -> ProbeResult:
     name = "OpenRouter API"
     key = os.getenv("OPENROUTER_API_KEY")
@@ -138,18 +145,8 @@ def _probe_openrouter() -> ProbeResult:
         return _row(name, "fail", f"({e})", ["Check network connectivity"])
     if r.status_code == 200:
         return _row(name, "ok")
-    if r.status_code == 401:
-        return _row(name, "fail", "(invalid API key)", ["Check OPENROUTER_API_KEY in .env"])
-    if r.status_code == 402:
-        return _row(name, "fail", "(out of credits — payment required)", [
-            "OpenRouter account has insufficient credits. "
-            "Fix: run 'hermes config set model.provider <provider>' "
-            "to switch providers, or fund your OpenRouter account "
-            "at https://openrouter.ai/settings/credits"])
-    if r.status_code == 429:
-        return _row(name, "fail", "(rate limited)", [
-            "OpenRouter rate limit hit — consider switching to a different provider or waiting"])
-    return _row(name, "fail", f"(HTTP {r.status_code})")
+    detail, issue = _OPENROUTER_STATUS.get(r.status_code, (f"(HTTP {r.status_code})", None))
+    return _row(name, "fail", detail, [issue] if issue else None)
 
 
 def _probe_anthropic() -> ProbeResult:
@@ -180,9 +177,7 @@ def _probe_anthropic() -> ProbeResult:
         return _row(name, "warn", f"({e})")
     if r.status_code == 200:
         return _row(name, "ok")
-    if r.status_code == 401:
-        return _row(name, "fail", "(invalid API key)")
-    return _row(name, "warn", "(couldn't verify)")
+    return _row(name, "fail", "(invalid API key)") if r.status_code == 401 else _row(name, "warn", "(couldn't verify)")
 
 
 def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_health_check) -> ProbeResult:
@@ -195,13 +190,11 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
     try:
         import httpx
         base = os.getenv(base_env, "") if base_env else ""
-        # Auto-detect Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1
-        # (OpenAI-compat surface, which exposes /models for health check).
+        # Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1 (OpenAI-compat surface exposing /models).
         if not base and key.startswith("sk-kimi-"):
             base = "https://api.kimi.com/coding/v1"
-        # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding
-        # with no /v1) don't support /models. Rewrite to OpenAI-compat
-        # /v1 surface for health checks.
+        # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding with no /v1) don't support
+        # /models — rewrite to the OpenAI-compat /v1 surface for health checks.
         if base and base.rstrip("/").endswith("/anthropic"):
             from agent.auxiliary_client import _to_openai_base_url
             base = _to_openai_base_url(base)
@@ -211,9 +204,8 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
         headers = {"Authorization": f"Bearer {key}", "User-Agent": _HERMES_USER_AGENT}
         if base_url_host_matches(base, "api.kimi.com"):
             headers["User-Agent"] = "claude-code/0.1.0"
-        # Google's Generative Language API rejects ``Authorization: Bearer
-        # <api-key>`` with 401 ``ACCESS_TOKEN_TYPE_UNSUPPORTED`` — that header is
-        # reserved for OAuth 2 access tokens; plain keys use ``x-goog-api-key``.
+        # Google's Generative Language API rejects ``Authorization: Bearer <api-key>`` with 401
+        # ACCESS_TOKEN_TYPE_UNSUPPORTED (reserved for OAuth 2 tokens); plain keys use ``x-goog-api-key``.
         if url and base_url_host_matches(url, "generativelanguage.googleapis.com"):
             headers.pop("Authorization", None)
             headers["x-goog-api-key"] = key
@@ -254,8 +246,7 @@ def _probe_bedrock() -> ProbeResult:
         return _row(name, "warn", f"(boto3 not installed — {pip})", [f"Install boto3 for Bedrock: {pip}"], label=label)
     except Exception as e:
         err_name = type(e).__name__
-        return _row(name, "warn", f"({err_name}: {e})",
-                    [f"AWS Bedrock: {err_name} — check IAM permissions for bedrock:ListFoundationModels"], label=label)
+        return _row(name, "warn", f"({err_name}: {e})", [f"AWS Bedrock: {err_name} — check IAM permissions for bedrock:ListFoundationModels"], label=label)
 
 
 def _probe_azure_entra() -> ProbeResult:
@@ -281,10 +272,7 @@ def _probe_azure_entra() -> ProbeResult:
 
     try:
         from agent.azure_identity_adapter import (
-            EntraIdentityConfig,
-            SCOPE_AI_AZURE_DEFAULT,
-            describe_active_credential,
-            has_azure_identity_installed,
+            EntraIdentityConfig, SCOPE_AI_AZURE_DEFAULT, describe_active_credential, has_azure_identity_installed,
         )
     except Exception as exc:
         return _row(name, "warn", f"(adapter import failed: {exc})", [f"Azure Foundry adapter import failed: {exc}"], label=label)
@@ -301,10 +289,7 @@ def _probe_azure_entra() -> ProbeResult:
         tag = ", ".join(env_sources) if env_sources else "default credential chain"
         return _row(name, "ok", f"({tag}, scope={scope})", label=label)
     err = info.get("error") or "credential chain exhausted"
-    hint = info.get("hint") or (
-        "Run `az login`, set AZURE_TENANT_ID/AZURE_CLIENT_ID/"
-        "AZURE_CLIENT_SECRET, or attach a managed identity to this VM."
-    )
+    hint = info.get("hint") or "Run `az login`, set AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET, or attach a managed identity to this VM."
     return _row(name, "warn", f"({err})", [f"Azure Foundry Entra: {err}. {hint}"], label=label)
 
 
@@ -313,14 +298,12 @@ def build_probes() -> list:
     global _APIKEY_PROVIDERS_CACHE
     if _APIKEY_PROVIDERS_CACHE is None:
         _APIKEY_PROVIDERS_CACHE = _build_apikey_providers_list()
-    probes = [("OpenRouter API", _probe_openrouter), ("Anthropic API", _probe_anthropic)]
-    for _pname, _env_vars, _default_url, _base_env, _supports in _APIKEY_PROVIDERS_CACHE:
-        # Bind loop vars via default args so every closure keeps its own provider.
-        probes.append((_pname, lambda p=_pname, e=_env_vars, u=_default_url, b=_base_env, s=_supports:
-                       _probe_apikey_provider(p, e, u, b, s)))
-    probes.append(("AWS Bedrock", _probe_bedrock))
-    probes.append(("Azure Foundry (Entra ID)", _probe_azure_entra))
-    return probes
+    return [
+        ("OpenRouter API", _probe_openrouter), ("Anthropic API", _probe_anthropic),
+        # functools.partial binds each row's args so every callable keeps its own provider.
+        *((row[0], functools.partial(_probe_apikey_provider, *row)) for row in _APIKEY_PROVIDERS_CACHE),
+        ("AWS Bedrock", _probe_bedrock), ("Azure Foundry (Entra ID)", _probe_azure_entra),
+    ]
 
 
 def run_probes(probes: list) -> list:

@@ -60,8 +60,7 @@ def _unreadable_reason(db_path: Path) -> str:
     """Explain why a database file could not be read, without opening it.
 
     ``read_header_bytes_preopen`` collapses every ``OSError`` into ``None``, but doctor must say *which*
-    problem it hit. ``stat()`` and ``access()`` answer that from directory metadata alone — neither takes
-    a file descriptor, so neither can cancel the file's POSIX advisory locks.
+    problem it hit. ``stat()``/``access()`` answer from directory metadata alone — no descriptor, no lock loss.
     """
     try:
         db_path.stat()
@@ -74,10 +73,9 @@ def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
     """Return (journal mode, error) from header byte 18 (2=WAL, 1=rollback) without opening the database.
 
     Opening through SQLite — even read-only — creates -wal/-shm sidecars, which a diagnostic must not do.
-    The read goes through ``read_header_bytes_preopen`` rather than a bare ``open()``: closing *any*
-    descriptor cancels this process's POSIX advisory locks (see ``hermes_cli.sqlite_safe_read``), and the
-    dashboard console runs ``run_doctor`` in-process with live ``SessionDB`` connections — the helper
-    refuses then and the mode is reported as unreadable.
+    ``read_header_bytes_preopen`` rather than a bare ``open()``: closing *any* descriptor cancels this
+    process's POSIX advisory locks (see ``hermes_cli.sqlite_safe_read``), and the dashboard console runs
+    ``run_doctor`` in-process with live ``SessionDB`` connections — the helper refuses then (unreadable).
     """
     from hermes_cli.sqlite_safe_read import has_live_connection, read_header_bytes_preopen
 
@@ -154,10 +152,8 @@ def _read_pyproject_version() -> str | None:
 
 
 def _check_version_consistency(issues: list[str]) -> None:
-    """Detect pyproject.toml vs hermes_cli.__version__ drift (a git conflict resolution can revert one but not the other).
-
-    Silent no-op for installed wheels (no pyproject).
-    """
+    """Detect pyproject.toml vs hermes_cli.__version__ drift (a conflict resolution can revert one but not the
+    other). Silent no-op for installed wheels (no pyproject)."""
     try:
         from hermes_cli import __version__ as init_version
     except Exception:
@@ -168,20 +164,15 @@ def _check_version_consistency(issues: list[str]) -> None:
     if pyproject_version == init_version:
         check_ok("Version files consistent", f"({init_version})")
     else:
-        _fail_and_issue(
-            "Version mismatch between source files",
-            f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
-            "Re-sync version files (e.g. run 'hermes update', or set "
-            "hermes_cli/__init__.py __version__ to match pyproject.toml)",
-            issues,
-        )
+        _fail_and_issue("Version mismatch between source files",
+                        f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
+                        "Re-sync version files (e.g. run 'hermes update', or set "
+                        "hermes_cli/__init__.py __version__ to match pyproject.toml)", issues)
 
 
 def _check_s6_supervision(issues: list[str]) -> None:
-    """Inside a container under our s6 /init, report static services and per-profile gateway slots that are ``up``.
-
-    Counterpart to :func:`_check_gateway_service_linger` (systemd-on-host); no-op outside the s6 container.
-    """
+    """Under our s6 /init, report static services and per-profile gateway slots that are ``up``; no-op elsewhere.
+    Counterpart to :func:`_check_gateway_service_linger` (systemd-on-host)."""
     try:
         from hermes_cli.service_manager import S6ServiceManager, detect_service_manager
     except Exception:
@@ -192,10 +183,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
     _section("s6 Supervision")
     mgr = S6ServiceManager()
     for static in ("main-hermes", "dashboard"):  # s6-rc symlinks under /run/service/, same s6-svstat probe
-        if mgr.is_running(static):
-            check_ok(f"{static}: up")
-        else:
-            check_info(f"{static}: down (expected if not enabled via env)")
+        (check_ok if mgr.is_running(static) else check_info)(
+            f"{static}: up" if mgr.is_running(static) else f"{static}: down (expected if not enabled via env)")
 
     profiles = mgr.list_profile_gateways()
     if not profiles:
@@ -209,8 +198,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
 def check_certificates(should_fix: bool = False, issues: "list | None" = None) -> None:
     """Verify the certifi CA bundle is loadable before the first HTTPS call tracebacks.
 
-    ``--fix`` repairs a broken bundle (e.g. a brew Python upgrade rebuilt the venv) by
-    force-reinstalling certifi into THIS interpreter's environment and re-verifying.
+    ``--fix`` repairs a broken bundle (e.g. a brew Python upgrade rebuilt the venv) by force-reinstalling
+    certifi into THIS interpreter's environment and re-verifying.
     """
     try:
         from agent.ssl_guard import verify_ca_bundle_with_fallback
@@ -271,10 +260,7 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
 
 
 def _check_gateway_service_linger(issues: list[str]) -> None:
-    """Warn when a systemd user gateway service will stop after logout.
-
-    Skipped under s6 (no systemd, no logout, no linger concept; ``_check_s6_supervision`` reports that state).
-    """
+    """Warn when a systemd user gateway service will stop after logout (skipped under s6: no linger concept)."""
     try:
         from hermes_cli.gateway import get_systemd_linger_status, get_systemd_unit_path, is_linux
         from hermes_cli.service_manager import detect_service_manager
@@ -297,13 +283,12 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
 
 
 def check_macos_tcc_grants() -> None:
-    """Check macOS TCC grant persistence for a locally-built desktop bundle.
+    """Check macOS TCC grant persistence for a locally-built desktop bundle; silent on non-macOS / no bundle.
 
     TCC keys grants to the app's designated requirement (DR). A cdhash-pinned ad-hoc DR changes on every
-    rebuild, so grants silently stop matching while the Settings toggle stays ON and macOS re-prompts;
-    identifier-pinned builds survive rebuilds, but grants made to older binaries stay stale until re-granted
-    once. TCC.db needs Full Disk Access, so the DR string is the only readable signal — a cdhash anchor is a
-    proxy for the signing class, not a contract on DR wording. Silent on non-macOS / no bundle.
+    rebuild, so grants silently stop matching while the Settings toggle stays ON; identifier-pinned builds
+    survive rebuilds, but grants made to older binaries stay stale until re-granted once. TCC.db needs Full
+    Disk Access, so the DR string is the only readable signal (a proxy for the signing class, not DR wording).
     """
     from hermes_cli.doctor import _desktop_app_bundle, _macos_desktop_dr
     if sys.platform != "darwin":
@@ -324,14 +309,10 @@ def check_macos_tcc_grants() -> None:
             "identity, then re-grant permissions once.",
         )
         return
-    if "certificate" in dr.lower():  # --setup-tcc-identity or notarized build: strongest anchor
-        check_ok("macOS TCC signing identity is stable", "(certificate-anchored DR; grants survive rebuilds)")
-    else:
-        check_ok(
-            "macOS TCC signing identity is stable",
-            "(identifier-pinned DR; grants survive rebuilds — for the strongest "
-            "anchor, see `hermes desktop --setup-tcc-identity`)",
-        )
+    check_ok("macOS TCC signing identity is stable",
+             # --setup-tcc-identity or notarized build: strongest anchor
+             "(certificate-anchored DR; grants survive rebuilds)" if "certificate" in dr.lower() else
+             "(identifier-pinned DR; grants survive rebuilds — for the strongest anchor, see `hermes desktop --setup-tcc-identity`)")
     check_info(
         "If macOS still re-prompts for permissions (toggle shows ON): the stored "
         "grant is stale — run `tccutil reset ScreenCapture com.nousresearch.hermes` "
@@ -341,10 +322,10 @@ def check_macos_tcc_grants() -> None:
 
 
 def _desktop_app_bundle() -> Path | None:
-    """Locate the locally-built desktop bundle (``apps/desktop/release/mac-<arch>/Hermes.app``), newest arch tree first.
+    """Locate the locally-built desktop bundle (``apps/desktop/release/mac-<arch>/Hermes.app``), newest first.
 
-    That is the only layout whose ad-hoc re-signed bundle can invalidate TCC grants. ``/Applications/Hermes.app``
-    is deliberately not probed: it is the separately-signed, certificate-anchored Hermes-Setup launcher.
+    The only layout whose ad-hoc re-signed bundle can invalidate TCC grants. ``/Applications/Hermes.app`` is
+    deliberately not probed: it is the separately-signed, certificate-anchored Hermes-Setup launcher.
     """
     release_dir = Path(__file__).resolve().parents[1] / "apps" / "desktop" / "release"
     candidates = [p for p in release_dir.glob("mac*/Hermes.app") if p.is_dir()]
@@ -365,9 +346,7 @@ def _macos_desktop_dr(app: Path) -> str | None:
 
 def check_macos_tcc_anchor(should_fix: bool = False) -> None:
     """Report (and with --fix install) the dylib-complete TCC anchor; silent on non-macOS / non-uv interpreters.
-
-    Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI.
-    """
+    Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI."""
     try:
         from hermes_cli import macos_tcc_anchor as tcc
 
@@ -391,8 +370,7 @@ def check_macos_full_disk_access() -> None:
     """One-grant guidance: Full Disk Access silences every per-folder TCC prompt. Silent on non-macOS.
 
     Probe: listdir of ``~/Library/Application Support/com.apple.TCC`` — FDA-gated, and probing it does NOT
-    trigger a prompt (prompts fire for protected-CATEGORY paths like Desktop; the TCC dir just returns EPERM).
-    A missing dir / other error is indeterminate, so stay silent rather than nag.
+    trigger a prompt (the TCC dir just returns EPERM). A missing dir / other error is indeterminate: stay silent.
     """
     if sys.platform != "darwin":
         return
@@ -448,26 +426,24 @@ def _check_python_environment(should_fix: bool) -> Finding:
     f = Finding()
     v = sys.version_info
     label = f"Python {v.major}.{v.minor}.{v.micro}"
-    if v >= (3, 11):
+    if v >= (3, 10):
         check_ok(label)
-    elif v >= (3, 10):
-        check_ok(label)
-        check_warn("Python 3.11+ recommended for RL Training tools (tinker requires >= 3.11)")
+        if v < (3, 11):
+            check_warn("Python 3.11+ recommended for RL Training tools (tinker requires >= 3.11)")
     elif v >= (3, 8):
         check_warn(label, "(3.10+ recommended)")
     else:
         _fail_and_issue(label, "(3.10+ required)", "Upgrade Python to 3.10+", f.issues)
 
-    # Linked SQLite: version + source id matter independently of the Python minor
-    # (uv's python-build-standalone can keep a vulnerable SQLite across upgrades).
+    # Linked SQLite: version + source id matter independently of the Python minor (uv's
+    # python-build-standalone can keep a vulnerable SQLite across upgrades).
     try:
         import sqlite3
         from hermes_state import is_sqlite_wal_reset_vulnerable, sqlite_source_id
 
         src = sqlite_source_id()
         if is_sqlite_wal_reset_vulnerable():
-            # Warn-only: Hermes already refuses to enable WAL on fresh DBs, and
-            # runtime repair is best-effort, so this never goes into ``issues``.
+            # Warn-only: Hermes already refuses WAL on fresh DBs and runtime repair is best-effort.
             check_warn(f"SQLite {sqlite3.sqlite_version} (WAL-reset bug)", _sqlite_upgrade_hint())
         else:
             check_ok(f"SQLite {sqlite3.sqlite_version}")
@@ -491,21 +467,25 @@ def _check_certificates(should_fix: bool) -> Finding:
     return f
 
 
+# (import name, display name, optional)
+_PACKAGES = (
+    ("openai", "OpenAI SDK", False), ("rich", "Rich (terminal UI)", False), ("dotenv", "python-dotenv", False),
+    ("yaml", "PyYAML", False), ("httpx", "HTTPX", False),
+    ("croniter", "Croniter (cron expressions)", True), ("telegram", "python-telegram-bot", True), ("discord", "discord.py", True),
+)
+
+
 def _check_required_packages(should_fix: bool) -> Finding:
     f = Finding()
-    for module, name in (("openai", "OpenAI SDK"), ("rich", "Rich (terminal UI)"), ("dotenv", "python-dotenv"),
-                         ("yaml", "PyYAML"), ("httpx", "HTTPX")):
+    for module, name, optional in _PACKAGES:
         try:
             __import__(module)
-            check_ok(name)
+            check_ok(name, "(optional)" if optional else "")
         except ImportError:
-            _fail_and_issue(name, "(missing)", f"Install {name}: {_python_install_cmd()} {module}", f.issues)
-    for module, name in (("croniter", "Croniter (cron expressions)"), ("telegram", "python-telegram-bot"), ("discord", "discord.py")):
-        try:
-            __import__(module)
-            check_ok(name, "(optional)")
-        except ImportError:
-            check_warn(name, "(optional, not installed)")
+            if optional:
+                check_warn(name, "(optional, not installed)")
+            else:
+                _fail_and_issue(name, "(missing)", f"Install {name}: {_python_install_cmd()} {module}", f.issues)
     return f
 
 
@@ -548,9 +528,7 @@ def _check_command_installation(should_fix: bool) -> Finding:
             f.issues.append(f"Broken symlink at {display}/hermes — run 'hermes doctor --fix'")
             return f
         link.unlink()
-        link.symlink_to(venv_bin)
-        check_ok(f"Fixed symlink: {display}/hermes → {venv_bin}")
-        f.fixed += 1
+        _link_venv(f, link, venv_bin, f"Fixed symlink: {display}/hermes → {venv_bin}")
     elif link.exists():  # regular file (wrapper script), not a symlink
         check_ok(f"{display}/hermes exists (non-symlink)")
     else:
@@ -559,10 +537,14 @@ def _check_command_installation(should_fix: bool) -> Finding:
             f.issues.append(f"Missing {display}/hermes symlink — run 'hermes doctor --fix'")
             return f
         link_dir.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(venv_bin)
-        check_ok(f"Created symlink: {display}/hermes → {venv_bin}")
-        f.fixed += 1
+        _link_venv(f, link, venv_bin, f"Created symlink: {display}/hermes → {venv_bin}")
         if str(link_dir) not in os.environ.get("PATH", "").split(os.pathsep):
             check_warn(f"{display} is not on your PATH", "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")")
             f.manual_issues.append(f"Add {display} to your PATH")
     return f
+
+
+def _link_venv(f: Finding, link: Path, venv_bin: Path, msg: str) -> None:
+    link.symlink_to(venv_bin)
+    check_ok(msg)
+    f.fixed += 1

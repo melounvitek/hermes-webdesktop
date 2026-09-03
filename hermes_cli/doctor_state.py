@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from hermes_cli.doctor_report import (
-    Finding, _fail_and_issue, _section, check_info, check_ok, check_warn, doctor_check, ensure_dir,
+    Finding, _fail_and_issue, _section, check_bool, check_info, check_ok, check_warn, doctor_check, ensure_dir,
 )
 from hermes_cli.sizefmt import format_bytes as _human_bytes
 
@@ -28,11 +28,10 @@ def _honcho_is_configured_for_doctor() -> bool:
 def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
     """Return the effective memory section used by doctor diagnostics."""
     from hermes_cli.doctor import HERMES_HOME
-    home = hermes_home if hermes_home is not None else HERMES_HOME
     try:
         from hermes_cli.config import _expand_env_vars, read_user_config_raw
 
-        config_path = home / "config.yaml"
+        config_path = (hermes_home if hermes_home is not None else HERMES_HOME) / "config.yaml"
         if not config_path.exists():
             return {}
         config = _expand_env_vars(read_user_config_raw(config_path))
@@ -173,11 +172,9 @@ def _check_directory_structure(should_fix: bool) -> Finding:
         check_ok(f"{_DHH}/memories/ directory exists")
         for enabled, fname in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")):
             mem_file = memories_dir / fname
-            if not enabled:
-                continue
-            if mem_file.exists():
+            if enabled and mem_file.exists():
                 check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
-            else:
+            elif enabled:
                 check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
     else:
         check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
@@ -214,10 +211,9 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, *,
         return
     if callable(ok_label):
         try:
-            count = _session_count(state_db_path)
+            ok_label = ok_label(_session_count(state_db_path))
         except Exception:
-            count = "?"
-        ok_label = ok_label(count)
+            ok_label = ok_label("?")
     backup_name = Path(report["backup_path"]).name if report.get("backup_path") else "n/a"
     check_ok(ok_label, f"(strategy: {report.get('strategy')}; backup: {backup_name})")
     f.fixed += 1
@@ -337,7 +333,9 @@ def _check_skills_hub(should_fix: bool) -> Finding:
     from hermes_cli.doctor import HERMES_HOME, _DHH
     f = Finding()
     hub_dir = HERMES_HOME / "skills" / ".hub"
-    if hub_dir.exists():
+    if not hub_dir.exists():
+        check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
+    else:
         check_ok("Skills Hub directory exists")
         lock_file = hub_dir / "lock.json"
         if lock_file.exists():
@@ -351,17 +349,14 @@ def _check_skills_hub(should_fix: bool) -> Finding:
         q_count = sum(1 for d in quarantine.iterdir() if d.is_dir()) if quarantine.exists() else 0
         if q_count > 0:
             check_warn(f"{q_count} skill(s) in quarantine", "(pending review)")
-    else:
-        check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
 
     from hermes_cli.config import get_env_value
 
     if get_env_value("GITHUB_TOKEN") or get_env_value("GH_TOKEN"):
         check_ok("GitHub token configured (authenticated API access)")
-    elif _gh_authenticated():
-        check_ok("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)")
     else:
-        check_warn("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)")
+        check_bool(_gh_authenticated(), ("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)"),
+                   ("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)"))
     return f
 
 
@@ -371,11 +366,9 @@ def _memory_provider_honcho(issues: list) -> None:
     cfg_path = resolve_config_path()
     if not cfg_path.exists():
         # Config file missing — env-var fallback may still have resolved it.
-        if hcfg.api_key or hcfg.base_url:
-            check_ok("Honcho configured via environment variables",
-                     f"config file {cfg_path} not found, using HONCHO_API_KEY env var")
-        else:
-            check_warn("Honcho config not found", "run: hermes memory setup")
+        check_bool(hcfg.api_key or hcfg.base_url,
+                   ("Honcho configured via environment variables", f"config file {cfg_path} not found, using HONCHO_API_KEY env var"),
+                   ("Honcho config not found", "run: hermes memory setup"))
     elif not hcfg.enabled:
         check_info(f"Honcho disabled (set enabled: true in {cfg_path} to activate)")
     elif not (hcfg.api_key or hcfg.base_url):
@@ -460,10 +453,9 @@ def _check_profiles(should_fix: bool, f: Finding) -> None:
             parts.append("gateway running")
         if p.model:
             parts.append(p.model[:30])
-        if not (p.path / "config.yaml").exists():
-            parts.append("⚠ missing config")
-        if not (p.path / ".env").exists():
-            parts.append("no .env")
+        for missing, text in (("config.yaml", "⚠ missing config"), (".env", "no .env")):
+            if not (p.path / missing).exists():
+                parts.append(text)
         if not (wrapper_dir / p.name).exists():
             parts.append("no alias")
         check_ok(f"  {p.name}: {', '.join(parts) if parts else 'configured'}")

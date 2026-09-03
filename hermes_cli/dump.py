@@ -14,11 +14,8 @@ from agent.skill_utils import is_excluded_skill_path
 
 
 def _dotenv_key_names() -> set[str]:
-    """Return the set of env-var names assigned a non-empty value in ~/.hermes/.env.
-
-    The managed backends (launchd / systemd / the desktop-spawned ``serve`` process) load credentials
-    from this file — NOT from an interactive shell's exports, which ``os.getenv`` reflects here.
-    """
+    """Env-var names assigned a non-empty value in ~/.hermes/.env — what the managed backends (launchd /
+    systemd / desktop ``serve``) load, as opposed to the shell exports ``os.getenv`` reflects here."""
     try:
         text = get_env_path().read_text(encoding="utf-8", errors="ignore")
     except (OSError, UnicodeError):
@@ -52,11 +49,8 @@ def _git_output(project_root: Path, *args: str) -> str:
 
 
 def _get_git_commit(project_root: Path) -> str:
-    """Return short git commit hash, or '(unknown)'.
-
-    Source installs resolve live via ``git rev-parse``. The published Docker image excludes ``.git``,
-    so fall back to the build SHA baked into ``<project_root>/.hermes_build_sha`` by the Dockerfile.
-    """
+    """Short git commit hash, or '(unknown)'. Docker images exclude ``.git``, so fall back to the build SHA
+    the Dockerfile bakes into ``<project_root>/.hermes_build_sha``."""
     value = _git_output(project_root, "rev-parse", "--short=8", "HEAD")
     if value:
         return value
@@ -185,8 +179,8 @@ _API_KEYS = [
 
 
 def _version_line(project_root: Path) -> str:
-    """``<version> [<commit>] (<commit date>)`` — the commit date is the real "as-of" date;
-    __release_date__ is intentionally NOT shown (reads like a wall-clock timestamp, confuses triage)."""
+    """``<version> [<commit>] (<commit date>)`` — the commit date is the real "as-of" date; __release_date__
+    is intentionally NOT shown (reads like a wall-clock timestamp, confuses triage)."""
     try:
         from hermes_cli import __version__
     except ImportError:
@@ -197,9 +191,8 @@ def _version_line(project_root: Path) -> str:
 
 
 def _effective_terminal_backend(config: dict) -> str:
-    """The EFFECTIVE backend, not just config.yaml: a TERMINAL_ENV set directly in .env / the shell
-    overrides ``terminal.backend`` and is what terminal_tool actually uses. run_dump() has already
-    loaded .env, so os.environ reflects the real override here."""
+    """The EFFECTIVE backend: a TERMINAL_ENV set directly in .env / the shell overrides ``terminal.backend`` and
+    is what terminal_tool uses. run_dump() has already loaded .env, so os.environ reflects the override."""
     config_backend = config.get("terminal", {}).get("backend", "local")
     env_backend = (os.environ.get("TERMINAL_ENV") or "").strip().lower()
     if env_backend and env_backend != str(config_backend).strip().lower():
@@ -213,13 +206,11 @@ def _api_key_lines(show_keys: bool) -> list[str]:
     for env_var, label in _API_KEYS:
         val = os.getenv(env_var, "")
         display = _redact(val) if show_keys and val else ("set" if val else "not set")
-        # Set in this (shell) process but absent from ~/.hermes/.env: a managed backend
-        # (launchd/systemd/desktop `serve`) loads .env, not the login shell, so it likely can't
-        # see this key — flag it so support doesn't chase a phantom "key is configured".
+        # Set in this shell but absent from ~/.hermes/.env: a managed backend loads .env, not the login
+        # shell, so it likely can't see this key — flag it so support doesn't chase a phantom "configured".
         if val and env_var not in dotenv_keys:
             display += " (shell only — not in .env; managed/desktop backend may not see it)"
-        # A credential added via `hermes auth add openrouter` lives in the credential pool, not as an
-        # env var — surface it so the dump doesn't read "not set" while `hermes auth list` shows it.
+        # `hermes auth add openrouter` credentials live in the pool, not env — don't read "not set".
         if not val and label == "openrouter":
             try:
                 from agent.credential_pool import load_pool as _load_pool
@@ -230,6 +221,14 @@ def _api_key_lines(show_keys: bool) -> list[str]:
                 pass
         lines.append(f"  {label:<20} {display}")
     return lines
+
+
+def _openai_version() -> str:
+    try:
+        import openai
+        return openai.__version__
+    except ImportError:
+        return "not installed"
 
 
 def run_dump(args):
@@ -250,11 +249,7 @@ def run_dump(args):
         profile = get_active_profile_name() or "(default)"
     except Exception:
         profile = "(default)"
-    try:
-        import openai
-        openai_ver = openai.__version__
-    except ImportError:
-        openai_ver = "not installed"
+    openai_ver = _openai_version()
 
     lines = [
         "--- hermes dump ---",
