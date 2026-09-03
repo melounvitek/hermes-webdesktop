@@ -326,12 +326,10 @@ def _cmd_export(db, args):
         if filters:
             candidates = db.list_prune_candidates(**filters)
             if args.dry_run:
-                _print_dry_run_preview(candidates, filters)
-                return None
+                return _print_dry_run_preview(candidates, filters)
             return [s for s in (_redact(db.export_session(row["id"])) for row in candidates) if s]
         if args.dry_run:
-            print("--dry-run requires at least one filter.")
-            return None
+            return print("--dry-run requires at least one filter.")
         return [_redact(s) for s in db.export_all(source=None)]
     if getattr(args, "only", None):
         return _export_only(args, _collect_sessions)
@@ -564,10 +562,8 @@ def _prune_never_active_keyed(db, args):
     if older_than is not None:
         seconds = parse_duration_seconds(str(older_than))
         if seconds is None:
-            print(
-                f"Error: --older-than '{older_than}' is not a duration. "
-                "Use a bare number of days or a form like '2d' / '1w'."
-            )
+            print(f"Error: --older-than '{older_than}' is not a duration. "
+                  "Use a bare number of days or a form like '2d' / '1w'.")
             return
         days = seconds / 86400.0
     candidates = db.list_never_active_keyed_sessions(older_than_days=days)
@@ -598,11 +594,8 @@ def _note_pinned_skipped(db, filters, action):
     """Tell the user how many pinned rows bulk prune/archive spared (pin = durable keep; only
     `prune --include-pinned` opts in, archive always spares them)."""
     _base = {k: v for k, v in filters.items() if k != "include_pinned"}
-    skipped = max(
-        int(db.count_prune_matches(**_base, include_pinned=True))
-        - int(db.count_prune_matches(**_base, include_pinned=False)),
-        0,
-    )
+    with_pinned, without = (int(db.count_prune_matches(**_base, include_pinned=flag)) for flag in (True, False))
+    skipped = max(with_pinned - without, 0)
     if not skipped:
         return
     suffix = "" if skipped == 1 else "s"
