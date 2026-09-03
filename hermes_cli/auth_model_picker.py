@@ -212,11 +212,7 @@ def _prompt_model_selection(
         # The pricing column header (and any unavailable-models block) is shown as a multi-line
         # description above the list so it survives the curses screen clear. menu_title already
         # embeds the aligned price header; keep only the header/legend portion.
-        desc_lines: list[str] = []
-        if rows.has_pricing:
-            header_part = menu_title.split("\n", 1)
-            if len(header_part) > 1:
-                desc_lines.extend(header_part[1].splitlines())
+        desc_lines: list[str] = menu_title.split("\n", 1)[1].splitlines() if rows.has_pricing else []
         if _unavailable:
             desc_lines.extend(f"   {rows.label(mid)}" for mid in _unavailable)
             desc_lines.append(f"  ── {unavailable_footer} ──")
@@ -281,8 +277,7 @@ def _prompt_model_selection(
             if 1 <= idx <= n:
                 return _confirmed_selection(ordered[idx - 1])
             if idx == n + 1:
-                custom = line_input("Enter model name: ").strip()
-                return _confirmed_selection(custom) if custom else None
+                return _custom_selection()
             if idx == n + 2:
                 return None
             print(f"Please enter 1-{n + 2}")
