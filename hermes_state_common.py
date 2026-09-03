@@ -743,8 +743,6 @@ def _clear_lock_holder_record(handle) -> None:
 def _lock_holder_provably_dead(record) -> bool:
     """True ONLY when the recorded holder is provably dead or PID-recycled.  Anything indeterminate
     (no/malformed record, PID owned by another user, /proc unavailable) is False: FAIL CLOSED and defer."""
-    if not isinstance(record, dict):
-        return False
     try:
         pid = int(record["pid"])
     except (KeyError, TypeError, ValueError):
