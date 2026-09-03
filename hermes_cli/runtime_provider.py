@@ -240,10 +240,8 @@ def _maybe_apply_codex_app_server_runtime(*, provider: str, api_mode: str, model
 # ── base_url / credential helpers ──────────────────────────────────────────────────────────
 
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
-_NO_ANTHROPIC_CREDENTIALS_MSG = (
-    "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
-    "run 'claude setup-token', or authenticate with 'claude /login'."
-)
+_NO_ANTHROPIC_CREDENTIALS_MSG = ("No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                                 "run 'claude setup-token', or authenticate with 'claude /login'.")
 
 
 def _runtime(provider: str, api_mode: str, base_url: Any, api_key: Any, **extra: Any) -> Dict[str, Any]:
@@ -745,11 +743,9 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -
     if base_url_host_matches(base_url, "azure.com") or (cfg_base_url and base_url_host_matches(cfg_base_url, "azure.com")):
         token = _azure_anthropic_env_key(model_cfg)
         if not token:
-            raise AuthError(
-                "No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or "
-                "ANTHROPIC_API_KEY, or point key_env/api_key_env in your "
-                "config.yaml model section at a custom env var."
-            )
+            raise AuthError("No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or "
+                            "ANTHROPIC_API_KEY, or point key_env/api_key_env in your "
+                            "config.yaml model section at a custom env var.")
     else:
         token = _anthropic_token_or_raise()
     return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
@@ -792,10 +788,8 @@ def _raise_if_provider_disabled(requested_provider: str) -> None:
     provs_cfg = full_cfg.get("providers") if isinstance(full_cfg, dict) else None
     block = provs_cfg.get(requested_provider) if isinstance(provs_cfg, dict) else None
     if isinstance(block, dict) and not _config_mod.is_provider_enabled(block):
-        raise ValueError(
-            f"provider {requested_provider!r} is disabled in config "
-            f"(providers.{requested_provider}.enabled: false)"
-        )
+        raise ValueError(f"provider {requested_provider!r} is disabled in config "
+                         f"(providers.{requested_provider}.enabled: false)")
 
 
 def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
@@ -805,15 +799,13 @@ def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
     from agent.vertex_adapter import get_vertex_config
     token, base_url = get_vertex_config()
     if not token or not base_url:
-        raise AuthError(
-            "Vertex AI credentials could not be resolved. Vertex uses "
-            "OAuth2 (not a static API key): provide a service-account JSON "
-            "via GOOGLE_APPLICATION_CREDENTIALS (or VERTEX_CREDENTIALS_PATH) "
-            "in ~/.hermes/.env, or run 'gcloud auth application-default "
-            "login' for ADC. Set the GCP project/region under vertex: in "
-            "config.yaml if they aren't embedded in the credentials. "
-            "Run `hermes setup` to install Vertex support."
-        )
+        raise AuthError("Vertex AI credentials could not be resolved. Vertex uses "
+                        "OAuth2 (not a static API key): provide a service-account JSON "
+                        "via GOOGLE_APPLICATION_CREDENTIALS (or VERTEX_CREDENTIALS_PATH) "
+                        "in ~/.hermes/.env, or run 'gcloud auth application-default "
+                        "login' for ADC. Set the GCP project/region under vertex: in "
+                        "config.yaml if they aren't embedded in the credentials. "
+                        "Run `hermes setup` to install Vertex support.")
     return _runtime("vertex", "chat_completions", base_url.rstrip("/"), token, source="vertex-oauth", requested_provider=requested_provider)
 
 
