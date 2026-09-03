@@ -1,8 +1,8 @@
 """Cron pre-run preflight: transient provider-resolution error classification, provider-key /
 delivery-target / skills checks, and the shared-route adapter view used by satellite profiles.
 
-Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident
-helpers are reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
+Split out of ``cron.scheduler``; every name is re-exported there, and origin-resident helpers are
+reached late-bound via ``_sched`` so monkeypatching ``cron.scheduler.<name>`` keeps working.
 """
 
 from __future__ import annotations
@@ -16,46 +16,26 @@ from typing import Optional
 # Log-record parity with the origin module.
 logger = logging.getLogger("cron.scheduler")
 
-
 # Error-string prefixes from ``run_job``; ``run_one_job`` keys off them for last_status and the
 # alert-once dedup. ``:silent`` = already alerted on a previous tick — do not deliver again.
 BLOCKED_CONFIG_MARKER = "[blocked_config]"
-
-
 BLOCKED_CONFIG_SILENT_MARKER = "[blocked_config:silent]"
-
-
 # Drift-guard skip: same contract (drift_alerted bit on the job record).
 DRIFT_SKIP_MARKER = "[drift_skip]"
-
-
 DRIFT_SKIP_SILENT_MARKER = "[drift_skip:silent]"
-
 
 _TRANSIENT_NET_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "NetworkError",
     "TimeoutException", "ClientConnectorError", "ClientConnectorDNSError", "ServerTimeoutError",
-    "ClientOSError",
-})
-
-
+    "ClientOSError"})
 _DNS_FAILURE_NEEDLES = ("nodename nor servname", "name or service not known")
-
-
 _TRANSIENT_OSERROR_NEEDLES = _DNS_FAILURE_NEEDLES + (
-    "temporary failure in name resolution", "network is unreachable",
-)
-
-
+    "temporary failure in name resolution", "network is unreachable")
 _TRANSIENT_HTTP_NEEDLES = _TRANSIENT_OSERROR_NEEDLES + (
-    "failed to resolve", "connection refused", "timed out", "timeout",
-)
-
-
+    "failed to resolve", "connection refused", "timed out", "timeout")
 _TRANSIENT_ERRNOS = frozenset({
     errno.ECONNREFUSED, errno.ECONNRESET, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN,
-    errno.ETIMEDOUT, errno.EAGAIN,
-})
+    errno.ETIMEDOUT, errno.EAGAIN})
 
 
 def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
@@ -80,8 +60,7 @@ def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
         if type(cur).__name__ in _TRANSIENT_NET_EXC_NAMES:
             return True
         if any(m in module for m in ("httpx", "httpcore", "aiohttp")) and any(
-            needle in msg for needle in _TRANSIENT_HTTP_NEEDLES
-        ):
+            needle in msg for needle in _TRANSIENT_HTTP_NEEDLES):
             return True
         if isinstance(cur, OSError):
             if isinstance(cur, socket.gaierror):
@@ -101,9 +80,7 @@ def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
 def _cron_preflight_enabled(cfg: dict) -> bool:
     """Preflight is ON unless ``cron.preflight`` is literally ``false``."""
     cron_cfg = (cfg or {}).get("cron")
-    if not isinstance(cron_cfg, dict):
-        return True
-    return cron_cfg.get("preflight", True) is not False
+    return not isinstance(cron_cfg, dict) or cron_cfg.get("preflight", True) is not False
 
 
 def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
@@ -118,17 +95,12 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 
     _cron_cfg = cfg.get("cron") if isinstance(cfg.get("cron"), dict) else {}
     requested = (
-        job.get("provider")
-        or str((_cron_cfg or {}).get("model_provider") or "").strip()
-        or None
-    )
+        job.get("provider") or str((_cron_cfg or {}).get("model_provider") or "").strip() or None)
     model = job.get("model") or os.getenv("HERMES_MODEL") or ""
 
     from hermes_cli.auth import AuthError
-
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
-
         kwargs = {"requested": requested, "target_model": model}
         if job.get("base_url"):
             kwargs["explicit_base_url"] = job.get("base_url")
@@ -147,16 +119,13 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 
 def _primary_profile_routes_for_current_home() -> list:
     """Primary gateway ``profile_routes`` targeting the profile being served; ``[]`` if this IS the
-    primary home.
-
-    Satellite crons are ticked and delivered by the primary gateway (a satellite holding its own
-    token is a ``duplicate_credential`` fatal). Reads the primary config.yaml directly (top-level or
-    nested ``gateway.``) instead of ``load_gateway_config()`` so no primary platform config leaks
-    into this process. Shared by preflight rescue and delivery-time resolution so they cannot drift.
-    """
+    primary home. Satellite crons are ticked and delivered by the primary gateway (a satellite
+    holding its own token is a ``duplicate_credential`` fatal). Reads the primary config.yaml
+    directly (top-level or nested ``gateway.``) instead of ``load_gateway_config()`` so no primary
+    platform config leaks into this process. Shared by preflight rescue and delivery-time
+    resolution so they cannot drift."""
     try:
         from hermes_constants import get_default_hermes_root, get_hermes_home
-
         primary_home = get_default_hermes_root()
         current_home = _sched.Path(get_hermes_home())
         if (
@@ -169,7 +138,6 @@ def _primary_profile_routes_for_current_home() -> list:
             return []
 
         import yaml
-
         with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         routes_raw = raw.get("profile_routes")
@@ -180,10 +148,8 @@ def _primary_profile_routes_for_current_home() -> list:
 
         from gateway.profile_routing import parse_profile_routes
         from hermes_cli.profiles import profile_matches_home
-
         return [
-            route
-            for route in parse_profile_routes(routes_raw)
+            route for route in parse_profile_routes(routes_raw)
             if route.enabled and profile_matches_home(route.profile)
         ]
     except Exception:
@@ -201,12 +167,10 @@ def _delivery_platform_routed_from_primary_gateway(platform_name: str) -> bool:
 
 
 class SharedRouteAdapters:
-    """Read-only adapter map for a credentialless satellite profile.
-
-    ``get(platform, target)`` resolves the PRIMARY adapter iff the inbound route matcher
-    (``ProfileRoute.matches``) accepts the target; anything else (unmatched target, disabled route,
-    other profile, or target-less ``get(platform)``) is a miss — fail closed, never the default bot.
-    """
+    """Read-only adapter map for a credentialless satellite profile. ``get(platform, target)``
+    resolves the PRIMARY adapter iff the inbound route matcher (``ProfileRoute.matches``) accepts
+    the target; anything else (unmatched target, disabled route, other profile, or target-less
+    ``get(platform)``) is a miss — fail closed, never the default bot."""
 
     def __init__(self, primary_adapters, routes) -> None:
         self._primary = dict(primary_adapters or {})
@@ -236,17 +200,14 @@ class SharedRouteAdapters:
 
 
 def _preflight_check_delivery(job: dict) -> Optional[str]:
-    """Check delivery targets resolve to configured platforms.
-
-    ``local``/``origin``/``all`` are never checked (no gateway-config load). Unknown platform always
-    blocks; known platform blocks only if the gateway config loads AND reports it unconnected.
-    Config load failures fail OPEN. ``failure_deliver`` is checked with the same rules: a typo'd
-    failure platform would otherwise only surface when a failure occurs (NS-788).
-    """
+    """Check delivery targets resolve to configured platforms. ``local``/``origin``/``all`` are
+    never checked (no gateway-config load). Unknown platform always blocks; known platform blocks
+    only if the gateway config loads AND reports it unconnected; config load failures fail OPEN.
+    ``failure_deliver`` gets the same rules — a typo'd failure platform would otherwise only
+    surface when a failure occurs (NS-788)."""
     deliver_value = _sched._normalize_deliver_value(job.get("deliver", "local"))
     failure_deliver_value = _sched._normalize_deliver_value(
-        _sched._delivery_lane_value(job, for_failure=True)
-    )
+        _sched._delivery_lane_value(job, for_failure=True))
     lane_values = [deliver_value]
     if failure_deliver_value != deliver_value:
         lane_values.append(failure_deliver_value)
@@ -256,7 +217,7 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
             part = part.strip()
             if not part or part.lower() in {"local", "origin", "all"}:
                 continue
-            # bot-chat targets deliver via a local subprocess; failures surface in last_delivery_error.
+            # bot-chat targets deliver via a local subprocess; failures land in last_delivery_error.
             if _sched.parse_bot_chat_deliver_token(part) is not None:
                 continue
             platform_parts.append(part.split(":", 1)[0].strip())
@@ -274,20 +235,19 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
         if connected is None:
             try:
                 from gateway.config import load_gateway_config
-
                 gateway_config = load_gateway_config()
                 connected = {p.value for p in gateway_config.get_connected_platforms()}
                 connected |= _sched._relay_fronted_delivery_platforms(connected)
             except Exception:
                 logger.debug(
                     "preflight: gateway config unavailable — skipping "
-                    "delivery credential check", exc_info=True,
-                )
+                    "delivery credential check", exc_info=True)
                 return None  # fail-open
-        if platform_name.lower() not in connected:
-            # Multiplex: a satellite served by the primary's adapters reads unconnected — no block.
-            if _delivery_platform_routed_from_primary_gateway(platform_name):
-                continue
+        # Multiplex: a satellite served by the primary's adapters reads unconnected — no block.
+        if (
+            platform_name.lower() not in connected
+            and not _delivery_platform_routed_from_primary_gateway(platform_name)
+        ):
             return (
                 f"delivery platform '{platform_name}' has no gateway "
                 "credentials configured (not connected). Configure it via "
@@ -296,21 +256,21 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     return None
 
 
+# ``skill_view`` payload keys naming missing prerequisites -> label for the preflight verdict.
+_SKILL_MISSING_FIELDS = (
+    ("missing_required_environment_variables", "env ${}"),
+    ("missing_required_commands", "command '{}'"),
+    ("missing_credential_files", "credential file {}"))
+
+
 def _preflight_check_skills(job: dict) -> Optional[str]:
     """Block only on an affirmative ``setup_needed`` verdict from ``skill_view``; skills that fail
     to load fall through to ``_build_job_prompt``'s skipped-skill handling (fail-open)."""
-    skills = job.get("skills")
-    if skills is None:
-        legacy = job.get("skill")
-        skills = [legacy] if legacy else []
-    elif isinstance(skills, str):
-        skills = [skills]
-    skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    from cron.scheduler_prompt import _job_skill_names
+    skill_names = _job_skill_names(job)
     if not skill_names:
         return None
-
     from tools.skills_tool import skill_view
-
     for skill_name in skill_names:
         try:
             payload = json.loads(skill_view(skill_name))
@@ -318,23 +278,11 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
             continue  # unreadable/missing skill → existing skip handling
         if not isinstance(payload, dict) or not payload.get("success"):
             continue
-        if (
-            payload.get("setup_needed")
-            or payload.get("readiness_status") == "setup_needed"
-        ):
+        if payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
             missing = [
-                f"env ${name}"
-                for name in payload.get(
-                    "missing_required_environment_variables"
-                ) or []
-            ]
-            missing += [
-                f"command '{name}'"
-                for name in payload.get("missing_required_commands") or []
-            ]
-            missing += [
-                f"credential file {name}"
-                for name in payload.get("missing_credential_files") or []
+                fmt.format(name)
+                for key, fmt in _SKILL_MISSING_FIELDS
+                for name in payload.get(key) or []
             ]
             detail = ", ".join(missing) or "required setup incomplete"
             return (
@@ -352,8 +300,7 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     for name, check in (
         ("provider_key", lambda: _preflight_check_provider_key(job, cfg)),
         ("skills", lambda: _preflight_check_skills(job)),
-        ("delivery", lambda: _preflight_check_delivery(job)),
-    ):
+        ("delivery", lambda: _preflight_check_delivery(job))):
         try:
             reason = check()
         except Exception:
