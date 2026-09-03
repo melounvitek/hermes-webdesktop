@@ -151,10 +151,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def build_recap(
-    messages: Sequence[Mapping[str, Any]],
-    *,
-    session_title: Optional[str] = None,
-    session_id: Optional[str] = None,
+    messages: Sequence[Mapping[str, Any]], *, session_title: Optional[str] = None, session_id: Optional[str] = None,
     platform: Optional[str] = None,
 ) -> str:
     """Multi-line plain-text recap of recent activity (80-col terminal / gateway bubble friendly).
