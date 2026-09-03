@@ -366,22 +366,22 @@ class _SessionScope:
     """Backend identity + scoping predicates for one call, read once.
 
     ``env_type`` is the scope-aware TERMINAL_ENV; ``persistent`` is
-    ``TERMINAL_CONTAINER_PERSISTENT``. The derived predicates:
+    ``TERMINAL_CONTAINER_PERSISTENT``. Derived predicates:
 
-    * ``session_isolated`` — non-persistent sandboxes get per-session identities.
+    * ``session_isolated`` — non-persistent sandboxes get per-session identities:
       ``container_persistent: false`` means state must not survive or be shared
-      across sessions, so one shared sandbox contradicts it. Applies to docker
-      and to plugin backends declaring ``session_isolated_when_nonpersistent``
-      (sandboxes resumed by name, where a shared deterministic name would let
-      two ephemeral runs attach one VM and delete it under each other).
+      across sessions, so one shared sandbox contradicts it. Docker, plus plugin
+      backends declaring ``session_isolated_when_nonpersistent`` (sandboxes resumed
+      by name, where a shared deterministic name would let two ephemeral runs
+      attach one VM and delete it under each other).
     * ``docker_session_isolated`` — docker-only view: the workspace mount and
       session-scoped teardown paths must not fire for other backends.
     * ``docker_profile_scoped`` — docker + ``container_persistent: true``: ONE
       long-lived container per profile shared by every session (CLI, gateway,
-      WebUI). The session-key fallback in :func:`_resolve_container_task_id`
-      exists to stop cross-profile SSH reuse; ungated it fragmented persistent
-      Docker into one container per gateway session, so this predicate restores
-      profile scoping for exactly this backend/mode.
+      WebUI). The session-key fallback in :func:`_resolve_container_task_id` stops
+      cross-profile SSH reuse; ungated it fragmented persistent Docker into one
+      container per gateway session, so this restores profile scoping for exactly
+      this backend/mode.
     """
     env_type: str
     persistent: bool
@@ -412,43 +412,29 @@ def _session_scope() -> _SessionScope:
     )
 
 
-def _session_isolation_enabled() -> bool:
-    """See :attr:`_SessionScope.session_isolated`."""
-    return _session_scope().session_isolated
-
-
 def _docker_session_isolation_enabled() -> bool:
-    """See :attr:`_SessionScope.docker_session_isolated`."""
+    """See :attr:`_SessionScope.docker_session_isolated` (used by the docker builder)."""
     return _session_scope().docker_session_isolated
 
 
-def _docker_persistent_profile_scoped() -> bool:
-    """See :attr:`_SessionScope.docker_profile_scoped`."""
-    return _session_scope().docker_profile_scoped
-
-
 def _resolve_container_task_id(task_id: Optional[str]) -> str:
-    """Map a tool-call ``task_id`` to the ``_active_environments`` key.
+    """Map a tool-call ``task_id`` to the ``_active_environments`` key. Order matters —
+    earlier branches are authoritative where they apply:
 
-    Order matters — earlier branches are authoritative where they apply:
-
-    1. Task ids with image/``env_type`` overrides (RL/benchmark rollouts) key
-       their own sandbox. CWD-only overrides (ACP workspace tracking) are NOT
-       isolation signals.
+    1. Image/``env_type`` overrides (RL/benchmark rollouts) key their own sandbox;
+       CWD-only overrides (ACP workspace tracking) are NOT isolation signals.
     2. Per-session isolation (docker + ``container_persistent: false``): each
-       session's task_id is its own key, so a fresh chat gets a fresh sandbox
-       with only ITS mounts; delegate_task children follow the alias registry
-       to the parent's container.
-    3. With a session key present (WebUI per-session, gateway per-message):
-       persistent Docker is PROFILE-scoped (``shared:<key>`` opt-in, else
-       ``profile:<name>``, with the default profile staying literally
-       ``"default"`` so CLI and default-profile gateway sessions share ONE
-       container); other backends key ``session:<key>`` so switching profiles
-       can't reuse another profile's SSHEnvironment on the wrong host.
-    4. No session key (CLI): ``shared:<key>`` when opted in — or a CLI run of
-       a keyed profile would split from its gateway sessions — else
-       ``"default"``, which subagent ids collapse onto so they share the
-       parent's long-lived container.
+       session's task_id is its own key (a fresh chat gets a fresh sandbox with only
+       ITS mounts); delegate_task children follow the alias registry to the parent.
+    3. Session key present (WebUI per-session, gateway per-message): persistent
+       Docker is PROFILE-scoped — ``shared:<key>`` opt-in, else ``profile:<name>``,
+       with the default profile staying literally ``"default"`` so CLI and
+       default-profile gateway sessions share ONE container; other backends key
+       ``session:<key>`` so switching profiles can't reuse another profile's
+       SSHEnvironment on the wrong host.
+    4. No session key (CLI): ``shared:<key>`` when opted in (else a CLI run of a
+       keyed profile would split from its gateway sessions), else ``"default"``,
+       which subagent ids collapse onto to share the parent's container.
     """
     if task_id and _has_isolation_overrides(task_id):
         return task_id
@@ -553,19 +539,16 @@ _terminal_config_bridge_attempted = False
 def _ensure_terminal_env_bridged() -> None:
     """Backfill TERMINAL_* env vars from config.yaml when no launcher did.
 
-    The CLI, gateway and TUI/dashboard PTY launches bridge ``terminal.*`` into
-    env vars at startup; processes that skip those paths (``hermes serve``,
-    Desktop in-process agents, desktop cron ticker, ACP) would otherwise fall
-    back to the local backend even when config selects docker, running
-    commands on the host the user meant to sandbox.
-
-    Explicit keys in config.yaml's ``terminal`` section override matching
-    env values (which may be stale from ``hermes setup``); env values for
-    omitted keys are preserved. Without a terminal section, an existing
-    TERMINAL_ENV selection is kept and defaults are backfilled only when none
-    is set. A per-turn terminal scope suppresses the bridge entirely: writing
-    the scope's values into the process-global env would re-create the
-    first-writer-wins cross-profile leak the scope exists to fix.
+    CLI, gateway and TUI/dashboard PTY launches bridge ``terminal.*`` into env vars
+    at startup; processes that skip those paths (``hermes serve``, Desktop
+    in-process agents, desktop cron ticker, ACP) would otherwise fall back to the
+    local backend even when config selects docker — running on the host the user
+    meant to sandbox. Explicit keys in the ``terminal`` section override matching
+    env values (possibly stale from ``hermes setup``); env values for omitted keys
+    are preserved. Without a terminal section an existing TERMINAL_ENV is kept and
+    defaults are backfilled only when none is set. A per-turn terminal scope
+    suppresses the bridge entirely: writing scope values into the process-global
+    env would re-create the first-writer-wins cross-profile leak the scope fixes.
     """
     from tools.terminal_scope import get_terminal_scope
 
