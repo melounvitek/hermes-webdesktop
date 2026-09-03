@@ -1,30 +1,30 @@
 """Custom-provider entry normalization and per-route lookups (TLS, headers, context length, capabilities).
 
 Split out of ``hermes_cli/config.py``; every name is re-imported there, so
-``hermes_cli.config.<name>`` keeps resolving (and monkeypatching) as before.
+``hermes_cli.config.<name>`` keeps resolving (and monkeypatching) as before. Functions that call
+``get_compatible_custom_providers`` / ``load_config*`` import them lazily from ``hermes_cli.config``
+so tests patching that module still intercept the call.
 """
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
+
 from hermes_cli.route_identity import normalize_route_base_url
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.config")
 
 
-# ``_normalize_custom_provider_entry`` runs on every ``load_picker_context()``
-# call (i.e. per interactive picker/inventory request), so any warning it emits
-# fires repeatedly for the same static config. Deduplicate per (provider,
-# signature): on Windows a repeated-warning storm contends on
-# ``concurrent-log-handler``'s cross-process rotation lock and can peg a core /
-# stall the gateway/serve event loop. The cache lives for the process lifetime.
+# ``_normalize_custom_provider_entry`` runs on every ``load_picker_context()`` call, so a warning
+# it emits would fire repeatedly for the same static config; on Windows that storm contends on
+# ``concurrent-log-handler``'s cross-process rotation lock and can stall the gateway/serve event
+# loop. Deduplicate per (provider, signature) for the process lifetime.
 _PROVIDER_NORMALIZE_WARNED: set = set()
 
 
-def _warn_once_per_provider(
-    provider_key: str, signature: str, msg: str, *args: Any
-) -> None:
+def _warn_once_per_provider(provider_key: str, signature: str, msg: str, *args: Any) -> None:
     """Emit ``logger.warning(msg, *args)`` at most once per (provider, signature)."""
     dedup_key = (provider_key or "?", signature)
     if dedup_key in _PROVIDER_NORMALIZE_WARNED:
@@ -33,14 +33,11 @@ def _warn_once_per_provider(
     logger.warning(msg, *args)
 
 
+# Values accepted by earlier releases (and natural spellings) → canonical transport names consumed
+# by agent_init. Without this map an unrecognized api_mode was silently ignored and the transport
+# fell through to hostname-based guessing, so ``api_mode: openai`` could flip to
+# ``codex_responses`` after an update and break the provider.
 _API_MODE_ALIASES = {
-    # Values accepted by earlier releases (and natural spellings) mapped to
-    # the canonical transport names consumed by agent_init. Before this map
-    # existed, an unrecognized api_mode was silently ignored and the
-    # transport fell through to hostname-based guessing, so a config that
-    # said ``api_mode: openai`` (valid on older releases) could flip to
-    # ``codex_responses`` after an update and break the provider (#66543
-    # discussion; observed live against api.actual.inc).
     "openai": "chat_completions",
     "openai_chat": "chat_completions",
     "openai-chat": "chat_completions",
@@ -56,14 +53,12 @@ _API_MODE_ALIASES = {
     "bedrock-converse": "bedrock_converse",
 }
 
+_FALSE_WORDS = frozenset({"false", "0", "no", "off"})
+_TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
+
 
 def _canonical_api_mode(api_mode: str) -> str:
-    """Map legacy/alias ``api_mode`` spellings to canonical transport names.
-
-    Unknown values pass through unchanged (callers keep their existing fall-through behavior); known
-    aliases are rewritten so downstream consumers (``agent_init``'s accepted-set check, runtime
-    resolution) see a canonical name instead of silently discarding the user's intent.
-    """
+    """Map alias ``api_mode`` spellings to canonical transport names; unknown values pass through."""
     cleaned = api_mode.strip()
     return _API_MODE_ALIASES.get(cleaned.lower(), cleaned)
 
@@ -78,8 +73,8 @@ def coerce_provider_id(value: Any) -> str:
 def stringify_provider_map(providers: Any) -> dict:
     """Copy a ``providers:`` mapping so keys are strings.
 
-    Desktop Custom Endpoints store the name as the dict key; an unquoted YAML key ``2070:`` loads
-    as int, so picker code calling ``ep_name.lower()`` crashes and CRUD lookups of ``"2070"`` miss.
+    An unquoted YAML key ``2070:`` loads as int, so picker code calling ``ep_name.lower()`` crashes
+    and CRUD lookups of ``"2070"`` miss.
     """
     if not isinstance(providers, dict):
         return {}
@@ -92,10 +87,7 @@ def stringify_provider_map(providers: Any) -> dict:
 
 
 def find_provider_entry(providers: Any, key: Any) -> Tuple[Any, Optional[Dict[str, Any]]]:
-    """Return ``(stored_key, entry)`` matching *key* by string identity.
-
-    Prefer an exact string hit, then scan.
-    """
+    """Return ``(stored_key, entry)`` matching *key* by string identity (exact hit first, then scan)."""
     if not isinstance(providers, dict):
         return None, None
     want = coerce_provider_id(key)
@@ -116,7 +108,7 @@ _CAMEL_ALIASES: Dict[str, str] = {
     "baseUrl": "base_url",
     "apiMode": "api_mode",
     "keyEnv": "key_env",
-    "apiKeyEnv": "key_env",  # alias — OpenClaw-compatible + docs variant
+    "apiKeyEnv": "key_env",  # OpenClaw-compatible + docs variant
     "defaultModel": "default_model",
     "contextLength": "context_length",
     "rateLimitDelay": "rate_limit_delay",
@@ -124,9 +116,8 @@ _CAMEL_ALIASES: Dict[str, str] = {
 
 
 _KNOWN_PROVIDER_KEYS = {
-    # ``provider`` duplicates the ``providers.<name>`` mapping key and is unused
-    # here, but Hermes' own config writer has historically emitted it into
-    # provider entries. Accept it silently so self-written configs don't warn.
+    # ``provider`` duplicates the ``providers.<name>`` mapping key and is unused here, but Hermes'
+    # own config writer has historically emitted it. Accept it so self-written configs don't warn.
     "provider",
     "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env", "key_cmd",
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
@@ -138,12 +129,10 @@ _KNOWN_PROVIDER_KEYS = {
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
     """First usable URL among ``base_url``/``url``/``api``, or "".
 
-    URLs containing unresolved placeholder tokens — ``${ENV_VAR}`` env-refs and bare ``{region}``
-    templates — are accepted without validation: they are expanded at runtime, and a caller reaching
-    this normalizer with raw config would otherwise see the provider silently dropped.
+    URLs with unresolved placeholders — ``${ENV_VAR}`` env-refs and ``{region}`` templates — are
+    accepted without validation: they expand at runtime, and rejecting them here would silently
+    drop the provider.
     """
-    from urllib.parse import urlparse
-
     for url_key in ("base_url", "url", "api"):
         raw_url = entry.get(url_key)
         if not (isinstance(raw_url, str) and raw_url.strip()):
@@ -163,17 +152,16 @@ def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
 
 
 def _normalize_provider_models(models: Any) -> Tuple[Dict[str, Any], bool]:
-    """Normalize an entry's ``models`` to the dict shape downstream expects.
+    """Normalize an entry's ``models`` to ``(models_dict, discovered_flag)``.
 
-    Returns ``(models_dict, discovered_flag)``. Older Hermes versions wrote an in-mapping
-    ``__discovered_model_catalog__`` sentinel (accepted on read, stripped so sentinel keys never
-    surface as model IDs). Hand-edited/older configs may write a plain list of ids or ``[{id: ...}]``
-    rows; both are converted so /model doesn't show the provider with (0) models.
+    Older Hermes versions wrote an in-mapping ``__discovered_model_catalog__`` sentinel (accepted,
+    stripped so it never surfaces as a model id). Hand-edited configs may write a plain list of ids
+    or ``[{id: ...}]`` rows; both are converted so /model doesn't show the provider with (0) models.
     """
     discovered = False
     if isinstance(models, dict) and models:
-        # Shallow-copy: `models` may alias a cached config sub-dict, and the
-        # normalized entry escapes into long-lived runtime state.
+        # Shallow-copy: `models` may alias a cached config sub-dict, and the normalized entry
+        # escapes into long-lived runtime state.
         models_copy = dict(models)
         if models_copy.pop("__discovered_model_catalog__", None) is True:
             discovered = True
@@ -192,9 +180,7 @@ def _normalize_provider_models(models: Any) -> Tuple[Dict[str, Any], bool]:
                 model_id = item.get("name")
             if not isinstance(model_id, str) or not model_id.strip():
                 continue
-            normalized_models[model_id.strip()] = {
-                k: v for k, v in item.items() if k not in {"id", "name"}
-            }
+            normalized_models[model_id.strip()] = {k: v for k, v in item.items() if k not in {"id", "name"}}
         return normalized_models, discovered
     return {}, discovered
 
@@ -205,20 +191,16 @@ def _normalize_custom_provider_entry(
     provider_key: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Return a runtime-compatible custom provider entry or ``None``."""
-    from hermes_cli.config import normalize_extra_headers
     if not isinstance(entry, dict):
         return None
 
-    # Shallow-copy before alias normalization writes into the entry: callers
-    # pass live sub-dicts from load_config_readonly()'s shared cache, and
-    # mutating those violates the cache's no-mutation contract and leaks alias
-    # keys back into config.yaml on a later save_config(load_config()).
+    # Shallow-copy before alias normalization writes into the entry: callers pass live sub-dicts
+    # from load_config_readonly()'s shared cache; mutating those violates its no-mutation contract
+    # and leaks alias keys back into config.yaml on a later save_config(load_config()).
     entry = dict(entry)
     provider_key = coerce_provider_id(provider_key)
 
-    # api_key_env is a documented snake_case alias for key_env (see
-    # website/docs/guides/azure-foundry.md).  Normalize it up front so the
-    # rest of the normalizer treats it as the canonical field.
+    # api_key_env is a documented snake_case alias for key_env (azure-foundry guide).
     if "api_key_env" in entry and "key_env" not in entry:
         entry["key_env"] = entry["api_key_env"]
     for camel, snake in _CAMEL_ALIASES.items():
@@ -246,12 +228,8 @@ def _normalize_custom_provider_entry(
     if not name:
         return None
 
-    normalized: Dict[str, Any] = {
-        "name": name,
-        "base_url": base_url,
-    }
+    normalized: Dict[str, Any] = {"name": name, "base_url": base_url}
 
-    provider_key = provider_key.strip()
     if provider_key:
         normalized["provider_key"] = provider_key
 
@@ -280,8 +258,7 @@ def _normalize_custom_provider_entry(
     if model_name:
         normalized["model"] = model_name
 
-    # Entry-level marker: the ``models`` mapping was auto-discovered by Hermes
-    # (``_save_discovered_models_to_config``), not hand-curated.
+    # ``models_discovered`` marks a mapping auto-discovered by Hermes, not hand-curated.
     models_dict, discovered = _normalize_provider_models(entry.get("models"))
     if models_dict:
         normalized["models"] = models_dict
@@ -291,8 +268,7 @@ def _normalize_custom_provider_entry(
     capabilities = entry.get("capabilities")
     if isinstance(capabilities, dict):
         normalized_capabilities = {
-            key: value
-            for key, value in capabilities.items()
+            key: value for key, value in capabilities.items()
             if isinstance(key, str) and isinstance(value, bool)
         }
         if normalized_capabilities:
@@ -312,16 +288,14 @@ def _normalize_custom_provider_entry(
     if isinstance(entry.get("extra_body"), dict):
         normalized["extra_body"] = dict(entry["extra_body"])
 
-    # Per-provider extra HTTP headers (proxies, gateways, custom auth).
-    # Values may carry credentials (e.g. CF-Access-Client-Secret) — never
-    # log them anywhere downstream.
+    # Per-provider extra HTTP headers may carry credentials — never log them downstream.
     normalized_headers = normalize_extra_headers(entry.get("extra_headers"))
     if normalized_headers:
         normalized["extra_headers"] = normalized_headers
 
-    ssl_ca_cert = entry.get("ssl_ca_cert")
-    if isinstance(ssl_ca_cert, str) and ssl_ca_cert.strip():
-        normalized["ssl_ca_cert"] = ssl_ca_cert.strip()
+    ssl_ca_cert = _stripped("ssl_ca_cert")
+    if ssl_ca_cert:
+        normalized["ssl_ca_cert"] = ssl_ca_cert
 
     ssl_verify = entry.get("ssl_verify")
     if isinstance(ssl_verify, bool):
@@ -338,16 +312,11 @@ def _custom_provider_entry_to_provider_config(
     provider_key: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Translate a legacy custom provider entry to the v12 providers shape."""
-    from hermes_cli.config import _normalize_custom_provider_entry
-    normalized = _normalize_custom_provider_entry(
-        dict(entry) if isinstance(entry, dict) else entry,
-        provider_key=provider_key,
-    )
+    normalized = _normalize_custom_provider_entry(entry, provider_key=provider_key)
     if normalized is None:
         return None
 
     provider_entry: Dict[str, Any] = {"api": normalized["base_url"]}
-
     for field in (
         "name", "api_key", "key_env", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
@@ -355,44 +324,36 @@ def _custom_provider_entry_to_provider_config(
     ):
         if field in normalized:
             provider_entry[field] = normalized[field]
-
     if "model" in normalized:
         provider_entry["default_model"] = normalized["model"]
     if "api_mode" in normalized:
         provider_entry["transport"] = normalized["api_mode"]
-
     return provider_entry
 
 
 def providers_dict_to_custom_providers(providers_dict: Any) -> List[Dict[str, Any]]:
-    """Normalize ``providers`` config entries into the legacy custom-provider shape."""
-    from hermes_cli.config import _normalize_custom_provider_entry
+    """Normalize enabled ``providers`` config entries into the legacy custom-provider shape."""
     if not isinstance(providers_dict, dict):
         return []
-
     custom_providers: List[Dict[str, Any]] = []
     for key, entry in providers_dict.items():
         if isinstance(entry, dict) and not is_provider_enabled(entry):
             continue
-        normalized = _normalize_custom_provider_entry(
-            entry, provider_key=coerce_provider_id(key)
-        )
+        normalized = _normalize_custom_provider_entry(entry, provider_key=coerce_provider_id(key))
         if normalized is not None:
             custom_providers.append(normalized)
-
     return custom_providers
 
 
 def get_compatible_custom_providers(
     config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return a deduplicated custom-provider view across legacy and v12+ config.
+    """Return a deduplicated list-shaped view over legacy ``custom_providers`` and v12+ ``providers``.
 
-    ``custom_providers`` remains the on-disk legacy format, while ``providers`` is the newer keyed
-    schema. Runtime and picker flows still need a single list-shaped view, but we should not
-    materialise that compatibility layer back into config.yaml because it duplicates entries in UIs.
+    Runtime and picker flows need one list; the compatibility layer is never materialised back
+    into config.yaml because it duplicates entries in UIs.
     """
-    from hermes_cli.config import _normalize_custom_provider_entry, load_config
+    from hermes_cli.config import load_config
     if config is None:
         config = load_config()
 
@@ -471,6 +432,19 @@ def _route_model_cfg(entry: Dict[str, Any], model: str) -> Optional[Dict[str, An
     return model_cfg if isinstance(model_cfg, dict) else None
 
 
+def _route_model_cfgs(
+    model: str,
+    base_url: str,
+    custom_providers: Optional[List[Dict[str, Any]]],
+    config: Optional[Dict[str, Any]],
+) -> Iterator[Dict[str, Any]]:
+    """Yield the ``models.<model>`` mapping of every entry matching *base_url*."""
+    for entry in _entries_for_route(base_url, custom_providers, config):
+        model_cfg = _route_model_cfg(entry, model)
+        if model_cfg is not None:
+            yield model_cfg
+
+
 def _coerce_ssl_verify(value: Any) -> Optional[bool]:
     if value is None:
         return None
@@ -478,9 +452,9 @@ def _coerce_ssl_verify(value: Any) -> Optional[bool]:
         return value
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in {"false", "0", "no", "off"}:
+        if lowered in _FALSE_WORDS:
             return False
-        if lowered in {"true", "1", "yes", "on"}:
+        if lowered in _TRUE_WORDS:
             return True
     return None
 
@@ -533,16 +507,10 @@ def get_custom_provider_extra_headers(
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
-    """Return ``extra_headers`` from a matching ``providers`` / ``custom_providers`` entry.
+    """Return ``extra_headers`` of the first route-matching entry that declares any, else ``{}``.
 
-    Matches the entry whose normalized route identity equals *base_url*, mirroring
-    :func:`get_custom_provider_tls_settings`, and returns its ``extra_headers`` dict, or ``{}`` when
-    no entry matches or declares none.
-
-    SECURITY: header values routinely carry credentials (Cloudflare Access service tokens, proxy
-    auth, custom bearer schemes). Callers must never log the returned values.
+    SECURITY: values may carry credentials — callers must never log them.
     """
-    from hermes_cli.config import normalize_extra_headers
     for entry in _entries_for_route(base_url, custom_providers, config):
         headers = normalize_extra_headers(entry.get("extra_headers"))
         if headers:
@@ -559,8 +527,7 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     """Merge per-provider ``extra_headers`` onto OpenAI client ``default_headers``.
 
     Provider-specific headers win over SDK/provider defaults already in ``client_kwargs`` (they
-    are the most specific level). No-op when base_url matches no provider entry or none declares
-    headers. SECURITY: values may carry credentials -- never log them.
+    are the most specific level). SECURITY: values may carry credentials -- never log them.
     """
     extra_headers = get_custom_provider_extra_headers(base_url, custom_providers, config)
     if not extra_headers:
@@ -576,12 +543,7 @@ def get_custom_provider_context_length(
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Optional[int]:
-    """Look up a per-model ``context_length`` override from ``custom_providers``.
-
-    Matches any entry whose normalized route identity equals ``base_url`` and returns
-    ``custom_providers[i].models.<model>.context_length`` if present and valid. Returns ``None``
-    when no override applies.
-    """
+    """Per-model ``context_length`` override from a route-matching entry, or ``None``."""
     from hermes_cli.config import get_compatible_custom_providers
     if not model or not base_url:
         return None
@@ -594,10 +556,7 @@ def get_custom_provider_context_length(
             raw = config.get("custom_providers")
             custom_providers = raw if isinstance(raw, list) else []
 
-    for entry in _entries_for_route(base_url, custom_providers, config):
-        model_cfg = _route_model_cfg(entry, model)
-        if model_cfg is None:
-            continue
+    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config):
         raw_ctx = model_cfg.get("context_length")
         if raw_ctx is None:
             continue
@@ -617,11 +576,10 @@ def get_custom_provider_model_capability(
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> Optional[bool]:
-    """Return an explicit boolean capability for one custom-provider model.
+    """Explicit boolean capability for one custom-provider model, or ``None``.
 
     Matching is scoped to the normalized route and exact runtime model id so aliases can declare
-    capabilities without changing the id sent upstream. Missing or non-boolean declarations return
-    ``None``.
+    capabilities without changing the id sent upstream.
     """
     from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
     if not model or not base_url or not capability:
@@ -629,19 +587,14 @@ def get_custom_provider_model_capability(
     if custom_providers is None:
         try:
             if config is None:
-                # Read-only path: this helper never mutates the entries it
-                # scans, and get_compatible_custom_providers shallow-copies
-                # each entry before normalizing, so the no-deepcopy cache is
-                # safe here (~135us saved per call on the blank-stub paths).
+                # Read-only path: entries are never mutated and get_compatible_custom_providers
+                # shallow-copies each one, so the no-deepcopy cache is safe (~135us saved per call).
                 config = load_config_readonly()
             custom_providers = get_compatible_custom_providers(config)
         except Exception:
             return None
 
-    for entry in _entries_for_route(base_url, custom_providers, config):
-        model_cfg = _route_model_cfg(entry, model)
-        if model_cfg is None:
-            continue
+    for model_cfg in _route_model_cfgs(model, base_url, custom_providers, config):
         value = model_cfg.get(capability)
         if isinstance(value, bool):
             return value
@@ -649,13 +602,10 @@ def get_custom_provider_model_capability(
 
 
 def is_provider_enabled(provider_cfg: Optional[Dict[str, Any]]) -> bool:
-    """Return whether a ``providers.<name>`` config block is enabled.
+    """Whether a ``providers.<name>`` block is enabled (default True; only explicit false hides it).
 
-    A provider is enabled by default. Only an explicit ``enabled: false`` in the block hides it from
-    the model picker, ``/models`` listings, the runtime resolver and the doctor / status output.
-
-    Backward-compat: configs without the ``enabled`` key keep working as before — the default is
-    ``True``.
+    An explicit ``enabled: false`` hides the provider from the model picker, ``/models``, the
+    runtime resolver and doctor/status output.
     """
     if not isinstance(provider_cfg, dict):
         return True
@@ -664,5 +614,5 @@ def is_provider_enabled(provider_cfg: Optional[Dict[str, Any]]) -> bool:
         return flag
     # YAML can produce strings for "true"/"false" depending on quoting.
     if isinstance(flag, str):
-        return flag.strip().lower() not in {"false", "0", "no", "off"}
+        return flag.strip().lower() not in _FALSE_WORDS
     return bool(flag)
