@@ -85,8 +85,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
         setup_terminal_backend,
     )
     # Step 1: Nous Portal — OAuth login + model selection (provider set to "nous" by the save).
-    print()
-    print_header("Nous Portal")
+    print_header("Nous Portal", gap=True)
     _info("One subscription, 300+ models, plus the Tool Gateway:",
           "  web search, image generation, TTS, browser automation.",
           "Sign up: https://portal.nousresearch.com/manage-subscription", None)
@@ -217,8 +216,7 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
         print_header, print_info, _print_setup_summary, print_success, prompt_choice, save_config,
         setup_model_provider, setup_terminal_backend,
     )
-    print()
-    print_header("Blank Slate Setup")
+    print_header("Blank Slate Setup", gap=True)
     _info("Everything starts OFF. First we force-enable only what's required",
           "to run an agent, then you choose whether to stop there or walk",
           "through enabling more — opting in to exactly what you want.", "",
@@ -247,8 +245,7 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     print_info("  Compression, memory, checkpoints, smart routing: off")
 
     # The fork: stop here, or walk through enabling things
-    print()
-    print_header("How far do you want to go?")
+    print_header("How far do you want to go?", gap=True)
     path = prompt_choice("Your minimal agent is ready. What next?", [
         "Start with everything disabled — finish now (most minimal)",
         "Walk through all configurations — opt in to tools, skills, plugins, MCP",
@@ -276,8 +273,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
         save_config, setup_gateway,
     )
     # Bundled skills — default to NONE, offer to seed all
-    print()
-    print_header("Bundled Skills")
+    print_header("Bundled Skills", gap=True)
     print_info("Blank Slate ships with NO bundled skills by default.")
     seed_skills = prompt_yes_no("Seed the full bundled skill catalog? (No = start with zero skills)", default=False)
 
@@ -298,8 +294,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
     )
 
     # Walk through enabling additional tools
-    print()
-    print_header("Tools")
+    print_header("Tools", gap=True)
     _info("Pick exactly which additional toolsets to turn on.",
           "(file and terminal are already on; leave the rest off if you want", " the most minimal agent.)")
     if prompt_yes_no("Open the tool selector to enable more tools?", default=False):
@@ -322,8 +317,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
          "Add servers with `hermes mcp add <name> --url ... | --command ...`.",
          "No MCP servers configured. Add later with `hermes mcp add`."),
     ):
-        print()
-        print_header(header)
+        print_header(header, gap=True)
         print_info(yes_msg if prompt_yes_no(question, default=False) else no_msg)
 
     # Optional messaging gateway
@@ -348,8 +342,7 @@ def _run_quick_setup(config: dict, hermes_home):
         _prompt_and_save_env_var, _prompt_api_key, prompt_checklist, save_config,
     )
     from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
-    print()
-    print_header("Quick Setup — Missing Items Only")
+    print_header("Quick Setup — Missing Items Only", gap=True)
 
     # Check what's missing
     missing_required = [v for v in get_missing_env_vars(required_only=False) if v.get("is_required")]
@@ -380,8 +373,7 @@ def _run_quick_setup(config: dict, hermes_home):
     missing_messaging = [v for v in missing_optional if v.get("category") == "messaging" and not v.get("advanced")]
 
     if missing_tools:  # checklist, then the API-key screen for each pick
-        print()
-        print_header("Tool API Keys")
+        print_header("Tool API Keys", gap=True)
         labels = []
         for var in missing_tools:
             tools = var.get("tools", [])
@@ -391,8 +383,7 @@ def _run_quick_setup(config: dict, hermes_home):
             _prompt_api_key(missing_tools[idx])
 
     if missing_messaging:  # checklist, then prompt for each selected platform's vars
-        print()
-        print_header("Messaging Platforms")
+        print_header("Messaging Platforms", gap=True)
         _info("Connect Hermes to messaging apps to chat from anywhere.",
               "You can configure these later with 'hermes setup gateway'.")
         # Group by platform in first-seen order; vars matching no platform are dropped.

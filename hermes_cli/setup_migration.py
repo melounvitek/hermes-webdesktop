@@ -266,8 +266,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     if not openclaw_dir.is_dir() or not _OPENCLAW_SCRIPT.exists():
         return False
 
-    print()
-    print_header("OpenClaw Installation Detected")
+    print_header("OpenClaw Installation Detected", gap=True)
     _info(f"Found OpenClaw data at {openclaw_dir}",
           "Hermes can preview what would be imported before making any changes.", None)
     if not prompt_yes_no("Would you like to see what can be imported?", default=True):
@@ -299,8 +298,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     if preview_count == 0:
         _info(None, "Nothing to import from OpenClaw.")
         return False
-    print()
-    print_header(f"Migration Preview — {preview_count} item(s) would be imported")
+    print_header(f"Migration Preview — {preview_count} item(s) would be imported", gap=True)
     _info("No changes have been made yet. Review the list below:", None)
     _print_migration_preview(preview_report)
 

@@ -97,10 +97,14 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _step(console: Console, n: int, title: str) -> None:
+    console.print()
+    console.print(f"[bold]Step {n}[/bold]  {title}")
+
+
 def _setup_binary(bw, console: Console) -> Optional[Path]:
     """Step 1: locate or download bws; None (after printing) on failure."""
-    console.print()
-    console.print("[bold]Step 1[/bold]  Install the bws CLI")
+    _step(console, 1, "Install the bws CLI")
     try:
         binary = bw.find_bws(install_if_missing=False)
         if binary is None:
@@ -126,8 +130,7 @@ def _missing_noninteractive_flags(args: argparse.Namespace) -> list[str]:
 
 def _setup_token(args: argparse.Namespace, console: Console, token_env: str) -> Optional[str]:
     """Step 2: take the token from ``--access-token`` or a masked prompt and persist it."""
-    console.print()
-    console.print("[bold]Step 2[/bold]  Provide your access token")
+    _step(console, 2, "Provide your access token")
     token = (args.access_token or "").strip() or masked_secret_prompt(f"  Paste access token ({token_env}): ").strip()
     if not token:
         console.print("  [red]Empty token, aborting.[/red]")
@@ -142,8 +145,7 @@ def _setup_token(args: argparse.Namespace, console: Console, token_env: str) -> 
 
 def _setup_project(binary: Path, token: str, console: Console, server_url: str) -> Optional[str]:
     """Step 4: list projects and let the user pick one; None (after printing) when none usable."""
-    console.print()
-    console.print("[bold]Step 4[/bold]  Pick a project")
+    _step(console, 4, "Pick a project")
     projects = _list_projects(binary, token, console, server_url=server_url)
     if projects is None:
         return None
@@ -195,8 +197,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if token is None:
         return 1
 
-    console.print()
-    console.print("[bold]Step 3[/bold]  Pick a Bitwarden region")
+    _step(console, 3, "Pick a Bitwarden region")
     server_url = _resolve_server_url(args, secrets_cfg, console)
     if server_url is None:
         return 1
@@ -210,8 +211,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         if project_id is None:
             return 1
 
-    console.print()
-    console.print(f"[bold]Step {4 if project_given else 5}[/bold]  Test fetch")
+    _step(console, 4 if project_given else 5, "Test fetch")
     try:
         secrets, warnings = bw.fetch_bitwarden_secrets(
             access_token=token, project_id=project_id, binary=binary, use_cache=False, server_url=server_url,
@@ -228,13 +228,10 @@ def cmd_setup(args: argparse.Namespace) -> int:
     for w in warnings:
         console.print(f"  [yellow]warning:[/yellow] {w}")
 
-    secrets_cfg["enabled"] = True
-    secrets_cfg["project_id"] = project_id
-    secrets_cfg["server_url"] = server_url
-    secrets_cfg.setdefault("access_token_env", token_env)
-    secrets_cfg.setdefault("cache_ttl_seconds", 300)
-    secrets_cfg.setdefault("override_existing", True)
-    secrets_cfg.setdefault("auto_install", True)
+    secrets_cfg.update(enabled=True, project_id=project_id, server_url=server_url)
+    for key, default in (("access_token_env", token_env), ("cache_ttl_seconds", 300),
+                         ("override_existing", True), ("auto_install", True)):
+        secrets_cfg.setdefault(key, default)
     save_config(cfg)
 
     console.print()
@@ -387,19 +384,18 @@ def cmd_sync(args: argparse.Namespace) -> int:
     rows = []
     applied = 0
     for key in sorted(secrets):
-        if key == token_env:
-            rows.append((key, "[dim]skip (bootstrap token)[/dim]"))
-            continue
         already = bool(os.environ.get(key))
-        if already and not override:
-            rows.append((key, "[dim]skip (already set)[/dim]"))
-            continue
-        if args.apply:
+        if key == token_env:
+            action = "[dim]skip (bootstrap token)[/dim]"
+        elif already and not override:
+            action = "[dim]skip (already set)[/dim]"
+        elif args.apply:
             os.environ[key] = secrets[key]
             applied += 1
-            rows.append((key, "[green]exported[/green]" + (" (overrode)" if already else "")))
+            action = "[green]exported[/green]" + (" (overrode)" if already else "")
         else:
-            rows.append((key, "[green]would export[/green]" + (" (overrides)" if already else "")))
+            action = "[green]would export[/green]" + (" (overrides)" if already else "")
+        rows.append((key, action))
 
     print_table(console, (("Name", {"style": "cyan"}), "Action"), rows, warnings)
 

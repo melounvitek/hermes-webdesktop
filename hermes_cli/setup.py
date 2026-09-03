@@ -38,8 +38,10 @@ _DOCS_BASE = "https://hermes-agent.nousresearch.com/docs"
 _BRACKETED_PASTE_PATTERN = re.compile(r"\x1b\[\s*200~|\x1b\[\s*201~")
 
 
-def print_header(title: str):
-    """Print a section header."""
+def print_header(title: str, *, gap: bool = False):
+    """Print a section header (``gap`` adds an extra blank line before it)."""
+    if gap:
+        print()
     print()
     print(color(f"◆ {title}", Colors.CYAN, Colors.BOLD))
 
@@ -302,12 +304,9 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
             # proceeds unattended instead of failing the whole command.
             print()
             return default
-        if not value:
-            return default
-        if value in {"y", "yes"}:
-            return True
-        if value in {"n", "no"}:
-            return False
+        answer = {"": default, "y": True, "yes": True, "n": False, "no": False}.get(value)
+        if answer is not None:
+            return answer
         print_error("Please enter 'y' or 'n'")
 
 
@@ -781,8 +780,7 @@ def _run_setup_wizard_impl(args):
         if quick_requested:
             _run_setup_steps([("Quick Setup", lambda: _run_quick_setup(config, hermes_home))])
             return
-        print()
-        print_header("Reconfigure")
+        print_header("Reconfigure", gap=True)
         print_success("You already have Hermes configured.")
         _info("Running the full wizard — each prompt shows your current value.",
               "Press Enter to keep it, or type a new value to change it.", "",

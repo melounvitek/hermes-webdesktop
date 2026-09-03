@@ -158,11 +158,7 @@ def _setup_telegram():
         print_success(f"Detected your Telegram user ID: {detected_id}")
         if prompt_yes_no("Allow this Telegram account to use the bot?", True):
             extra = prompt("Additional allowed user IDs (comma-separated, optional)")
-            ids = [detected_id]
-            for uid in extra.replace(" ", "").split(","):
-                if uid and uid not in ids:
-                    ids.append(uid)
-            allowed_users = ",".join(ids)
+            allowed_users = ",".join(dict.fromkeys([detected_id, *filter(None, extra.replace(" ", "").split(","))]))
     if allowed_users is None:
         allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
 
