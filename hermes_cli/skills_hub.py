@@ -32,18 +32,15 @@ _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
 # unavailable (offline / first run before the cache populates).
 _BROWSE_LIMITS = {
     "hermes-index": 1000000, "official": 200, "skills-sh": 200, "well-known": 50,
-    "github": 200, "clawhub": 500, "lobehub": 500, "browse-sh": 500,
-}
+    "github": 200, "clawhub": 500, "lobehub": 500, "browse-sh": 500}
 # Programmatic (TUI gateway) browse keeps its own, lower caps.
 _BROWSE_API_LIMITS = {
     "hermes-index": 5000, "official": 100, "skills-sh": 100, "well-known": 25,
-    "github": 100, "clawhub": 50, "lobehub": 50, "browse-sh": 500,
-}
+    "github": 100, "clawhub": 50, "lobehub": 50, "browse-sh": 500}
 _EXTRA_META_LABELS = (
     ("repo_url", "Repo"), ("detail_url", "Detail Page"), ("index_url", "Index"),
     ("endpoint", "Endpoint"), ("install_command", "Install Command"),
-    ("installs", "Installs"), ("weekly_installs", "Weekly Installs"),
-)
+    ("installs", "Installs"), ("weekly_installs", "Weekly Installs"))
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +256,7 @@ def _existing_categories() -> List[str]:
     try:
         return sorted(
             name for name in set(_category_skill_dirs(SKILLS_DIR))
-            if not (SKILLS_DIR / name / "SKILL.md").exists()
-        )
+            if not (SKILLS_DIR / name / "SKILL.md").exists())
     except (FileNotFoundError, OSError):
         return []
 
@@ -271,13 +267,11 @@ def _prompt_for_skill_name(c: Console, url: str, default: str = "") -> Optional[
     c.print(
         f"[yellow]The SKILL.md at {url} doesn't declare a `name:` in its "
         f"frontmatter,[/]\n[yellow]and the URL path doesn't produce a valid "
-        f"identifier either.[/]"
-    )
+        f"identifier either.[/]")
     default_hint = f" [{default}]" if default else ""
     c.print(
         f"[bold]Enter a skill name{default_hint}:[/] "
-        f"[dim](lowercase letters, digits, hyphens, underscores; starts with a letter)[/]"
-    )
+        f"[dim](lowercase letters, digits, hyphens, underscores; starts with a letter)[/]")
     from hermes_cli.cli_output import line_input
     try:
         answer = line_input("Name: ").strip()
@@ -297,8 +291,7 @@ def _prompt_for_category(c: Console, existing: List[str]) -> str:
     if existing:
         c.print(
             "[bold]Pick a category[/] "
-            "[dim](reuse an existing bucket, type a new one, or press Enter to install flat)[/]"
-        )
+            "[dim](reuse an existing bucket, type a new one, or press Enter to install flat)[/]")
         c.print(f"[dim]Existing: {', '.join(existing)}[/]")
     else:
         c.print(
@@ -337,8 +330,7 @@ def do_search(query: str, source: str = "all", limit: int = 10,
         payload = [
             {"name": r.name, "identifier": r.identifier, "source": r.source,
              "trust_level": r.trust_level, "description": r.description}
-            for r in results
-        ]
+            for r in results]
         print(json.dumps(payload, indent=2))
         return
 
@@ -376,8 +368,7 @@ def _rank_and_page(all_results, page: int, page_size: int):
         if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
             seen[r.identifier] = r
     deduped = sorted(seen.values(), key=lambda r: (
-        -_TRUST_RANK.get(r.trust_level, 0), r.source != "official", r.name.lower(),
-    ))
+        -_TRUST_RANK.get(r.trust_level, 0), r.source != "official", r.name.lower()))
     total_pages = max(1, (len(deduped) + page_size - 1) // page_size)
     page = max(1, min(page, total_pages))
     start = (page - 1) * page_size
@@ -396,14 +387,11 @@ def _fetch_browse_results(c: Console, source: str):
         def _on_source_done(sid: str, count: int) -> None:
             _done.append(f"{sid} ({count})")
             status.update(
-                "[bold]Fetching skills from registries...[/]  "
-                f"[dim]done: {', '.join(_done)}[/]"
-            )
+                f"[bold]Fetching skills from registries...[/]  [dim]done: {', '.join(_done)}[/]")
 
         return parallel_search_sources(
             _sources(), query="", per_source_limits=_BROWSE_LIMITS, source_filter=source,
-            overall_timeout=30, on_source_done=_on_source_done,
-        )
+            overall_timeout=30, on_source_done=_on_source_done)
 
 
 def _render_browse_page(c: Console, deduped, page_items, page: int, total_pages: int,
@@ -482,16 +470,14 @@ def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> di
     # hermes-index AND the external APIs at once would double-count every skill.
     all_results, _counts, _timed_out = parallel_search_sources(
         _sources(), query="", per_source_limits=_BROWSE_API_LIMITS,
-        source_filter=source, overall_timeout=30,
-    )
+        source_filter=source, overall_timeout=30)
     if not all_results:
         return {"items": [], "page": 1, "total_pages": 1, "total": 0}
     deduped, page_items, page, total_pages, _start = _rank_and_page(all_results, page, page_size)
     return {
         "items": [{"name": r.name, "description": r.description, "source": r.source,
                    "trust": r.trust_level, "identifier": r.identifier} for r in page_items],
-        "page": page, "total_pages": total_pages, "total": len(deduped),
-    }
+        "page": page, "total_pages": total_pages, "total": len(deduped)}
 
 
 def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
@@ -510,8 +496,7 @@ def do_inspect(identifier: str, console: Optional[Console] = None) -> None:
         f"[bold]Description:[/] {meta.description}",
         f"[bold]Source:[/] {meta.source}",
         f"[bold]Trust:[/] {_trust_cell(meta.trust_level, meta.source)}",
-        f"[bold]Identifier:[/] {meta.identifier}",
-    ]
+        f"[bold]Identifier:[/] {meta.identifier}"]
     if meta.tags:
         info_lines.append(f"[bold]Tags:[/] {', '.join(meta.tags)}")
     info_lines.extend(_format_extra_metadata_lines(meta.extra))
@@ -534,8 +519,7 @@ def inspect_skill(identifier: str) -> Optional[dict]:
         return None
     out: dict = {
         "name": meta.name, "description": meta.description, "source": meta.source,
-        "identifier": meta.identifier, "tags": list(meta.tags) if meta.tags else [],
-    }
+        "identifier": meta.identifier, "tags": list(meta.tags) if meta.tags else []}
     preview = _skill_md_preview(bundle)
     if preview is not None:
         out["skill_md_preview"] = preview
@@ -573,8 +557,7 @@ def _resolve_url_bundle_name(c: Console, bundle, meta, identifier: str,
         c.print(
             f"[bold red]Invalid --name:[/] {name_override!r}. "
             "Must be a lowercase identifier (letters, digits, hyphens, "
-            "underscores; starts with a letter).\n"
-        )
+            "underscores; starts with a letter).\n")
         return False
     elif skip_confirm:
         # Non-interactive surface (slash command / TUI / gateway): can't prompt.
@@ -586,8 +569,7 @@ def _resolve_url_bundle_name(c: Console, bundle, meta, identifier: str,
             f"  [bold]/skills install {url} --name <your-name>[/]\n"
             f"  [bold]hermes skills install {url} --name <your-name>[/]\n\n"
             "[dim]Or ask the SKILL.md's author to add a `name:` field to "
-            "its YAML frontmatter.[/]\n"
-        )
+            "its YAML frontmatter.[/]\n")
         return False
     else:
         chosen = _prompt_for_skill_name(c, url)
@@ -621,24 +603,20 @@ def _announce_blueprint(c: Console, skill_name: str) -> None:
         if register_blueprint_suggestion(spec) is not None:
             c.print(
                 f"[bold cyan]Blueprint:[/] '{skill_name}' is an automation "
-                f"(schedule [bold]{spec.schedule}[/])."
-            )
+                f"(schedule [bold]{spec.schedule}[/]).")
             c.print(
                 "[dim]Added to your suggestions — run[/] [bold]/suggestions[/] "
-                "[dim]to schedule or dismiss it.[/]\n"
-            )
+                "[dim]to schedule or dismiss it.[/]\n")
         else:
             # Dropped: already offered/dismissed (latched) or the pending list is at its cap.
             c.print(
                 f"[bold cyan]Blueprint:[/] '{skill_name}' is an automation "
                 f"(schedule [bold]{spec.schedule}[/]), but it wasn't added to "
                 "your suggestions (already offered/dismissed, or the pending "
-                "list is full — run [bold]/suggestions[/] to review)."
-            )
+                "list is full — run [bold]/suggestions[/] to review).")
             c.print(
                 "[dim]You can still schedule it any time by asking the agent "
-                "or via[/] [bold]hermes cron add[/][dim].[/]\n"
-            )
+                "or via[/] [bold]hermes cron add[/][dim].[/]\n")
     except Exception:  # pragma: no cover - blueprint detection is best-effort
         pass
 
@@ -661,8 +639,7 @@ def _print_fetch_failure(c: Console, sources, identifier: str) -> None:
     rate_limited = any(
         getattr(src, "is_rate_limited", False)
         or getattr(getattr(src, "github", None), "is_rate_limited", False)
-        for src in sources
-    )
+        for src in sources)
     c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.")
     if rate_limited:
         c.print(
@@ -670,8 +647,7 @@ def _print_fetch_failure(c: Console, sources, identifier: str) -> None:
             "(unauthenticated: 60 requests/hour).\n"
             "Set [bold]GITHUB_TOKEN[/] in your .env or install the "
             "[bold]gh[/] CLI and run [bold]gh auth login[/] "
-            "to raise the limit to 5,000/hr.\n"
-        )
+            "to raise the limit to 5,000/hr.\n")
     else:
         c.print()
 
@@ -689,8 +665,7 @@ def _scan_quarantined(c: Console, q_path: Path, bundle, meta, identifier: str):
                        or identifier)
     result, prov = scan_skill_cached(
         q_path, source=scan_source, source_url=source_url_for_bundle(bundle),
-        cache_dir=HUB_DIR / "scan-cache",
-    )
+        cache_dir=HUB_DIR / "scan-cache")
     c.print(format_scan_report(result))
     freshness = "fresh" if prov["fresh"] else "cached"
     c.print(f"[dim]Scan provenance: {freshness}; scanner "
@@ -710,8 +685,7 @@ def _confirm_install(c: Console, bundle, category: str) -> bool:
             "It ships with hermes-agent but is not activated by default.\n"
             "Installing will copy it to your skills directory where the agent can use it.\n\n"
             + files_at,
-            title="Official Skill", border_style="bright_cyan",
-        ))
+            title="Official Skill", border_style="bright_cyan"))
     else:
         c.print(Panel(
             "[bold yellow]You are installing a third-party skill at your own risk.[/]\n\n"
@@ -719,8 +693,7 @@ def _confirm_install(c: Console, bundle, category: str) -> bool:
             "shell commands, and scripts. Even after automated scanning, you should\n"
             "review the installed files before use.\n\n"
             + files_at,
-            title="Disclaimer", border_style="yellow",
-        ))
+            title="Disclaimer", border_style="yellow"))
     return _confirm_or_cancel(c, f"[bold]Install '{bundle.name}'?[/]",
                               cancel="[dim]Installation cancelled.[/]\n")
 
@@ -841,8 +814,7 @@ def _print_tier1_advisory(skill_dir, console) -> None:
         if report.secrets_findings:
             console.print(
                 "[bold red]Possible credentials detected above.[/] "
-                "Review the flagged lines before using this skill.\n"
-            )
+                "Review the flagged lines before using this skill.\n")
     except Exception as exc:  # advisory only — never break an install
         logging.getLogger(__name__).debug("Tier 1 advisory scan skipped: %s", exc)
 
@@ -1057,8 +1029,7 @@ def do_reset(name: str, restore: bool = False,
     c = console or _console
     if not skip_confirm and restore and not _confirm_or_cancel(
         c, f"\n[bold]Restore '{name}' from bundled source?[/]",
-        "[dim]This will DELETE your current copy and re-copy the bundled version.[/]",
-    ):
+        "[dim]This will DELETE your current copy and re-copy the bundled version.[/]"):
         return
     result = reset_bundled_skill(name, restore=restore)
     if not result["ok"]:
@@ -1173,8 +1144,7 @@ def do_opt_out(remove: bool = False,
         c.print(f"[dim]Keeping {len(kept)} (user-modified or non-bundled).[/]")
     if not skip_confirm and not _confirm_or_cancel(
         c, "[dim]This deletes the on-disk copies. User-edited and hub/local skills are NOT touched.[/]",
-        cancel="[dim]Marker kept; no skills deleted.[/]\n",
-    ):
+        cancel="[dim]Marker kept; no skills deleted.[/]\n"):
         return
     result = remove_pristine_bundled_skills(dry_run=False)
     c.print(f"[bold green]{result['message']}[/]")
@@ -1386,8 +1356,7 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
                 headers=headers, timeout=15,
                 json={"message": f"Add {skill_name} skill: {rel}",
                       "content": base64.b64encode(f.read_bytes()).decode(),
-                      "branch": branch_name},
-            )
+                      "branch": branch_name})
         except Exception as e:
             return False, f"Failed to upload {rel}: {e}"
 
@@ -1399,9 +1368,7 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
                 "body": f"Submitting the `{skill_name}` skill via Hermes Skills Hub.\n\n"
                         f"This skill was scanned by the Hermes Skills Guard before submission.",
                 "head": f"{fork_repo.split('/')[0]}:{branch_name}",
-                "base": default_branch,
-            },
-        )
+                "base": default_branch})
         if resp.status_code == 201:
             return True, f"PR created: {resp.json().get('html_url', '')}"
         return False, f"Failed to create PR: {resp.status_code} {resp.text[:200]}"
@@ -1425,12 +1392,9 @@ def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> N
                 "source": entry.get("source", ""),
                 "identifier": entry.get("identifier", ""),
                 "category": str(Path(entry.get("install_path", "")).parent)
-                            if "/" in entry.get("install_path", "") else "",
-            }
-            for entry in installed
-        ],
-        "taps": tap_list,
-    }
+                            if "/" in entry.get("install_path", "") else ""}
+            for entry in installed],
+        "taps": tap_list}
     payload = json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n"
     if output_path == "-":
         sys.stdout.write(payload)
@@ -1533,8 +1497,7 @@ _CLI_ACTIONS = {
     "publish": lambda a: do_publish(a.skill_path, target=getattr(a, "to", "github"),
                                     repo=getattr(a, "repo", "")),
     "snapshot": lambda a: _snapshot_cli(a),
-    "tap": lambda a: _tap_cli(a),
-}
+    "tap": lambda a: _tap_cli(a)}
 
 
 def skills_command(args) -> None:
@@ -1652,8 +1615,7 @@ _SLASH_ACTIONS = {
     "tap": _slash_tap,
     "help": lambda args, c: _print_skills_help(c),
     "--help": lambda args, c: _print_skills_help(c),
-    "-h": lambda args, c: _print_skills_help(c),
-}
+    "-h": lambda args, c: _print_skills_help(c)}
 
 # Actions that need at least one argument -> usage lines printed when called bare.
 _SLASH_USAGE = {
@@ -1664,8 +1626,7 @@ _SLASH_USAGE = {
     "reset": (
         "[bold red]Usage:[/] /skills reset <name> [--restore] [--now]\n",
         "[dim]Clears the bundled-skills manifest entry so future updates stop marking it as user-modified.[/]",
-        "[dim]Pass --restore to also replace the current copy with the bundled version.[/]\n",
-    ),
+        "[dim]Pass --restore to also replace the current copy with the bundled version.[/]\n"),
     "diff": ("[bold red]Usage:[/] /skills diff <name>\n",),
     "publish": ("[bold red]Usage:[/] /skills publish <skill-path> [--to github] [--repo owner/repo]\n",),
 }
@@ -1713,5 +1674,4 @@ def _print_skills_help(console: Console) -> None:
         "  [cyan]publish[/] <path> --repo <r>   Publish a skill to GitHub via PR\n"
         "  [cyan]snapshot[/] export|import      Export/import skill configurations\n"
         "  [cyan]tap[/] list|add|remove         Manage skill sources\n",
-        title="/skills",
-    ))
+        title="/skills"))
