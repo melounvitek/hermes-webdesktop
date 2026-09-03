@@ -31,21 +31,33 @@ class SkinConfig:
     def get_color(self, key: str, fallback: str = "") -> str:
         return self.colors.get(key, fallback)
 
+    def get_branding(self, key: str, fallback: str = "") -> str:
+        return self.branding.get(key, fallback)
+
     def get_spinner_wings(self) -> List[Tuple[str, str]]:
         """Spinner wing pairs, or empty list if none."""
         return [(str(pair[0]), str(pair[1])) for pair in self.spinner.get("wings", [])
                 if isinstance(pair, (list, tuple)) and len(pair) == 2]
 
-    def get_branding(self, key: str, fallback: str = "") -> str:
-        return self.branding.get(key, fallback)
+
+def _branding(who: str, symbol: str, goodbye: str, prompt: str = "", help_header: str = "") -> Dict[str, str]:
+    """Branding block for a "<who> Agent" persona keyed by its glyph."""
+    return {
+        "agent_name": f"{who} Agent",
+        "welcome": f"Welcome to {who} Agent! Type your message or /help for commands.",
+        "goodbye": goodbye, "response_label": f" {symbol} {who} ", "prompt_symbol": prompt or symbol,
+        "help_header": help_header or f"({symbol}) Available Commands"}
+
+
+def _wings(*glyphs) -> List[List[str]]:
+    """Spinner wing pairs `⟪g` / `g⟫`; a (left, right) tuple gives asymmetric glyphs."""
+    return [[f"⟪{g[0] if isinstance(g, tuple) else g}", f"{g[1] if isinstance(g, tuple) else g}⟫"]
+            for g in glyphs]
 
 
 # Branding shared by every Hermes-named built-in (mono/daylight override help_header).
-_HERMES_BRANDING: Dict[str, str] = {
-    "agent_name": "Hermes Agent",
-    "welcome": "Welcome to Hermes Agent! Type your message or /help for commands.",
-    "goodbye": "Goodbye! ⚕", "response_label": " ⚕ Hermes ", "prompt_symbol": "❯",
-    "help_header": "(^_^)? Available Commands"}
+_HERMES_BRANDING: Dict[str, str] = _branding(
+    "Hermes", "⚕", "Goodbye! ⚕", prompt="❯", help_header="(^_^)? Available Commands")
 
 _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
     "default": {
@@ -101,12 +113,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "thinking_verbs": [
                 "forging", "marching", "sizing the field", "holding the line",
                 "hammering plans", "tempering steel", "plotting impact", "raising the shield"],
-            "wings": [["⟪⚔", "⚔⟫"], ["⟪▲", "▲⟫"], ["⟪╸", "╺⟫"], ["⟪⛨", "⛨⟫"]]},
-        "branding": {
-            "agent_name": "Ares Agent",
-            "welcome": "Welcome to Ares Agent! Type your message or /help for commands.",
-            "goodbye": "Farewell, warrior! ⚔", "response_label": " ⚔ Ares ", "prompt_symbol": "⚔",
-            "help_header": "(⚔) Available Commands"},
+            "wings": _wings("⚔", "▲", ("╸", "╺"), "⛨")},
+        "branding": _branding("Ares", "⚔", "Farewell, warrior! ⚔"),
         "tool_prefix": "╎",
         "banner_logo": """[bold #A3261F] █████╗ ██████╗ ███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #B73122]██╔══██╗██╔══██╗██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -218,12 +226,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "charting currents", "sounding the depth", "reading foam lines",
                 "steering the trident", "tracking undertow", "plotting sea lanes",
                 "calling the swell", "measuring pressure"],
-            "wings": [["⟪≈", "≈⟫"], ["⟪Ψ", "Ψ⟫"], ["⟪∿", "∿⟫"], ["⟪◌", "◌⟫"]]},
-        "branding": {
-            "agent_name": "Poseidon Agent",
-            "welcome": "Welcome to Poseidon Agent! Type your message or /help for commands.",
-            "goodbye": "Fair winds! Ψ", "response_label": " Ψ Poseidon ", "prompt_symbol": "Ψ",
-            "help_header": "(Ψ) Available Commands"},
+            "wings": _wings("≈", "Ψ", "∿", "◌")},
+        "branding": _branding("Poseidon", "Ψ", "Fair winds! Ψ"),
         "tool_prefix": "│",
         "banner_logo": """[bold #B8E8FF]██████╗  ██████╗ ███████╗███████╗██╗██████╗  ██████╗ ███╗   ██╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #97D6FF]██╔══██╗██╔═══██╗██╔════╝██╔════╝██║██╔══██╗██╔═══██╗████╗  ██║      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -266,12 +270,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "finding traction", "measuring the grade", "resetting the boulder",
                 "counting the ascent", "testing leverage", "setting the shoulder",
                 "pushing uphill", "enduring the loop"],
-            "wings": [["⟪◉", "◉⟫"], ["⟪◬", "◬⟫"], ["⟪◌", "◌⟫"], ["⟪⬤", "⬤⟫"]]},
-        "branding": {
-            "agent_name": "Sisyphus Agent",
-            "welcome": "Welcome to Sisyphus Agent! Type your message or /help for commands.",
-            "goodbye": "The boulder waits. ◉", "response_label": " ◉ Sisyphus ",
-            "prompt_symbol": "◉", "help_header": "(◉) Available Commands"},
+            "wings": _wings("◉", "◬", "◌", "⬤")},
+        "branding": _branding("Sisyphus", "◉", "The boulder waits. ◉"),
         "tool_prefix": "│",
         "banner_logo": """[bold #F5F5F5]███████╗██╗███████╗██╗   ██╗██████╗ ██╗  ██╗██╗   ██╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #E7E7E7]██╔════╝██║██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██║   ██║██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -316,12 +316,8 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "banking into the draft", "measuring burn", "reading the updraft",
                 "tracking ember fall", "setting wing angle", "holding the flame core",
                 "plotting a hot landing", "coiling for lift"],
-            "wings": [["⟪✦", "✦⟫"], ["⟪▲", "▲⟫"], ["⟪◌", "◌⟫"], ["⟪◇", "◇⟫"]]},
-        "branding": {
-            "agent_name": "Charizard Agent",
-            "welcome": "Welcome to Charizard Agent! Type your message or /help for commands.",
-            "goodbye": "Flame out! ✦", "response_label": " ✦ Charizard ", "prompt_symbol": "✦",
-            "help_header": "(✦) Available Commands"},
+            "wings": _wings("✦", "▲", "◌", "◇")},
+        "branding": _branding("Charizard", "✦", "Flame out! ✦"),
         "tool_prefix": "│",
         "banner_logo": """[bold #FFF0D4] ██████╗██╗  ██╗ █████╗ ██████╗ ██╗███████╗ █████╗ ██████╗ ██████╗        █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
 [bold #FFD39A]██╔════╝██║  ██║██╔══██╗██╔══██╗██║╚══███╔╝██╔══██╗██╔══██╗██╔══██╗      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
@@ -398,28 +394,21 @@ def list_skins() -> List[Dict[str, str]]:
     result = [{"name": name, "description": data.get("description", ""), "source": "builtin"}
               for name, data in _BUILTIN_SKINS.items()]
     skins_path = _skins_dir()
-    if skins_path.is_dir():
-        for f in sorted(skins_path.glob("*.yaml")):
-            data = _load_skin_from_yaml(f)
-            if data:
-                skin_name = data.get("name", f.stem)
-                if any(s["name"] == skin_name for s in result):
-                    continue
-                result.append({"name": skin_name, "description": data.get("description", ""), "source": "user"})
+    for f in sorted(skins_path.glob("*.yaml")) if skins_path.is_dir() else ():
+        data = _load_skin_from_yaml(f)
+        if data and not any(s["name"] == data.get("name", f.stem) for s in result):
+            result.append({"name": data.get("name", f.stem), "description": data.get("description", ""),
+                           "source": "user"})
     return result
 
 
 def load_skin(name: str) -> SkinConfig:
     """Load a skin by name: user skins first, then built-in, then default."""
     user_file = _skins_dir() / f"{name}.yaml"
-    if user_file.is_file():
-        data = _load_skin_from_yaml(user_file)
-        if data:
-            return _build_skin_config(data)
-    if name in _BUILTIN_SKINS:
-        return _build_skin_config(_BUILTIN_SKINS[name])
-    logger.warning("Skin '%s' not found, using default", name)
-    return _build_skin_config(_BUILTIN_SKINS["default"])
+    data = _load_skin_from_yaml(user_file) if user_file.is_file() else None
+    if not data and name not in _BUILTIN_SKINS:
+        logger.warning("Skin '%s' not found, using default", name)
+    return _build_skin_config(data or _BUILTIN_SKINS.get(name) or _BUILTIN_SKINS["default"])
 
 
 def get_active_skin() -> SkinConfig:
@@ -470,6 +459,46 @@ def get_active_goodbye(fallback: str = "Goodbye! ⚕") -> str:
     return _active_branding("goodbye", fallback)
 
 
+# Palette resolution order for prompt_toolkit styles: (name, skin color key, fallback). A
+# fallback starting with "@" names an earlier entry (so a missing key inherits its remapped value).
+_STYLE_PALETTE = (
+    ("prompt", "prompt", ""), ("input_rule", "input_rule", "#CD7F32"),
+    ("title", "banner_title", "#FFD700"), ("text", "banner_text", "#FFF8DC"),
+    ("dim", "banner_dim", "#555555"), ("label", "ui_label", "@title"), ("warn", "ui_warn", "#FF8C00"),
+    ("error", "ui_error", "#FF6B6B"), ("status_bg", "status_bar_bg", "#1a1a2e"),
+    ("status_text", "status_bar_text", "@text"), ("status_strong", "status_bar_strong", "@title"),
+    ("status_dim", "status_bar_dim", "@dim"), ("ok", "ui_ok", "#8FBC8F"),
+    ("status_good", "status_bar_good", "@ok"), ("status_warn", "status_bar_warn", "@warn"),
+    ("accent", "banner_accent", "@warn"), ("status_bad", "status_bar_bad", "@accent"),
+    ("status_critical", "status_bar_critical", "@error"), ("voice_bg", "voice_status_bg", "@status_bg"),
+    ("menu_bg", "completion_menu_bg", "#1a1a2e"), ("menu_current_bg", "completion_menu_current_bg", "#333355"),
+    ("menu_meta_bg", "completion_menu_meta_bg", "@menu_bg"),
+    ("menu_meta_current_bg", "completion_menu_meta_current_bg", "@menu_current_bg"))
+
+# prompt_toolkit style class -> format template over the resolved palette names.
+_STYLE_TEMPLATES = {
+    "input-area": "",  # terminal default fg/bg — `prompt` styles the symbol, NOT typed text
+    "placeholder": "{dim} italic", "prompt": "{prompt}", "prompt-working": "{dim} italic",
+    "hint": "{dim} italic",
+    "status-bar": "bg:{status_bg} {status_text}", "status-bar-strong": "bg:{status_bg} {status_strong} bold",
+    "status-bar-dim": "bg:{status_bg} {status_dim}", "status-bar-good": "bg:{status_bg} {status_good} bold",
+    "status-bar-warn": "bg:{status_bg} {status_warn} bold", "status-bar-bad": "bg:{status_bg} {status_bad} bold",
+    "status-bar-critical": "bg:{status_bg} {status_critical} bold",
+    "input-rule": "{input_rule}", "image-badge": "{label} bold",
+    "completion-menu": "bg:{menu_bg} {text}", "completion-menu.completion": "bg:{menu_bg} {text}",
+    "completion-menu.completion.current": "bg:{menu_current_bg} {title}",
+    "completion-menu.meta.completion": "bg:{menu_meta_bg} {dim}",
+    "completion-menu.meta.completion.current": "bg:{menu_meta_current_bg} {label}",
+    "clarify-border": "{input_rule}", "clarify-title": "{title} bold", "clarify-question": "{text} bold",
+    "clarify-choice": "{dim}", "clarify-selected": "{title} bold", "clarify-active-other": "{title} italic",
+    "clarify-countdown": "{input_rule}",
+    "sudo-prompt": "{error} bold", "sudo-border": "{input_rule}", "sudo-title": "{error} bold",
+    "sudo-text": "{text}",
+    "approval-border": "{input_rule}", "approval-title": "{warn} bold", "approval-desc": "{text} bold",
+    "approval-cmd": "{dim} italic", "approval-choice": "{dim}", "approval-selected": "{title} bold",
+    "voice-status": "bg:{voice_bg} {label}", "voice-status-recording": "bg:{voice_bg} {error} bold"}
+
+
 def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     """Return prompt_toolkit style overrides derived from the active skin."""
     try:
@@ -478,65 +507,8 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         return {}
     # `prompt` is unset by default so typed text inherits the terminal's foreground (readable
     # on light and dark schemes); skins opt into a colored prompt symbol via `prompt` in YAML.
-    c = skin.get_color
-    prompt = c("prompt", "")
-    input_rule = c("input_rule", "#CD7F32")
-    title = c("banner_title", "#FFD700")
-    text = c("banner_text", "#FFF8DC")
-    dim = c("banner_dim", "#555555")
-    label = c("ui_label", title)
-    warn = c("ui_warn", "#FF8C00")
-    error = c("ui_error", "#FF6B6B")
-    status_bg = c("status_bar_bg", "#1a1a2e")
-    status_text = c("status_bar_text", text)
-    status_strong = c("status_bar_strong", title)
-    status_dim = c("status_bar_dim", dim)
-    status_good = c("status_bar_good", c("ui_ok", "#8FBC8F"))
-    status_warn = c("status_bar_warn", warn)
-    status_bad = c("status_bar_bad", c("banner_accent", warn))
-    status_critical = c("status_bar_critical", error)
-    voice_bg = c("voice_status_bg", status_bg)
-    menu_bg = c("completion_menu_bg", "#1a1a2e")
-    menu_current_bg = c("completion_menu_current_bg", "#333355")
-    menu_meta_bg = c("completion_menu_meta_bg", menu_bg)
-    menu_meta_current_bg = c("completion_menu_meta_current_bg", menu_current_bg)
-
-    return {
-        "input-area": "",  # terminal default fg/bg — `prompt` styles the symbol, NOT typed text
-        "placeholder": f"{dim} italic",
-        "prompt": prompt,
-        "prompt-working": f"{dim} italic",
-        "hint": f"{dim} italic",
-        "status-bar": f"bg:{status_bg} {status_text}",
-        "status-bar-strong": f"bg:{status_bg} {status_strong} bold",
-        "status-bar-dim": f"bg:{status_bg} {status_dim}",
-        "status-bar-good": f"bg:{status_bg} {status_good} bold",
-        "status-bar-warn": f"bg:{status_bg} {status_warn} bold",
-        "status-bar-bad": f"bg:{status_bg} {status_bad} bold",
-        "status-bar-critical": f"bg:{status_bg} {status_critical} bold",
-        "input-rule": input_rule,
-        "image-badge": f"{label} bold",
-        "completion-menu": f"bg:{menu_bg} {text}",
-        "completion-menu.completion": f"bg:{menu_bg} {text}",
-        "completion-menu.completion.current": f"bg:{menu_current_bg} {title}",
-        "completion-menu.meta.completion": f"bg:{menu_meta_bg} {dim}",
-        "completion-menu.meta.completion.current": f"bg:{menu_meta_current_bg} {label}",
-        "clarify-border": input_rule,
-        "clarify-title": f"{title} bold",
-        "clarify-question": f"{text} bold",
-        "clarify-choice": dim,
-        "clarify-selected": f"{title} bold",
-        "clarify-active-other": f"{title} italic",
-        "clarify-countdown": input_rule,
-        "sudo-prompt": f"{error} bold",
-        "sudo-border": input_rule,
-        "sudo-title": f"{error} bold",
-        "sudo-text": text,
-        "approval-border": input_rule,
-        "approval-title": f"{warn} bold",
-        "approval-desc": f"{text} bold",
-        "approval-cmd": f"{dim} italic",
-        "approval-choice": dim,
-        "approval-selected": f"{title} bold",
-        "voice-status": f"bg:{voice_bg} {label}",
-        "voice-status-recording": f"bg:{voice_bg} {error} bold"}
+    # Every read goes through skin.get_color (cli.py wraps it for light-mode remapping).
+    palette: Dict[str, str] = {}
+    for name, key, fallback in _STYLE_PALETTE:
+        palette[name] = skin.get_color(key, palette[fallback[1:]] if fallback.startswith("@") else fallback)
+    return {cls: tpl.format(**palette) for cls, tpl in _STYLE_TEMPLATES.items()}

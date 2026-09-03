@@ -43,11 +43,7 @@ _EXTRA_META_LABELS = (
 
 def _display_source(r) -> str:
     """Source label for a result row: GitHub-tap rows surface their per-tap provider label."""
-    if r.source == "github":
-        provider = (getattr(r, "extra", None) or {}).get("provider")
-        if provider:
-            return provider
-    return r.source
+    return ((r.extra or {}).get("provider") if r.source == "github" else None) or r.source
 
 
 def _trust_cell(trust_level: str, source: str, official_label: str = "official") -> str:
@@ -174,8 +170,6 @@ def _skill_md_preview(bundle) -> Optional[str]:
 
 def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    if not extra:
-        return lines
     for key, label in _EXTRA_META_LABELS:
         value = extra.get(key)
         if value is not None and (value or key == "installs"):  # installs: 0 is still shown
@@ -366,13 +360,12 @@ def do_search(query: str, source: str = "all", limit: int = 10, console: Optiona
 def _rank_and_page(all_results, page: int, page_size: int):
     """Dedupe by identifier (higher trust wins; names are NOT unique across browse-sh sites),
     sort official-first, slice one page -> (deduped, page_items, page, total_pages, start)."""
+    rank = lambda r: _TRUST_RANK.get(r.trust_level, 0)  # noqa: E731
     seen: dict = {}
     for r in all_results:
-        rank = _TRUST_RANK.get(r.trust_level, 0)
-        if r.identifier not in seen or rank > _TRUST_RANK.get(seen[r.identifier].trust_level, 0):
+        if r.identifier not in seen or rank(r) > rank(seen[r.identifier]):
             seen[r.identifier] = r
-    deduped = sorted(seen.values(), key=lambda r: (
-        -_TRUST_RANK.get(r.trust_level, 0), r.source != "official", r.name.lower()))
+    deduped = sorted(seen.values(), key=lambda r: (-rank(r), r.source != "official", r.name.lower()))
     total_pages = max(1, (len(deduped) + page_size - 1) // page_size)
     page = max(1, min(page, total_pages))
     start = (page - 1) * page_size
@@ -530,7 +523,7 @@ def _resolve_url_bundle_name(c: Console, bundle, meta, identifier: str,
                              name_override: str, skip_confirm: bool) -> bool:
     """Name a URL-sourced bundle whose SKILL.md has none: --name override, else TTY prompt,
     else an actionable refusal on non-interactive surfaces. False => abort the install."""
-    bundle_meta = getattr(bundle, "metadata", {}) or {}
+    bundle_meta = bundle.metadata
     if bundle.source != "url" or (bundle.name and not bundle_meta.get("awaiting_name")):
         return True
     url = bundle_meta.get("url") or identifier
@@ -631,11 +624,8 @@ def _scan_quarantined(c: Console, q_path: Path, bundle, meta, identifier: str):
     from tools.skills_hub import HUB_DIR, source_url_for_bundle
     from tools.skills_guard import scan_skill_cached, format_scan_report
     c.print("[bold]Running security scan...[/]")
-    if bundle.source == "official":
-        scan_source = "official"
-    else:
-        scan_source = (getattr(bundle, "identifier", "") or getattr(meta, "identifier", "")
-                       or identifier)
+    scan_source = ("official" if bundle.source == "official"
+                   else bundle.identifier or getattr(meta, "identifier", "") or identifier)
     result, prov = scan_skill_cached(
         q_path, source=scan_source, source_url=source_url_for_bundle(bundle),
         cache_dir=HUB_DIR / "scan-cache")
@@ -716,8 +706,7 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             c.print("Use --force to reinstall.\n")
             return
 
-    extra_metadata = dict(getattr(meta, "extra", {}) or {})
-    extra_metadata.update(getattr(bundle, "metadata", {}) or {})
+    extra_metadata = {**(getattr(meta, "extra", {}) or {}), **bundle.metadata}
 
     try:
         q_path = quarantine_bundle(bundle)
@@ -903,12 +892,10 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None,
     if not installed:
         c.print("[dim]No hub-installed skills to audit.[/]\n")
         return
-    targets = installed
-    if name:
-        targets = [e for e in installed if e["name"] == name]
-        if not targets:
-            _print_error(c, f"'{name}' is not a hub-installed skill.")
-            return
+    targets = [e for e in installed if e["name"] == name] if name else installed
+    if not targets:
+        _print_error(c, f"'{name}' is not a hub-installed skill.")
+        return
     c.print(f"\n[bold]Auditing {len(targets)} skill(s)...[/]\n")
     if deep:
         from tools.skills_ast_audit import ast_scan_path, format_ast_report
@@ -1108,8 +1095,7 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
             return
         table = _table(("Repo", {"style": "bold cyan"}), "Path", title="Configured Taps")
         for t in taps:
-            label = t.get("repo") or t.get("name") or t.get("path", "unknown")
-            table.add_row(label, t.get("path", "skills/"))
+            table.add_row(t.get("repo") or t.get("name") or t.get("path", "unknown"), t.get("path", "skills/"))
         c.print(table)
         c.print()
     elif action in _TAP_OPS:
@@ -1144,7 +1130,7 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
     path = Path(skill_path)
     if not path.is_absolute():
         path = SKILLS_DIR / path
-    if not path.exists() or not (path / "SKILL.md").exists():
+    if not (path / "SKILL.md").exists():
         _print_error(c, f"No SKILL.md found at {path}")
         return
     skill_md = (path / "SKILL.md").read_text(encoding="utf-8").lstrip("\ufeff")  # tolerate BOM
