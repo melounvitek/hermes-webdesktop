@@ -489,8 +489,7 @@ def _build_no_backend_setup_message() -> str:
         lines.append("  - FAL_KEY is not set and the managed FAL gateway is unreachable")
     else:
         lines.append("  - FAL_KEY environment variable is not set")
-        gateway_message = nous_tool_gateway_unavailable_message("managed FAL image generation")
-        if gateway_message:
+        if gateway_message := nous_tool_gateway_unavailable_message("managed FAL image generation"):
             lines.append(f"  - {gateway_message}")
     lines += ["", "To enable image generation, do one of:",
               "  1. Get a free API key at https://fal.ai and set FAL_KEY=<your-key> (then restart the session)"]
@@ -777,18 +776,15 @@ def _active_image_capabilities() -> Dict[str, Any]:
                 return info
         except Exception:  # noqa: BLE001
             pass
-    # In-tree FAL path (provider unset or == "fal").
-    try:
-        model_id, meta = _resolve_fal_model()
-        can_edit = bool(meta.get("edit_endpoint"))
-        info["provider"] = "FAL.ai"
-        info["model"] = meta.get("display", model_id)
-        info["modalities"] = ["text", "image"] if can_edit else ["text"]
-        info["max_reference_images"] = int(meta.get("max_reference_images") or 1) if can_edit else 0
-        # Clarity is available on request for ANY catalog model (``upscale`` is only the default).
-        info["supports_upscale"] = True
-    except Exception:  # noqa: BLE001
-        pass
+    # In-tree FAL path (provider unset or == "fal"); _resolve_fal_model() never raises.
+    model_id, meta = _resolve_fal_model()
+    can_edit = bool(meta.get("edit_endpoint"))
+    info["provider"] = "FAL.ai"
+    info["model"] = meta.get("display", model_id)
+    info["modalities"] = ["text", "image"] if can_edit else ["text"]
+    info["max_reference_images"] = int(meta.get("max_reference_images") or 1) if can_edit else 0
+    # Clarity is available on request for ANY catalog model (``upscale`` is only the default).
+    info["supports_upscale"] = True
     return info
 
 
@@ -822,16 +818,11 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
         "file path; reference it in your response using the current "
         "platform's file-delivery convention."
     )
-    try:
-        info = _active_image_capabilities()
-    except Exception:  # noqa: BLE001
-        info = dict(_NO_CAPABILITIES)
+    info = _active_image_capabilities()
     max_refs = int(info.get("max_reference_images") or 0)
     can_edit = "image" in set(info.get("modalities") or ["text"])
     static_props = IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-    properties: Dict[str, Any] = {
-        "prompt": static_props["prompt"], "aspect_ratio": static_props["aspect_ratio"],
-    }
+    properties: Dict[str, Any] = {"prompt": static_props["prompt"], "aspect_ratio": static_props["aspect_ratio"]}
     if can_edit:
         edit_clause = ", or edit / transform an existing image by passing image_url"
         properties["image_url"] = _IMAGE_URL_PARAM
@@ -850,10 +841,8 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
         edit_clause = " (text-to-image only — the active model cannot edit existing images)"
     if info.get("supports_upscale"):
         properties["upscale"] = _UPSCALE_PARAM
-    return {
-        "description": base_desc.format(edit_clause=edit_clause),
-        "parameters": {"type": "object", "properties": properties, "required": ["prompt"]},
-    }
+    return {"description": base_desc.format(edit_clause=edit_clause),
+            "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
 
 
 registry.register(

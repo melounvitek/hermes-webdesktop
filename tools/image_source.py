@@ -76,23 +76,26 @@ async def resolve_image_source(src: str, ctx: ResolveContext, *, permitted: tupl
     p = Path(os.path.expanduser(candidate))
     host_target = _permitted_host_read_target(p, ctx)
     if host_target is not None and host_target.is_file():
-        # Shared credential-read guard: refuse secret-bearing files (.env, auth.json) with a
-        # specific error. Guard import is best-effort; a real block always propagates.
-        try:
-            from agent.file_safety import raise_if_read_blocked
-        except Exception:  # noqa: BLE001 — guard unavailable: proceed
-            raise_if_read_blocked = None
-        if raise_if_read_blocked is not None:
-            try:
-                raise_if_read_blocked(str(host_target))
-            except ValueError as exc:
-                raise SourceUnsafe(str(exc), src=s, origin="file")
+        _guard_credential_read(host_target, s)
         data = await asyncio.to_thread(host_target.read_bytes)
         return _finalize(data, "", "file", s, permitted)
     if _is_local_terminal_backend():
         # Any path was host-readable, so a miss means the file doesn't exist.
         raise SourceNotFound(f"media file not found: '{p}'", src=s, origin="file")
     return await _resolve_container_fallback(p, ctx, s, permitted)
+
+
+def _guard_credential_read(host_target: Path, src: str) -> None:
+    """Shared credential-read guard: refuse secret-bearing files (.env, auth.json) with a specific
+    error. Guard import is best-effort; a real block always propagates."""
+    try:
+        from agent.file_safety import raise_if_read_blocked
+    except Exception:  # noqa: BLE001 — guard unavailable: proceed
+        return
+    try:
+        raise_if_read_blocked(str(host_target))
+    except ValueError as exc:
+        raise SourceUnsafe(str(exc), src=src, origin="file")
 
 
 def _resolve_data_url(s: str) -> tuple[bytes, str]:
@@ -117,8 +120,7 @@ def _http_block_reason(url: str) -> Optional[str]:
     from tools.website_policy import check_website_access
     if not is_safe_url(url):
         return "blocked: unsafe or private URL"
-    blocked = check_website_access(url)
-    if blocked:
+    if blocked := check_website_access(url):
         return blocked.get("message") or "blocked by website policy"
     return None
 
@@ -173,12 +175,8 @@ def _permitted_host_read_target(p: Path, ctx: ResolveContext) -> Optional[Path]:
         real = Path(from_agent_visible_cache_path(str(p))).resolve()
     except Exception:  # noqa: BLE001 — cannot resolve -> not a safe host read
         return None
-    for root in _media_cache_roots():
-        try:
-            real.relative_to(root.resolve())
-            return real
-        except ValueError:
-            continue
+    if any(real.is_relative_to(root.resolve()) for root in _media_cache_roots()):
+        return real
     return None
 
 
