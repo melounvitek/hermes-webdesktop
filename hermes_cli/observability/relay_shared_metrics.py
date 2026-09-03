@@ -41,34 +41,21 @@ from .shared_metrics_subscriber import SharedMetricsSubscriber
 
 logger = logging.getLogger(__name__)
 
-HANDLED_HOOKS = frozenset({
-    "on_session_start",
-    "on_session_end",
-    "on_session_finalize",
-    "on_session_reset",
-    "pre_llm_call",
-    "pre_api_request",
-    "pre_tool_call",
-    "post_tool_call",
-    "post_approval_response",
-    "post_api_request",
-    "api_request_error",
-    "on_skill_lifecycle",
-    "subagent_stop",
-})
-
 _RUNTIME_FAILED = object()
 _RUNTIMES: dict[str, _Runtime | object] = {}
 _RUNTIME_LOCK = threading.RLock()
 
+_ABORTED = {"failed": True, "turn_exit_reason": "system_aborted"}
+
+
+def _text(event: dict[str, Any], key: str) -> str:
+    return str(event.get(key) or "")
+
 
 def _session_pair(event: dict[str, Any], key: str) -> tuple[str, str] | None:
     """(session_id, event[key]) when both are non-empty."""
-    session_id = str(event.get("session_id") or "")
-    value = str(event.get(key) or "")
-    if not session_id or not value:
-        return None
-    return session_id, value
+    session_id, value = _text(event, "session_id"), _text(event, key)
+    return (session_id, value) if session_id and value else None
 
 
 def _retry_ordinal(event: dict[str, Any]) -> int | None:
@@ -76,6 +63,12 @@ def _retry_ordinal(event: dict[str, Any]) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
     return None
+
+
+def _sole(items: Any) -> Any:
+    """The single distinct element of ``items`` (identity-deduplicated), else None."""
+    unique = {id(item): item for item in items}
+    return next(iter(unique.values())) if len(unique) == 1 else None
 
 
 @dataclass
@@ -119,12 +112,8 @@ class _MetricsSession:
     closing: bool = False
     model_calls: dict[tuple[str, str], _ModelCall] = field(default_factory=dict)
     tasks: dict[str, _TaskRun] = field(default_factory=dict)
-    tool_calls: dict[tuple[str, str, str, str], _ToolCall] = field(
-        default_factory=dict
-    )
-    retired_turn_ids: deque[str] = field(
-        default_factory=lambda: deque(maxlen=256),
-    )
+    tool_calls: dict[tuple[str, str, str, str], _ToolCall] = field(default_factory=dict)
+    retired_turn_ids: deque[str] = field(default_factory=lambda: deque(maxlen=256))
 
 
 class _Runtime:
@@ -148,9 +137,7 @@ class _Runtime:
         self._turn_sessions: dict[tuple[str, str], _MetricsSession] = {}
         self._subscriber_name = f"{SUBSCRIBER_NAME}.{self.host.runtime_id}"
         self.subscriber = SharedMetricsSubscriber(
-            SharedMetricsStore(),
-            __version__,
-            runtime_id=self.host.runtime_id,
+            SharedMetricsStore(), __version__, runtime_id=self.host.runtime_id
         )
         self.relay.subscribers.register(self._subscriber_name, self.subscriber)
         self.host.retain_managed_execution(self._subscriber_name)
@@ -158,7 +145,7 @@ class _Runtime:
         atexit.register(self.shutdown)
 
     def ensure_session(self, event: dict[str, Any]) -> _MetricsSession | None:
-        session_id = str(event.get("session_id") or "")
+        session_id = _text(event, "session_id")
         if not session_id:
             return None
         with self._sessions_lock:
@@ -169,10 +156,7 @@ class _Runtime:
                 return None
             session = self._sessions.get(session_id)
             if session is None:
-                session = _MetricsSession(
-                    session_id=session_id,
-                    relay_session=relay_session,
-                )
+                session = _MetricsSession(session_id=session_id, relay_session=relay_session)
                 self._sessions[session_id] = session
         with session.lock:
             if session.closing:
@@ -182,40 +166,26 @@ class _Runtime:
     def record_client_active(self, event: dict[str, Any]) -> None:
         """Emit one payload-free activation attempt under the session scope."""
         session = self.ensure_session(event)
-        if session is None:
-            return
-        self._emit_client_active(session)
+        if session is not None:
+            self._emit_client_active(session)
 
     def _emit_client_active(self, session: _MetricsSession) -> None:
         with session.lock:
             if session.closing:
                 return
             self._run_in_session(
-                session,
-                self.relay.scope.event,
-                CLIENT_ACTIVE_MARK,
-                handle=session.relay_session.handle,
-                data={},
-                metadata=self._event_metadata(),
+                session, self.relay.scope.event, CLIENT_ACTIVE_MARK,
+                handle=session.relay_session.handle, data={}, metadata=self._event_metadata(),
             )
 
     def _run_in_session(
-        self,
-        session: _MetricsSession,
-        callback: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
+        self, session: _MetricsSession, callback: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
-        return self.host.run_in_session(
-            session.relay_session,
-            callback,
-            *args,
-            **kwargs,
-        )
+        return self.host.run_in_session(session.relay_session, callback, *args, **kwargs)
 
     def start_task(self, event: dict[str, Any]) -> _TaskRun | None:
         """Open one Relay function scope for a Hermes task run."""
-        task_key = self._task_key(event)
+        task_key = _session_pair(event, "task_id")
         if task_key is None:
             return None
         _, task_id = task_key
@@ -236,7 +206,7 @@ class _Runtime:
             if session is None:
                 return None
             with session.lock:
-                turn_id = str(event.get("turn_id") or "")
+                turn_id = _text(event, "turn_id")
                 if (
                     session.closing
                     or (turn_id and turn_id in session.retired_turn_ids)
@@ -259,17 +229,13 @@ class _Runtime:
                 def push_task() -> Any:
                     self.relay.get_scope_stack()
                     return self.relay.scope.push(
-                        TASK_SCOPE,
-                        self.relay.ScopeType.Function,
-                        handle=parent_handle,
-                        input=start_fields,
-                        metadata=self._event_metadata(),
+                        TASK_SCOPE, self.relay.ScopeType.Function,
+                        handle=parent_handle, input=start_fields, metadata=self._event_metadata(),
                     )
 
-                handle = task_context.run(push_task)
                 task = _TaskRun(
                     task_id=task_id,
-                    handle=handle,
+                    handle=task_context.run(push_task),
                     context=task_context,
                     started_ns=monotonic_ns(),
                     start_fields=start_fields,
@@ -282,11 +248,7 @@ class _Runtime:
                 return task
 
     def _run_in_task(
-        self,
-        task: _TaskRun,
-        callback: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
+        self, task: _TaskRun, callback: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
         def invoke() -> Any:
             self.relay.get_scope_stack()
@@ -295,7 +257,7 @@ class _Runtime:
         return task.context.copy().run(invoke)
 
     def start_model_call(self, event: dict[str, Any]) -> None:
-        task_id = str(event.get("task_id") or "")
+        task_id = _text(event, "task_id")
         session, task = self._task_for(event, start=True)
         if task_id and task is None:
             return
@@ -323,38 +285,27 @@ class _Runtime:
             if existing is not None:
                 existing.fields = fields
                 if task is not None:
-                    # Every repeated start for one logical request is another
-                    # physical attempt. Provider fallback resets Hermes's
-                    # provider-local retry ordinal, so ordinal deltas are not a
-                    # reliable task-level retry counter.
+                    # Every repeated start for one logical request is another physical
+                    # attempt. Provider fallback resets Hermes's provider-local retry
+                    # ordinal, so ordinal deltas are not a reliable task-level counter.
                     task.retry_count += 1
                 if retry_ordinal is not None:
-                    existing.retry_ordinal = max(
-                        existing.retry_ordinal or 0,
-                        retry_ordinal,
-                    )
+                    existing.retry_ordinal = max(existing.retry_ordinal or 0, retry_ordinal)
                 return
             if task is not None:
                 task.model_call_ids.add(request_id)
                 if retry_ordinal is not None and retry_ordinal > 0:
-                    # A real Hermes retry can advance api_request_id while
-                    # carrying the retry ordinal. Count that physical attempt.
+                    # A real Hermes retry can advance api_request_id while carrying the
+                    # retry ordinal. Count that physical attempt.
                     task.retry_count += 1
             handle = self._run_scoped(
-                session,
-                task,
-                self.relay.llm.call,
-                MODEL_CALL_SCOPE,
-                self.relay.LLMRequest({}, {}),
+                session, task, self.relay.llm.call, MODEL_CALL_SCOPE, self.relay.LLMRequest({}, {}),
                 handle=task.handle if task is not None else session.relay_session.handle,
                 metadata=self._event_metadata(),
                 model_name=MODEL_CALL_PROFILE_MODEL,
             )
             session.model_calls[model_call_key] = _ModelCall(
-                handle=handle,
-                task_id=task_id,
-                fields=fields,
-                retry_ordinal=retry_ordinal,
+                handle=handle, task_id=task_id, fields=fields, retry_ordinal=retry_ordinal
             )
 
     def record_model_call_error(self, event: dict[str, Any]) -> None:
@@ -371,18 +322,13 @@ class _Runtime:
 
     def start_tool_call(self, event: dict[str, Any]) -> None:
         """Open one privacy-safe Relay tool lifecycle under its task."""
-        task_id = str(event.get("task_id") or "")
+        task_id = _text(event, "task_id")
         session, task = self._task_for(event, start=True)
-        if session is None or task is None:
-            return
-        tool_call_id = str(event.get("tool_call_id") or "")
-        if not tool_call_id:
+        if session is None or task is None or not _text(event, "tool_call_id"):
             return
         identity = self._tool_call_identity(event)
         with session.lock:
-            if session.closing:
-                return
-            if not self._event_matches_task_turn(task, event):
+            if session.closing or not self._event_matches_task_turn(task, event):
                 return
             self._remember_turn(session, task, event)
             key = (task_id, *identity)
@@ -397,51 +343,37 @@ class _Runtime:
         if session is None or task is None:
             return
         outcome = tool_approval_outcome(event)
-        tool_call_id = str(event.get("tool_call_id") or "")
         attribution = "unattributed"
         with session.lock:
-            if session.closing:
+            if session.closing or not self._event_matches_task_turn(task, event):
                 return
-            if not self._event_matches_task_turn(task, event):
-                return
-            if tool_call_id:
+            if _text(event, "tool_call_id"):
                 identity = self._tool_call_identity(event)
                 tool_call = session.tool_calls.get((task.task_id, *identity))
                 if tool_call is None:
-                    matching_keys = self._compatible_tool_call_keys(
-                        session, task.task_id, identity
-                    )
-                    tool_call = (
-                        session.tool_calls[matching_keys[0]]
-                        if len(matching_keys) == 1
-                        else None
-                    )
+                    key = _sole(self._compatible_tool_call_keys(session, task.task_id, identity))
+                    tool_call = session.tool_calls[key] if key is not None else None
                 if tool_call is not None:
                     tool_call.approval_outcome = outcome
                     attribution = "tool_call"
             self._run_in_task(
-                task,
-                self.relay.scope.event,
-                TOOL_APPROVAL_MARK,
-                handle=task.handle,
+                task, self.relay.scope.event, TOOL_APPROVAL_MARK, handle=task.handle,
                 data={"attribution": attribution, "outcome": outcome},
                 metadata=self._event_metadata(),
             )
 
     def record_tool_call(self, event: dict[str, Any]) -> None:
         """Close and count one unique privacy-safe tool lifecycle."""
-        task_id = str(event.get("task_id") or "")
+        task_id = _text(event, "task_id")
         session, task = self._task_for(event, start=False)
         if session is None or task is None:
             return
-        tool_call_id = str(event.get("tool_call_id") or "")
         with session.lock:
-            if session.closing:
-                return
-            if not self._event_matches_task_turn(task, event):
+            if session.closing or not self._event_matches_task_turn(task, event):
                 return
             self._remember_turn(session, task, event)
-            if tool_call_id:
+            tool_call = None
+            if _text(event, "tool_call_id"):
                 observed_identity = self._tool_call_identity(event)
                 if observed_identity in task.completed_tool_call_ids:
                     return
@@ -449,84 +381,61 @@ class _Runtime:
                 tool_call = session.tool_calls.pop((task_id, *identity), None)
                 if tool_call is None:
                     if any(
-                        self._tool_call_identities_are_compatible(
-                            completed_identity,
-                            observed_identity,
-                        )
-                        for completed_identity in task.completed_tool_call_ids
+                        self._tool_call_identities_are_compatible(completed, observed_identity)
+                        for completed in task.completed_tool_call_ids
                     ):
                         return
                     matching_keys = self._compatible_tool_call_keys(
                         session, task_id, observed_identity
                     )
                     if len(matching_keys) > 1:
-                        # Partial context cannot safely choose between
-                        # concurrent calls that reused the provider-local ID.
+                        # Partial context cannot safely choose between concurrent calls
+                        # that reused the provider-local ID.
                         return
                     if matching_keys:
                         key = matching_keys[0]
                         identity = key[1:]
                         tool_call = session.tool_calls.pop(key)
-                task.completed_tool_call_ids.update({
-                    identity,
-                    observed_identity,
-                })
+                task.completed_tool_call_ids.update({identity, observed_identity})
                 task.tool_call_ids.add(identity)
             else:
                 task.unidentified_tool_calls += 1
-                tool_call = None
             if tool_call is None:
                 tool_call = self._open_tool_call(task, event)
             self._finish_tool_call(task, tool_call, event)
 
     def record_skill_lifecycle(self, event: dict[str, Any]) -> None:
         """Emit one allowlisted skill fact without its local identity."""
-        action = str(event.get("action") or "").strip().lower()
-        if action == "loaded":
-            mark = SKILL_LOAD_MARK
-            fields = skill_load_fields(event)
+        if _text(event, "action").strip().lower() == "loaded":
+            mark, fields = SKILL_LOAD_MARK, skill_load_fields(event)
         else:
-            mark = SKILL_LIFECYCLE_MARK
-            fields = skill_lifecycle_fields(event)
+            mark, fields = SKILL_LIFECYCLE_MARK, skill_lifecycle_fields(event)
         if fields is None:
             return
 
-        session_id = str(event.get("session_id") or "")
-        task_id = str(event.get("task_id") or "")
-        session = self._task_session(
-            event,
-            allow_task_id_fallback=not session_id,
-        )
-        task = session.tasks.get(task_id) if session is not None else None
+        session_id, task_id = _text(event, "session_id"), _text(event, "task_id")
+        session = self._task_session(event, allow_task_id_fallback=not session_id)
         if session is not None:
+            task = session.tasks.get(task_id)
             if task is None:
                 return
             with session.lock:
-                if session.closing:
-                    return
                 if (
-                    session.tasks.get(task.task_id) is not task
+                    session.closing
+                    or session.tasks.get(task.task_id) is not task
                     or not self._event_matches_task_turn(task, event)
                 ):
                     return
                 self._run_in_task(
-                    task,
-                    self.relay.scope.event,
-                    mark,
-                    handle=task.handle,
-                    data=fields,
-                    metadata=self._event_metadata(),
+                    task, self.relay.scope.event, mark,
+                    handle=task.handle, data=fields, metadata=self._event_metadata(),
                 )
             return
         if session_id and task_id:
             return
 
         self.relay.get_scope_stack()
-        self.relay.scope.event(
-            mark,
-            data=fields,
-            metadata=self._event_metadata(),
-        )
+        self.relay.scope.event(mark, data=fields, metadata=self._event_metadata())
 
     def end_model_call(self, event: dict[str, Any]) -> None:
         session = self._any_session(event)
@@ -544,14 +453,13 @@ class _Runtime:
 
     def finish_task(self, event: dict[str, Any]) -> None:
         """Close one task scope exactly once with bounded terminal fields."""
-        task_id = str(event.get("task_id") or "")
         session = self._any_session(event)
         if session is None:
             return
         with session.lock:
             if session.closing:
                 return
-            finished = self._finish_task(session, task_id, event)
+            finished = self._finish_task(session, _text(event, "task_id"), event)
         if finished:
             self._flush_and_export("Hermes shared-metrics task flush failed")
 
@@ -559,35 +467,28 @@ class _Runtime:
         session = self._session(event)
         if session is None:
             return
-        failures: list[str] = []
         with session.lock:
             if session.closing:
                 return
             session.closing = True
             self._abort_tasks(
-                session,
-                {
-                    **event,
-                    "completed": False,
-                    "failed": True,
-                    "interrupted": False,
-                    "turn_exit_reason": "system_aborted",
-                },
+                session, {**event, **_ABORTED, "completed": False, "interrupted": False}
             )
         try:
             self.relay.subscribers.flush()
         except Exception as exc:
-            failures.append(f"subscriber flush failed: {exc}")
+            failure: str | None = f"subscriber flush failed: {exc}"
         else:
+            failure = None
             self._export()
         with self._sessions_lock:
             if self._sessions.get(session.session_id) is session:
                 self._sessions.pop(session.session_id, None)
-        if failures:
+        if failure:
             logger.warning(
                 "Hermes shared-metrics session %s closed with errors: %s",
                 session.session_id,
-                "; ".join(failures),
+                failure,
             )
 
     def shutdown(self) -> None:
@@ -600,11 +501,8 @@ class _Runtime:
             return
         self._flush_and_export("Hermes shared-metrics shutdown flush failed")
         self._deregister()
-        # The final export above may have started a send. Give it the same
-        # bounded chance to finish that deactivate() gets — without this a
-        # short-lived CLI process exits immediately and kills the daemon
-        # thread mid-request, which is the common case for the one cadence
-        # this feature has.
+        # The final export may have started a send; give it the same bounded chance
+        # deactivate() gets, or a short-lived CLI exits and kills the daemon thread mid-request.
         self._join_send_thread()
         self._unregister_atexit()
 
@@ -627,14 +525,7 @@ class _Runtime:
                 if session.closing:
                     continue
                 session.closing = True
-                self._abort_tasks(
-                    session,
-                    {
-                        "session_id": session.session_id,
-                        "failed": True,
-                        "turn_exit_reason": "system_aborted",
-                    },
-                )
+                self._abort_tasks(session, {"session_id": session.session_id, **_ABORTED})
         with self._sessions_lock:
             self._sessions.clear()
         with self._task_sessions_lock:
@@ -644,10 +535,10 @@ class _Runtime:
         self._unregister_atexit()
 
     def _join_send_thread(self, timeout: float = 2.0) -> None:
-        """Give an in-flight send a brief chance to finish at exit.
+        """Give an in-flight send a brief, bounded chance to finish at exit.
 
-        Bounded on purpose: pending packages stay in SQLite and go out next run, so blocking
-        shutdown on a slow network is the wrong trade. The daemon thread dies with the process.
+        Pending packages stay in SQLite and go out next run, so blocking shutdown on a
+        slow network is the wrong trade. The daemon thread dies with the process.
         """
         with self._send_lock:
             thread = self._send_thread
@@ -659,43 +550,32 @@ class _Runtime:
             logger.debug("Shared-metrics send thread join failed", exc_info=True)
 
     def _session(self, event: dict[str, Any]) -> _MetricsSession | None:
-        session_id = str(event.get("session_id") or "")
         with self._sessions_lock:
-            return self._sessions.get(session_id)
+            return self._sessions.get(_text(event, "session_id"))
 
     def _any_session(self, event: dict[str, Any]) -> _MetricsSession | None:
         """Owner session by task/turn correlation, else by session_id."""
-        return self._task_session(
-            event, allow_task_id_fallback=True
-        ) or self._session(event)
+        return self._task_session(event, allow_task_id_fallback=True) or self._session(event)
 
     def _task_for(
-        self,
-        event: dict[str, Any],
-        *,
-        start: bool,
+        self, event: dict[str, Any], *, start: bool
     ) -> tuple[_MetricsSession | None, _TaskRun | None]:
         """Resolve (session, task) for a task-scoped hook, optionally opening the task."""
-        task_id = str(event.get("task_id") or "")
         session = self._task_session(event, allow_task_id_fallback=True)
-        task = session.tasks.get(task_id) if session is not None else None
+        task = session.tasks.get(_text(event, "task_id")) if session is not None else None
         if task is None and start:
             task = self.start_task(event)
             session = self._task_session(event) if task is not None else None
         return session, task
 
     def _model_call_for(
-        self,
-        session: _MetricsSession,
-        event: dict[str, Any],
+        self, session: _MetricsSession, event: dict[str, Any]
     ) -> tuple[tuple[str, str], _ModelCall] | None:
         model_call_key = self._existing_model_call_key(session, event)
         if model_call_key is None:
             return None
         model_call = session.model_calls.get(model_call_key)
-        if model_call is None:
-            return None
-        return model_call_key, model_call
+        return None if model_call is None else (model_call_key, model_call)
 
     def _run_scoped(
         self,
@@ -730,52 +610,31 @@ class _Runtime:
         except Exception:
             pass
 
-    @staticmethod
-    def _task_key(event: dict[str, Any]) -> tuple[str, str] | None:
-        return _session_pair(event, "task_id")
-
     def _task_session(
-        self,
-        event: dict[str, Any],
-        *,
-        allow_task_id_fallback: bool = False,
+        self, event: dict[str, Any], *, allow_task_id_fallback: bool = False
     ) -> _MetricsSession | None:
-        session_id = str(event.get("session_id") or "")
-        task_id = str(event.get("task_id") or "")
+        session_id, task_id = _text(event, "session_id"), _text(event, "task_id")
         if not task_id:
             return None
-        task_key = (session_id, task_id) if session_id else None
-        turn_key = self._turn_key(event)
+        turn_key = _session_pair(event, "turn_id")
         with self._task_sessions_lock:
-            if turn_key is not None:
-                owner = self._turn_sessions.get(turn_key)
-                if owner is not None:
-                    return owner
-            if task_key is not None:
-                owner = self._task_sessions.get(task_key)
-                if owner is not None:
-                    return owner
+            owner = self._turn_sessions.get(turn_key) if turn_key is not None else None
+            if owner is None and session_id:
+                owner = self._task_sessions.get((session_id, task_id))
+            if owner is not None:
+                return owner
             if not allow_task_id_fallback:
                 return None
-            candidates: list[_MetricsSession] = []
-            for (_, candidate_task_id), session in self._task_sessions.items():
-                if candidate_task_id != task_id:
-                    continue
-                if not any(candidate is session for candidate in candidates):
-                    candidates.append(session)
-            return candidates[0] if len(candidates) == 1 else None
-
-    @staticmethod
-    def _turn_key(event: dict[str, Any]) -> tuple[str, str] | None:
-        return _session_pair(event, "turn_id")
+            return _sole(
+                session
+                for (_, candidate_task_id), session in self._task_sessions.items()
+                if candidate_task_id == task_id
+            )
 
     def _remember_turn(
-        self,
-        session: _MetricsSession,
-        task: _TaskRun,
-        event: dict[str, Any],
+        self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
-        turn_id = str(event.get("turn_id") or "")
+        turn_id = _text(event, "turn_id")
         if not turn_id:
             return
         task.turn_ids.add(turn_id)
@@ -785,52 +644,34 @@ class _Runtime:
     @staticmethod
     def _tool_call_identity(event: dict[str, Any]) -> tuple[str, str, str]:
         """Identify one provider-local tool call without exporting its IDs."""
-        return (
-            str(event.get("api_request_id") or ""),
-            str(event.get("turn_id") or ""),
-            str(event.get("tool_call_id") or ""),
-        )
+        return _text(event, "api_request_id"), _text(event, "turn_id"), _text(event, "tool_call_id")
 
     @staticmethod
     def _tool_call_identities_are_compatible(
-        candidate: tuple[str, str, str],
-        observed: tuple[str, str, str],
+        candidate: tuple[str, str, str], observed: tuple[str, str, str]
     ) -> bool:
         """Match partial hook context without crossing known call boundaries."""
         if not observed[2] or candidate[2] != observed[2]:
             return False
         return all(
-            not candidate_value
-            or not observed_value
-            or candidate_value == observed_value
-            for candidate_value, observed_value in zip(
-                candidate[:2],
-                observed[:2],
-                strict=True,
-            )
+            not left or not right or left == right
+            for left, right in zip(candidate[:2], observed[:2], strict=True)
         )
 
     @classmethod
     def _compatible_tool_call_keys(
-        cls,
-        session: _MetricsSession,
-        task_id: str,
-        identity: tuple[str, str, str],
+        cls, session: _MetricsSession, task_id: str, identity: tuple[str, str, str]
     ) -> list[tuple[str, str, str, str]]:
         return [
             key
             for key in session.tool_calls
-            if key[0] == task_id
-            and cls._tool_call_identities_are_compatible(key[1:], identity)
+            if key[0] == task_id and cls._tool_call_identities_are_compatible(key[1:], identity)
         ]
 
     @staticmethod
-    def _event_matches_task_turn(
-        task: _TaskRun,
-        event: dict[str, Any],
-    ) -> bool:
+    def _event_matches_task_turn(task: _TaskRun, event: dict[str, Any]) -> bool:
         """Reject delayed hooks from a prior run that reused the task ID."""
-        turn_id = str(event.get("turn_id") or "")
+        turn_id = _text(event, "turn_id")
         if not turn_id:
             return True
         if turn_id in task.retired_turn_ids:
@@ -838,66 +679,40 @@ class _Runtime:
         return not task.turn_ids or turn_id in task.turn_ids
 
     def _approval_task(
-        self,
-        event: dict[str, Any],
+        self, event: dict[str, Any]
     ) -> tuple[_MetricsSession | None, _TaskRun | None]:
         """Resolve approval correlation without guessing across ambiguous turns."""
         active = relay_runtime.active_turn()
         if active is not None:
-            correlated = {
-                **event,
-                "session_id": active.lease.session_id,
-                "task_id": active.task_id,
-            }
+            correlated = {**event, "session_id": active.lease.session_id, "task_id": active.task_id}
             session = self._task_session(correlated)
             task = session.tasks.get(active.task_id) if session is not None else None
             if task is not None:
                 return session, task
 
         session = self._task_session(event)
-        task_id = str(event.get("task_id") or "")
-        task = session.tasks.get(task_id) if session is not None else None
+        task = session.tasks.get(_text(event, "task_id")) if session is not None else None
         if task is not None:
             return session, task
 
-        turn_id = str(event.get("turn_id") or "")
+        turn_id = _text(event, "turn_id")
         if not turn_id:
             return None, None
         with self._task_sessions_lock:
-            candidates = [
+            session = _sole(
                 candidate
-                for (
-                    candidate_session_id,
-                    candidate_turn_id,
-                ), candidate in self._turn_sessions.items()
-                if candidate_turn_id == turn_id
-                and self._sessions.get(candidate_session_id) is candidate
-            ]
-        unique_sessions = {id(candidate): candidate for candidate in candidates}
-        if len(unique_sessions) != 1:
+                for (owner_id, candidate_turn_id), candidate in self._turn_sessions.items()
+                if candidate_turn_id == turn_id and self._sessions.get(owner_id) is candidate
+            )
+        if session is None:
             return None, None
-        session = next(iter(unique_sessions.values()))
-        matching_tasks = [
-            candidate
-            for candidate in session.tasks.values()
-            if turn_id in candidate.turn_ids
-        ]
-        if len(matching_tasks) != 1:
-            return None, None
-        return session, matching_tasks[0]
+        task = _sole(task for task in session.tasks.values() if turn_id in task.turn_ids)
+        return (None, None) if task is None else (session, task)
 
-    def _open_tool_call(
-        self,
-        task: _TaskRun,
-        event: dict[str, Any],
-    ) -> _ToolCall:
+    def _open_tool_call(self, task: _TaskRun, event: dict[str, Any]) -> _ToolCall:
         handle = self._run_in_task(
-            task,
-            self.relay.tools.call,
-            TOOL_CALL_SCOPE,
-            {},
-            handle=task.handle,
-            metadata=self._event_metadata(),
+            task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
+            handle=task.handle, metadata=self._event_metadata(),
         )
         return _ToolCall(
             handle=handle,
@@ -907,99 +722,63 @@ class _Runtime:
         )
 
     def _finish_tool_call(
-        self,
-        task: _TaskRun,
-        tool_call: _ToolCall,
-        event: dict[str, Any],
+        self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
     ) -> None:
         fields = tool_terminal_fields(
             event,
             category=tool_call.category,
             approval_outcome=tool_call.approval_outcome,
-            fallback_duration_ms=max(
-                0,
-                (monotonic_ns() - tool_call.started_ns) // 1_000_000,
-            ),
+            fallback_duration_ms=max(0, (monotonic_ns() - tool_call.started_ns) // 1_000_000),
         )
         try:
             self._run_in_task(
-                task,
-                self.relay.tools.call_end,
-                tool_call.handle,
-                fields,
+                task, self.relay.tools.call_end, tool_call.handle, fields,
                 metadata=self._event_metadata(),
             )
         except Exception:
-            logger.warning(
-                "Hermes shared-metrics tool call close failed",
-                exc_info=True,
-            )
+            logger.warning("Hermes shared-metrics tool call close failed", exc_info=True)
 
     def _end_pending_tool_calls(
-        self,
-        session: _MetricsSession,
-        task: _TaskRun,
-        event: dict[str, Any],
+        self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
         pending_keys = [key for key in session.tool_calls if key[0] == task.task_id]
         task_outcome, _, _ = task_terminal_state(event)
-        status = {
-            "cancelled": "cancelled",
-            "timed_out": "timeout",
-        }.get(task_outcome, "error")
+        status = {"cancelled": "cancelled", "timed_out": "timeout"}.get(task_outcome, "error")
         for key in pending_keys:
             tool_call = session.tool_calls.pop(key, None)
             if tool_call is not None:
                 self._finish_tool_call(task, tool_call, {**event, "status": status})
 
-    def _finish_model_call(
-        self,
-        session: _MetricsSession,
-        model_call_key: tuple[str, str],
-    ) -> None:
+    def _finish_model_call(self, session: _MetricsSession, model_call_key: tuple[str, str]) -> None:
         model_call = session.model_calls.pop(model_call_key, None)
         if model_call is None:
             return
         try:
             self._run_scoped(
-                session,
-                session.tasks.get(model_call.task_id),
-                self.relay.llm.call_end,
-                model_call.handle,
-                model_call.fields,
-                metadata=self._event_metadata(),
+                session, session.tasks.get(model_call.task_id), self.relay.llm.call_end,
+                model_call.handle, model_call.fields, metadata=self._event_metadata(),
             )
         except Exception:
-            logger.warning(
-                "Hermes shared-metrics model call close failed", exc_info=True
-            )
+            logger.warning("Hermes shared-metrics model call close failed", exc_info=True)
 
-    def _end_pending_model_calls(
-        self,
-        session: _MetricsSession,
-        event: dict[str, Any],
-    ) -> None:
-        task_id = str(event.get("task_id") or "")
-        model_call_keys = [
-            model_call_key
-            for model_call_key, model_call in session.model_calls.items()
-            if not task_id or model_call.task_id == task_id
+    def _end_pending_model_calls(self, session: _MetricsSession, event: dict[str, Any]) -> None:
+        task_id = _text(event, "task_id")
+        pending = [
+            key
+            for key, call in session.model_calls.items()
+            if not task_id or call.task_id == task_id
         ]
-        for model_call_key in model_call_keys:
+        for model_call_key in pending:
             self._finish_model_call(session, model_call_key)
 
     @staticmethod
     def _new_model_call_key(event: dict[str, Any]) -> tuple[str, str] | None:
-        request_id = str(event.get("api_request_id") or "")
-        if not request_id:
-            return None
-        return str(event.get("task_id") or ""), request_id
+        request_id = _text(event, "api_request_id")
+        return (_text(event, "task_id"), request_id) if request_id else None
 
     @classmethod
     def _existing_model_call_key(
-        cls,
-        session: _MetricsSession,
-        event: dict[str, Any],
+        cls, session: _MetricsSession, event: dict[str, Any]
     ) -> tuple[str, str] | None:
         key = cls._new_model_call_key(event)
         if key is None:
@@ -1008,17 +787,10 @@ class _Runtime:
             return key
         if key[0]:
             return None
-        candidates = [
-            candidate for candidate in session.model_calls if candidate[1] == key[1]
-        ]
+        candidates = [candidate for candidate in session.model_calls if candidate[1] == key[1]]
         return candidates[0] if len(candidates) == 1 else None
 
-    def _finish_task(
-        self,
-        session: _MetricsSession,
-        task_id: str,
-        event: dict[str, Any],
-    ) -> bool:
+    def _finish_task(self, session: _MetricsSession, task_id: str, event: dict[str, Any]) -> bool:
         task = session.tasks.get(task_id)
         if task is None:
             return False
@@ -1033,12 +805,8 @@ class _Runtime:
         )
         try:
             self._run_in_task(
-                task,
-                relay_runtime.pop_relay_scope,
-                self.relay,
-                task.handle,
-                output=fields,
-                metadata=self._event_metadata(),
+                task, relay_runtime.pop_relay_scope, self.relay, task.handle,
+                output=fields, metadata=self._event_metadata(),
             )
         except Exception:
             logger.warning("Hermes shared-metrics task close failed", exc_info=True)
@@ -1057,27 +825,22 @@ class _Runtime:
 
     def _export(self) -> None:
         exported = self._safe(self.subscriber.store.create_and_export_package_if_due)
-        # Sending is opt-in and must never delay the caller: _export runs on
-        # finish_task, which is the user's interactive path. Errors inside the
-        # sender are already swallowed there; the thread is about latency, not
-        # correctness.
+        # Sending is opt-in and must never delay the caller: _export runs on finish_task,
+        # the user's interactive path. The sender swallows its own errors; the thread is
+        # about latency, not correctness.
         if exported is not None:
             self._safe(self._send_exported_packages)
 
     def _observe_send_consent(self, send_enabled: bool) -> None:
         """Reconcile consent windows with the observed config state.
 
-        Failures must never break the export hook, but they are logged at warning rather than debug:
-        silently failing to close a consent window is a privacy-relevant event, not routine
-        bookkeeping.
+        Failures must never break the export hook, but are logged at warning: silently
+        failing to close a consent window is a privacy-relevant event.
         """
         try:
             _reconcile_store_consent(self.subscriber.store, send_enabled)
         except Exception:
-            logger.warning(
-                "Unable to record a shared-metrics consent transition",
-                exc_info=True,
-            )
+            logger.warning("Unable to record a shared-metrics consent transition", exc_info=True)
 
     def _send_exported_packages(self) -> None:
         try:
@@ -1086,20 +849,15 @@ class _Runtime:
             logger.debug("Unable to read shared-metrics send policy", exc_info=True)
             return
 
-        # Observe the consent EDGE before deciding whether to send. Recording
-        # revocation inside the send loop (as an earlier fix did) can never
-        # work: the dominant case is the user turning sending off while no
-        # pass is running, and then this method returns below without ever
-        # constructing a sender. The window has to close on the transition,
-        # not on the next transmission that by definition will not happen.
+        # Observe the consent EDGE before deciding whether to send. The dominant case is
+        # the user turning sending off while no pass is running; recording revocation
+        # inside the send loop can never see that, so the window must close here.
         self._observe_send_consent(resolved.send)
-
         if not resolved.send:
             return
 
         with self._send_lock:
-            # One in-flight pass per process. A queued second pass would add
-            # nothing: the next hook fire picks up whatever is still pending.
+            # One in-flight pass per process; the next hook fire picks up what is pending.
             if self._send_thread is not None and self._send_thread.is_alive():
                 return
             thread = threading.Thread(
@@ -1112,9 +870,7 @@ class _Runtime:
             thread.start()
 
     def _run_send_pass(self, endpoint: str) -> None:
-        from hermes_cli.observability.shared_metrics_sender import (
-            SharedMetricsSender,
-        )
+        from hermes_cli.observability.shared_metrics_sender import SharedMetricsSender
 
         def still_consented() -> bool:
             """Re-read consent so revoking `send` stops an in-flight pass."""
@@ -1123,9 +879,7 @@ class _Runtime:
 
         try:
             SharedMetricsSender(
-                self.subscriber.store,
-                endpoint,
-                consent_check=still_consented,
+                self.subscriber.store, endpoint, consent_check=still_consented
             ).send_pending()
         except Exception:
             logger.warning("Shared-metrics send pass failed", exc_info=True)
@@ -1148,17 +902,13 @@ class _Runtime:
 def _resolved_send_config():
     """Resolve the opt-in send policy from the read-only config snapshot."""
     from hermes_cli.config import read_raw_config_readonly
-    from hermes_cli.observability.shared_metrics_send_config import (
-        resolve_send_config,
-    )
+    from hermes_cli.observability.shared_metrics_send_config import resolve_send_config
 
     return resolve_send_config(read_raw_config_readonly() or {})
 
 
 def _reconcile_store_consent(store: SharedMetricsStore, send_enabled: bool) -> None:
-    from hermes_cli.observability.shared_metrics_sender import (
-        reconcile_send_consent,
-    )
+    from hermes_cli.observability.shared_metrics_sender import reconcile_send_consent
     from hermes_cli.sqlite_util import write_txn
 
     with store._connection() as connection:
@@ -1172,22 +922,16 @@ def enabled() -> bool:
     try:
         from hermes_cli.config import read_raw_config_readonly
 
-        # Collection consent is profile-owned. Managed config overlays may
-        # control runtime policy, but cannot opt a profile into or out of
-        # shared metrics. Read-only fast path: this gate runs 2-3x per agent
-        # turn, and the mutable read_raw_config() paid a full config deepcopy
-        # on every call.
+        # Collection consent is profile-owned: managed overlays cannot opt a profile in or
+        # out. Read-only fast path — this gate runs 2-3x per agent turn and the mutable
+        # read_raw_config() paid a full config deepcopy on every call.
         config = read_raw_config_readonly() or {}
     except Exception:
         logger.debug("Unable to read Hermes shared-metrics policy", exc_info=True)
-        value = False
-    else:
-        telemetry = config.get("telemetry") if isinstance(config, dict) else None
-        shared_metrics = (
-            telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
-        )
-        value = isinstance(shared_metrics, dict) and shared_metrics.get("enabled") is True
-    if value:
+        config = None
+    telemetry = config.get("telemetry") if isinstance(config, dict) else None
+    shared_metrics = telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
+    if isinstance(shared_metrics, dict) and shared_metrics.get("enabled") is True:
         return True
     with _RUNTIME_LOCK:
         runtime = _RUNTIMES.pop(profile_key, None)
@@ -1206,14 +950,13 @@ _consent_reconcile_done = False
 def _reconcile_send_consent_once() -> None:
     """Reconcile consent windows with config, once per process.
 
-    Runs BEFORE and INDEPENDENT of the collection gate — that placement is the fix for the round-5
-    D1 leak, where the only idle-path consent observer sat behind ``handles_hook()`` and became dead
-    code the moment ``enabled: false`` was set. A user with collection off still gets their send-
-    consent windows reconciled here.
+    Runs BEFORE and INDEPENDENT of the collection gate: the only idle-path consent observer
+    must not sit behind ``handles_hook()``, or it becomes dead code the moment
+    ``enabled: false`` is set and a user with collection off never gets windows reconciled.
 
-    Skipped only when there is no store on disk AND consent is off: with no store there are no
-    packages, so there is nothing a window could protect, and creating ``~/.hermes/telemetry`` for
-    every fully-disabled user would be a behaviour change in the wrong direction.
+    Skipped only when there is no store on disk AND consent is off: with no store there are
+    no packages for a window to protect, and creating ``~/.hermes/telemetry`` for every
+    fully-disabled user would be a behaviour change in the wrong direction.
     """
     global _consent_reconcile_done
     if _consent_reconcile_done:
@@ -1224,28 +967,20 @@ def _reconcile_send_consent_once() -> None:
         from hermes_constants import get_hermes_home
 
         resolved = _resolved_send_config()
-        # Probe for an existing store WITHOUT constructing one: the
-        # constructor creates the directory and schema as a side effect,
-        # which round 6 caught making this skip dead code — every
-        # fully-disabled user was getting a ~/.hermes/telemetry directory.
-        default_path = (
-            get_hermes_home() / "telemetry" / "shared_metrics" / "metrics.sqlite3"
-        )
+        # Probe WITHOUT constructing a store: the constructor creates the directory and
+        # schema as a side effect, which would make the skip below dead code.
+        default_path = get_hermes_home() / "telemetry" / "shared_metrics" / "metrics.sqlite3"
         if not resolved.send and not default_path.exists():
             return
         _reconcile_store_consent(SharedMetricsStore(), resolved.send)
     except Exception:
-        logger.warning(
-            "Unable to reconcile shared-metrics send consent", exc_info=True
-        )
+        logger.warning("Unable to reconcile shared-metrics send consent", exc_info=True)
 
 
 def observe_lifecycle(hook_name: str, **kwargs: Any) -> None:
     """Project one Hermes lifecycle event into the core Relay integration."""
     _reconcile_send_consent_once()
-    if not handles_hook(hook_name):
-        return
-    if not relay_runtime.relay_instrumentation_enabled():
+    if not handles_hook(hook_name) or not relay_runtime.relay_instrumentation_enabled():
         return
     runtime = _get_runtime()
     if runtime is None:
@@ -1253,17 +988,13 @@ def observe_lifecycle(hook_name: str, **kwargs: Any) -> None:
     try:
         _HOOK_HANDLERS[hook_name](runtime, kwargs)
     except Exception:
-        logger.warning(
-            "Hermes shared metrics hook failed: %s", hook_name, exc_info=True
-        )
+        logger.warning("Hermes shared metrics hook failed: %s", hook_name, exc_info=True)
 
 
 def _with_runtime_toolset(event: dict[str, Any]) -> dict[str, Any]:
     """Attach the toolset already declared by Hermes's runtime registry."""
-    if event.get("toolset"):
-        return event
-    tool_name = str(event.get("tool_name") or "")
-    if not tool_name:
+    tool_name = _text(event, "tool_name")
+    if event.get("toolset") or not tool_name:
         return event
     try:
         from model_tools import get_toolset_for_tool
@@ -1275,7 +1006,7 @@ def _with_runtime_toolset(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _close_child_session(runtime: _Runtime, kwargs: dict[str, Any]) -> None:
-    child_session_id = str(kwargs.get("child_session_id") or "")
+    child_session_id = _text(kwargs, "child_session_id")
     if child_session_id:
         runtime.close_session({"session_id": child_session_id})
 
@@ -1295,13 +1026,10 @@ _HOOK_HANDLERS: dict[str, Callable[[_Runtime, dict[str, Any]], Any]] = {
     "on_session_finalize": lambda rt, kw: rt.close_session(kw),
     "on_session_reset": lambda rt, kw: rt.close_session(kw),
 }
-assert frozenset(_HOOK_HANDLERS) == HANDLED_HOOKS
+HANDLED_HOOKS = frozenset(_HOOK_HANDLERS)
 
 
-def _prepare_core_session(
-    host: relay_runtime.RelayRuntime,
-    context: dict[str, Any],
-) -> None:
+def _prepare_core_session(host: relay_runtime.RelayRuntime, context: dict[str, Any]) -> None:
     """Prepare the profile subscriber before the coordinator opens a scope."""
     del context
     if host.profile_key == relay_runtime.current_profile_key() and enabled():
@@ -1309,27 +1037,22 @@ def _prepare_core_session(
 
 
 def start_task_run(
-    *,
-    session_id: str,
-    task_id: str,
-    platform: str,
-    parent_session_id: str = "",
+    *, session_id: str, task_id: str, platform: str, parent_session_id: str = ""
 ) -> None:
     """Start task metrics at the outer Hermes execution boundary."""
     if not enabled():
         return
     runtime = _get_runtime(retry_failed=True)
-    if runtime is None:
-        return
-    runtime._safe(
-        runtime.start_task,
-        {
-            "session_id": session_id,
-            "task_id": task_id,
-            "platform": platform,
-            "parent_session_id": parent_session_id,
-        },
-    )
+    if runtime is not None:
+        runtime._safe(
+            runtime.start_task,
+            {
+                "session_id": session_id,
+                "task_id": task_id,
+                "platform": platform,
+                "parent_session_id": parent_session_id,
+            },
+        )
 
 
 def finish_task_run(
@@ -1351,22 +1074,18 @@ def finish_task_run(
     interrupted = terminal.get("interrupted") is True
     completed = terminal.get("completed") is True
     failed = terminal.get("failed") is True
-    reason = str(
-        terminal.get("turn_exit_reason") or terminal.get("failure_reason") or ""
-    )
+    reason = str(terminal.get("turn_exit_reason") or terminal.get("failure_reason") or "")
     if error is not None:
-        interrupted = isinstance(error, (KeyboardInterrupt, InterruptedError)) or (
-            type(error).__name__ == "CancelledError"
+        interrupted = (
+            isinstance(error, (KeyboardInterrupt, InterruptedError))
+            or type(error).__name__ == "CancelledError"
         )
-        timed_out = isinstance(error, TimeoutError)
         completed = False
         failed = not interrupted
         if interrupted:
             reason = "interrupted_by_user"
-        elif timed_out:
-            reason = "timed_out"
         else:
-            reason = "system_aborted"
+            reason = "timed_out" if isinstance(error, TimeoutError) else "system_aborted"
     elif not reason:
         reason = "failed" if failed else "unknown"
 
@@ -1385,9 +1104,7 @@ def finish_task_run(
 
 
 def _get_runtime(
-    *,
-    retry_failed: bool = False,
-    host: relay_runtime.RelayRuntime | None = None,
+    *, retry_failed: bool = False, host: relay_runtime.RelayRuntime | None = None
 ) -> _Runtime | None:
     profile_key = relay_runtime.current_profile_key()
     with _RUNTIME_LOCK:
@@ -1397,9 +1114,9 @@ def _get_runtime(
                 return runtime
             runtime.deactivate()
             _RUNTIMES.pop(profile_key, None)
-        if runtime is _RUNTIME_FAILED and not retry_failed:
-            return None
-        if runtime is _RUNTIME_FAILED:
+        elif runtime is _RUNTIME_FAILED:
+            if not retry_failed:
+                return None
             _RUNTIMES.pop(profile_key, None)
         try:
             runtime = _Runtime(host=host)
@@ -1412,8 +1129,7 @@ def _get_runtime(
 
 
 relay_runtime.SESSION_COORDINATOR.register_session_initializer(
-    SUBSCRIBER_NAME,
-    _prepare_core_session,
+    SUBSCRIBER_NAME, _prepare_core_session
 )
 
 
