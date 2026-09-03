@@ -398,6 +398,19 @@ class RelayAdapter(BasePlatformAdapter):
         plain-code-block downgrade)."""
         return self._with_scope(chat_id, self._with_format_hints_for_chat(chat_id, metadata))
 
+    def _draft_frame(
+        self, chat_id: str, draft_id: int, content: str, final: bool, metadata: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """One ``draft`` op frame (``final=True`` seals the stream)."""
+        return {
+            "op": "draft",
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "content": content,
+            "final": final,
+            "metadata": self._text_metadata(chat_id, dict(metadata or {})),
+        }
+
     async def send_draft(
         self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
@@ -433,17 +446,7 @@ class RelayAdapter(BasePlatformAdapter):
             self._open_draft_by_chat[chat_key] = draft_id
             self._evict_oldest(self._open_draft_by_chat)
         try:
-            result = await self._outbound(
-                chat_id,
-                {
-                    "op": "draft",
-                    "chat_id": chat_id,
-                    "draft_id": draft_id,
-                    "content": content,
-                    "final": False,
-                    "metadata": self._text_metadata(chat_id, dict(metadata or {})),
-                },
-            )
+            result = await self._outbound(chat_id, self._draft_frame(chat_id, draft_id, content, False, metadata))
         except Exception as e:
             # Ambiguous (stale socket, mid-write drop): may have been delivered;
             # keep interception armed.
@@ -479,14 +482,7 @@ class RelayAdapter(BasePlatformAdapter):
         self._evict_oldest(self._sealed_draft_by_chat)
         if self._transport is None:
             return SendResult(success=False, error="no transport")
-        seal_frame = {
-            "op": "draft",
-            "chat_id": chat_id,
-            "draft_id": draft_id,
-            "content": content,
-            "final": True,
-            "metadata": self._text_metadata(chat_id, dict(metadata or {})),
-        }
+        seal_frame = self._draft_frame(chat_id, draft_id, content, True, metadata)
 
         _seal_platform = self._platform_by_chat.get(str(chat_id))
         _transport = self._transport  # narrowed by the None-guard above
