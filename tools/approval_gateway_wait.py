@@ -5,10 +5,9 @@ pending approval, the gateway notifies the user, and the thread blocks until
 ``/approve`` / ``/deny`` resolves it or the approval timeout elapses. Multiple
 threads (parallel subagents, execute_code RPC handlers) can block concurrently
 — each gets its own ``threading.Event``; ``/approve`` resolves the oldest,
-``/approve all`` every pending entry.
-
-Queue state (``_gateway_queues``, ``_lock``) is owned by ``tools.approval`` and
-reached through that module at call time so tests patching it keep working.
+``/approve all`` every pending entry. Queue state (``_gateway_queues``,
+``_lock``) is owned by ``tools.approval`` and reached through that module at
+call time so tests patching it keep working.
 """
 
 import logging
@@ -31,27 +30,23 @@ class _ApprovalEntry:
         self.data.setdefault("request_id", uuid.uuid4().hex)
         self.acknowledged = False
         self.result: str | None = None  # "once"|"session"|"always"|"deny"
-        # Free-text reason from ``/deny <reason>`` so the agent can adapt
-        # instead of only hearing "denied".
+        # Free-text reason from ``/deny <reason>`` so the agent can adapt, not just hear "denied".
         self.reason: str | None = None
 
 
 def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
-    """Wait on *event* until it fires, the turn is interrupted, or approvals.timeout elapses.
-
-    Returns ``"set"`` | ``"interrupted"`` | ``"timeout"``. Polls in ~1s slices
-    so activity heartbeats reach the agent's inactivity tracker every ~10s —
+    """Wait on *event* until it fires, the turn is interrupted, or approvals.timeout
+    elapses; returns ``"set"`` | ``"interrupted"`` | ``"timeout"``. Polls in ~1s
+    slices so activity heartbeats reach the agent's inactivity tracker every ~10s —
     otherwise the gateway watchdog kills the agent while the user is still
-    responding (mirrors ``_wait_for_process()`` cadence). The loop is recorded
-    as human-wait time so the concurrent batch deadline excludes it.
+    responding (mirrors ``_wait_for_process()`` cadence). The loop is recorded as
+    human-wait time so the concurrent batch deadline excludes it.
 
-    ``is_interrupted()`` deliberately does NOT distinguish a deliberate /stop
-    from a gateway inactivity timeout — both resolve as 'deny' (not
-    outcome='timeout'). The per-thread interrupt flag carries no stable
-    machine-checkable cause, so a fail-closed deny preserves the historical
-    semantics; changing this needs a dedicated interrupt-cause channel, not
-    string matching.
-    """
+    ``is_interrupted()`` deliberately does NOT distinguish a deliberate /stop from
+    a gateway inactivity timeout — both resolve as 'deny' (not outcome='timeout').
+    The per-thread interrupt flag carries no stable machine-checkable cause, so a
+    fail-closed deny preserves the historical semantics; changing this needs a
+    dedicated interrupt-cause channel, not string matching."""
     from tools.approval import _get_approval_timeout, human_wait_window
 
     timeout = _get_approval_timeout()
@@ -87,15 +82,13 @@ def _finish(payload: dict, resolved: bool, choice: str | None, reason, **extra) 
 
 def _await_coalesced_leader(session_key: str, leader, payload: dict):
     """Wait on an already-pending identical approval instead of re-prompting.
-
     Adopts the leader's decision: ``session``/``always`` → approval (same dict
     shape as a direct resolution; persistence stays the caller's and is
     idempotent across leader and followers); ``deny`` → denial carrying the
     leader's reason; leader timeout / our own deadline → unresolved. ``once``
     returns ``None``: single-use consent covers only the leader's execution,
     so the caller must issue a fresh prompt. Hooks fire with ``coalesced=True``
-    so observers see the follower's lifecycle without a duplicate prompt.
-    """
+    so observers see the follower's lifecycle without a duplicate prompt."""
     from tools.approval import _fire_approval_hook
     _fire_approval_hook("pre_approval_request", **payload, coalesced=True)
     state = _poll_event(leader.event, session_key,
@@ -117,9 +110,8 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                             *, surface: str = "gateway") -> dict:
-    """Enqueue *approval_data*, notify the user, and block until resolved or timed out.
-
-    Shared by the terminal command guard, the execute_code guard, the plugin
+    """Enqueue *approval_data*, notify the user, and block until resolved or timed
+    out. Shared by the terminal command guard, the execute_code guard, the plugin
     escalation gate, and MCP elicitation. Returns ``{"resolved", "choice",
     "reason"}`` or ``{"resolved": False, "choice": None, "notify_failed": True}``
     when the notify callback raised. Persisting the choice and building the
@@ -129,8 +121,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     coalesced: parallel tool calls would otherwise fire N identical prompts
     the user must /approve N times while the agent sits wedged. Followers adopt
     the leader's ``session``/``always``/``deny``/timeout; a ``once`` covers only
-    the leader, so the follower falls through to a fresh prompt.
-    """
+    the leader, so the follower falls through to a fresh prompt."""
     from tools import approval as _approval
 
     primary_key = approval_data.get("pattern_key", "")

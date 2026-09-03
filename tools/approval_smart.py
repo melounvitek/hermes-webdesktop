@@ -55,12 +55,9 @@ def _strip_line_comment(line: str) -> str:
 
 
 def _strip_shell_comments(command: str) -> str:
-    """Strip unquoted ``# ...`` comments before LLM assessment.
-
-    Not a POSIX parser — quoted ``#`` and heredoc bodies are preserved by a
-    simple state machine. The goal is removing the low-hanging injection
-    surface, not full shell parsing.
-    """
+    """Strip unquoted ``# ...`` comments before LLM assessment. Not a POSIX parser
+    — quoted ``#`` and heredoc bodies are preserved by a simple state machine; the
+    goal is removing the low-hanging injection surface, not full shell parsing."""
     cleaned: list[str] = []
     for line in command.split("\n"):
         stripped = _strip_line_comment(line)
@@ -82,16 +79,15 @@ def _smart_approve(command: str, description: str) -> str:
     try:
         from agent.auxiliary_client import _get_task_timeout, call_llm
 
-        # Pass the timeout explicitly AND log call + duration: this synchronous
-        # call gates EVERY flagged command, and a stalled provider once froze
-        # turns for tens of minutes with zero log output.
+        # Pass the timeout explicitly AND log call + duration: this synchronous call
+        # gates EVERY flagged command, and a stalled provider once froze turns for
+        # tens of minutes with zero log output.
         smart_timeout = _get_task_timeout("approval")
         logger.debug("Smart approvals: assessing risk for command (timeout=%ss)", smart_timeout)
         system_prompt = _SYSTEM_PROMPT
-        # Operator policy goes in the SYSTEM prompt only — the trusted channel.
-        # Never next to the <command> block: that would dilute the trust
-        # boundary and teach the guard to accept policy-looking text adjacent
-        # to (untrusted) commands.
+        # Operator policy goes in the SYSTEM prompt only — the trusted channel. Never
+        # next to the <command> block: that would dilute the trust boundary and teach
+        # the guard to accept policy-looking text adjacent to (untrusted) commands.
         operator_policy = _get_smart_policy()
         if operator_policy:
             system_prompt += (
@@ -127,10 +123,8 @@ def _smart_approve(command: str, description: str) -> str:
 def _smart_verdict(command: str, description: str, pattern_key: str,
                    pattern_keys: list[str], session_key: str) -> str:
     """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
-
     Redaction is observer-payload preparation, not approval policy: if it fails,
-    skip observability rather than leak raw data or block the LLM decision.
-    """
+    skip observability rather than leak raw data or block the LLM decision."""
     from tools import approval as _a
     try:
         from agent.redact import redact_sensitive_text

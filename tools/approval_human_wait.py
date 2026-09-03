@@ -6,11 +6,10 @@ deadline in agent/tool_executor.py excludes this time so a slow human answer
 never times a batch out — but ONLY this time. Measuring at the source (rather
 than residency in the authorization gate, which is arbitrary code) is what keeps
 a wedged pre_tool_call plugin or a dead approval client from growing the
-exclusion 1:1 with wall clock and defeating the deadline entirely.
-
-Keyed by session so one gateway session's pending approval cannot extend a
-different session's batch deadline. State is process-global like the rest of
-the approval state; entries are bounded by _HUMAN_WAIT_MAX_SESSIONS.
+exclusion 1:1 with wall clock and defeating the deadline entirely. Keyed by
+session so one gateway session's pending approval cannot extend a different
+session's batch deadline; state is process-global like the rest of the approval
+state, bounded by _HUMAN_WAIT_MAX_SESSIONS.
 """
 
 import contextlib
@@ -30,26 +29,23 @@ class _HumanWaitState:
 _human_wait_lock = threading.Lock()
 _human_wait_states: dict[str, _HumanWaitState] = {}
 _HUMAN_WAIT_MAX_SESSIONS = 256
-# Margin added on top of approvals.timeout when clamping a window's
-# contribution (read-side AND close-side) and when bounding the authorization
-# gate's serialization-lock acquire in agent/tool_executor.py. One constant so
-# the clamps can't drift apart.
+# Margin added on top of approvals.timeout when clamping a window's contribution
+# (read-side AND close-side) and when bounding the authorization gate's
+# serialization-lock acquire in agent/tool_executor.py. One constant so the
+# clamps can't drift apart.
 HUMAN_WAIT_MARGIN_S = 60.0
 
 
 def human_wait_ceiling() -> float:
     """Max seconds a single window may contribute: approvals.timeout + margin.
-
-    Every legitimate human wait self-terminates at ``approvals.timeout`` (the
-    CLI prompt join and the gateway poll loop both enforce it), so a window
-    that overstays this ceiling is itself wedged and must not keep extending
-    a batch deadline. Also the bound on the authorization gate's
-    serialization-lock acquire in agent/tool_executor.py, so the two cannot
-    drift. Never call while holding ``_human_wait_lock`` — it reads the
-    config cache. ``_get_approval_timeout`` caps at
-    ``agent.deadline.MAX_SAFE_TIMEOUT_S`` so the value is always safe for
-    ``Lock.acquire(timeout=...)`` / ``Thread.join(timeout=...)``.
-    """
+    Every legitimate human wait self-terminates at ``approvals.timeout`` (the CLI
+    prompt join and the gateway poll loop both enforce it), so a window that
+    overstays this ceiling is itself wedged and must not keep extending a batch
+    deadline. Also the bound on the authorization gate's serialization-lock
+    acquire in agent/tool_executor.py, so the two cannot drift. Never call while
+    holding ``_human_wait_lock`` — it reads the config cache.
+    ``_get_approval_timeout`` caps at ``agent.deadline.MAX_SAFE_TIMEOUT_S`` so the
+    value is always safe for ``Lock.acquire(timeout=...)`` / ``Thread.join(timeout=...)``."""
     from tools.approval import _get_approval_timeout
     return float(_get_approval_timeout()) + HUMAN_WAIT_MARGIN_S
 
@@ -62,14 +58,12 @@ def _clamped_window_seconds(started: float, now: float, ceiling: float) -> float
 
 
 def _human_wait_state(session_key: str) -> _HumanWaitState:
-    """Return (creating if needed) the wait state for *session_key*.
-
-    Caller must hold ``_human_wait_lock``. Evicts idle entries (no pending
-    waiter) insertion-order-first until the table is under the cap so an army
-    of short-lived session keys cannot grow it without bound. Entries with an
-    open window are never evicted (that would corrupt live accounting), so
-    the cap is best-effort under 256+ concurrently-pending sessions.
-    """
+    """Return (creating if needed) the wait state for *session_key*. Caller must
+    hold ``_human_wait_lock``. Evicts idle entries (no pending waiter)
+    insertion-order-first until the table is under the cap so an army of
+    short-lived session keys cannot grow it without bound. Entries with an open
+    window are never evicted (that would corrupt live accounting), so the cap is
+    best-effort under 256+ concurrently-pending sessions."""
     state = _human_wait_states.get(session_key)
     if state is None:
         for key in list(_human_wait_states):
@@ -90,16 +84,13 @@ def _resolve_key(session_key: str | None) -> str:
 
 @contextlib.contextmanager
 def human_wait_window(session_key: str | None = None):
-    """Mark the enclosed block as time spent blocked on a human prompt.
-
-    Wrap ONLY code that is genuinely parked waiting for a user's answer (the
-    CLI approval prompt, the gateway approval poll loop). The concurrent tool
-    batch deadline excludes this time; wrapping anything else re-creates the
-    hang where arbitrary wedged code pushes the deadline out forever.
-
-    Overlapping windows for the same session coalesce (pending counter), so
-    two serialized approval prompts don't double-count the same wall clock.
-    """
+    """Mark the enclosed block as time spent blocked on a human prompt. Wrap ONLY
+    code that is genuinely parked waiting for a user's answer (the CLI approval
+    prompt, the gateway approval poll loop). The concurrent tool batch deadline
+    excludes this time; wrapping anything else re-creates the hang where
+    arbitrary wedged code pushes the deadline out forever. Overlapping windows
+    for the same session coalesce (pending counter), so two serialized approval
+    prompts don't double-count the same wall clock."""
     key = _resolve_key(session_key)
     now = time.monotonic()
     with _human_wait_lock:
@@ -111,8 +102,8 @@ def human_wait_window(session_key: str | None = None):
         yield
     finally:
         now = time.monotonic()
-        # Clamp the accrual too: a window that overstayed the ceiling was
-        # wedged — record at most the ceiling, not the whole overstay.
+        # Clamp the accrual too: a window that overstayed the ceiling was wedged —
+        # record at most the ceiling, not the whole overstay.
         ceiling = human_wait_ceiling()
         with _human_wait_lock:
             state = _human_wait_states.get(key)
@@ -120,27 +111,23 @@ def human_wait_window(session_key: str | None = None):
                 state.pending -= 1
                 if state.pending == 0:
                     if state.window_started is not None:
-                        state.completed_seconds += _clamped_window_seconds(
-                            state.window_started, now, ceiling
-                        )
+                        state.completed_seconds += _clamped_window_seconds(state.window_started, now, ceiling)
                     state.window_started = None
 
 
 def human_wait_seconds(session_key: str | None = None) -> float:
-    """Return total human-wait seconds recorded for the session.
-
-    Completed windows plus the currently open one (if any). Monotonically
-    non-decreasing for the life of the process — except when an idle session's
-    entry is evicted under cap pressure, which can only shrink a consumer's
-    baseline delta to zero (the safe direction: the deadline fires sooner).
-    Deadline consumers snapshot a baseline at batch start and use the delta.
-    Each window's contribution is clamped to :func:`human_wait_ceiling`
-    (belt-and-braces against the wedged-window hang).
-    """
+    """Return total human-wait seconds recorded for the session: completed windows
+    plus the currently open one (if any). Monotonically non-decreasing for the
+    life of the process — except when an idle session's entry is evicted under
+    cap pressure, which can only shrink a consumer's baseline delta to zero (the
+    safe direction: the deadline fires sooner). Deadline consumers snapshot a
+    baseline at batch start and use the delta. Each window's contribution is
+    clamped to :func:`human_wait_ceiling` (belt-and-braces against the
+    wedged-window hang)."""
     key = _resolve_key(session_key)
     now = time.monotonic()
-    # Resolve the clamp outside the lock: it reads the config cache, which
-    # must never nest under _human_wait_lock.
+    # Resolve the clamp outside the lock: it reads the config cache, which must
+    # never nest under _human_wait_lock.
     ceiling = human_wait_ceiling()
     with _human_wait_lock:
         state = _human_wait_states.get(key)

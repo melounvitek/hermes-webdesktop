@@ -2,8 +2,7 @@
 
 Session identity and observability contextvars, the interactive/gateway/cron/
 unattended predicates, and the ``approvals.*`` config readers used by every
-gate in :mod:`tools.approval` (which re-exports all of them). No approval
-state or prompting lives here.
+gate in :mod:`tools.approval` (which re-exports all of them).
 """
 
 import contextvars
@@ -19,23 +18,22 @@ def _ctx(name: str, default: "str | None" = "") -> contextvars.ContextVar:
     return contextvars.ContextVar(name, default=default)
 
 
-# Per-thread/per-task gateway session identity. Gateway runs agent turns
-# concurrently in executor threads, so a process-global env var is racy; the
-# env fallback stays for legacy single-threaded callers.
+# Per-thread/per-task gateway session identity: gateway runs agent turns
+# concurrently in executor threads, so a process-global env var is racy (the
+# env fallback stays for legacy single-threaded callers).
 _approval_session_key: contextvars.ContextVar[str] = _ctx("approval_session_key")
 _approval_turn_id: contextvars.ContextVar[str] = _ctx("approval_turn_id")
 _approval_tool_call_id: contextvars.ContextVar[str] = _ctx("approval_tool_call_id")
 # Hermes session id (observability identity, distinct from the gateway routing
-# session_key). Forwarded to approval hooks so observer plugins attach marks to
-# the REAL session scope — without it they fall back to a synthetic "default"
+# session_key), forwarded to approval hooks so observer plugins attach marks to
+# the REAL session scope — otherwise they fall back to a synthetic "default"
 # session whose scope never closes, so close-time exporters never ship them.
 _approval_session_id: contextvars.ContextVar[str] = _ctx("approval_session_id")
 # Interactive-CLI flag. Concurrent ACP sessions share a ThreadPoolExecutor, so
 # mutating os.environ["HERMES_INTERACTIVE"] races: one session's `finally`
 # restore can clobber another's set mid-run, dropping it onto the
 # non-interactive auto-approve path so a dangerous command runs without the
-# approval callback firing (GHSA-96vc-wcxf-jjff). None = unset → fall back to
-# the env var for legacy single-threaded CLI callers.
+# approval callback firing (GHSA-96vc-wcxf-jjff). None = unset → env fallback.
 _hermes_interactive_ctx: contextvars.ContextVar[str | None] = _ctx("hermes_interactive", None)
 
 
@@ -75,8 +73,7 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
             kwargs.setdefault("session_id", _approval_session_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
-        # invoke_hook() swallows per-callback errors; reaching here means the
-        # dispatch layer itself failed.
+        # invoke_hook() swallows per-callback errors; this is the dispatch layer itself failing.
         logger.debug("Approval hook %s dispatch failed: %s", hook_name, exc)
 
 
@@ -168,8 +165,7 @@ def _is_gateway_approval_context() -> bool:
     HERMES_SESSION_PLATFORM via contextvars. Cron is NEVER a gateway approval
     context even when it originated from a platform (cron binds the platform for
     delivery routing): falling through would submit a pending approval with no
-    listener and block the job indefinitely. Unattended platforms are excluded
-    for the same reason.
+    listener and block the job indefinitely; unattended platforms likewise.
     """
     from tools import approval as _a
     if _a._is_cron_approval_context() or _is_unattended_platform_approval_context():
@@ -189,13 +185,11 @@ def _resolve_cli_approval_callback(approval_callback=None):
 
 
 def _should_fall_through_to_cli_approval(*, is_cli: bool, approval_callback, notify_cb) -> bool:
-    """Prefer the CLI Dangerous Command panel over a silent pending approval.
-
+    """Prefer the CLI Dangerous Command panel over a silent pending approval:
     ``HERMES_EXEC_ASK`` (or a platform marker) can leak into an interactive CLI
-    process — historically via ``import gateway.run``. Without a gateway notify
+    process (historically via ``import gateway.run``), and without a gateway notify
     listener the ask branch used to return ``pending_approval`` immediately and
-    skip the panel the user can actually answer.
-    """
+    skip the panel the user can actually answer."""
     return bool(is_cli and approval_callback is not None and notify_cb is None)
 
 
@@ -203,12 +197,10 @@ _VALID_MODES = ("manual", "smart", "off")
 
 
 def _normalize_approval_mode(mode) -> str:
-    """Normalize approval mode values loaded from YAML/config.
-
-    YAML 1.1 parses a bare ``off`` as False, so ``mode: off`` arrives as a bool;
-    treat it as the intended string mode. Unknown strings (e.g. 'auto') warn and
-    fall back to 'manual' instead of silently failing every mode check.
-    """
+    """Normalize approval mode values loaded from YAML/config. YAML 1.1 parses a
+    bare ``off`` as False, so ``mode: off`` arrives as a bool; treat it as the
+    intended string mode. Unknown strings (e.g. 'auto') warn and fall back to
+    'manual' instead of silently failing every mode check."""
     if isinstance(mode, bool):
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
@@ -222,11 +214,8 @@ def _normalize_approval_mode(mode) -> str:
 
 
 def _get_approval_config() -> dict:
-    """Read the approvals config block.
-
-    Returns the LIVE config-cache sub-dict (load_config_readonly contract) —
-    callers must not mutate it or any nested structure.
-    """
+    """Read the approvals config block: the LIVE config-cache sub-dict
+    (load_config_readonly contract) — callers must not mutate it or any nested structure."""
     try:
         from hermes_cli.config import load_config_readonly
         return load_config_readonly().get("approvals", {}) or {}
@@ -251,12 +240,10 @@ def _get_approval_mode() -> str:
 def _get_approval_timeout() -> int:
     """Read ``approvals.timeout`` (default 300s: gateway push notifications may
     not be seen for minutes; 60s failed closed before Telegram taps landed).
-
     Clamped to ``agent.deadline.MAX_SAFE_TIMEOUT_S`` (~1 year): a larger value
     overflows ``time_t`` inside ``Thread.join`` / ``Lock.acquire`` on macOS and
-    crashed every parallel tool batch. Clamping at the single config-read site
-    keeps every consumer platform-safe at once.
-    """
+    crashed every parallel tool batch; clamping at the single config-read site
+    keeps every consumer platform-safe at once."""
     from tools import approval as _a
     try:
         raw = int(_a._get_approval_config().get("timeout", 300))
@@ -304,10 +291,8 @@ def _get_unattended_approval_mode() -> str:
 
 def _tirith_fail_open() -> bool:
     """``security.tirith_fail_open`` (default True; True when config is unreadable).
-
     False means the operator opted into fail-closed: an un-importable scanner
-    must not silently grant access.
-    """
+    must not silently grant access."""
     try:
         from hermes_cli.config import load_config_readonly as _load_cfg
         _sec = (_load_cfg() or {}).get("security", {}) or {}

@@ -22,29 +22,26 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
                               *, allow_session: bool = True, smart_denied: bool = False) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
-    Args:
-        allow_permanent: When False, hide [a]lways (tirith warnings present:
-            broad permanent allowlisting is wrong for content-level findings).
-        allow_session: When False, hide [s]ession too — the caller grants one
-            operation and re-asks next time (the protected agent-instruction
-            gate in ``tools/file_tools.py``). Offering a scope the caller
-            discards makes every later write re-prompt and reads as broken.
-        smart_denied: Owner override of a Smart DENY: offer only once/deny.
-        approval_callback: CLI prompt_toolkit callback,
-            ``(command, description, *, allow_permanent=True,
-            allow_session=True, smart_denied=False) -> str``. Legacy
-            signatures keep working while both keywords hold their defaults.
+    allow_permanent=False hides [a]lways (tirith warnings present: broad permanent
+    allowlisting is wrong for content-level findings). allow_session=False hides
+    [s]ession too — the caller grants one operation and re-asks next time (the
+    protected agent-instruction gate in ``tools/file_tools.py``); offering a scope
+    the caller discards makes every later write re-prompt and reads as broken.
+    smart_denied: owner override of a Smart DENY, offer only once/deny.
+    approval_callback: CLI prompt_toolkit callback ``(command, description, *,
+    allow_permanent=True, allow_session=True, smart_denied=False) -> str``; legacy
+    signatures keep working while both keywords hold their defaults.
 
-    Returns: 'once', 'session', 'always', 'deny', or 'timeout'. 'timeout'
-        means no user response — still blocked (fail-closed), but callers
-        report "no response" rather than an explicit denial.
+    Returns 'once', 'session', 'always', 'deny', or 'timeout'. 'timeout' means no
+    user response — still blocked (fail-closed), but callers report "no response"
+    rather than an explicit denial.
     """
     from tools import approval as _a
     if timeout_seconds is None:
         timeout_seconds = _a._get_approval_timeout()
-    # Everything below is a human prompt (callback panel or input() fallback,
-    # both bounded by the approval deadline): record it as human-wait time so
-    # the concurrent batch deadline excludes it.
+    # Everything below is a human prompt (callback panel or input() fallback, both
+    # bounded by the approval deadline): record it as human-wait time so the
+    # concurrent batch deadline excludes it.
     with human_wait_window():
         return _prompt_dangerous_approval_inner(
             command, description, timeout_seconds, allow_permanent,
@@ -85,9 +82,9 @@ def _read_choice(prompt: str, timeout_seconds: int) -> str | None:
 def _prompt_dangerous_approval_inner(command: str, description: str, timeout_seconds: int,
                                      allow_permanent: bool = True, approval_callback=None,
                                      *, allow_session: bool = True, smart_denied: bool = False) -> str:
-    # Redact before any user-visible rendering; the original `command` is
-    # still what executes after approval. Same redactor as memory/log
-    # sanitization so tokens mask consistently across surfaces.
+    # Redact before any user-visible rendering; the original `command` still
+    # executes after approval. Same redactor as memory/log sanitization so
+    # tokens mask consistently across surfaces.
     from agent.redact import redact_sensitive_text
     display_command = redact_sensitive_text(command)
     display_description = redact_sensitive_text(description)
@@ -106,12 +103,11 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
 
-    # Fail-closed guard: when prompt_toolkit owns the terminal and no callback
-    # is registered on this thread, the input() fallback would spawn a daemon
-    # thread whose read never sees Enter (keystrokes go to prompt_toolkit) —
-    # an invisible deadlock. Deny loudly instead; threads needing interactive
-    # approval must install a callback via
-    # tools.terminal_tool.set_approval_callback() first.
+    # Fail-closed guard: when prompt_toolkit owns the terminal and no callback is
+    # registered on this thread, the input() fallback would spawn a daemon thread
+    # whose read never sees Enter (keystrokes go to prompt_toolkit) — an invisible
+    # deadlock. Deny loudly instead; threads needing interactive approval must
+    # install a callback via tools.terminal_tool.set_approval_callback() first.
     try:
         from prompt_toolkit.application.current import get_app_or_none
         if get_app_or_none() is not None:
@@ -163,9 +159,9 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
 def get_plugin_manager():
     """Lazy plugin-manager seam used by tests and early tool-only imports."""
     from hermes_cli.plugins import discover_plugins, get_plugin_manager as _get_manager
-    # Approval can be imported before model_tools (which triggers discovery);
-    # make an explicitly selected transport available on the first approval
-    # instead of treating the undiscovered registry as unavailable.
+    # Approval can be imported before model_tools (which triggers discovery); make
+    # an explicitly selected transport available on the first approval instead of
+    # treating the undiscovered registry as unavailable.
     discover_plugins()
     return _get_manager()
 
@@ -178,13 +174,11 @@ def _attempt(name: str, choice, failure, fallback) -> dict:
 def _present_with_selected_transport(*, command: str, description: str, pattern_key: str,
                                      pattern_keys: list[str], session_key: str, surface: str,
                                      allow_session: bool, allow_permanent: bool) -> dict:
-    """Present through an explicitly selected plugin transport, if any.
-
-    A selected transport replaces every built-in prompt surface; detection,
-    allowed scopes, persistence, timeout, and final authorization stay
-    host-owned. A failed transport reaches a built-in surface only under the
-    explicit ``transport_fallback: builtin`` opt-in.
-    """
+    """Present through an explicitly selected plugin transport, if any. A selected
+    transport replaces every built-in prompt surface; detection, allowed scopes,
+    persistence, timeout, and final authorization stay host-owned. A failed
+    transport reaches a built-in surface only under the explicit
+    ``transport_fallback: builtin`` opt-in."""
     from tools import approval as _a
     name, fallback = _a._get_approval_transport_config()
     if name == "builtin":
@@ -213,9 +207,8 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
             timeout_seconds=timeout_seconds,
         )
     except Exception:
-        # Never fall back to raw text if redaction or request construction
-        # fails: fail closed without calling the plugin or leaking the
-        # unredacted payload to logs/hooks.
+        # Never fall back to raw text if redaction or request construction fails:
+        # fail closed without calling the plugin or leaking the unredacted payload.
         logger.warning("Could not build redacted plugin approval request")
         return _attempt(name, "deny", "error", None)
     hook_kwargs = dict(
@@ -246,12 +239,10 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
 
 
 def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
-    """Interpret a ``_present_with_selected_transport`` attempt.
-
-    Returns ``(choice, denied_result)``: both None when the built-in surfaces
-    should run (no transport selected, or a failure with the explicit builtin
-    fallback); a denied result for any other failure; else the user's choice.
-    """
+    """Interpret a ``_present_with_selected_transport`` attempt into
+    ``(choice, denied_result)``: both None when the built-in surfaces should run
+    (no transport selected, or a failure with the explicit builtin fallback); a
+    denied result for any other failure; else the user's choice."""
     if not attempt.get("selected"):
         return None, None
     failure = attempt.get("failure")
@@ -281,14 +272,12 @@ def _consent(choice, unresolved: str) -> str:
 def request_elicitation_consent(message: str, description: str, *,
                                 timeout_seconds: int | None = None,
                                 surface: str = "mcp-elicitation") -> str:
-    """Route an MCP elicitation request to the surface owning the active session.
-
-    Gateway sessions go through ``_await_gateway_decision``; CLI/TUI through
-    ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in
-    a gateway session, timeouts, and exceptions map to ``"decline"`` so a server
+    """Route an MCP elicitation request to the surface owning the active session:
+    gateway sessions through ``_await_gateway_decision``, CLI/TUI through
+    ``prompt_dangerous_approval``. Always fails closed: a missing notify_cb in a
+    gateway session, timeouts, and exceptions map to ``"decline"`` so a server
     treats them as "user did not approve" rather than retrying or hanging.
-    Returns ``"accept" | "decline" | "cancel"``.
-    """
+    Returns ``"accept" | "decline" | "cancel"``."""
     from tools import approval as _a
     try:
         session_key = _a.get_current_session_key()
@@ -315,8 +304,7 @@ def request_elicitation_consent(message: str, description: str, *,
             return "cancel"
         return _consent(decision.get("choice"), "decline")
 
-    # allow_permanent=False: elicitation is a per-call confirmation — there
-    # is no pattern to remember.
+    # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
     try:
         choice = _a.prompt_dangerous_approval(
             message, description, timeout_seconds=timeout_seconds, allow_permanent=False,

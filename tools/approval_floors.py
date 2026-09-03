@@ -18,14 +18,12 @@ logger = logging.getLogger("tools.approval")
 
 
 def _match_user_deny_rule(command: str) -> str | None:
-    """Return the matching ``approvals.deny`` glob, or None.
-
-    User-defined fnmatch globs that block unconditionally — like the hardline
-    floor, a match fires BEFORE the yolo / mode=off bypass ("never let the
-    agent run this, even under yolo"). Case-insensitive, run over the same
-    normalized/deobfuscated variants the dangerous-pattern detector uses so
-    quoting tricks (``r\\m``, ``git st""atus``) can't sidestep a rule.
-    """
+    """Return the matching ``approvals.deny`` glob, or None. User-defined fnmatch
+    globs that block unconditionally — like the hardline floor, a match fires
+    BEFORE the yolo / mode=off bypass ("never let the agent run this, even under
+    yolo"). Case-insensitive, run over the same normalized/deobfuscated variants
+    the dangerous-pattern detector uses so quoting tricks (``r\\m``,
+    ``git st""atus``) can't sidestep a rule."""
     from tools import approval as _a
     try:
         deny_patterns = _a._get_approval_config().get("deny") or []
@@ -58,15 +56,13 @@ def _user_deny_block_result(pattern: str) -> dict:
 
 
 def _save_blocked_payload(command: str) -> str | None:
-    """Persist a parser-limit-blocked command as a runnable script.
-
-    The parser-limit block fires on payload SIZE/shape, not the operation —
-    usually a legitimate script the model inlined. Saving it makes recovery one
-    turn (`bash <file>`) instead of two, and is strictly safer than the
-    hint-only path: the file goes through the normal execution pipeline
-    (including the referenced-script content guard) and nothing runs here.
-    Returns the path, or None on any failure (hint falls back to write_file).
-    """
+    """Persist a parser-limit-blocked command as a runnable script. That block
+    fires on payload SIZE/shape, not the operation — usually a legitimate script
+    the model inlined. Saving it makes recovery one turn (`bash <file>`) instead
+    of two, and is strictly safer than the hint-only path: the file goes through
+    the normal execution pipeline (including the referenced-script content guard)
+    and nothing runs here. Returns the path, or None on any failure (hint falls
+    back to write_file)."""
     try:
         from hermes_constants import get_hermes_home
         script_dir = get_hermes_home() / "cache" / "blocked-scripts"
@@ -113,8 +109,8 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
         "agent."
     )
     # The parser-limit block is almost always a giant inline payload, not a
-    # forbidden operation, and is typically followed by blind rephrase
-    # retries — point at the saved script (or the write_file recipe).
+    # forbidden operation, and is typically followed by blind rephrase retries —
+    # point at the saved script (or the write_file recipe).
     if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
         saved = _a._save_blocked_payload(command) if command else None
         if saved:
@@ -146,28 +142,24 @@ def _sudo_stdin_block_result(description: str) -> dict:
     }
 
 
-# Shell control characters that make a command compound when they appear
-# OUTSIDE quotes. Inside quotes they are literal to the outer shell — but they
-# become executable again if an option like `-c`/`-e`/`--eval` (or a git
-# `-c alias.x=!...`) hands the quoted argument to another interpreter, so quoted
-# control chars only disqualify a command when such an option is present.
+# Shell control characters that make a command compound when they appear OUTSIDE
+# quotes. Inside quotes they are literal to the outer shell — but they become
+# executable again if an option like `-c`/`-e`/`--eval` (or a git `-c alias.x=!...`)
+# hands the quoted argument to another interpreter, so quoted control chars only
+# disqualify a command when such an option is present.
 _SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
 
-_REINTERPRETED_ARGUMENT_RE = re.compile(
-    r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)"
-)
+_REINTERPRETED_ARGUMENT_RE = re.compile(r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)")
 
 
 def _has_allowlist_shell_operator(command: str) -> bool:
     """Return True when a command is too compound for the allowlist shortcut.
-
     Quote-aware: metacharacters inside quotes or behind a backslash are literal
     arguments (``cargo bench -- '^a(b|c)$'``), not shell syntax. Still
     disqualifying: ``$`` or backtick inside DOUBLE quotes (expansion stays
     active), and any quoted/escaped control character when the command also
     carries a ``-c``/``-e``/``--command``/``--eval``-style option that would
-    hand the quoted text to another interpreter.
-    """
+    hand the quoted text to another interpreter."""
     command = command or ""
     quote = None  # None | "'" | '"'
     has_reinterpretable = False
@@ -191,8 +183,8 @@ def _has_allowlist_shell_operator(command: str) -> bool:
         elif ch in ("'", '"'):
             quote = ch
         elif ch == "$":
-            # Unquoted $ is only compound when it opens a substitution
-            # ("$HOME" stays simple, matching the historical `\$\(` behavior).
+            # Unquoted $ is only compound when it opens a substitution ("$HOME"
+            # stays simple, matching the historical `\$\(` behavior).
             if i + 1 < n and command[i + 1] == "(":
                 return True
         elif ch in _SHELL_CONTROL_CHARS and ch not in "()":
@@ -205,12 +197,10 @@ def _has_allowlist_shell_operator(command: str) -> bool:
 
 
 def _command_matches_permanent_allowlist(command: str) -> bool:
-    """True when command_allowlist holds this exact command text or a matching glob.
-
-    Permanent approvals historically store dangerous-pattern keys such as
+    """True when command_allowlist holds this exact command text or a matching
+    glob. Permanent approvals historically store dangerous-pattern keys such as
     ``recursive delete``; manual entries are command text, possibly with
-    shell-style wildcards like ``podman *``.
-    """
+    shell-style wildcards like ``podman *``."""
     from tools import approval as _a
     command = (command or "").strip()
     if not command or _a._has_allowlist_shell_operator(command):
