@@ -66,10 +66,10 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
                 continue
             try:
                 st = os.stat(src)
-                if (st.st_mtime_ns, st.st_size) != (mtime_ns, size):
-                    cache.pop(key, None)
-                    return None
+                changed = (st.st_mtime_ns, st.st_size) != (mtime_ns, size)
             except OSError:
+                changed = True
+            if changed:
                 cache.pop(key, None)
                 return None
             return json.dumps({

@@ -41,7 +41,7 @@ _SKILLS_CACHE_TTL_SECONDS = 30.0
 
 
 def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
-    """O(#dirs + #categories) stat-based change signature. The platform is read via
+    """O(#dirs + #categories) stat-based change signature; platform is read via
     ``agent.skill_utils.sys`` so test patches are honored."""
     from agent import skill_utils as _skill_utils
     sig = []
@@ -316,10 +316,9 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
 
 def _under_any(path: Path, dirs) -> bool:
     """True when ``path`` (resolved where possible) lives under one of ``dirs``."""
-    try:
+    resolved = path
+    with suppress(Exception):
         resolved = path.resolve()
-    except Exception:
-        resolved = path
     return any(resolved.is_relative_to(d) for d in dirs)
 
 
@@ -525,8 +524,8 @@ def skill_view(
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
     slash/preload callers render the message themselves."""
     try:
-        # Validate before the ':' dispatch so a Windows drive path (C:\skills\foo)
-        # can't be reinterpreted as a plugin namespace.
+        # Validate before the ':' dispatch so a Windows drive path (C:\skills\foo) can't be
+        # reinterpreted as a plugin namespace.
         if lookup_error := _skill_lookup_path_error(name):
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         local_category_name: str | None = None
@@ -534,8 +533,8 @@ def skill_view(
             served, local_category_name = _resolve_plugin_skill(name, file_path, task_id, preprocess)
             if served is not None:
                 return served
-        # The fall-through form (namespace/bare) joins onto each search dir too;
-        # re-validate it since `bare` is not namespace-checked.
+        # The fall-through form (namespace/bare) joins onto each search dir too; re-validate it
+        # since `bare` is not namespace-checked.
         if local_category_name and (lookup_error := _skill_lookup_path_error(local_category_name)):
             return _fail(lookup_error, hint=_LOOKUP_HINT)
         project_dirs, all_dirs, active_skills_dir = _skill_search_dirs()

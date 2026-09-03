@@ -102,14 +102,12 @@ def _capture_required_environment_variables(
     if not missing_entries:
         return _capture_result([])
     missing_names = [entry["name"] for entry in missing_entries]
-    # Messaging-platform gateway surfaces can't prompt for a secret, so they get
-    # the "unsupported" hint. Interactive gateway surfaces (desktop app / TUI) set
-    # HERMES_INTERACTIVE (same flag tools/approval.py uses) and register a callback
-    # routing to a secure secret.request overlay, so they fall through and prompt.
+    # Messaging-platform gateway surfaces can't prompt for a secret, so they get the "unsupported"
+    # hint. Interactive gateway surfaces (desktop app / TUI) set HERMES_INTERACTIVE (same flag
+    # tools/approval.py uses) and register a callback routing to a secure secret.request overlay.
     if _is_gateway_surface() and not env_var_enabled("HERMES_INTERACTIVE"):
         return _capture_result(missing_names, gateway_setup_hint=_gateway_setup_hint())
-    callback = _st._secret_capture_callback
-    if callback is None:
+    if (callback := _st._secret_capture_callback) is None:
         return _capture_result(missing_names)
     remaining_names: List[str] = []
     for entry in missing_entries:
