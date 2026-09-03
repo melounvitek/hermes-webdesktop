@@ -160,8 +160,8 @@ def _is_official_ssh_remote(url: str | None) -> bool:
 _GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 
-def _git_run(
-    args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True, network: bool = False):
+def _git_run(args: list[str], *, cwd: Optional[Path] = None, timeout: int = 5, text: bool = True,
+             network: bool = False):
     """Run ``git <args>`` with the shared subprocess boilerplate; None on any exception.
 
     git output is UTF-8; on Windows ``text=True`` defaults to the ANSI code page and a byte like the
@@ -241,8 +241,8 @@ def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: O
     """
     if not head_rev or not target_rev:
         return None
-    if head_rev == target_rev or (
-            repo_dir is not None and _git_ok(["merge-base", "--is-ancestor", target_rev, "HEAD"], cwd=repo_dir)):
+    if head_rev == target_rev or (repo_dir is not None and _git_ok(
+            ["merge-base", "--is-ancestor", target_rev, "HEAD"], cwd=repo_dir)):
         return 0
     counted = _github_compare_behind(head_rev, target_rev)
     return counted if counted is not None else UPDATE_AVAILABLE_NO_COUNT
@@ -578,15 +578,17 @@ def load_banner_snapshot(enabled_toolsets: List[str] = None) -> Optional[Dict[st
     if blob is None:
         return None
     fp = banner_snapshot_fingerprint()
-    if (not fp or blob.get("fingerprint") != fp or blob.get("enabled_toolsets") != sorted(enabled_toolsets or [])
+    if (not fp or blob.get("fingerprint") != fp
+            or blob.get("enabled_toolsets") != sorted(enabled_toolsets or [])
             or not isinstance(blob.get("tools"), list)
-            or not all(isinstance(blob.get(k), dict) for k in ("toolset_map", "availability", "skills_by_category"))):
+            or not all(isinstance(blob.get(k), dict)
+                       for k in ("toolset_map", "availability", "skills_by_category"))):
         return None
     return blob
 
 
-def save_banner_snapshot(
-    tools: List[dict], enabled_toolsets: List[str], availability: Dict[str, Any], toolset_map: Dict[str, str]) -> None:
+def save_banner_snapshot(tools: List[dict], enabled_toolsets: List[str], availability: Dict[str, Any],
+                         toolset_map: Dict[str, str]) -> None:
     """Persist the banner tool panel inputs for next launch (best-effort)."""
     fp = banner_snapshot_fingerprint()
     if not fp:
