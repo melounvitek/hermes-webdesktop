@@ -1,9 +1,7 @@
 """Interactive model picker used after OAuth login.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -13,7 +11,6 @@ import subprocess
 from typing import Dict, List, Optional
 from hermes_cli.auth_constants import DEFAULT_NOUS_PORTAL_URL
 
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
 _CUSTOM_LABEL = "Enter custom model name"
@@ -52,10 +49,10 @@ def _confirm_selection_guards(
 
 
 class _ModelPickerRows:
-    """Column-aligned model rows (name + $/Mtok prices + Nous sale chrome) for the model picker.
+    """Column-aligned picker rows (name + $/Mtok + Nous sale chrome).
 
-    Sale chrome (★ / -N% / was) is drawn as curses/ANSI segments (yellow % / dim "was"), not baked
-    into one plain string — curses addnstr would otherwise render escape bytes literally.
+    Sale chrome is emitted as styled segments, not ANSI baked into one string — curses addnstr
+    would render escape bytes literally.
     """
 
     def __init__(
@@ -164,15 +161,13 @@ def _prompt_model_selection(
     """
     from hermes_cli.cli_output import line_input
     _unavailable = unavailable_models or []
-    # Sale chrome (★ / -N% / was) is Nous Portal-only — never for OpenRouter or other providers
-    # even if pricing.original is somehow present.
+    # Sale chrome is Nous Portal-only, even if pricing.original is present for another provider.
     sale_chrome = (confirm_provider or "").strip().lower() == "nous"
 
     def _confirmed_selection(mid: str) -> Optional[str]:
         if not mid:
             return None
-        # The cost guard only runs when a provider is known (pricing lookups need one); id-keyed
-        # guards like the data-policy guard always run — even via a custom endpoint or gateway.
+        # Cost guard needs a known provider; id-keyed guards (data policy) always run.
         ok = _confirm_selection_guards(
             mid, provider=confirm_provider, base_url=confirm_base_url, api_key=confirm_api_key,
             include_kinds=None if confirm_provider else ["data_policy"],
@@ -209,17 +204,14 @@ def _prompt_model_selection(
         if not unavailable_footer and _unavailable:
             unavailable_footer = f"Upgrade at {_upgrade_url} for paid models"
 
-        # The pricing column header (and any unavailable-models block) is shown as a multi-line
-        # description above the list so it survives the curses screen clear. menu_title already
-        # embeds the aligned price header; keep only the header/legend portion.
+        # Header/legend + unavailable block go in the description so they survive the curses clear.
         desc_lines: list[str] = menu_title.split("\n", 1)[1].splitlines() if rows.has_pricing else []
         if _unavailable:
             desc_lines.extend(f"   {rows.label(mid)}" for mid in _unavailable)
             desc_lines.append(f"  ── {unavailable_footer} ──")
 
-        # Search haystacks keep pricing labels visible while adding aliases for brand-less wire
-        # ids (e.g. Kimi Coding `k3` ↔ query "kimi"). model_search_text always starts with the
-        # wire id; only append when aliases add tokens beyond the bare id already in the label.
+        # Search haystack = label + aliases for brand-less wire ids (Kimi `k3` ↔ "kimi"); skip when
+        # model_search_text adds nothing beyond the bare id.
         from hermes_cli.model_search import model_search_text
         model_search_labels = []
         for mid in ordered:

@@ -1,9 +1,7 @@
 """xAI Grok OAuth: token store, discovery, refresh, device-code login.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ from utils import env_float
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
 _RELOGIN = "Re-authenticate with `hermes model`."
@@ -101,20 +98,18 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
 
 
 def _write_through_xai_oauth_to_global_root(state: Dict[str, Any]) -> None:
-    """Persist a rotated xAI OAuth ``state`` into the global-root auth.json (best effort).
+    """Best-effort persist of a rotated xAI grant into the global-root auth.json.
 
-    xAI rotates the refresh_token on every refresh, so when a profile session refreshes a grant it
-    resolved from the root fallback, the rotated chain must land back in root. Only updates
-    ``providers.xai-oauth`` in root; never touches the profile store (the caller saved that).
-    Swallows all errors — a failed write-through degrades to root-stale, never breaks the profile save.
+    xAI rotates refresh_token on every refresh, so a profile that refreshed a root-resolved grant
+    must write the chain back to root. Touches only root ``providers.xai-oauth``; swallows all
+    errors (root-stale is better than breaking the profile's own save).
     """
     from hermes_cli.auth import _global_auth_file_path, _persist_provider_state_to_store
     global_path = _global_auth_file_path()
     if global_path is None:  # classic mode (profile == root); the profile save already hit root
         return
-    # Seat belt: under pytest, refuse to write the real user's ~/.hermes/auth.json even when
-    # HERMES_HOME points at a profile path (mirrors the read-side guard in _load_global_auth_store).
-    # Uses the unmodified HOME env, not Path.home() which fixtures may monkeypatch.
+    # Seat belt: under pytest never write the real ~/.hermes/auth.json (mirrors the read-side guard
+    # in _load_global_auth_store). Uses raw HOME, not Path.home(), which fixtures may monkeypatch.
     real_home_env = os.environ.get("HOME", "") if os.environ.get("PYTEST_CURRENT_TEST") else ""
     if real_home_env:
         real_root = Path(real_home_env) / ".hermes" / "auth.json"
@@ -134,21 +129,19 @@ def _save_xai_oauth_tokens(
     last_refresh: Optional[str] = None, auth_mode: str = "oauth_device_code",
     set_active: bool = True,
 ) -> None:
-    """Persist xAI OAuth tokens into the auth store.
+    """Persist xAI OAuth tokens; *set_active* also promotes ``xai-oauth`` to ``active_provider``.
 
-    *set_active* (default True) also promotes ``xai-oauth`` to ``active_provider`` — right for an
-    intentional login. Pass False for side-tool credential bootstrap (TTS/setup, tools config,
-    dashboard token save, token refresh) so inference routing is unchanged.
+    Pass ``set_active=False`` for side-tool bootstrap (TTS/setup, tools config, dashboard, refresh)
+    so inference routing is unchanged.
     """
     from hermes_cli.auth import _auth_store_lock, _global_auth_file_path, _load_auth_store, _load_provider_state_with_source, _same_path, _save_auth_store, _store_provider_state, _utc_now_z, _write_through_xai_oauth_to_global_root
     if last_refresh is None:
         last_refresh = _utc_now_z()
     with _auth_store_lock():
         auth_store = _load_auth_store()
-        # A profile without its own xai-oauth block reads the root grant through
-        # _load_provider_state's fallback. Refreshing that (rotating) grant must write the rotated
-        # chain back to root, or root keeps a revoked refresh token. Decide by where the grant was
-        # resolved FROM, not by key presence: _store_provider_state below would create the key.
+        # A profile lacking its own xai-oauth block reads root's grant via fallback; refreshing it
+        # must write the rotated chain back to root or root keeps a revoked refresh token. Decide by
+        # where the grant was resolved FROM (key presence lies: _store_provider_state creates it).
         state, source_path = _load_provider_state_with_source(auth_store, "xai-oauth")
         state = state if state is not None else {}
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode=auth_mode)
@@ -158,8 +151,7 @@ def _save_xai_oauth_tokens(
             state["redirect_uri"] = redirect_uri
         global_root = _global_auth_file_path()
         if source_path is not None and global_root is not None and _same_path(source_path, global_root):
-            # Resolved from root — write back to root only. Storing on the profile auth_store would
-            # create a shadowing providers.xai-oauth key that disables write-through next refresh.
+            # Root-only write-back: a profile copy would shadow root and disable write-through.
             _write_through_xai_oauth_to_global_root(state)
         else:
             _store_provider_state(auth_store, "xai-oauth", state, set_active=set_active)
@@ -187,12 +179,10 @@ def _xai_access_token_is_expiring(access_token: str, skew_seconds: int = 0) -> b
 
 
 def _xai_proactive_refresh_skew_seconds(access_token: str) -> int:
-    """How far before JWT ``exp`` to proactively refresh xAI OAuth tokens.
+    """Proactive-refresh lead time before JWT ``exp``.
 
-    SuperGrok sessions ship multi-hour tokens where the hour-long skew makes sense, but device-code
-    logins often return ~15-minute JWTs; the full skew would force a refresh on every credential
-    resolution, burning single-use refresh tokens and racing concurrent callers into
-    ``invalid_grant`` quarantine.
+    Device-code logins often return ~15-minute JWTs; the full hour-long skew would refresh on every
+    resolution, burning single-use refresh tokens and racing callers into ``invalid_grant``.
     """
     max_skew = XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS
     exp = _xai_jwt_exp(access_token)
@@ -221,11 +211,10 @@ def _xai_url_problem(url: str) -> tuple[Optional[str], str]:
 
 
 def _xai_validate_oauth_endpoint(url: str, *, field: str) -> str:
-    """Refuse any OIDC discovery endpoint that isn't HTTPS on the xAI origin.
+    """Refuse a discovery endpoint that isn't HTTPS on the xAI origin.
 
-    The discovery result is cached in auth.json, so a single MITM at login could plant a malicious
-    ``token_endpoint`` that receives the refresh_token forever. Pinning scheme + host (RFC 8414 §2)
-    removes that persistence.
+    Discovery is cached in auth.json, so one MITM at login could plant a ``token_endpoint`` that
+    receives the refresh_token forever; pinning scheme + host (RFC 8414 §2) removes that.
     """
     problem, host = _xai_url_problem(url)
     if problem is None:
@@ -244,11 +233,9 @@ def _xai_validate_oauth_endpoint(url: str, *, field: str) -> str:
 
 
 def _xai_validate_inference_base_url(value: str, *, fallback: str) -> str:
-    """Refuse a non-xAI base_url for the OAuth-authenticated inference path.
+    """Pin the OAuth inference base_url to ``*.x.ai``; warn and use *fallback* on rejection.
 
-    Pins the inference origin to ``api.x.ai`` (or any ``*.x.ai`` subdomain). On rejection, fall
-    back to the default and log a warning rather than raise — a bad env var should not deadlock
-    authentication, but it must never leak the bearer. Empty input returns ``fallback``.
+    Warn-not-raise: a bad env var must not deadlock auth, but the bearer must never leak elsewhere.
     """
     candidate = (value or "").strip().rstrip("/")
     if not candidate:
@@ -321,9 +308,8 @@ def refresh_xai_oauth_pure(
             f"xAI OAuth is missing refresh_token. {_RELOGIN}", "xai_auth_missing_refresh_token", relogin=True,
         )
     endpoint = token_endpoint.strip() or _xai_oauth_discovery(timeout_seconds)["token_endpoint"]
-    # Re-validate cached endpoints on the refresh hot path: an auth.json written by an older Hermes
-    # (or hand-edited) may carry a non-xAI token_endpoint that would receive every future
-    # refresh_token in plaintext if trusted blindly.
+    # Re-validate cached endpoints: an old/hand-edited auth.json may carry a non-xAI token_endpoint
+    # that would otherwise receive every future refresh_token.
     _xai_validate_oauth_endpoint(endpoint, field="token_endpoint")
     timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
     with httpx.Client(timeout=timeout, headers={"Accept": "application/json"}) as client:
@@ -334,9 +320,8 @@ def refresh_xai_oauth_pure(
     if response.status_code != 200:
         detail = response.text.strip()
         suffix = f" Response: {detail}" if detail else ""
-        # 403 from xAI's token endpoint is almost always a tier / entitlement gate (the grant exists
-        # but the account isn't allowlisted for API access). Re-running `hermes model` won't fix
-        # that — use a separate code so format_auth_error skips the re-authenticate hint.
+        # 403 is almost always a tier/entitlement gate; re-login won't fix it, so use a separate
+        # code and format_auth_error skips the re-authenticate hint.
         if response.status_code == 403:
             raise _xai_err(
                 "xAI token refresh failed with HTTP 403." + suffix
@@ -365,8 +350,7 @@ def refresh_xai_oauth_pure(
 def _refresh_xai_oauth_tokens(
     tokens: Dict[str, Any], *, token_endpoint: str, redirect_uri: str = "", timeout_seconds: float
 ) -> Dict[str, Any]:
-    # Re-persist whatever auth_mode is already stored (legacy pre-device-code logins may still
-    # carry ``oauth_pkce``): the refresh hot path must not relabel how the grant was obtained.
+    # Keep the stored auth_mode (legacy logins may carry ``oauth_pkce``): refresh must not relabel it.
     from hermes_cli.auth import _load_auth_store, _load_provider_state, refresh_xai_oauth_pure
     try:
         state = _load_provider_state(_load_auth_store(), "xai-oauth") or {}
@@ -386,8 +370,7 @@ def _refresh_xai_oauth_tokens(
         updated_tokens["expires_in"] = refreshed["expires_in"]
     if refreshed.get("token_type"):
         updated_tokens["token_type"] = refreshed["token_type"]
-    # set_active=False: refresh must not flip active_provider — TTS/side tools can refresh xAI
-    # tokens while chat still routes through another provider.
+    # set_active=False: side tools (TTS) refresh xAI tokens while chat routes elsewhere.
     _save_xai_oauth_tokens(
         updated_tokens, discovery={"token_endpoint": token_endpoint}, redirect_uri=redirect_uri,
         last_refresh=refreshed["last_refresh"], auth_mode=auth_mode, set_active=False,
@@ -396,11 +379,9 @@ def _refresh_xai_oauth_tokens(
 
 
 def _quarantine_xai_oauth_tokens(exc: AuthError) -> None:
-    """Clear dead xAI tokens from auth.json after a terminal refresh failure.
+    """Clear dead xAI tokens after a terminal (400/401/403) refresh failure so later sessions fail fast.
 
-    Terminal = HTTP 400/401/403 (invalid_grant, token revoked). Subsequent sessions then fail fast
-    without a network retry. Best-effort: persistence failures are logged and swallowed (caller
-    re-raises the original error regardless).
+    Best-effort: persistence failures are logged and swallowed; the caller re-raises regardless.
     """
     from hermes_cli.auth import _last_auth_error_marker, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state
     try:
@@ -471,8 +452,7 @@ def resolve_xai_oauth_runtime_credentials(
         "api_key": _clean(tokens.get("access_token")),
         "source": "hermes-auth-store",
         "last_refresh": data.get("last_refresh"),
-        # Display/telemetry only. Device-code is the only supported xAI OAuth flow, so report it
-        # unconditionally — auth.json may still carry a legacy ``oauth_pkce`` label.
+        # Display only; auth.json may still carry a legacy ``oauth_pkce`` label.
         "auth_mode": "oauth_device_code",
     }
 
@@ -506,11 +486,9 @@ def _login_xai_oauth(args, pconfig: ProviderConfig, *, force_new_login: bool = F
         redirect_uri=creds.get("redirect_uri", ""), last_refresh=creds.get("last_refresh"),
         auth_mode="oauth_device_code",
     )
-    # An explicit interactive re-login means the user wants the xAI credential re-enabled.
-    # ``hermes auth remove xai-oauth`` leaves a ``device_code`` suppression marker that otherwise
-    # stops the singleton seed from re-creating the pool entry. Kept OUT of _save_xai_oauth_tokens
-    # on purpose — that helper is shared with the refresh hot path, which must never mutate
-    # suppression state.
+    # Explicit re-login re-enables the credential: clear the ``device_code`` suppression marker left
+    # by ``hermes auth remove xai-oauth``. Deliberately NOT inside _save_xai_oauth_tokens — the
+    # refresh hot path shares that helper and must never mutate suppression state.
     unsuppress_credential_source("xai-oauth", "device_code")
     config_path = _update_config_for_provider("xai-oauth", creds.get("base_url", DEFAULT_XAI_OAUTH_BASE_URL))
     _print_login_success("xai-oauth", config_path, show_auth_state=True)

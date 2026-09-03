@@ -1,9 +1,7 @@
 """MiniMax OAuth (user-code grant) login, refresh and runtime credentials.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Re-exported from ``hermes_cli/auth.py`` (patch targets unchanged); origin helpers are imported
+lazily per function so ``hermes_cli.auth.<helper>`` patches still intercept and no cycle forms.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ from hermes_cli.auth_constants import (
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
-# Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
 _MINIMAX_OAUTH_ERROR_BODY_LIMIT = 16 * 1024
@@ -121,8 +118,7 @@ def _minimax_poll_token(
     client: httpx.Client, *, portal_base_url: str, client_id: str,
     user_code: str, code_verifier: str, expired_in: int, interval_ms: Optional[int],
 ) -> Dict[str, Any]:
-    # OpenClaw treats expired_in as a unix-ms timestamp; if it's small enough to be a duration,
-    # treat it as seconds.
+    # expired_in is a unix-ms timestamp upstream (OpenClaw) but small values are TTL seconds.
     deadline = _minimax_resolve_token_expiry_unix(expired_in, now=datetime.now(timezone.utc))
     interval = max(2.0, (interval_ms or 2000) / 1000.0)
 
@@ -247,9 +243,8 @@ def _refresh_minimax_oauth_state(state: Dict[str, Any], *, timeout_seconds: floa
             data={"grant_type": "refresh_token", "client_id": state["client_id"], "refresh_token": state["refresh_token"]},
             headers=_FORM_JSON_HEADERS,
         )
-        # The non-200 branch reads a STREAMED body, so it must run while the client is still open
-        # (iter_bytes() after close raises StreamClosed). The 200 path was already read by
-        # _minimax_post_form, so response.json() below is safe outside.
+        # Non-200 reads a STREAMED body, so it must run inside the client context (iter_bytes()
+        # after close raises StreamClosed); the 200 body was already read by _minimax_post_form.
         if response.status_code != 200:
             body = _minimax_response_error_text(response)
             body_lower = body.lower()
@@ -298,11 +293,10 @@ def _minimax_fresh_state() -> Dict[str, Any]:
 
 
 def build_minimax_oauth_token_provider() -> Callable[[], str]:
-    """Return a zero-arg callable that yields a fresh MiniMax access token.
+    """Zero-arg callable yielding a fresh MiniMax access token.
 
-    The Anthropic SDK caches ``api_key`` as a static string at construction time, so a session that
-    resolves credentials once at startup would keep sending the same bearer until MiniMax returns
-    401 — typically ~15 minutes in, because MiniMax issues short-lived access tokens.
+    The Anthropic SDK caches ``api_key`` at construction; MiniMax tokens live ~15 minutes, so a
+    static bearer would start 401-ing mid-session.
     """
     def _provide() -> str:
         token = _minimax_fresh_state().get("access_token")
@@ -317,11 +311,7 @@ def resolve_minimax_oauth_runtime_credentials(
     *, min_token_ttl_seconds: int = MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
     as_token_provider: bool = False,
 ) -> Dict[str, Any]:
-    """Return {provider, api_key, base_url, source} for minimax-oauth.
-
-    The default (string ``api_key``) preserves the historical contract for diagnostic call sites
-    like ``hermes status`` that just want to know whether a valid token exists right now.
-    """
+    """Return {provider, api_key, base_url, source}; string ``api_key`` by default (``hermes status`` contract)."""
     state = _minimax_fresh_state()
     return {
         "provider": "minimax-oauth",
