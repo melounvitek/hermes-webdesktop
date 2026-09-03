@@ -20,8 +20,7 @@ import time as _time
 from pathlib import Path
 from typing import Callable
 from hermes_cli.main_tui_launch import (
-    _npm_lifecycle_env, _termux_workspace_install_context, _workspace_root
-)
+    _npm_lifecycle_env, _termux_workspace_install_context, _workspace_root)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.main")
@@ -178,8 +177,7 @@ def _web_ui_build_needed(web_dir: Path) -> bool:
     if not sentinel.exists():
         return True
     return not _stamp_is_current(
-        _web_ui_stamp_path(), lambda: _compute_web_ui_content_hash(project_root, web_dir)
-    )
+        _web_ui_stamp_path(), lambda: _compute_web_ui_content_hash(project_root, web_dir))
 
 
 def _compute_web_ui_content_hash(project_root: Path, web_dir: Path) -> str:
@@ -196,8 +194,7 @@ def _web_ui_stamp_path() -> Path:
 def _write_web_ui_build_stamp(project_root: Path, web_dir: Path) -> None:
     """Write the web UI build stamp after a successful build."""
     _write_build_stamp(
-        _web_ui_stamp_path(), "web UI", lambda: _compute_web_ui_content_hash(project_root, web_dir)
-    )
+        _web_ui_stamp_path(), "web UI", lambda: _compute_web_ui_content_hash(project_root, web_dir))
 
 
 def _console_print(text: str) -> None:
@@ -211,8 +208,7 @@ def _console_print(text: str) -> None:
 
 def _run_with_idle_timeout(
     cmd: list[str], cwd: Path, *, idle_timeout_seconds: int = 180, indent: str = "    ",
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+    env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Stream a subprocess, killing it after *idle_timeout_seconds* of silence (a silent captured
     Vite build on a low-memory host looks like a hang and users reboot mid-install). Returns merged
     stdout, empty stderr, rc 124 if terminate raced a clean exit; never raises on idle timeout."""
@@ -223,8 +219,7 @@ def _run_with_idle_timeout(
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
-        )
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
     except OSError as exc:
         # E.g. npm not on PATH between the which() check and now.
         return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
@@ -309,8 +304,7 @@ def _nixos_build_env() -> dict[str, str] | None:
 
 def _run_npm_install_deterministic(
     npm: str, cwd: Path, *, extra_args: tuple[str, ...] = (), capture_output: bool = True,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+    env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Deterministic npm install that never mutates ``package-lock.json``.
 
     ``npm ci`` when a lockfile exists, else/on failure ``npm install --no-save``

@@ -70,8 +70,7 @@ _SYSTEMCTL_ERRORS = (FileNotFoundError, subprocess.TimeoutExpired, OSError)
 def _run_probe(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
     """Captured, text-decoded ``subprocess.run`` for short local probes (systemctl, ps)."""
     return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-    )
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _restart_managed_dashboard_service(reason: str, unit: str = _DASHBOARD_SYSTEMD_UNIT) -> bool:
@@ -263,8 +262,7 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
             with open(log_path, "ab") as log_f:
                 subprocess.Popen(
                     command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
-                    start_new_session=True, close_fds=True,
-                )
+                    start_new_session=True, close_fds=True)
             respawned.append(command)
         except (OSError, ValueError) as exc:
             failed.append((command, str(exc)))
@@ -335,8 +333,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
     (stdio wrapped in ``_UpdateOutputStream``). SIGINT/SIGTERM are left alone — legitimate cancels.
     No-op in gateway mode (already detached). Returns state for ``_finalize_update_output``."""
     state = {
-        "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False
-    }
+        "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False}
 
     if gateway_mode:
         return state
@@ -700,8 +697,7 @@ def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_non
         "serve" if _headless_backend else "dashboard",
         "--port", str(args.port),
         "--host", args.host,
-        "--open-profile", _launch_profile,
-    ]
+        "--open-profile", _launch_profile]
     if _ssh_owner_nonce:
         reexec_argv.extend(["--ssh-owner-nonce", _ssh_owner_nonce])
     if _token_file:

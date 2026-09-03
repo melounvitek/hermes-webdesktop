@@ -54,8 +54,7 @@ def _print_tui_exit_summary(session_id: Optional[str], active_session_file: Opti
             return  # No real conversation — don't show resume info
         tokens = {
             k: int(session.get(f"{k}_tokens") or 0)
-            for k in ("input", "output", "cache_read", "cache_write", "reasoning")
-        }
+            for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
     except Exception:
         return
     finally:
@@ -99,8 +98,7 @@ def _workspace_root(dir: Path) -> Path:
     if (
         (dir / "package.json").is_file()
         and not (dir / "package-lock.json").is_file()
-        and (dir.parent / "package-lock.json").is_file()
-    ):
+        and (dir.parent / "package-lock.json").is_file()):
         return dir.parent
     return dir
 
@@ -340,8 +338,7 @@ def _ensure_tui_node() -> None:
         result = subprocess.run(
             ["bash", "-c", f'source "{helper}" >&2 && ensure_node >&2 && command -v node'],
             env={**os.environ, "HERMES_HOME": hermes_home},
-            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
-        )
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     except (OSError, subprocess.SubprocessError):
         return
 
@@ -378,8 +375,7 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
     try:
         subprocess.run(
             [git, "restore", "--", tui_dir.name], cwd=str(tui_dir.parent), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", check=False,
-        )
+            text=True, encoding="utf-8", errors="replace", check=False)
     except OSError:
         return False
     return tui_dir.is_dir()
@@ -405,8 +401,7 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
         "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
         "  3. Retry `hermes --tui`\n"
         "If the checkout is still inconsistent, run `hermes update --force`.",
-        file=sys.stderr,
-    )
+        file=sys.stderr)
     sys.exit(1)
 
 
@@ -457,8 +452,7 @@ def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
     """``npm run build`` in *cwd*; exit with *failure_message* + output tail on failure."""
     result = subprocess.run(
         [npm, "run", "build"], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
-        errors="replace", env=_npm_lifecycle_env(),
-    )
+        errors="replace", env=_npm_lifecycle_env())
     _exit_on_npm_failure(result, failure_message, sep="")
 
 
@@ -489,8 +483,7 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
         return subprocess.run(
             npm_install_cmd, cwd=str(npm_cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
-            env=_npm_lifecycle_env(with_hermes_node_path()),
-        )
+            env=_npm_lifecycle_env(with_hermes_node_path()))
 
     result = _run_tui_install()
     if result.returncode != 0:
@@ -517,8 +510,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             f"Error: --dev is incompatible with HERMES_TUI_DIR={ext_dir}\n"
             f"The prebuilt TUI has no source code to hot-reload.\n"
             f"Unset HERMES_TUI_DIR (e.g. `unset HERMES_TUI_DIR`) to use --dev from a checkout.",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
         sys.exit(1)
 
     # 1. Prebuilt bundle (nix / packaged release / Docker image): just run it.
@@ -700,8 +692,7 @@ def _launch_tui(
     provider: Optional[str] = None, toolsets: object = None, skills: object = None,
     verbose: Optional[bool] = None, quiet: bool = False, query: Optional[str] = None,
     image: Optional[str] = None, worktree: bool = False, checkpoints: bool = False,
-    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False,
-):
+    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False):
     """Replace current process with the TUI."""
     from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv, _resolve_tui_heap_mb
     tui_dir = PROJECT_ROOT / "ui-tui"
@@ -748,8 +739,7 @@ def _launch_tui(
         ("HERMES_TUI_PASS_SESSION_ID", "1" if pass_session_id else None),
         ("HERMES_TUI_MAX_TURNS", str(max_turns) if max_turns is not None else None),
         ("HERMES_TUI_TOOL_PROGRESS", "verbose" if verbose else "off" if quiet else None),
-        ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None),
-    ):
+        ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None)):
         if value:
             env[key] = value
     # Generous V8 heap (8GB target; default cap can fatal-OOM on long sessions),
