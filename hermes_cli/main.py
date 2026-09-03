@@ -2185,7 +2185,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_stop_process_trees", "_sync_with_upstream_if_needed", "_update_node_dependencies",
         "_update_via_zip", "_upgrade_pip_before_lazy_refresh", "_validate_critical_files_syntax",
         "_validate_critical_modules_import", "_venv_launcher_ancestors",
-        "_wait_for_windows_update_gateway_exit", "_warn_orphaned_update_autostashes",
+        "_wait_for_windows_update_gateway_exit",
         "_warn_pending_fleet_restart_on_startup", "_write_marker_file",
         "_write_update_incomplete_marker",
     ),
