@@ -1180,13 +1180,12 @@ def _emit_compression_attempt_telemetry(
         payload.setdefault("event", "compression_attempt")
         payload.setdefault("attempt_id", getattr(agent, "_compression_attempt_id", "") or uuid.uuid4().hex)
         payload.setdefault("session_id", getattr(agent, "session_id", "") or "")
-        payload["total_duration_ms"] = int((time.monotonic() - started_at) * 1000)
-        payload["commit_status"] = commit_status
-        payload["split_status"] = split_status
+        payload.update(
+            total_duration_ms=int((time.monotonic() - started_at) * 1000), commit_status=commit_status,
+            split_status=split_status,
+        )
         if commit_started_at is not None:
-            commit_ms = max(0, int((time.monotonic() - commit_started_at) * 1000))
-            telemetry["commit_ms"] = commit_ms
-            payload["commit_ms"] = commit_ms
+            telemetry["commit_ms"] = payload["commit_ms"] = max(0, int((time.monotonic() - commit_started_at) * 1000))
         if failure_class:
             payload["failure_class"] = failure_class
         payload.setdefault("chunking", False)
@@ -1260,11 +1259,10 @@ def _set_context_compression_timeout_outcome(agent: Any, timed_out: bool) -> Non
 
     The ``agent._last_compression_timed_out`` mirror stays authoritative for minimal agent doubles that do not
     support ``vars()``."""
-    locked_state = _get_context_compression_timeout_state(agent, create=True)
-    if locked_state is None or locked_state[1] is None:
+    lock, state = _get_context_compression_timeout_state(agent, create=True) or (None, None)
+    if state is None:
         agent._last_compression_timed_out = timed_out
         return
-    lock, state = locked_state
     with lock:
         state.timed_out = timed_out
         agent._last_compression_timed_out = timed_out
@@ -1381,7 +1379,7 @@ def _adopt_live_compression_child(
     if not isinstance(child, dict) or child.get("ended_at") is not None:
         return None
     recovered = loader(session_db, child_session_id)
-    if not isinstance(recovered, list) or not recovered:
+    if not (isinstance(recovered, list) and recovered):
         return None
     # Revalidate after loading: the tip may have rotated or a competing
     # continuation may have appeared between the two DB reads.
@@ -1512,9 +1510,11 @@ class _CompressionActivityHeartbeat:
             interval_seconds = getattr(agent, "_compression_activity_heartbeat_interval", 60.0)
         try:
             interval_seconds = float(interval_seconds or 60.0)
+            if not math.isfinite(interval_seconds):
+                interval_seconds = 60.0
         except (TypeError, ValueError):
             interval_seconds = 60.0
-        self._interval_seconds = max(0.1, interval_seconds if math.isfinite(interval_seconds) else 60.0)
+        self._interval_seconds = max(0.1, interval_seconds)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="compression-activity-heartbeat", daemon=True)
 
@@ -1962,14 +1962,11 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
     if isinstance(content, list):
         cleaned = []
         for part in content:
-            idx = str(part.get("text") or "").find(TODO_INJECTION_HEADER) if (
-                isinstance(part, dict) and part.get("type") == "text"
-            ) else -1
+            text = str(part.get("text") or "") if isinstance(part, dict) and part.get("type") == "text" else ""
+            idx = text.find(TODO_INJECTION_HEADER) if text else -1
             if idx == -1:
                 cleaned.append(part)
-                continue
-            stripped = str(part.get("text") or "")[:idx].rstrip()
-            if stripped:
+            elif stripped := text[:idx].rstrip():
                 cleaned.append({**part, "text": stripped})
         return cleaned
     return content
@@ -2086,9 +2083,7 @@ def _insert_real_user_anchor(messages: list, anchor: dict) -> CompressedUserTurn
 
 def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) -> CompressedUserTurnOutcome:
     """Preserve human intent, not merely a synthetic user-role placeholder."""
-    if any(_is_real_user_message(message) for message in compressed):
-        return "already_present"
-    if _compressed_has_busy_steer(compressed):
+    if any(_is_real_user_message(message) for message in compressed) or _compressed_has_busy_steer(compressed):
         return "already_present"
     from agent.context_compressor import COMPRESSION_CONTINUATION_USER_CONTENT, _fresh_compaction_message_copy
     # One reversed scan over BOTH kinds: scanning steer then user would let an older
@@ -2176,12 +2171,12 @@ def _notify_context_engine_compression_complete(agent: Any, *, new_session_id: s
             platform=getattr(agent, "platform", None) or "cli",
             conversation_id=getattr(agent, "_gateway_session_key", None),
         )
+        return True
     except Exception:
         # Context-engine hooks are observers. A callback failure must not undo
         # history that the core or an outer host transaction already committed.
         logger.debug("context engine on_session_start (compression) failed", exc_info=True)
         return False
-    return True
 
 
 def _queue_context_engine_compression_notification(agent: Any, *, new_session_id: str, old_session_id: str) -> None:
@@ -2322,11 +2317,11 @@ def _resolve_lock_api(lock_db: Any) -> Tuple[Any, Optional[Exception]]:
         if _lock_api_is_absent_on_session_db(lock_db):
             return None, None
         try_acquire = lock_db.try_acquire_compression_lock
-        if not callable(try_acquire):
-            return None, TypeError("compression lock API is present but not callable")
-        return try_acquire, None
     except Exception as exc:
         return None, exc
+    if not callable(try_acquire):
+        return None, TypeError("compression lock API is present but not callable")
+    return try_acquire, None
 
 
 def _abort_lease(
@@ -2537,16 +2532,13 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
     # In-memory carries this turn's un-persisted user tail; flush it via the normal
     # rotation-boundary path before adopting, else skip adoption (would drop input).
     _preflush_idx = getattr(agent, "_persist_user_message_idx", None)
-    _preflush_ok = False
+    # No un-persisted tail means the transcript is fully durable: adopting the longer parent cannot drop input.
+    _preflush_ok = True
     if isinstance(_preflush_idx, int) and 0 <= _preflush_idx < len(messages):
         try:
             _preflush_ok = agent._flush_messages_to_session_db(messages, conversation_history=messages[:_preflush_idx])
         except Exception:
             _preflush_ok = False
-    else:
-        # No un-persisted tail: transcript is fully durable, so adopting the longer
-        # parent cannot drop live input — adopt directly.
-        _preflush_ok = True
     if not _preflush_ok:
         logger.warning(
             "compression: session=%s grew before lease (%d → %d msgs) but the pre-adoption flush of the "
@@ -2761,13 +2753,11 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
     # never reached long sessions. Equal bytes keep KV; preserve object identity.
     rebuilt_system_prompt = agent._build_system_prompt(system_message)
     if cached_system_prompt is not None and rebuilt_system_prompt == cached_system_prompt:
-        new_system_prompt = cached_system_prompt
-        agent._cached_system_prompt = cached_system_prompt
+        new_system_prompt = agent._cached_system_prompt = cached_system_prompt
         from agent.system_prompt import reconstruct_static_prefix
         reconstruct_static_prefix(agent, system_message=system_message, log_label="compression keep-prompt")
     else:
-        new_system_prompt = rebuilt_system_prompt
-        agent._cached_system_prompt = new_system_prompt
+        new_system_prompt = agent._cached_system_prompt = rebuilt_system_prompt
         if cached_system_prompt is not None:
             logger.info(
                 "Compaction rebuilt a drifted system prompt (session=%s, %d -> %d chars): builder output changed "
@@ -2866,7 +2856,7 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
         _src = agent._session_db.get_session_title_source(old_session_id)
     try:
         agent._session_db.set_session_title(agent.session_id, old_title)
-    except (ValueError, Exception) as e:
+    except Exception as e:
         logger.debug("Could not propagate title on compression: %s", e)
         return
     # set_session_title() records "user"; restore the original authority.
@@ -2904,12 +2894,11 @@ def _publish_rotated_compaction(
     # Publish closure + child + handoff in one transaction so no reader sees an
     # empty child. Child stays on the parent's profile ("default" persists as NULL);
     # publish also COALESCEs from the parent row for threads lacking HERMES_HOME.
-    try:
+    _profile_for_child = None
+    with contextlib.suppress(Exception):
         from hermes_cli.profiles import get_active_profile_name
         _profile_for_child = get_active_profile_name()
-        if _profile_for_child == "default":
-            _profile_for_child = None
-    except Exception:
+    if _profile_for_child == "default":
         _profile_for_child = None
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -2960,16 +2949,15 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
         # auxiliary.compression.model is broken even though compression succeeded.
         _aux_fail_model = getattr(agent.context_compressor, "_last_aux_model_failure_model", None)
         _aux_fail_err = getattr(agent.context_compressor, "_last_aux_model_failure_error", None)
-        if _aux_fail_model:
-            # Dedup on (model, error) so we don't spam on every compaction
-            _aux_key = (_aux_fail_model, _aux_fail_err)
-            if getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
-                agent._last_aux_fallback_warning_key = _aux_key
-                agent._emit_warning(
-                    f"ℹ Configured compression model '{_aux_fail_model}' failed "
-                    f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
-                    "check auxiliary.compression.model in config.yaml."
-                )
+        # Dedup on (model, error) so we don't spam on every compaction
+        _aux_key = (_aux_fail_model, _aux_fail_err)
+        if _aux_fail_model and getattr(agent, "_last_aux_fallback_warning_key", None) != _aux_key:
+            agent._last_aux_fallback_warning_key = _aux_key
+            agent._emit_warning(
+                f"ℹ Configured compression model '{_aux_fail_model}' failed "
+                f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
+                "check auxiliary.compression.model in config.yaml."
+            )
 
 
 def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
@@ -3030,7 +3018,8 @@ def _finish_compaction_boundary(
 
     # Route via _emit_status so the warning reaches gateway platforms; store it on
     # _compression_warning so a late-bound status_callback can replay it.
-    _cc = agent.context_compressor.compression_count
+    compressor = agent.context_compressor
+    _cc = compressor.compression_count
     if _cc >= 2:
         _cc_msg = (
             f"{agent.log_prefix}⚠️  Session compressed {_cc} times — accuracy may degrade. Consider /new to start fresh."
@@ -3045,11 +3034,9 @@ def _finish_compaction_boundary(
             agent.event_callback(
                 "session:compress",
                 {
-                    "platform": agent.platform or "",
-                    "session_id": agent.session_id,
-                    "old_session_id": _old_sid or "",
-                    "in_place": in_place,
-                    "compression_count": agent.context_compressor.compression_count,
+                    "platform": agent.platform or "", "session_id": agent.session_id,
+                    "old_session_id": _old_sid or "", "in_place": in_place,
+                    "compression_count": compressor.compression_count,
                 },
             )
 
@@ -3060,7 +3047,6 @@ def _finish_compaction_boundary(
 
     # Diagnostics only, not provider usage: schema-heavy rough estimates can stay
     # above threshold even after the next real request fits.
-    compressor = agent.context_compressor
     _compressed_est = estimate_request_tokens_rough(
         compressed, system_prompt=new_system_prompt or "", tools=agent.tools or None
     )
@@ -3422,15 +3408,10 @@ def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: b
     attempt_id = uuid.uuid4().hex
     with contextlib.suppress(Exception):
         agent._compression_attempt_id = attempt_id
-        setattr(
-            agent.context_compressor,
-            "_compression_telemetry_seed",
-            {
-                "attempt_id": attempt_id,
-                "session_id": agent.session_id or "",
-                "trigger_source": "manual" if force else "auto",
-            },
-        )
+        agent.context_compressor._compression_telemetry_seed = {
+            "attempt_id": attempt_id, "session_id": agent.session_id or "",
+            "trigger_source": "manual" if force else "auto",
+        }
     return _Attempt(snapshot, generation, started_at)
 
 
@@ -3659,10 +3640,8 @@ def _codex_compaction_cooldown_remaining(agent: Any) -> float:
     except Exception:
         logger.debug("codex compaction cooldown lookup failed", exc_info=True)
         return 0.0
-    if not state:
-        return 0.0
     try:
-        return max(0.0, float(state.get("remaining_seconds") or 0.0))
+        return max(0.0, float(state.get("remaining_seconds") or 0.0)) if state else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -3784,13 +3763,12 @@ def _data_url_mime(header: str, default: str = "image/jpeg") -> str:
 def _decode_pixels(data_url: str) -> Optional[tuple]:
     """``(width, height)`` of a base64 data URL; None when Pillow is missing or the payload is corrupt."""
     try:
-        import base64 as _b64_dim
-        import io as _io_dim
-        header_d, _, data_d = data_url.partition(",")
+        import base64, io
+        _, _, data_d = data_url.partition(",")
         if not data_d or not data_url.startswith("data:"):
             return None
-        from PIL import Image as _PILImage
-        with _PILImage.open(_io_dim.BytesIO(_b64_dim.b64decode(data_d))) as _img:
+        from PIL import Image
+        with Image.open(io.BytesIO(base64.b64decode(data_d))) as _img:
             return _img.size
     except Exception:
         return None
@@ -3862,9 +3840,7 @@ def _source_to_data_url(source: Any) -> Optional[str]:
     if not isinstance(data, str) or not data:
         return None
     media_type = str(source.get("media_type") or "image/jpeg").strip()
-    if not media_type.startswith("image/"):
-        media_type = "image/jpeg"
-    return f"data:{media_type};base64,{data}"
+    return f"data:{media_type if media_type.startswith('image/') else 'image/jpeg'};base64,{data}"
 
 
 def _write_data_url_to_source(source: dict, data_url: str) -> dict:
