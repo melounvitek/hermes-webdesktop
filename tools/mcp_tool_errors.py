@@ -19,24 +19,20 @@ logger = logging.getLogger("tools.mcp_tool")
 _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 
-def _jsonrpc_code(exc: BaseException):
-    """Structural ``MCPError.error.code`` (None when absent)."""
-    return getattr(getattr(exc, "error", None), "code", None)
-
-
-def _jsonrpc_matches(exc: BaseException, code, codes: tuple, markers: tuple) -> bool:
-    """Structural *code* in *codes*, else any *marker* in ``str(exc).lower()``. Never ``isinstance``
-    on SDK exception types: they arrive wrapped in ExceptionGroups and drift across generations."""
+def _jsonrpc_matches(exc: BaseException, codes: tuple, markers: tuple, code=None) -> bool:
+    """Structural ``MCPError.error.code`` (or *code*) in *codes*, else any *marker* in
+    ``str(exc).lower()``. Never ``isinstance`` on SDK exception types: they arrive wrapped in
+    ExceptionGroups and drift across generations."""
+    code = getattr(getattr(exc, "error", None), "code", None) or code
     return code in codes or any(marker in str(exc).lower() for marker in markers)
 
 
 def _handshake_rejected_as_modern(exc: BaseException) -> bool:
     """True when a failed ``initialize`` signals a stateless-only (2026-07-28) server."""
     return _jsonrpc_matches(
-        exc, _jsonrpc_code(exc) or getattr(exc, "code", None),
-        (_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION, _core._JSONRPC_METHOD_NOT_FOUND),
+        exc, (_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION, _core._JSONRPC_METHOD_NOT_FOUND),
         ("unsupported protocol version", str(_JSONRPC_UNSUPPORTED_PROTOCOL_VERSION)),
-    ) or _is_method_not_found_error(exc)
+        code=getattr(exc, "code", None)) or _is_method_not_found_error(exc)
 
 
 def _is_method_not_found_error(exc: BaseException) -> bool:
@@ -44,7 +40,7 @@ def _is_method_not_found_error(exc: BaseException) -> bool:
     substring fallback includes "Unknown method: <name>" — without it the ping→list_tools keepalive
     fallback never latches and reconnect-loops."""
     return _jsonrpc_matches(
-        exc, _jsonrpc_code(exc), (_core._JSONRPC_METHOD_NOT_FOUND,),
+        exc, (_core._JSONRPC_METHOD_NOT_FOUND,),
         (str(_core._JSONRPC_METHOD_NOT_FOUND), "method not found", "unknown method", "not found: ping"))
 
 
@@ -138,8 +134,7 @@ def _resolve_client_cert(server_name: str, config: dict):
         cert_path = _expand(raw_cert, "client_cert")
         return (cert_path, _expand(raw_key, "client_key")) if raw_key is not None else cert_path  # combined PEM
     if raw_key is not None:
-        raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR "
-                         f"client_cert + client_key, not both")
+        raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR client_cert + client_key, not both")
     if len(raw_cert) not in (2, 3):
         raise ValueError(f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})")
     pair = (_expand(raw_cert[0], "client_cert[0]"), _expand(raw_cert[1], "client_cert[1]"))
@@ -248,11 +243,6 @@ def _format_connect_error(exc: BaseException) -> str:
     return _sanitize_error(message)
 
 
-# Lazily-built caches so this module imports without the SDK OAuth module.
-_AUTH_ERROR_TYPES: tuple = ()
-_HTTP_STATUS_ERROR_TYPES: Optional[tuple] = None
-
-
 def _optional_types(module: str, *names: str) -> list:
     """``[module.name, ...]`` or ``[]`` when the module/attribute is unavailable."""
     try:
@@ -262,35 +252,33 @@ def _optional_types(module: str, *names: str) -> list:
         return []
 
 
-def _http_status_error_types() -> tuple:
-    """``HTTPStatusError`` from both httpx flavours: a 401 may come from the SDK's own stack
-    (``httpx2`` on mcp >= 2.0) or Hermes' pinned ``httpx``; the classes are unrelated."""
-    global _HTTP_STATUS_ERROR_TYPES
-    if _HTTP_STATUS_ERROR_TYPES is None:
-        sdk_mod = _core.sdk_httpx()
-        _HTTP_STATUS_ERROR_TYPES = tuple(dict.fromkeys(
-            ([sdk_mod.HTTPStatusError] if sdk_mod is not None else []) + _optional_types("httpx", "HTTPStatusError")))
-    return _HTTP_STATUS_ERROR_TYPES
+# Lazily-built ``(auth_types, http_status_types)`` so this module imports without the SDK OAuth module.
+_AUTH_ERROR_TYPES: Optional[tuple] = None
 
 
 def _get_auth_error_types() -> tuple:
-    """Cached MCP OAuth failure types: SDK ``OAuthFlowError``/``OAuthTokenError`` (+ legacy
-    ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and both ``HTTPStatusError`` flavours
-    (which still need the 401 check in :func:`_is_auth_error`)."""
+    """Cached ``(auth_types, http_status_types)``: SDK ``OAuthFlowError``/``OAuthTokenError`` (+ legacy
+    ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and ``HTTPStatusError`` from both httpx
+    flavours — a 401 may come from the SDK's own stack (``httpx2`` on mcp >= 2.0) or Hermes' pinned
+    ``httpx``; the classes are unrelated and still need the 401 check in :func:`_is_auth_error`."""
     global _AUTH_ERROR_TYPES
-    if not _AUTH_ERROR_TYPES:
-        _AUTH_ERROR_TYPES = (*_optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError"),
-                             *_optional_types("mcp.client.auth", "UnauthorizedError"),  # older SDKs
-                             *_optional_types("tools.mcp_oauth", "OAuthNonInteractiveError"),
-                             *_http_status_error_types())
+    if not (_AUTH_ERROR_TYPES and _AUTH_ERROR_TYPES[0]):  # retry while empty (SDK may import later)
+        sdk_mod = _core.sdk_httpx()
+        http_types = tuple(dict.fromkeys(
+            ([sdk_mod.HTTPStatusError] if sdk_mod is not None else []) + _optional_types("httpx", "HTTPStatusError")))
+        auth_types = (*_optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError"),
+                      *_optional_types("mcp.client.auth", "UnauthorizedError"),  # older SDKs
+                      *_optional_types("tools.mcp_oauth", "OAuthNonInteractiveError"), *http_types)
+        _AUTH_ERROR_TYPES = (auth_types, http_types)
     return _AUTH_ERROR_TYPES
 
 
 def _is_auth_error(exc: BaseException) -> bool:
     """True if ``exc`` indicates an MCP OAuth failure; ``HTTPStatusError`` counts only with status 401."""
-    if not isinstance(exc, _get_auth_error_types()):
+    auth_types, http_types = _get_auth_error_types()
+    if not isinstance(exc, auth_types):
         return False
-    return getattr(exc.response, "status_code", None) == 401 if isinstance(exc, _http_status_error_types()) else True
+    return getattr(exc.response, "status_code", None) == 401 if isinstance(exc, http_types) else True
 
 
 # Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).

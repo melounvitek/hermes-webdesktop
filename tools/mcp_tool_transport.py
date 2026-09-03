@@ -1,6 +1,6 @@
 """Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID
 ledger), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth),
-protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py."""
+protocol negotiation and initial tool discovery."""
 
 import logging
 import asyncio
@@ -29,15 +29,17 @@ def _is_2xx(resp) -> bool:
     return 200 <= resp.status_code < 300
 
 
+def _present(**kwargs) -> dict:
+    """*kwargs* minus the ``None`` values (optional httpx client arguments)."""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
 def _pgroup_alive(pgid: Optional[int]) -> bool:
     """Signal 0 to the group succeeds iff any member is alive (POSIX only)."""
-    _killpg = getattr(os, "killpg", None)
-    if pgid is None or _killpg is None:
-        return False
     try:
-        _killpg(pgid, 0)
+        os.killpg(pgid, 0)
         return True
-    except (ProcessLookupError, PermissionError, OSError):
+    except (AttributeError, TypeError, OSError):  # non-POSIX / pgid None / gone
         return False
 
 
@@ -63,16 +65,17 @@ class MCPServerTransportMixin:
     __slots__ = ()
 
     def _advertises_tools(self) -> bool:
-        """Whether the server advertises ``tools`` (prompt-/resource-only servers omit it and
-        ``tools/list`` raises -32601). True when no capability info was captured (legacy fallback)."""
+        """False only when captured capabilities omit ``tools`` (prompt-/resource-only servers,
+        where ``tools/list`` raises -32601); True without capability info (legacy fallback)."""
         caps = getattr(self.initialize_result, "capabilities", None)
         return caps is None or getattr(caps, "tools", None) is not None
 
     def _session_kwargs(self) -> dict:
         """ClientSession kwargs: sampling, elicitation, notification + logging callbacks."""
-        kwargs = self._sampling.session_kwargs() if self._sampling else {}
-        if self._elicitation:
-            kwargs.update(self._elicitation.session_kwargs())
+        kwargs = {}
+        for handler in (self._sampling, self._elicitation):
+            if handler:
+                kwargs.update(handler.session_kwargs())
         if _core._MCP_NOTIFICATION_TYPES and _core._MCP_MESSAGE_HANDLER_SUPPORTED:
             kwargs["message_handler"] = self._make_message_handler()
         if _core._MCP_LOGGING_CALLBACK_SUPPORTED:
@@ -80,12 +83,11 @@ class MCPServerTransportMixin:
         return kwargs
 
     async def _negotiate_session(self, session, connect_timeout: float):
-        """Negotiate the protocol era (``initialize`` vs ``server/discover``); both results expose
-        ``.capabilities``. ``protocol: auto`` (default) tries the legacy handshake FIRST and falls back
-        to discover only on a modern-only signal (-32022 / initialize -32601) — deliberately the
-        reverse of the SDK's discover-first mode: zero extra round-trips for the handshake-era
-        servers that dominate today. ``stateless`` probes discover first (one legacy retry on any
-        error); ``legacy`` is handshake only. A handshake TIMEOUT never falls back — it propagates."""
+        """Negotiate the protocol era (``initialize`` vs ``server/discover``; both expose
+        ``.capabilities``). ``auto`` tries the legacy handshake FIRST, falling back to discover only
+        on a modern-only signal (-32022 / initialize -32601) — the reverse of the SDK's discover-first
+        mode, so handshake-era servers pay zero extra round-trips. ``stateless`` probes discover first
+        (one legacy retry on any error); ``legacy`` is handshake only. A TIMEOUT never falls back."""
         def call(method: str):
             return asyncio.wait_for(getattr(session, method)(), timeout=connect_timeout)
 
@@ -111,14 +113,13 @@ class MCPServerTransportMixin:
         # mcp 1.x has no server/discover client — nothing to fall back to.
         return await attempt(
             "initialize", "discover", lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
-            "MCP server '%s': legacy handshake rejected (%s) — "
-            "retrying via server/discover (2026-07-28 stateless server)")
+            "MCP server '%s': legacy handshake rejected (%s) — retrying via server/discover (2026-07-28 stateless server)")
 
     async def _serve_session(self, session, connect_timeout: float,
                              label: str = "", mark_lifecycle: bool = False) -> str:
         """Handshake, discover, publish readiness, then serve until a lifecycle event. Clears stale
         breaker state but leaves the session UNPROVEN: flapping transports handshake fine and drop
-        moments later, so only keepalive or tool-call success clears the reconnect budget."""
+        moments later, so only keepalive/tool-call success clears the reconnect budget."""
         self.initialize_result = await self._negotiate_session(session, connect_timeout)
         self.session = session
         if mark_lifecycle:
@@ -135,8 +136,7 @@ class MCPServerTransportMixin:
 
     async def _serve_transport(self, transport_cm, label: str, connect_timeout: float) -> str:
         """Open *transport_cm*, wrap its streams in a ClientSession and serve it. Streams are indexed,
-        not unpacked: mcp 1.x yields ``(read, write, get_session_id)``, 2.x ``(read, write)``.
-        A transport TaskGroup drop maps to ``"reconnect"`` instead of backoff/park."""
+        not unpacked (mcp 1.x yields a 3-tuple, 2.x a pair); a TaskGroup drop maps to ``"reconnect"``."""
         try:
             async with transport_cm as _streams:
                 async with _core.ClientSession(_streams[0], _streams[1], **self._session_kwargs()) as session:
@@ -148,12 +148,12 @@ class MCPServerTransportMixin:
 
     def _track_spawned_children(self, new_pids: Set[int]) -> None:
         """Ledger the freshly spawned stdio children (pids, pgids, machine spawn ledger). pgids are
-        captured while alive (getpgid fails once it exits; the sweep needs it for reparented descendants)."""
+        captured while alive (getpgid fails after exit; the sweep needs them for reparented descendants)."""
         new_pgids: Dict[int, int] = {}
         for pid in new_pids:
             try:
                 new_pgids[pid] = os.getpgid(pid)
-            except (AttributeError, ProcessLookupError, OSError):  # Windows / already exited
+            except (AttributeError, OSError):  # Windows / already exited
                 pass
         with _core._lock:
             _stdio_pids.update(dict.fromkeys(new_pids, self.name))
@@ -173,8 +173,7 @@ class MCPServerTransportMixin:
         with _core._lock:
             for pid in new_pids:
                 _stdio_pids.pop(pid, None)
-                # ``os.kill(pid, 0)`` is NOT a no-op on Windows; the child may be gone while
-                # descendants remain in its pgroup.
+                # Windows-safe pid probe; the child may be gone while descendants remain in its pgroup.
                 if _pid_exists(pid) or _pgroup_alive(_stdio_pgids.get(pid)):
                     _orphan_stdio_pids.add(pid)
                     _orphan_stdio_pid_servers[pid] = self.name
@@ -183,8 +182,7 @@ class MCPServerTransportMixin:
 
     async def _run_stdio(self, config: dict):
         """Run the server using stdio transport."""
-        if config.get("identity_header") is not None:
-            # No headers on stdio — warn so a copy-pasted HTTP block doesn't mislead.
+        if config.get("identity_header") is not None:  # copy-pasted HTTP block: warn, don't mislead
             logger.warning("MCP server '%s': identity_header is only supported on "
                            "HTTP/SSE transports — ignored for stdio servers", self.name)
         if not _core._ensure_mcp_sdk():
@@ -195,39 +193,34 @@ class MCPServerTransportMixin:
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
         command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
         await _osv_malware_preflight(self.name, command, config.get("args", []))
-        # Parent-death watchdog so kill -9 / crash can't leave the child tree running (POSIX-only).
-        # AFTER the OSV preflight so the check inspects the real package.
+        # Parent-death watchdog (POSIX) so kill -9 can't leave the child tree running; AFTER the
+        # OSV preflight so the check inspects the real package.
         command, args = _wrap_command_with_watchdog(command, config.get("args", []))
         server_params = _core.StdioServerParameters(
             command=command, args=args, env=safe_env or None, cwd=config.get("cwd"),
             # Windows pipes can split non-UTF-8 bytes at chunk boundaries; substitute, don't raise.
             encoding_error_handler="replace")
-        session_kwargs = self._session_kwargs()
-        # Reap orphans of prior attempts first, else each retry piles up zombie pairs. Unscoped on
-        # purpose (also reaps servers that never reconnect). Off-loop: the reaper blocks up to 2s.
+        # Reap orphans of prior attempts first (else retries pile up zombie pairs); unscoped on purpose;
+        # off-loop because the reaper blocks up to 2s.
         await asyncio.to_thread(_core._kill_orphaned_mcp_children)
         pids_before = _core._snapshot_child_pids()  # so the new child can be identified after spawn
         new_pids: set = set()
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
         _core._write_stderr_log_header(self.name)
         try:
-            errlog = _core._get_mcp_stderr_log()
-            async with _core.stdio_client(server_params, errlog=errlog) as (read_stream, write_stream):
-                # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) that
-                # race into the window: they share the TUI's pgid, so leaking them into _stdio_pgids
-                # would make the shutdown killpg() kill the TUI itself.
+            async with _core.stdio_client(server_params, errlog=_core._get_mcp_stderr_log()) as (read_stream, write_stream):
+                # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
+                # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
                 new_pids = _filter_mcp_children(_core._snapshot_child_pids() - pids_before)
                 if new_pids:
                     self._track_spawned_children(new_pids)
                 self._stdio_child_pids = set(new_pids)  # so in-flight calls fail fast when the child dies
-                async with _core.ClientSession(read_stream, write_stream, **session_kwargs) as session:
-                    # Bound the handshake here: ``connect_timeout`` only bounds the caller's ``.result()``.
-                    # A server that never answers ``initialize`` would otherwise hang forever, skip the
-                    # ``finally`` and leak child + pipes on every retry until EMFILE.
+                async with _core.ClientSession(read_stream, write_stream, **self._session_kwargs()) as session:
+                    # Bound the handshake here (``connect_timeout`` only bounds the caller's ``.result()``):
+                    # a server that never answers ``initialize`` would leak child + pipes per retry until EMFILE.
                     connect_timeout = float(config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT))
                     return await self._serve_session(session, connect_timeout, mark_lifecycle=True)
-        finally:
-            # Runs on clean exit, exceptions AND cancellation.
+        finally:  # clean exit, exceptions AND cancellation
             if new_pids:
                 self._release_spawned_children(new_pids)
 
@@ -235,29 +228,33 @@ class MCPServerTransportMixin:
 
     async def _preflight_content_type(self, url: str, *, headers: Optional[dict] = None,
                                       ssl_verify: bool = True, client_cert=None, timeout: float = 5.0) -> None:
-        """Probe *url* before the SDK connects: a plain web page makes the SDK sit out the full
+        """Probe *url* before the SDK connects: a plain web page would make the SDK sit out the full
         ``connect_timeout`` before an opaque ``CancelledError``; this raises NonMcpEndpointError within
-        ``timeout`` instead. Allow-list based: only a 2xx with a definite non-MCP content type is
-        rejected, and only after a JSON-RPC ``initialize`` POST also fails to look like MCP (some
-        servers serve a UI on GET but speak MCP via POST). Missing content type, non-2xx or transport
-        errors pass silently — the real handshake stays the source of truth. Own httpx client, OUTSIDE
-        the SDK's anyio task group, so the error isn't wrapped in an ExceptionGroup."""
+        ``timeout``. Allow-list based: only a 2xx with a definite non-MCP content type is rejected, and
+        only after a JSON-RPC ``initialize`` POST also fails to look like MCP (some servers serve a UI
+        on GET but speak MCP via POST). Anything else passes — the handshake stays the source of truth.
+        Own httpx client, OUTSIDE the SDK's anyio task group, so the error isn't group-wrapped."""
         try:
             import httpx as _httpx
         except ImportError:
             return  # No httpx → skip probe; SDK import would have failed first.
 
+        def _non_mcp_2xx(resp) -> bool:
+            # Only judge 2xx (4xx/5xx may be an auth challenge the handshake handles); no content
+            # type advertised → don't second-guess the SDK.
+            ct = _content_type_base(resp)
+            return _is_2xx(resp) and bool(ct) and ct not in self._MCP_CONTENT_TYPES
+
         probe_headers = dict(headers) if headers else {}
         try:
             async with _httpx.AsyncClient(verify=ssl_verify, follow_redirects=True, timeout=_httpx.Timeout(timeout),
-                                          **({"cert": client_cert} if client_cert is not None else {})) as client:
+                                          **_present(cert=client_cert)) as client:
                 # HEAD is cheapest; fall back to GET on 405/501.
                 resp = await client.head(url, headers=probe_headers)
                 if resp.status_code in (405, 501):
                     resp = await client.get(url, headers=probe_headers)
                 # Non-MCP content type on HEAD/GET: try a JSON-RPC POST so POST-only servers pass.
-                ct = _content_type_base(resp)
-                if ct and ct not in self._MCP_CONTENT_TYPES and _is_2xx(resp):
+                if _non_mcp_2xx(resp):
                     post_resp = await client.post(
                         url, content=_PROBE_INITIALIZE_BODY,
                         headers={**probe_headers, "Content-Type": "application/json",
@@ -266,12 +263,9 @@ class MCPServerTransportMixin:
                         resp = post_resp
         except _httpx.HTTPError:
             return  # DNS/connect/timeout/transport error — let the SDK try.
-
-        # Only judge 2xx (4xx/5xx may be an auth challenge the handshake handles); no content type
-        # advertised → don't second-guess the SDK.
-        ct_base = _content_type_base(resp)
-        if not _is_2xx(resp) or not ct_base or ct_base in self._MCP_CONTENT_TYPES:
+        if not _non_mcp_2xx(resp):
             return
+        ct_base = _content_type_base(resp)
         raise NonMcpEndpointError(
             f"MCP server '{self.name}' at {url} returned Content-Type '{ct_base}', not an MCP "
             f"response (expected one of: {', '.join(self._MCP_CONTENT_TYPES)}). The URL most likely "
@@ -281,10 +275,10 @@ class MCPServerTransportMixin:
     def _reconnect_or_reraise_group(self, eg: BaseExceptionGroup) -> str:
         """Map an SDK transport TaskGroup failure to a clean ``"reconnect"``: HTTP/SSE stream pumps
         run in an anyio TaskGroup, so a transient drop escapes as a ``BaseExceptionGroup`` that would
-        otherwise back off and park the server for 300s over a sub-second glitch. Re-raise when it is
-        not a transient drop: shutdown in progress (``_shutdown_event`` is set before cancel), the
-        group carries KeyboardInterrupt/SystemExit or a real CancelledError, or no live session was
-        reached this attempt (``_ready`` unset — connect failures must back off, not hot-loop)."""
+        otherwise park the server for 300s over a sub-second glitch. Re-raise when it is not one:
+        shutdown in progress (``_shutdown_event`` is set before cancel), KeyboardInterrupt/SystemExit
+        or a real CancelledError in the group, or no live session this attempt (``_ready`` unset —
+        connect failures must back off, not hot-loop)."""
         if (self._shutdown_event.is_set()
                 or eg.split((KeyboardInterrupt, SystemExit))[0] is not None
                 or eg.split(asyncio.CancelledError)[0] is not None
@@ -296,8 +290,7 @@ class MCPServerTransportMixin:
 
     def _build_oauth_auth(self, url: str, config: dict):
         """OAuth 2.1 PKCE via the central MCPOAuthManager (one provider reused across reconnects and
-        CLI paths). Setup failures (e.g. non-interactive without cached tokens) re-raise so only this
-        server is reported failed."""
+        CLI paths). Setup failures re-raise (after a warning) so only this server is reported failed."""
         if self._auth_type != "oauth":
             return None
         try:
@@ -310,28 +303,25 @@ class MCPServerTransportMixin:
     def _sse_transport(self, url: str, headers: dict, connect_timeout: float,
                        ssl_verify, client_cert, oauth_auth, strict_cfg_headers: bool):
         """``sse_client`` context manager for ``transport: sse`` entries."""
-        if strict_cfg_headers:
-            # Fail closed: SSE cannot enforce the redirect boundary.
+        if strict_cfg_headers:  # fail closed: SSE cannot enforce the redirect boundary
             raise ValueError(f"MCP server '{self.name}': strict_redirect_headers is "
                              "not supported on the SSE transport.")
         if _core.sse_client is None:
             raise ImportError(f"MCP server '{self.name}' requires SSE transport but "
                               "mcp.client.sse.sse_client is not available. "
                               "Upgrade the mcp package to get SSE support.")
-        # sse_read_timeout bounds the gap between events: SSE servers idle for minutes, so 300s
-        # (matching the Streamable HTTP read timeout), not tool_timeout. ``auth`` must be forwarded
-        # or OAuth SSE servers 401 silently.
+        # sse_read_timeout bounds the gap between events: SSE servers idle for minutes, so 300s (the
+        # Streamable HTTP read timeout), not tool_timeout. ``auth`` must be forwarded or OAuth SSE 401s silently.
         sse_kwargs: dict = {"url": url, "headers": headers or None, "timeout": float(connect_timeout),
-                            "sse_read_timeout": 300.0, **({"auth": oauth_auth} if oauth_auth is not None else {})}
+                            "sse_read_timeout": 300.0, **_present(auth=oauth_auth)}
         if client_cert is not None or ssl_verify is not True:
-            # sse_client has no verify/cert kwargs: an httpx_client_factory forwards the SDK's
-            # (headers, auth, timeout) and layers TLS on top. The client MUST come from the SDK's
-            # own httpx module (httpx2 on mcp >= 2.0) — see sdk_httpx().
+            # sse_client has no verify/cert kwargs: an httpx_client_factory forwards the SDK's (headers,
+            # auth, timeout) and layers TLS on top. Client MUST come from the SDK's httpx (httpx2 on mcp >= 2.0).
             _httpx_mod = _core.sdk_httpx()
             sse_kwargs["httpx_client_factory"] = lambda headers=None, timeout=None, auth=None: _httpx_mod.AsyncClient(
                 follow_redirects=True, verify=ssl_verify,
                 timeout=timeout if timeout is not None else _httpx_mod.Timeout(30.0, read=300.0),
-                **{k: v for k, v in (("headers", headers), ("auth", auth), ("cert", client_cert)) if v is not None})
+                **_present(headers=headers, auth=auth, cert=client_cert))
         return _core.sse_client(**sse_kwargs)
 
     def _streamable_http_transport(self, url: str, headers: dict, connect_timeout: float,
@@ -340,26 +330,24 @@ class MCPServerTransportMixin:
         """Streamable HTTP context manager: mcp >= 1.24.0 gets a caller-owned httpx client; on the
         deprecated API (mcp < 1.24.0) the SDK owns the client."""
         if not _core._MCP_NEW_HTTP:
-            if strict_cfg_headers:
-                # Fail closed: without an owned client redirects can't be hooked.
+            if strict_cfg_headers:  # fail closed: without an owned client redirects can't be hooked
                 raise ImportError(f"MCP server '{self.name}' requires mcp >= 1.24.0 to "
                                   "enforce the portable redirect-header boundary "
                                   "(strict_redirect_headers). Upgrade the mcp package.")
             return _core.streamablehttp_client(url, headers=headers, timeout=float(connect_timeout), verify=ssl_verify,
-                                               **({"auth": oauth_auth} if oauth_auth is not None else {}))
-        # Explicit AsyncClient matching the SDK's create_mcp_http_client defaults; MUST come from
-        # the SDK's httpx module (httpx2 on mcp >= 2.0) since the SDK sends its own Requests through it.
+                                               **_present(auth=oauth_auth))
+        # Explicit AsyncClient matching the SDK's create_mcp_http_client defaults; MUST come from the
+        # SDK's httpx (httpx2 on mcp >= 2.0) since the SDK sends its own Requests through it.
         httpx = _core.sdk_httpx()
         _strip_auth_on_cross_origin_redirect = _make_redirect_header_stripper(
             httpx.URL(url), strict=strict_cfg_headers, configured_header_names=configured_header_names)
         client_kwargs: dict = {"follow_redirects": True, "timeout": httpx.Timeout(float(connect_timeout), read=300.0),
                                "verify": ssl_verify, **({"headers": headers} if headers else {}),
                                "event_hooks": {"response": [_strip_auth_on_cross_origin_redirect]},
-                               **{k: v for k, v in (("auth", oauth_auth), ("cert", client_cert)) if v is not None}}
+                               **_present(auth=oauth_auth, cert=client_cert)}
 
         @asynccontextmanager
-        async def _owned_client_streams():
-            # Caller owns the client lifecycle — the SDK skips cleanup when http_client is provided.
+        async def _owned_client_streams():  # the SDK skips cleanup when http_client is provided
             async with httpx.AsyncClient(**client_kwargs) as http_client:
                 async with _core.streamable_http_client(url, http_client=http_client) as streams:
                     yield streams
@@ -376,13 +364,11 @@ class MCPServerTransportMixin:
         url = config["url"]
         headers = dict(config.get("headers") or {})
         # Agent Plugins v1 strict_redirect_headers: configured headers MUST NOT follow a cross-origin
-        # redirect. Capture their names BEFORE client-generated headers are merged in.
+        # redirect — capture their names BEFORE client-generated headers are merged in.
         configured_header_names = {key.lower() for key in headers}
-        # Optional per-user identity header; explicit headers of the same name win.
-        headers = _apply_identity_header(self.name, config, headers)
-        # Some servers require MCP-Protocol-Version on the first request; seed it (user override
-        # wins) from the HANDSHAKE version, not the latest: a 2026-07-28 header would route the
-        # handshake-era ``initialize()`` body onto the per-request-envelope ladder, which rejects it.
+        headers = _apply_identity_header(self.name, config, headers)  # explicit same-name headers win
+        # Seed MCP-Protocol-Version (user override wins) from the HANDSHAKE version, not the latest: a
+        # 2026-07-28 header routes the handshake-era ``initialize()`` onto the envelope ladder, which rejects it.
         if not any(key.lower() == "mcp-protocol-version" for key in headers):
             headers["mcp-protocol-version"] = _core.LATEST_HANDSHAKE_VERSION
         connect_timeout = config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
@@ -400,8 +386,7 @@ class MCPServerTransportMixin:
     async def _discover_tools(self):
         """Discover tools from the connected session. Capability-gated: prompt-/resource-only
         servers raise ``MCPError(-32601)`` on ``tools/list``, which would abort the connection."""
-        # Fresh transport: re-probe ``ping`` in case the server gained support across the reconnect.
-        self._ping_unsupported = False
+        self._ping_unsupported = False  # fresh transport: re-probe ``ping`` across the reconnect
         if self.session is None:
             return
         if not self._advertises_tools():
@@ -416,19 +401,18 @@ class MCPServerTransportMixin:
         self._register_discovered_tools_if_needed()
 
     def _register_discovered_tools_if_needed(self) -> None:
-        """Publish freshly discovered tools for a registry-owned server if none are registered
-        (initial registration normally happens in ``_discover_and_register_server``). On reconnect,
-        outage handling may clear ``_ready`` and deregister stale tools; ownership via ``_servers``
-        authorizes publishing before readiness is restored so a revival never comes back with zero
-        tools — likewise a server retained after a recoverable initial failure."""
+        """Publish freshly discovered tools when none are registered (initial registration normally
+        happens in ``_discover_and_register_server``). Outage handling may clear ``_ready`` and
+        deregister stale tools; ownership via ``_servers`` authorizes publishing before readiness is
+        restored so a revival (or a server retained after a recoverable initial failure) never comes
+        back with zero tools."""
         if self._registered_tool_names:
             return
-        if not self._ready.is_set():
-            with _core._lock:
-                if _core._servers.get(self.name) is not self:
-                    return
-        self._registered_tool_names = _core._register_server_tools(self.name, self, self._config)
-        # A retained initial-failure server that just published tools has recovered.
         with _core._lock:
+            owned = _core._servers.get(self.name) is self
+        if not owned and not self._ready.is_set():
+            return
+        self._registered_tool_names = _core._register_server_tools(self.name, self, self._config)
+        with _core._lock:  # a retained initial-failure server that just published tools has recovered
             if _core._servers.get(self.name) is self:
                 _core._server_connect_errors.pop(self.name, None)

@@ -1,6 +1,6 @@
 """Session health for MCPServerTask: dynamic tool refresh on list_changed notifications, server
 log forwarding, keepalive probes, suspect-mark / lazy-verify, in-flight call fail-fast, stdio
-child liveness and stdio idle/lifetime recycling. Split from tools/mcp_tool.py."""
+child liveness and stdio idle/lifetime recycling."""
 
 import asyncio
 import json
@@ -88,8 +88,7 @@ class MCPServerHealthMixin:
                 if len(data) > 2000:  # cap payloads so a chatty server can't flood agent.log
                     data = data[:2000] + "... [truncated]"
                 logger_name = getattr(params, "logger", None)
-                origin = f"{self.name}/{logger_name}" if logger_name else self.name
-                logger.log(level, "MCP server log [%s]: %s", origin, data)
+                logger.log(level, "MCP server log [%s]: %s", f"{self.name}/{logger_name}" if logger_name else self.name, data)
             except Exception:
                 logger.debug("Failed to handle MCP log notification from '%s'", self.name, exc_info=True)
         return _on_log
@@ -125,12 +124,10 @@ class MCPServerHealthMixin:
         """Deregister *tool_names* this server's toolset still owns. Never removes a colliding
         name currently owned by another server."""
         from tools.registry import registry
-        toolset_name = f"mcp-{self.name}"
         for tool_name in tool_names:
-            if registry.get_toolset_for_tool(tool_name) != toolset_name:
-                continue
-            registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
-            _forget_mcp_tool_server(tool_name)
+            if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
+                registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
+                _forget_mcp_tool_server(tool_name)
 
     async def _refresh_tools(self):
         """Re-fetch tools on ``tools/list_changed`` and update the registry. The lock serializes
@@ -165,6 +162,9 @@ class MCPServerHealthMixin:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
         OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
         back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+        async def list_tools():
+            await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+
         if not self._ping_unsupported:
             try:
                 await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
@@ -180,7 +180,7 @@ class MCPServerHealthMixin:
                     # A server that silently drops ping looks like a dead transport: confirm with
                     # list_tools before declaring it dead, else propagate the original failure.
                     try:
-                        await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+                        await list_tools()
                     except Exception:
                         raise exc from None
                     self._ping_unsupported = True  # latch so later keepalives skip the 30s wait
@@ -189,7 +189,7 @@ class MCPServerHealthMixin:
                     return
                 else:
                     raise  # closed transport, expired session, etc. — real failure
-        await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+        await list_tools()
 
     def _mark_session_proven(self) -> None:
         """Record that the session demonstrated real health (keepalive or tool-call success).
@@ -204,8 +204,7 @@ class MCPServerHealthMixin:
             logger.warning("MCP server '%s': revived — session healthy again after "
                            "parking (state: parked → connected)", self.name)
         # A proven fresh transport clears the one-time permanent-failure grace and any race bookkeeping.
-        self._permanent_grace_used = False
-        self._teardown_race = False
+        self._permanent_grace_used = self._teardown_race = False
 
     def mark_suspect(self, reason: str) -> None:
         """Latch a suspicion (no I/O). The NEXT call verifies via :meth:`ensure_healthy` and
@@ -253,8 +252,7 @@ class MCPServerHealthMixin:
         victims = [t for t in self._inflight_tasks if not t.done()]
         if not victims:
             return
-        self._reconnecting = True
-        self._teardown_race = True
+        self._reconnecting = self._teardown_race = True
         self.mark_suspect(f"{reason} tore down {len(victims)} in-flight call(s)")
         for task in victims:
             task.cancel()

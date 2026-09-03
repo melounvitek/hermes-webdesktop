@@ -1,8 +1,7 @@
 """Registering a connected (or schema-cached) MCP server's tools into the tool registry:
-include/exclude filtering, trust-tier metadata capture, utility-tool selection,
-name-collision resolution and the schema-cache write-through. Both entry points
-(``_register_server_tools`` live, ``_register_from_cache_sync`` lazy) build ``_Candidate``
-records and feed the single ``_register_candidates`` loop."""
+include/exclude filtering, trust-tier metadata capture, utility-tool selection, name-collision
+resolution and the schema-cache write-through. Both entry points (``_register_server_tools``
+live, ``_register_from_cache_sync`` lazy) build ``_Candidate`` records for ``_register_candidates``."""
 
 import logging
 from dataclasses import dataclass
@@ -34,8 +33,7 @@ def _normalize_server_trust(value: Any) -> str:
     text = str(value).strip().lower()
     if text in (_core._TRUST_FULL, _core._TRUST_UNTRUSTED):
         return text
-    logger.warning("MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)",
-                   value)
+    logger.warning("MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)", value)
     return _core._TRUST_UNTRUSTED
 
 
@@ -43,9 +41,8 @@ def _annotation_read_only_hint(mcp_tool: Any) -> bool:
     """True only when annotations (SDK object or schema-cache dict) carry ``readOnlyHint is
     True``; unknown metadata means write-capable."""
     annotations = getattr(mcp_tool, "annotations", None)
-    if isinstance(annotations, dict):
-        return annotations.get("readOnlyHint") is True
-    return getattr(annotations, "readOnlyHint", None) is True
+    hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else getattr(annotations, "readOnlyHint", None)
+    return hint is True
 
 
 def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]) -> None:
@@ -55,10 +52,7 @@ def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]
     with _core._lock:
         _core._server_trust_levels[server_name] = _normalize_server_trust((config or {}).get("trust"))
         hints = _core._tool_read_only_hints.setdefault(server_name, {})
-        for tool in tools:
-            name = getattr(tool, "name", None)
-            if name:
-                hints[name] = _annotation_read_only_hint(tool)
+        hints.update({t.name: _annotation_read_only_hint(t) for t in tools if getattr(t, "name", None)})
 
 
 def _track_mcp_tool_server(tool_name: str, server_name: str) -> None:
@@ -80,17 +74,14 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
     filters anything since ClientSession defines all four methods."""
     tools_filter = config.get("tools") or {}
     enabled = {f: _parse_boolish(tools_filter.get(f), default=True) for f in ("resources", "prompts")}
-    init_result = getattr(server, "initialize_result", None)
-    advertised = getattr(init_result, "capabilities", None) if init_result is not None else None
+    advertised = getattr(getattr(server, "initialize_result", None), "capabilities", None)
 
     def _skip_reason(handler_key: str) -> Optional[str]:
         family = _UTILITY_CAPABILITY_ATTRS[handler_key]
         if not enabled[family]:
             return f"{family} disabled"
         if advertised is not None:
-            if getattr(advertised, family, None) is None:
-                return f"server does not advertise '{family}' capability"
-            return None
+            return None if getattr(advertised, family, None) is not None else f"server does not advertise '{family}' capability"
         # Legacy gate (no initialize_result): the ClientSession method shares the handler key.
         return None if hasattr(server.session, handler_key) else f"session lacks {handler_key}"
 
@@ -176,8 +167,7 @@ def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[
             continue
         _core._scan_mcp_description(name, t.name, t.description or "")
         schema = _core._convert_mcp_schema(name, t)
-        handler = _core._make_tool_handler(name, t.name, tool_timeout)
-        out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, handler))
+        out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, _core._make_tool_handler(name, t.name, tool_timeout)))
     return out
 
 
@@ -187,8 +177,8 @@ def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout) -> List
     for raw in entries:
         schema, key = (raw.get("schema"), raw.get("handler_key")) if isinstance(raw, dict) else (None, None)
         if isinstance(schema, dict) and key in _UTILITY_HANDLER_FACTORIES and schema.get("name"):
-            handler = _UTILITY_HANDLER_FACTORIES[key](name, tool_timeout)
-            out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema, handler))
+            out.append(_Candidate(schema["name"], f"{_UTILITY_ORIGIN_PREFIX}{key!r}", schema,
+                                  _UTILITY_HANDLER_FACTORIES[key](name, tool_timeout)))
     return out
 
 
@@ -197,16 +187,15 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
     a native tool's name is shadowed (native wins); any other multi-origin collision skips every
     colliding entry (fail closed). Returns survivors in order."""
     unique: List[_Candidate] = []
-    seen: set[tuple[str, str]] = set()
     origins_by_name: Dict[str, set[str]] = {}
     for c in candidates:
-        if (c.registry_name, c.origin) in seen:
+        origins = origins_by_name.setdefault(c.registry_name, set())
+        if c.origin in origins:
             logger.debug("MCP server '%s': duplicate registration candidate %s for '%s'; keeping one",
                          name, c.origin, c.registry_name)
             continue
-        seen.add((c.registry_name, c.origin))
+        origins.add(c.origin)
         unique.append(c)
-        origins_by_name.setdefault(c.registry_name, set()).add(c.origin)
     ambiguous: Dict[str, List[str]] = {}
     shadowed: set[tuple[str, str]] = set()
     for registry_name, origins in origins_by_name.items():
@@ -220,8 +209,8 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
                 "MCP server '%s': generated utility %s normalizes onto server-native %s — keeping the native tool "
                 "and dropping the utility (the utility only applies when the server has no such tool of its own)",
                 name, ", ".join(utility_origins), native_origins[0])
-            continue
-        ambiguous[registry_name] = sorted(origins)
+        else:
+            ambiguous[registry_name] = sorted(origins)
     for registry_name, origins in sorted(ambiguous.items()):
         logger.error("MCP server '%s': name normalization collision for '%s' from %s; skipping every colliding "
                      "entry instead of choosing an arbitrary handler", name, registry_name, ", ".join(origins))
@@ -234,8 +223,7 @@ def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bo
         if not c.is_utility:
             logger.warning("MCP server '%s' (lazy): cached tool '%s' collides with toolset '%s' — skipping",
                            name, c.registry_name, existing_toolset)
-        return
-    if existing_toolset.startswith("mcp-"):
+    elif existing_toolset.startswith("mcp-"):
         logger.error("MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to "
                      "preserve the existing owner", name, c.origin, c.registry_name, existing_toolset)
     else:
@@ -259,13 +247,12 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
         registry.register(
             name=c.registry_name, toolset=toolset_name, schema=c.schema, handler=c.handler, check_fn=check_fn,
             is_async=False, description=c.schema.get("description") or "", scope=scope())
-        if registry.get_toolset_for_tool(c.registry_name) != toolset_name:
-            if not lazy:
-                logger.error("MCP server '%s': registration of %s as '%s' was rejected by the registry; "
-                             "skipping provenance/count updates", name, c.origin, c.registry_name)
-            continue
-        _core._track_mcp_tool_server(c.registry_name, name)
-        registered.append(c.registry_name)
+        if registry.get_toolset_for_tool(c.registry_name) == toolset_name:
+            _core._track_mcp_tool_server(c.registry_name, name)
+            registered.append(c.registry_name)
+        elif not lazy:
+            logger.error("MCP server '%s': registration of %s as '%s' was rejected by the registry; "
+                         "skipping provenance/count updates", name, c.origin, c.registry_name)
     if registered:
         registry.register_toolset_alias(name, toolset_name)
     return registered
@@ -279,8 +266,7 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
         tools_payload = [{
             "name": t.name, "description": t.description or "",
             "inputSchema": t.inputSchema if isinstance(getattr(t, "inputSchema", None), dict) else {},
-            # Persisted so the lazy path trust-gates identically next startup.
-            "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},
+            "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},  # lazy path trust-gates identically
         } for t in server._tools if should_register(t.name)]
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]
