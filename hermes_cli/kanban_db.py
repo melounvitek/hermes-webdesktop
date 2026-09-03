@@ -198,6 +198,14 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
+def _fire_task_hook(event: str, task: Optional["Task"], task_id: str, run_id: Optional[int], **fields: Any) -> None:
+    """Lifecycle hook for a task transition; ``assignee`` from the (possibly missing) row."""
+    _fire_kanban_lifecycle_hook(
+        event, task_id, board=get_current_board(),
+        assignee=task.assignee if task else None, run_id=run_id, **fields,
+    )
+
+
 def _hook_profile_name() -> str:
     """Active profile for hook payloads; ``"default"`` when it cannot be resolved."""
     from hermes_cli.profiles import get_active_profile_name
@@ -927,48 +935,34 @@ class Task:
         parsed = _json_or(g("skills"))
         skills_value = [str(s) for s in parsed if s] if isinstance(parsed, list) else None
         return cls(
-            id=row["id"],
-            title=row["title"],
-            body=row["body"],
-            assignee=row["assignee"],
-            status=row["status"],
-            priority=row["priority"],
-            created_by=row["created_by"],
-            created_at=row["created_at"],
-            started_at=row["started_at"],
-            completed_at=row["completed_at"],
-            workspace_kind=row["workspace_kind"],
-            workspace_path=row["workspace_path"],
-            branch_name=g("branch_name"),
-            project_id=g("project_id"),
-            claim_lock=row["claim_lock"],
-            claim_expires=row["claim_expires"],
-            tenant=g("tenant"),
-            result=g("result"),
-            idempotency_key=g("idempotency_key"),
+            **{col: row[col] for col in _TASK_REQUIRED_COLUMNS},
+            **{col: g(col) for col in _TASK_OPTIONAL_COLUMNS},
+            **{col: g(col) or None for col in _TASK_EMPTY_IS_NULL_COLUMNS},
             # Pre-migration fallbacks (spawn_failures / last_spawn_error) are only
             # reachable on a DB never opened since the rename migration landed.
             consecutive_failures=g("consecutive_failures", g("spawn_failures", 0)),
-            worker_pid=g("worker_pid"),
             last_failure_error=g("last_failure_error", g("last_spawn_error")),
-            max_runtime_seconds=g("max_runtime_seconds"),
-            last_heartbeat_at=g("last_heartbeat_at"),
-            current_run_id=g("current_run_id"),
-            workflow_template_id=g("workflow_template_id"),
-            current_step_key=g("current_step_key"),
             skills=skills_value,
-            model_override=g("model_override") or None,
-            provider_override=g("provider_override") or None,
-            reasoning_effort=g("reasoning_effort") or None,
-            max_retries=g("max_retries"),
             goal_mode=bool(g("goal_mode")),
-            goal_max_turns=g("goal_max_turns") or None,
-            session_id=g("session_id"),
-            block_kind=g("block_kind") or None,
-            block_recurrences=(
-                int(g("block_recurrences")) if g("block_recurrences") is not None else 0
-            ),
+            block_recurrences=int(g("block_recurrences") or 0),
         )
+
+
+# Columns every schema version has (KeyError if the SELECT omitted them).
+_TASK_REQUIRED_COLUMNS = (
+    "id", "title", "body", "assignee", "status", "priority", "created_by", "created_at",
+    "started_at", "completed_at", "workspace_kind", "workspace_path", "claim_lock", "claim_expires",
+)
+# Later-added columns read as NULL when absent from the row.
+_TASK_OPTIONAL_COLUMNS = (
+    "branch_name", "project_id", "tenant", "result", "idempotency_key", "worker_pid",
+    "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
+    "current_step_key", "max_retries", "session_id",
+)
+# Text columns where "" is stored/read as "not set".
+_TASK_EMPTY_IS_NULL_COLUMNS = (
+    "model_override", "provider_override", "reasoning_effort", "goal_max_turns", "block_kind",
+)
 
 
 @dataclass
@@ -1002,22 +996,16 @@ class Run:
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
         return cls(
+            **{
+                col: row[col] for col in (
+                    "task_id", "profile", "step_key", "status", "claim_lock", "claim_expires",
+                    "worker_pid", "max_runtime_seconds", "last_heartbeat_at", "outcome", "summary", "error",
+                )
+            },
             id=int(row["id"]),
-            task_id=row["task_id"],
-            profile=row["profile"],
-            step_key=row["step_key"],
-            status=row["status"],
-            claim_lock=row["claim_lock"],
-            claim_expires=row["claim_expires"],
-            worker_pid=row["worker_pid"],
-            max_runtime_seconds=row["max_runtime_seconds"],
-            last_heartbeat_at=row["last_heartbeat_at"],
             started_at=int(row["started_at"]),
             ended_at=_opt_int(row["ended_at"]),
-            outcome=row["outcome"],
-            summary=row["summary"],
             metadata=_json_or(row["metadata"]),
-            error=row["error"],
         )
 
 
@@ -1871,22 +1859,29 @@ def set_model_override(
         raise ValueError("provider_override requires a model_override")
     if not model:
         provider = None
+    return _set_task_override(
+        conn, task_id,
+        "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
+        "model_override_set", {"model": model, "provider": provider},
+        ("model_override", "provider_override"), archived_msg="cannot set model override",
+    )
+
+
+def _set_task_override(
+    conn: sqlite3.Connection, task_id: str, sql: str, params: tuple, event_kind: str, payload: dict,
+    changed_fields: tuple[str, ...], *, archived_msg: str,
+) -> bool:
+    """Per-task override write: refuse archived tasks, record ``event_kind``,
+    then fire the task-updated observer AFTER commit (RFC #58548)."""
     with write_txn(conn):
         status = _task_status(conn, task_id)
         if status is None:
             return False
         if status == "archived":
-            raise RuntimeError(f"cannot set model override on archived task {task_id}")
-        conn.execute(
-            "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?",
-            (model, provider, task_id),
-        )
-        _append_event(
-            conn, task_id, "model_override_set",
-            {"model": model, "provider": provider},
-        )
-    # Task-mutation observer (RFC #58548), fired AFTER the txn commits.
-    notify_task_updated(conn, task_id, ("model_override", "provider_override"))
+            raise RuntimeError(f"{archived_msg} on archived task {task_id}")
+        conn.execute(sql, (*params, task_id))
+        _append_event(conn, task_id, event_kind, payload)
+    notify_task_updated(conn, task_id, changed_fields)
     return True
 
 
@@ -1904,17 +1899,12 @@ def set_reasoning_effort(conn: sqlite3.Connection, task_id: str, effort: Optiona
     running task. Returns True on success.
     """
     effort = normalize_reasoning_effort(effort)
-    with write_txn(conn):
-        status = _task_status(conn, task_id)
-        if status is None:
-            return False
-        if status == "archived":
-            raise RuntimeError(f"cannot set reasoning effort on archived task {task_id}")
-        conn.execute("UPDATE tasks SET reasoning_effort = ? WHERE id = ?", (effort, task_id))
-        _append_event(conn, task_id, "reasoning_effort_set", {"reasoning_effort": effort})
-    # Task-mutation observer (RFC #58548), fired AFTER the txn commits.
-    notify_task_updated(conn, task_id, ("reasoning_effort",))
-    return True
+    return _set_task_override(
+        conn, task_id,
+        "UPDATE tasks SET reasoning_effort = ? WHERE id = ?", (effort,),
+        "reasoning_effort_set", {"reasoning_effort": effort},
+        ("reasoning_effort",), archived_msg="cannot set reasoning effort",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2691,13 +2681,7 @@ def claim_task(
         if run_id is None:
             return None
         claimed = get_task(conn, task_id)
-    _fire_kanban_lifecycle_hook(
-        "kanban_task_claimed",
-        task_id,
-        board=get_current_board(),
-        assignee=claimed.assignee if claimed else None,
-        run_id=run_id,
-    )
+    _fire_task_hook("kanban_task_claimed", claimed, task_id, run_id)
     return claimed
 
 
@@ -3278,14 +3262,7 @@ def complete_task(
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
     if fire_lifecycle_hook:
-        _fire_kanban_lifecycle_hook(
-            "kanban_task_completed",
-            task_id,
-            board=get_current_board(),
-            assignee=_done_task.assignee if _done_task else None,
-            run_id=run_id,
-            summary=handoff_summary,
-        )
+        _fire_task_hook("kanban_task_completed", _done_task, task_id, run_id, summary=handoff_summary)
     return True
 
 
@@ -3654,40 +3631,11 @@ def block_task(
             if cur_row["status"] == "running"
             else "ready"
         )
-        prev_kind = _row_get(cur_row, "block_kind")
-        prev_recurrences = int(_row_get(cur_row, "block_recurrences") or 0)
-
-        # Dependency blocks never enter the human ``blocked`` bucket — they
-        # wait in ``todo`` and let ``recompute_ready`` gate on parents. Routing
-        # here (rather than ``blocked``) is what keeps a cron from ever seeing
-        # a dependency-wait as something to "unblock".
-        if kind == "dependency":
-            new_status, event_kind = "todo", "dependency_wait"
-            set_sql, params = "block_kind    = ?", (kind,)
-            payload = {"reason": reason, "kind": kind, "source_status": source_status}
-        else:
-            # Truly-blocked kinds. Increment the unblock-loop counter when this
-            # is a re-block for the SAME reason after a prior unblock: block_task
-            # only fires from running/ready (i.e. AFTER an unblock returned the
-            # task to the work pool), so a stored block_kind matching the
-            # incoming kind means blocked → unblocked → re-block, same cause.
-            # An un-typed (None) block compares as "same" to a prior un-typed one.
-            recurrences = prev_recurrences + 1 if prev_kind == kind else 1
-            set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
-            params = (kind, recurrences)
-            payload = {
-                "reason": reason,
-                "kind": kind,
-                "recurrences": recurrences,
-                "source_status": source_status,
-            }
-            if recurrences >= BLOCK_RECURRENCE_LIMIT:
-                # Loop detected — route to triage for a human-in-the-loop
-                # decision instead of letting the unblocker spin this task.
-                new_status, event_kind = "triage", "block_loop_detected"
-                payload["limit"] = BLOCK_RECURRENCE_LIMIT
-            else:
-                new_status, event_kind = "blocked", "blocked"
+        new_status, event_kind, set_sql, params, payload = _route_block(
+            kind, reason, source_status,
+            prev_kind=_row_get(cur_row, "block_kind"),
+            prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+        )
         sql = f"""
                 UPDATE tasks
                    SET status        = '{new_status}',
@@ -3711,24 +3659,40 @@ def block_task(
         if run_id is None and reason:
             run_id = _synthesize_ended_run(conn, task_id, outcome="blocked", summary=reason)
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
-        _blocked_task = get_task(conn, task_id)
-
-        def _fire_blocked_hook() -> None:
-            _fire_kanban_lifecycle_hook(
-                "kanban_task_blocked",
-                task_id,
-                board=get_current_board(),
-                assignee=_blocked_task.assignee if _blocked_task else None,
-                run_id=run_id,
-                reason=reason,
-            )
-
+        blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
-            _fire_blocked_hook()
+            _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
             return True
-    _fire_blocked_hook()
+    _fire_task_hook("kanban_task_blocked", blocked_task, task_id, run_id, reason=reason)
     return True
+
+
+def _route_block(
+    kind: Optional[str], reason: Optional[str], source_status: str, *,
+    prev_kind: Optional[str], prev_recurrences: int,
+) -> tuple[str, str, str, tuple, dict]:
+    """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
+
+    ``dependency`` never enters the human ``blocked`` bucket: it waits in
+    ``todo`` for ``recompute_ready``, so a cron never sees a dependency-wait
+    as something to "unblock". Every other kind counts unblock-loop
+    recurrences: block_task only fires from running/ready (AFTER an unblock
+    returned the task to the pool), so a stored ``block_kind`` equal to the
+    incoming one means blocked -> unblocked -> re-block for the same cause
+    (un-typed None compares equal to a prior un-typed block). At
+    ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+    """
+    payload = {"reason": reason, "kind": kind, "source_status": source_status}
+    if kind == "dependency":
+        return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
+    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
+    payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
+    if recurrences >= BLOCK_RECURRENCE_LIMIT:
+        payload["limit"] = BLOCK_RECURRENCE_LIMIT
+        return "triage", "block_loop_detected", set_sql, (kind, recurrences), payload
+    return "blocked", "blocked", set_sql, (kind, recurrences), payload
 
 
 def redact_review_value(value: Any) -> Any:
