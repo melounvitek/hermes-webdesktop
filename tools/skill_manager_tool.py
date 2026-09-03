@@ -34,7 +34,7 @@ from tools.skill_manager_guards import (  # noqa: F401 — re-exported for calle
     _background_review_write_guard, _containing_skills_root, _curator_consolidation_delete_guard,
     _is_path_redirect, _maybe_auto_propose_org_edit, _org_mirror_write_guard, _pinned_guard,
     _reset_background_review_read_marks, _validate_delete_target, _is_background_review,
-    mark_background_review_skill_read)
+    mark_background_review_skill_read, _refusal as _err)
 from tools.skill_manager_batch import (  # noqa: F401
     _BATCH_MAX_OPS, _BATCH_OP_ACTIONS, _skill_manage_batch)
 from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
@@ -104,10 +104,6 @@ def _display_create_dir() -> str:
         return f"{display_hermes_home()}/skills/"
 
 
-def _err(message: str) -> Dict[str, Any]:
-    return {"success": False, "error": message}
-
-
 # --- Validation helpers -------------------------------------------------------
 
 def _validate_name(name: str) -> Optional[str]:
@@ -157,10 +153,9 @@ def _validate_frontmatter(content: str, *, new_skill: bool = False) -> Optional[
         return f"YAML frontmatter parse error: {e}"
     if not isinstance(parsed, dict):
         return "Frontmatter must be a YAML mapping (key: value pairs)."
-    if "name" not in parsed:
-        return "Frontmatter must include 'name' field."
-    if "description" not in parsed:
-        return "Frontmatter must include 'description' field."
+    for field in ("name", "description"):
+        if field not in parsed:
+            return f"Frontmatter must include '{field}' field."
     desc = str(parsed["description"])
     if len(desc) > MAX_DESCRIPTION_LENGTH:
         return f"Description exceeds {MAX_DESCRIPTION_LENGTH} characters."
@@ -199,9 +194,7 @@ def _resolve_skill_dir(name: str, category: str = None) -> Path:
     base = _skills_dir()
     try:
         from agent.skill_utils import get_skill_create_dir
-        create_dir = get_skill_create_dir()
-        if create_dir is not None:
-            base = create_dir
+        base = get_skill_create_dir() or base
     except Exception:
         logger.debug("skills.create_dir lookup failed", exc_info=True)
     return base / category / name if category else base / name
@@ -267,14 +260,12 @@ def _find_skill_in_other_profiles(name: str) -> List[Tuple[str, Path]]:
         if profiles_root.is_dir():
             candidates += [(e.name, e / "skills") for e in profiles_root.iterdir() if e.is_dir()]
     for profile_name, skills_dir in candidates:
-        try:
+        with suppress(OSError, RuntimeError):
             if skills_dir.resolve() == active_dir or not skills_dir.is_dir():
                 continue
             hit = next((d for d in _iter_skill_dirs(skills_dir) if d.name == name), None)
             if hit is not None:
                 matches.append((profile_name, hit))  # one match per profile is enough
-        except (OSError, RuntimeError):
-            continue
     return matches
 
 
@@ -325,28 +316,22 @@ def _resolve_supporting_file(skill_dir: Path, file_path: str):
     -> ``(target, None)`` | ``(None, error_dict)``."""
     from tools.path_security import validate_within_dir
 
-    err = _validate_file_path(file_path)
-    if err:
-        return None, _err(err)
-    target = skill_dir / file_path
-    err = validate_within_dir(target, skill_dir)
-    if err:
-        return None, _err(err)
-    return target, None
+    target = skill_dir / (file_path or "")
+    err = _validate_file_path(file_path) or validate_within_dir(target, skill_dir)
+    return (None, _err(err)) if err else (target, None)
 
 
-def _locate_for_write(name: str, action: str, not_found_suffix: str = ""):
-    """Find the skill and run the org-mirror + background-review write guards
-    -> ``(skill_dir, None)`` | ``(None, error_dict)``."""
+def _locate_for_write(name: str, action: str, not_found_suffix: str = "", *,
+                      org_guard: bool = True):
+    """Find the skill and run the org-mirror (unless ``org_guard=False``) +
+    background-review write guards -> ``(skill_dir, None)`` | ``(None, error_dict)``."""
     existing = _find_skill(name)
     if not existing:
         return None, _err(_skill_not_found_error(name, not_found_suffix))
     skill_dir = existing["path"]
-    guard = (_org_mirror_write_guard(name, skill_dir, action)
+    guard = ((org_guard and _org_mirror_write_guard(name, skill_dir, action))
              or _background_review_write_guard(name, skill_dir, action))
-    if guard:
-        return None, guard
-    return skill_dir, None
+    return (None, guard) if guard else (skill_dir, None)
 
 
 def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label: str,
@@ -356,8 +341,7 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
     Returns an error dict or None."""
     original = None
     if target.exists():
-        read_guard = _background_review_read_before_write_guard(name, target, action, label)
-        if read_guard:
+        if read_guard := _background_review_read_before_write_guard(name, target, action, label):
             return read_guard
         original = target.read_text(encoding="utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -373,8 +357,7 @@ def _guarded_write(name: str, skill_dir: Path, target: Path, action: str, label:
 
 
 def _attach_org_note(result: Dict[str, Any], name: str, skill_dir: Path) -> None:
-    org_note = _maybe_auto_propose_org_edit(name, skill_dir)
-    if org_note:
+    if org_note := _maybe_auto_propose_org_edit(name, skill_dir):
         result["org_sharing"] = org_note
         result["message"] = f"{result['message']} {org_note}"
 
@@ -403,6 +386,10 @@ def _attach_lint_findings(result: Dict[str, Any], skill_md: Path) -> None:
         "— fix them with skill_manage(action='patch') to match Hermes skill standards.")
 
 
+def _clip(text: str, n: int, ellipsis: str) -> str:
+    return text[:n] + (ellipsis if len(text) > n else "")
+
+
 # --- Core actions -------------------------------------------------------------
 
 def _create_skill(name: str, content: str, category: str = None) -> Dict[str, Any]:
@@ -410,8 +397,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
            or _validate_frontmatter(content, new_skill=True) or _validate_content_size(content))
     if err:
         return _err(err)
-    existing = _find_skill(name)
-    if existing:
+    if existing := _find_skill(name):
         return _err(f"A skill named '{name}' already exists at {existing['path']}.")
 
     skill_dir = _resolve_skill_dir(name, category)
@@ -427,8 +413,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     display = skill_dir.relative_to(root) if skill_dir.is_relative_to(root) else skill_dir
     result = {
         "success": True, "message": f"Skill '{name}' created.", "path": str(display),
-        "skill_md": str(skill_md), "_change": {"description": _description_preview(content)},
-    }
+        "skill_md": str(skill_md), "_change": {"description": _description_preview(content)}}
     if category:
         result["category"] = category
     result["hint"] = (
@@ -442,15 +427,12 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
 
 def _edit_skill(name: str, content: str) -> Dict[str, Any]:
     """Replace the SKILL.md of any existing skill (full rewrite)."""
-    err = _validate_frontmatter(content) or _validate_content_size(content)
-    if err:
+    if err := _validate_frontmatter(content) or _validate_content_size(content):
         return _err(err)
     skill_dir, guard = _locate_for_write(name, "edit")
-    if guard:
-        return guard
     # SKILL.md always exists here (_find_skill requires it), so a blocked scan restores it.
-    guard = _guarded_write(name, skill_dir, skill_dir / "SKILL.md", "edit", "SKILL.md", content)
-    if guard:
+    if guard := guard or _guarded_write(
+            name, skill_dir, skill_dir / "SKILL.md", "edit", "SKILL.md", content):
         return guard
     result = {
         "success": True, "message": f"Skill '{name}' updated (full rewrite).",
@@ -480,7 +462,6 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
     skill_dir, guard = _locate_for_write(name, "patch")
     if guard:
         return guard
-
     if file_path:
         target, err = _resolve_supporting_file(skill_dir, file_path)
         if err:
@@ -490,8 +471,7 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
     if not target.exists():
         return _err(f"File not found: {target.relative_to(skill_dir)}")
     target_label = file_path or "SKILL.md"
-    read_guard = _background_review_read_before_write_guard(name, target, "patch", target_label)
-    if read_guard:
+    if read_guard := _background_review_read_before_write_guard(name, target, "patch", target_label):
         return read_guard
 
     content = target.read_text(encoding="utf-8")
@@ -504,24 +484,18 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         with suppress(Exception):
             from tools.fuzzy_match import format_no_match_hint
             match_error += format_no_match_hint(match_error, match_count, old_string, content)
-        return _err(match_error) | {"file_preview": content[:500] + ("..." if len(content) > 500 else "")}
+        return _err(match_error) | {"file_preview": _clip(content, 500, "...")}
 
-    err = _validate_content_size(new_content, label=target_label)
-    if err:
+    if err := _validate_content_size(new_content, label=target_label):
         return _err(err)
-    if not file_path:
-        err = _validate_frontmatter(new_content)
-        if err:
-            return _err(f"Patch would break SKILL.md structure: {err}")
-
-    guard = _guarded_write(name, skill_dir, target, "patch", target_label, new_content)
-    if guard:
+    if not file_path and (err := _validate_frontmatter(new_content)):
+        return _err(f"Patch would break SKILL.md structure: {err}")
+    if guard := _guarded_write(name, skill_dir, target, "patch", target_label, new_content):
         return guard
     result = {
         "success": True,
         "message": f"Patched {target_label} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
-        "_change": {"old": old_string[:200] + ("…" if len(old_string) > 200 else ""),
-                    "new": new_string[:200] + ("…" if len(new_string) > 200 else "")}}
+        "_change": {"old": _clip(old_string, 200, "…"), "new": _clip(new_string, 200, "…")}}
     _attach_org_note(result, name, skill_dir)
     return result
 
@@ -531,13 +505,9 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
     explicit prune; "<skill>" = absorbed into that umbrella, which must exist on
     disk (validated here so the model can't claim a nonexistent umbrella)."""
     skill_dir, guard = _locate_for_write(name, "delete")
-    if guard:
+    if guard := guard or _curator_consolidation_delete_guard(name, absorbed_into):
         return guard
-    fail_closed = _curator_consolidation_delete_guard(name, absorbed_into)
-    if fail_closed:
-        return fail_closed
-    pinned_err = _pinned_guard(name)
-    if pinned_err:
+    if pinned_err := _pinned_guard(name):
         return _err(pinned_err)
 
     absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
@@ -549,8 +519,7 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
                         f"Create or patch the umbrella skill first, then retry the delete.")
 
     skills_root = _containing_skills_root(skill_dir)
-    unsafe = _validate_delete_target(skill_dir)  # defense-in-depth before rmtree
-    if unsafe:
+    if unsafe := _validate_delete_target(skill_dir):  # defense-in-depth before rmtree
         return _err(unsafe)
 
     # Curator consolidations must be RECOVERABLE (`hermes curator restore`): archive
@@ -580,8 +549,7 @@ def _rmdir_if_empty(parent: Path, stop: Path) -> None:
 
 def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     """Add or overwrite a supporting file within any skill directory."""
-    err = _validate_file_path(file_path)
-    if err:
+    if err := _validate_file_path(file_path):
         return _err(err)
     if not file_content and file_content != "":
         return _err("file_content is required.")
@@ -589,18 +557,14 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
     if content_bytes > MAX_SKILL_FILE_BYTES:
         return _err(f"File content is {content_bytes:,} bytes (limit: {MAX_SKILL_FILE_BYTES:,} "
                     f"bytes / 1 MiB). Consider splitting into smaller files.")
-    err = _validate_content_size(file_content, label=file_path)
-    if err:
+    if err := _validate_content_size(file_content, label=file_path):
         return _err(err)
 
     skill_dir, guard = _locate_for_write(name, "write_file", " Create it first with action='create'.")
     if guard:
         return guard
     target, err = _resolve_supporting_file(skill_dir, file_path)
-    if err:
-        return err
-    guard = _guarded_write(name, skill_dir, target, "write_file", file_path, file_content)
-    if guard:
+    if guard := err or _guarded_write(name, skill_dir, target, "write_file", file_path, file_content):
         return guard
     result = {"success": True, "message": f"File '{file_path}' written to skill '{name}'.",
               "path": str(target)}
@@ -610,14 +574,9 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
 
 def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     """Remove a supporting file from any skill directory."""
-    err = _validate_file_path(file_path)
-    if err:
+    if err := _validate_file_path(file_path):
         return _err(err)
-    existing = _find_skill(name)
-    if not existing:
-        return _err(_skill_not_found_error(name))
-    skill_dir = existing["path"]
-    guard = _background_review_write_guard(name, skill_dir, "remove_file")
+    skill_dir, guard = _locate_for_write(name, "remove_file", org_guard=False)
     if guard:
         return guard
     target, err = _resolve_supporting_file(skill_dir, file_path)
@@ -630,8 +589,7 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
             for f in (skill_dir / subdir).rglob("*") if f.is_file()]
         return {"success": False, "error": f"File '{file_path}' not found in skill '{name}'.",
                 "available_files": available if available else None}
-    read_guard = _background_review_read_before_write_guard(name, target, "remove_file", file_path)
-    if read_guard:
+    if read_guard := _background_review_read_before_write_guard(name, target, "remove_file", file_path):
         return read_guard
 
     target.unlink()

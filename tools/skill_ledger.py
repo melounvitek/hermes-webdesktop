@@ -3,10 +3,9 @@
 Every skill mutation (any actor) appends one JSONL entry to
 ``~/.hermes/skills/.curator_ledger.jsonl`` with before/after file manifests whose
 contents are stored content-addressed (sha256-deduped) under
-``~/.hermes/.curator_backups/blobs/``. JSONL, not the state DB: durable,
-human-greppable, survives DB resets. The ledger is TELEMETRY, NOT A GATE: every
-public write path swallows and logs. The one exception is ``rollback_entry``,
-which FAILS CLOSED when its own pre-rollback safety capture fails.
+``~/.hermes/.curator_backups/blobs/``. JSONL, not the state DB: durable, greppable,
+survives DB resets. TELEMETRY, NOT A GATE: every public write path swallows and
+logs — except ``rollback_entry``, which FAILS CLOSED when its safety capture fails.
 """
 
 from __future__ import annotations
@@ -28,14 +27,12 @@ from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
-# Snapshot-id shape used by agent.curator_backup (duplicated so the ledger can
-# read the newest skills.tar.gz without importing the backup stack).
+# Snapshot-id shape of agent.curator_backup (duplicated to avoid importing the backup stack).
 _BACKUP_ID_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z(-\d{2})?$")
 # ".archive/<name>-YYYYMMDDHHMMSS" collision suffix added by archive_skill.
 _ARCHIVE_TS_SUFFIX_RE = re.compile(r"^(.+)-\d{14}$")
-# Actions whose rollback must restore a COMPLETE package: consolidation may
-# have re-homed support files out of the tree first, so a disk-only capture
-# would make rollback restore a hollow skill.
+# Rollback of these must restore a COMPLETE package: consolidation may have re-homed
+# support files first, so a disk-only capture would restore a hollow skill.
 _PACKAGE_RESTORE_ACTIONS = frozenset({"delete", "archive", "purge"})
 _VALID_ACTORS = {"curator", "agent", "user"}
 _NON_PACKAGE_TOPS = {".curator_backups", ".hub", ".archive"}
@@ -96,17 +93,13 @@ def _rel_posix(path: Path | str, root: Path) -> Optional[str]:
     """POSIX path of ``path`` relative to ``root`` (both normalized), or None when outside."""
     try:
         return _norm(path).relative_to(_norm(root)).as_posix()
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
 def _is_within(root: Path, path: Path) -> bool:
     """True when *path* (normalized, no symlink resolution) sits under *root*."""
-    try:
-        root_r, path_r = _norm(root), _norm(path)
-        return path_r == root_r or root_r in path_r.parents
-    except Exception:
-        return False
+    return _rel_posix(path, root) is not None
 
 
 def _store_blob(data: bytes) -> str:
@@ -150,9 +143,7 @@ def snapshot_paths(root: Optional[Path], *, complete_package: bool = False) -> L
     else:
         return []
     out = [{"path": str(f), "sha256": _store_blob(f.read_bytes())} for f in files]
-    if complete_package:
-        out = fill_snapshot_from_curator_backup(root, out)
-    return out
+    return fill_snapshot_from_curator_backup(root, out) if complete_package else out
 
 
 def _package_rel(root: Path) -> Optional[str]:
@@ -208,9 +199,7 @@ def _latest_skills_tarball() -> Optional[Path]:
 def _read_package_files_from_latest_backup(prefixes: List[str]) -> Dict[str, bytes]:
     """``{posix-relpath: bytes}`` under *prefixes* in the newest snapshot; malicious
     member names (absolute, ``..`` traversal) are rejected."""
-    if not prefixes:
-        return {}
-    archive = _latest_skills_tarball()
+    archive = _latest_skills_tarball() if prefixes else None
     if archive is None:
         return {}
     prefixed = tuple(p if p.endswith("/") else p + "/" for p in prefixes)
@@ -219,12 +208,10 @@ def _read_package_files_from_latest_backup(prefixes: List[str]) -> Dict[str, byt
     try:
         with tarfile.open(archive, "r:gz") as tf:
             for member in tf.getmembers():
-                if not member.isfile():
-                    continue
                 name = member.name.replace("\\", "/").lstrip("./")
-                if not name or name.startswith("/") or ".." in Path(name).parts:
-                    continue
-                if name not in exact and not name.startswith(prefixed):
+                if (not member.isfile() or not name or name.startswith("/")
+                        or ".." in Path(name).parts
+                        or (name not in exact and not name.startswith(prefixed))):
                     continue
                 extracted = tf.extractfile(member)
                 if extracted is not None:
@@ -293,14 +280,10 @@ def append_entry(
         return None
     try:
         entry = {
-            "id": uuid.uuid4().hex[:12],
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "id": uuid.uuid4().hex[:12], "ts": datetime.now(timezone.utc).isoformat(),
             "actor": actor if actor in _VALID_ACTORS else derive_actor(),
-            "action": action,
-            "skill": skill,
-            "evidence": evidence or {},
-            "before": before or [],
-            "after": after or []}
+            "action": action, "skill": skill, "evidence": evidence or {},
+            "before": before or [], "after": after or []}
         path = ledger_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as fh:
@@ -327,9 +310,8 @@ def record_mutation(
             before = snapshot_paths(before_root, complete_package=_complete)
         elif _complete:
             before = fill_snapshot_from_curator_backup(before_root, before, skill=skill)
-        after = snapshot_paths(after_root)
-        return append_entry(
-            action, skill, before=before, after=after, actor=actor, evidence=evidence)
+        return append_entry(action, skill, before=before, after=snapshot_paths(after_root),
+                            actor=actor, evidence=evidence)
     except Exception as e:
         logger.warning("skill_ledger: record_mutation failed (%s) — mutation unaffected", e)
         return None
@@ -361,20 +343,16 @@ def list_entries(skill: Optional[str] = None, limit: Optional[int] = None) -> Li
     try:
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
-                try:
+                with suppress(json.JSONDecodeError):
                     row = json.loads(line) if line.strip() else None
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+                    if isinstance(row, dict):
+                        rows.append(row)
     except OSError:
         return []
     if skill:
         rows = [r for r in rows if r.get("skill") == skill]
     rows.reverse()
-    if limit is not None and limit >= 0:
-        rows = rows[:limit]
-    return rows
+    return rows[:limit] if limit is not None and limit >= 0 else rows
 
 
 def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
@@ -403,14 +381,11 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     entry = get_entry(entry_id)
     if entry is None:
         return False, f"no ledger entry with id '{entry_id}'"
-
-    path_err = _validate_entry_paths(entry)
-    if path_err:
+    if path_err := _validate_entry_paths(entry):
         return False, f"refusing rollback: {path_err}"
 
     before = list(entry.get("before") or [])
     after = list(entry.get("after") or [])
-
     # Historical hollow delete/archive/purge entries (SKILL.md only): fill from the
     # newest curator backup so the complete package is restored. Entry hashes win;
     # only missing paths are added, and the filled set is re-validated.
@@ -418,10 +393,8 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
         before = fill_snapshot_from_curator_backup(
             next(iter(_skill_md_parents(before)), None), before,
             skill=str(entry.get("skill") or "") or None)
-        path_err = _validate_entry_paths({**entry, "before": before, "after": after})
-        if path_err:
+        if path_err := _validate_entry_paths({**entry, "before": before, "after": after}):
             return False, f"refusing rollback: {path_err}"
-
     # Pre-check every blob we need so we never fail mid-restore.
     for item in before:
         if read_blob(str(item.get("sha256", ""))) is None:
@@ -431,11 +404,8 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     # Safety entry: CURRENT state of every touched path, so the rollback itself is undoable.
     touched = {str(i["path"]) for i in before + after if i.get("path")}
     try:
-        safety_before: List[Dict[str, str]] = []
-        for p in sorted(touched):
-            fp = Path(p)
-            if fp.is_file():
-                safety_before.append({"path": p, "sha256": _store_blob(fp.read_bytes())})
+        safety_before = [{"path": p, "sha256": _store_blob(Path(p).read_bytes())}
+                         for p in sorted(touched) if Path(p).is_file()]
         safety_id = append_entry(
             "pre-rollback", entry.get("skill", "?"), before=safety_before, after=safety_before,
             evidence={"rollback_target": entry_id})
@@ -456,10 +426,9 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     for item in after:
         p = str(item.get("path", ""))
         if p and p not in before_paths:
-            fp = Path(p)
             try:
-                if fp.is_file():
-                    fp.unlink()
+                if Path(p).is_file():
+                    Path(p).unlink()
                     removed += 1
             except OSError as e:
                 logger.warning("skill_ledger: could not remove %s during rollback: %s", p, e)
