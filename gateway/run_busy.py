@@ -478,8 +478,7 @@ class GatewayBusySessionMixin:
             _media_urls = getattr(event, "media_urls", None) or []
             if self._pending_event_audio_paths(event):
                 _interrupt_text, _ = await self._transcribe_and_echo_pending_voice(
-                    event, adapter, event.source, event.text or "",
-                    log_context="Voice-busy-interrupt",
+                    event, adapter, event.source, event.text or "", log_context="Voice-busy-interrupt",
                 )
             elif not _interrupt_text and _media_urls:
                 _interrupt_text = _build_media_placeholder(event)
@@ -561,9 +560,7 @@ class GatewayBusySessionMixin:
 
         # One-time onboarding hint about the queue/interrupt knob (flag persisted to config.yaml).
         try:
-            from agent.onboarding import (
-                BUSY_INPUT_FLAG, busy_input_hint_gateway, is_seen, mark_seen
-            )
+            from agent.onboarding import (BUSY_INPUT_FLAG, busy_input_hint_gateway, is_seen, mark_seen)
             if not is_seen(_load_gateway_config(), BUSY_INPUT_FLAG):
                 _hint_mode = (
                     "steer" if is_steer_mode
@@ -590,8 +587,7 @@ class GatewayBusySessionMixin:
         if not self._is_user_authorized(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
-                "user=%s (%s), platform=%s, session=%s", event.source.user_id,
-                event.source.user_name,
+                "user=%s (%s), platform=%s, session=%s", event.source.user_id, event.source.user_name,
                 event.source.platform.value if event.source.platform else "unknown", session_key,
             )
             return True  # handled (silently dropped); do not fall through
@@ -694,8 +690,7 @@ class GatewayBusySessionMixin:
     def _command_handler_table(self, names) -> Dict[str, Any]:
         return {
             name: getattr(
-                self,
-                self._COMMAND_HANDLER_ALIASES.get(name, f"_handle_{name.replace('-', '_')}_command"),
+                self, self._COMMAND_HANDLER_ALIASES.get(name, f"_handle_{name.replace('-', '_')}_command"),
             )
             for name in names
         }
@@ -731,9 +726,7 @@ class GatewayBusySessionMixin:
         "loop": "_busy_loop_command",
     }
 
-    async def _dispatch_busy_slash_command(
-        self, event: MessageEvent, cmd_def, quick_key: str, source,
-    ):
+    async def _dispatch_busy_slash_command(self, event: MessageEvent, cmd_def, quick_key: str, source):
         """Dispatch a recognized slash command while an agent is running.
 
         Order: ``busy_handler`` (mid-run variant) → ``busy_policy == "dispatch"`` (normal handler)
@@ -798,8 +791,7 @@ class GatewayBusySessionMixin:
         # Hard-kill: a soft interrupt can't reach a truly hung executor thread.
         from gateway.run import _INTERRUPT_REASON_STOP
         await self._interrupt_and_clear_session(
-            quick_key, source, interrupt_reason=_INTERRUPT_REASON_STOP,
-            invalidation_reason="stop_command",
+            quick_key, source, interrupt_reason=_INTERRUPT_REASON_STOP, invalidation_reason="stop_command",
         )
         logger.info("STOP for session %s — agent interrupted, session lock released", quick_key)
         return EphemeralReply(t("gateway.stop.stopped"))
@@ -809,8 +801,7 @@ class GatewayBusySessionMixin:
         # into the same broken history); clear pending messages so the old text doesn't replay.
         from gateway.run import _INTERRUPT_REASON_RESET
         await self._interrupt_and_clear_session(
-            quick_key, source, interrupt_reason=_INTERRUPT_REASON_RESET,
-            invalidation_reason="new_command",
+            quick_key, source, interrupt_reason=_INTERRUPT_REASON_RESET, invalidation_reason="new_command",
         )
         return await self._handle_reset_command(event)
 
@@ -824,8 +815,7 @@ class GatewayBusySessionMixin:
         adapter = self._adapter_for_source(source)
         if adapter:
             self._enqueue_fifo(quick_key, MessageEvent(
-                text=queued_text,
-                message_type=event.message_type if has_media else MessageType.TEXT,
+                text=queued_text, message_type=event.message_type if has_media else MessageType.TEXT,
                 source=event.source, raw_message=event.raw_message, message_id=event.message_id,
                 media_urls=list(getattr(event, "media_urls", []) or []),
                 media_types=list(getattr(event, "media_types", []) or []),
@@ -1137,9 +1127,7 @@ class GatewayBusySessionMixin:
                 if button_result and getattr(button_result, "success", False):
                     return None  # buttons rendered — no redundant text ack
             except Exception as exc:
-                logger.debug(
-                    "send_slash_confirm failed for %s on %s: %s", command, source.platform, exc
-                )
+                logger.debug("send_slash_confirm failed for %s on %s: %s", command, source.platform, exc)
         # Text fallback — the prompt message itself is the direct reply.
         return message
 
