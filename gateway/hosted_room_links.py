@@ -1,8 +1,7 @@
 """Private SQLite storage for negotiated hosted-room links.
 
-Route metadata and its scoped grant share the gateway's private root
-``state.db``. SQLite WAL plus ``BEGIN IMMEDIATE`` owns concurrency; grants are
-never included in reprs, status payloads, or exception messages.
+Route metadata and its scoped grant share the gateway's private root ``state.db``. SQLite WAL plus
+``BEGIN IMMEDIATE`` owns concurrency; grants are never included in reprs, status payloads, or exception messages.
 """
 
 from __future__ import annotations

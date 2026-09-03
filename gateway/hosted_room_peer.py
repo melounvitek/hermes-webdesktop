@@ -1,8 +1,7 @@
 """Typed contracts for autonomous cross-gateway hosted-room members.
 
-The Desktop may bootstrap an invitation but is never the issuer or runtime
-courier: the target gateway verifies a scoped grant and the full task
-coordinates before admitting any model or tool work.
+The Desktop may bootstrap an invitation but is never the issuer or runtime courier: the target gateway
+verifies a scoped grant and the full task coordinates before admitting any model or tool work.
 """
 
 from __future__ import annotations
@@ -53,8 +52,7 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
     (home := Path(home_value)).mkdir(parents=True, exist_ok=True)
     path = home / _ROOM_GRANT_SECRET_FILE
     def _read() -> bytes:
-        data = path.read_bytes()
-        if len(data) != 32:
+        if len(data := path.read_bytes()) != 32:
             raise HostedRoomGrantError("gateway RoomLink secret is invalid")
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
             path.chmod(0o600)
@@ -195,7 +193,6 @@ _CATALOG_FIELDS = {
 @dataclass(frozen=True)
 class GatewayRoomCatalog:
     """Authenticated gateway capabilities inherited by its Bots."""
-
     installation_id: str
     protocol_versions: tuple[int, ...]
     link_modes: tuple[LinkMode, ...]
@@ -220,8 +217,8 @@ class GatewayRoomCatalog:
         policy = RoomExecutionPolicy.from_mapping(value["execution_policy"])
         endpoint = _parse_endpoint(value["endpoint"]) if "endpoint" in value else (None, None, None)
         catalog = cls(
-            installation_id, versions, links, value["persistent_process"], value["text"], value["attachments"],
-            policy, _digest(value["catalog_digest"], field="catalog_digest"), *endpoint)
+            installation_id, versions, links, value["persistent_process"], value["text"], value["attachments"], policy,
+            _digest(value["catalog_digest"], field="catalog_digest"), *endpoint)
         if not hmac.compare_digest(_catalog_digest(catalog.as_mapping()), catalog.catalog_digest):
             raise HostedRoomPeerError("catalog_digest does not match the catalog")
         return catalog
@@ -252,7 +249,7 @@ def catalog_mapping(
     """Build a canonical catalog mapping with its digest."""
     # A Desktop-managed gateway exits with the app: the caller's flag is only an upper bound.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
-    profile = (str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default")
+    profile = str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default"
     checked_policy = RoomExecutionPolicy.from_mapping(
         execution_policy or execution_policy_mapping(target_profile=profile))
     # A RoomLink run is initiated by another installation. Process-wide YOLO mode bypasses the scoped
@@ -354,7 +351,6 @@ _DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
 @dataclass(frozen=True)
 class HostedMemberDispatch:
     """Recipient-validated identity for one remote room member attempt."""
-
     protocol_version: int
     room_id: str
     home_install_id: str
@@ -380,8 +376,7 @@ class HostedMemberDispatch:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "HostedMemberDispatch":
         _exact_fields(value, required=set(_DISPATCH_FIELDS) | {"prompt", "prompt_digest"}, label="dispatch")
-        prompt = value["prompt"]
-        if not isinstance(prompt, str) or not prompt.strip():
+        if not isinstance(prompt := value["prompt"], str) or not prompt.strip():
             raise HostedRoomPeerError("prompt must be a non-empty string")
         text(prompt, error=HostedRoomPeerError, label="prompt", max_bytes=MAX_PROMPT_BYTES, strip=False)
         prompt_digest = _digest(value["prompt_digest"], field="prompt_digest")
@@ -481,8 +476,7 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
     operation_expires_at = status_expires_at if permission in {"approve", "status", "stop"} else expires_at
     if checked_now < issued_at - 30 or checked_now >= operation_expires_at:
         raise HostedRoomGrantError("room grant is expired or not active")
-    permissions = payload.get("permissions")
-    if not isinstance(permissions, list) or permission not in permissions:
+    if not isinstance(permissions := payload.get("permissions"), list) or permission not in permissions:
         raise HostedRoomGrantError("room grant does not allow this operation")
     return payload
 

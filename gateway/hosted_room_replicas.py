@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from functools import partial
 from typing import Any, Iterator
 
@@ -53,16 +53,10 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def _replica_transaction(db_path: DbPath) -> Iterator[sqlite3.Connection]:
-    """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction.
-
-    The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
-    """
-    conn = _connect(db_path)
-    try:
-        with conn:
-            _initialize_replica_schema(conn)
-    finally:
-        conn.close()
+    """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction. The DDL is
+    deliberately re-run inside the transaction: that double init is the established statement order."""
+    with closing(_connect(db_path)) as conn, conn:
+        _initialize_replica_schema(conn)
     with _transaction(db_path, immediate=True) as conn:
         _initialize_replica_schema(conn)
         yield conn
@@ -206,9 +200,9 @@ def promote_replica(
 ) -> dict[str, Any]:
     """Continue a replicated room on THIS gateway at ``epoch + 1``.
 
-    Copies the replica log into the authoritative store and appends a lineage-proving
-    ``authority.claimed`` event, so wherever the claim replicates the old epoch is stale and every
-    fenced primitive rejects it. The caller decides takeover is safe; this makes it atomic and provable.
+    Copies the replica log into the authoritative store and appends a lineage-proving ``authority.claimed``
+    event, so wherever the claim replicates the old epoch is stale and every fenced primitive rejects it.
+    The caller decides takeover is safe; this makes it atomic and provable.
     """
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
@@ -225,10 +219,8 @@ def promote_replica(
             raise RoomConflictError("room_id already exists in the local authoritative store")
         if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
             raise RoomConflictError("room_id belongs to a disbanded room")
-        previous_gateway = str(replica["authority_gateway_id"])
-        previous_epoch = int(replica["authority_epoch"])
-        target_epoch = previous_epoch + 1
-        claim_seq = int(replica["last_seq"]) + 1
+        previous_gateway, previous_epoch = str(replica["authority_gateway_id"]), int(replica["authority_epoch"])
+        target_epoch, claim_seq = previous_epoch + 1, int(replica["last_seq"]) + 1
         claim = _control_event("claimed", target_epoch, {
             "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
             "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason})
@@ -257,9 +249,9 @@ def demote_room(
 ) -> dict[str, Any]:
     """Fence THIS gateway's stale room authority against a proven newer epoch.
 
-    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that
-    another gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed
-    lineage so no local send can commit at the stale epoch. Idempotent per lineage.
+    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that another
+    gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed lineage so no
+    local send can commit at the stale epoch. Idempotent per lineage.
     """
     room_id = _room_id(room_id)
     observed_gateway_id = _validate_identifier(
@@ -272,8 +264,7 @@ def demote_room(
                  FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
         if row is None:
             raise ReplicaError("room not found in the local authoritative store")
-        current_gateway = str(row["authority_gateway_id"])
-        current_epoch = int(row["authority_epoch"])
+        current_gateway, current_epoch = str(row["authority_gateway_id"]), int(row["authority_epoch"])
         if current_gateway == observed_gateway_id and current_epoch == observed_epoch:
             return {
                 "room_id": room_id, "authority_gateway_id": current_gateway, "authority_epoch": current_epoch,

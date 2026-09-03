@@ -1,9 +1,8 @@
 """Durable state for gateway-hosted Bot Mode rooms.
 
-Owns only hosted-room identity and its append-only event log; delivery, relay leasing
-and agent turns belong to the relay and the hosted-room driver, so the log composes with
-a durable relay without a second transport queue. Callers supply the database path
-(production handlers use the gateway's root ``state.db``).
+Owns only hosted-room identity and its append-only event log; delivery, relay leasing and agent turns
+belong to the relay and the hosted-room driver, so the log composes with a durable relay without a second
+transport queue. Callers supply the database path (production handlers use the gateway's root ``state.db``).
 """
 
 from __future__ import annotations
@@ -18,8 +17,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from gateway.hosted_rooms_common import (
-    DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite, table_columns,
-    table_exists, transaction)
+    DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, fenced_update as _fenced_update,
+    identifier, open_sqlite, table_columns, table_exists, transaction, utf8_len)
 
 PROTOCOL_VERSION = 2
 MAX_ROOM_ID_CHARS = 128
@@ -39,9 +38,8 @@ MAX_DISBANDED_ROOM_TOMBSTONES = 512
 DISBANDED_ROOM_RETENTION_SECONDS = 90 * 24 * 60 * 60
 MAX_EVENTS_PER_ROOM = 50_000
 MAX_ROOM_EVENT_BYTES = 256 * 1024 * 1024
-# Leave substantial headroom below the pre-update state.db snapshot ceiling.
-# Event accounting does not include SQLite indexes or repeated room ids, so the
-# logical budget must stay well below the physical-file limit.
+# Leave substantial headroom below the pre-update state.db snapshot ceiling: event accounting excludes
+# SQLite indexes and repeated room ids, so the logical budget must stay well below the physical-file limit.
 MAX_GATEWAY_EVENT_BYTES = 16 * 1024 * 1024
 CONTROL_EVENT_COUNT_RESERVE = 64
 CONTROL_EVENT_BYTE_RESERVE = 1024 * 1024
@@ -62,7 +60,6 @@ _OPTIONAL_ACTOR_FIELDS = (
 _ACTOR_FIELDS = frozenset({"kind", "id", *(field for field, _ in _OPTIONAL_ACTOR_FIELDS)})
 
 # --- schema -----------------------------------------------------------------
-
 _REMOTE_RUN_IDENTITY_COLUMNS = (
     "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id", "target_install_id",
     "target_profile", "task_id", "execution_generation")
@@ -156,7 +153,6 @@ _REQUIRED_COLUMNS = tuple(
 _REMOTE_RUN_SCHEMA_COLUMNS = _REQUIRED_COLUMNS[4][1]
 
 # --- SQL fragments (statement text must stay byte-stable after whitespace normalisation) ---
-
 _EVENT_COLUMNS = ("room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at")
 _SELECT_EVENT = f"SELECT {_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=? AND event_id=?"
 _INSERT_EVENT = (f"INSERT INTO hosted_room_events ({_EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
@@ -206,7 +202,6 @@ class AuthoritySupersededError(AuthorityConflictError):
 
 
 # --- validation ---------------------------------------------------------------
-
 _canonical_json = partial(canonical_json, error=HostedRoomError, ensure_ascii=False)
 _validate_identifier = partial(identifier, error=HostedRoomError)
 _room_id = partial(_validate_identifier, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
@@ -338,9 +333,8 @@ def _migrate_remote_run_schema(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE hosted_room_remote_runs_migrating RENAME TO hosted_room_remote_runs")
 
 
-# Draft builds before the actor contract carried no identity. Preserve their
-# inert replay rows explicitly as legacy system events rather than guessing a
-# user or Bot author.
+# Draft builds before the actor contract carried no identity. Preserve their inert replay rows explicitly
+# as legacy system events rather than guessing a user or Bot author.
 _LEGACY_ACTOR_JSON = _system_actor_json("legacy").replace("'", "''")
 # (table, column, ddl) applied in this exact order; each table's PRAGMA is read on first use.
 _LEGACY_COLUMN_DDL = (
@@ -380,10 +374,9 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     for statement in _SCHEMA_DDL:
         conn.execute(statement)
     _migrate_legacy_columns(conn)
-    # Old schemas kept the final identity tombstone in hosted_rooms itself.
-    # Copy those identities before bounded history pruning can remove their
-    # heavier room/event payloads. This compact registry is intentionally
-    # permanent: a stale coordinate must never name a different Group Chat.
+    # Old schemas kept the final identity tombstone in hosted_rooms itself. Copy those identities before
+    # bounded history pruning can remove their heavier room/event payloads. This compact registry is
+    # intentionally permanent: a stale coordinate must never name a different Group Chat.
     conn.execute(_RETIRE_FROM_ROOMS.format(where="disbanded_at IS NOT NULL"))
     _migrate_remote_run_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hosted_room_events_cursor ON hosted_room_events(room_id, seq)")
@@ -449,8 +442,7 @@ def _room_row(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], room_
     row = conn.execute(sql, params).fetchone()
     if row is not None:
         return row
-    # A retained disband tombstone still has replayable history; the caller simply
-    # did not opt into reading disbanded rooms.
+    # A retained disband tombstone still has replayable history; the caller did not opt into disbanded rooms.
     retained = conn.execute("SELECT 1 FROM hosted_rooms WHERE room_id=?", (room_id,)).fetchone()
     if retained is None and _is_retired(conn, room_id):
         raise RoomHistoryExpiredError("Group Chat history expired; room_id remains permanently retired")
@@ -460,12 +452,6 @@ def _room_row(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], room_
 def _require_authority(room: sqlite3.Row, gateway_id: str, epoch: int, message: str) -> None:
     if str(room["authority_gateway_id"]) != gateway_id or int(room["authority_epoch"]) != epoch:
         raise AuthorityConflictError(message)
-
-
-def _fenced_update(conn: sqlite3.Connection, sql: str, params: tuple, error: Exception) -> None:
-    """Run a compare-and-swap UPDATE; anything but exactly one row means the fence was lost."""
-    if conn.execute(sql, params).rowcount != 1:
-        raise error
 
 
 def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> sqlite3.Row:
@@ -522,7 +508,7 @@ def _prepare_event(
     conn: sqlite3.Connection, room: sqlite3.Row, event_id: str, kind: str, actor_json: str, payload_json: str, *,
     allow_control: bool = False) -> int:
     """Size one pending event and enforce per-room and gateway capacity; returns its bytes."""
-    additional_bytes = len((event_id + kind + actor_json + payload_json).encode("utf-8"))
+    additional_bytes = utf8_len(event_id, kind, actor_json, payload_json)
     count_reserve, byte_reserve = (CONTROL_EVENT_COUNT_RESERVE, CONTROL_EVENT_BYTE_RESERVE) if allow_control else (0, 0)
     gateway_byte_limit = MAX_GATEWAY_EVENT_BYTES + byte_reserve
     if int(room["next_seq"]) - 1 >= MAX_EVENTS_PER_ROOM + count_reserve:
@@ -540,7 +526,6 @@ def _prepare_event(
 
 
 # --- retention -------------------------------------------------------------------
-
 # Deleted in this order when a disbanded room's payload is purged.
 _DEPENDENT_TABLES = (
     "hosted_room_policy_transcript_state", "hosted_room_policy_transcript", "hosted_room_policy_publications",
@@ -710,7 +695,7 @@ def reserve_peer_room(
     if expiry <= timestamp:
         raise HostedRoomError("peer room reservation must expire in the future")
     values = _reservation_claims(claims)
-    room_id, _member_id, target_profile, gateway_id, epoch = values
+    room_id, _, target_profile, gateway_id, epoch = values
     with _transaction(db_path, immediate=True) as conn:
         conn.execute("DELETE FROM hosted_room_peer_reservations WHERE expires_at<=?", (timestamp,))
         authority_rows = conn.execute(
@@ -822,11 +807,10 @@ def _adopt_legacy_room(
     """Claim a 'legacy'-authority room for a real gateway with a fenced claim event."""
     target_epoch = int(existing["authority_epoch"]) + 1
     seq = int(existing["next_seq"])
-    actor_json = _system_actor_json("authority-control")
-    payload_json = _claim_payload_json("legacy", authority_gateway_id, target_epoch)
     claim_bytes = _insert_event(
-        conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed", actor_json, target_epoch,
-        payload_json, now, allow_control=True)
+        conn, existing, room_id, seq, "system:authority-adopted", "authority.claimed",
+        _system_actor_json("authority-control"), target_epoch,
+        _claim_payload_json("legacy", authority_gateway_id, target_epoch), now, allow_control=True)
     _fenced_update(conn, """UPDATE hosted_rooms
             SET members_json=?, authority_gateway_id=?, authority_epoch=?,
                 next_seq=next_seq+1, revision=revision+1, event_bytes=event_bytes+?, updated_at=?
@@ -869,8 +853,8 @@ def create_room(
             if existing["authority_gateway_id"] != authority_gateway_id:
                 raise RoomConflictError("room_id already belongs to a different authority")
             return _room_from_row(existing, idempotent=True)
-        active_rooms = int(conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0])
-        if active_rooms >= MAX_ACTIVE_ROOMS:
+        active = conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0]
+        if int(active) >= MAX_ACTIVE_ROOMS:
             raise HostedRoomError("This host has too many active Group Chats. Delete one and try again.")
         conn.execute(
             f"""INSERT INTO hosted_rooms ({_ROOM_COLUMNS_WITH_BYTES})
@@ -923,17 +907,14 @@ def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now:
         conn.execute(_INSERT_EVENT, (
             room_id, seq, event_id, "room.renamed", actor_json, int(room["authority_epoch"]), payload_json, now))
         updated = conn.execute(_SELECT_ROOM, (room_id,)).fetchone()
-        event = _load_event(conn, room_id, event_id)
-    return {**_room_from_row(updated), "event": _event_from_row(event)}
+        return {**_room_from_row(updated), "event": _event_from_row(_load_event(conn, room_id, event_id))}
 
 
 def append_event(
     db_path: DbPath, *, room_id: Any, event_id: Any, kind: Any, actor: Any, payload: Any,
     authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None) -> dict[str, Any]:
-    """Append one immutable event and allocate its per-room sequence atomically.
-
-    Repeating an ``event_id`` with identical content returns the original; different content fails closed.
-    """
+    """Append one immutable event and allocate its per-room sequence atomically; repeating an ``event_id``
+    with identical content returns the original, different content fails closed."""
     room_id = _room_id(room_id)
     event_id = _event_id(event_id)
     kind = _validate_event_kind(kind)
@@ -984,11 +965,9 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
 
 
 def probe_hosted_room(db_path: DbPath, *, room_id: Any) -> bool:
-    """Check room ownership without creating or migrating the shared store.
-
-    Runs on the synchronous prompt-admission path for older Desktop clients, so it fails fast
-    under contention instead of blocking the WebSocket reader for SQLite's ten-second timeout.
-    """
+    """Check room ownership without creating or migrating the shared store; runs on the synchronous
+    prompt-admission path for older Desktop clients, so it fails fast under contention instead of blocking
+    the WebSocket reader for SQLite's ten-second timeout."""
     return _probe(
         Path(db_path), "hosted_rooms", "SELECT 1 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL LIMIT 1",
         (_room_id(room_id),), "hosted room ownership is temporarily unavailable")
@@ -1031,11 +1010,9 @@ def request_room_stop(
 def claim_authority(
     db_path: DbPath, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, new_gateway_id: Any, event_id: Any,
     now: float | None = None) -> dict[str, Any]:
-    """Fence a verified authority transfer with a compare-and-swap epoch.
-
-    Does not decide *when* takeover is safe: a replicated driver calls it only after its
-    lease/quorum policy established that the previous owner can no longer commit.
-    """
+    """Fence a verified authority transfer with a compare-and-swap epoch; does not decide *when* takeover is
+    safe (a replicated driver calls it only after its lease/quorum policy established that the previous
+    owner can no longer commit)."""
     room_id = _room_id(room_id)
     expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")
     new_gateway_id = _actor_id(new_gateway_id, "new_gateway_id")
@@ -1110,8 +1087,7 @@ def disband_room(
     with _transaction(db_path, immediate=True) as conn:
         room = conn.execute("""SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes, disbanded_at
                 FROM hosted_rooms WHERE room_id=?""", (room_id,)).fetchone()
-        replay = _disband_replay(conn, room_id, room)
-        if replay is not None:
+        if (replay := _disband_replay(conn, room_id, room)) is not None:
             return replay
         _require_authority(room, expected_gateway_id, expected_epoch, "stale hosted room authority")
         disband_bytes = _insert_event(
@@ -1169,19 +1145,16 @@ def read_events(
         cursor = page_events[-1]["seq"] if page_events else since_seq
         return {"events": page_events, "cursor": cursor, "latest_seq": latest_seq, "has_more": cursor < latest_seq,
                 "authority": authority}
-    def page_bytes(page: dict[str, Any]) -> int:
-        return len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-    page = build_page(events)
-    if events and page_bytes(page) > MAX_LOG_PAGE_BYTES:
+    def fits(page_events: list[dict[str, Any]]) -> bool:
+        page_json = json.dumps(build_page(page_events), ensure_ascii=False, separators=(",", ":"))
+        return utf8_len(page_json) <= MAX_LOG_PAGE_BYTES
+    if events and not fits(events):
         # Binary-search the largest prefix whose serialized page fits the budget.
         low, high = 1, len(events)
         while low < high:
             middle = (low + high + 1) // 2
-            if page_bytes(build_page(events[:middle])) <= MAX_LOG_PAGE_BYTES:
-                low = middle
-            else:
-                high = middle - 1
-        page = build_page(events[:low])
-        if page_bytes(page) > MAX_LOG_PAGE_BYTES:
+            low, high = (middle, high) if fits(events[:middle]) else (low, middle - 1)
+        events = events[:low]
+        if not fits(events):
             raise HostedRoomError("hosted room event exceeds replay page limit")
-    return page
+    return build_page(events)
