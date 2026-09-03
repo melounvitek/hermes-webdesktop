@@ -5,6 +5,7 @@ or an ABC-subclass fallback."""
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import logging
@@ -150,10 +151,8 @@ def instance_from_module(mod: Any, *, collector: Any, collected_attr: str, base_
     for attr_name in dir(mod):
         attr = getattr(mod, attr_name, None)
         if isinstance(attr, type) and issubclass(attr, base_cls) and attr is not base_cls:
-            try:
+            with contextlib.suppress(Exception):
                 return attr()
-            except Exception:
-                pass
     return None
 
 

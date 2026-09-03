@@ -8,6 +8,7 @@ Scope: strictly HERMES_HOME and /tmp/hermes-*; never ~/.hermes/logs/ or system d
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import shutil
@@ -37,11 +38,9 @@ def _state_file(name: str) -> Path:
 
 def is_safe_path(path: Path) -> bool:
     """Accept only paths under HERMES_HOME or ``/tmp/hermes-*`` (rejects /mnt/c etc.)."""
-    try:
+    with contextlib.suppress(ValueError, OSError):
         path.resolve().relative_to(get_hermes_home())
         return True
-    except (ValueError, OSError):
-        pass
     parts = path.parts
     return len(parts) >= 3 and parts[1] == "tmp" and parts[2].startswith("hermes-")
 
@@ -284,13 +283,11 @@ def _sweep_empty_dirs(hermes_home: Path) -> int:
     while stack:
         dirpath, visited = stack.pop()
         if visited:
-            try:
+            with contextlib.suppress(OSError):
                 if not any(dirpath.iterdir()):
                     dirpath.rmdir()
                     removed += 1
                     _log(f"DELETED: {dirpath} (empty dir)")
-            except OSError:
-                pass
             continue
         stack.append((dirpath, True))
         stack.extend((child, False) for child in _subdirs(dirpath, _EMPTY_DIR_SWEEP_PRUNE_DIRS))

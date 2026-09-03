@@ -53,9 +53,8 @@ def find_provider_dir(name: str) -> Optional[Path]:
     if bundled.is_dir() and (bundled / "__init__.py").exists():
         return bundled
     user_dir = _loader.user_plugins_dir()
-    if user_dir and (user_dir / name).is_dir() and _is_cron_provider_dir(user_dir / name):
-        return user_dir / name
-    return None
+    user = user_dir / name if user_dir else None
+    return user if user and user.is_dir() and _is_cron_provider_dir(user) else None
 
 
 def discover_cron_schedulers() -> List[Tuple[str, str, bool]]:
@@ -85,9 +84,7 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  #
     mod = _loader.load_plugin_module(
         module_name, provider_dir, parents=("plugins", "plugins.cron_providers"), logger=logger,
         synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
-    if mod is None:
-        return None
-    return _loader.instance_from_module(
+    return mod and _loader.instance_from_module(
         mod, collector=_ProviderCollector(), collected_attr="provider",
         base_cls=CronScheduler, name=name, logger=logger)
 

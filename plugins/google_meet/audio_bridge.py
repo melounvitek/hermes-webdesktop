@@ -7,6 +7,7 @@ Linux: pactl creates a null-sink plus a virtual source on the sink's monitor; ca
 
 from __future__ import annotations
 
+import contextlib
 import platform
 import subprocess
 from typing import Optional
@@ -29,7 +30,6 @@ class AudioBridge:
         self._device_name: Optional[str] = None
         self._write_target: Optional[str] = None
         self._module_ids: list[int] = []
-        self._torn_down = False
 
     def _ready(self, value: Optional[str]) -> str:
         if not value:
@@ -46,29 +46,21 @@ class AudioBridge:
             return self._setup_linux()
         if system == "Darwin":
             return self._setup_darwin()
-        if system == "Windows":
-            raise RuntimeError("windows not supported in v2")
-        raise RuntimeError(f"unsupported platform: {system}")
+        raise RuntimeError("windows not supported in v2" if system == "Windows"
+                           else f"unsupported platform: {system}")
 
     def teardown(self) -> None:
         """Release the virtual audio device. Idempotent; never raises."""
-        if self._torn_down:
-            return
-        if self._platform == "linux":
-            for mod_id in reversed(self._module_ids):  # virtual-source before null-sink
-                try:
-                    _pactl("unload-module", str(mod_id), check=False)
-                except Exception:
-                    pass
-            self._module_ids = []
-        self._torn_down = True
+        for mod_id in reversed(self._module_ids):  # linux only; virtual-source before null-sink
+            with contextlib.suppress(Exception):
+                _pactl("unload-module", str(mod_id), check=False)
+        self._module_ids = []
 
     def _finish(self, tag: str, device: str, write_target: str, module_ids: list[int]) -> dict:
         self._platform = tag
         self._device_name = device
         self._write_target = write_target
         self._module_ids = module_ids
-        self._torn_down = False
         return {"platform": tag, "device_name": device, "sample_rate": 48000, "channels": 2,
                 "module_ids": list(module_ids), "write_target": write_target}
 

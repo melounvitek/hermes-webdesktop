@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import platform
@@ -213,17 +214,16 @@ def _cmd_auth() -> int:
         return 1
     path = _auth_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"opening Chromium — sign in to Google, then return here and press Enter.\nsaving storage state to: {path}")
+    print("opening Chromium — sign in to Google, then return here and press Enter.\n"
+          f"saving storage state to: {path}")
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
             page.goto("https://accounts.google.com/", wait_until="domcontentloaded")
-            try:
+            with contextlib.suppress(EOFError):
                 input("press Enter after you've signed in ... ")
-            except EOFError:
-                pass
             context.storage_state(path=str(path))
             browser.close()
     except Exception as e:

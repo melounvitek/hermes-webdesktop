@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import shlex
@@ -38,10 +39,8 @@ def _extract_paths_from_terminal(args: Dict[str, Any], result: str) -> Set[str]:
     paths: Set[str] = set()
     cmd = args.get("command") or ""
     if isinstance(cmd, str) and cmd:
-        try:  # tokenise — catches `touch /tmp/hermes-x/test_foo.py`
+        with contextlib.suppress(ValueError):  # tokenise — catches `touch /tmp/hermes-x/test_foo.py`
             paths.update(tok for tok in shlex.split(cmd, posix=True) if tok.startswith(("/", "~")))
-        except ValueError:
-            pass
     # Only scan the result text if it's a reasonable size (avoid 50KB dumps).
     if isinstance(result, str) and len(result) < 4096:
         paths.update(_TERMINAL_PATH_REGEX.findall(result))
