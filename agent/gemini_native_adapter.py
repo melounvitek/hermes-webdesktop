@@ -162,18 +162,34 @@ class GeminiAPIError(Exception):
 
 # ── OpenAI → Gemini request translation ──────────────────────────────────────
 
+def _text_of(item: Any) -> Optional[str]:
+    """Text of an OpenAI content item (plain str or ``{"type": "text"}`` dict), else None."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+        return item["text"]
+    return None
+
+
 def _coerce_content_to_text(content: Any) -> str:
     if content is None:
         return ""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
-        return "\n".join(
-            p if isinstance(p, str) else p["text"]
-            for p in content
-            if isinstance(p, str) or (isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str))
-        )
-    return str(content)
+        return "\n".join(t for t in map(_text_of, content) if t is not None)
+    return content if isinstance(content, str) else str(content)
+
+
+def _inline_data_part(url: Any) -> Optional[Dict[str, Any]]:
+    """``inlineData`` part for a ``data:`` URL; None for remote/malformed URLs."""
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    try:
+        header, encoded = url.split(",", 1)
+        mime = header.split(":", 1)[1].split(";", 1)[0]
+        raw = base64.b64decode(encoded)
+    except Exception:
+        return None
+    return {"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}}
 
 
 def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
@@ -182,24 +198,13 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
         return [{"text": text}] if text else []
     parts: List[Dict[str, Any]] = []
     for item in content:
-        if isinstance(item, str):
-            parts.append({"text": item})
-        elif not isinstance(item, dict):
-            continue
-        elif item.get("type") == "text":
-            if isinstance(item.get("text"), str) and item["text"]:
-                parts.append({"text": item["text"]})
-        elif item.get("type") == "image_url":
-            url = (item.get("image_url") or {}).get("url") or ""
-            if not isinstance(url, str) or not url.startswith("data:"):
-                continue
-            try:
-                header, encoded = url.split(",", 1)
-                mime = header.split(":", 1)[1].split(";", 1)[0]
-                raw = base64.b64decode(encoded)
-            except Exception:
-                continue
-            parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(raw).decode("ascii")}})
+        text = _text_of(item)
+        if text or isinstance(item, str):
+            parts.append({"text": text})
+        elif isinstance(item, dict) and item.get("type") == "image_url":
+            image = _inline_data_part((item.get("image_url") or {}).get("url") or "")
+            if image:
+                parts.append(image)
     return parts
 
 
@@ -361,19 +366,22 @@ def _translate_tool_choice_to_gemini(tool_choice: Any) -> Optional[Dict[str, Any
     return None
 
 
+# (camelCase key, snake_case alias, accepted types, normalizer)
+_THINKING_KEYS = (
+    ("thinkingBudget", "thinking_budget", (int, float), int),
+    ("includeThoughts", "include_thoughts", bool, lambda v: v),
+    ("thinkingLevel", "thinking_level", str, lambda v: v.strip().lower()),
+)
+
+
 def _normalize_thinking_config(config: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(config, dict) or not config:
         return None
-    budget = config.get("thinkingBudget", config.get("thinking_budget"))
-    include = config.get("includeThoughts", config.get("include_thoughts"))
-    level = config.get("thinkingLevel", config.get("thinking_level"))
     normalized: Dict[str, Any] = {}
-    if isinstance(budget, (int, float)):
-        normalized["thinkingBudget"] = int(budget)
-    if isinstance(include, bool):
-        normalized["includeThoughts"] = include
-    if isinstance(level, str) and level.strip():
-        normalized["thinkingLevel"] = level.strip().lower()
+    for key, alias, types, norm in _THINKING_KEYS:
+        value = config.get(key, config.get(alias))
+        if isinstance(value, types) and (value.strip() if isinstance(value, str) else True):
+            normalized[key] = norm(value)
     return normalized or None
 
 
@@ -469,11 +477,22 @@ def _usage_from_metadata(usage_meta: Dict[str, Any]) -> SimpleNamespace:
     )
 
 
-def _assistant_message(content: Any, tool_calls: Any, reasoning: Any) -> SimpleNamespace:
-    return SimpleNamespace(
-        role="assistant", content=content, tool_calls=tool_calls,
-        reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None,
+def _envelope(model: str, object_: str, choice: SimpleNamespace, usage: Any, cls: type = SimpleNamespace) -> Any:
+    """OpenAI chat.completion / chat.completion.chunk envelope around one choice."""
+    return cls(
+        id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object=object_, created=int(time.time()), model=model,
+        choices=[choice], usage=usage,
     )
+
+
+def _tool_call_ns(fc: Dict[str, Any], part: Dict[str, Any], index: int) -> SimpleNamespace:
+    tool_call = SimpleNamespace(
+        id=_new_call_id(fc), type="function", index=index,
+        function=SimpleNamespace(name=str(fc["name"]), arguments=_dump_call_args(fc)),
+    )
+    if extra_content := _tool_call_extra_from_part(part):
+        tool_call.extra_content = extra_content
+    return tool_call
 
 
 def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespace:
@@ -494,27 +513,19 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
         elif isinstance(part.get("text"), str):
             text_pieces.append(part["text"])
         elif isinstance(fc := part.get("functionCall"), dict) and fc.get("name"):
-            tool_call = SimpleNamespace(
-                id=_new_call_id(fc), type="function", index=index,
-                function=SimpleNamespace(name=str(fc["name"]), arguments=_dump_call_args(fc)),
-            )
-            if extra_content := _tool_call_extra_from_part(part):
-                tool_call.extra_content = extra_content
-            tool_calls.append(tool_call)
+            tool_calls.append(_tool_call_ns(fc, part, index))
 
     if cand is None:
         finish_reason, usage = "stop", _usage_from_metadata({})
     else:
         finish_reason = "tool_calls" if tool_calls else _map_gemini_finish_reason(str(cand.get("finishReason") or ""))
         usage = _usage_from_metadata(resp.get("usageMetadata") or {})
-    message = _assistant_message(
-        "".join(text_pieces) if text_pieces else ("" if cand is None else None),
-        tool_calls or None, "".join(reasoning_pieces) or None,
+    reasoning = "".join(reasoning_pieces) or None
+    message = SimpleNamespace(
+        role="assistant", content="".join(text_pieces) if text_pieces else ("" if cand is None else None),
+        tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None,
     )
-    return SimpleNamespace(
-        id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object="chat.completion", created=int(time.time()), model=model,
-        choices=[SimpleNamespace(index=0, message=message, finish_reason=finish_reason)], usage=usage,
-    )
+    return _envelope(model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason), usage)
 
 
 class _GeminiStreamChunk(SimpleNamespace):
@@ -538,10 +549,8 @@ def _make_stream_chunk(
         role="assistant", content=content or None, tool_calls=tool_calls,
         reasoning=reasoning or None, reasoning_content=reasoning or None,
     )
-    return _GeminiStreamChunk(
-        id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object="chat.completion.chunk", created=int(time.time()), model=model,
-        choices=[SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)], usage=None,
-    )
+    choice = SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)
+    return _envelope(model, "chat.completion.chunk", choice, None, cls=_GeminiStreamChunk)
 
 
 def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
@@ -700,12 +709,6 @@ class GeminiNativeClient:
             self._http.close()
         except Exception:
             pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
     def _headers(self) -> Dict[str, str]:
         return {

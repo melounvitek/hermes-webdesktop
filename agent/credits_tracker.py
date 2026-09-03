@@ -17,7 +17,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from utils import is_truthy_value
 
@@ -165,21 +165,6 @@ def is_free_tier_model(model: str, base_url: str = "") -> bool:
         return False
 
 
-def _sync_notice(
-    key: str, want: bool, make: Callable[[], AgentNotice], active: set, to_show: list, to_clear: list
-) -> Optional[str]:
-    """Reconcile one keyed sticky notice; returns ``"shown"``, ``"cleared"`` or None."""
-    if want and key not in active:
-        to_show.append(make())
-        active.add(key)
-        return "shown"
-    if key in active and not want:
-        to_clear.append(key)
-        active.discard(key)
-        return "cleared"
-    return None
-
-
 def evaluate_credits_notices(
     state: CreditsState, latch: dict, *, model_is_free: bool = False,
 ) -> tuple[list[AgentNotice], list[str]]:
@@ -249,26 +234,30 @@ def evaluate_credits_notices(
     grant_cond = (
         state.denominator_kind == "subscription_cap" and uf is not None and uf >= 1.0 and state.purchased_micros > 0
     )
-    if _sync_notice(
-        "credits.grant_spent", grant_cond and latch.get("seen_grant_unspent", False),
-        lambda: _sticky_notice(f"• Grant spent · ${state.purchased_usd} top-up left", "info", "credits.grant_spent"),
-        active, to_show, to_clear,
-    ) == "shown":
+    if grant_cond and "credits.grant_spent" not in active and latch.get("seen_grant_unspent", False):
+        to_show.append(_sticky_notice(f"• Grant spent · ${state.purchased_usd} top-up left", "info", "credits.grant_spent"))
+        active.add("credits.grant_spent")
         latch["seen_grant_unspent"] = False
+    elif "credits.grant_spent" in active and not grant_cond:
+        to_clear.append("credits.grant_spent")
+        active.discard("credits.grant_spent")
 
     # ── depleted: suppressed while the model is free (inference still works).
     depleted_cond = not state.paid_access
-    if _sync_notice(
-        "credits.depleted", depleted_cond and not model_is_free,
-        lambda: _sticky_notice("✕ Credit access paused · run /topup to top up", "error", "credits.depleted"),
-        active, to_show, to_clear,
-    ) == "cleared" and not depleted_cond:
-        # Genuine recovery only — switching to a free model while still
-        # depleted must NOT claim access was restored.
-        to_show.append(AgentNotice(
-            text="✓ Credit access restored", level="success", kind="ttl",
-            ttl_ms=CREDITS_RESTORED_TTL_MS, key="credits.restored", id="credits.restored",
-        ))
+    show_depleted = depleted_cond and not model_is_free
+    if show_depleted and "credits.depleted" not in active:
+        to_show.append(_sticky_notice("✕ Credit access paused · run /topup to top up", "error", "credits.depleted"))
+        active.add("credits.depleted")
+    elif "credits.depleted" in active and not show_depleted:
+        to_clear.append("credits.depleted")
+        active.discard("credits.depleted")
+        if not depleted_cond:
+            # Genuine recovery only — switching to a free model while still
+            # depleted must NOT claim access was restored.
+            to_show.append(AgentNotice(
+                text="✓ Credit access restored", level="success", kind="ttl",
+                ttl_ms=CREDITS_RESTORED_TTL_MS, key="credits.restored", id="credits.restored",
+            ))
     return (to_show, to_clear)
 
 
