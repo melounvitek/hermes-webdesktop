@@ -169,29 +169,20 @@ def _build_child_agent(
         request_overrides = dict(override_request_overrides)
     else:
         request_overrides = {} if override_provider else dict(getattr(parent_agent, "request_overrides", {}) or {})
+    parent_sid = getattr(parent_agent, "session_id", None)
     child_session_db = _open_child_session_db(parent_agent)
     with delegated_child_context():
         try:
             child = AIAgent(
-                **rt,
-                max_iterations=max_iterations,
-                prefill_messages=getattr(parent_agent, "prefill_messages", None),
-                enabled_toolsets=child_toolsets,
-                disabled_toolsets=child_disabled_toolsets,
-                quiet_mode=True,
-                ephemeral_system_prompt=child_prompt,
-                log_prefix=f"[subagent-{task_index}]",
-                platform="subagent",
-                skip_context_files=True,
-                skip_memory=True,
-                clarify_callback=None,
+                **rt, max_iterations=max_iterations, prefill_messages=getattr(parent_agent, "prefill_messages", None),
+                enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets, quiet_mode=True,
+                ephemeral_system_prompt=child_prompt, log_prefix=f"[subagent-{task_index}]", platform="subagent",
+                skip_context_files=True, skip_memory=True, clarify_callback=None,
                 thinking_callback=(
                     (lambda text: _safe_progress(child_progress_cb, "_thinking", text) if text else None)
                     if child_progress_cb else None
                 ),
-                session_db=child_session_db,
-                parent_session_id=getattr(parent_agent, "session_id", None),
-                request_overrides=request_overrides,
+                session_db=child_session_db, parent_session_id=parent_sid, request_overrides=request_overrides,
                 tool_progress_callback=child_progress_cb,
                 iteration_budget=None,  # fresh budget per subagent
             )
@@ -207,10 +198,8 @@ def _build_child_agent(
         child._owns_session_db = True  # released by the child's close(), never by the parent
     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
     child._progress_identity_ref = child_session_ref
-    child._delegate_depth = child_depth
-    child._delegate_role = effective_role  # post-degrade role
-    child._subagent_id = subagent_id
-    child._parent_subagent_id = parent_subagent_id
+    child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
+    child._subagent_id, child._parent_subagent_id = subagent_id, parent_subagent_id
     # Ownership chain for action=list/steer/stop; weakref so a finished parent
     # can be collected while a detached child record lingers in the registry.
     try:
@@ -219,10 +208,8 @@ def _build_child_agent(
         child._delegate_parent_ref = None  # non-weakref-able test doubles
     # Sidebar marker: subagent sessions stay out of session pickers even when a
     # parent delete orphans them (mirrors /branch's ``_branched_from``).
-    parent_sid = getattr(parent_agent, "session_id", None)
     if parent_sid and getattr(child, "_session_init_model_config", None) is not None:
         child._session_init_model_config["_delegate_from"] = parent_sid
-
     # Shared pool lets children rotate credentials on rate limits.
     child_pool = _resolve_child_credential_pool(rt["provider"], parent_agent, rt["base_url"])
     if child_pool is not None:
@@ -313,23 +300,26 @@ def _build_children(
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
     from tools.delegation_live_log import wrap_progress_callback
+    from tools.delegation_output_schema import append_output_contract
+    overrides = {
+        "override_provider": creds["provider"], "override_base_url": creds["base_url"],
+        "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
+        "override_request_overrides": creds.get("request_overrides"),
+        "override_max_tokens": creds.get("max_output_tokens"), "override_acp_command": creds.get("command"),
+        "override_acp_args": creds.get("args"),
+    }
     children = []
     for i, t in enumerate(task_list):
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
         _child_context = t.get("context")
         if _task_schema is not None:
-            from tools.delegation_output_schema import append_output_contract
             _child_context = append_output_contract(_child_context, _task_schema)
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, override_provider=creds["provider"], override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"], override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"), override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"), role=_normalize_role(t.get("role") or top_role),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
             )
         except ValueError as exc:
             return [], str(exc)
@@ -403,19 +393,16 @@ def delegate_task(
             "delegate_task: ignoring caller-supplied max_iterations=%s; using delegation.max_iterations=%s from config",
             max_iterations, default_max_iter,
         )
-
     # credentials_cfg (internal callers only, e.g. /review → auxiliary.review) is
     # a per-call override shaped like the delegation config section.
     try:
         creds = _resolve_delegation_credentials(credentials_cfg if credentials_cfg else cfg, parent_agent)
     except ValueError as exc:
         return tool_error(str(exc))
-
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)
-    if err:
-        return tool_error(err)
-    task_schemas, err = _coerce_task_schemas(task_list, output_schema)
+    if not err:
+        task_schemas, err = _coerce_task_schemas(task_list, output_schema)
     if err:
         return tool_error(err)
 
