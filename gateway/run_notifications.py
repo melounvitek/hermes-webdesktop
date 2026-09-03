@@ -431,6 +431,10 @@ class GatewayNotificationsMixin:
             await self._send_update_notification()
 
     @staticmethod
+    def _update_exit_code(paths: "_UpdatePaths") -> int:
+        return int(paths.exit_code.read_text(encoding="utf-8").strip() or "1")
+
+    @staticmethod
     def _read_update_output_since(path: Path, offset: int) -> tuple[str, int]:
         """Read update output defensively; logs may contain invalid UTF-8."""
         try:
@@ -524,7 +528,7 @@ class GatewayNotificationsMixin:
                 _read_new_output()
                 await _flush_buffer()
                 with _log_suppressed(logging.WARNING, "Update final notification failed: %s"):
-                    exit_code = int(paths.exit_code.read_text(encoding="utf-8").strip() or "1")
+                    exit_code = self._update_exit_code(paths)
                     await target.send(
                         "✅ Hermes update finished." if exit_code == 0
                         else "❌ Hermes update failed (exit code {}).".format(exit_code)
@@ -601,7 +605,7 @@ class GatewayNotificationsMixin:
             if not paths.exit_code.exists():
                 return _defer("Update notification deferred: update still running")
 
-            exit_code = int(paths.exit_code.read_text(encoding="utf-8").strip() or "1")
+            exit_code = self._update_exit_code(paths)
             output = paths.output.read_bytes().decode("utf-8", errors="replace") if paths.output.exists() else ""
 
             platform = Platform(platform_str)
@@ -1564,24 +1568,18 @@ class GatewayNotificationsMixin:
         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                       session_id, interval, notify_mode, agent_notify)
 
-        if notify_mode == "off" and not agent_notify:
-            # Still wait for the process to exit so we can log it, but don't push any messages.
-            while True:
-                await asyncio.sleep(interval)
-                session = process_registry.get(session_id)
-                if session is None or session.exited:
-                    break
-            logger.debug("Process watcher ended (silent): %s", session_id)
-            return
-
+        silent = notify_mode == "off" and not agent_notify
         last_output_len = 0
         while True:
             await asyncio.sleep(interval)
-
             session = process_registry.get(session_id)
             if session is None:
                 break
-
+            if silent:
+                # Still wait for the process to exit so we can log it, but don't push any messages.
+                if session.exited:
+                    break
+                continue
             current_output_len = len(session.output_buffer)
             has_new_output = current_output_len > last_output_len
             last_output_len = current_output_len
@@ -1627,4 +1625,4 @@ class GatewayNotificationsMixin:
                     f"[Background process {session_id} is still running~ New output:\n{new_output}]",
                 )
 
-        logger.debug("Process watcher ended: %s", session_id)
+        logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)

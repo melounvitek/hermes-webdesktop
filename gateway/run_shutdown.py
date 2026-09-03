@@ -657,6 +657,15 @@ class GatewayShutdownMixin:
         platform_cfg = self.config.platforms.get(platform)
         return platform_cfg is None or bool(platform_cfg.gateway_restart_notification)
 
+    def _notice_allowed(self, platform: Platform, what: str) -> bool:
+        """``_restart_notification_allowed`` with the INFO suppression line for shutdown notices."""
+        if self._restart_notification_allowed(platform):
+            return True
+        logger.info(
+            "Shutdown notification suppressed for %s: %s has gateway_restart_notification=false", what, platform.value,
+        )
+        return False
+
     async def _notify_interrupted_cron_jobs(self, job_ids) -> int:
         """Tell the owner of each just-interrupted cron job that its run died; returns notices sent.
 
@@ -791,11 +800,7 @@ class GatewayShutdownMixin:
                 adapter = self.adapters.get(platform)
                 if not adapter:
                     continue
-                if not self._restart_notification_allowed(platform):
-                    logger.info(
-                        "Shutdown notification suppressed for active session: %s has gateway_restart_notification=false",
-                        platform_str,
-                    )
+                if not self._notice_allowed(platform, "active session"):
                     continue
                 reply_to_message_id = getattr(source, "message_id", None)
                 if reply_to_message_id is None and restart_key == dedup_key:
@@ -807,9 +812,7 @@ class GatewayShutdownMixin:
             except Exception as e:
                 logger.debug("Failed to send shutdown notification to %s:%s: %s", platform_str, chat_id, e)
                 continue
-            if await self._send_shutdown_notice(
-                adapter, chat_id, msg, "active chat", platform_str, metadata=metadata
-            ):
+            if await self._send_shutdown_notice(adapter, chat_id, msg, "active chat", platform_str, metadata=metadata):
                 notified.add(dedup_key)
         if self._restart_requested and restart_source is not None:
             logger.debug("Skipping home-channel shutdown notifications for in-chat restart")
@@ -833,11 +836,7 @@ class GatewayShutdownMixin:
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
-            if not self._restart_notification_allowed(platform):
-                logger.info(
-                    "Shutdown notification suppressed for home channel: %s has gateway_restart_notification=false",
-                    platform.value,
-                )
+            if not self._notice_allowed(platform, "home channel"):
                 continue
             dedup_key = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if dedup_key in notified:
@@ -944,10 +943,8 @@ class GatewayShutdownMixin:
             await asyncio.wait_for(self._run_in_executor_with_context(_call), timeout=self._FINALIZE_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.warning(
-                "Session finalize hooks (%s, reason=%s) exceeded %ss; "
-                "proceeding without blocking the event loop (the worker "
-                "thread is left to finish on its own).",
-                session_id, reason, self._FINALIZE_TIMEOUT_S,
+                "Session finalize hooks (%s, reason=%s) exceeded %ss; proceeding without blocking the event loop "
+                "(the worker thread is left to finish on its own).", session_id, reason, self._FINALIZE_TIMEOUT_S,
             )
         except Exception as finalize_exc:
             logger.debug("Session finalize hooks (%s, reason=%s) failed: %s", session_id, reason, finalize_exc)
@@ -967,9 +964,8 @@ class GatewayShutdownMixin:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Agent resource cleanup%s exceeded %ss; proceeding without "
-                "blocking the event loop (the worker thread is left to finish "
-                "on its own). (#53175)", ctx_label, self._CLEANUP_TIMEOUT_S,
+                "Agent resource cleanup%s exceeded %ss; proceeding without blocking the event loop (the worker "
+                "thread is left to finish on its own). (#53175)", ctx_label, self._CLEANUP_TIMEOUT_S,
             )
         except Exception as cleanup_exc:
             logger.warning("Agent resource cleanup%s failed: %s (#53175)", ctx_label, cleanup_exc)
@@ -1346,6 +1342,9 @@ class GatewayShutdownMixin:
             if _async_n:
                 logger.info("Shutdown (%s): interrupted %d background delegation(s)", phase, _async_n)
 
+        _step("process_registry.kill_all", _kill_processes)
+        _marked_cron_jobs = _step("mark_running_jobs_interrupted", _mark_cron_interrupted) or []
+        _step("async interrupt_all", _interrupt_delegations)
         def _cleanup_environments() -> None:
             from tools.terminal_tool import cleanup_all_environments
             cleanup_all_environments()
@@ -1354,9 +1353,6 @@ class GatewayShutdownMixin:
             from tools.browser_tool import cleanup_all_browsers
             cleanup_all_browsers()
 
-        _step("process_registry.kill_all", _kill_processes)
-        _marked_cron_jobs = _step("mark_running_jobs_interrupted", _mark_cron_interrupted) or []
-        _step("async interrupt_all", _interrupt_delegations)
         _step("cleanup_all_environments", _cleanup_environments)
         _step("cleanup_all_browsers", _cleanup_browsers)
         return _marked_cron_jobs

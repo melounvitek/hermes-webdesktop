@@ -1076,10 +1076,7 @@ class GatewayStartupMixin:
                 )
                 continue
             if outcome == "ok":
-                self.adapters[platform] = adapter
-                self._sync_voice_mode_state_to_adapter(adapter)
-                # Wire voice input at connect time so transcription works without /voice join.
-                self._bind_voice_input_callback(adapter)
+                self._publish_primary_adapter(platform, adapter)
                 connected_count += 1
                 self._update_platform_runtime_status(
                     platform.value, platform_state="connected", error_code=None, error_message=None,

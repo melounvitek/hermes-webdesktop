@@ -496,10 +496,8 @@ class GatewayAdapterLifecycleMixin:
 
         # A row still 'running' at startup belongs to a gateway that died mid-dispatch; it blocks
         # request_handoff until reclaimed.
-        def _scope(profile_home):
-            if profile_home is None:
-                return contextlib.nullcontext()
-            return _async_profile_runtime_scope(profile_home)
+        def _scope(profile_home):  # local: tests bind this watcher onto bare SimpleNamespace runners
+            return GatewayAdapterLifecycleMixin._scope_or_null(_async_profile_runtime_scope, profile_home)
 
         for _pname, _phome in _handoff_watch_scopes(self):
             with _log_suppressed(logging.DEBUG, "Stale-handoff reclaim failed", exc_info=True):
@@ -727,11 +725,15 @@ class GatewayAdapterLifecycleMixin:
         logger.warning("Reconnect %s: %s, removing from retry queue", platform.value, reason)
         del self._failed_platforms[platform]
 
-    async def _install_reconnected_adapter(self, platform, adapter) -> None:
-        """Publish a freshly reconnected primary adapter and replay what it missed while down."""
+    def _publish_primary_adapter(self, platform, adapter) -> None:
+        """Register a connected primary adapter and wire voice mode/input (transcription without /voice join)."""
         self.adapters[platform] = adapter
         self._sync_voice_mode_state_to_adapter(adapter)
         self._bind_voice_input_callback(adapter)
+
+    async def _install_reconnected_adapter(self, platform, adapter) -> None:
+        """Publish a freshly reconnected primary adapter and replay what it missed while down."""
+        self._publish_primary_adapter(platform, adapter)
         self.delivery_router.adapters = self.adapters
         del self._failed_platforms[platform]
         self._update_platform_runtime_status(
@@ -925,11 +927,9 @@ class GatewayAdapterLifecycleMixin:
         if owner is None:
             return False
         pv = platform.value
+        head = f"Profile '{owner}' and '{profile_name}' both configure {pv} "
         if kind == "credential":
-            message = (
-                f"Profile '{owner}' and '{profile_name}' both configure {pv} with the same credential. "
-                f"Give each profile its own {pv} credential."
-            )
+            message = head + f"with the same credential. Give each profile its own {pv} credential."
             logger.error(
                 "Profile '%s' and '%s' both configure %s with the same credential — refusing to start the "
                 "duplicate (one credential cannot be consumed twice). Give each profile its own %s credential.",
@@ -937,10 +937,7 @@ class GatewayAdapterLifecycleMixin:
             )
         else:
             bind, port = claim[-2:]
-            message = (
-                f"Profile '{owner}' and '{profile_name}' both configure {pv} sidecars on the same listener. "
-                f"Configure a distinct listener for profile '{profile_name}'."
-            )
+            message = head + f"sidecars on the same listener. Configure a distinct listener for profile '{profile_name}'."
             logger.error(
                 "Profile '%s' and '%s' both configure %s sidecars on %s:%s — refusing to start the duplicate "
                 "listener. Set platforms.%s.extra.sidecar_port to a distinct port for profile '%s'.",
@@ -1277,6 +1274,11 @@ class GatewayAdapterLifecycleMixin:
             return None
 
     @staticmethod
+    def _scope_or_null(scope_factory, profile_home):
+        """``scope_factory(profile_home)`` or a nullcontext when the profile home is unknown."""
+        return scope_factory(profile_home) if profile_home is not None else contextlib.nullcontext()
+
+    @staticmethod
     def _stamp_event_profile(event, profile_name: str) -> None:
         """Best-effort: stamp ``source.profile`` on an inbound event that has none yet."""
         try:
@@ -1293,10 +1295,7 @@ class GatewayAdapterLifecycleMixin:
 
         async def _handler(event):
             self._stamp_event_profile(event, profile_name)
-            async with (
-                _async_profile_runtime_scope(profile_home) if profile_home is not None
-                else contextlib.nullcontext()
-            ):
+            async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
                 return await self._handle_message(event)
 
         return _handler
@@ -1369,10 +1368,7 @@ class GatewayAdapterLifecycleMixin:
         async def _handler(event, source):
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
-            with (
-                _profile_runtime_scope(profile_home) if profile_home is not None
-                else contextlib.nullcontext()
-            ):
+            with self._scope_or_null(_profile_runtime_scope, profile_home):
                 return await self._handle_gateway_platform_event(event, source)
 
         return _handler
