@@ -50,16 +50,14 @@ class XAIGrokAdapter(UpstreamAdapter):
             pool = self._load_pool()
             if pool is None or not pool.has_credentials():
                 raise RuntimeError(
-                    "No xAI OAuth credentials found. Run "
-                    "`hermes auth add xai-oauth --type oauth` first."
+                    "No xAI OAuth credentials found. Run `hermes auth add xai-oauth --type oauth` first."
                 )
 
             entry = pool.select()
             if entry is None:
                 raise RuntimeError(
                     "No available xAI OAuth credentials found. Run "
-                    "`hermes auth reset xai-oauth` or re-authenticate with "
-                    "`hermes auth add xai-oauth --type oauth`."
+                    "`hermes auth reset xai-oauth` or re-authenticate with `hermes auth add xai-oauth --type oauth`."
                 )
 
             self._pool = pool

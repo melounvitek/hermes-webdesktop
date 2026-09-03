@@ -120,8 +120,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
     _setup_restart_daemon(console, args, proxy_cfg)
     console.print()
     console.print(
-        "[green]✓ iron-proxy is configured.[/green]  "
-        "Sandboxes will route outbound traffic through it."
+        "[green]✓ iron-proxy is configured.[/green]  Sandboxes will route outbound traffic through it."
     )
     console.print(
         "  Start:   [cyan]hermes egress start[/cyan]\n"
@@ -136,8 +135,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 
 def _setup_install_binary(console: Console) -> bool:
-    console.print()
-    console.print("[bold]Step 1[/bold]  Install the iron-proxy binary")
+    _step(console, 1, "Install the iron-proxy binary")
     try:
         binary = ip.find_iron_proxy(install_if_missing=False)
         if binary is None:
@@ -152,8 +150,7 @@ def _setup_install_binary(console: Console) -> bool:
 
 
 def _setup_ca_cert(console: Console):
-    console.print()
-    console.print("[bold]Step 2[/bold]  Generate a CA cert")
+    _step(console, 2, "Generate a CA cert")
     try:
         ca_crt, ca_key = ip.ensure_ca_cert()
     except Exception as exc:  # noqa: BLE001
@@ -165,8 +162,7 @@ def _setup_ca_cert(console: Console):
 
 def _setup_mint_tokens(console: Console, args: argparse.Namespace):
     """Discover providers, merge with existing tokens (rotating on request), print the table."""
-    console.print()
-    console.print("[bold]Step 3[/bold]  Mint proxy tokens for known providers")
+    _step(console, 3, "Mint proxy tokens for known providers")
 
     available_env_names: List[str] = []
     if args.from_bitwarden:
@@ -195,8 +191,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         if sys.stdin.isatty():
             console.print(
                 "[yellow]⚠[/yellow]  --rotate-tokens will invalidate proxy "
-                "tokens in every running Hermes sandbox.  They will start "
-                "401-ing against upstreams until restarted."
+                "tokens in every running Hermes sandbox.  They will start 401-ing against upstreams until restarted."
             )
             if _prompt("Type 'rotate' to confirm: ") != "rotate":
                 console.print("[yellow]Cancelled.[/yellow]")
@@ -214,8 +209,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
             console.print(f"  [yellow]Could not back up mappings before rotation: {exc}[/yellow]")
     elif rotate and not existing:
         console.print(
-            "[dim]Note: --rotate-tokens is a no-op on first-time setup "
-            "(no existing tokens to rotate).[/dim]"
+            "[dim]Note: --rotate-tokens is a no-op on first-time setup (no existing tokens to rotate).[/dim]"
         )
 
     mappings = ip.merge_mappings(existing=existing, discovered=discovered, rotate=rotate)
@@ -254,8 +248,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
 
 def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca_crt, ca_key):
     """Write proxy.yaml + mappings, then enable the integration in config; returns ``proxy_cfg``."""
-    console.print()
-    console.print("[bold]Step 4[/bold]  Write config and persist mappings")
+    _step(console, 4, "Write config and persist mappings")
 
     cfg = load_config()
     proxy_cfg = cfg.setdefault("proxy", {})
@@ -264,8 +257,7 @@ def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca
     if args.tunnel_port is not None:
         if args.tunnel_port < 1 or args.tunnel_port > 65534:
             console.print(
-                "  [red]✗ --tunnel-port must be between 1 and 65534 "
-                "(the plain-HTTP listener uses port+1).[/red]"
+                "  [red]✗ --tunnel-port must be between 1 and 65534 (the plain-HTTP listener uses port+1).[/red]"
             )
             return None
         tunnel_port = int(args.tunnel_port)
@@ -371,8 +363,7 @@ def _setup_restart_daemon(console: Console, args: argparse.Namespace, proxy_cfg:
                 f"  [yellow]⚠ could not start iron-proxy with the new config: {exc}[/yellow]"
             )
             console.print(
-                "  Run [cyan]hermes egress start[/cyan] manually before "
-                "launching new Docker sandboxes."
+                "  Run [cyan]hermes egress start[/cyan] manually before launching new Docker sandboxes."
             )
         else:
             listening = "listening" if new_status.listening else "not yet listening"
@@ -410,23 +401,17 @@ def cmd_start(args: argparse.Namespace) -> int:
     if credential_source == "bitwarden" and not refresh_bw:
         if bool(proxy_cfg.get("allow_env_fallback", False)):
             console.print(
-                "[yellow]⚠ credential_source=bitwarden but "
-                "secrets.bitwarden is disabled or missing — falling back "
-                "to host-env secrets (allow_env_fallback=true).  Rotated "
-                "Bitwarden keys will NOT propagate.[/yellow]"
+                "[yellow]⚠ credential_source=bitwarden but secrets.bitwarden is disabled or missing — falling back "
+                "to host-env secrets (allow_env_fallback=true).  Rotated Bitwarden keys will NOT propagate.[/yellow]"
             )
         else:
-            console.print(
-                "[red]✗ Refusing to start: proxy.credential_source is "
-                "'bitwarden' but secrets.bitwarden is disabled or missing.[/red]"
-            )
-            console.print(
-                "  Re-enable it (`secrets.bitwarden.enabled: true`), switch "
+            return _refuse(
+                console,
+                "proxy.credential_source is 'bitwarden' but secrets.bitwarden is disabled or missing.",
+                "Re-enable it (`secrets.bitwarden.enabled: true`), switch "
                 "back to env credentials with `hermes egress setup "
-                "--no-bitwarden`, or set `proxy.allow_env_fallback: true` "
-                "to opt into the host-env fallback."
+                "--no-bitwarden`, or set `proxy.allow_env_fallback: true` to opt into the host-env fallback.",
             )
-            return 1
     # Pass the allow_env_fallback opt-in through to start_proxy: when set the daemon falls back
     # to host env if BWS is unreachable instead of raising. Default is strict (raise).
     if refresh_bw and bw_cfg is not None:
@@ -439,25 +424,19 @@ def cmd_start(args: argparse.Namespace) -> int:
     if refresh_bw:
         bw_access_env = (bw_cfg or {}).get("access_token_env", "BWS_ACCESS_TOKEN")
         if not os.environ.get(bw_access_env, "").strip():
-            console.print(
-                f"[red]✗ Refusing to start: credential_source=bitwarden but "
-                f"{bw_access_env} is not set in the environment.[/red]"
+            return _refuse(
+                console,
+                f"credential_source=bitwarden but {bw_access_env} is not set in the environment.",
+                "Either export the access token, or run "
+                "`hermes egress setup --no-bitwarden` to switch back to env-based credentials.",
             )
-            console.print(
-                "  Either export the access token, or run "
-                "`hermes egress setup --no-bitwarden` to switch back to env-based credentials."
-            )
-            return 1
         if not (bw_cfg or {}).get("project_id"):
-            console.print(
-                "[red]✗ Refusing to start: credential_source=bitwarden but "
-                "secrets.bitwarden.project_id is empty.[/red]"
+            return _refuse(
+                console,
+                "credential_source=bitwarden but secrets.bitwarden.project_id is empty.",
+                "Run `hermes secrets bitwarden setup` to configure the "
+                "project, or switch back via `hermes egress setup --no-bitwarden`.",
             )
-            console.print(
-                "  Run `hermes secrets bitwarden setup` to configure the "
-                "project, or switch back via `hermes egress setup --no-bitwarden`."
-            )
-            return 1
 
     try:
         status = ip.start_proxy(
@@ -595,8 +574,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if uncovered:
         console.print()
         console.print(
-            "[yellow]Uncovered providers[/yellow] "
-            "(real credentials still visible inside the sandbox):"
+            "[yellow]Uncovered providers[/yellow] (real credentials still visible inside the sandbox):"
         )
         for name in uncovered:
             console.print(f"  - {name}")
@@ -618,8 +596,7 @@ def cmd_disable(args: argparse.Namespace) -> int:
     # spuriously on a stale pidfile from a crashed run.
     if ip.get_status().pid is not None:
         console.print(
-            "  iron-proxy is still running — stop it with "
-            "[cyan]hermes egress stop[/cyan] if you want it down too."
+            "  iron-proxy is still running — stop it with [cyan]hermes egress stop[/cyan] if you want it down too."
         )
     return 0
 
@@ -671,8 +648,7 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
         if not names:
             console.print(
                 "  [red]✗ Bitwarden returned an empty secrets list.[/red]\n"
-                "  Check the project_id in secrets.bitwarden and the "
-                "BWS access-token's project scope."
+                "  Check the project_id in secrets.bitwarden and the BWS access-token's project scope."
             )
             return None
         console.print(f"  Pulled {len(names)} env names from Bitwarden.")
@@ -681,8 +657,7 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
         console.print(f"  [red]✗ Could not enumerate Bitwarden secrets: {exc}[/red]")
         console.print(
             "  Either fix the Bitwarden config and retry, or rerun setup "
-            "without --from-bitwarden (the proxy will read secrets from "
-            "the host process env at start time)."
+            "without --from-bitwarden (the proxy will read secrets from the host process env at start time)."
         )
         return None
 
@@ -711,6 +686,18 @@ def _load_env_file_into_environ() -> int:
             os.environ[name] = val
             added += 1
     return added
+
+
+def _step(console: Console, n: int, title: str) -> None:
+    console.print()
+    console.print(f"[bold]Step {n}[/bold]  {title}")
+
+
+def _refuse(console: Console, reason: str, hint: str) -> int:
+    """Print a ``✗ Refusing to start`` headline plus an indented remedy; returns exit code 1."""
+    console.print(f"[red]✗ Refusing to start: {reason}[/red]")
+    console.print(f"  {hint}")
+    return 1
 
 
 def _yn(value: bool) -> str:
