@@ -812,19 +812,16 @@ def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dic
         return token
     except Exception as exc:
         restore_names = ([current_service_name] if current_service_name else []) + list(reversed(paused_services))
-        rollback_failures = []
-        for service_name in dict.fromkeys(restore_names):
-            try:
-                _restore_windows_gateway_service(service_name)
-            except Exception as restore_exc:
-                rollback_failures.append(f"{service_name}: {restore_exc}")
+        rollback: list[tuple[str, object]] = [(n, lambda n=n: _restore_windows_gateway_service(n)) for n in dict.fromkeys(restore_names)]
         if profiles or unmapped:
+            rollback.append(("ordinary gateways", lambda: _resume_windows_gateways_after_update(token)))
+        rollback_failures = []
+        for label, restore in rollback:
             try:
-                _resume_windows_gateways_after_update(token)
+                restore()
             except Exception as restore_exc:
-                rollback_failures.append(f"ordinary gateways: {restore_exc}")
-        failed_service = current_service_name or "unknown"
-        detail = f"Could not stop Windows gateway service {failed_service}: {exc}"
+                rollback_failures.append(f"{label}: {restore_exc}")
+        detail = f"Could not stop Windows gateway service {current_service_name or 'unknown'}: {exc}"
         if rollback_failures:
             detail += "; rollback failures: " + "; ".join(rollback_failures)
         raise RuntimeError(detail) from exc
@@ -832,11 +829,7 @@ def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dic
 
 def _discover_windows_gateways():
     """``(profile_processes, service_gateways, running_pids)`` for the pause; any indeterminate probe aborts."""
-    from hermes_cli.gateway import (
-        find_gateway_pids,
-        find_profile_gateway_processes,
-        find_windows_gateway_services,
-    )
+    from hermes_cli.gateway import find_gateway_pids, find_profile_gateway_processes, find_windows_gateway_services
 
     with _abort_on_error("Could not map Windows gateway PIDs to profiles"):
         profile_process_list = find_profile_gateway_processes(strict=True)
@@ -861,9 +854,7 @@ def _request_socket_pauses(running_pids, profile_processes, service_gateway_pids
     mapped_pids = []
     socket_acks: list[dict] = []
     for pid in running_pids:
-        if pid in service_gateway_pids:
-            continue
-        proc = profile_processes.get(pid)
+        proc = None if pid in service_gateway_pids else profile_processes.get(pid)
         if proc is None:
             continue
         profiles[str(proc.profile)] = int(pid)
@@ -915,9 +906,7 @@ def _pause_windows_gateways_for_update() -> dict | None:
     if not running_pids:
         return _windows_cold_start_plan()
 
-    profiles, mapped_pids, socket_acks = _request_socket_pauses(
-        running_pids, profile_processes, service_gateway_pids
-    )
+    profiles, mapped_pids, socket_acks = _request_socket_pauses(running_pids, profile_processes, service_gateway_pids)
 
     # Resolve venv-side launchers BEFORE draining: a dead worker's parent cannot be
     # recovered (NoSuchProcess). The launcher keeps ``.pyd`` mapped and would trip the
@@ -1009,10 +998,9 @@ def _refresh_windows_gateway_launchers() -> None:
     with _best_effort('Could not refresh Windows gateway launchers after update: %s'):
         from hermes_cli import gateway_windows
 
-        if not gateway_windows.is_installed():
-            return
-        gateway_windows._write_task_script()
-        print("  ✓ Refreshed Windows gateway launcher scripts")
+        if gateway_windows.is_installed():
+            gateway_windows._write_task_script()
+            print("  ✓ Refreshed Windows gateway launcher scripts")
 
 
 def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
@@ -1037,10 +1025,8 @@ def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
         refreshed = []
         for kind, src_name in (("ps1", "install.ps1"), ("sh", "install.sh")):
             src = _m().PROJECT_ROOT / "scripts" / src_name
-            if not src.is_file():
-                continue
             cached = cache_dir / f"install-{safe_ref}.{kind}"
-            if not cached.is_file():
+            if not src.is_file() or not cached.is_file():
                 continue  # this ref was never bootstrap-cached — nothing to heal
             data = src.read_bytes()
             if kind == "ps1" and not data.startswith(b"\xef\xbb\xbf"):
@@ -1091,10 +1077,7 @@ def _relaunch_paused_gateways(token: dict, profiles: dict, unmapped: list) -> tu
     reconciliation still surfaces them — Windows has no watcher to recover them.
     """
     with _abort_on_error("Could not load Windows gateway restart helper"):
-        from hermes_cli.gateway import (
-            launch_detached_gateway_restart_by_cmdline,
-            launch_detached_profile_gateway_restart,
-        )
+        from hermes_cli.gateway import launch_detached_gateway_restart_by_cmdline, launch_detached_profile_gateway_restart
 
     def _launched(launch, log_message: str, log_arg) -> bool:
         """``launch()`` truthiness; an exception (incl. bad pid/argv coercion) logs at debug and reads False."""
@@ -1212,24 +1195,17 @@ def _resume_windows_gateways_and_merge_outcome(outcome, _windows_gateway_resume,
 
     if isinstance(_windows_gateway_resume, dict):
         def _extend_unique(target: list, items) -> None:
-            for item in items:
-                if item not in target:
-                    target.append(item)
+            target.extend(item for item in dict.fromkeys(items) if item not in target)
 
+        token = _windows_gateway_resume
         # Failed relaunches are absent from the token so they still surface. Best-effort.
         with _best_effort('Could not merge Windows relaunch outcome into fleet reconciliation bookkeeping: %s'):
-            _extend_unique(outcome.relaunched_profiles, _windows_gateway_resume.get("relaunched_profiles") or [])
-        windows_restarted = list(_windows_gateway_resume.get("restarted_services") or [])
-        service_profiles = _windows_gateway_resume.get("service_profiles") or {}
+            _extend_unique(outcome.relaunched_profiles, token.get("relaunched_profiles") or [])
+        windows_restarted = list(token.get("restarted_services") or [])
+        service_profiles = token.get("service_profiles") or {}
         _extend_unique(outcome.restarted_services, windows_restarted)
-        _extend_unique(
-            outcome.relaunched_profiles,
-            (p for p in (service_profiles.get(n) for n in windows_restarted) if p),
-        )
-        _extend_unique(
-            outcome.failed_or_stale_units,
-            (str(service_profiles.get(n) or n) for n in (_windows_gateway_resume.get("services") or [])),
-        )
+        _extend_unique(outcome.relaunched_profiles, (p for p in (service_profiles.get(n) for n in windows_restarted) if p))
+        _extend_unique(outcome.failed_or_stale_units, (str(service_profiles.get(n) or n) for n in (token.get("services") or [])))
 
         with suppress(Exception):
             from hermes_cli.update_receipt import record_gateway_restart
@@ -1260,8 +1236,7 @@ def _terminate_leftover_gateways(pids) -> None:
 
     for _pid in pids:
         try:
-            pid_int = int(_pid)
-            terminate_pid(pid_int, force=True, expected_start_time=get_process_start_time(pid_int))
+            terminate_pid(int(_pid), force=True, expected_start_time=get_process_start_time(int(_pid)))
         except Exception as exc:
             logger.debug("Could not stop leftover gateway %s: %s", _pid, exc)
 
@@ -1273,12 +1248,8 @@ def _in_handoff_without_live_shim(args) -> bool:
     """
     from hermes_cli.update_cmd import _m
     try:
-        handoff = bool(getattr(args, "gateway", False)) and _m()._update_marker_path().exists()
-    except Exception:
-        return False
-    if not handoff:
-        return False
-    try:
+        if not (bool(getattr(args, "gateway", False)) and _m()._update_marker_path().exists()):
+            return False
         scripts_dir = _m()._venv_scripts_dir()
         return scripts_dir is not None and not _m()._detect_concurrent_hermes_instances(scripts_dir)
     except Exception:
@@ -1303,10 +1274,8 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
                 _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
                 sys.exit(2)
             _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_gateway_holders)} gateway process(es) still "
-                "hold the venv after the pause; stopping them",
-                _gateway_holders,
-                stop=_terminate_leftover_gateways,
+                f"  ⚠ {len(_gateway_holders)} gateway process(es) still hold the venv after the pause; stopping them",
+                _gateway_holders, stop=_terminate_leftover_gateways,
             )
     if _venv_holders:
         # Positive-identity rung (any context): spawn ledger proves the holder is an
@@ -1315,8 +1284,7 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
         if _ledger_backends:
             _venv_holders = _reap_and_rescan(
                 f"  ⚠ {len(_ledger_backends)} ledger-identified orphaned "
-                "Hermes backend process(es) hold the venv; stopping their trees",
-                _ledger_backends,
+                "Hermes backend process(es) hold the venv; stopping their trees", _ledger_backends,
             )
     if _venv_holders:
         # Desktop `serve` backends whose app is GONE: nothing respawns an orphan, so
@@ -1325,8 +1293,7 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
         if _orphan_backends:
             _venv_holders = _reap_and_rescan(
                 f"  ⚠ {len(_orphan_backends)} orphaned Desktop backend "
-                "process(es) still hold the venv; stopping their trees",
-                _orphan_backends,
+                "process(es) still hold the venv; stopping their trees", _orphan_backends,
             )
     if _venv_holders:
         # Manual serve/dashboard rung (e.g. `hermes serve --host <ip>` for a REMOTE Desktop):
@@ -1339,16 +1306,12 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
                 _record_update_step("serve_pause", True, f"stopped={len(_serve_entries)}")
                 import atexit as _serve_atexit
 
-                _serve_atexit.register(
-                    _m()._relaunch_stopped_serves, {"pending": True, "entries": _serve_entries}
-                )
+                _serve_atexit.register(_m()._relaunch_stopped_serves, {"pending": True, "entries": _serve_entries})
 
             _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_serve_entries)} manual serve/dashboard "
-                "backend(s) hold the venv; stopping them for the update "
-                "(they will be relaunched on their recorded endpoints)",
-                [int(e["pid"]) for e in _serve_entries],
-                stop=_stop_and_park,
+                f"  ⚠ {len(_serve_entries)} manual serve/dashboard backend(s) hold the venv; stopping them for "
+                "the update (they will be relaunched on their recorded endpoints)",
+                [int(e["pid"]) for e in _serve_entries], stop=_stop_and_park,
             )
     if _venv_holders and _in_handoff_without_live_shim(args):
         # Final rung: in a GUI hand-off the Desktop is contractually gone; surviving `serve`
@@ -1358,9 +1321,7 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
         if _handoff_backends:
             _venv_holders = _reap_and_rescan(
                 f"  ⚠ {len(_handoff_backends)} Hermes backend process(es) "
-                "still hold the venv after the Desktop hand-off; "
-                "stopping their trees",
-                _handoff_backends,
+                "still hold the venv after the Desktop hand-off; stopping their trees", _handoff_backends,
             )
     if _venv_holders:
         print(_format_venv_python_holders_message(_venv_holders))
