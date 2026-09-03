@@ -150,15 +150,13 @@ def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[thr
     return backend, call_lock
 
 def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock],
-                  on_error: Optional[Callable[[Exception], None]] = None) -> None:
+                  on_error: Callable[[Exception], None]) -> None:
     """Stop under the session call lock (if any) so an in-flight action finishes first. Never called under
-    ``_backend_lock`` (unrelated sessions stay free). Raises unless ``on_error`` absorbs the failure."""
+    ``_backend_lock`` (unrelated sessions stay free). ``on_error`` absorbs the failure (never raises)."""
     try:
         with call_lock if call_lock is not None else contextlib.nullcontext():
             backend.stop()
     except Exception as e:
-        if on_error is None:
-            raise
         on_error(e)
 
 def _get_backend(session_id: str = "") -> ComputerUseBackend:
@@ -338,9 +336,8 @@ def _do_capture(backend, action, args, **_):
     if mode not in {"som", "vision", "ax"}:
         return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
     # pid/window_id forwarded only when given so older backends keep their defaults.
-    target = {k: args.get(k) for k in ("pid", "window_id")}
     return _capture_response(backend.capture(mode=mode, app=args.get("app"),
-                                             **(target if any(v is not None for v in target.values()) else {})))
+                                             **{k: args[k] for k in ("pid", "window_id") if args.get(k) is not None}))
 
 def _do_focus_app(backend, action, args, **_):
     if not args.get("app"):
