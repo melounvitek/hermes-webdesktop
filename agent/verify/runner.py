@@ -136,7 +136,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         try:
             pgid = getpgid(proc.pid)
         except (ProcessLookupError, PermissionError):
-            pgid = None
+            pass
 
     def stop(sig: int, fallback: Callable[[], None]) -> None:
         if pgid is not None:

@@ -180,9 +180,9 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
         return None
 
     lower = f"{pyproject or ''}\n{requirements or ''}".lower()
-    install = _PYTHON_INSTALL.get(detect_package_manager(root) or "")
-    if install is None:
-        install = "pip install -e ." if pyproject and not requirements else "pip install -r requirements.txt"
+    install = _PYTHON_INSTALL.get(detect_package_manager(root) or "") or (
+        "pip install -e ." if pyproject and not requirements else "pip install -r requirements.txt"
+    )
     pytest_or_empty = ["pytest"] if (root / "tests").exists() else []
 
     # Precedence: Django, then FastAPI/uvicorn, then Flask, then generic.
@@ -214,22 +214,21 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
     )
 
 
-def _detect_go_recipe(root: Path) -> Recipe | None:
-    if not (root / "go.mod").exists():
-        return None
-    return Recipe(
-        name="Go project", kind="go", build=["go build ./..."], test=["go test ./..."],
-        start="go run ." if (root / "main.go").exists() else None, evidence=["Detected go.mod"],
-    )
+# Single-manifest toolchains: manifest -> (label, kind, build, test, start command, entry file).
+_SIMPLE_TOOLCHAINS = (
+    ("go.mod", "Go project", "go", "go build ./...", "go test ./...", "go run .", Path("main.go")),
+    ("Cargo.toml", "Rust project", "rust", "cargo build", "cargo test", "cargo run", Path("src") / "main.rs"),
+)
 
 
-def _detect_rust_recipe(root: Path) -> Recipe | None:
-    if not (root / "Cargo.toml").exists():
-        return None
-    return Recipe(
-        name="Rust project", kind="rust", build=["cargo build"], test=["cargo test"],
-        start="cargo run" if (root / "src" / "main.rs").exists() else None, evidence=["Detected Cargo.toml"],
-    )
+def _detect_simple_recipe(root: Path) -> Recipe | None:
+    for manifest, label, kind, build, test, start, entry in _SIMPLE_TOOLCHAINS:
+        if (root / manifest).exists():
+            return Recipe(
+                name=label, kind=kind, build=[build], test=[test],
+                start=start if (root / entry).exists() else None, evidence=[f"Detected {manifest}"],
+            )
+    return None
 
 
 def _detect_java_recipe(root: Path) -> Recipe | None:
@@ -275,9 +274,7 @@ _COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "c
 
 def _detect_compose_recipe(root: Path) -> Recipe | None:
     compose_file = _first_existing(root, _COMPOSE_FILES)
-    if compose_file is None:
-        return None
-    return Recipe(
+    return None if compose_file is None else Recipe(
         name="docker-compose project", kind="compose", build=["docker compose build"],
         start="docker compose up", evidence=[f"Detected {compose_file}"],
     )
@@ -292,8 +289,7 @@ def detect_recipe(root: Path) -> Recipe | None:
         return _detect_node_recipe(root, pkg)
     return (
         _detect_python_recipe(root)
-        or _detect_go_recipe(root)
-        or _detect_rust_recipe(root)
+        or _detect_simple_recipe(root)
         or _detect_java_recipe(root)
         or _detect_make_recipe(root)
         or _detect_compose_recipe(root)
