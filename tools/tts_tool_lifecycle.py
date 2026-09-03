@@ -55,14 +55,11 @@ _LAZY_SDK_FEATURES = {"edge": "tts.edge", "elevenlabs": "tts.elevenlabs", "mistr
 
 
 def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) -> Optional[str]:
-    """Forward a lease ``hook`` (``"warm"`` / ``"release"``) to a user-declared provider.
+    """Forward a lease ``hook`` (``"warm"``/``"release"``) to a user-declared provider; returns the action.
 
-    Command providers run their optional ``warm_command`` / ``release_command`` (same
-    template/env/timeout rules as ``command``; output discarded) on a background thread so
-    a toggle never waits on a model server. Plugin providers get :meth:`TTSProvider.warm`
-    / :meth:`TTSProvider.release`. Best-effort: failures are logged at debug. Returns the
-    action taken.
-    """
+    Command providers run their optional ``<hook>_command`` (same template/env/timeout rules as
+    ``command``) on a background thread so a toggle never waits on a model server; plugins get
+    :meth:`TTSProvider.warm`/``release``. Best-effort: failures are logged at debug."""
     if not name or name in BUILTIN_TTS_PROVIDERS:
         return None
     cfg = _get_named_provider_config(tts_config, name)
@@ -97,14 +94,11 @@ def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) 
 
 
 def warm_tts_provider(tts_config: Optional[Dict[str, Any]] = None, provider: Optional[str] = None) -> Dict[str, Any]:
-    """Pre-load the configured TTS provider so the next synthesis starts hot.
+    """Pre-load the configured TTS provider so the next synthesis starts hot (blocking; never raises).
 
-    Local engines load their voice/model into the same LRU slot synthesis reads (including
-    first-use download); lazily-installed cloud SDKs are made importable; user-declared
-    providers get ``warm_command`` / :meth:`TTSProvider.warm`; everything else is
-    ``action: "noop"``. Never raises — the result dict carries ``warmed`` / ``action`` /
-    ``error``. Blocking; UI threads should run it in the background.
-    """
+    Local engines fill the same LRU slot synthesis reads (including first-use download); lazily
+    installed cloud SDKs are made importable; user-declared providers get their warm hook;
+    everything else is ``action: "noop"``. The result carries ``warmed`` / ``action`` / ``error``."""
     if tts_config is None:
         tts_config = _origin()._load_tts_config()
     name = (provider or _origin()._get_provider(tts_config) or "").lower().strip()
@@ -153,12 +147,8 @@ def warm_tts_provider(tts_config: Optional[Dict[str, Any]] = None, provider: Opt
 
 
 def release_tts_provider(provider: Optional[str] = None) -> Dict[str, Any]:
-    """Drop resident local TTS models so their memory is returned.
-
-    With ``provider`` given only that engine's cache is cleared; otherwise every local
-    cache is, and the configured user-declared provider is signalled (plugin ``release()``
-    / command ``release_command``). Returns ``{"released": <model instances dropped>}``.
-    """
+    """Drop resident local models -> ``{"released": <count>}``. With ``provider`` only that engine's
+    cache is cleared; otherwise every cache is, and the configured user provider is signalled."""
     name = (provider or "").lower().strip()
     if not name:
         tts_config = _origin()._load_tts_config()
@@ -175,11 +165,8 @@ def release_tts_provider(provider: Optional[str] = None) -> Dict[str, Any]:
 
 
 def acquire_tts_lease(lease: str, tts_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Register ``lease`` (e.g. ``"desktop:read-aloud"``) as a live consumer and warm the provider.
-
-    Re-acquiring is idempotent but still re-warms (cheap on a cache hit, and heals a cache
-    cleared elsewhere).
-    """
+    """Register ``lease`` (e.g. ``"desktop:read-aloud"``) and warm the provider. Re-acquiring is
+    idempotent but still re-warms (cheap on a cache hit; heals a cache cleared elsewhere)."""
     with _tts_lease_lock:
         _tts_leases.add(lease)
         holders = len(_tts_leases)
@@ -189,11 +176,8 @@ def acquire_tts_lease(lease: str, tts_config: Optional[Dict[str, Any]] = None) -
 
 
 def release_tts_lease(lease: str) -> Dict[str, Any]:
-    """Drop ``lease``; when it was the last one, unload resident local models.
-
-    Releasing a never-acquired lease is a no-op (still reports the holder count) so
-    surfaces can call it unconditionally on their "off" path.
-    """
+    """Drop ``lease``; the last one out unloads resident local models. A never-acquired lease is a
+    no-op (still reports the holder count) so surfaces can call this unconditionally."""
     with _tts_lease_lock:
         _tts_leases.discard(lease)
         holders = len(_tts_leases)

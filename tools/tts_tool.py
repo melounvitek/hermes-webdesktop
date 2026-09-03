@@ -100,10 +100,8 @@ def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str
     """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
 
     ``feature`` names a ``tools.lazy_deps`` feature to best-effort install first (users who
-    enabled a provider by editing config.yaml never ran the post-setup hook); any failure
-    there falls through so the raw import still raises a clean ImportError. sounddevice
-    additionally raises OSError when PortAudio is unavailable.
-    """
+    enabled a provider in config.yaml never ran the post-setup hook); any failure there falls
+    through so the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
     def _import():
         if feature:
             try:
@@ -167,19 +165,11 @@ _DEFAULT_OUTPUT_DIR_AT_IMPORT = DEFAULT_OUTPUT_DIR
 
 
 def _default_output_dir() -> str:
-    """The active profile's audio output dir at call time.
-
-    Long-lived multi-profile runtimes switch profiles after import, so a frozen constant
-    would keep writing into the launch profile's cache. ``DEFAULT_OUTPUT_DIR`` stays a
-    module attribute for tests/patchers and wins whenever it has been patched.
-    """
+    """The active profile's audio output dir at call time (long-lived runtimes switch profiles
+    after import); a monkeypatched ``DEFAULT_OUTPUT_DIR`` wins."""
     if DEFAULT_OUTPUT_DIR != _DEFAULT_OUTPUT_DIR_AT_IMPORT:
         return DEFAULT_OUTPUT_DIR
     return _get_default_output_dir()
-
-
-# Back-compat alias. Prefer ``_resolve_max_text_length()`` for new code.
-MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
 
 
 def _load_tts_config() -> Dict[str, Any]:
@@ -196,12 +186,8 @@ def _load_tts_config() -> Dict[str, Any]:
 
 
 def _get_provider(tts_config: Dict[str, Any]) -> str:
-    """The explicitly configured TTS provider, or the free default.
-
-    Inference credentials do not imply consent to paid speech generation: cloud TTS is
-    opt-in via ``tts.provider``. The managed selection (``nous``) is serviced by the
-    OpenAI implementation routed through the managed openai-audio gateway.
-    """
+    """The configured TTS provider, or the free default — inference credentials never imply consent
+    to paid speech. ``nous`` is serviced by the OpenAI path via the managed openai-audio gateway."""
     provider = (tts_config.get("provider") or DEFAULT_PROVIDER).lower().strip()
     return "openai" if provider == NOUS_MANAGED_PROVIDER else provider
 
@@ -266,11 +252,8 @@ def _run_edge_tts(text: str, file_str: str, tts_config: Dict[str, Any]) -> None:
 
 
 def _select_builtin_engine(provider: str) -> tuple:
-    """Check a built-in provider's SDK. Returns ``(engine, None)`` or ``(provider, error_json)``.
-
-    Unknown names take the Edge default; when edge-tts is missing, NeuTTS is the local
-    fallback (``engine`` then differs from ``provider``).
-    """
+    """Check a built-in provider's SDK -> ``(engine, None)`` or ``(provider, error_json)``. Unknown
+    names take the Edge default; without edge-tts NeuTTS is the fallback (engine != provider)."""
     entry = _BUILTIN_DISPATCH.get(provider)
     if entry is not None:
         available, missing_error = entry[0], entry[3]
@@ -303,12 +286,11 @@ def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[
 def _finalize_voice_delivery(
     file_str: str, provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
-    """Decide voice-bubble eligibility and Opus-convert when needed; returns ``(path, voice_compatible)``.
+    """Decide voice-bubble eligibility, Opus-converting when needed -> ``(path, voice_compatible)``.
 
-    Command and plugin providers are documents by default and opt in via ``voice_compatible``;
-    native-Opus built-ins are voice-compatible when the platform wants Opus and they wrote
-    .ogg; MP3/WAV built-ins are converted with ffmpeg only when the platform needs Opus.
-    """
+    Command/plugin providers are documents unless they opt in via ``voice_compatible``; native-Opus
+    built-ins qualify when the platform wants Opus and they wrote .ogg; MP3/WAV built-ins are
+    ffmpeg-converted only when the platform needs Opus."""
     if command_provider_config is not None:
         opted_in = _is_command_tts_voice_compatible(command_provider_config)
     elif provider not in BUILTIN_TTS_PROVIDERS:
@@ -349,13 +331,11 @@ def _session_platform() -> tuple:
 def _resolve_output_base(
     output_path: Optional[str], provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
-    """Pick the output file. Returns ``(Path, None)`` or ``(None, error_json)``.
+    """Pick the output file -> ``(Path, None)`` or ``(None, error_json)``.
 
-    A caller-supplied path is rejected on ``..`` traversal (bug or prompt-injection; an
-    absolute path is fine) and on protected credential/system locations. Command providers
-    get their configured extension. Default: ``<audio cache>/tts_<timestamp>.<ext>`` where
-    ext is the command format, ``.ogg`` for native-Opus providers on Opus platforms, else ``.mp3``.
-    """
+    A caller path is rejected on ``..`` traversal (bug or prompt-injection; absolute is fine) and
+    on protected credential/system locations. Default ``<audio cache>/tts_<timestamp>.<ext>``: the
+    command format, ``.ogg`` for native-Opus providers on Opus platforms, else ``.mp3``."""
     if output_path:
         from tools.path_security import has_traversal_component
         if has_traversal_component(output_path):
@@ -397,14 +377,11 @@ def _text_to_speech_single(
     text: str, file_str: str, *, provider: str, tts_config: Dict[str, Any],
     command_provider_config: Optional[Dict[str, Any]], want_opus: bool, instructions: Optional[str],
 ) -> str:
-    """Synthesize one provider-safe text chunk into *file_str* and return one final-encoded file.
+    """Synthesize one normalized, provider-safe chunk into *file_str*; returns the result envelope.
 
-    Text arrives already normalized and the output path already validated. Command providers
-    resolve BEFORE built-in dispatch; built-in names short-circuit so
-    ``tts.providers.openai.command`` can't shadow OpenAI. Plugin providers fire only for names
-    that are neither built-in nor command; a None return falls through to built-in dispatch
-    (unknown -> Edge default).
-    """
+    Command providers resolve BEFORE built-in dispatch, but built-in names short-circuit so
+    ``tts.providers.openai.command`` can't shadow OpenAI. Plugins fire only for names that are
+    neither; a None return falls through to built-in dispatch (unknown -> Edge default)."""
     try:
         if command_provider_config is not None:
             logger.info("Generating speech with command TTS provider '%s'...", provider)
@@ -450,12 +427,10 @@ class _ChunkFailed(Exception):
 
 
 def _synthesize_chunks(chunks: List[str], base_path: Path, generated_artifacts: set, **single_kwargs) -> tuple:
-    """Synthesize every chunk into ``<base>.chunkNNN<ext>`` (or ``base`` alone) sequentially.
+    """Synthesize chunks into ``<base>.chunkNNN<ext>`` (or ``base`` alone) -> ``(encoded_paths, results)``.
 
-    Every path touched is added to *generated_artifacts* so the caller can sweep non-final
-    files. Returns ``(encoded_paths, chunk_results)``; raises :class:`_ChunkFailed` when a
-    chunk reports failure and ``RuntimeError`` when it returns garbage or no audio.
-    """
+    Every touched path lands in *generated_artifacts* for the caller's sweep. Raises
+    :class:`_ChunkFailed` on a reported failure, ``RuntimeError`` on garbage or missing audio."""
     provider = single_kwargs["provider"]
     encoded_paths: List[str] = []
     chunk_results: List[Dict[str, Any]] = []
@@ -485,14 +460,11 @@ def text_to_speech_tool(
     text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
     instructions: Optional[str] = None, provider: Optional[str] = None,
 ) -> str:
-    """Convert text to speech audio with long-form chunking; returns the JSON result envelope.
+    """Convert text to speech with long-form chunking; returns the JSON result envelope.
 
-    Text is normalized, split into provider-safe chunks (never silently truncated),
-    synthesized sequentially (each chunk final-encoded), then packed against the destination
-    platform's upload limit. Multi-chunk voice output is re-encoded when combined; a failed
-    combine keeps separate valid files; no over-limit artifact is returned. ``speed`` is a
-    0.25-4.0 multiplier; ``instructions`` is voice-design guidance for backends that take it.
-    """
+    Text is normalized, split into provider-safe chunks (never silently truncated), synthesized
+    sequentially, then packed against the platform's upload limit: a failed combine keeps the
+    separate valid files and no over-limit artifact is ever returned."""
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 

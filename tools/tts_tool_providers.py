@@ -252,11 +252,8 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
 # --- ElevenLabs ---
 
 def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Client kwargs redirecting the SDK to ``tts.elevenlabs.base_url``/``wss_url``.
-
-    Empty when no base_url is set (SDK default environment); ``wss_url`` defaults
-    to the base_url host with a ``ws(s)://`` scheme.
-    """
+    """SDK client kwargs for ``tts.elevenlabs.base_url``/``wss_url``; empty (SDK default environment)
+    without a base_url. ``wss_url`` defaults to the base_url host with a ``ws(s)://`` scheme."""
     base_url = (el_config.get("base_url") or "").rstrip("/")
     if not base_url:
         return {}
@@ -298,13 +295,9 @@ _XAI_FIRST_SENTENCE_RE = re.compile(r"^(.{12,120}?[.!?…])\s+(?=\S)", flags=re.
 
 
 def _apply_xai_auto_speech_tags(text: str) -> str:
-    """Add xAI speech tags for more natural voice-mode replies.
-
-    Local conservative pass first ([pause] between paragraphs and after the first
-    sentence). If the text carried no explicit speech tags already, the auxiliary
-    model then rewrites it with the richer xAI tag set; any failure falls back to
-    the locally tagged text.
-    """
+    """Add xAI speech tags: a conservative local pass ([pause] between paragraphs / after the first
+    sentence), then — only when the text carried no explicit tags — an auxiliary-model rewrite
+    with the richer xAI tag set, falling back to the locally tagged text on any failure."""
     clean = text.strip()
     if not clean:
         return text
@@ -337,11 +330,8 @@ def _apply_xai_auto_speech_tags(text: str) -> str:
 
 
 def _clamped_number(raw: Any, cast, lo, hi):
-    """Parse an optional numeric knob and clamp into [lo, hi]; ``None``/unparseable -> None.
-
-    An empty string is deliberately passed to the clamp unconverted (the resulting
-    TypeError is reported by the caller's generic handler as a TTS failure).
-    """
+    """Parse an optional numeric knob and clamp into [lo, hi]; ``None``/unparseable -> None. An empty
+    string is deliberately clamped unconverted (its TypeError surfaces as a generic TTS failure)."""
     if raw is None:
         return None
     if raw != "":
@@ -439,12 +429,8 @@ _MINIMAX_OFFICIAL_HOSTS = {
 
 
 def _resolve_minimax_tts_runtime(tts_config: Dict[str, Any]) -> _MiniMaxTTSRuntime:
-    """Select MiniMax TTS region, endpoint, and credential atomically.
-
-    An explicit ``tts.minimax.region`` wins. Without one, the legacy global
-    credential wins when present; a China credential is selected only when it
-    is the sole configured MiniMax credential.
-    """
+    """Select MiniMax region, endpoint and credential atomically: explicit ``tts.minimax.region`` wins,
+    else the legacy global credential; ``cn`` only when it is the sole configured credential."""
     mm_config = _section(tts_config, "minimax")
     resolve_key = _origin()._resolve_provider_key
     credentials = {
@@ -481,12 +467,8 @@ def _raise_minimax_api_error(result: Dict[str, Any]) -> None:
 
 
 def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Generate audio via MiniMax.
-
-    Two endpoints, detected from the URL: ``t2a_v2`` (nested payload, JSON reply
-    with hex-encoded audio) and legacy ``text_to_speech`` (flat payload, raw
-    ``audio/*`` body).
-    """
+    """Generate audio via MiniMax: ``t2a_v2`` (nested payload, JSON reply with hex audio) or the legacy
+    ``text_to_speech`` endpoint (flat payload, raw ``audio/*`` body), detected from the URL."""
     runtime = _resolve_minimax_tts_runtime(tts_config)
     mm_config = _section(tts_config, "minimax")
     model = mm_config.get("model", DEFAULT_MINIMAX_MODEL)
@@ -648,11 +630,8 @@ def _rewrite_gemini_tts_audio_tags(text: str, persona_prompt: str = "") -> str:
 
 
 def _compose_gemini_tts_prompt(text: str, gemini_config: Dict[str, Any], persona_prompt: Optional[str] = None) -> str:
-    """Build the Gemini prompt from persona direction plus the live transcript.
-
-    A ``{transcript}`` / ``{{transcript}}`` placeholder in the persona prompt is
-    substituted in place; otherwise the transcript is appended under a heading.
-    """
+    """Gemini prompt = persona direction + transcript; a ``{transcript}`` / ``{{transcript}}``
+    placeholder is substituted in place, otherwise the transcript is appended under a heading."""
     transcript = text.strip()
     if persona_prompt is None:
         persona_prompt = _read_gemini_persona_prompt(gemini_config)
@@ -687,12 +666,8 @@ def _gemini_error_detail(response: Any) -> str:
 
 
 def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Generate audio via Gemini ``generateContent`` with ``responseModalities=["AUDIO"]``.
-
-    The API returns raw 24kHz mono 16-bit PCM as base64; it is wrapped as WAV and
-    ffmpeg-converted to MP3/Opus when the caller asked for those (no ffmpeg -> the
-    WAV is written under the requested name, same as NeuTTS).
-    """
+    """Generate audio via Gemini ``generateContent`` (``responseModalities=["AUDIO"]``). The reply is
+    base64 24kHz mono 16-bit PCM, wrapped as WAV and ffmpeg-converted to the requested container."""
     origin = _origin()
     api_key = (
         origin._resolve_provider_key("GEMINI_API_KEY", "gemini")
