@@ -6,11 +6,7 @@ import threading
 from contextlib import nullcontext
 from typing import Optional
 
-from hermes_constants import (
-    get_hermes_home_override,
-    reset_hermes_home_override,
-    set_hermes_home_override,
-)
+from hermes_constants import get_hermes_home_override, reset_hermes_home_override, set_hermes_home_override
 
 _mcp_discovery_lock = threading.Lock()
 _mcp_discovery_started = False
@@ -30,9 +26,7 @@ def _has_configured_mcp_servers() -> bool:
 
         return has_enabled_agent_plugin_mcp(raw_config)
     except Exception:
-        # Be conservative: if config probing fails, try discovery in the
-        # background so startup still can't block.
-        return True
+        return True  # conservative: still try discovery in the background; startup can't block
 
 
 def _any_mcp_connected() -> bool:
@@ -44,9 +38,8 @@ def _any_mcp_connected() -> bool:
 def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
     """Spawn one shared background MCP discovery thread for this process.
 
-    If the first background discovery run exits without connecting any MCP server (for example after
-    startup cancellation / OOM restart), later calls are allowed to retry instead of permanently
-    pinning the process in a "discovery already started" state with zero MCP tools.
+    If the first run exits without connecting any server (e.g. startup cancellation / OOM restart),
+    later calls may retry instead of pinning the process in "already started" with zero MCP tools.
     """
     global _mcp_discovery_started, _mcp_discovery_thread
 
@@ -71,13 +64,9 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
         if not _has_configured_mcp_servers():
             return
 
-        # Capture the caller's context-local HERMES_HOME override (profile
-        # scoping in multi-profile processes like the dashboard/desktop
-        # backend) and re-install it inside the discovery thread. ContextVars
-        # do not propagate into bare threads, so without this a session
-        # "switched" to profile X would discover the LAUNCH profile's
-        # mcp_servers instead (#67605). The config gate above already runs on
-        # the caller's thread, so it sees the same override.
+        # Re-install the caller's context-local HERMES_HOME override (multi-profile dashboard/desktop
+        # backends) inside the thread: ContextVars don't propagate into bare threads, so a session
+        # switched to profile X would otherwise discover the LAUNCH profile's mcp_servers.
         home_override = get_hermes_home_override()
 
         def _discover() -> None:
@@ -86,9 +75,7 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
                 _discover_mcp_tools_without_interactive_oauth()
                 try:
                     if not _any_mcp_connected():
-                        logger.warning(
-                            "Background MCP discovery completed with zero connected servers"
-                        )
+                        logger.warning("Background MCP discovery completed with zero connected servers")
                 except Exception:
                     logger.debug("Failed to inspect MCP status after background discovery", exc_info=True)
             except Exception:
@@ -99,31 +86,20 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
                     global _mcp_discovery_thread
                     _mcp_discovery_thread = None
 
-        thread = threading.Thread(
-            target=_discover,
-            name=thread_name,
-            daemon=True,
-        )
+        thread = threading.Thread(target=_discover, name=thread_name, daemon=True)
         _mcp_discovery_thread = thread
         thread.start()
 
 
-def _resolve_discovery_timeout(
-    explicit: "float | None", *, single_query: bool = False
-) -> float:
-    """Resolve the MCP discovery wait bound: explicit arg > config > default.
+def _resolve_discovery_timeout(explicit: "float | None", *, single_query: bool = False) -> float:
+    """Resolve the MCP discovery wait bound: explicit arg > config.yaml > ``DEFAULT_CONFIG``.
 
-    Reads ``mcp_discovery_timeout`` from config.yaml, defaulting to the value in ``DEFAULT_CONFIG``
-    (single source of truth) when the key is absent. Kept lazy and fail-safe — a missing/invalid
-    value or a broken config falls back to a short safe bound so startup can never hang or crash.
+    Lazy and fail-safe: a missing/invalid value or broken config falls back to a short bound so
+    startup can never hang or crash.
     """
     if explicit is not None:
         return explicit
-    key = (
-        "mcp_single_query_discovery_timeout"
-        if single_query
-        else "mcp_discovery_timeout"
-    )
+    key = "mcp_single_query_discovery_timeout" if single_query else "mcp_discovery_timeout"
     fallback = 15.0 if single_query else 1.5
     try:
         from hermes_cli.config import load_config, DEFAULT_CONFIG
@@ -154,10 +130,9 @@ def _discover_mcp_tools_without_interactive_oauth() -> None:
 def defer_background_mcp_discovery(*, logger, thread_name: str, delay: float) -> None:
     """Arm ``start_background_mcp_discovery`` to run ``delay`` seconds from now.
 
-    Used by the Desktop ``serve`` backend after its socket is announced: the discovery thread's
-    first act is the ~350ms ``mcp`` SDK import, which holds the GIL against the renderer's connect +
-    first hydration reads if it starts at bind time, and against the web_server import if it starts
-    before.
+    Used by the Desktop ``serve`` backend after its socket is announced: the thread's first act is
+    the ~350ms ``mcp`` SDK import, which would hold the GIL against the renderer's connect + first
+    hydration reads (or the web_server import) if started earlier.
     """
     global _mcp_discovery_deferred
     with _mcp_discovery_lock:
@@ -187,18 +162,12 @@ def _start_deferred_mcp_discovery_now() -> None:
     timer.function()
 
 
-def wait_for_mcp_discovery(
-    timeout: "float | None" = None, *, single_query: bool = False
-) -> None:
+def wait_for_mcp_discovery(timeout: "float | None" = None, *, single_query: bool = False) -> None:
     """Wait for background MCP discovery before the first tool snapshot.
 
-    ``thread.join(timeout)`` returns the INSTANT discovery completes, so this only ever blocks for
-    the real connect time of a still-pending server — users with no MCP servers or fast servers pay
-    ~0s.
-
-    When ``single_query`` is True, the bound comes from ``mcp_single_query_discovery_timeout``
-    instead (default 15s vs 1.5s interactive) because one-shot sessions have no second turn to
-    recover.
+    ``join`` returns the instant discovery completes, so this only blocks for a still-pending
+    server's real connect time. ``single_query`` uses ``mcp_single_query_discovery_timeout``
+    (15s vs 1.5s) because one-shot sessions have no second turn to recover.
     """
     _start_deferred_mcp_discovery_now()
     thread = _mcp_discovery_thread
@@ -208,23 +177,18 @@ def wait_for_mcp_discovery(
 
 
 def mcp_discovery_in_flight() -> bool:
-    """Return True if THIS module's background discovery thread is still running.
+    """True if THIS module's discovery thread is still running.
 
-    Mirrors ``tui_gateway.entry.mcp_discovery_in_flight`` for surfaces that start discovery here
-    (desktop app, dashboard WebSocket sidecar, ``hermes dashboard``). Those populate THIS module's
-    thread, so the late-refresh scheduler must consult both to know if a slow server is pending.
+    Mirrors ``tui_gateway.entry.mcp_discovery_in_flight``; surfaces that start discovery here
+    (desktop, dashboard sidecar) populate this thread, so the late-refresh scheduler consults both.
     """
     thread = _mcp_discovery_thread
     return thread is not None and thread.is_alive()
 
 
 def join_mcp_discovery(timeout: "float | None" = None) -> bool:
-    """Block until THIS module's background discovery finishes, up to ``timeout``.
-
-    Returns True once discovery has completed, False if still running after the timeout. Unlike
-    ``wait_for_mcp_discovery`` this accepts a long wait and reports the outcome, for the
-    off-critical-path late-refresh waiter.
-    """
+    """Block up to ``timeout`` for THIS module's discovery; True once complete, False if still
+    running. For the off-critical-path late-refresh waiter (accepts a long wait, reports outcome)."""
     thread = _mcp_discovery_thread
     if thread is None:
         return True
@@ -241,22 +205,12 @@ def ensure_mcp_discovery_before_agent_build(
 ) -> None:
     """Give configured MCP tools a bounded chance to register before AIAgent.
 
-    Non-interactive first turns (``chat -q``, ``hermes -z``) can construct ``AIAgent`` before the
-    normal banner or tool-list paths touch ``get_tool_definitions()``.
-
-    ``wait_for_mcp_discovery()`` only joins an already-created discovery thread, so it no-ops if a
-    direct/single-query path reaches agent construction before MCP startup created that thread. This
-    helper makes the construction site self-sufficient: start discovery if needed, then wait up to
-    the configured bound.
+    Non-interactive first turns (``chat -q``, ``hermes -z``) can construct ``AIAgent`` before any
+    path started discovery, and ``wait_for_mcp_discovery()`` only joins an existing thread — so
+    start discovery if needed, then wait up to the configured bound.
     """
     try:
-        start_background_mcp_discovery(
-            logger=logger,
-            thread_name=thread_name,
-        )
+        start_background_mcp_discovery(logger=logger, thread_name=thread_name)
         wait_for_mcp_discovery(timeout=timeout, single_query=single_query)
     except Exception:
-        logger.debug(
-            "MCP discovery readiness check failed before agent build",
-            exc_info=True,
-        )
+        logger.debug("MCP discovery readiness check failed before agent build", exc_info=True)

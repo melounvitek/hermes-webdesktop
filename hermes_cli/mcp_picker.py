@@ -10,22 +10,10 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.cli_output import prompt_yes_no
 from hermes_cli.curses_ui import curses_single_select
 from hermes_cli.mcp_catalog import (
-    CatalogEntry,
-    CatalogError,
-    catalog_diagnostics,
-    install_entry,
-    is_enabled,
-    is_installed,
-    list_catalog,
-    installed_servers,
-    remove_server,
-    server_enabled,
-    uninstall_entry,
+    CatalogEntry, CatalogError, catalog_diagnostics, install_entry, is_enabled, is_installed,
+    list_catalog, installed_servers, remove_server, server_enabled, uninstall_entry,
 )
 from hermes_cli.config import load_config, save_config
-
-
-# ─── Status badges ────────────────────────────────────────────────────────────
 
 _STATUS_NOT_INSTALLED = "available"
 _STATUS_DISABLED = "installed (disabled)"
@@ -34,13 +22,9 @@ _STATUS_CUSTOM_ENABLED = "custom — enabled"
 _STATUS_CUSTOM_DISABLED = "custom — disabled"
 
 
-# ─── Row model — unifies catalog and custom entries ──────────────────────────
-
-
 @dataclass
 class _Row:
-    """A row in the picker. ``entry`` is set for catalog rows; for custom
-    user-added MCPs only ``name`` + ``description`` + status are populated."""
+    """A picker row. ``entry`` is set for catalog rows; custom MCPs carry only name/description/status."""
 
     name: str
     description: str
@@ -68,24 +52,18 @@ def _build_rows() -> List[_Row]:
         else:
             status = _STATUS_DISABLED
         rows.append(_Row(entry.name, entry.description, status, entry))
-
-    # Custom MCPs the user added directly (not in the catalog)
+    # Custom (non-catalog) MCPs: the transport URL/command doubles as the description.
     for name, cfg in sorted(servers.items()):
         if name in catalog_names:
             continue
         status = _STATUS_CUSTOM_ENABLED if server_enabled(cfg) else _STATUS_CUSTOM_DISABLED
-        # Use the transport URL/command as the "description" for custom rows
-        desc = cfg.get("url") or cfg.get("command") or "(no transport)"
-        rows.append(_Row(name, str(desc), status))
-
+        rows.append(_Row(name, str(cfg.get("url") or cfg.get("command") or "(no transport)"), status))
     return rows
 
 
 def _format_row(row: _Row) -> str:
     return f"{row.name:<18} {row.status:<24} {row.description}"
 
-
-# ─── Actions ──────────────────────────────────────────────────────────────────
 
 
 def _enable_disable(name: str, *, enable: bool) -> None:
@@ -156,19 +134,13 @@ def _run_submenu(title: str, actions: list) -> None:
 
 def _handle_row(row: _Row) -> None:
     """Act on the picked row based on its current status."""
-    # === Catalog row, not yet installed ===
     if row.entry and not is_installed(row.name):
         _install(row.entry, "install")
         return
-
-    # === Catalog row, installed but disabled ===
     if row.entry and not is_enabled(row.name):
         _enable_disable(row.name, enable=True)
         return
-
-    # === Catalog row, installed + enabled OR custom row ===
     if row.is_custom:
-        # Custom (non-catalog) row submenu
         enabled = is_enabled(row.name)
         _run_submenu(f"Action for '{row.name}' (custom)", [
             ("Configure tools (probe server + re-pick)", lambda: _configure_tools(row.name)),
@@ -177,7 +149,6 @@ def _handle_row(row: _Row) -> None:
             ("Remove from config", lambda: _remove_custom(row.name)),
         ])
         return
-
     # Catalog row, installed + enabled
     print()
     print(color(f"  '{row.name}' is already enabled.", Colors.DIM))
@@ -191,12 +162,8 @@ def _handle_row(row: _Row) -> None:
     ])
 
 
-# ─── Output / entry points ────────────────────────────────────────────────────
-
-
 def _print_rows_text(rows: List[_Row]) -> None:
-    """Plain-text catalog dump used as a fallback when curses can't run, and
-    as the default output of `hermes mcp catalog`."""
+    """Plain-text catalog dump: `hermes mcp catalog` output and the non-curses fallback."""
     print()
     if not rows:
         print(color("  No MCPs in the catalog or configured.", Colors.DIM))
@@ -210,13 +177,8 @@ def _print_rows_text(rows: List[_Row]) -> None:
     for row in rows:
         print(f"  {_format_row(row)}")
     print()
-    print(color(
-        "  Install: hermes mcp install <name>    Picker: hermes mcp",
-        Colors.DIM,
-    ))
-
-    # Surface manifest-version warnings so users know when their Hermes is
-    # too old to install everything in the catalog.
+    print(color("  Install: hermes mcp install <name>    Picker: hermes mcp", Colors.DIM))
+    # Manifest-version warnings: the user's Hermes is too old to install everything listed.
     future = [d for d in catalog_diagnostics() if d[1] == "future_manifest"]
     if future:
         print()
@@ -236,22 +198,15 @@ def show_catalog() -> None:
 
 
 def run_picker() -> None:
-    """`hermes mcp picker` (and default `hermes mcp`) — interactive selector.
-
-    Loops until the user hits ESC/q. After each action the picker re-renders so the user can manage
-    several entries in one session.
-    """
+    """`hermes mcp picker` (and default `hermes mcp`) — interactive selector; re-renders after each
+    action until ESC/q."""
     while True:
         rows = _build_rows()
         if not rows or not sys.stdin.isatty():
-            # Non-interactive shell: degrade to the text dump rather than failing.
-            _print_rows_text(rows)
+            _print_rows_text(rows)  # non-interactive: degrade to the text dump
             return
-
-        labels = [_format_row(r) for r in rows]
         idx = curses_single_select(
-            "MCP Catalog  —  ↑↓ navigate  ENTER act on entry  ESC/q quit",
-            labels,
+            "MCP Catalog  —  ↑↓ navigate  ENTER act on entry  ESC/q quit", [_format_row(r) for r in rows],
         )
         if idx is None:
             return
