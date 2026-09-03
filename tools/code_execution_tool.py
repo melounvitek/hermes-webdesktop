@@ -67,26 +67,18 @@ def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
     """
     stdout_bytes = stdout_text.encode("utf-8", errors="replace")
     total = len(stdout_bytes)
+    captured = min(total, MAX_STDOUT_BYTES)
+    metadata: Dict[str, Any] = {"stdout_truncated": total > captured, "stdout_bytes_captured": captured,
+                                "stdout_bytes_total": total, "stdout_bytes_omitted": total - captured}
     if total <= MAX_STDOUT_BYTES:
-        return stdout_bytes.decode("utf-8", errors="replace"), {
-            "stdout_truncated": False, "stdout_bytes_captured": total,
-            "stdout_bytes_total": total, "stdout_bytes_omitted": 0,
-        }
+        return stdout_bytes.decode("utf-8", errors="replace"), metadata
     head_bytes = int(MAX_STDOUT_BYTES * 0.4)
-    omitted = total - MAX_STDOUT_BYTES
-    text = (
-        stdout_bytes[:head_bytes].decode("utf-8", errors="replace")
-        + f"\n\n... [OUTPUT TRUNCATED - {omitted:,} bytes omitted "
-        f"out of {total:,} total] ...\n\n"
-        + stdout_bytes[head_bytes - MAX_STDOUT_BYTES:].decode("utf-8", errors="replace")
-    )
-    metadata: Dict[str, Any] = {
-        "stdout_truncated": True, "stdout_bytes_captured": MAX_STDOUT_BYTES,
-        "stdout_bytes_total": total, "stdout_bytes_omitted": omitted,
-        "warning": ("execute_code stdout was truncated; the script did run, but only "
-                    "the captured head/tail output is included. Re-run only with "
-                    "narrower output if the omitted data is required."),
-    }
+    text = (stdout_bytes[:head_bytes].decode("utf-8", errors="replace")
+            + f"\n\n... [OUTPUT TRUNCATED - {total - captured:,} bytes omitted out of {total:,} total] ...\n\n"
+            + stdout_bytes[head_bytes - MAX_STDOUT_BYTES:].decode("utf-8", errors="replace"))
+    metadata["warning"] = ("execute_code stdout was truncated; the script did run, but only "
+                           "the captured head/tail output is included. Re-run only with "
+                           "narrower output if the omitted data is required.")
     spill_path = _spill_full_stdout(stdout_text)
     if spill_path:
         metadata["stdout_spill_path"] = spill_path
@@ -128,9 +120,7 @@ def check_sandbox_requirements() -> bool:
     except Exception:
         logger.debug("Could not resolve terminal config for execute_code availability", exc_info=True)
         return False
-    if config.get("env_type") == "vercel_sandbox":
-        return _check_vercel_sandbox_requirements(config)
-    return True
+    return config.get("env_type") != "vercel_sandbox" or _check_vercel_sandbox_requirements(config)
 
 
 # ---------------------------------------------------------------------------
@@ -139,41 +129,27 @@ def check_sandbox_requirements() -> bool:
 
 # Per-tool stub templates: (signature, docstring, args_dict_expr — the JSON payload sent over RPC).
 _TOOL_STUBS = {
-    "web_search": (
-        "query: str, limit: int = 5",
+    "web_search": ("query: str, limit: int = 5",
         '"""Search the web. Returns dict with data.web list of {url, title, description}."""',
-        '{"query": query, "limit": limit}',
-    ),
-    "web_extract": (
-        "urls: list, char_limit: int = None",
+        '{"query": query, "limit": limit}'),
+    "web_extract": ("urls: list, char_limit: int = None",
         '"""Extract content from URLs (no LLM summarization). Returns dict with results list of {url, title, content, error}. Pages over char_limit (default 15000) are head+tail truncated with the full text stored on disk; the content footer gives the path. content is markdown."""',
-        '{"urls": urls, "char_limit": char_limit}',
-    ),
-    "read_file": (
-        "path: str, offset: int = 1, limit: int = 2000",
+        '{"urls": urls, "char_limit": char_limit}'),
+    "read_file": ("path: str, offset: int = 1, limit: int = 2000",
         '"""Read a file (1-indexed lines). Returns dict with "content" and "total_lines"."""',
-        '{"path": path, "offset": offset, "limit": limit}',
-    ),
-    "write_file": (
-        "path: str, content: str, cross_profile: bool = False",
+        '{"path": path, "offset": offset, "limit": limit}'),
+    "write_file": ("path: str, content: str, cross_profile: bool = False",
         '"""Write content to a file (always overwrites). Returns dict with status."""',
-        '{"path": path, "content": content, "cross_profile": cross_profile}',
-    ),
-    "search_files": (
-        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
+        '{"path": path, "content": content, "cross_profile": cross_profile}'),
+    "search_files": ('pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
         '"""Search file contents (target="content") or find files by name (target="files"). Returns dict with "matches"."""',
-        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}',
-    ),
-    "patch": (
-        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
+        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}'),
+    "patch": ('path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status."""',
-        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}',
-    ),
-    "terminal": (
-        "command: str, timeout: int = None, workdir: str = None",
+        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}'),
+    "terminal": ("command: str, timeout: int = None, workdir: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}',
-    ),
+        '{"command": command, "timeout": timeout, "workdir": workdir}'),
 }
 
 
@@ -784,8 +760,8 @@ def _kill_process_group(proc, escalate: bool = False):
     import signal as _signal
     def _tree_signal(sig) -> None:
         try:
-            from agent.deadline import kill_process_tree as _deadline_kill_tree
-            _deadline_kill_tree(proc.pid, sig=sig)
+            from agent.deadline import kill_process_tree
+            kill_process_tree(proc.pid, sig=sig)
         except Exception as e:
             logger.debug("Could not terminate process tree: %s", e, exc_info=True)
             try:
@@ -840,26 +816,19 @@ def _get_execution_mode() -> str:
 
 # Per-tool documentation lines for the execute_code description, in canonical display order.
 _TOOL_DOC_LINES = [
-    ("web_search",
-     "  web_search(query: str, limit: int = 5) -> dict\n"
+    ("web_search", "  web_search(query: str, limit: int = 5) -> dict\n"
      "    Returns {\"data\": {\"web\": [{\"url\", \"title\", \"description\"}, ...]}}"),
-    ("web_extract",
-     "  web_extract(urls: list[str], char_limit: int = None) -> dict\n"
+    ("web_extract", "  web_extract(urls: list[str], char_limit: int = None) -> dict\n"
      "    Returns {\"results\": [{\"url\", \"title\", \"content\", \"error\"}, ...]} where content is markdown.\n"
      "    No LLM summarization. Pages over char_limit (default 15000) are head+tail truncated; full text stored on disk (path in the content footer)."),
-    ("read_file",
-     "  read_file(path: str, offset: int = 1, limit: int = 2000) -> dict\n"
+    ("read_file", "  read_file(path: str, offset: int = 1, limit: int = 2000) -> dict\n"
      "    Lines are 1-indexed. Returns {\"content\": \"...\", \"total_lines\": N}"),
-    ("write_file",
-     "  write_file(path: str, content: str) -> dict\n    Always overwrites the entire file."),
-    ("search_files",
-     "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n"
+    ("write_file", "  write_file(path: str, content: str) -> dict\n    Always overwrites the entire file."),
+    ("search_files", "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n"
      "    target: \"content\" (search inside files) or \"files\" (find files by name). Returns {\"matches\": [...]}"),
-    ("patch",
-     "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n"
+    ("patch", "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n"
      "    Replaces old_string with new_string in the file."),
-    ("terminal",
-     "  terminal(command: str, timeout=None, workdir=None) -> dict\n"
+    ("terminal", "  terminal(command: str, timeout=None, workdir=None) -> dict\n"
      "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N}"),
 ]
 

@@ -216,9 +216,7 @@ class SessionKernel:
     """One live kernel process plus its RPC server and reader threads."""
 
     def __init__(self, key: Tuple):
-        self.key = key
-        self.owner: str = key[0]
-        self.lock = threading.Lock()
+        self.key, self.owner, self.lock = key, key[0], threading.Lock()
         self.proc: Optional[subprocess.Popen] = None
         self.tmpdir = self.rpc_token = self.sentinel = ""
         self.sock_path: Optional[str] = None
@@ -228,8 +226,7 @@ class SessionKernel:
         self.tool_call_counter: List[int] = [0]
         self.response_q: "queue.Queue[dict]" = queue.Queue()
         self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer()
-        self.execution_count = 0
-        self.last_used: float = time.monotonic()
+        self.execution_count, self.last_used = 0, time.monotonic()
         self.cell_authority: Optional[CellAuthority] = None
 
     def alive(self) -> bool:
@@ -259,8 +256,7 @@ class KernelRegistry:
 
     def __init__(self, teardown: Callable[[Any], None]):
         self.kernels: Dict[Tuple, Any] = {}
-        self.lock = threading.Lock()
-        self._teardown = teardown
+        self.lock, self._teardown = threading.Lock(), teardown
 
     def shutdown(self, owner: Optional[str] = None) -> None:
         """Tear down every kernel, or every kernel one owner (key[0]) holds."""
@@ -295,8 +291,7 @@ def _lifecycle_limits() -> Tuple[int, int]:
             return max(1, int(config.get(key, default)))
         except (TypeError, ValueError):
             return default
-    return (limit("max_session_kernels", DEFAULT_MAX_SESSION_KERNELS),
-            limit("kernel_idle_timeout", DEFAULT_KERNEL_IDLE_TIMEOUT))
+    return limit("max_session_kernels", DEFAULT_MAX_SESSION_KERNELS), limit("kernel_idle_timeout", DEFAULT_KERNEL_IDLE_TIMEOUT)
 
 
 def _resolve_owner(task_id: str) -> str:

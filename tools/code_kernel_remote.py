@@ -181,12 +181,8 @@ def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
             cell_source=RUNNER_CELL_SOURCE, capture_limit=MAX_STDOUT_BYTES, idle_exit=idle_exit))
         _ship_file_to_remote(env, f"{kernel_dir}/hermes_tools.py",
                              generate_hermes_tools_module(list(sandbox_tools), transport="file"))
-        env_prefix = (
-            f"HERMES_KERNEL_DIR={q_dir} "
-            f"HERMES_RPC_DIR={shlex.quote(kernel_dir + '/rpc')} "
-            f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
-            f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={q_dir}"
-        )
+        env_prefix = (f"HERMES_KERNEL_DIR={q_dir} HERMES_RPC_DIR={shlex.quote(kernel_dir + '/rpc')} "
+                      f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={q_dir}")
         started = _sh(env, f"cd {q_dir} && nohup env {env_prefix} python3 kernel_runner.py "
                            f"> {q_dir}/runner.log 2>&1 & echo PID:$!", timeout=20)
         pid = next((line.strip()[4:].strip() for line in started.splitlines()
