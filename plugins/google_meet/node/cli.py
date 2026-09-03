@@ -41,8 +41,7 @@ def _cmd_run(args: argparse.Namespace, reg: NodeRegistry) -> int:
     token = server.ensure_token()
     print(f"[meet-node] display_name={server.display_name}\n"
           f"[meet-node] listening on ws://{args.host}:{args.port}\n"
-          f"[meet-node] token (copy to gateway): {token}\n"
-          "[meet-node] approve with:\n"
+          f"[meet-node] token (copy to gateway): {token}\n[meet-node] approve with:\n"
           f"             hermes meet node approve <name> ws://<host>:{args.port} {token}")
     try:
         asyncio.run(server.serve())
@@ -85,8 +84,6 @@ def _cmd_ping(args: argparse.Namespace, reg: NodeRegistry) -> int:
     except Exception as exc:  # noqa: BLE001 — surface any connection error
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 1
-    if not isinstance(result, dict):
-        result = {"result": result}
     print(json.dumps({"ok": True, "node": args.name, **result}))
     return 0
 
@@ -97,8 +94,7 @@ _COMMANDS = {
     "approve": _cmd_approve,
     "remove": _cmd_remove,
     "status": _cmd_ping,
-    "ping": _cmd_ping,
-}
+    "ping": _cmd_ping}
 
 
 def node_command(args: argparse.Namespace) -> int:

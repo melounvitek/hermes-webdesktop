@@ -1,15 +1,8 @@
 """disk-cleanup plugin — auto-cleanup of ephemeral Hermes session files.
 
-Wires three behaviours:
-
-1. ``post_tool_call`` hook — inspects ``write_file`` / ``patch`` / ``terminal``
-   tool calls for newly-created paths matching test/temp patterns under
-   ``HERMES_HOME`` and tracks them silently.  Zero agent compliance required.
-2. ``on_session_end`` hook — when any test files were auto-tracked during the
-   just-finished turn, runs :func:`disk_cleanup.quick` and logs one line to
-   ``$HERMES_HOME/disk-cleanup/cleanup.log``.
-3. ``/disk-cleanup`` slash command — manual ``status``, ``dry-run``, ``quick``,
-   ``deep``, ``track``, ``forget``.
+``post_tool_call`` silently tracks test/temp paths created by write_file/patch/terminal;
+``on_session_end`` runs :func:`disk_cleanup.quick` when any test file was tracked this turn;
+``/disk-cleanup`` exposes status / dry-run / quick / deep / track / forget.
 """
 
 from __future__ import annotations
@@ -26,27 +19,22 @@ from . import disk_cleanup as dg
 logger = logging.getLogger(__name__)
 
 
-# Per-task set of test files newly tracked this turn, keyed by task_id (or
-# session_id as fallback) so on_session_end can decide whether to run cleanup.
-# Locked: post_tool_call can fire concurrently on parallel tool calls.
+# Test files newly tracked this turn, keyed by task_id (or session_id) so on_session_end can
+# decide whether to run cleanup. Locked: post_tool_call fires concurrently on parallel calls.
 _recent_test_tracks: Dict[str, Set[str]] = {}
 _lock = threading.Lock()
 
 _TERMINAL_PATH_REGEX = re.compile(r"(?:^|\s)(/[^\s'\"`]+|\~/[^\s'\"`]+)")
 
 
-# --- Path extraction from tool calls ----------------------------------------
-
 def _extract_path_arg(args: Dict[str, Any], result: str) -> Set[str]:
-    """write_file and patch: only the single-file ``path`` arg. patch mostly edits
-    existing files; re-tracking is a no-op (track() dedups), so this is safe."""
+    """write_file/patch: the single ``path`` arg (re-tracking existing files is a no-op)."""
     path = args.get("path")
     return {path} if isinstance(path, str) and path else set()
 
 
 def _extract_paths_from_terminal(args: Dict[str, Any], result: str) -> Set[str]:
-    """Best-effort: pull candidate filesystem paths from a terminal command and
-    its output; ``guess_category`` / ``is_safe_path`` filter them afterwards."""
+    """Candidate paths from a terminal command + output; guess_category/is_safe_path filter later."""
     paths: Set[str] = set()
     cmd = args.get("command") or ""
     if isinstance(cmd, str) and cmd:
@@ -63,21 +51,11 @@ def _extract_paths_from_terminal(args: Dict[str, Any], result: str) -> Set[str]:
 _PATH_EXTRACTORS: Dict[str, Callable[[Dict[str, Any], str], Set[str]]] = {
     "write_file": _extract_path_arg,
     "patch": _extract_path_arg,
-    "terminal": _extract_paths_from_terminal,
-}
+    "terminal": _extract_paths_from_terminal}
 
 
-# --- Hooks ------------------------------------------------------------------
-
-def _on_post_tool_call(
-    tool_name: str = "",
-    args: Optional[Dict[str, Any]] = None,
-    result: Any = None,
-    task_id: str = "",
-    session_id: str = "",
-    tool_call_id: str = "",
-    **_: Any,
-) -> None:
+def _on_post_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, result: Any = None,
+                       task_id: str = "", session_id: str = "", tool_call_id: str = "", **_: Any) -> None:
     """Auto-track ephemeral files created by recent tool calls. Best-effort, never raises."""
     extractor = _PATH_EXTRACTORS.get(tool_name)
     if not isinstance(args, dict) or extractor is None:
@@ -96,14 +74,9 @@ def _on_post_tool_call(
 
 
 def _on_session_end(
-    session_id: str = "",
-    completed: bool = True,
-    interrupted: bool = False,
-    **_: Any,
-) -> None:
+    session_id: str = "", completed: bool = True, interrupted: bool = False, **_: Any) -> None:
     """Run quick cleanup if any test files were tracked during this turn."""
-    # Drain the session bucket plus every task-scoped bucket: subagents record
-    # into their own task_id buckets and should be cleaned up at session end too.
+    # Drain the session bucket plus every task-scoped bucket (subagents record into their own).
     with _lock:
         had_tracks = bool(_recent_test_tracks.pop(session_id or "default", None) or _recent_test_tracks)
         _recent_test_tracks.clear()
@@ -117,13 +90,9 @@ def _on_session_end(
         return
 
     if summary["deleted"] or summary["empty_dirs"]:
-        dg._log(
-            f"AUTO_QUICK (session_end): deleted={summary['deleted']} "
-            f"dirs={summary['empty_dirs']} freed={dg.fmt_size(summary['freed'])}"
-        )
+        dg._log(f"AUTO_QUICK (session_end): deleted={summary['deleted']} "
+                f"dirs={summary['empty_dirs']} freed={dg.fmt_size(summary['freed'])}")
 
-
-# --- Slash command ----------------------------------------------------------
 
 _HELP_TEXT = """\
 /disk-cleanup — ephemeral-file cleanup
@@ -144,10 +113,8 @@ Test files are auto-tracked on write_file / terminal and auto-cleaned at session
 
 
 def _fmt_summary(summary: Dict[str, Any]) -> str:
-    base = (
-        f"[disk-cleanup] Cleaned {summary['deleted']} files + "
-        f"{summary['empty_dirs']} empty dirs, freed {dg.fmt_size(summary['freed'])}."
-    )
+    base = (f"[disk-cleanup] Cleaned {summary['deleted']} files + "
+            f"{summary['empty_dirs']} empty dirs, freed {dg.fmt_size(summary['freed'])}.")
     if summary.get("errors"):
         base += f"\n  {len(summary['errors'])} error(s); see cleanup.log."
     return base
@@ -169,8 +136,7 @@ def _cmd_dry_run(argv: List[str]) -> str:
 
 
 def _cmd_deep(argv: List[str]) -> str:
-    # In-session deep can't prompt interactively — show what quick cleaned plus
-    # the items that WOULD need confirmation.
+    # In-session deep can't prompt — show what quick cleaned plus items needing confirmation.
     quick_summary = dg.quick()
     _auto, prompt_items = dg.dry_run()
     lines = [_fmt_summary(quick_summary)]
@@ -195,10 +161,8 @@ def _cmd_forget(argv: List[str]) -> str:
     if len(argv) < 2:
         return "Usage: /disk-cleanup forget <path>"
     n = dg.forget(argv[1])
-    return (
-        f"Removed {n} tracking entr{'y' if n == 1 else 'ies'} for {argv[1]}."
-        if n else f"Not found in tracking: {argv[1]}"
-    )
+    return (f"Removed {n} tracking entr{'y' if n == 1 else 'ies'} for {argv[1]}." if n
+            else f"Not found in tracking: {argv[1]}")
 
 
 _SUBCOMMANDS: Dict[str, Callable[[List[str]], str]] = {
@@ -207,8 +171,7 @@ _SUBCOMMANDS: Dict[str, Callable[[List[str]], str]] = {
     "quick": lambda argv: _fmt_summary(dg.quick()),
     "deep": _cmd_deep,
     "track": _cmd_track,
-    "forget": _cmd_forget,
-}
+    "forget": _cmd_forget}
 
 
 def _handle_slash(raw_args: str) -> Optional[str]:
@@ -224,8 +187,5 @@ def _handle_slash(raw_args: str) -> Optional[str]:
 def register(ctx) -> None:
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("on_session_end", _on_session_end)
-    ctx.register_command(
-        "disk-cleanup",
-        handler=_handle_slash,
-        description="Track and clean up ephemeral Hermes session files.",
-    )
+    ctx.register_command("disk-cleanup", handler=_handle_slash,
+                         description="Track and clean up ephemeral Hermes session files.")

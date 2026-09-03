@@ -1,10 +1,7 @@
-"""Shared directory-plugin loader for the ``plugins/<kind>/<name>/`` discovery packages.
-
-Used by ``plugins.cron_providers`` and ``plugins.context_engine``: import a plugin
-``__init__.py`` by path (with its sibling ``*.py`` pre-registered so relative
-imports work), then extract the provider instance via ``register(ctx)`` or an
-ABC-subclass fallback.
-"""
+"""Shared directory-plugin loader for ``plugins/<kind>/<name>/`` discovery packages
+(cron_providers, context_engine, memory): import ``__init__.py`` by path with siblings
+pre-registered so relative imports work, then extract the provider via ``register(ctx)``
+or an ABC-subclass fallback."""
 
 from __future__ import annotations
 
@@ -41,12 +38,8 @@ def iter_plugin_dirs(root: Path) -> List[Path]:
     """Sorted child dirs of *root* that have an ``__init__.py`` (skips ``_``/``.`` names)."""
     if not root.is_dir():
         return []
-    return [
-        child for child in sorted(root.iterdir())
-        if child.is_dir()
-        and not child.name.startswith(("_", "."))
-        and (child / "__init__.py").exists()
-    ]
+    return [child for child in sorted(root.iterdir())
+            if child.is_dir() and not child.name.startswith(("_", ".")) and (child / "__init__.py").exists()]
 
 
 def read_plugin_description(plugin_dir: Path) -> str:
@@ -66,8 +59,7 @@ def read_plugin_description(plugin_dir: Path) -> str:
 def _new_module(name: str, file: Path, search_locations: Optional[List[str]] = None) -> Optional[Any]:
     """spec -> module -> sys.modules[name] (NOT executed); None if no spec."""
     spec = importlib.util.spec_from_file_location(
-        name, str(file), submodule_search_locations=search_locations
-    )
+        name, str(file), submodule_search_locations=search_locations)
     if not spec:
         return None
     mod = importlib.util.module_from_spec(spec)
@@ -77,10 +69,7 @@ def _new_module(name: str, file: Path, search_locations: Optional[List[str]] = N
 
 def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
     """Execute a module made by ``_new_module`` (None -> False); False (and debug-log) if it raised.
-
-    The sys.modules entry is left in place on failure; callers that need a clean
-    retry (the main plugin module) pop it themselves.
-    """
+    The sys.modules entry stays on failure; callers needing a clean retry pop it themselves."""
     if mod is None:
         return False
     try:
@@ -92,20 +81,13 @@ def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
         return False
 
 
-def load_plugin_module(
-    module_name: str,
-    plugin_dir: Path,
-    *,
-    parents: Tuple[str, ...],
-    logger: logging.Logger,
-    synthetic_namespace: Optional[str] = None,
-) -> Optional[Any]:
+def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: Tuple[str, ...],
+                       logger: logging.Logger, synthetic_namespace: Optional[str] = None) -> Optional[Any]:
     """Import ``plugin_dir/__init__.py`` as *module_name* (reusing sys.modules when loaded).
 
-    Order matters: parent packages first (relative imports need them), then sibling
-    ``*.py`` as ``module_name.<stem>`` (so ``from ._x import Y`` resolves), then the
-    module itself. Finally the child is bound onto its parent and the siblings onto the
-    module — the shape normal imports produce, which dotted imports and monkeypatch rely on.
+    Order matters: parents first (relative imports need them), then siblings as ``module_name.<stem>``
+    (so ``from ._x import Y`` resolves), then the module. Finally child is bound onto parent and
+    siblings onto module — the shape normal imports produce, which monkeypatch relies on.
     """
     init_file = plugin_dir / "__init__.py"
     if not init_file.exists():
@@ -151,8 +133,8 @@ def load_plugin_module(
 
 
 class NoopPluginContext:
-    """Base for the fake ``register(ctx)`` contexts: every registration is a no-op except
-    the one the subclass overrides to capture its provider."""
+    """Base for fake ``register(ctx)`` contexts: every registration is a no-op except the one the
+    subclass overrides to capture its provider."""
 
     def _noop(self, *args, **kwargs):
         pass
@@ -160,15 +142,8 @@ class NoopPluginContext:
     register_tool = register_hook = register_cli_command = register_memory_provider = _noop
 
 
-def instance_from_module(
-    mod: Any,
-    *,
-    collector: Any,
-    collected_attr: str,
-    base_cls: type,
-    name: str,
-    logger: logging.Logger,
-) -> Optional[Any]:
+def instance_from_module(mod: Any, *, collector: Any, collected_attr: str, base_cls: type, name: str,
+                         logger: logging.Logger) -> Optional[Any]:
     """Extract the provider instance: ``register(ctx)`` first, then any ``base_cls`` subclass."""
     if hasattr(mod, "register"):
         try:
@@ -189,15 +164,8 @@ def instance_from_module(
     return None
 
 
-def load_named(
-    name: str,
-    plugin_dir: Path,
-    load_from_dir: Callable[[Path], Optional[Any]],
-    *,
-    kind: str,
-    noun: str,
-    logger: logging.Logger,
-) -> Optional[Any]:
+def load_named(name: str, plugin_dir: Path, load_from_dir: Callable[[Path], Optional[Any]], *, kind: str,
+               noun: str, logger: logging.Logger) -> Optional[Any]:
     """Shared body of ``load_<kind>(name)``: load from *plugin_dir*, warn + None on failure."""
     try:
         instance = load_from_dir(plugin_dir)

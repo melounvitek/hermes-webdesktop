@@ -1,15 +1,9 @@
-"""disk_cleanup — ephemeral file cleanup for Hermes Agent.
-
-Library module behind the disk-cleanup plugin; ``__init__.py`` wires these
-functions into ``post_tool_call`` / ``on_session_end`` hooks so tracking and
-cleanup happen without the agent calling a tool or remembering a skill.
+"""disk_cleanup — ephemeral file cleanup library behind the disk-cleanup plugin.
 
 Rules: test files delete at task end (age >= 0); temp after 7 days; cron-output
-after 14 days; empty dirs under HERMES_HOME always. Deep-only prompts: research
+after 14 days; empty dirs under HERMES_HOME always. Prompt-only: research
 (keep 10 newest, > 30 days), chrome-profile > 14 days, any file > 500 MB.
-
-Scope: strictly HERMES_HOME and /tmp/hermes-*. Never touches ~/.hermes/logs/ or
-any system directory.
+Scope: strictly HERMES_HOME and /tmp/hermes-*; never ~/.hermes/logs/ or system dirs.
 """
 
 from __future__ import annotations
@@ -19,7 +13,7 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 try:
     from hermes_constants import get_hermes_home
@@ -36,19 +30,13 @@ logger = logging.getLogger(__name__)
 _LARGE_FILE_BYTES = 500 * 1024 * 1024
 
 
-# --- Paths / safety ---------------------------------------------------------
-
 def _state_file(name: str) -> Path:
-    """``$HERMES_HOME/disk-cleanup/<name>`` — state and audit log deliberately
-    live outside ``$HERMES_HOME/logs/``."""
+    """``$HERMES_HOME/disk-cleanup/<name>`` — deliberately outside ``$HERMES_HOME/logs/``."""
     return get_hermes_home() / "disk-cleanup" / name
 
 
 def is_safe_path(path: Path) -> bool:
-    """Accept only paths under HERMES_HOME or ``/tmp/hermes-*``.
-
-    Rejects Windows mounts (``/mnt/c`` etc.) and any system directory.
-    """
+    """Accept only paths under HERMES_HOME or ``/tmp/hermes-*`` (rejects /mnt/c etc.)."""
     try:
         path.resolve().relative_to(get_hermes_home())
         return True
@@ -70,8 +58,6 @@ def _log(message: str) -> None:
         pass
 
 
-# --- tracked.json — atomic read/write, backup scoped to tracked.json only ----
-
 def load_tracked() -> List[Dict[str, Any]]:
     """Load tracked.json.  Restores from ``.bak`` on corruption."""
     tf = _state_file("tracked.json")
@@ -81,16 +67,17 @@ def load_tracked() -> List[Dict[str, Any]]:
     try:
         return json.loads(tf.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError):
-        bak = tf.with_suffix(".json.bak")
-        if bak.exists():
-            try:
-                data = json.loads(bak.read_text(encoding="utf-8"))
-                _log("WARN: tracked.json corrupted — restored from .bak")
-                return data
-            except Exception:
-                pass
-        _log("WARN: tracked.json corrupted, no backup — starting fresh")
-        return []
+        pass
+    bak = tf.with_suffix(".json.bak")
+    if bak.exists():
+        try:
+            data = json.loads(bak.read_text(encoding="utf-8"))
+            _log("WARN: tracked.json corrupted — restored from .bak")
+            return data
+        except Exception:
+            pass
+    _log("WARN: tracked.json corrupted, no backup — starting fresh")
+    return []
 
 
 def save_tracked(tracked: List[Dict[str, Any]]) -> None:
@@ -104,59 +91,43 @@ def save_tracked(tracked: List[Dict[str, Any]]) -> None:
     tmp.replace(tf)
 
 
-# --- Categories / protected trees -------------------------------------------
-
 ALLOWED_CATEGORIES = {
-    "temp", "test", "research", "download",
-    "chrome-profile", "cron-output", "other",
-}
+    "temp", "test", "research", "download", "chrome-profile", "cron-output", "other"}
 
-# Top-level HERMES_HOME dirs whose empty subdirs are never swept. The last row
-# is user-authored project trees (patches/, projects/, ...) — never sweep inside.
+# Top-level HERMES_HOME dirs whose empty subdirs are never swept (last row: user project trees).
 _EMPTY_DIR_PROTECTED_TOP_LEVEL = frozenset({
     "logs", "memories", "sessions", "cron", "cronjobs",
     "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
     "hermes-agent", "backups", "profiles", ".worktrees",
-    "patches", "projects", "skins", "themes", "contributors",
-})
+    "patches", "projects", "skins", "themes", "contributors"})
 
 _EMPTY_DIR_SWEEP_PRUNE_DIRS = frozenset({
-    ".git", "node_modules", "venv", ".venv",
-    "site-packages", "__pycache__",
-})
+    ".git", "node_modules", "venv", ".venv", "site-packages", "__pycache__"})
 
-# Top-level entries under HERMES_HOME that guess_category() never auto-tracks:
-# state dir, logs, memory, sessions, config/secrets, and user-authored project
-# trees (a file named test_*/tmp_* inside patches/ or projects/ is not disposable).
+# Top-level HERMES_HOME entries guess_category() never auto-tracks: state, logs, memory,
+# sessions, config/secrets, and user project trees (test_* inside projects/ is not disposable).
 _NEVER_TRACK_TOP_LEVEL = frozenset({
     "disk-cleanup", "logs", "memories", "sessions", "config.yaml",
     "skills", "plugins", ".env", "USER.md", "MEMORY.md", "SOUL.md",
     "auth.json", "hermes-agent",
     "patches", "projects", "skins", "themes", "contributors",
-    "profiles", "backups", "optional-skills",
-})
+    "profiles", "backups", "optional-skills"})
 
-# Defense-in-depth for quick(): exact cron control-plane paths never deleted,
-# regardless of stored category (guards stale tracked.json entries).
+# Defense-in-depth for quick(): exact cron control-plane paths never deleted regardless of
+# stored category (guards stale tracked.json entries).
 _PROTECTED_CRON_PATHS: set[str] = set()
 
 
 def _is_protected_cron_path(p: Path) -> bool:
-    """True if *p* is cron control-plane state that must never be deleted.
-
-    Matches by EXACT path only: the ``cron/`` dir itself, ``jobs.json``,
-    ``.tick.lock``, and the ``output/`` root. It must NOT be widened to
-    everything under ``cron/output/`` — run artifacts there are disposable and
-    cleaned by retention; only the ``output/`` root is protected because
-    deleting it wholesale erases every job's retained run history.
-    """
+    """True if *p* is cron control-plane state (EXACT match: ``cron/``, ``jobs.json``,
+    ``.tick.lock``, the ``output/`` root). Never widen to everything under ``cron/output/``:
+    run artifacts there are disposable; only wholesale deletion of ``output/`` is fatal."""
     if not _PROTECTED_CRON_PATHS:  # built lazily so HERMES_HOME resolves once
         hermes_home = get_hermes_home()
         for parent in ("cron", "cronjobs"):
             base = hermes_home / parent
             _PROTECTED_CRON_PATHS.update(
-                str(x) for x in (base, base / "output", base / "jobs.json", base / ".tick.lock")
-            )
+                str(x) for x in (base, base / "output", base / "jobs.json", base / ".tick.lock"))
     return str(p.resolve()) in _PROTECTED_CRON_PATHS
 
 
@@ -167,8 +138,6 @@ def fmt_size(n: float) -> str:
         n /= 1024
     return f"{n:.1f} PB"
 
-
-# --- Track / forget ---------------------------------------------------------
 
 def track(path_str: str, category: str, silent: bool = False) -> bool:
     """Register a file for tracking. Returns True if newly tracked."""
@@ -189,12 +158,8 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
     if any(item["path"] == str(path) for item in tracked):
         return False
 
-    tracked.append({
-        "path": str(path),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "category": category,
-        "size": size,
-    })
+    tracked.append({"path": str(path), "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "category": category, "size": size})
     save_tracked(tracked)
     _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
     if not silent:
@@ -206,26 +171,22 @@ def forget(path_str: str) -> int:
     """Remove a path from tracking without deleting the file."""
     p = Path(path_str).resolve()
     tracked = load_tracked()
-    before = len(tracked)
-    tracked = [i for i in tracked if Path(i["path"]).resolve() != p]
-    removed = before - len(tracked)
+    kept = [i for i in tracked if Path(i["path"]).resolve() != p]
+    removed = len(tracked) - len(kept)
     if removed:
-        save_tracked(tracked)
+        save_tracked(kept)
         _log(f"FORGOT: {p} ({removed} entries)")
     return removed
 
-
-# --- Rules shared by dry_run / quick / deep ---------------------------------
 
 def _live_items(tracked: List[Dict], now: datetime, *, log_stale: bool = False) -> Iterator[Tuple[Dict, Path, int]]:
     """Yield ``(item, path, age_days)`` for entries whose path still exists."""
     for item in tracked:
         p = Path(item["path"])
-        if not p.exists():
-            if log_stale:
-                _log(f"STALE: {p} (removed from tracking)")
-            continue
-        yield item, p, (now - datetime.fromisoformat(item["timestamp"])).days
+        if p.exists():
+            yield item, p, (now - datetime.fromisoformat(item["timestamp"])).days
+        elif log_stale:
+            _log(f"STALE: {p} (removed from tracking)")
 
 
 def _is_auto_delete(cat: str, age: int) -> bool:
@@ -233,15 +194,13 @@ def _is_auto_delete(cat: str, age: int) -> bool:
 
 
 def _prompt_group(item: Dict, age: int) -> Optional[str]:
-    """Deep-only bucket: ``research`` / ``chrome`` / ``large`` or None."""
+    """Prompt-only bucket: ``research`` / ``chrome`` / ``large`` or None."""
     cat = item["category"]
     if cat == "research" and age > 30:
         return "research"
     if cat == "chrome-profile" and age > 14:
         return "chrome"
-    if item["size"] > _LARGE_FILE_BYTES:
-        return "large"
-    return None
+    return "large" if item["size"] > _LARGE_FILE_BYTES else None
 
 
 def _delete_item(item: Dict) -> Optional[str]:
@@ -259,14 +218,10 @@ def _delete_item(item: Dict) -> Optional[str]:
     return None
 
 
-# Stored categories that are re-validated against guess_category() before use.
-# Old tracked.json entries can carry "cron-output" for control-plane files
-# (cron/jobs.json) or "test" for files now under protected project trees;
-# guess_category() was tightened later but existing entries were never re-checked.
+# Stored categories re-validated against guess_category() before use: old tracked.json entries
+# may carry "cron-output" for control-plane files or "test" for files under protected trees.
 _STALE_SKIP_NOTE = {"cron-output": "", "test": " — under protected tree"}
 
-
-# --- Dry run / quick / deep -------------------------------------------------
 
 def dry_run() -> Tuple[List[Dict], List[Dict]]:
     """Return (auto_delete_list, needs_prompt_list) without touching files."""
@@ -285,10 +240,7 @@ def dry_run() -> Tuple[List[Dict], List[Dict]]:
 
 
 def quick() -> Dict[str, Any]:
-    """Safe deterministic cleanup — no prompts.
-
-    Returns: ``{"deleted": N, "empty_dirs": N, "freed": bytes, "errors": [str, ...]}``.
-    """
+    """Safe deterministic cleanup — no prompts. Returns ``{deleted, empty_dirs, freed, errors}``."""
     deleted = freed = 0
     new_tracked: List[Dict] = []
     errors: List[str] = []
@@ -328,14 +280,12 @@ def _subdirs(dirpath: Path, exclude: frozenset) -> List[Path]:
 
 
 def _sweep_empty_dirs(hermes_home: Path) -> int:
-    """Remove empty dirs under HERMES_HOME, never recursing into durable state
-    trees. Some installs keep the Hermes checkout, venv, and desktop build under
-    HERMES_HOME; a full rglob there can stall the gateway event loop for minutes.
+    """Remove empty dirs under HERMES_HOME without recursing into durable/heavy trees (a full
+    rglob over a checkout+venv under HERMES_HOME can stall the gateway loop for minutes).
     Iterative post-order so parents emptied by child removal are caught."""
     removed = 0
     stack: List[Tuple[Path, bool]] = [
-        (top, False) for top in _subdirs(hermes_home, _EMPTY_DIR_PROTECTED_TOP_LEVEL | _EMPTY_DIR_SWEEP_PRUNE_DIRS)
-    ]
+        (top, False) for top in _subdirs(hermes_home, _EMPTY_DIR_PROTECTED_TOP_LEVEL | _EMPTY_DIR_SWEEP_PRUNE_DIRS)]
     while stack:
         dirpath, visited = stack.pop()
         if visited:
@@ -352,36 +302,6 @@ def _sweep_empty_dirs(hermes_home: Path) -> int:
     return removed
 
 
-def deep(confirm: Optional[Callable[[Dict], bool]] = None) -> Dict[str, Any]:
-    """Deep cleanup: :func:`quick`, then ask *confirm(item)* for each risky item
-    (research > 30d beyond the 10 newest, chrome-profile > 14d, any file > 500 MB).
-
-    Returns: ``{"quick": {...}, "deep_deleted": N, "deep_freed": bytes}``.
-    """
-    quick_result = quick()
-    if confirm is None:  # no interactive confirmer — stop after the quick pass
-        return {"quick": quick_result, "deep_deleted": 0, "deep_freed": 0}
-
-    tracked = load_tracked()
-    groups: Dict[str, List[Dict]] = {"research": [], "chrome": [], "large": []}
-    for item, _p, age in _live_items(tracked, datetime.now(timezone.utc)):
-        group = _prompt_group(item, age)
-        if group:
-            groups[group].append(item)
-
-    groups["research"].sort(key=lambda x: x["timestamp"], reverse=True)
-    del groups["research"][:10]  # keep the 10 newest research items
-
-    removed = [item for group in groups.values() for item in group if confirm(item) and _delete_item(item) is None]
-    if removed:
-        remove_paths = {i["path"] for i in removed}
-        save_tracked([i for i in tracked if i["path"] not in remove_paths])
-
-    return {"quick": quick_result, "deep_deleted": len(removed), "deep_freed": sum(i["size"] for i in removed)}
-
-
-# --- Status -----------------------------------------------------------------
-
 def status() -> Dict[str, Any]:
     """Return per-category breakdown and top 10 largest tracked files."""
     tracked = load_tracked()
@@ -391,8 +311,8 @@ def status() -> Dict[str, Any]:
         c["count"] += 1
         c["size"] += item["size"]
 
-    existing = [(i["path"], i["size"], i["category"]) for i in tracked if Path(i["path"]).exists()]
-    existing.sort(key=lambda x: x[1], reverse=True)
+    existing = sorted(((i["path"], i["size"], i["category"]) for i in tracked
+                       if Path(i["path"]).exists()), key=lambda x: x[1], reverse=True)
     return {"categories": cats, "top10": existing[:10], "total_tracked": len(tracked)}
 
 
@@ -413,17 +333,12 @@ def format_status(s: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# --- Auto-categorisation from tool-call inspection --------------------------
-
 _TEST_PATTERNS = ("test_", "tmp_")
 _TEST_SUFFIXES = (".test.py", ".test.js", ".test.ts", ".test.md")
 
 
 def guess_category(path: Path) -> Optional[str]:
-    """Return a category label for *path*, or None if we shouldn't track it.
-
-    Used by the ``post_tool_call`` hook to auto-track ephemeral files.
-    """
+    """Category label for *path*, or None if we shouldn't track it (``post_tool_call`` hook)."""
     if not is_safe_path(path):
         return None
 
@@ -433,18 +348,13 @@ def guess_category(path: Path) -> Optional[str]:
         if top in _NEVER_TRACK_TOP_LEVEL:
             return None
         if top in ("cron", "cronjobs"):
-            # Only the disposable ``output/`` subtree is a candidate. Top-level
-            # control-plane state (jobs.json, .tick.lock) must never be tracked —
-            # deleting it wipes the live scheduler registry.
-            if len(rel.parts) >= 3 and rel.parts[1] == "output":
-                return "cron-output"
-            return None
+            # Only the disposable ``output/`` subtree; control-plane state (jobs.json,
+            # .tick.lock) must never be tracked — deleting it wipes the scheduler registry.
+            return "cron-output" if len(rel.parts) >= 3 and rel.parts[1] == "output" else None
         if top == "cache":
             return "temp"
     except ValueError:
         pass  # not under HERMES_HOME (e.g. /tmp/hermes-*) — fall through to name rules
 
     name = path.name
-    if name.startswith(_TEST_PATTERNS) or name.endswith(_TEST_SUFFIXES):
-        return "test"
-    return None
+    return "test" if name.startswith(_TEST_PATTERNS) or name.endswith(_TEST_SUFFIXES) else None

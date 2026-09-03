@@ -1,9 +1,6 @@
-"""Thin HTTP client for the agent -> NAS ``agent-cron`` endpoints (Chronos).
-
-The agent only asks NAS to "arm a one-shot at time T" / "cancel" / "list", authenticated
-with its existing Nous Portal access token (no new secret). NAS owns the external
-scheduler and its credentials. Wire contract: ``docs/chronos-managed-cron-contract.md``.
-"""
+"""Thin HTTP client for the agent -> NAS ``agent-cron`` endpoints (Chronos): arm one-shot / cancel /
+list, authenticated with the existing Nous Portal token.
+Wire contract: ``docs/chronos-managed-cron-contract.md``."""
 
 from __future__ import annotations
 
@@ -31,26 +28,20 @@ class NasCronClient:
     def _headers(self) -> Dict[str, str]:
         """Bearer auth with the agent's existing Nous Portal access token (refresh-aware)."""
         from hermes_cli.auth import resolve_nous_access_token
-        return {
-            "Authorization": f"Bearer {resolve_nous_access_token()}",
-            "Content-Type": "application/json",
-        }
+        return {"Authorization": f"Bearer {resolve_nous_access_token()}",
+                "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
         """Issue one request; raise NasCronClientError on transport error or non-2xx."""
         import requests  # lazy: agent already depends on requests
 
         try:
-            resp = requests.request(
-                method, f"{self.portal_url}{path}",
-                headers=self._headers(), timeout=self.timeout_seconds, **kwargs,
-            )
+            resp = requests.request(method, f"{self.portal_url}{path}", headers=self._headers(),
+                                    timeout=self.timeout_seconds, **kwargs)
         except Exception as e:
             raise NasCronClientError(f"{method} {path} failed: {e}") from e
         if resp.status_code // 100 != 2:
-            raise NasCronClientError(
-                f"{method} {path} returned {resp.status_code}: {resp.text[:200]}"
-            )
+            raise NasCronClientError(f"{method} {path} returned {resp.status_code}: {resp.text[:200]}")
         try:
             return resp.json() if resp.content else {}
         except Exception:
@@ -58,17 +49,11 @@ class NasCronClient:
 
     def provision(self, *, job_id: str, fire_at: str, agent_callback_url: str,
                   dedup_key: str) -> Dict[str, Any]:
-        """Arm a one-shot for ``job_id`` at ``fire_at`` (ISO 8601).
-
-        ``dedup_key`` (``{job_id}:{fire_at}``) makes re-arming the same fire idempotent
-        NAS-side. Returns the NAS response (e.g. ``{schedule_id}``).
-        """
+        """Arm a one-shot for ``job_id`` at ``fire_at`` (ISO 8601); ``dedup_key`` makes re-arming
+        idempotent NAS-side. Returns the NAS response (e.g. ``{schedule_id}``)."""
         return self._request("POST", _PROVISION_PATH, json={
-            "job_id": job_id,
-            "fire_at": fire_at,
-            "agent_callback_url": agent_callback_url,
-            "dedup_key": dedup_key,
-        })
+            "job_id": job_id, "fire_at": fire_at, "agent_callback_url": agent_callback_url,
+            "dedup_key": dedup_key})
 
     def cancel(self, *, job_id: str) -> Dict[str, Any]:
         """Cancel any armed one-shot for ``job_id``."""
