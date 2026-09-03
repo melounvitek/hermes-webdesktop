@@ -23,10 +23,7 @@ def _unwrap_results(response: Any) -> list:
 
 class Mem0Backend(ABC):
     """Unified interface over Platform (MemoryClient), self-hosted (HTTP) and OSS (Memory) backends.
-
-    update()/delete() are template methods: subclasses implement the raw
-    ``_update``/``_delete`` calls and the base wraps the uniform result dict.
-    """
+    update()/delete() are template methods: subclasses implement raw ``_update``/``_delete``."""
 
     @abstractmethod
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]: ...
@@ -74,19 +71,15 @@ class PlatformBackend(Mem0Backend):
 
 class SelfHostedBackend(Mem0Backend):
     """Direct HTTP backend for a self-hosted Mem0 server (the FastAPI ``server/``).
-
-    mem0.MemoryClient is hardwired to the cloud API (``Authorization: Token`` auth,
-    ``GET /v1/ping/`` in ``__init__``) so it can't be reused here; this speaks the
-    server's real contract: ``X-API-Key`` auth and the ``/memories`` / ``/search`` routes.
-    """
+    mem0.MemoryClient is hardwired to the cloud API (``Authorization: Token``, ``GET /v1/ping/`` in ``__init__``),
+    so this speaks the server's real contract: ``X-API-Key`` auth and the ``/memories`` / ``/search`` routes."""
 
     def __init__(self, api_key: str, host: str, transport=None):
         import httpx
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["X-API-Key"] = api_key  # omitted only for AUTH_DISABLED servers
-        # Connect-level retries keep a single dropped SYN from counting toward the
-        # provider failure breaker. ``transport`` is injectable for tests.
+        # Connect-level retries keep one dropped SYN from counting toward the breaker. ``transport`` is injectable for tests.
         self._client = httpx.Client(base_url=host.rstrip("/"), headers=headers, timeout=30.0, transport=transport or httpx.HTTPTransport(retries=2))
 
     def _json(self, method: str, path: str, **kwargs) -> Any:
@@ -168,8 +161,7 @@ class OSSBackend(Mem0Backend):
 
         config = {"vector_store": vector_store, "llm": _provider_block("llm"), "embedder": _provider_block("embedder"), "version": "v1.1"}
         if str(config["llm"].get("provider") or "").strip().lower() == "openai":
-            # mem0 validates LlmConfig.provider before its factory lookup: build the
-            # supported OpenAI config first, then swap the provider on the validated object.
+            # mem0 validates LlmConfig.provider before its factory lookup: build the supported OpenAI config, then swap the provider.
             _register_direct_openai_provider()
             from mem0.configs.base import MemoryConfig
             memory_config = MemoryConfig(**config)
@@ -212,11 +204,7 @@ class OSSBackend(Mem0Backend):
                 with closing(psycopg2.connect(**conn_params)) as conn:
                     conn.autocommit = True
                     with closing(conn.cursor()) as cur:
-                        cur.execute(
-                            "SELECT atttypmod FROM pg_attribute "
-                            "WHERE attrelid = %s::regclass AND attname = 'vector'",
-                            (collection_name,),
-                        )
+                        cur.execute("SELECT atttypmod FROM pg_attribute WHERE attrelid = %s::regclass AND attname = 'vector'", (collection_name,))
                         row = cur.fetchone()
                         if row and row[0] > 0 and row[0] != expected_dims:
                             cur.execute(pgsql.SQL("DROP TABLE IF EXISTS {}").format(pgsql.Identifier(collection_name)))
@@ -243,13 +231,10 @@ class OSSBackend(Mem0Backend):
                     telemetry.posthog.shutdown()
                 except Exception:
                     pass
-            if hasattr(self._memory, "close"):
-                self._memory.close()
             vs = getattr(self._memory, "vector_store", None)
-            if vs and hasattr(vs, "close"):
-                vs.close()
-            client = getattr(vs, "client", None)
-            if client and hasattr(client, "close"):
-                client.close()
+            # Memory, then its vector store, then the store's raw client; the first failure aborts the chain.
+            for obj in filter(None, (self._memory, vs, getattr(vs, "client", None))):
+                if hasattr(obj, "close"):
+                    obj.close()
         except Exception:
             pass

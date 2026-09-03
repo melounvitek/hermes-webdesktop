@@ -1,11 +1,10 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
-Server-side LLM fact extraction, semantic search and deduplication via the Mem0
-Platform API (cloud), a self-hosted Mem0 server (MEM0_HOST, HTTP), or OSS Memory.
-Secrets live in $HERMES_HOME/.env (MEM0_API_KEY, MEM0_HOST); behavioral settings
-in $HERMES_HOME/mem0.json via `hermes memory setup`: mode ("platform"|"oss"), host,
-user_id (canonical id across every gateway so one human gets one merged store;
-unset → gateway-native id), agent_id. MEM0_* env vars remain a fallback.
+Server-side fact extraction and semantic search via the Mem0 Platform API (cloud), a
+self-hosted Mem0 server (MEM0_HOST, HTTP), or OSS Memory. Secrets live in $HERMES_HOME/.env
+(MEM0_API_KEY, MEM0_HOST); settings in $HERMES_HOME/mem0.json via `hermes memory setup`:
+mode ("platform"|"oss"), host, user_id (canonical id across gateways; unset → gateway-native
+id), agent_id. MEM0_* env vars remain a fallback.
 """
 
 from __future__ import annotations
@@ -76,27 +75,16 @@ def _schema(name: str, description: str, properties: dict[str, tuple[str, str]],
     return {"name": name, "description": description, "parameters": {"type": "object", "properties": props, "required": required}}
 
 
-TOOL_SCHEMAS = [_schema(
-    "mem0_search",
-    "Search the user's memories by meaning; returns facts ranked by relevance. Use this before answering any question that may depend on what you know about the user (preferences, facts, history, people, projects, past decisions). For multi-part or multi-hop questions, call it several times — vary the wording and run follow-up searches on what earlier results reveal; one search is rarely enough.",
-    {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only).")},
-    ["query"],
-), _schema(
-    "mem0_add",
-    "Store a durable fact about the user, verbatim (no LLM extraction). Call this the moment the user states a lasting preference, correction, decision, or personal detail worth recalling on future turns — don't wait to be asked to remember. Skip transient chit-chat and facts you've already stored.",
-    {"content": ("string", "The fact to store.")},
-    ["content"],
-), _schema(
-    "mem0_update",
-    "Replace the text of an existing memory by its ID (take the ID from a mem0_search result). Use when a stored fact has changed or was wrong — correct it in place instead of adding a duplicate.",
-    {"memory_id": ("string", "Memory UUID to update."), "text": ("string", "New text content.")},
-    ["memory_id", "text"],
-), _schema(
-    "mem0_delete",
-    "Delete a memory by its ID (take the ID from a mem0_search result). Use when a stored fact is obsolete or the user asks you to forget it; prefer mem0_update if the fact merely changed.",
-    {"memory_id": ("string", "Memory UUID to delete.")},
-    ["memory_id"],
-)]
+TOOL_SCHEMAS = [
+    _schema("mem0_search", "Search the user's memories by meaning; returns facts ranked by relevance. Use this before answering any question that may depend on what you know about the user (preferences, facts, history, people, projects, past decisions). For multi-part or multi-hop questions, call it several times — vary the wording and run follow-up searches on what earlier results reveal; one search is rarely enough.",
+            {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only).")}, ["query"]),
+    _schema("mem0_add", "Store a durable fact about the user, verbatim (no LLM extraction). Call this the moment the user states a lasting preference, correction, decision, or personal detail worth recalling on future turns — don't wait to be asked to remember. Skip transient chit-chat and facts you've already stored.",
+            {"content": ("string", "The fact to store.")}, ["content"]),
+    _schema("mem0_update", "Replace the text of an existing memory by its ID (take the ID from a mem0_search result). Use when a stored fact has changed or was wrong — correct it in place instead of adding a duplicate.",
+            {"memory_id": ("string", "Memory UUID to update."), "text": ("string", "New text content.")}, ["memory_id", "text"]),
+    _schema("mem0_delete", "Delete a memory by its ID (take the ID from a mem0_search result). Use when a stored fact is obsolete or the user asks you to forget it; prefer mem0_update if the fact merely changed.",
+            {"memory_id": ("string", "Memory UUID to delete.")}, ["memory_id"]),
+]
 
 _PROMPT_BODY = (
     "You have persistent memory of this user from past conversations. You should call mem0_search before answering anything that could depend on prior context (the user's preferences, facts, history, people, projects, or earlier decisions) — do not rely on the chat window alone, and do not assume you have no memory.\n"
@@ -160,9 +148,8 @@ class Mem0MemoryProvider(MemoryProvider):
         return template.format(vs=self._config.get("oss", {}).get("vector_store", {}).get("provider", default))
 
     def _create_backend(self):
-        # Lazy-install the mem0 SDK before either backend imports it. ensure() honors
-        # security.allow_lazy_installs and redirects sealed Docker venvs to the durable
-        # target; on failure the backend import raises the canonical error, captured below.
+        # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
+        # on failure the backend import raises the canonical error, captured below.
         try:
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("memory.mem0", prompt=False)
@@ -203,26 +190,34 @@ class Mem0MemoryProvider(MemoryProvider):
     def _record_failure(self):
         with self._breaker_lock:
             self._consecutive_failures = count = self._consecutive_failures + 1
-            tripped = count >= _BREAKER_THRESHOLD
-            if tripped:
+            if count >= _BREAKER_THRESHOLD:
                 self._breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECS
-        if tripped:
+        if count >= _BREAKER_THRESHOLD:
             hint = self._oss_hint(" Check that your {vs} vector store is running and reachable.", "unknown")
             logger.warning("Mem0 circuit breaker tripped after %d consecutive failures. Pausing API calls for %ds.%s", count, _BREAKER_COOLDOWN_SECS, hint)
+
+    def _try(self, call, log, msg: str):
+        """Background-path wrapper: run ``call`` under the breaker; on error log ``msg`` and return None."""
+        try:
+            result = call()
+            self._record_success()
+            return result
+        except Exception as e:
+            self._record_failure()
+            log(msg, e)
+            return None
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
         self._mode = self._config.get("mode", "platform")
         self._api_key = self._config.get("api_key", "")
         self._host = self._config.get("host", "")
-        # user_id precedence: operator-configured (env/mem0.json) > gateway-native id
-        # from kwargs > _DEFAULT_USER_ID. The literal placeholder counts as unset so
-        # wizard users still get gateway-native ids instead of being bucketed together.
+        # user_id precedence: operator-configured (env/mem0.json) > gateway-native id (kwargs) > _DEFAULT_USER_ID.
+        # The literal placeholder counts as unset so wizard users still get gateway-native ids.
         configured = self._config.get("user_id")
         self._user_id = (None if configured == _DEFAULT_USER_ID else configured) or kwargs.get("user_id") or _DEFAULT_USER_ID
         self._agent_id = self._config.get("agent_id", "hermes")
-        # Persisted rerank preference: DEFAULT for mem0_search when the model doesn't
-        # pass ``rerank``; per-call args win. Platform-only; other backends ignore it.
+        # Persisted rerank preference: default for mem0_search when the model omits ``rerank``. Platform-only.
         self._rerank_default = _truthy(self._config.get("rerank", False))
         self._channel = kwargs.get("platform") or "cli"
         self._backend = self._create_backend()
@@ -231,9 +226,8 @@ class Mem0MemoryProvider(MemoryProvider):
             self._atexit_registered = True
 
     def _search(self, query: str, top_k: int = 10, rerank: bool = False, backend=None) -> list:
-        # Scoped to user_id only — by design — so recall surfaces memories from any
-        # gateway/agent under this principal; writes attach agent_id and metadata.channel
-        # (dashboard per-channel filtering) so narrower views remain possible at query time.
+        # Scoped to user_id only — by design — so recall surfaces memories from any gateway/agent under this
+        # principal; writes attach agent_id and metadata.channel so narrower views remain possible at query time.
         return (backend or self._backend).search(query, filters={"user_id": self._user_id}, top_k=top_k, rerank=rerank)
 
     def _add(self, messages: list, infer: bool):
@@ -241,8 +235,7 @@ class Mem0MemoryProvider(MemoryProvider):
         return self._backend.add(messages, user_id=self._user_id, agent_id=self._agent_id, infer=infer, metadata=metadata)
 
     def system_prompt_block(self) -> str:
-        # Mirror _create_backend precedence (oss > host > platform) so the label names
-        # the backend that actually runs. Rerank is a Mem0 Platform feature only.
+        # Mirror _create_backend precedence (oss > host > platform). Rerank is a Mem0 Platform feature only.
         mode_label = "OSS (self-hosted)" if self._mode == "oss" else "self-hosted (HTTP API)" if self._host else "platform (cloud API)"
         rerank_note = " Rerank is available on search." if (self._mode == "platform" and not self._host) else ""
         return f"# Mem0 Memory\nActive. Mode: {mode_label}. User: {self._user_id}.\n{_PROMPT_BODY}{rerank_note}"
@@ -268,15 +261,9 @@ class Mem0MemoryProvider(MemoryProvider):
             self._prefetch_query, self._prefetch_result, self._prefetch_done = query, "", False
 
         def _run():
-            body = ""
-            try:
-                lines = [r.get("memory", "") for r in (self._search(query, backend=backend) or []) if r.get("memory")]
-                if lines:
-                    body = "## Mem0 Memory\n" + "\n".join(f"- {l}" for l in lines)
-                self._record_success()
-            except Exception as e:
-                self._record_failure()
-                logger.debug("Mem0 prefetch failed: %s", e)
+            results = self._try(lambda: self._search(query, backend=backend), logger.debug, "Mem0 prefetch failed: %s")
+            lines = [r.get("memory", "") for r in (results or []) if r.get("memory")]
+            body = "## Mem0 Memory\n" + "\n".join(f"- {l}" for l in lines) if lines else ""
             with self._prefetch_lock:
                 if self._prefetch_query == query:
                     self._prefetch_result, self._prefetch_done = body, True
@@ -305,14 +292,9 @@ class Mem0MemoryProvider(MemoryProvider):
             return
 
         def _sync():
-            if self._backend is None:
-                return
-            try:
-                self._add([{"role": "user", "content": user_content}, {"role": "assistant", "content": assistant_content}], infer=True)
-                self._record_success()
-            except Exception as e:
-                self._record_failure()
-                logger.warning("Mem0 sync failed: %s", e)
+            if self._backend is not None:
+                messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": assistant_content}]
+                self._try(lambda: self._add(messages, infer=True), logger.warning, "Mem0 sync failed: %s")
 
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -362,9 +344,8 @@ class Mem0MemoryProvider(MemoryProvider):
         if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
         required, label, body, on_client_error = self._TOOL_HANDLERS[tool_name]
-        for k in required:
-            if not args.get(k, ""):
-                return tool_error(f"Missing required parameter: {k}")
+        if missing := next((k for k in required if not args.get(k, "")), None):
+            return tool_error(f"Missing required parameter: {missing}")
         try:
             result = body(self, args)
             self._record_success()
