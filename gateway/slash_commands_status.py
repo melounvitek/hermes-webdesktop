@@ -43,7 +43,7 @@ def _fmt(n) -> str:
     return f"{n:,}"
 
 
-def _pct(used, total) -> float:
+def _pct(used, total) -> float:  # clamped occupancy percentage; 0 for an unknown window
     return min(100, used / total * 100) if total else 0
 
 
@@ -67,6 +67,7 @@ async def _quiet(call, default=None):
 
 
 def _quiet_sync(call, default=None):
+    """Sync twin of ``_quiet``."""
     try:
         return call()
     except Exception:
@@ -123,10 +124,9 @@ def _context_compressor_lines(agent, ctx, used: int) -> list[str]:
                            threshold_pct=threshold_pct, to_go=_fmt(threshold - used)))
     compressions = _n(ctx, "compression_count")
     lines.append(t("gateway.context.compressions", count=compressions))
-    if compressions:
-        savings = getattr(ctx, "_last_compression_savings_pct", None)
-        if savings is not None:
-            lines.append(t("gateway.context.last_savings", savings=f"{savings:.0f}"))
+    savings = getattr(ctx, "_last_compression_savings_pct", None) if compressions else None
+    if savings is not None:
+        lines.append(t("gateway.context.last_savings", savings=f"{savings:.0f}"))
     lines += [
         "",
         t("gateway.context.totals_header", calls=_n(agent, "session_api_calls")),
@@ -146,11 +146,10 @@ def _agents_delegation_lines(d: dict) -> list[str]:
     goal = _clip(" ".join(str(d.get("goal") or "").split()), 70)
     status = d.get("status", "?")
     row = f"- `{d.get('delegation_id', '?')}` · {status}"
-    if status == "stalling":
-        quiet = d.get("stalled_after_quiet_seconds")
-        if quiet is not None:
-            row += f" · no progress {quiet:.0f}s"
-    elif d.get("seconds_since_progress", 0) >= 60:
+    quiet = d.get("stalled_after_quiet_seconds")
+    if status == "stalling" and quiet is not None:
+        row += f" · no progress {quiet:.0f}s"
+    elif status != "stalling" and d.get("seconds_since_progress", 0) >= 60:
         row += f" · quiet {d['seconds_since_progress']:.0f}s"
     if goal:
         row += f" · {goal}"
@@ -162,9 +161,7 @@ def _agents_delegation_lines(d: dict) -> list[str]:
         doing = f"`{tool}`" if tool else "between turns"
         part = f"  - child {i + 1}: {child.get('api_calls', '?')} api calls · {doing}"
         idle = child.get("seconds_since_activity")
-        if idle is not None:
-            part += f" · active {idle:.0f}s ago"
-        lines.append(part)
+        lines.append(part + (f" · active {idle:.0f}s ago" if idle is not None else ""))
     return lines
 
 
