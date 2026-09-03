@@ -18,11 +18,10 @@ from plugins.image_gen._common import (
 
 logger = logging.getLogger(__name__)
 
-_MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
-
-
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    return resolve_static_model(_MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai")
+    return resolve_static_model(
+        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai",
+    )
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -63,7 +62,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
 
     provider_id = "openai"
     label = "OpenAI"
-    models = _MODELS
+    models = GPT_IMAGE_2_TIERS
     default_model_id = DEFAULT_MODEL
     price = "varies"
     setup = dict(

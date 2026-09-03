@@ -28,7 +28,6 @@ from plugins.image_gen._common import (
 logger = logging.getLogger(__name__)
 
 _MAX_ERROR_BODY_CHARS = 500
-_MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
 
 # Hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work.
 _CODEX_CHAT_MODEL = "gpt-5.5"
@@ -68,7 +67,7 @@ def _summarize_error_body(body: str) -> str:
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return resolve_static_model(
-        _MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex")
+        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex")
 
 
 def _read_codex_access_token() -> Optional[str]:
@@ -214,8 +213,7 @@ def _extract_image_candidates(value: Any) -> Tuple[Optional[str], Optional[str]]
 
 def _extract_image_b64(value: Any) -> Optional[str]:
     """Image b64 from a payload, preferring a final result over a partial."""
-    result_b64, partial_b64 = _extract_image_candidates(value)
-    return result_b64 or partial_b64
+    return next((b64 for b64 in _extract_image_candidates(value) if b64), None)
 
 
 def _png_pixel_size(raw: bytes) -> Optional[str]:
@@ -308,7 +306,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
 
     provider_id = "openai-codex"
     label = "OpenAI (Codex auth)"
-    models = _MODELS
+    models = GPT_IMAGE_2_TIERS
     default_model_id = DEFAULT_MODEL
     price = "varies"
 
