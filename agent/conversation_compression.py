@@ -325,11 +325,7 @@ def _restore_compressor_attempt_state(
     # window where a fallback may have claimed; stale writes must not interleave.
     # The rollback itself is safe: landing after a fallback needs a prior claim.
     with _COMPRESSOR_ATTEMPT_LOCK:
-        if (
-            attempt_generation is not None
-            and attempt_generation
-            and (int(getattr(compressor, "_compression_attempt_generation", 0) or 0) != attempt_generation)
-        ):
+        if attempt_generation and int(getattr(compressor, "_compression_attempt_generation", 0) or 0) != attempt_generation:
             logger.warning(
                 "Skipping stale compressor attempt-state restore at write "
                 "time: attempt generation %s lost the compressor mid-restore.",
@@ -356,12 +352,10 @@ def _capture_authoritative_cooldown_under_lease(
         values = vars(compressor)
         session_db = values.get("_session_db")
         session_id = values.get("_session_id")
-        raw_reader = (
-            getattr(type(session_db), "get_compression_failure_cooldown_row", None) if session_db is not None else None
-        )
         if session_db is None or not session_id:
             # Unbound compressors have no durable row to mutate or restore.
             return None, None
+        raw_reader = getattr(type(session_db), "get_compression_failure_cooldown_row", None)
         if not callable(raw_reader):
             return False, None
         # Read the raw persisted row: the active getter filters expired rows and is not a lossless rollback snapshot.
@@ -1254,7 +1248,8 @@ def _emit_compression_attempt_telemetry(
 ) -> None:
     """Emit one content-free JSON log line for a compression attempt."""
     with _swallow('failed to emit compression attempt telemetry: %s'):
-        telemetry = getattr(agent.context_compressor, "_last_compression_telemetry", None)
+        compressor = agent.context_compressor
+        telemetry = getattr(compressor, "_last_compression_telemetry", None)
         if not isinstance(telemetry, dict):
             telemetry = {}
         payload = dict(telemetry)
@@ -1274,8 +1269,8 @@ def _emit_compression_attempt_telemetry(
         payload.setdefault("chunk_count", 0)
         payload["fallback_used"] = bool(
             payload.get("fallback_used")
-            or getattr(agent.context_compressor, "_last_summary_fallback_used", False)
-            or getattr(agent.context_compressor, "_last_aux_model_failure_model", None)
+            or getattr(compressor, "_last_summary_fallback_used", False)
+            or getattr(compressor, "_last_aux_model_failure_model", None)
         )
         logger.info(
             "context compression attempt telemetry: %s", json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1614,9 +1609,7 @@ class _CompressionActivityHeartbeat:
             interval_seconds = float(interval_seconds or 60.0)
         except (TypeError, ValueError):
             interval_seconds = 60.0
-        if not math.isfinite(interval_seconds):
-            interval_seconds = 60.0
-        self._interval_seconds = max(0.1, interval_seconds)
+        self._interval_seconds = max(0.1, interval_seconds if math.isfinite(interval_seconds) else 60.0)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="compression-activity-heartbeat", daemon=True)
 
@@ -1640,17 +1633,10 @@ class _CompressionActivityHeartbeat:
         # durable labels would stay "in progress" for the 60s persist window.
         self._touch(desc, force_persist=True)
 
-    def _fence_cancelled(self) -> bool:
-        fence = self._commit_fence
-        return fence is not None and fence.is_cancelled
-
     def _should_suppress(self) -> bool:
-        if self._suppressed:
-            return True
-        if self._fence_cancelled():
+        if not self._suppressed and self._commit_fence is not None and self._commit_fence.is_cancelled:
             self._suppressed = True
-            return True
-        return False
+        return self._suppressed
 
     def _touch(self, desc: str, *, allow_terminal_overwrite: bool = False, force_persist: bool = False) -> None:
         with _swallow('compression activity heartbeat touch failed', exc_info=True):
@@ -1743,13 +1729,9 @@ class _CompressionLockLeaseRefresher:
                 first = False
                 if self._stop.is_set():
                     break
-            try:
-                refreshed = self._db.refresh_compression_lock(
-                    self._session_id, self._holder, ttl_seconds=self._ttl_seconds
-                )
-            except Exception as exc:
-                logger.debug("compression lock refresh raised: %s", exc)
-                refreshed = False
+            refreshed = False
+            with _swallow("compression lock refresh raised: %s"):
+                refreshed = self._db.refresh_compression_lock(self._session_id, self._holder, ttl_seconds=self._ttl_seconds)
             if refreshed:
                 consecutive_failures = 0
                 continue
