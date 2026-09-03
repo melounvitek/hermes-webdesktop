@@ -344,9 +344,7 @@ def _sniff_audio_container(path: str) -> str:
 def _repair_ogg_container(file_str: str) -> str:
     """Ensure a ``.ogg`` path really holds Ogg: transcode in place, else rename to the sniffed
     real extension so platforms get an honest file instead of a 0-second voice bubble."""
-    if not file_str.endswith(".ogg"):
-        return file_str
-    container = _sniff_audio_container(file_str)
+    container = _sniff_audio_container(file_str) if file_str.endswith(".ogg") else "ogg"
     if container in ("ogg", "unknown"):
         return file_str
     logger.info("TTS wrote %s bytes into a .ogg path (%s) — transcoding to real Ogg/Opus", container, file_str)

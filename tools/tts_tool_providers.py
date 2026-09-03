@@ -450,7 +450,7 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
     client_kwargs: Dict[str, Any] = {"api_key": api_key}
     if mi_config.get("base_url"):
         client_kwargs["server_url"] = mi_config["base_url"]  # the Mistral SDK calls it server_url
-    Mistral = _origin()._import_mistral_client()
+    Mistral = _origin()._import_mistral_client()  # ImportError must escape the RuntimeError wrap
     try:
         with Mistral(**client_kwargs) as client:
             response = client.audio.speech.complete(

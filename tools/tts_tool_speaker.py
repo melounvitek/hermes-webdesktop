@@ -68,12 +68,7 @@ def _play_via_tempfile(audio_iter: Iterable[bytes], stop_evt: threading.Event, s
 
 def _drain_chunks(chunk_queue: "queue.Queue[Optional[bytes]]") -> List[bytes]:
     """Collect one sentence's PCM chunks up to the ``None`` sentinel."""
-    chunks: List[bytes] = []
-    while True:
-        chunk = chunk_queue.get()
-        if chunk is None:
-            return chunks
-        chunks.append(chunk)
+    return list(iter(chunk_queue.get, None))
 
 
 class _SyncSentencePipeline:
@@ -142,8 +137,7 @@ class _StreamerPlayback:
     _CHUNK_QUEUE_MAX = 64
 
     def __init__(self, streamer, stop_event: threading.Event):
-        self.streamer = streamer
-        self.stop_event = stop_event
+        self.streamer, self.stop_event = streamer, stop_event
         self.output_stream = self._open_output_stream()
         self._audio_queue: "queue.Queue[Optional[queue.Queue[Optional[bytes]]]]" = queue.Queue()
         self._prefetch_threads: List[threading.Thread] = []
@@ -217,6 +211,7 @@ class _StreamerPlayback:
 
     def _write_pcm(self, buf: bytes) -> None:
         self._current_stream.write(self._np.frombuffer(buf, dtype="<i2").reshape(-1, 1))
+
     def _recover_stream(self) -> bool:
         """Close the broken PortAudio stream and open a fresh one after a failed write; False once
         ``_MAX_REINIT`` is exhausted (remaining sentences go through temp files)."""

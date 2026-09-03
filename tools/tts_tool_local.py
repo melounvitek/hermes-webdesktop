@@ -179,6 +179,7 @@ def _load_kittentts_model_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, D
         m = KittenTTS(model_name)
         logger.info("[KittenTTS] Model loaded successfully")
         return m
+
     return _tts_cache_get_or_load(_kittentts_model_cache, model_name, _load_kittentts_model), kt_config
 
 
