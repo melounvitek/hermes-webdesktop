@@ -321,11 +321,6 @@ def _do_scroll(backend, action, args, **delivery):
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
                           element=args.get("element"), **_xy(args), modifiers=args.get("modifiers"), **delivery)
 
-def _do_set_value(backend, action, args, **delivery):
-    if args.get("value") is None:
-        return json.dumps({"error": "set_value requires `value`"})
-    return backend.set_value(value=str(args["value"]), element=args.get("element"))
-
 def _do_capture(backend, action, args, **_):
     mode = str(args.get("mode", "som"))
     if mode not in {"som", "vision", "ax"}:
@@ -333,11 +328,6 @@ def _do_capture(backend, action, args, **_):
     # pid/window_id forwarded only when given so older backends keep their defaults.
     return _capture_response(backend.capture(mode=mode, app=args.get("app"),
                                              **{k: args[k] for k in ("pid", "window_id") if args.get(k) is not None}))
-
-def _do_focus_app(backend, action, args, **_):
-    if not args.get("app"):
-        return json.dumps({"error": "focus_app requires `app`"})
-    return backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
 
 def _do_listing(backend, action, args, key, **_):
     return json.dumps({key: (items := getattr(backend, action)()), "count": len(items)})
@@ -367,9 +357,13 @@ _ACTIONS: Dict[str, _ActionSpec] = {
                                                   + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
     "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
                   summarize=lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
-    "set_value": _input(_do_set_value),
-    "focus_app": _ActionSpec(_do_focus_app, destructive=True, summarize=lambda a, args, fg: (
-        f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""))),
+    "set_value": _input(lambda backend, action, args, **_: (
+        json.dumps({"error": "set_value requires `value`"}) if args.get("value") is None
+        else backend.set_value(value=str(args["value"]), element=args.get("element")))),
+    "focus_app": _ActionSpec(lambda backend, action, args, **_: (
+        json.dumps({"error": "focus_app requires `app`"}) if not args.get("app")
+        else backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))), destructive=True,
+        summarize=lambda a, args, fg: f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")),
     "capture": _ActionSpec(_do_capture),
     "wait": _ActionSpec(lambda backend, action, args, **_: _text_response(backend.wait(float(args.get("seconds", 1.0))))),
     "list_apps": _ActionSpec(partial(_do_listing, key="apps")),
@@ -460,8 +454,7 @@ def _bounds_unknown(bounds) -> bool:
     return False
 
 def _element_to_dict(e: UIElement) -> Dict[str, Any]:
-    # A zero rect is "geometry unknown", not a position — null it so no coordinate= is ever derived from it.
-    # The element index still works.
+    # A zero rect is "geometry unknown", not a position — null it so no coordinate= is ever derived from it (the index still works).
     return {"index": e.index, "role": e.role, "label": e.label[:_MAX_ELEMENT_LABEL_CHARS],
             "bounds": None if _bounds_unknown(e.bounds) else list(e.bounds), "app": e.app,
             **({"label_truncated": True} if len(e.label) > _MAX_ELEMENT_LABEL_CHARS else {})}
