@@ -42,16 +42,11 @@ def send_message_tool(args, **kw):
     return _handle_send(args)
 
 
-def _split_target(target: str):
-    """Split ``platform[:ref]`` into ``(platform_name, target_ref)``."""
-    parts = target.split(":", 1)
-    return parts[0].strip().lower(), (parts[1].strip() if len(parts) > 1 else None)
-
-
 def _resolve_tool_target(target: str, *, pass_unresolved_references: bool = False):
-    """``(platform_name, chat_id, thread_id, error)`` for a tool ``target``; ``chat_id`` is
-    None when no ref was given (caller falls back to the home channel)."""
-    platform_name, target_ref = _split_target(target)
+    """``(platform_name, chat_id, thread_id, error)`` for a ``platform[:ref]`` target;
+    ``chat_id`` is None when no ref was given (caller falls back to the home channel)."""
+    platform_name, _, target_ref = target.partition(":")
+    platform_name, target_ref = platform_name.strip().lower(), target_ref.strip() or None
     prepare_send_message_platforms()
     if not target_ref:
         return platform_name, None, None, None
@@ -229,13 +224,11 @@ def _home_chat_id(config, platform, platform_name):
     """Return ``(home chat_id, None)`` or ``(None, actionable error)``.
     Weixin additionally honours the WEIXIN_HOME_CHANNEL env var."""
     home = config.get_home_channel(platform)
-    if not home and platform_name == "weixin":
-        wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip()
-        if wx_home:
-            from gateway.config import HomeChannel
-            home = HomeChannel(platform=platform, chat_id=wx_home, name="Weixin Home")
     if home:
         return home.chat_id, None
+    wx_home = os.getenv("WEIXIN_HOME_CHANNEL", "").strip() if platform_name == "weixin" else ""
+    if wx_home:
+        return wx_home, None
     home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(platform_name, f"{platform_name.upper()}_HOME_CHANNEL")
     return None, (
         f"No home channel set for {platform_name} to determine where to send the message. "
@@ -247,9 +240,7 @@ def _slack_dm_chat_id(pconfig, chat_id):
     """Open Slack user targets (``user:U...`` / ``user_name:@handle`` from the parser, or a
     bare U... id from session metadata / home-channel config) as DM conversations —
     chat.postMessage needs a conversation ID. ``(chat_id, None)`` or ``(None, error_dict)``."""
-    dm_target = chat_id
-    if dm_target.startswith("U") and _SLACK_USER_ID_RE.fullmatch(dm_target):
-        dm_target = f"user:{dm_target}"
+    dm_target = f"user:{chat_id}" if chat_id.startswith("U") and _SLACK_USER_ID_RE.fullmatch(chat_id) else chat_id
     if not dm_target.startswith(("user:", "user_name:")):
         return chat_id, None
     from model_tools import _run_async
@@ -293,10 +284,9 @@ def _describe_media_for_mirror(media_files):
     ext = os.path.splitext(media_path)[1].lower()
     if is_voice and ext in _VOICE_EXTS:
         return "[Sent voice message]"
-    for exts, kind in ((_IMAGE_EXTS, "image"), (_VIDEO_EXTS, "video"), (_AUDIO_EXTS, "audio")):
-        if ext in exts:
-            return f"[Sent {kind} attachment]"
-    return "[Sent document attachment]"
+    kind = next((k for exts, k in ((_IMAGE_EXTS, "image"), (_VIDEO_EXTS, "video"), (_AUDIO_EXTS, "audio"))
+                 if ext in exts), "document")
+    return f"[Sent {kind} attachment]"
 
 
 def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id: str | None):
@@ -309,10 +299,7 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     auto_thread_id = get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "").strip() or None
     if not (auto_platform == platform_name and auto_chat_id == str(chat_id) and auto_thread_id == thread_id):
         return None
-
-    target_label = f"{platform_name}:{chat_id}"
-    if thread_id is not None:
-        target_label += f":{thread_id}"
+    target_label = f"{platform_name}:{chat_id}" + (f":{thread_id}" if thread_id is not None else "")
     return {
         "success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target",
         "target": target_label,
