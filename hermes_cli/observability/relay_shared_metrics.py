@@ -17,19 +17,7 @@ from hermes_cli import __version__
 
 from .shared_metrics import SharedMetricsStore
 from . import shared_metrics_contract as contract
-from .shared_metrics_contract import (
-    CLIENT_ACTIVE_MARK,
-    MODEL_CALL_PROFILE_MODEL,
-    MODEL_CALL_SCOPE,
-    SCHEMA_KEY,
-    SCHEMA_VERSION,
-    SKILL_LIFECYCLE_MARK,
-    SKILL_LOAD_MARK,
-    SUBSCRIBER_NAME,
-    TASK_SCOPE,
-    TOOL_APPROVAL_MARK,
-    TOOL_CALL_SCOPE,
-)
+from .shared_metrics_contract import MODEL_CALL_SCOPE, SUBSCRIBER_NAME, TASK_SCOPE
 from .shared_metrics_subscriber import SharedMetricsSubscriber
 
 logger = logging.getLogger(__name__)
@@ -207,7 +195,7 @@ class _Runtime:
     def _emit_client_active(self, session: _MetricsSession) -> None:
         with session.lock:
             if not session.closing:
-                self._mark(session, None, CLIENT_ACTIVE_MARK, {})
+                self._mark(session, None, contract.CLIENT_ACTIVE_MARK, {})
 
     def _mark(
         self, session: _MetricsSession, task: _TaskRun | None, name: str, data: dict[str, str]
@@ -280,11 +268,10 @@ class _Runtime:
 
     def start_model_call(self, event: dict[str, Any]) -> None:
         task_id = _text(event, "task_id")
-        session, task = self._task_for(event, start=True)
+        session, task = self._task_pair(event, start=True, allow_task_id_fallback=True)
         if task_id and task is None:
             return
-        if session is None:
-            session = self.ensure_session(event)
+        session = session or self.ensure_session(event)
         if session is None:
             return
         request_id = _text(event, "api_request_id")
@@ -315,19 +302,16 @@ class _Runtime:
             handle = self._run_scoped(
                 session, task, self.relay.llm.call, MODEL_CALL_SCOPE, self.relay.LLMRequest({}, {}),
                 handle=_scope_handle(session, task), metadata=self._event_metadata(),
-                model_name=MODEL_CALL_PROFILE_MODEL,
+                model_name=contract.MODEL_CALL_PROFILE_MODEL,
             )
             session.model_calls[model_call_key] = _ModelCall(handle, task_id, fields)
 
-    def record_model_call_error(self, event: dict[str, Any]) -> None:
-        """Retain the latest attempt error without closing the logical call."""
-        self._update_model_call(event, finish=False)
+    def update_model_call(self, event: dict[str, Any], *, finish: bool) -> None:
+        """Refresh the located model call's fields from ``event``; ``finish`` closes it.
 
-    def end_model_call(self, event: dict[str, Any]) -> None:
-        self._update_model_call(event, finish=True)
-
-    def _update_model_call(self, event: dict[str, Any], *, finish: bool) -> None:
-        """Refresh the located model call's fields from ``event``, optionally closing it."""
+        ``api_request_error`` retains the latest attempt error without closing the logical
+        call; ``post_api_request`` closes it.
+        """
         session = self._any_session(event)
         if session is None:
             return
@@ -345,7 +329,7 @@ class _Runtime:
     def start_tool_call(self, event: dict[str, Any]) -> None:
         """Open one privacy-safe Relay tool lifecycle under its task."""
         task_id = _text(event, "task_id")
-        session, task = self._task_for(event, start=True)
+        session, task = self._task_pair(event, start=True, allow_task_id_fallback=True)
         if session is None or task is None or not _text(event, "tool_call_id"):
             return
         identity = self._tool_call_identity(event)
@@ -378,13 +362,14 @@ class _Runtime:
                     tool_call.approval_outcome = outcome
                     attribution = "tool_call"
             self._mark(
-                session, task, TOOL_APPROVAL_MARK, {"attribution": attribution, "outcome": outcome}
+                session, task, contract.TOOL_APPROVAL_MARK,
+                {"attribution": attribution, "outcome": outcome},
             )
 
     def record_tool_call(self, event: dict[str, Any]) -> None:
         """Close and count one unique privacy-safe tool lifecycle."""
         task_id = _text(event, "task_id")
-        session, task = self._task_for(event, start=False)
+        session, task = self._task_pair(event, allow_task_id_fallback=True)
         if session is None or task is None:
             return
         with session.lock:
@@ -422,9 +407,9 @@ class _Runtime:
     def record_skill_lifecycle(self, event: dict[str, Any]) -> None:
         """Emit one allowlisted skill fact without its local identity."""
         if _text(event, "action").strip().lower() == "loaded":
-            mark, fields = SKILL_LOAD_MARK, contract.skill_load_fields(event)
+            mark, fields = contract.SKILL_LOAD_MARK, contract.skill_load_fields(event)
         else:
-            mark, fields = SKILL_LIFECYCLE_MARK, contract.skill_lifecycle_fields(event)
+            mark, fields = contract.SKILL_LIFECYCLE_MARK, contract.skill_lifecycle_fields(event)
         if fields is None:
             return
 
@@ -544,21 +529,15 @@ class _Runtime:
         """Owner session by task/turn correlation, else by session_id."""
         return self._task_session(event, allow_task_id_fallback=True) or self._session(event)
 
-    def _task_for(
-        self, event: dict[str, Any], *, start: bool
+    def _task_pair(
+        self, event: dict[str, Any], *, start: bool = False, **lookup: Any
     ) -> tuple[_MetricsSession | None, _TaskRun | None]:
-        """Resolve (session, task) for a task-scoped hook, optionally opening the task."""
-        session, task = self._task_pair(event, allow_task_id_fallback=True)
+        """Resolve (session, task) for a task-scoped hook; ``start`` opens a missing task."""
+        session = self._task_session(event, **lookup)
+        task = session.tasks.get(_text(event, "task_id")) if session is not None else None
         if task is None and start:
             task = self.start_task(event)
             session = self._task_session(event) if task is not None else None
-        return session, task
-
-    def _task_pair(
-        self, event: dict[str, Any], **lookup: Any
-    ) -> tuple[_MetricsSession | None, _TaskRun | None]:
-        session = self._task_session(event, **lookup)
-        task = session.tasks.get(_text(event, "task_id")) if session is not None else None
         return session, task
 
     def _run_scoped(
@@ -685,7 +664,7 @@ class _Runtime:
 
     def _open_tool_call(self, task: _TaskRun, event: dict[str, Any]) -> _ToolCall:
         handle = self._run_in_task(
-            task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
+            task, self.relay.tools.call, contract.TOOL_CALL_SCOPE, {},
             handle=task.handle, metadata=self._event_metadata(),
         )
         return _ToolCall(handle, contract.tool_category(event), monotonic_ns())
@@ -777,14 +756,6 @@ class _Runtime:
         if exported is not None:
             self._safe(self._send_exported_packages)
 
-    def _observe_send_consent(self, send_enabled: bool) -> None:
-        """Reconcile consent windows with observed config; failures never break the export
-        hook but log at warning (an unclosed consent window is privacy-relevant)."""
-        self._guarded(
-            "Unable to record a shared-metrics consent transition",
-            _reconcile_store_consent, self.subscriber.store, send_enabled,
-        )
-
     def _send_exported_packages(self) -> None:
         try:
             resolved = _resolved_send_config()
@@ -794,7 +765,11 @@ class _Runtime:
 
         # Observe the consent EDGE before deciding whether to send: the dominant revocation
         # case is "sending turned off while no pass is running", invisible to the send loop.
-        self._observe_send_consent(resolved.send)
+        # Failures never break the export hook but log at warning (privacy-relevant).
+        self._guarded(
+            "Unable to record a shared-metrics consent transition",
+            _reconcile_store_consent, self.subscriber.store, resolved.send,
+        )
         if not resolved.send:
             return
 
@@ -820,7 +795,7 @@ class _Runtime:
 
     def _event_metadata(self) -> dict[str, str]:
         return {
-            SCHEMA_KEY: SCHEMA_VERSION,
+            contract.SCHEMA_KEY: contract.SCHEMA_VERSION,
             relay_runtime.RUNTIME_INSTANCE_KEY: self.host.runtime_id,
         }
 
@@ -962,8 +937,8 @@ _HOOK_HANDLERS: dict[str, Callable[[_Runtime, dict[str, Any]], Any]] = {
     "post_tool_call": lambda rt, kw: rt.record_tool_call(_with_runtime_toolset(kw)),
     "post_approval_response": lambda rt, kw: rt.record_approval(kw),
     "on_skill_lifecycle": lambda rt, kw: rt.record_skill_lifecycle(kw),
-    "post_api_request": lambda rt, kw: rt.end_model_call(kw),
-    "api_request_error": lambda rt, kw: rt.record_model_call_error(kw),
+    "post_api_request": lambda rt, kw: rt.update_model_call(kw, finish=True),
+    "api_request_error": lambda rt, kw: rt.update_model_call(kw, finish=False),
     "on_session_end": lambda rt, kw: rt.finish_task(kw),
     "subagent_stop": _close_child_session,
     "on_session_finalize": lambda rt, kw: rt.close_session(kw),
