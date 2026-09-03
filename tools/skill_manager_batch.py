@@ -169,7 +169,7 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
     try:
         for i, op in enumerate(operations):
             raw = _smt._skill_manage_from(
-                {**op, "name": names[i]}, task_id=task_id, session_id=session_id)
+                {**op, "name": names[i], "operations": None}, task_id=task_id, session_id=session_id)
             try:
                 parsed = json.loads(raw)
             except Exception:  # noqa: BLE001

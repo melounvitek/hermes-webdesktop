@@ -1,9 +1,7 @@
-"""Write/delete guards for ``skill_manage``.
-
-Every guard returns ``None`` when the operation may proceed, otherwise a refusal
-(error dict or message). Origin-owned state (``_find_skill``, ``_skills_dir``) is
-reached lazily through ``tools.skill_manager_tool`` so test patches keep working.
-"""
+"""Write/delete guards for ``skill_manage``. Every guard returns ``None`` when the
+operation may proceed, else a refusal (error dict or message). Origin-owned state
+(``_find_skill``, ``_skills_dir``) is reached lazily via ``tools.skill_manager_tool``
+so test patches keep working."""
 
 import contextvars as _ctxvars
 import logging
@@ -56,10 +54,9 @@ _background_review_read_paths: "_ctxvars.ContextVar[Optional[_BackgroundReviewRe
 
 
 def mark_background_review_skill_read(path: Path) -> None:
-    """Record that the active background-review fork has read a skill file.
-
-    The fork must not patch content it only inferred from the transcript:
-    skill_view/read_file call this, and the write guards require the mark."""
+    """Record that the active background-review fork has read a skill file. The fork must not
+    patch content it only inferred from the transcript: skill_view/read_file call this, and
+    the write guards require the mark."""
     if not _is_background_review():
         return
     marks = _background_review_read_paths.get()
@@ -79,8 +76,7 @@ def _reset_background_review_read_marks() -> None:
 
 
 def _resolved_roots(skill_path: Path):
-    """``(resolved skill_path, [(root, resolved_root), ...])`` over every skills root
-    whose resolve() succeeds; an unresolvable skill_path is used as-is."""
+    """``(resolved skill_path, [(root, resolved_root), ...])`` over every resolvable skills root."""
     from agent.skill_utils import get_all_skills_dirs
 
     try:
@@ -103,8 +99,7 @@ def _containing_skills_root(skill_path: Path) -> Path:
 
 
 def _is_path_redirect(path: Path) -> bool:
-    """Symlink or (Windows 3.12+) junction — either lets a poisoned tree redirect
-    ``shutil.rmtree`` outside the skills root."""
+    """Symlink or (Windows 3.12+) junction — either lets a poisoned tree redirect rmtree outside."""
     try:
         return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
     except OSError:
@@ -112,9 +107,8 @@ def _is_path_redirect(path: Path) -> bool:
 
 
 def _validate_delete_target(skill_dir: Path) -> Optional[str]:
-    """Last-line guard before ``shutil.rmtree(skill_dir)``: even a poisoned tree
-    must never delete (1) a path outside every known skills root, (2) a skills
-    root itself, or (3) a symlink/junction (rmtree would follow it)."""
+    """Last-line guard before rmtree: even a poisoned tree must never delete (1) a path outside
+    every known skills root, (2) a skills root itself, (3) a symlink/junction (rmtree follows it)."""
     if _is_path_redirect(skill_dir):
         return (
             f"Refusing to delete '{skill_dir}': the skill directory is a "
@@ -147,11 +141,9 @@ def _is_pinned(name: str, what: str) -> Optional[bool]:
 
 
 def _pinned_guard(name: str) -> Optional[str]:
-    """Refusal message if *name* is pinned or essential, else None.
-
-    Pin only guards **deletion**; patches/edits stay allowed. ESSENTIAL_SKILLS are
-    permanently pinned (the system prompt references them). Best-effort: an
-    unreadable sidecar lets the delete through."""
+    """Refusal message if *name* is pinned or essential, else None. Pin only guards DELETION;
+    patches/edits stay allowed. ESSENTIAL_SKILLS are permanently pinned (the system prompt
+    references them). Best-effort: an unreadable sidecar lets the delete through."""
     try:
         from agent.skill_utils import ESSENTIAL_SKILLS
         if name in ESSENTIAL_SKILLS:
@@ -171,10 +163,8 @@ def _pinned_guard(name: str) -> Optional[str]:
 
 def _background_review_write_guard(
     name: str, skill_dir: Path, action: str) -> Optional[Dict[str, Any]]:
-    """Refuse autonomous curator writes to anything but curator-owned sediment.
-
-    The background review fork has no user in the loop, so unlike foreground
-    agents it is also blocked on pinned/external/bundled/hub skills."""
+    """Refuse autonomous curator writes to anything but curator-owned sediment. The review fork
+    has no user in the loop, so it is also blocked on pinned/external/bundled/hub skills."""
     if not _is_background_review():
         return None
     refuse = f"Refusing background curator {action} for"
@@ -244,12 +234,10 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
 
 def _curator_consolidation_delete_guard(
     name: str, absorbed_into: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Fail closed on unverified deletes during the curator consolidation pass.
-
-    The review fork's only legitimate delete is a verified consolidation declared
-    via ``absorbed_into=<umbrella>`` (existence validated in ``_delete_skill``).
-    The deterministic inactivity prune never calls ``skill_manage``, so a bare
-    delete here can only be the LLM pass pruning without evidence: refuse it."""
+    """Fail closed on unverified deletes during the curator consolidation pass. The fork's only
+    legitimate delete is a consolidation declared via ``absorbed_into=<umbrella>`` (existence
+    validated in ``_delete_skill``); the deterministic inactivity prune never calls skill_manage,
+    so a bare delete here can only be the LLM pass pruning without evidence."""
     if not _is_background_review() or (isinstance(absorbed_into, str) and absorbed_into.strip()):
         return None
     return _refusal(
@@ -268,9 +256,8 @@ def _is_org_mirror(skill_path: Path) -> bool:
 
 
 def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
-    """Submit an org-skill edit upstream when `sync.org_auto_propose` is on.
-    Returns a note for the tool result or None; never raises (the edit is
-    already saved locally and can be proposed later)."""
+    """Submit an org-skill edit upstream when `sync.org_auto_propose` is on. Returns a note for
+    the tool result or None; never raises (the edit is saved locally and can be proposed later)."""
     try:
         from tools import skills_sync_client as ssc
 
@@ -295,12 +282,10 @@ def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
 
 
 def _org_mirror_write_guard(name: str, skill_path: Path, action: str) -> Optional[Dict[str, Any]]:
-    """Org-shared skills are EDITABLE IN PLACE — this only blocks deletion.
-
-    Edits land in the mirror, survive the next org pull (baseline sidecar in
-    skills_sync_client) and reach the org via `hermes sync propose`. Deletion
-    stays refused: the mirror is a view of org HEAD, so a local delete just
-    comes back, and removing for everyone is an admin action."""
+    """Org-shared skills are EDITABLE IN PLACE — this only blocks deletion. Edits land in the
+    mirror, survive the next org pull (baseline sidecar in skills_sync_client) and reach the org
+    via `hermes sync propose`. Deletion stays refused: the mirror is a view of org HEAD, so a
+    local delete just comes back, and removing for everyone is an admin action."""
     if action not in {"delete", "remove_file"}:
         return None
     try:
