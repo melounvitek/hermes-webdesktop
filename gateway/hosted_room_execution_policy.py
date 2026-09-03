@@ -17,8 +17,7 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _POLICY_FIELDS = {"version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
 
 
-class RoomExecutionPolicyError(ValueError):
-    """A RoomLink execution policy is malformed or no longer current."""
+class RoomExecutionPolicyError(ValueError): """A RoomLink execution policy is malformed or no longer current."""
 
 
 def _policy_digest(unsigned: Mapping[str, Any]) -> str:

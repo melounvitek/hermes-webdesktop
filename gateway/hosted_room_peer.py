@@ -39,12 +39,10 @@ LinkMode = Literal["direct", "overlay", "relay", "pull", "desktop"]
 TransportSecurity = Literal["tls", "loopback"]
 
 
-class HostedRoomPeerError(ValueError):
-    """Base error for malformed or unauthorized peer-room input."""
+class HostedRoomPeerError(ValueError): """Base error for malformed or unauthorized peer-room input."""
 
 
-class HostedRoomGrantError(HostedRoomPeerError):
-    """Raised when a room-scoped grant is invalid or expired."""
+class HostedRoomGrantError(HostedRoomPeerError): """Raised when a room-scoped grant is invalid or expired."""
 
 
 _ROOM_GRANT_SECRET_FILE = ".room-link-grant-secret"

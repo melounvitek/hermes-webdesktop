@@ -66,8 +66,7 @@ _GATEWAY_EVENT_FIELDS = {
 _EPOCH_STAMPED_KINDS = _TERMINAL_EVENT_KINDS | {"message.member", *_GATEWAY_EVENT_FIELDS}
 
 
-class DiscussionPolicyError(ValueError):
-    """Base class for invalid policy input or unreconstructable state."""
+class DiscussionPolicyError(ValueError): """Base class for invalid policy input or unreconstructable state."""
 
 
 class DiscussionValidationError(DiscussionPolicyError):

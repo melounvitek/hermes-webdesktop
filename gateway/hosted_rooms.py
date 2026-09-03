@@ -188,12 +188,10 @@ _SELECT_LIVE_RESERVATION = (
     f"SELECT 1 FROM hosted_room_peer_reservations {_LIVE_RESERVATION_WHERE} LIMIT 1")
 
 
-class HostedRoomError(ValueError):
-    """Base class for invalid or conflicting hosted-room operations."""
+class HostedRoomError(ValueError): """Base class for invalid or conflicting hosted-room operations."""
 
 
-class RoomNotFoundError(HostedRoomError):
-    """Raised when a room does not exist or has been disbanded."""
+class RoomNotFoundError(HostedRoomError): """Raised when a room does not exist or has been disbanded."""
 
 
 class RoomHistoryExpiredError(RoomNotFoundError):
@@ -202,16 +200,14 @@ class RoomHistoryExpiredError(RoomNotFoundError):
     reason = "room_history_expired"
 
 
-class RoomConflictError(HostedRoomError):
-    """Raised when an idempotency key is reused for different room state."""
+class RoomConflictError(HostedRoomError): """Raised when an idempotency key is reused for different room state."""
 
 
 class RoomProbeUnavailableError(HostedRoomError):
     """Raised when a non-blocking ownership probe cannot read the room store."""
 
 
-class EventConflictError(HostedRoomError):
-    """Raised when an event id is reused with different immutable content."""
+class EventConflictError(HostedRoomError): """Raised when an event id is reused with different immutable content."""
 
 
 class AuthorityConflictError(HostedRoomError):

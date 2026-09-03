@@ -40,16 +40,13 @@ _INSERT_REPLICA_EVENT = f"INSERT INTO hosted_room_replica_events {_EVENT_COLUMNS
 _SELECT_REPLICA = "SELECT * FROM hosted_room_replicas WHERE room_id=?"
 
 
-class ReplicaError(HostedRoomError):
-    """Base class for invalid or conflicting replica operations."""
+class ReplicaError(HostedRoomError): """Base class for invalid or conflicting replica operations."""
 
 
-class ReplicaGapError(ReplicaError):
-    """A page does not start at the replica's next expected sequence."""
+class ReplicaGapError(ReplicaError): """A page does not start at the replica's next expected sequence."""
 
 
-class ReplicaEpochRegressionError(ReplicaError):
-    """A page or demotion carries an older authority epoch than stored."""
+class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries an older authority epoch than stored."""
 
 
 def _initialize_replica_schema(conn: sqlite3.Connection) -> None:

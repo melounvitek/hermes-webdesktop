@@ -103,36 +103,28 @@ _GENERATION_TRANSITIONS = {
         "deferred task generation changed", "deferred task changed during requeue")}
 
 
-class DriverStateError(ValueError):
-    """Base class for invalid or conflicting driver-state operations."""
+class DriverStateError(ValueError): """Base class for invalid or conflicting driver-state operations."""
 
 
-class DriverValidationError(DriverStateError):
-    """Raised when an identifier, clock, TTL, or payload is invalid."""
+class DriverValidationError(DriverStateError): """Raised when an identifier, clock, TTL, or payload is invalid."""
 
 
-class RoomUnavailableError(DriverStateError):
-    """Raised when the hosted room does not exist or was disbanded."""
+class RoomUnavailableError(DriverStateError): """Raised when the hosted room does not exist or was disbanded."""
 
 
-class LeaseHeldError(DriverStateError):
-    """Raised when another unexpired driver generation owns the room."""
+class LeaseHeldError(DriverStateError): """Raised when another unexpired driver generation owns the room."""
 
 
-class StaleLeaseError(DriverStateError):
-    """Raised when a lease generation can no longer mutate room state."""
+class StaleLeaseError(DriverStateError): """Raised when a lease generation can no longer mutate room state."""
 
 
-class TaskConflictError(DriverStateError):
-    """Raised when an idempotency key is reused for different task state."""
+class TaskConflictError(DriverStateError): """Raised when an idempotency key is reused for different task state."""
 
 
-class StaleTaskError(DriverStateError):
-    """Raised when an obsolete task attempt or cancellation tries to commit."""
+class StaleTaskError(DriverStateError): """Raised when an obsolete task attempt or cancellation tries to commit."""
 
 
-class InvalidTaskTransitionError(DriverStateError):
-    """Raised when a requested task transition is not allowed."""
+class InvalidTaskTransitionError(DriverStateError): """Raised when a requested task transition is not allowed."""
 
 
 _identifier = partial(identifier, error=DriverValidationError, max_chars=MAX_IDENTIFIER_CHARS)
