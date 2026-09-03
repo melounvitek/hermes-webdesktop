@@ -74,12 +74,10 @@ def _forget_mcp_tool_server(tool_name: str) -> None:
 
 
 def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: dict) -> List[dict]:
-    """Utility schemas allowed by config (``tools.resources``/``tools.prompts``) and by the
-    server's advertised capabilities. ``initialize_result.capabilities`` is the source of
-    truth: its sub-objects are non-None iff the server advertises that request family (a
-    ``hasattr(server.session, ...)`` gate never filters anything — ClientSession defines all
-    four methods). Without an initialize_result (test fixtures, older paths) fall back to
-    that legacy session-method check."""
+    """Utility schemas allowed by config (``tools.resources``/``tools.prompts``) and advertised
+    capabilities. ``initialize_result.capabilities`` is the truth (sub-object non-None iff the
+    family is served); without it fall back to the legacy session-method check, which never
+    filters anything since ClientSession defines all four methods."""
     tools_filter = config.get("tools") or {}
     enabled = {f: _parse_boolish(tools_filter.get(f), default=True) for f in ("resources", "prompts")}
     init_result = getattr(server, "initialize_result", None)
@@ -204,11 +202,9 @@ def _utility_candidates(name: str, entries: Iterable[Any], tool_timeout) -> List
 
 
 def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_Candidate]:
-    """Preflight registry-name collisions among one server's candidates. Exact duplicates
-    (same name + origin) are dropped silently; a generated utility that normalizes onto a
-    server-native tool's name is shadowed (the native tool wins); any other multi-origin
-    collision is ambiguous and every colliding entry is skipped (fail closed). Returns the
-    survivors in order."""
+    """Preflight name collisions: exact duplicates dropped silently; a utility normalizing onto
+    a native tool's name is shadowed (native wins); any other multi-origin collision skips every
+    colliding entry (fail closed). Returns survivors in order."""
     unique: List[_Candidate] = []
     seen: set[tuple[str, str]] = set()
     origins_by_name: Dict[str, set[str]] = {}
@@ -264,9 +260,8 @@ def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bo
 def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: Callable,
                          scope: Callable[[], Optional[str]], lazy: bool) -> List[str]:
     """Register candidates under toolset ``mcp-{name}``; returns the names that landed. The
-    ownership pre-check is advisory only — servers connect in parallel, so
-    ``ToolRegistry.register()`` is the atomic ownership gate and its verdict is re-read after
-    every call."""
+    ownership pre-check is advisory (servers connect in parallel): ``registry.register()`` is
+    the atomic gate and its verdict is re-read after every call."""
     from tools.registry import registry
     toolset_name = f"mcp-{name}"
     registered: List[str] = []
@@ -315,11 +310,9 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
 
 
 def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> List[str]:
-    """Register an already-connected server's tools (plus utility tools); used by initial
-    discovery and list_changed refresh. Returns the registered names. Toolset resolution for
-    ``mcp-{server}`` / raw-name aliases derives from the live registry rather than mutating
-    ``toolsets.TOOLSETS``. Lossy name normalization can map distinct raw names
-    (``read-file``/``read_file``) to one registry name; such collisions fail closed."""
+    """Register a connected server's tools plus utilities (initial discovery and list_changed
+    refresh); returns the names. Toolset aliases derive from the live registry, not
+    ``toolsets.TOOLSETS``; lossy normalization collisions (``read-file``/``read_file``) fail closed."""
     should_register = _make_tool_filter(name, config)
     _record_tool_trust_metadata(name, config, server._tools)
     candidates = _tool_candidates(name, server._tools, should_register, server.tool_timeout)
@@ -333,10 +326,9 @@ def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> 
 
 
 def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]:
-    """Lazy startup: register a server's tools from a cached manifest with no child process;
-    the first real call goes through ``_get_connected_server_for_call`` ->
-    ``_ensure_lazy_server_connected``. Trust metadata is recorded first so the call-time gate
-    is identical whether the server was spawned live or registered from cache."""
+    """Lazy startup: register from a cached manifest with no child process (first real call goes
+    through ``_ensure_lazy_server_connected``). Trust metadata is recorded first so the
+    call-time gate is identical for live and cached registrations."""
     from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
     tool_timeout = _resolve_tool_timeout(config)
     cached_tools = _CachedMCPTool.from_cache_dicts(tools_from_cache_entry(entry))
