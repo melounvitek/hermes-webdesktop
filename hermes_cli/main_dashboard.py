@@ -77,10 +77,9 @@ def _run_probe(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
 def _restart_managed_dashboard_service(reason: str, unit: str = _DASHBOARD_SYSTEMD_UNIT) -> bool:
     """Restart a systemd-managed dashboard instead of raw-killing its PID.
 
-    Returns True when a dashboard unit was found and handled (successfully or
-    with a printed actionable failure). Returning True deliberately prevents the
-    caller from falling back to ``os.kill``: systemd treats a direct SIGTERM of
-    the main PID as a clean stop, so ``Restart=on-failure`` won't bring it back.
+    True when a unit was found and handled (success or printed failure) — which
+    deliberately stops the caller's ``os.kill`` fallback: systemd treats a direct
+    SIGTERM as a clean stop, so ``Restart=on-failure`` won't bring it back.
     """
     if sys.platform == "win32":
         return False
@@ -216,12 +215,8 @@ def _try_restart_systemd_service(svc_name: str, cgroup_path: str | None = None) 
 
 
 def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
-    """The exact argv of a running process, when recoverable.
-
-    Linux: ``/proc/<pid>/cmdline`` (lossless). macOS: ``ps -o command=`` + shlex
-    (best effort). Windows: None — taskkill /F gives no graceful window and the
-    desktop app manages its own backend there.
-    """
+    """Exact argv of a running process: ``/proc/<pid>/cmdline`` (Linux), ``ps -o command=`` + shlex
+    (macOS), None on Windows (no graceful taskkill window; Desktop manages its backend)."""
     if sys.platform == "win32":
         return None
     try:
@@ -247,16 +242,10 @@ def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
 
 
 def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
-    """Best-effort respawn of manually-started dashboards after ``hermes update``.
-
-    Spawns each argv detached (new session, output appended to the profile's
-    ``logs/dashboard-restart.log``). Returns the commands that failed to spawn so
-    the caller can print the manual hint. Callers must pre-filter via
-    ``_filter_dashboard_respawn_candidates`` (no Desktop ``--port 0`` backends,
-    duplicates capped per profile).
-    """
+    """Respawn manually-started dashboards after ``hermes update``, detached, logging to
+    ``logs/dashboard-restart.log``; returns the argvs that failed to spawn. Callers pre-filter via
+    ``_filter_dashboard_respawn_candidates`` (no Desktop ``--port 0`` backends, capped per profile)."""
     from hermes_constants import get_hermes_home
-
     respawned: list[list[str]] = []
     failed: list[tuple[list[str], str]] = []
     log_path = get_hermes_home() / "logs" / "dashboard-restart.log"
@@ -288,14 +277,8 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
 
 
 class _UpdateOutputStream:
-    """Stream wrapper used during ``hermes update`` to survive terminal loss.
-
-    Every write is mirrored to an append-only log (``~/.hermes/logs/update.log``)
-    and writes to the original stream that fail with ``BrokenPipeError`` /
-    ``OSError`` / ``ValueError`` stop the on-screen output instead of the update.
-    With ``SIGHUP -> SIG_IGN`` from ``_install_hangup_protection`` this makes
-    ``hermes update`` safe in an SSH session that disconnects mid-install.
-    """
+    """stdout/stderr wrapper for ``hermes update``: mirrors to ``logs/update.log`` and, once the
+    terminal vanishes (BrokenPipe/OSError/ValueError), drops screen output instead of the update."""
 
     _BROKEN = (BrokenPipeError, OSError, ValueError)
 
@@ -348,17 +331,9 @@ class _UpdateOutputStream:
 
 
 def _install_hangup_protection(gateway_mode: bool = False):
-    """Protect ``cmd_update`` from SIGHUP and broken terminal pipes.
-
-    1. ``SIGHUP`` → ``SIG_IGN`` (preserved across exec, so pip/git children
-       survive hangup too). ``SIGINT``/``SIGTERM`` are intentionally left alone —
-       those are legitimate cancellation signals.
-    2. ``sys.stdout``/``sys.stderr`` are wrapped to mirror to
-       ``~/.hermes/logs/update.log`` and absorb ``BrokenPipeError``.
-
-    No-op in gateway mode (already detached). Returns the state dict that
-    ``_finalize_update_output`` consumes on exit.
-    """
+    """Protect ``cmd_update`` from SIGHUP (→ SIG_IGN, inherited by pip/git children) and broken pipes
+    (stdio wrapped in ``_UpdateOutputStream``). SIGINT/SIGTERM are left alone — legitimate cancels.
+    No-op in gateway mode (already detached). Returns state for ``_finalize_update_output``."""
     state = {
         "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False
     }
@@ -379,7 +354,6 @@ def _install_hangup_protection(gateway_mode: bool = False):
         # Late-bound import so tests can monkeypatch
         # hermes_cli.config.get_hermes_home to simulate setup failure.
         from hermes_cli.config import get_hermes_home as _get_hermes_home
-
         logs_dir = _get_hermes_home() / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(logs_dir / "update.log", "a", buffering=1, encoding="utf-8")
@@ -428,7 +402,6 @@ def _report_dashboard_status() -> int:
     """
     from hermes_cli.main import _dashboard_listening, _self
     from gateway.status import _pid_exists
-
     live: list[tuple[int, str, str]] = []
     for pid, command in _self()._scan_dashboard_processes():
         runtime = _parse_dashboard_runtime(command)
@@ -452,7 +425,6 @@ def _report_dashboard_status() -> int:
 def _dashboard_listening(host: str, port: int) -> bool:
     """True when something accepts TCP connections at host:port (even a 401 proves a dashboard is up)."""
     import socket
-
     try:
         with socket.create_connection((_dashboard_probe_host(host), port), timeout=1.5):
             return True
@@ -466,14 +438,12 @@ def _cancel(message: str = "  Cancelled.") -> NoReturn:
 
 
 def _maybe_setup_dashboard_auth_interactively(args) -> None:
-    """Offer to configure dashboard auth when the gate engages and none exists.
+    """Offer to configure dashboard auth when the gate engages and no provider exists.
 
-    Called from ``cmd_dashboard`` just before ``start_server``, which fails closed
-    when no ``DashboardAuthProvider`` is registered for a non-loopback bind or a
-    non-loopback ``dashboard.public_url``. Prompt an interactive operator to set
-    up the bundled password provider (or point at ``hermes dashboard register``
-    for OAuth). No-op — leaving the fail-closed ``SystemExit`` as backstop — when
-    the gate doesn't engage, a provider exists, or stdin/stdout isn't a TTY.
+    ``start_server`` fails closed for a non-loopback bind / ``dashboard.public_url``
+    without a ``DashboardAuthProvider``; prompt an interactive operator first.
+    No-op (fail-closed backstop stays) when the gate doesn't engage, a provider
+    exists, or stdin/stdout isn't a TTY.
     """
     host = getattr(args, "host", "127.0.0.1") or "127.0.0.1"
 
@@ -530,7 +500,6 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
 
     import getpass
     import secrets
-
     print()
     try:
         username = line_input("  Username [admin]: ").strip() or "admin"
@@ -556,7 +525,6 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     try:
         from hermes_cli.config import load_config, save_config
         from hermes_cli.plugins_cmd import ensure_basic_auth_plugin_enabled_in_config
-
         cfg = load_config()
         basic = cfg.setdefault("dashboard", {}).setdefault("basic_auth", {})
         basic["username"] = username
@@ -576,7 +544,6 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     # Re-run plugin discovery so the provider registers before start_server's gate.
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins(force=True)
     except Exception as exc:
         print(f"  ⚠ Plugin re-discovery failed ({exc}); the gate may still "
@@ -686,15 +653,13 @@ def _is_electron_packaged_web_dist(path: str) -> bool:
 
 
 def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str) -> None:
-    """Named-profile launches route to the single MACHINE dashboard.
+    """Route a named-profile launch to the single MACHINE dashboard (per-request ``?profile=`` scoping
+    makes one server per profile pure fragmentation).
 
-    The dashboard manages every profile via per-request ``?profile=`` scoping, so
-    one server per profile only fragments it. If the machine dashboard is already
-    listening, open the browser at ``?profile=<name>`` and exit; otherwise re-exec
-    as the machine dashboard pinned to ``-p default`` (so ``_apply_profile_override``
-    can't re-route through the sticky active_profile file) with this profile
-    preselected. ``--isolated`` opts out; Desktop pool backends (HERMES_DESKTOP=1)
-    stay per-profile. Returns normally when no routing applies.
+    Already listening → open ``?profile=<name>`` and exit; else re-exec pinned to
+    ``-p default`` (so ``_apply_profile_override`` can't re-route via the sticky
+    active_profile file). ``--isolated`` opts out; Desktop pool backends
+    (HERMES_DESKTOP=1) stay per-profile. Returns normally when no routing applies.
     """
     from hermes_cli.main import _dashboard_listening
     try:
@@ -773,12 +738,10 @@ def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_non
 def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
     """Build or validate the web UI dist before the server imports.
 
-    ``serve`` sets HERMES_SERVE_HEADLESS so mount_spa() stays off even if a stray
-    dist exists. Otherwise build unless HERMES_WEB_DIST or --skip-build says a
-    dist is pre-built — then verify index.html exists (an unverified promise
-    means the server starts and serves 404s). --skip-build on the default dist
-    location gets ONE recovery build; a caller-managed HERMES_WEB_DIST cannot be
-    populated and is written back expanded because web_server reads it raw.
+    ``serve`` sets HERMES_SERVE_HEADLESS so mount_spa() stays off. Otherwise build
+    unless HERMES_WEB_DIST / --skip-build promise a dist — then verify index.html
+    (else the server serves 404s). --skip-build on the default location gets ONE
+    recovery build; a caller-managed HERMES_WEB_DIST can't be populated.
     """
     from hermes_cli.main import PROJECT_ROOT, _build_web_ui
     skip_build = getattr(args, "skip_build", False)

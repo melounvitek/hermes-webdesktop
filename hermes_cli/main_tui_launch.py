@@ -43,7 +43,6 @@ def _print_tui_exit_summary(session_id: Optional[str], active_session_file: Opti
     db = None
     try:
         from hermes_state import SessionDB
-
         db = SessionDB()
         session = db.get_session(target)
         if not session:
@@ -94,14 +93,9 @@ intersection comparison in :func:`_tui_need_npm_install` always catches.
 
 
 def _workspace_root(dir: Path) -> Path:
-    """The npm workspace root for *dir*.
-
-    If *dir* has a ``package.json`` but no ``package-lock.json`` and its parent has
-    one, the parent is the workspace root (single lockfile + hoisted node_modules).
-    Otherwise *dir* itself (standalone project or prebuilt-bundle layout). Shared
-    by the install-need check, the TUI launcher and the web build so lockfile /
-    node_modules resolution and ``npm install`` cwd can't diverge.
-    """
+    """The npm workspace root for *dir*: its parent when *dir* has ``package.json`` but the
+    lockfile lives one level up (hoisted node_modules), else *dir* (standalone / prebuilt).
+    Shared by the install check, TUI launcher and web build so their cwd can't diverge."""
     if (
         (dir / "package.json").is_file()
         and not (dir / "package-lock.json").is_file()
@@ -141,19 +135,14 @@ def _termux_workspace_install_context(dir: Path, *, include_child_workspaces: bo
 
 
 def _npm_lock_workspace_closure(packages: dict, starts) -> Optional[set]:
-    """Package-map keys reachable from the selected workspaces via npm resolution.
+    """Package-map keys reachable from the selected workspaces (*starts*: set or str) via npm resolution.
 
-    *starts* is the set of workspace keys the launch install scopes to (a str is
-    accepted). ``devDependencies`` are followed for each of those (npm installs
-    the dev toolchain of every workspace it selects) but not for transitive deps.
-    Returns ``None`` when none of *starts* are in *packages* so callers fall back
-    to the full-lockfile comparison. The shared root lock also lists every OTHER
-    workspace's deps (``apps/desktop``, ``web``); comparing in full reported them
-    as "missing" and reinstalled on every launch.
-
-    Keys follow npm's v3 ``packages`` map; dependency names resolve by walking up
-    ``node_modules`` ancestors (node resolution), and workspace symlinks
-    (``link: true``) are followed to their real entry.
+    ``devDependencies`` are followed for each start (npm installs every selected
+    workspace's dev toolchain) but not for transitive deps. None when no start is
+    in *packages* so callers fall back to the full comparison — which would report
+    every OTHER workspace's deps (``apps/desktop``, ``web``) as missing and
+    reinstall on every launch. Names resolve by walking up ``node_modules``
+    ancestors; ``link: true`` entries are followed to their real package.
     """
     start_set = {starts} if isinstance(starts, str) else {s for s in starts if s}
     present = [s for s in start_set if s in packages]
@@ -198,12 +187,8 @@ def _npm_lock_workspace_closure(packages: dict, starts) -> Optional[set]:
 
 
 def _tui_selected_workspace_keys(tui_dir: Path, ws_root: Path) -> set:
-    """Lock-map keys for the workspaces the launch install scopes to.
-
-    Mirrors ``_make_tui_argv``: the ui-tui workspace, plus its child ``packages/*``
-    on Termux. Each is a dev-included closure root (npm installs devDependencies
-    of every selected workspace). Empty set when ui-tui isn't under *ws_root*.
-    """
+    """Lock-map keys the launch install scopes to: ui-tui, plus its child ``packages/*`` on Termux
+    (each a dev-included closure root). Empty when ui-tui isn't under *ws_root*."""
     from hermes_cli.main import _is_termux_startup_environment
     try:
         keys = {tui_dir.relative_to(ws_root).as_posix()}
@@ -221,16 +206,13 @@ def _tui_selected_workspace_keys(tui_dir: Path, ws_root: Path) -> set:
 def _tui_need_npm_install(root: Path) -> bool:
     """True when @hermes/ink is missing or node_modules is behind package-lock.json.
 
-    Prebuilt bundle (``dist/entry.js`` with no lockfile): nothing to install.
-    Lockfile / ink / marker checks use the workspace root. The root lock is
-    compared against npm's hidden ``node_modules/.package-lock.json`` by CONTENT
-    (git checkouts bump mtimes without changing deps): an entry missing from the
-    hidden lock → reinstall unless ``optional``/``peer``/``link`` or not under
-    ``node_modules/``; present in both → compare only the intersection of
-    non-null fields after stripping ``_NPM_LOCK_RUNTIME_KEYS`` (the hidden lock
-    omits or nulls many metadata fields; ``resolved``/``integrity`` are always in
-    both). Extra hidden-only entries are ignored. Falls back to mtime when either
-    lockfile is unparseable.
+    Prebuilt bundle (``dist/entry.js``, no lockfile): nothing to install. The root
+    lock is compared to npm's hidden ``node_modules/.package-lock.json`` by CONTENT
+    (git bumps mtimes without changing deps): missing from hidden → reinstall
+    unless ``optional``/``peer``/``link`` or outside ``node_modules/``; present in
+    both → compare the intersection of non-null fields minus
+    ``_NPM_LOCK_RUNTIME_KEYS`` (``resolved``/``integrity`` are always in both).
+    Hidden-only entries are ignored; unparseable lockfiles fall back to mtime.
     """
     entry = root / "dist" / "entry.js"
     ws_root = _workspace_root(root)
@@ -317,11 +299,8 @@ def _iter_tui_build_inputs(root: Path):
 
 
 def _tui_need_rebuild(root: Path) -> bool:
-    """True when ``dist/entry.js`` is missing or older than TUI inputs.
-
-    Rebuilding on every launch is a visible cold-start tax on slow Termux CPUs;
-    ``HERMES_TUI_FORCE_BUILD=1`` forces the old always-rebuild behaviour.
-    """
+    """True when ``dist/entry.js`` is missing or older than TUI inputs (Termux cold-start saver);
+    ``HERMES_TUI_FORCE_BUILD=1`` forces a rebuild."""
     force = (os.environ.get("HERMES_TUI_FORCE_BUILD") or "").strip().lower()
     if force in {"1", "true", "yes", "on"}:
         return True
@@ -341,13 +320,8 @@ def _tui_need_rebuild(root: Path) -> bool:
 
 
 def _ensure_tui_node() -> None:
-    """Make sure `node` + `npm` are on PATH for the TUI.
-
-    If either is missing, source scripts/lib/node-bootstrap.sh and call
-    `ensure_node` (fnm/nvm/proto/brew/bundled cascade), then prepend the resolved
-    node's directory to PATH so shutil.which finds it in this process. No-op when
-    both exist; ``HERMES_SKIP_NODE_BOOTSTRAP=1`` disables auto-install.
-    """
+    """Ensure `node` + `npm` are on PATH: else run node-bootstrap.sh `ensure_node` and prepend
+    the resolved node dir to PATH. ``HERMES_SKIP_NODE_BOOTSTRAP=1`` disables auto-install."""
     from hermes_cli.main import PROJECT_ROOT
     if shutil.which("node") and shutil.which("npm"):
         return
@@ -359,7 +333,6 @@ def _ensure_tui_node() -> None:
         return
 
     from hermes_constants import get_hermes_home
-
     hermes_home = str(get_hermes_home())
     try:
         # Helper logs to stderr; stdout carries `command -v node` — subshell PATH
@@ -397,13 +370,8 @@ def _find_bundled_tui(hermes_cli_dir: Path | None = None) -> Path | None:
 
 
 def _restore_tui_workspace(tui_dir: Path) -> bool:
-    """Try to restore a missing ``ui-tui/`` from git, returning True on success.
-
-    On Windows an antivirus / NTFS filter driver can leave tracked ``ui-tui/``
-    files deleted after ``hermes update``; ``git restore`` puts them back.
-    Best-effort: False when git is unavailable, this isn't a checkout, or the
-    directory is still missing afterwards.
-    """
+    """Best-effort ``git restore`` of a missing ``ui-tui/`` (Windows AV/NTFS filters can delete
+    tracked files after ``hermes update``); True when the directory exists afterwards."""
     git = shutil.which("git")
     if not git or not (tui_dir.parent / ".git").exists():
         return False
@@ -418,12 +386,8 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
 
 
 def _ensure_tui_workspace(tui_dir: Path) -> None:
-    """Ensure ``ui-tui/`` exists before any npm/node subprocess uses it as cwd.
-
-    Otherwise ``subprocess.run(cwd=<missing>)`` crashes with ``NotADirectoryError``
-    (``WinError 267``) instead of a usable message. Self-heal via ``git restore``
-    first; abort with manual recovery steps only if that fails.
-    """
+    """Ensure ``ui-tui/`` exists before it is used as a subprocess cwd (else ``NotADirectoryError``
+    / ``WinError 267`` with no usable message): git-restore first, then abort with recovery steps."""
     if tui_dir.is_dir():
         return
 
@@ -456,18 +420,13 @@ def _npm_lifecycle_env(env: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def _tui_node_bin(bin: str) -> str:
-    """Resolve ``node``/``npm`` for the TUI launch, or exit with a hint.
-
-    ``HERMES_NODE`` wins for node. ``find_node_executable()`` prefers the managed
-    ``$HERMES_HOME/node`` tree, which is not on PATH — a bare which() would say
-    "node not found" on an install whose only Node is the one Hermes installed.
-    """
+    """Resolve ``node``/``npm`` for the TUI launch, or exit with a hint. ``HERMES_NODE`` wins for node;
+    ``find_node_executable()`` sees the managed ``$HERMES_HOME/node`` tree a bare which() misses."""
     if bin == "node":
         env_node = os.environ.get("HERMES_NODE")
         if env_node and os.path.isfile(env_node) and os.access(env_node, os.X_OK):
             return env_node
     from hermes_constants import find_node_executable
-
     path = find_node_executable(bin)
     if not path and bin == "node":
         try:
@@ -506,11 +465,10 @@ def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
 def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
     """``npm install`` for the TUI workspace, with one EBADENGINE repair retry. Exits on failure.
 
-    ``--workspace ui-tui`` avoids resolving apps/desktop (Electron + node-pty);
-    omitted when ui-tui/ has its own lockfile (npm can't find a workspace named
-    "ui-tui" inside ui-tui/). Termux scopes the install to ui-tui + its child
-    packages. ``--include=dev``: the build toolchain lives in devDependencies and
-    an inherited ``NODE_ENV=production`` / ``omit=dev`` would silently skip it.
+    ``--workspace ui-tui`` avoids resolving apps/desktop (Electron + node-pty) and
+    is omitted when ui-tui/ has its own lockfile. ``--include=dev``: the build
+    toolchain is in devDependencies and an inherited ``NODE_ENV=production`` /
+    ``omit=dev`` would silently skip it.
     """
     npm = _tui_node_bin("npm")
     if not os.environ.get("HERMES_QUIET"):
@@ -526,7 +484,6 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
 
     def _run_tui_install() -> subprocess.CompletedProcess:
         from hermes_constants import with_hermes_node_path
-
         # Managed tree first on PATH: if the EBADENGINE repair provisioned a
         # managed Node, npm's shebang/lifecycle scripts must resolve that node.
         return subprocess.run(
@@ -541,7 +498,6 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
         # repair once (upgrade a managed npm in place, or provision a managed
         # runtime) and retry rather than dumping EBADENGINE at the user.
         from hermes_cli.npm_engine import maybe_repair_npm_engine
-
         repaired_npm = maybe_repair_npm_engine(npm, f"{result.stdout or ''}\n{result.stderr or ''}")
         if repaired_npm:
             npm_install_cmd[0] = repaired_npm
@@ -629,20 +585,16 @@ def _normalize_tui_toolsets(toolsets: object) -> list[str]:
     """Normalize argparse/Fire-style toolset input for the TUI subprocess."""
     try:
         from hermes_cli.oneshot import _normalize_toolsets
-
         return _normalize_toolsets(toolsets) or []
     except (AttributeError, ImportError):
         return _split_comma_items(toolsets, split_non_str=False) if toolsets else []
 
 
 def _read_cgroup_memory_limit() -> Optional[int]:
-    """Container memory limit in bytes, or None if unconstrained.
+    """Container memory limit in bytes, or None if unconstrained (v2 ``memory.max``, then v1).
 
-    V8 is NOT cgroup-aware: a flat ``--max-old-space-size=8192`` grows past a
-    smaller container limit and the cgroup OOM-killer SIGKILLs Node (no JS
-    handler, no breadcrumb — the user sees a bare ``stdin EOF``). Checks cgroup
-    v2 ``memory.max`` then v1 ``memory.limit_in_bytes``; ``max`` or the v1
-    near-INT64 "unlimited" sentinel means no limit.
+    V8 is NOT cgroup-aware: a flat 8GB heap grows past a smaller container limit
+    and the OOM-killer SIGKILLs Node with no breadcrumb (bare ``stdin EOF``).
     """
     candidates = (
         "/sys/fs/cgroup/memory.max",  # cgroup v2
@@ -671,13 +623,9 @@ def _read_cgroup_memory_limit() -> Optional[int]:
 
 
 def _resolve_tui_heap_mb(default_mb: int = 8192) -> int:
-    """Pick a V8 ``--max-old-space-size`` (MB) that fits the container.
-
-    ``default_mb`` when unconstrained or the box is large enough; otherwise ~75% of
-    the cgroup limit (headroom for non-heap RSS and the Python gateway child in
-    the same cgroup), floored at 1536MB when the container is > 2GB (below that
-    V8 GC-thrashes). Never exceeds ``default_mb``.
-    """
+    """V8 ``--max-old-space-size`` (MB) that fits the container: ``default_mb`` when unconstrained,
+    else 75% of the cgroup limit (headroom for non-heap RSS + the gateway child), floored at
+    1536MB when the container is > 2GB (below that V8 GC-thrashes)."""
     from hermes_cli.main import _read_cgroup_memory_limit
     limit = _read_cgroup_memory_limit()
     if not limit:
@@ -731,7 +679,6 @@ def _setup_tui_worktree() -> dict:
     wt_info = None
     try:
         from cli import _git_repo_root, _maintain_pack_health, _prune_stale_worktrees, _setup_worktree
-
         repo = _git_repo_root()
         if repo:
             _prune_stale_worktrees(repo)
@@ -760,7 +707,6 @@ def _launch_tui(
     tui_dir = PROJECT_ROOT / "ui-tui"
 
     import tempfile
-
     # TUI child is a hermes process: propagate the profile-home contract via
     # the single factory; keep secrets (the TUI/agent needs provider creds).
     from tools.environments.local import build_subprocess_env
@@ -849,7 +795,6 @@ def _launch_tui(
     # preserve_inherited=False keeps --tui and other flags out of the subcommand.
     if code == 42:
         from hermes_cli.relaunch import relaunch
-
         print()
         print("⚕ Launching update...")
         print()
@@ -859,47 +804,34 @@ def _launch_tui(
 
 
 def _pin_kanban_board_env() -> None:
-    """Pin the active kanban board into ``HERMES_KANBAN_BOARD`` for the chat session.
-
-    Otherwise in-process ``kanban_*`` tools and shelled-out ``hermes kanban`` calls
-    resolve the board on different paths (env pin vs the global ``kanban/current``
-    file), and a concurrent ``boards switch`` can flip the file mid-turn.
-    """
+    """Pin the active kanban board into ``HERMES_KANBAN_BOARD`` so in-process tools and shelled-out
+    ``hermes kanban`` calls agree even if a concurrent ``boards switch`` flips the file mid-turn."""
     if os.environ.get("HERMES_KANBAN_BOARD"):
         return
     try:
         from hermes_cli.kanban_db import get_current_board
-
         os.environ["HERMES_KANBAN_BOARD"] = get_current_board()
     except Exception:
         pass
 
 
 def _sync_bundled_skills_quietly() -> None:
-    """Seed ``~/.hermes/skills/`` with the bundled skill library on first launch.
-
-    Manifest-based and idempotent (skipped skills cost milliseconds), so every
-    first-interaction entrypoint may call it. Failures are swallowed: skills are
-    an enhancement, not a hard dependency.
-    """
+    """Seed ``~/.hermes/skills/`` with the bundled library (idempotent, milliseconds when synced).
+    Failures are swallowed: skills are an enhancement, not a hard dependency."""
     try:
         from tools.skills_sync import sync_skills
-
         sync_skills(quiet=True)
     except Exception:
         pass
 
 
 def _resolve_use_tui(args) -> bool:
-    """Decide whether to launch the TUI for a chat/bare invocation.
-
-    Precedence: ``--cli`` → classic; ``--tui`` → TUI; no TTY → classic;
+    """Decide whether to launch the TUI: ``--cli`` → classic; ``--tui`` → TUI; no TTY → classic;
     ``HERMES_TUI=1`` → TUI; ``display.interface`` config; default classic.
-    The TTY gate is load-bearing: ambient TUI preferences must never hijack a
-    non-interactive invocation (kanban workers, cron, pipelines run
-    ``hermes chat -q`` on a pipe; the Ink no-TTY bail-out exits 0 and a kanban
-    worker then dies with a protocol violation). An explicit ``--tui`` still gets
-    the informative bail-out.
+
+    The TTY gate is load-bearing: ambient preferences must never hijack a piped
+    ``hermes chat -q`` (kanban workers, cron) — the Ink no-TTY bail-out exits 0 and
+    the worker dies with a protocol violation. Explicit ``--tui`` still bails out.
     """
     if getattr(args, "cli", False):
         return False
@@ -914,7 +846,6 @@ def _resolve_use_tui(args) -> bool:
         return True
     try:
         from hermes_cli.config import load_config
-
         iface = (load_config().get("display", {}) or {}).get("interface", "cli")
         return isinstance(iface, str) and iface.strip().lower() == "tui"
     except Exception:

@@ -48,15 +48,11 @@ def _record_bytecode_fingerprint() -> None:
 
 
 def _sweep_stale_bytecode_if_checkout_changed() -> None:
-    """Clear ``__pycache__`` at launch when the checkout changed underneath us.
+    """Clear ``__pycache__`` at launch when the checkout fingerprint changed since the last sweep.
 
-    Stale-bytecode bug class: the checkout's ``.py`` files change (git pull inside
-    ``hermes update``, a manual pull, a ZIP update, a file-sync restore) while
-    ``__pycache__`` keeps bytecode from the previous revision. Update-time clears
-    can't close it — ``hermes update`` runs the PRE-pull updater code, and manual
-    pulls never run it — so every entry point compares the checkout fingerprint
-    (cheap file reads, no git subprocess) against the last-validated stamp and
-    sweeps once when they diverge. Never raises.
+    Update-time clears can't close the stale-bytecode class: ``hermes update`` runs
+    the PRE-pull updater code and manual pulls never run it. Cheap file reads, no
+    git subprocess. Never raises.
     """
     from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint, _record_bytecode_fingerprint
     try:
@@ -112,7 +108,6 @@ def _hash_source_tree(project_root: Path, tree_dir: Path) -> str:
         h.update(b"\0")
 
     from pathspec import PathSpec
-
     gitignore = project_root / ".gitignore"
     lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.is_file() else []
     spec = PathSpec.from_lines("gitignore", lines)
@@ -218,13 +213,9 @@ def _run_with_idle_timeout(
     cmd: list[str], cwd: Path, *, idle_timeout_seconds: int = 180, indent: str = "    ",
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess that streams output, killing it after *idle_timeout_seconds* of silence.
-
-    A silent, captured ``npm run build`` on a low-memory host looks like a hang and
-    users reboot mid-install. Stdout is streamed, and idle output terminates the
-    process with a non-zero returncode (124 if terminate raced a clean exit).
-    Returns merged stdout (text) and empty stderr; never raises on idle timeout.
-    """
+    """Stream a subprocess, killing it after *idle_timeout_seconds* of silence (a silent captured
+    Vite build on a low-memory host looks like a hang and users reboot mid-install). Returns merged
+    stdout, empty stderr, rc 124 if terminate raced a clean exit; never raises on idle timeout."""
     merged_chunks: list[str] = []
     last_output_ts = _time.monotonic()
     lock = threading.Lock()
@@ -285,15 +276,10 @@ def _run_with_idle_timeout(
 
 
 def _nixos_build_env() -> dict[str, str] | None:
-    """Extra env for native module builds on NixOS, or None when not needed.
-
-    node-gyp's ``find-python.js`` does a bare PATH lookup for python3, which fails
-    on NixOS outside a nix-shell. Tier 1: the hermes venv python3; tier 2: resolve
-    via ``nix-shell`` (a self-contained Nix store binary, valid after the shell exits).
-    """
+    """``PYTHON=`` env for node-gyp on NixOS (bare PATH lookup fails outside nix-shell): the hermes
+    venv python3, else a ``nix-shell``-resolved store path. None off NixOS / python3 on PATH."""
     from hermes_cli.main import PROJECT_ROOT
     import re
-
     try:
         os_release = Path("/etc/os-release").read_text(encoding="utf-8")
     except OSError:
@@ -327,14 +313,11 @@ def _run_npm_install_deterministic(
 ) -> subprocess.CompletedProcess:
     """Deterministic npm install that never mutates ``package-lock.json``.
 
-    ``npm ci`` when a lockfile is present, else/on failure ``npm install --no-save``
-    (lockfile may be out of sync on a WIP checkout; ``--no-save`` keeps the
-    contract — a rewritten lockfile makes every future ``npm ci`` fail).
-    ``--include=dev`` is forced: callers are frontend builds whose toolchain is in
-    devDependencies, and an inherited ``NODE_ENV=production`` / ``omit=dev`` would
-    silently skip them (exit 0) and the build then dies with ``tsc: not found``.
-    An npm outside the root ``engines.npm`` range fails every command identically,
-    so that failure gets exactly one ``maybe_repair_npm_engine`` retry.
+    ``npm ci`` when a lockfile exists, else/on failure ``npm install --no-save``
+    (a rewritten lockfile makes every future ``npm ci`` fail). ``--include=dev``
+    is forced: an inherited ``NODE_ENV=production`` / ``omit=dev`` silently skips
+    the build toolchain and the build dies with ``tsc: not found``. An npm outside
+    ``engines.npm`` fails every command, so it gets one engine-repair retry.
     """
     # CI=1 no-ops unicode-animations' postinstall that animates to /dev/tty.
     run_env = _npm_lifecycle_env(env)
@@ -355,14 +338,12 @@ def _run_npm_install_deterministic(
         return result
 
     from hermes_cli.npm_engine import maybe_repair_npm_engine
-
     repaired_npm = maybe_repair_npm_engine(npm, f"{result.stdout or ''}\n{result.stderr or ''}")
     if not repaired_npm:
         return result
     # A freshly provisioned managed npm resolves `node` from PATH — put the
     # managed tree first so it finds the managed Node, not a mismatched system one.
     from hermes_constants import with_hermes_node_path
-
     run_env["PATH"] = with_hermes_node_path(run_env)["PATH"]
     return _attempt(repaired_npm)
 
@@ -404,14 +385,9 @@ def _missing_web_build_tool(output: str) -> str | None:
 
 
 def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
-    """Build the web UI frontend if npm is available, serializing across processes.
-
-    Concurrent dashboard boots used to each spawn ``npm install`` + ``vite build``
-    over the same tree and starve each other. One process builds under an
-    exclusive flock; the rest serve the existing dist (stale is acceptable) or,
-    when none exists yet, block until the builder finishes. Staleness is checked
-    once inside :func:`_do_build_web_ui`, after the lock is held.
-    """
+    """Build the web UI if npm is available, serialized across processes by flock: one builds, the
+    rest serve the existing dist (stale is fine) or block until the first build exists. Staleness is
+    checked inside :func:`_do_build_web_ui` after the lock is held."""
     if not (web_dir / "package.json").exists():
         return True
     try:
@@ -449,14 +425,11 @@ def _relay_npm_output(result: subprocess.CompletedProcess) -> None:
 def _web_npm_install_context(web_dir: Path) -> tuple[Path, tuple[str, ...]]:
     """``(cwd, workspace_args)`` for installing the web workspace's deps.
 
-    Scoped to ``--workspace web`` so the root ``apps/*`` glob never pulls desktop
-    (Electron + node-pty) into a web build; no args when ``web/`` has its own
-    lockfile (``_workspace_root`` returns web_dir and ``--workspace`` would fail).
-    From the workspace root this must name the SAME closure as ``hermes update``'s
-    ``_update_node_dependencies()`` (ui-tui + web + root): ``npm ci`` deletes
-    node_modules before reifying, so a narrower closure silently prunes what the
-    update step just installed while still exiting 0. ui-tui is only named when
-    present (prebuilt/partial checkouts lack it and npm fails hard otherwise).
+    ``--workspace web`` keeps desktop (Electron + node-pty) out of a web build; no
+    args when ``web/`` has its own lockfile. From the root this must name the SAME
+    closure as ``hermes update``'s ``_update_node_dependencies()`` (ui-tui + web +
+    root): ``npm ci`` wipes node_modules first, so a narrower closure silently
+    prunes what update just installed. ui-tui is named only when present.
     """
     from hermes_cli.main import _is_termux_startup_environment
     if _is_termux_startup_environment():
@@ -491,7 +464,6 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         return True
 
     from hermes_constants import with_hermes_node_path
-
     npm = _resolve_node_runtime_npm()
     if not npm:
         if fatal:
