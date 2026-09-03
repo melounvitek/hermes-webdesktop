@@ -2674,6 +2674,96 @@ def _abort_lease(
     return None, prompt
 
 
+def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit_fence: Any) -> bool:
+    """Acquire the durable lock for ``lease.holder`` and capture the start watermark.
+
+    Watermark = MAX(id) of active rows at START: appends aren't blocked during summary;
+    later rows are concurrent tail that archive_and_compact re-sequences. Capture is
+    safety-additive (fallback archives everything), so its failure never aborts. An
+    acquire that raises is not version skew: fail closed and release holder-qualified
+    best-effort (safe if never acquired).
+    """
+    try:
+        acquired = try_acquire(lease.sid, lease.holder, ttl_seconds=lease.ttl)
+        if acquired:
+            try:
+                lease.watermark = lease.db.get_active_message_watermark(lease.sid)
+                # A captured watermark makes the commit safe against later rows on BOTH commit
+                # paths; tell the fence so a host may keep this attempt's admission.
+                if commit_fence is not None:
+                    try:
+                        commit_fence.mark_commit_watermark_fenced()
+                    except AttributeError:
+                        pass  # test doubles without the method
+            except Exception as _wm_err:
+                logger.warning(
+                    "compression watermark capture failed for "
+                    "session=%s (%s) — concurrent appends this cycle "
+                    "will be archived with the snapshot",
+                    lease.sid,
+                    _wm_err,
+                )
+                lease.watermark = None
+        return acquired
+    except Exception as _lock_err:
+        try:
+            lease.db.release_compression_lock(lease.sid, lease.holder)
+        except Exception as _release_err:
+            logger.debug("compression lock cleanup after failed acquire failed: %s", _release_err)
+        lease.holder = None
+        logger.warning(
+            "compression lock acquisition raised unexpectedly for "
+            "session=%s (%s: %s) — skipping compression this cycle",
+            lease.sid,
+            type(_lock_err).__name__,
+            _lock_err,
+        )
+        return False
+
+
+def _sit_out_lock_contention(
+    agent: Any,
+    lease: _CompressionLease,
+    lifecycle: _CompactionLifecycle,
+    system_message: str,
+    approx_tokens: Optional[int],
+    attempt_started_at: float,
+) -> Tuple[None, str]:
+    """Another path holds the lock: publish the lock-skip signal, warn once, sit out."""
+    try:
+        existing = lease.db.get_compression_lock_holder(lease.sid)
+    except Exception:
+        existing = None
+    logger.warning(
+        "compression skipped: another path is compressing session=%s "
+        "(holder=%s) — returning messages unchanged to avoid session fork",
+        lease.sid,
+        existing,
+    )
+    lease.holder = None  # don't release a lock we don't own
+    # Distinguish lock-contention no-op from "nothing to compress" so manual
+    # /compress can show a clear status instead of "No changes".
+    agent._compression_skipped_due_to_lock = existing or True
+    # Surface to the user once — quiet for downstream auto-compress loops
+    if getattr(agent, "_last_compression_lock_warning_sid", None) != lease.sid:
+        agent._last_compression_lock_warning_sid = lease.sid
+        try:
+            agent._emit_warning(
+                "⚠ Skipping concurrent compression — another path "
+                "is already compressing this session. Will retry "
+                "after it finishes."
+            )
+        except Exception:
+            pass
+    _existing_sp = _existing_system_prompt(agent, system_message)
+    try:
+        if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
+            agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
+    except Exception:
+        pass
+    return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "lock_contended", _existing_sp)
+
+
 def _acquire_compression_lease(
     agent: Any,
     *,
@@ -2745,81 +2835,12 @@ def _acquire_compression_lease(
                 )
                 agent._last_compaction_in_place = False
                 return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "commit_fence_cancelled")
-            try:
-                _lock_acquired = _try_acquire_lock(_lock_sid, lease.holder, ttl_seconds=_lock_ttl)
-                if _lock_acquired:
-                    # Watermark = MAX(id) of active rows at START. Appends aren't blocked during
-                    # summary; later rows are concurrent tail that archive_and_compact re-sequences.
-                    try:
-                        lease.watermark = _lock_db.get_active_message_watermark(_lock_sid)
-                        # A captured watermark makes the commit safe against later rows on BOTH commit
-                        # paths; tell the fence so a host may keep this attempt's admission.
-                        if commit_fence is not None:
-                            try:
-                                commit_fence.mark_commit_watermark_fenced()
-                            except AttributeError:
-                                pass  # test doubles without the method
-                    except Exception as _wm_err:
-                        # Watermark capture is safety-additive (fallback archives everything), so
-                        # failure here must not abort compression.
-                        logger.warning(
-                            "compression watermark capture failed for "
-                            "session=%s (%s) — concurrent appends this cycle "
-                            "will be archived with the snapshot",
-                            _lock_sid,
-                            _wm_err,
-                        )
-                        lease.watermark = None
-            except Exception as _lock_err:
-                # Method entered but failed: not version skew, fail closed. Acquire may have
-                # committed, so release holder-qualified best-effort (safe if never acquired).
-                try:
-                    _lock_db.release_compression_lock(_lock_sid, lease.holder)
-                except Exception as _release_err:
-                    logger.debug("compression lock cleanup after failed acquire failed: %s", _release_err)
-                lease.holder = None
-                logger.warning(
-                    "compression lock acquisition raised unexpectedly for "
-                    "session=%s (%s: %s) — skipping compression this cycle",
-                    _lock_sid,
-                    type(_lock_err).__name__,
-                    _lock_err,
-                )
-                _lock_acquired = False
+            _lock_acquired = _try_acquire_durable_lock(lease, _try_acquire_lock, commit_fence)
         if not _lock_acquired:
             lease.finish_lock_setup()
-            try:
-                existing = _lock_db.get_compression_lock_holder(_lock_sid)
-            except Exception:
-                existing = None
-            logger.warning(
-                "compression skipped: another path is compressing session=%s "
-                "(holder=%s) — returning messages unchanged to avoid session fork",
-                _lock_sid,
-                existing,
+            return _sit_out_lock_contention(
+                agent, lease, lifecycle, system_message, approx_tokens, attempt_started_at
             )
-            lease.holder = None  # don't release a lock we don't own
-            # Distinguish lock-contention no-op from "nothing to compress" so manual
-            # /compress can show a clear status instead of "No changes".
-            agent._compression_skipped_due_to_lock = existing or True
-            # Surface to the user once — quiet for downstream auto-compress loops
-            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
-                agent._last_compression_lock_warning_sid = _lock_sid
-                try:
-                    agent._emit_warning(
-                        "⚠ Skipping concurrent compression — another path "
-                        "is already compressing this session. Will retry "
-                        "after it finishes."
-                    )
-                except Exception:
-                    pass
-            _existing_sp = _existing_system_prompt(agent, system_message)
-            try:
-                if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
-                    agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
-            except Exception:
-                pass
-            return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "lock_contended", _existing_sp)
 
     if lease.holder is not None:
         agent._active_compression_lock_holder = lease.holder
