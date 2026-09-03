@@ -298,8 +298,7 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
             continue
         if not isinstance(field_value, str):
             raise HostedRoomError(f"actor.{field} must be a string")
-        field_value = field_value.strip()
-        if len(field_value) > max_chars:
+        if len(field_value := field_value.strip()) > max_chars:
             raise HostedRoomError(f"actor.{field} is too long")
         if field_value:
             actor[field] = field_value
@@ -478,17 +477,15 @@ def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> 
 
 
 def _room_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, Any]:
-    room = {
+    keys = row.keys()  # sqlite3.Row: ``x in row`` scans values, so ``.keys()`` is load-bearing.
+    return {
         "room_id": row["room_id"], "name": row["name"], "members": json.loads(row["members_json"]),
         "authority_gateway_id": row["authority_gateway_id"], "authority_epoch": int(row["authority_epoch"]),
         "revision": int(row["revision"]), "created_at": float(row["created_at"]),
-        "updated_at": float(row["updated_at"]), "idempotent": idempotent}
-    # sqlite3.Row: ``x in row`` scans values, so ``.keys()`` is load-bearing.
-    if "disbanded_at" in row.keys() and row["disbanded_at"] is not None:  # noqa: SIM118
-        room["disbanded_at"] = float(row["disbanded_at"])
-    if "next_seq" in row.keys():  # noqa: SIM118
-        room["latest_seq"] = int(row["next_seq"]) - 1
-    return room
+        "updated_at": float(row["updated_at"]), "idempotent": idempotent,
+        **({"disbanded_at": float(row["disbanded_at"])} if "disbanded_at" in keys and row["disbanded_at"] is not None
+           else {}),
+        **({"latest_seq": int(row["next_seq"]) - 1} if "next_seq" in keys else {})}
 
 
 def _event_from_row(row: sqlite3.Row, *, idempotent: bool = False) -> dict[str, Any]:
