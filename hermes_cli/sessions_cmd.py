@@ -10,6 +10,7 @@ working and imports stay one-way. Browse picker: :mod:`hermes_cli.sessions_cmd_b
 
 import json
 import os
+import shutil
 import sys
 from functools import partial
 from pathlib import Path
@@ -111,12 +112,9 @@ def _cmd_repair(args):
         try:
             from hermes_state import SessionDB
 
-            _repair_db = SessionDB()
-            try:
+            with SessionDB() as _repair_db:
                 n = _repair_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-                print(f"✓ Repaired — {n} sessions recovered.")
-            finally:
-                _repair_db.close()
+            print(f"✓ Repaired — {n} sessions recovered.")
         except Exception:
             print("✓ Repaired.")
         return
@@ -201,8 +199,7 @@ def _cmd_recover(args):
 class _RecoveryProgress:
     """`recover` progress printer: one live-updating ``  <table>: n/total`` line per table."""
 
-    def __init__(self):
-        self.table = None
+    table = None
 
     def __call__(self, info):
         table = info.get("table")
@@ -396,14 +393,11 @@ def _export_html(args, collect):
     sessions = collect()
     if sessions is None:
         return
-    if len(sessions) == 1:
-        content = generate_html_export(sessions[0])
-    else:
-        content = generate_multi_session_html_export(sessions)
+    single = len(sessions) == 1
+    content = generate_html_export(sessions[0]) if single else generate_multi_session_html_export(sessions)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(content)
-    suffix = "" if len(sessions) == 1 else "s"
-    print(f"Exported {len(sessions)} session{suffix} to {args.output} (HTML)")
+    print(f"Exported {len(sessions)} session{'' if single else 's'} to {args.output} (HTML)")
 
 
 def _export_jsonl(args, collect):
@@ -577,9 +571,7 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
     if db.delete_session(resolved_session_id, sessions_dir=_sessions_dir(), expected_delete_ids=delete_target_ids):
         delegate_count = len(delete_target_ids) - 1
         delegate_suffix = (
-            ""
-            if not delegate_count
-            else f" and {delegate_count} delegate session{'' if delegate_count == 1 else 's'}"
+            f" and {delegate_count} delegate session{'' if delegate_count == 1 else 's'}" if delegate_count else ""
         )
         print(f"Deleted exported session '{resolved_session_id}'{delegate_suffix}.")
     else:
@@ -594,8 +586,7 @@ def _cmd_delete(db, args):
         return _not_found(args.session_id)
     # The user named this id directly so the delete is honored, but a pin is a
     # "keep" flag and silently destroying it is surprising — say so.
-    _get_session = getattr(db, "get_session", None)
-    _meta = (_get_session(resolved_session_id) or {}) if callable(_get_session) else {}
+    _meta = db.get_session(resolved_session_id) or {}
     _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
     if not args.yes:
         if not _confirm_prompt(
@@ -671,18 +662,12 @@ def _note_pinned_skipped(db, filters, action):
     """Pinned sessions are excluded by default from bulk prune/archive (pin =
     durable keep). `prune --include-pinned` opts in; archive has no such flag,
     so archive always spares pinned rows. Tell the user how many were spared."""
-    _count_matches = getattr(db, "count_prune_matches", None)
-    if not callable(_count_matches):
-        return
     _base = {k: v for k, v in filters.items() if k != "include_pinned"}
-    try:
-        skipped = max(
-            int(_count_matches(**_base, include_pinned=True))
-            - int(_count_matches(**_base, include_pinned=False)),
-            0,
-        )
-    except TypeError:
-        return  # a db double without include_pinned support — skip the note
+    skipped = max(
+        int(db.count_prune_matches(**_base, include_pinned=True))
+        - int(db.count_prune_matches(**_base, include_pinned=False)),
+        0,
+    )
     if not skipped:
         return
     suffix = "" if skipped == 1 else "s"
@@ -778,12 +763,10 @@ def _cmd_prune_or_archive(db, args, action):
         return
 
     if action == "prune":
-        count = db.prune_sessions(sessions_dir=_sessions_dir(), **filters)
-        print(f"Pruned {count} session(s).")
+        print(f"Pruned {db.prune_sessions(sessions_dir=_sessions_dir(), **filters)} session(s).")
     else:
-        count = db.archive_sessions(**filters)
         print(
-            f"Archived {count} session(s). They're hidden from listings "
+            f"Archived {db.archive_sessions(**filters)} session(s). They're hidden from listings "
             "but fully recoverable (nothing was deleted)."
         )
 
@@ -996,8 +979,6 @@ def _cmd_optimize_storage(db, args):
     # VACUUM needs a full second copy — require headroom ≈ current file size.
     do_vacuum = not getattr(args, "no_vacuum", False)
     try:
-        import shutil
-
         free_bytes = shutil.disk_usage(db_path.parent).free
     except Exception:
         free_bytes = None
@@ -1146,11 +1127,9 @@ def cmd_sessions(args, sessions_parser=None):
         print(f"Error: Could not open session database: {e}")
         return 1
 
-    try:
+    with db:
         handler = _DB_HANDLERS.get(action)
         if handler is None:
             sessions_parser.print_help()
             return
         return handler(db, args)
-    finally:
-        db.close()

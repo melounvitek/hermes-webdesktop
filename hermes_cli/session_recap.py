@@ -79,9 +79,7 @@ def _tool_call_name_and_args(tool_call: Any) -> Tuple[str, Mapping[str, Any]]:
     return name, raw_args if isinstance(raw_args, Mapping) else {}
 
 
-def _iter_assistant_tool_calls(
-    messages: Sequence[Mapping[str, Any]],
-) -> Iterable[Tuple[str, Mapping[str, Any]]]:
+def _iter_assistant_tool_calls(messages: Sequence[Mapping[str, Any]]) -> Iterable[Tuple[str, Mapping[str, Any]]]:
     for msg in messages:
         if not isinstance(msg, Mapping):
             continue
@@ -96,9 +94,7 @@ def _iter_assistant_tool_calls(
                 yield name, args
 
 
-def _count_visible_turns(
-    messages: Sequence[Mapping[str, Any]],
-) -> Tuple[int, int, int]:
+def _count_visible_turns(messages: Sequence[Mapping[str, Any]]) -> Tuple[int, int, int]:
     """Return ``(user_turn_count, assistant_turn_count, tool_message_count)``."""
     roles = Counter(msg.get("role") for msg in messages if isinstance(msg, Mapping))
     return roles["user"], roles["assistant"], roles["tool"]

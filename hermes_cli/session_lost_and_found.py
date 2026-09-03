@@ -82,11 +82,7 @@ def _cli_supports_recover(binary: str) -> bool:
             conn.commit()
         finally:
             conn.close()
-        probe = subprocess.run(
-            [binary, "-readonly", str(scratch), ".recover"],
-            capture_output=True,
-            timeout=30,
-        )
+        probe = subprocess.run([binary, "-readonly", str(scratch), ".recover"], capture_output=True, timeout=30)
         if probe.returncode != 0:
             return False
         return b"sqlite_dbpage" not in probe.stderr
@@ -129,9 +125,7 @@ def run_cli_lost_and_found_recover(
         except subprocess.TimeoutExpired:
             dump.kill()
             load.kill()
-            raise LostAndFoundError(
-                f"sqlite3 .recover timed out after {timeout:.0f}s"
-            )
+            raise LostAndFoundError(f"sqlite3 .recover timed out after {timeout:.0f}s")
         attempt = {
             "command": command,
             "dump_returncode": dump.returncode,
@@ -162,9 +156,7 @@ def _lost_and_found_db_usable(lf_path: Path) -> bool:
     try:
         conn = sqlite3.connect(str(lf_path))
         try:
-            return conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
-            ).fetchone() is not None
+            return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is not None
         finally:
             conn.close()
     except sqlite3.DatabaseError:
@@ -218,22 +210,14 @@ def _looks_like_source(value: Any) -> bool:
     return value in KNOWN_SOURCES or bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
 
 
-def classify_lost_and_found_row(
-    nfield: int,
-    cells: tuple[Any, ...],
-) -> Optional[str]:
+def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional[str]:
     """Classify one lost_and_found record by field count + sentinel values."""
 
     if len(cells) >= 3 and cells[0] is None:
         # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL in the
         # record; messages is the only canonical table shaped like that with
         # a session id second and a role third.
-        if (
-            isinstance(cells[1], str)
-            and cells[1]
-            and isinstance(cells[2], str)
-            and cells[2] in MESSAGE_ROLES
-        ):
+        if (isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES):
             return "messages"
         return None
 
@@ -281,26 +265,16 @@ def _insert_prefix_row(
     columns = dest_columns[: len(values)]
     quoted = ", ".join(f'"{column}"' for column in columns)
     placeholders = ", ".join("?" for _ in columns)
-    cursor = dest.execute(
-        f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})',
-        values,
-    )
+    cursor = dest.execute(f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})', values)
     return cursor.rowcount == 1
 
 
-def _copy_direct_tables(
-    lf_conn: sqlite3.Connection,
-    dest: sqlite3.Connection,
-) -> dict[str, int]:
+def _copy_direct_tables(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -> dict[str, int]:
     """Copy rows .recover managed to attribute to real canonical tables."""
 
     # Lazy import: session_recovery imports this module inside a function, so
     # a module-level import here would be circular.
-    from hermes_cli.session_recovery import (
-        _AUXILIARY_TABLE_SCHEMAS,
-        _AUXILIARY_TABLES,
-        _CANONICAL_TABLES,
-    )
+    from hermes_cli.session_recovery import (_AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES)
 
     copied: dict[str, int] = {}
     for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES):
@@ -323,19 +297,13 @@ def _copy_direct_tables(
             copied[table] = 0
             continue
         before = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-        dest.executemany(
-            f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})',
-            rows,
-        )
+        dest.executemany(f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})', rows)
         after = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
         copied[table] = after - before
     return copied
 
 
-def map_lost_and_found_rows(
-    lf_conn: sqlite3.Connection,
-    dest: sqlite3.Connection,
-) -> dict[str, Any]:
+def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -> dict[str, Any]:
     """Best-effort mapping of a .recover output DB into a fresh SessionDB."""
 
     report: dict[str, Any] = {
@@ -356,11 +324,7 @@ def map_lost_and_found_rows(
         # genuinely NULL was already rejected by classify_lost_and_found_row,
         # so the substitutions only fill NOT NULL bookkeeping counters/flags.
         targets: dict[str, tuple[list[str], dict[int, Any]]] = {}
-        for kind_name, protected in (
-            ("sessions", (0, 1)),
-            ("messages", (1, 2)),
-            ("session_model_usage", (0, 1)),
-        ):
+        for kind_name, protected in (("sessions", (0, 1)), ("messages", (1, 2)), ("session_model_usage", (0, 1))):
             defaults = _notnull_defaults(dest, kind_name)
             for index in protected:
                 defaults.pop(index, None)
@@ -447,11 +411,7 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
     clearly marked.
     """
 
-    result: dict[str, Any] = {
-        "sessions_stubbed": 0,
-        "messages_retained": 0,
-        "usage_rows_retained": 0,
-    }
+    result: dict[str, Any] = {"sessions_stubbed": 0, "messages_retained": 0, "usage_rows_retained": 0}
     dest.execute("BEGIN IMMEDIATE")
     try:
         orphan_ids: dict[str, dict[str, Any]] = {}
@@ -470,42 +430,24 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
             "WHERE u.session_id IS NOT NULL AND NOT EXISTS "
             "(SELECT 1 FROM sessions WHERE sessions.id = u.session_id)"
         ):
-            orphan_ids.setdefault(
-                str(session_id), {"started_at": 0.0, "message_count": 0}
-            )
+            orphan_ids.setdefault(str(session_id), {"started_at": 0.0, "message_count": 0})
 
         sequence = 1
         for session_id, info in sorted(orphan_ids.items()):
             while True:
-                title = (
-                    f"[best-effort recovered {sequence}] session metadata "
-                    "was unreadable"
-                )
+                title = (f"[best-effort recovered {sequence}] session metadata " "was unreadable")
                 sequence += 1
-                if (
-                    dest.execute(
-                        "SELECT 1 FROM sessions WHERE title = ? LIMIT 1",
-                        (title,),
-                    ).fetchone()
-                    is None
-                ):
+                if (dest.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,),).fetchone() is None):
                     break
             dest.execute(
                 "INSERT INTO sessions (id, source, started_at, title, "
                 "message_count) VALUES (?, 'recovered', ?, ?, ?)",
-                (
-                    session_id,
-                    info["started_at"],
-                    title,
-                    info["message_count"],
-                ),
+                (session_id, info["started_at"], title, info["message_count"]),
             )
             result["sessions_stubbed"] += 1
             result["messages_retained"] += info["message_count"]
 
-        result["usage_rows_retained"] = int(
-            dest.execute("SELECT COUNT(*) FROM session_model_usage").fetchone()[0]
-        )
+        result["usage_rows_retained"] = int(dest.execute("SELECT COUNT(*) FROM session_model_usage").fetchone()[0])
 
         # Repair dangling intra-sessions references without deleting rows.
         dest.execute(

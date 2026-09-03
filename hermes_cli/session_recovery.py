@@ -18,12 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from hermes_state import (
-    FTS_STORAGE_VERSION,
-    SCHEMA_VERSION,
-    SessionDB,
-    _db_opens_cleanly,
-)
+from hermes_state import (FTS_STORAGE_VERSION, SCHEMA_VERSION, SessionDB, _db_opens_cleanly)
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -38,10 +33,7 @@ _CANONICAL_TABLES = (
     "async_delegations",
 )
 
-_TOPIC_TABLES = (
-    "telegram_dm_topic_mode",
-    "telegram_dm_topic_bindings",
-)
+_TOPIC_TABLES = ("telegram_dm_topic_mode", "telegram_dm_topic_bindings")
 
 
 def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
@@ -63,12 +55,7 @@ _AUXILIARY_TABLE_SCHEMAS: dict[str, Callable[[sqlite3.Connection], None]] = {
 
 _AUXILIARY_TABLES = tuple(_AUXILIARY_TABLE_SCHEMAS)
 
-_INVENTORY_TABLES = (
-    *_CANONICAL_TABLES,
-    "state_meta",
-    *_TOPIC_TABLES,
-    *_AUXILIARY_TABLES,
-)
+_INVENTORY_TABLES = (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES)
 
 # These values describe derived indexes or the schema that owns an optional
 # table. A fresh destination must generate them from its own current schema.
@@ -134,9 +121,7 @@ def _validate_paths(
         for suffix in _SIDECAR_SUFFIXES:
             candidate = _sidecar_path(output, suffix)
             if os.path.lexists(candidate):
-                raise SessionRecoverySafetyError(
-                    f"Refusing to overwrite existing recovery output: {candidate}"
-                )
+                raise SessionRecoverySafetyError(f"Refusing to overwrite existing recovery output: {candidate}")
 
     work_root = (
         work_dir.expanduser().resolve(strict=True)
@@ -144,9 +129,7 @@ def _validate_paths(
         else (output.parent if output is not None else source.parent)
     )
     if not work_root.is_dir():
-        raise SessionRecoverySafetyError(
-            f"Recovery work directory is not a directory: {work_root}"
-        )
+        raise SessionRecoverySafetyError(f"Recovery work directory is not a directory: {work_root}")
     return source, output, work_root
 
 
@@ -180,11 +163,7 @@ def _same_filesystem(left: Path, right: Path) -> bool:
         return left.anchor.casefold() == right.anchor.casefold()
 
 
-def _disk_space_preflight(
-    source: Path,
-    work_root: Path,
-    output_parent: Optional[Path],
-) -> dict[str, Any]:
+def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional[Path]) -> dict[str, Any]:
     """Require space for the disposable bundle, output, and safety headroom."""
 
     bundle_bytes = sum(
@@ -355,9 +334,7 @@ def _copy_rows(
                 destination.executemany(insert_sql, rows)
             result["copied_rows"] += len(rows)
             if progress_cb is not None:
-                progress_cb(
-                    {"table": table, "copied_rows": result["copied_rows"], "source_rows": expected_rows}
-                )
+                progress_cb({"table": table, "copied_rows": result["copied_rows"], "source_rows": expected_rows})
     except sqlite3.DatabaseError as exc:
         result["status"] = "partial" if result["copied_rows"] else "failed"
         result["error"] = str(exc)
@@ -370,10 +347,7 @@ def _copy_rows(
     return result
 
 
-def _table_inventory(
-    conn: sqlite3.Connection,
-    table: str,
-) -> dict[str, Any]:
+def _table_inventory(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
     result: dict[str, Any] = {"available": False, "columns": [], "rows": None}
     try:
         columns = _table_columns(conn, table)
@@ -419,10 +393,7 @@ def _snapshot_and_inspect(
     work_root: Path,
 ) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, Any]]:
     before = _source_fingerprint(source)
-    temp_dir = tempfile.TemporaryDirectory(
-        prefix="hermes-session-recovery-",
-        dir=str(work_root),
-    )
+    temp_dir = tempfile.TemporaryDirectory(prefix="hermes-session-recovery-", dir=str(work_root))
     snapshot_dir = Path(temp_dir.name)
     try:
         snapshot_source, copied = _copy_source_bundle(source, snapshot_dir)
@@ -454,11 +425,7 @@ def _snapshot_and_inspect(
         raise
 
 
-def inspect_session_database(
-    source_path: Path,
-    *,
-    work_dir: Optional[Path] = None,
-) -> dict[str, Any]:
+def inspect_session_database(source_path: Path, *, work_dir: Optional[Path] = None) -> dict[str, Any]:
     """Inspect canonical table readability without opening the source itself."""
 
     source, _, work_root = _validate_paths(source_path, work_dir=work_dir)
@@ -476,10 +443,7 @@ def inspect_session_database(
         temp_dir.cleanup()
 
 
-def _ensure_auxiliary_destination_schema(
-    destination: sqlite3.Connection,
-    table: str,
-) -> None:
+def _ensure_auxiliary_destination_schema(destination: sqlite3.Connection, table: str) -> None:
     """Create a lazy auxiliary table on the recovered destination.
 
     Recovery initializes the destination via base ``SessionDB``, which does not create gateway-owned
@@ -517,14 +481,11 @@ def _copy_table(
     source_rows: Optional[int],
 ) -> dict[str, Any]:
     """Copy one canonical table: straight chunked copy, or rowid-range salvage when ``salvage``."""
+    copy_kwargs = dict(chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows)
     if table == "state_meta":
-        return _copy_state_meta(
-            source, destination, salvage=salvage, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows
-        )
+        return _copy_state_meta(source, destination, salvage=salvage, **copy_kwargs)
     if salvage:
-        return _copy_table_salvage(
-            source, destination, table, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows
-        )
+        return _copy_table_salvage(source, destination, table, **copy_kwargs)
     result: dict[str, Any] = {"source_rows": source_rows, "copied_rows": 0}
     columns = _compatible_columns(source, destination, table, result)
     if columns is None:
@@ -544,12 +505,7 @@ def _copy_table(
     )
 
 
-def _append_skipped_range(
-    ranges: list[dict[str, Any]],
-    low: int,
-    high: int,
-    error: str,
-) -> None:
+def _append_skipped_range(ranges: list[dict[str, Any]], low: int, high: int, error: str) -> None:
     """Record skipped rowid ranges without producing one entry per row."""
 
     if ranges and ranges[-1]["high"] + 1 == low and ranges[-1]["error"] == error:
@@ -558,10 +514,7 @@ def _append_skipped_range(
     ranges.append({"low": low, "high": high, "error": error})
 
 
-def _salvage_rowid_bounds(
-    source: sqlite3.Connection,
-    table: str,
-) -> dict[str, Any]:
+def _salvage_rowid_bounds(source: sqlite3.Connection, table: str) -> dict[str, Any]:
     """Find the readable rowid edges without scanning the complete table."""
 
     result: dict[str, Any] = {"errors": [], "fallback_edges": []}
@@ -606,13 +559,7 @@ def _salvage_rowid_bounds(
     return result
 
 
-def _probe_populated_edge(
-    source: sqlite3.Connection,
-    table: str,
-    *,
-    edge: str,
-    anchor: int,
-) -> dict[str, Any]:
+def _probe_populated_edge(source: sqlite3.Connection, table: str, *, edge: str, anchor: int) -> dict[str, Any]:
     """Find a finite bound for a damaged rowid edge (issue #80205).
 
     Substituting the whole rowid domain for a failed edge probe made range bisection burn the entire
@@ -634,9 +581,7 @@ def _probe_populated_edge(
     span = 1
     while True:
         candidate = position + span if ascending else position - span
-        if (ascending and candidate >= domain_limit) or (
-            not ascending and candidate <= domain_limit
-        ):
+        if (ascending and candidate >= domain_limit) or (not ascending and candidate <= domain_limit):
             # No clean empty-tail answer before the domain edge; keep the
             # domain fallback rather than inventing a bound.
             result["bound"] = domain_limit
@@ -776,9 +721,7 @@ def _copy_table_salvage(
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
     insert_prefix: str = "INSERT",
-    row_filter: Optional[
-        Callable[[tuple[Any, ...], tuple[str, ...]], bool]
-    ] = None,
+    row_filter: Optional[Callable[[tuple[Any, ...], tuple[str, ...]], bool]] = None,
 ) -> dict[str, Any]:
     """Best-effort rowid-range copy that continues past damaged source pages."""
 
@@ -829,10 +772,7 @@ def _copy_table_salvage(
     if skipped_ranges:
         result["status"] = "partial" if result["copied_rows"] else "failed"
         result["error"] = f"{len(skipped_ranges)} rowid range(s) skipped"
-    elif (
-        source_rows is not None
-        and result["copied_rows"] + result["excluded_rows"] != source_rows
-    ):
+    elif (source_rows is not None and result["copied_rows"] + result["excluded_rows"] != source_rows):
         result["status"] = "partial"
         result["error"] = (
             f"copied {result['copied_rows']} and excluded "
@@ -927,10 +867,7 @@ def _copy_state_meta(
     filtered_source_rows: Optional[int] = None
     try:
         filtered_source_rows = int(
-            source.execute(
-                f"SELECT COUNT(*) FROM state_meta WHERE key NOT IN ({placeholders})",
-                params,
-            ).fetchone()[0]
+            source.execute(f"SELECT COUNT(*) FROM state_meta WHERE key NOT IN ({placeholders})", params).fetchone()[0]
         )
     except sqlite3.DatabaseError:
         pass  # the copy loop below will return the concrete read error
@@ -949,9 +886,7 @@ def _copy_state_meta(
     )
 
 
-def _reconstruct_missing_sessions(
-    destination: sqlite3.Connection,
-) -> dict[str, Any]:
+def _reconstruct_missing_sessions(destination: sqlite3.Connection) -> dict[str, Any]:
     """Recreate placeholder session rows for salvaged orphaned messages.
 
     When the ``sessions`` b-tree is damaged worse than ``messages``, salvage can recover the
@@ -1008,18 +943,11 @@ def _reconcile(destination: sqlite3.Connection, table: str, where: str, mutation
     return count
 
 
-_DEPENDENT_TABLES = (
-    "messages",
-    "session_model_usage",
-    "compression_locks",
-    "telegram_dm_topic_bindings",
-)
+_DEPENDENT_TABLES = ("messages", "session_model_usage", "compression_locks", "telegram_dm_topic_bindings")
 _RELINK_COUNTERS = ("session_prompt_refs_cleared", "sessions_parent_cleared")
 
 
-def _cleanup_partial_orphans(
-    destination: sqlite3.Connection,
-) -> dict[str, Any]:
+def _cleanup_partial_orphans(destination: sqlite3.Connection) -> dict[str, Any]:
     """Reconcile references to sessions that could not be salvaged.
 
     Messages are never discarded for lack of a session row: their owning session is reconstructed as
@@ -1257,10 +1185,7 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     fts_keys = tuple(key for key in _GENERATED_META_KEYS if key.startswith("fts_"))
     placeholders = ", ".join("?" for _ in fts_keys)
     with _immediate_transaction(destination):
-        destination.execute(
-            f"DELETE FROM state_meta WHERE key IN ({placeholders})",
-            fts_keys,
-        )
+        destination.execute(f"DELETE FROM state_meta WHERE key IN ({placeholders})", fts_keys)
         destination.execute(
             "INSERT INTO state_meta(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1442,11 +1367,7 @@ def recover_session_database(
     if chunk_size <= 0:
         raise SessionRecoverySafetyError("chunk_size must be greater than zero")
 
-    source, output, work_root = _validate_paths(
-        source_path,
-        output_path=output_path,
-        work_dir=work_dir,
-    )
+    source, output, work_root = _validate_paths(source_path, output_path=output_path, work_dir=work_dir)
     assert output is not None
     disk_space = _disk_space_preflight(source, work_root, output.parent)
 
