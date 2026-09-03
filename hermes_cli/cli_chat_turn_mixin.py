@@ -1,4 +1,4 @@
-"""chat() and its per-turn phase helpers (image routing, staging, agent thread, interrupt monitor, rendering).
+"""chat() and its per-turn phases: image routing, staging, agent thread, interrupt monitor, rendering.
 
 Mixin bound onto ``HermesCLI`` via the MRO. cli.py-internal symbols are imported LAZILY
 inside each method — importing ``cli`` at module load time would be a cycle.
@@ -88,7 +88,7 @@ class CLIChatTurnMixin:
             self._chat_release_turn_audio(turn)
 
     def _chat_release_turn_audio(self, turn):
-        """Every exit path: stop the thinking sound, send the TTS sentinel, cut TTS only on abnormal exit."""
+        """Every exit path: stop the thinking sound, send the TTS sentinel, cut TTS only if abnormal."""
         from cli import logger
         if turn.thinking_started:
             try:
@@ -233,10 +233,10 @@ class CLIChatTurnMixin:
             def display_callback(sentence: str):
                 if not turn.box_opened:
                     turn.box_opened = True
-                    w = self._scrollback_box_width(getattr(self.console, "width", 80))
                     label = " ⚕ Hermes "
                     if self.show_timestamps:
                         label = f"{label}{datetime.now().strftime(self.timestamp_format)} "
+                    w = self._scrollback_box_width(getattr(self.console, "width", 80))
                     fill = w - 2 - self._status_bar_display_width(label)
                     _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
                 _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
@@ -566,8 +566,7 @@ class CLIChatTurnMixin:
             if reasoning:
                 w = self._scrollback_box_width()
                 r_label = " Reasoning "
-                r_fill = w - 2 - len(r_label)
-                r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
+                r_top = f"{_DIM}┌─{r_label}{'─' * max(w - 3 - len(r_label), 0)}┐{_RST}"
                 r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
                 # First 10 lines unless the user opted into /reasoning full.
                 lines = reasoning.strip().splitlines()
