@@ -1153,6 +1153,25 @@ def _extract_tool_call_id(tool_call: Any) -> str:
     return str(getattr(tool_call, "id", "") or "")
 
 
+def _tool_calls_by_id(messages: List[Dict[str, Any]]) -> Dict[str, tuple]:
+    """Map ``tool_call_id -> (tool_name, raw_arguments)`` over every assistant tool call."""
+    out: Dict[str, tuple] = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in msg.get("tool_calls") or []:
+            if isinstance(tc, dict):
+                fn = tc.get("function", {})
+                out[tc.get("id", "")] = (fn.get("name", "unknown"), fn.get("arguments", ""))
+            else:
+                fn = getattr(tc, "function", None)
+                out[getattr(tc, "id", "") or ""] = (
+                    getattr(fn, "name", "unknown") if fn else "unknown",
+                    getattr(fn, "arguments", "") if fn else "",
+                )
+    return out
+
+
 def _collect_path_mentions(text: str, relevant_files: list[str], *, limit: int = 12) -> None:
     for match in _PATH_MENTION_RE.findall(text):
         _dedupe_append(relevant_files, match.rstrip(".,:;"), limit=limit)
@@ -2878,6 +2897,169 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         return False
 
 
+    def _prune_boundary(
+        self, result: List[Dict[str, Any]], protect_tail_count: int, protect_tail_tokens: int | None,
+    ) -> int:
+        """First index of the protected tail; token budget (when given) beats the count floor."""
+        if protect_tail_tokens is None or protect_tail_tokens <= 0:
+            return len(result) - protect_tail_count
+        # Token-budget walk; cap the message-count floor like tail-cut so a bulky recent run stays prunable.
+        accumulated = 0
+        boundary = len(result)
+        min_protect = min(protect_tail_count, len(result), _MAX_TAIL_MESSAGE_FLOOR)
+        # Charge thinking on the newest turn only (parity with tail-cut and the estimator).
+        _newest_asst_idx = _last_assistant_index(result)
+        _charge_all_thinking = self._stale_thinking_on_wire()
+        for i in range(len(result) - 1, -1, -1):
+            msg_tokens = _estimate_msg_budget_tokens(
+                result[i], charge_stale_thinking=(_charge_all_thinking or i == _newest_asst_idx),
+            )
+            if accumulated + msg_tokens > protect_tail_tokens and (len(result) - i) >= min_protect:
+                boundary = i
+                break
+            accumulated += msg_tokens
+            boundary = i
+        # Apply the floor in count-space: `max` in index-space would invert (smaller index = MORE protected).
+        return len(result) - max(len(result) - boundary, min_protect)
+
+    @staticmethod
+    def _dedupe_tool_results(result: List[Dict[str, Any]]) -> int:
+        """Pass 1: keep the newest copy of identical tool results, back-reference older ones."""
+        pruned = 0
+        content_hashes: set = set()
+        for i in range(len(result) - 1, -1, -1):
+            msg = result[i]
+            content = msg.get("content") or ""
+            # Non-string/multimodal-envelope shapes can't be hashed by text.
+            if msg.get("role") != "tool" or not isinstance(content, str) or len(content) < _PRUNE_MIN_CHARS:
+                continue
+            h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+            if h in content_hashes:
+                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
+                pruned += 1
+            else:
+                content_hashes.add(h)
+        return pruned
+
+    @staticmethod
+    def _truncate_tool_call_args_at(result: List[Dict[str, Any]], idx: int) -> bool:
+        """Shrink large tool_call argument payloads at ``idx`` (inside the parsed JSON, so it stays valid)."""
+        msg = result[idx]
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            return False
+        new_tcs = []
+        modified = False
+        for tc in msg["tool_calls"]:
+            if isinstance(tc, dict):
+                args = tc.get("function", {}).get("arguments", "")
+                if len(args) > 500:
+                    new_args = _truncate_tool_call_args_json(args)
+                    if new_args != args:
+                        tc = {**tc, "function": {**tc["function"], "arguments": new_args}}
+                        modified = True
+            new_tcs.append(tc)
+        if modified:
+            result[idx] = {**msg, "tool_calls": new_tcs}
+        return modified
+
+    @staticmethod
+    def _demote_tool_result_at(
+        result: List[Dict[str, Any]], idx: int, call_id_to_tool: Dict[str, tuple[str, str]],
+        min_prune_chars: int, protected_skills: Optional[set[str]] = None,
+    ) -> bool:
+        """Replace the tool result at ``idx`` with a 1-line summary; True if modified.
+
+        ``protected_skills`` (lower-cased) spares matching skill_view bodies; pass None for the
+        pressure pass, which overrides the guard.
+        """
+        msg = result[idx]
+        if msg.get("role") != "tool":
+            return False
+        content = msg.get("content", "")
+        if isinstance(content, list) or (isinstance(content, dict) and content.get("_multimodal")):
+            # Shared strip policy with pass 3.5 (also drops the stale api_content sidecar).
+            new_msg = _strip_images_from_tool_msg(msg)
+            if new_msg is None:
+                return False
+            result[idx] = new_msg
+            return True
+        if not isinstance(content, str) or not content or content == _PRUNED_TOOL_PLACEHOLDER:
+            return False
+        if content.startswith(("[Duplicate tool output", "[screenshot removed")):
+            return False
+        if content.startswith("[") and " chars)" in content and len(content) < 400:
+            return False
+        if len(content) <= min_prune_chars:
+            return False
+        tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
+        if protected_skills and tool_name == "skill_view":
+            try:
+                _args = json.loads(tool_args) if tool_args else {}
+            except (json.JSONDecodeError, TypeError):
+                _args = {}
+            _skill = _args.get("name", "") if isinstance(_args, dict) else ""
+            if isinstance(_skill, str) and _skill.lower() in protected_skills:
+                return False
+        result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
+        return True
+
+    def _pressure_demote_tail(
+        self, result: List[Dict[str, Any]], prune_boundary: int, protect_tail_tokens: int,
+        call_id_to_tool: Dict[str, tuple[str, str]], min_prune_chars: int,
+    ) -> int:
+        """Pass 4: demote inside the protected tail when it alone exceeds the soft budget (#61932).
+
+        Keeps a short recent floor verbatim; overrides the skill guard (else the dead-end recurs).
+        Returns the number of tool results demoted (arg truncations are logged but not counted).
+        """
+        soft_ceiling = int(protect_tail_tokens * 1.5)
+        demote_end = len(result) - min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))
+        start = max(0, prune_boundary)
+
+        def _protected_region_tokens() -> int:
+            return sum(_estimate_msg_budget_tokens(result[i]) for i in range(start, len(result)))
+
+        demoted = 0
+        pressure_hits = 0
+
+        def _shrink_at(i: int) -> None:
+            # Each helper no-ops on the other role, so both may run unconditionally.
+            nonlocal demoted, pressure_hits
+            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars):
+                demoted += 1
+                pressure_hits += 1
+            if self._truncate_tool_call_args_at(result, i):
+                pressure_hits += 1
+
+        if demote_end <= prune_boundary or _protected_region_tokens() <= soft_ceiling:
+            return 0
+        for i in range(start, demote_end):
+            _shrink_at(i)
+            if _protected_region_tokens() <= soft_ceiling:
+                break
+        # If the recent floor is still dominated by huge tool bodies, demote all but the newest.
+        if _protected_region_tokens() > soft_ceiling:
+            last_tool_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "tool"), None)
+            for i in range(start, len(result)):
+                if i != last_tool_idx:
+                    _shrink_at(i)
+            # Last resort: the newest body alone may exceed the soft budget; summarize it.
+            if (
+                last_tool_idx is not None
+                and last_tool_idx >= prune_boundary
+                and _protected_region_tokens() > soft_ceiling
+            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars):
+                demoted += 1
+                pressure_hits += 1
+        if pressure_hits and not self.quiet_mode:
+            logger.info(
+                "Pre-compression pressure demotion: reclaimed protected-tail "
+                "tool output (%d change(s); protected region now ~%s tokens, "
+                "soft ceiling %s)",
+                pressure_hits, f"{_protected_region_tokens():,}", f"{soft_ceiling:,}",
+            )
+        return demoted
+
     def _prune_old_tool_results(
         self, messages: List[Dict[str, Any]], protect_tail_count: int,
         protect_tail_tokens: int | None = None,
@@ -2890,216 +3072,26 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """
         if not messages:
             return messages, 0
-
         result = [m.copy() for m in messages]
-        pruned = 0
-
-        call_id_to_tool: Dict[str, tuple] = {}
-        for msg in result:
-            if msg.get("role") == "assistant":
-                for tc in msg.get("tool_calls") or []:
-                    if isinstance(tc, dict):
-                        cid = tc.get("id", "")
-                        fn = tc.get("function", {})
-                        call_id_to_tool[cid] = (fn.get("name", "unknown"), fn.get("arguments", ""))
-                    else:
-                        cid = getattr(tc, "id", "") or ""
-                        fn = getattr(tc, "function", None)
-                        name = getattr(fn, "name", "unknown") if fn else "unknown"
-                        args_str = getattr(fn, "arguments", "") if fn else ""
-                        call_id_to_tool[cid] = (name, args_str)
-
-        if protect_tail_tokens is not None and protect_tail_tokens > 0:
-            # Token-budget walk; cap the message-count floor like tail-cut so a bulky recent run stays prunable.
-            accumulated = 0
-            boundary = len(result)
-            min_protect = min(
-                protect_tail_count,
-                len(result),
-                _MAX_TAIL_MESSAGE_FLOOR,
-            )
-            # Charge thinking on the newest turn only (parity with tail-cut and the estimator).
-            _newest_asst_idx = _last_assistant_index(result)
-            _charge_all_thinking = self._stale_thinking_on_wire()
-            for i in range(len(result) - 1, -1, -1):
-                msg = result[i]
-                msg_tokens = _estimate_msg_budget_tokens(
-                    msg,
-                    charge_stale_thinking=(
-                        _charge_all_thinking or i == _newest_asst_idx
-                    ),
-                )
-                if accumulated + msg_tokens > protect_tail_tokens and (len(result) - i) >= min_protect:
-                    boundary = i
-                    break
-                accumulated += msg_tokens
-                boundary = i
-            # Apply the floor in count-space: `max` in index-space would invert (smaller index = MORE protected).
-            budget_protect_count = len(result) - boundary
-            protected_count = max(budget_protect_count, min_protect)
-            prune_boundary = len(result) - protected_count
-        else:
-            prune_boundary = len(result) - protect_tail_count
-
-        # Pass 1: dedup identical tool results; keep the newest copy, back-reference older ones.
-        content_hashes: dict = {}  # hash -> (index, tool_call_id)
-        for i in range(len(result) - 1, -1, -1):
-            msg = result[i]
-            if msg.get("role") != "tool":
-                continue
-            content = msg.get("content") or ""
-            if isinstance(content, list):
-                continue
-            if not isinstance(content, str):
-                # Non-string/multimodal-envelope shapes can't be hashed by text.
-                continue
-            if len(content) < _PRUNE_MIN_CHARS:
-                continue
-            h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
-            if h in content_hashes:
-                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
-                pruned += 1
-            else:
-                content_hashes[h] = (i, msg.get("tool_call_id", "?"))
-
+        call_id_to_tool = _tool_calls_by_id(result)
+        prune_boundary = self._prune_boundary(result, protect_tail_count, protect_tail_tokens)
+        pruned = self._dedupe_tool_results(result)
         # Just-loaded / tail-referenced skills keep full skill_view bodies through the ordinary passes.
         protected_skills = _collect_protected_skill_names(result, prune_boundary)
-
-        def _demote_tool_result_at(idx: int, *, spare_protected_skills: bool = True) -> bool:
-            """Replace the tool result at ``idx`` with a 1-line summary; True if modified."""
-            nonlocal pruned
-            msg = result[idx]
-            if msg.get("role") != "tool":
-                return False
-            content = msg.get("content", "")
-            if isinstance(content, list) or (
-                isinstance(content, dict) and content.get("_multimodal")
-            ):
-                # Shared strip policy with pass 3.5 (also drops the stale api_content sidecar).
-                new_msg = _strip_images_from_tool_msg(msg)
-                if new_msg is None:
-                    return False
-                result[idx] = new_msg
-                pruned += 1
-                return True
-            if not isinstance(content, str):
-                return False
-            if not content or content == _PRUNED_TOOL_PLACEHOLDER:
-                return False
-            if content.startswith("[Duplicate tool output"):
-                return False
-            if content.startswith("[") and " chars)" in content and len(content) < 400:
-                return False
-            if content.startswith("[screenshot removed"):
-                return False
-            if len(content) <= min_prune_chars:
-                return False
-            call_id = msg.get("tool_call_id", "")
-            tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
-            if spare_protected_skills and tool_name == "skill_view" and protected_skills:
-                # Protected skills survive here; pass-4 pressure demotion overrides this.
-                try:
-                    _args = json.loads(tool_args) if tool_args else {}
-                except (json.JSONDecodeError, TypeError):
-                    _args = {}
-                _skill = _args.get("name", "") if isinstance(_args, dict) else ""
-                if isinstance(_skill, str) and _skill.lower() in protected_skills:
-                    return False
-            summary = _summarize_tool_result(tool_name, tool_args, content)
-            result[idx] = {**msg, "content": summary}
-            pruned += 1
-            return True
-
-        def _truncate_tool_call_args_at(idx: int) -> bool:
-            """Shrink large tool_call argument payloads at ``idx``."""
-            msg = result[idx]
-            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
-                return False
-            new_tcs = []
-            modified = False
-            for tc in msg["tool_calls"]:
-                if isinstance(tc, dict):
-                    args = tc.get("function", {}).get("arguments", "")
-                    if len(args) > 500:
-                        new_args = _truncate_tool_call_args_json(args)
-                        if new_args != args:
-                            tc = {**tc, "function": {**tc["function"], "arguments": new_args}}
-                            modified = True
-                new_tcs.append(tc)
-            if modified:
-                result[idx] = {**msg, "tool_calls": new_tcs}
-            return modified
-
-        # Pass 2: summarize old tool results.
+        # Pass 2: summarize old tool results. Pass 3: shrink large tool_call arguments INSIDE the
+        # parsed JSON so the result stays valid; otherwise providers 400 on every turn until the
+        # call leaves the window.
         for i in range(max(0, prune_boundary)):
-            _demote_tool_result_at(i)
-
-        # Pass 3: shrink large tool_call arguments INSIDE the parsed JSON so the result stays valid
-        # JSON; otherwise providers 400 on every turn until the call leaves the window.
+            pruned += self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, protected_skills)
         for i in range(max(0, prune_boundary)):
-            _truncate_tool_call_args_at(i)
-
+            self._truncate_tool_call_args_at(result, i)
         # Pass 3.5: retire image payloads inside the protected tail; re-sent embeds otherwise make
         # compression look ineffective and trip anti-thrash. Newest frames stay live.
         pruned += _retire_stale_tool_result_images(result)
-
-        # Pass 4: pressure demotion inside the protected tail when it alone exceeds the soft budget,
-        # keeping a short recent floor verbatim (#61932).
         if protect_tail_tokens is not None and protect_tail_tokens > 0 and result:
-            soft_ceiling = int(protect_tail_tokens * 1.5)
-            keep_recent = min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))
-            demote_end = len(result) - keep_recent
-
-            def _protected_region_tokens() -> int:
-                start = max(0, prune_boundary)
-                return sum(
-                    _estimate_msg_budget_tokens(result[i])
-                    for i in range(start, len(result))
-                )
-
-            if demote_end > prune_boundary and _protected_region_tokens() > soft_ceiling:
-                pressure_hits = 0
-                for i in range(max(0, prune_boundary), demote_end):
-                    # Pressure passes override the skill guard, else the #61932 dead-end recurs.
-                    if _demote_tool_result_at(i, spare_protected_skills=False):
-                        pressure_hits += 1
-                    if _truncate_tool_call_args_at(i):
-                        pressure_hits += 1
-                    if _protected_region_tokens() <= soft_ceiling:
-                        break
-                # If the recent floor is still dominated by huge tool bodies, demote all but the newest.
-                if _protected_region_tokens() > soft_ceiling:
-                    last_tool_idx = None
-                    for i in range(len(result) - 1, -1, -1):
-                        if result[i].get("role") == "tool":
-                            last_tool_idx = i
-                            break
-                    for i in range(max(0, prune_boundary), len(result)):
-                        if last_tool_idx is not None and i == last_tool_idx:
-                            continue
-                        # _demote_tool_result_at / _truncate_tool_call_args_at each no-op on the
-                        # other role, so both may run unconditionally.
-                        if _demote_tool_result_at(i, spare_protected_skills=False):
-                            pressure_hits += 1
-                        if _truncate_tool_call_args_at(i):
-                            pressure_hits += 1
-                    # Last resort: the newest body alone may exceed the soft budget; summarize it.
-                    if (
-                        last_tool_idx is not None
-                        and last_tool_idx >= prune_boundary
-                        and _protected_region_tokens() > soft_ceiling
-                    ) and _demote_tool_result_at(last_tool_idx, spare_protected_skills=False):
-                        pressure_hits += 1
-                if pressure_hits and not self.quiet_mode:
-                    logger.info(
-                        "Pre-compression pressure demotion: reclaimed protected-tail "
-                        "tool output (%d change(s); protected region now ~%s tokens, "
-                        "soft ceiling %s)",
-                        pressure_hits,
-                        f"{_protected_region_tokens():,}",
-                        f"{soft_ceiling:,}",
-                    )
-
+            pruned += self._pressure_demote_tail(
+                result, prune_boundary, protect_tail_tokens, call_id_to_tool, min_prune_chars,
+            )
         return result, pruned
 
     def prune_tool_results_only(
