@@ -2967,8 +2967,6 @@ def _salvage_or_refuse_grown_transcript(
     pass, else treats the attempt as a refused no-op. Returns ``(compressed, None)``
     to proceed or ``(None, prompt)`` when refused (caller releases the lease).
     """
-    # Anti-growth guard at the COMMIT SITE: in-place commits here before the gateway
-    # can inspect. Compare like-for-like rough estimates; on growth treat as no-op.
     _rough_in = estimate_messages_tokens_rough(messages)
     _rough_out = estimate_messages_tokens_rough(compressed)
     if _rough_out > _rough_in:
@@ -3129,7 +3127,7 @@ def _publish_rotated_compaction(
             _compressed_anchor_source[_DB_PERSISTED_MARKER] = True
             _session_messages = getattr(agent, "_session_messages", None)
             if isinstance(_session_messages, list) and _session_messages is not messages:
-                # Adoption may leave _session_messages on the pre-adoption list with an out-of- range idx; stamp every
+                # Adoption may leave _session_messages on the pre-adoption list with an out-of-range idx; stamp every
                 # scoped twin against the ANCHOR SOURCE, as the wrapper. An already-stamped exact twin still
                 # suppresses the broad pass here, or a content-equal old duplicate would get stamped.
                 _stamp_scoped_twins(_session_messages, _compressed_anchor_source, exact_counts_stamped=True)
@@ -3568,8 +3566,6 @@ def _run_summary_phase(
 
         messages_before_compression = copy.deepcopy(messages)
         _activity_heartbeat = _CompressionActivityHeartbeat(agent, commit_fence=commit_fence).start()
-        # Interrupts/redirects must not tear a summary in half. Use the explicit stop
-        # Event (message fields race) + fence timeout so pool slots free promptly.
         compressed = _run_summary_dispatch(
             agent, messages, compress_fn, compress_kwargs, commit_fence=commit_fence,
             attempt_generation=attempt.generation, hard_cancel_event=hard_cancel_event,
