@@ -46,6 +46,4 @@ def ensure_install_id(config: Dict[str, Any]) -> str:
     return minted
 
 
-__all__ = [
-    "ensure_install_id",
-]
+__all__ = ["ensure_install_id"]

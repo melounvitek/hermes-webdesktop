@@ -1,18 +1,12 @@
 """Export monitoring events to an OpenTelemetry Collector over OTLP/HTTP.
 
-Maps gateway monitoring events to OTel spans and sends them to the operator
-configured ``monitoring.export.otlp`` endpoint (no default destination ships).
-Also hosts the OTLP plumbing shared with ``gateway_health_export`` (SDK loading,
-header resolution, resource attributes, endpoint mapping).
-
-* The OTel SDK is an optional extra (``pip install hermes-agent[otlp]``),
-  imported lazily so it is only required when export is actually used.
-* ``headers_env`` maps a header name to an environment variable name; values
-  are read from the environment at export time and never logged or stored.
-* The continuous subscriber runs in the emitter's dispatcher thread and is
-  fail-isolated, so an export error cannot affect the gateway. The
-  ``event_filter`` seam keeps future planes sharing the emitter from silently
-  riding along on this exporter.
+Maps gateway monitoring events to OTel spans for the operator-configured
+``monitoring.export.otlp`` endpoint (no default destination ships) and hosts the OTLP
+plumbing shared with ``gateway_health_export`` (SDK loading, header resolution, resource
+attributes, endpoint mapping).  The OTel SDK is an optional extra (``hermes-agent[otlp]``)
+imported lazily; ``headers_env`` values are read from the environment at export time and
+never logged or stored.  The continuous subscriber runs on the emitter's dispatcher thread,
+fail-isolated, and ``event_filter`` keeps other planes from riding along on this exporter.
 """
 
 from __future__ import annotations
@@ -21,6 +15,7 @@ import importlib
 import logging
 import os
 import re
+from contextlib import suppress
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from agent.monitoring.gateway_health import _safe_instance_id
@@ -56,27 +51,19 @@ _SDK_SYMBOLS: Dict[str, str] = {
 _SPAN_SDK = ("TracerProvider", "BatchSpanProcessor", "Resource", "OTLPSpanExporter", "SpanKind")
 
 
-def _require_sdk(
-    names: Iterable[str] = _SPAN_SDK, *, auto_install: bool = True, prompt: bool = True
-) -> Dict[str, Any]:
+def _require_sdk(names: Iterable[str] = _SPAN_SDK, *, auto_install: bool = True, prompt: bool = True) -> Dict[str, Any]:
     """Import the named OTel SDK symbols, lazily installing the extra on first use.
 
-    Routes through tools.lazy_deps (feature 'export.otlp') — gated by
-    security.allow_lazy_installs and TTY-prompted (``prompt=False`` from
-    non-interactive contexts). Any lazy-install failure falls through to the
-    import attempt, which raises OTLPUnavailable with a manual install hint.
+    Routes through tools.lazy_deps (feature 'export.otlp') — gated by security.allow_lazy_installs
+    and TTY-prompted (``prompt=False`` from non-interactive contexts).  Any lazy-install failure
+    falls through to the import attempt, which raises OTLPUnavailable with a manual install hint.
     """
     if auto_install:
-        try:
+        with suppress(Exception):
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("export.otlp", prompt=prompt)
-        except Exception:
-            pass
     try:
-        return {
-            name: getattr(importlib.import_module(_SDK_SYMBOLS[name]), name)
-            for name in names
-        }
+        return {name: getattr(importlib.import_module(_SDK_SYMBOLS[name]), name) for name in names}
     except Exception as e:  # ImportError or partial install
         raise OTLPUnavailable(
             "OTLP export requires the optional dependency. Install with:\n"
@@ -122,15 +109,8 @@ def _signal_endpoint(endpoint: str, signal: str) -> str:
 
 
 _RESOURCE_ATTRIBUTE_KEYS = frozenset({
-    "service.name",
-    "service.namespace",
-    "service.version",
-    "service.instance.id",
-    "deployment.environment.name",
-    "cloud.provider",
-    "cloud.platform",
-    "cloud.region",
-    "telemetry.scope",
+    "service.name", "service.namespace", "service.version", "service.instance.id",
+    "deployment.environment.name", "cloud.provider", "cloud.platform", "cloud.region", "telemetry.scope",
 })
 _SAFE_RESOURCE_VALUE = re.compile(r"^[A-Za-z0-9._:/-]{1,128}$")
 
@@ -158,12 +138,9 @@ def _safe_resource_attributes(raw: Any) -> Dict[str, str]:
     return attrs
 
 
-def _runtime_resource_attributes(
-    config: Dict[str, Any], *, telemetry_scope: str
-) -> Dict[str, str]:
+def _runtime_resource_attributes(config: Dict[str, Any], *, telemetry_scope: str) -> Dict[str, str]:
     """Build the safe OTLP resource shared by spans, metrics and diagnostic logs."""
-    gh = _monitoring_section(config, "gateway_health_export")
-    attrs = _safe_resource_attributes(gh.get("resource_attributes"))
+    attrs = _safe_resource_attributes(_monitoring_section(config, "gateway_health_export").get("resource_attributes"))
     attrs["service.name"] = "hermes-gateway"
     attrs["service.instance.id"] = _safe_instance_id(_install_id(config))
     attrs["telemetry.scope"] = telemetry_scope
@@ -177,8 +154,7 @@ def build_exporter(config: Dict[str, Any]):
     endpoint = otlp.get("endpoint")
     if not endpoint:
         raise ValueError("monitoring.export.otlp.endpoint is not set")
-    headers = _resolve_headers(otlp.get("headers_env"))
-    return sdk["OTLPSpanExporter"](endpoint=endpoint, headers=headers or None)
+    return sdk["OTLPSpanExporter"](endpoint=endpoint, headers=_resolve_headers(otlp.get("headers_env")) or None)
 
 
 def _resource_attributes(config: Dict[str, Any]) -> Dict[str, str]:
@@ -187,8 +163,7 @@ def _resource_attributes(config: Dict[str, Any]) -> Dict[str, str]:
 
 def _make_provider(config: Dict[str, Any]):
     sdk = _require_sdk()
-    resource = sdk["Resource"].create(_resource_attributes(config))
-    provider = sdk["TracerProvider"](resource=resource)
+    provider = sdk["TracerProvider"](resource=sdk["Resource"].create(_resource_attributes(config)))
     processor = sdk["BatchSpanProcessor"](build_exporter(config))
     provider.add_span_processor(processor)
     return provider, processor
@@ -234,9 +209,7 @@ def export_batch(provider, batch: List[Dict[str, Any]]) -> int:
     n = 0
     for ev in batch:
         try:
-            name = f"hermes.{ev.get('event', 'event')}"
-            span = tracer.start_span(name, attributes=_span_attrs(ev))
-            span.end()
+            tracer.start_span(f"hermes.{ev.get('event', 'event')}", attributes=_span_attrs(ev)).end()
             n += 1
         except Exception:
             logger.debug("OTLP span map failed", exc_info=True)
@@ -246,36 +219,25 @@ def export_batch(provider, batch: List[Dict[str, Any]]) -> int:
 # ── continuous streaming subscribers ─────────────────────────────────────────
 class EmitterStreamer:
     """Base for emitter subscribers owning an OTel provider + batch processor.
-
-    Register with ``emitter.subscribe(streamer)``. Fail-isolated by the emitter.
-    """
+    Register with ``emitter.subscribe(streamer)``. Fail-isolated by the emitter."""
 
     _provider: Any
     _processor: Any
     exported: int = 0
 
     def shutdown(self) -> None:
-        try:
+        with suppress(Exception):
             from agent.monitoring.emitter import get_emitter
             get_emitter().unsubscribe(self)
-        except Exception:
-            pass
-        try:
+        with suppress(Exception):
             self._processor.force_flush()
             self._provider.shutdown()
-        except Exception:
-            pass
 
 
 class OTLPStreamer(EmitterStreamer):
     """A live subscriber that pushes each emitter batch to OTLP as spans."""
 
-    def __init__(
-        self,
-        config: Dict[str, Any],
-        *,
-        event_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
-    ):
+    def __init__(self, config: Dict[str, Any], *, event_filter: Optional[Callable[[Dict[str, Any]], bool]] = None):
         self._provider, self._processor = _make_provider(config)
         self._event_filter = event_filter
         self.exported = 0
@@ -303,16 +265,13 @@ def is_enabled(config: Dict[str, Any]) -> bool:
 
 
 def start_streaming(
-    config: Dict[str, Any],
-    *,
-    event_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    config: Dict[str, Any], *, event_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
 ) -> Optional[OTLPStreamer]:
     """If OTLP is enabled, attach a streamer to the singleton emitter.
 
-    ``event_filter`` scopes the exporter to its plane. Startup is non-interactive:
-    a configured-but-missing SDK is lazily installed once (prompt=False, gated by
-    security.allow_lazy_installs); if it still can't load, log and no-op — never
-    raise into startup.
+    ``event_filter`` scopes the exporter to its plane.  Startup is non-interactive: a
+    configured-but-missing SDK is lazily installed once (prompt=False, gated by
+    security.allow_lazy_installs); if it still can't load, log and no-op — never raise into startup.
     """
     if not is_enabled(config):
         return None
@@ -329,11 +288,5 @@ def start_streaming(
 
 
 __all__ = [
-    "OTLPUnavailable",
-    "OTLPStreamer",
-    "build_exporter",
-    "export_batch",
-    "is_available",
-    "is_enabled",
-    "start_streaming",
+    "OTLPUnavailable", "OTLPStreamer", "build_exporter", "export_batch", "is_available", "is_enabled", "start_streaming",
 ]

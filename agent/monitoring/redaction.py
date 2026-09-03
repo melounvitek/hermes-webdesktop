@@ -1,11 +1,9 @@
 """Redaction applied to monitoring data before egress.
 
-One unconditional scrub, no modes, no knobs. Every string that leaves the
-process passes through ``redact_for_export``: secrets first (wraps
-``agent/redact.py::redact_sensitive_text(force=True)`` plus bearer/token
-shapes, failing CLOSED so a broken redactor never emits the raw string), then
+One unconditional scrub, no modes, no knobs. Every string that leaves the process passes
+through ``redact_for_export``: secrets first (``agent/redact.py::redact_sensitive_text(force=True)``
+plus bearer/token shapes, failing CLOSED so a broken redactor never emits the raw string), then
 PII (e-mail, phone, UUID-shaped ids -> ``[email]`` / ``[phone]`` / ``[id]``).
-There is deliberately no setting to weaken this.
 """
 
 from __future__ import annotations
@@ -15,9 +13,7 @@ from typing import Any, Optional
 
 # ── secret shapes (belt-and-suspenders on top of agent/redact.py) ───────────
 _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+\-/]+=*", re.IGNORECASE)
-_TOKEN_RE = re.compile(
-    r"\b(xox[baprs]-[A-Za-z0-9-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,})\b"
-)
+_TOKEN_RE = re.compile(r"\b(xox[baprs]-[A-Za-z0-9-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,})\b")
 _SECRET_LITERAL_RE = re.compile(r"\*{3,}")
 _BEARER_RESIDUE_RE = re.compile(r"\bBearer\s+\[[^\]]+\]", re.IGNORECASE)
 
@@ -27,9 +23,7 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(
     r"(?<!\w)(?:\+?\d{1,3}[\s.\-]?)?(?:\(\d{2,4}\)[\s.\-]?)?\d{3}[\s.\-]?\d{3,4}(?:[\s.\-]?\d{2,4})?(?!\w)"
 )
-_UUID_RE = re.compile(
-    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
-)
+_UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 
 UNAVAILABLE = "[redaction-unavailable]"
 
@@ -58,13 +52,7 @@ def redact_for_export(text: Optional[str]) -> Optional[str]:
     return out
 
 
-def redact_bounded(
-    raw: Any,
-    *,
-    limit: int = 500,
-    empty: str = "[redacted]",
-    unavailable: str = UNAVAILABLE,
-) -> str:
+def redact_bounded(raw: Any, *, limit: int = 500, empty: str = "[redacted]", unavailable: str = UNAVAILABLE) -> str:
     """Redact ``str(raw or "")`` and length-bound it; ``empty`` replaces an empty
     result, ``unavailable`` is returned if redaction itself raises."""
     try:
@@ -73,7 +61,4 @@ def redact_bounded(
         return unavailable
 
 
-__all__ = [
-    "redact_for_export",
-    "redact_bounded",
-]
+__all__ = ["redact_for_export", "redact_bounded"]
