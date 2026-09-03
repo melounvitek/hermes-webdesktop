@@ -621,14 +621,12 @@ def _configured_custom_provider_ids() -> set[str]:
         config = load_config()
         providers = config.get("providers", {})
         if isinstance(providers, dict):
-            for key, entry in providers.items():
-                if isinstance(entry, dict):
-                    ids.add(custom_provider_slug(str(entry.get("name") or key), str(key)))
+            ids.update(custom_provider_slug(str(entry.get("name") or key), str(key))
+                       for key, entry in providers.items() if isinstance(entry, dict))
         legacy = config.get("custom_providers", [])
         if isinstance(legacy, list):
-            for entry in legacy:
-                if isinstance(entry, dict):
-                    ids.add(custom_provider_slug(str(entry.get("name") or "")))
+            ids.update(
+                custom_provider_slug(str(entry.get("name") or "")) for entry in legacy if isinstance(entry, dict))
     except _CONFIG_ERRORS:
         pass
     return ids
@@ -1029,28 +1027,25 @@ def _resolve_copilot_catalog_api_key() -> str:
     ``resolve_api_key_provider_credentials``, then ``auth.json`` ``credential_pool.copilot[]``, then
     ``~/.copilot/config.json`` ``copilotTokens`` (the ACP CLI's own store). Without the latter two,
     keyless users see the picker fall back to the stale curated list on a silent 401."""
-    try:
-        from hermes_cli.auth import resolve_api_key_provider_credentials
-
-        api_key = str(resolve_api_key_provider_credentials("copilot").get("api_key") or "").strip()
-        if api_key:
-            return api_key
-    except Exception:
-        pass
-    try:
+    def _pool_token() -> str:
         from hermes_cli.auth import read_credential_pool
 
-        token = _first_exchangeable_copilot_token(
-            entry.get("access_token") for entry in read_credential_pool("copilot") if isinstance(entry, dict)
-        )
+        return _first_exchangeable_copilot_token(
+            entry.get("access_token") for entry in read_credential_pool("copilot") if isinstance(entry, dict))
+
+    sources = (
+        lambda: _api_key_credentials("copilot")[0],
+        _pool_token,
+        lambda: _first_exchangeable_copilot_token(_copilot_cli_config_tokens()),
+    )
+    for source in sources:
+        try:
+            token = source()
+        except Exception:
+            continue
         if token:
             return token
-    except Exception:
-        pass
-    try:
-        return _first_exchangeable_copilot_token(_copilot_cli_config_tokens())
-    except Exception:
-        return ""
+    return ""
 
 
 def _model_dedup_key(model_id: str) -> str:
@@ -1087,7 +1082,8 @@ def _openai_discovery_base_url(provider: str) -> str:
     try:
         model_cfg = _get_model_config_dict()
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-        if cfg_provider in ("openai", "openai-api") and normalize_provider(provider) == normalize_provider(cfg_provider):
+        same_provider = normalize_provider(provider) == normalize_provider(cfg_provider)
+        if cfg_provider in ("openai", "openai-api") and same_provider:
             cfg_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
             if cfg_url:
                 return cfg_url
@@ -1411,22 +1407,23 @@ def _credential_fingerprint(provider: str) -> str:
             pass
 
     if provider == "ollama":
-        parts.append(f"OLLAMA_HOST={os.environ.get('OLLAMA_HOST', '')}")
         provider_cfg = _get_provider_config_dict("ollama")
-        parts.append(
-            "providers.ollama.base_url="
-            f"{provider_cfg.get('base_url', '') or provider_cfg.get('api', '') or provider_cfg.get('url', '')}"
-        )
-        parts.append(f"providers.ollama.api_key={provider_cfg.get('api_key', '')}")
         key_env = provider_cfg.get("key_env") or provider_cfg.get("api_key_env") or ""
-        parts.append(f"providers.ollama.key_env={key_env}")
+        model_cfg = _get_model_config_dict()
+        parts += [
+            f"OLLAMA_HOST={os.environ.get('OLLAMA_HOST', '')}",
+            "providers.ollama.base_url="
+            f"{provider_cfg.get('base_url', '') or provider_cfg.get('api', '') or provider_cfg.get('url', '')}",
+            f"providers.ollama.api_key={provider_cfg.get('api_key', '')}",
+            f"providers.ollama.key_env={key_env}",
+        ]
         if key_env:
             parts.append(f"{key_env}={os.environ.get(str(key_env), '')}")
-        model_cfg = _get_model_config_dict()
-        parts.append(f"model.provider={model_cfg.get('provider', '')}|model.base_url={model_cfg.get('base_url', '')}")
-        parts.append(
+        parts += [
+            f"model.provider={model_cfg.get('provider', '')}|model.base_url={model_cfg.get('base_url', '')}",
             "providers.ollama.extra_headers="
-            + json.dumps(provider_cfg.get("extra_headers", {}), sort_keys=True, default=str))
+            + json.dumps(provider_cfg.get("extra_headers", {}), sort_keys=True, default=str),
+        ]
 
     def _mtime_part(label: str, path) -> None:
         try:
