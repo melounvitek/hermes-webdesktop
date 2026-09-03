@@ -67,25 +67,18 @@ def _format_live_usage_output(sid: str, session: dict, arg: str) -> str:
 
     def n(key: str) -> str:
         return f"{int(usage.get(key) or 0):,}"
-    lines = [
-        "Session Token Usage",
-        "────────────────────────────────────────",
-        f"Model: {usage.get('model') or _metadata_mirror(session).get('model') or getattr(agent, 'model', '') or '(unknown)'}",
-        f"Input tokens:                 {n('input')}",
-        f"Output tokens:                {n('output')}"]
+    rows = [("Input tokens:", n("input")), ("Output tokens:", n("output"))]
     if int(usage.get("reasoning") or 0):
-        lines.append(f"Reasoning tokens:             {n('reasoning')}")
-    lines += [
-        f"Prompt tokens:                {n('prompt')}",
-        f"Completion tokens:            {n('completion')}",
-        f"Total tokens:                 {n('total')}",
-        f"API calls:                    {n('calls')}"]
+        rows.append(("Reasoning tokens:", n("reasoning")))
+    rows += [("Prompt tokens:", n("prompt")), ("Completion tokens:", n("completion")),
+             ("Total tokens:", n("total")), ("API calls:", n("calls"))]
     if usage.get("context_max"):
-        lines.append(
-            f"Current context:              {n('context_used')} / {n('context_max')} "
-            f"({int(usage.get('context_percent') or 0)}%)")
-    lines += [f"Messages:                     {message_count:,}", f"Compressions:                 {n('compressions')}"]
-    return "\n".join(lines)
+        pct = int(usage.get("context_percent") or 0)
+        rows.append(("Current context:", f"{n('context_used')} / {n('context_max')} ({pct}%)"))
+    rows += [("Messages:", f"{message_count:,}"), ("Compressions:", n("compressions"))]
+    model = usage.get("model") or _metadata_mirror(session).get("model") or getattr(agent, "model", "") or "(unknown)"
+    lines = ["Session Token Usage", "────────────────────────────────────────", f"Model: {model}"]
+    return "\n".join(lines + [f"{label:<30}{value}" for label, value in rows])
 
 
 def _live_session_messages(session: dict) -> Optional[list]:
@@ -305,9 +298,7 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
 
 
 def _mirror_model(sid, session, agent, arg) -> str:
-    if arg and agent:
-        return _apply_model_switch(sid, session, arg).get("warning", "")
-    return ""
+    return _apply_model_switch(sid, session, arg).get("warning", "") if arg and agent else ""
 
 
 def _mirror_approvals(sid, session, agent, arg) -> str:

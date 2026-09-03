@@ -348,14 +348,10 @@ class _Catalog:
         self.pairs: list[list[str]] = []
         self.canon: dict[str, str] = {}
         self.commands: dict[str, dict[str, str | None]] = {}
-        self.cat_map: dict[str, list[list[str]]] = {}
-        self.cat_order: list[str] = []
+        self.cat_map: dict[str, list[list[str]]] = {}  # insertion order = category order
 
     def bucket(self, cat: str) -> list[list[str]]:
-        if cat not in self.cat_map:
-            self.cat_map[cat] = []
-            self.cat_order.append(cat)
-        return self.cat_map[cat]
+        return self.cat_map.setdefault(cat, [])
 
     def add(self, key: str, desc: str, cat: str) -> None:
         self.canon[key.lower()] = key
@@ -449,7 +445,7 @@ def _(rid, params: dict) -> dict:
         "sub": {k: v[:] for k, v in SUBCOMMANDS.items()},
         "canon": cat.canon,
         "commands": cat.commands,
-        "categories": [{"name": c, "pairs": cat.cat_map[c]} for c in cat.cat_order],
+        "categories": [{"name": c, "pairs": rows} for c, rows in cat.cat_map.items()],
         "skills": skills,
         "skill_count": len(skills),
         "warning": warning})
