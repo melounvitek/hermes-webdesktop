@@ -1,12 +1,12 @@
 """Cross-platform Computer Use readiness + macOS permission helpers.
 
-"Ready to drive" differs per platform: macOS needs explicit TCC grants (Accessibility +
-Screen Recording) via cua-driver ``permissions status`` / ``permissions grant``;
-Windows/Linux have no TCC toggles, so readiness == driver health. The grants attach to
-cua-driver's OWN identity (``com.trycua.driver``), not Hermes, so ``grant`` launches
-CuaDriver via LaunchServices for correct dialog attribution. ``cua-driver doctor --json``
-is the universal signal; ``computer_use_status`` folds it with the macOS detail into one
-payload for the desktop card, the ``permissions`` CLI and ``/api/tools/computer-use/status``.
+"Ready to drive" differs per platform: macOS needs explicit TCC grants (Accessibility + Screen
+Recording) via cua-driver ``permissions status`` / ``permissions grant``; Windows/Linux have no TCC
+toggles, so readiness == driver health. The grants attach to cua-driver's OWN identity
+(``com.trycua.driver``), not Hermes, so ``grant`` launches CuaDriver via LaunchServices for correct
+dialog attribution. ``cua-driver doctor --json`` is the universal signal; ``computer_use_status``
+folds it with the macOS detail into one payload for the desktop card, the ``permissions`` CLI and
+``/api/tools/computer-use/status``.
 """
 
 from __future__ import annotations
@@ -19,18 +19,17 @@ from typing import Any, Dict, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 
-# Platforms with a cua-driver runtime backend (mirrors the toolset platform_gate).
-_RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})
+_RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})  # mirrors the toolset platform_gate
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
 def _resolve_driver_cmd(override: Optional[str]) -> Optional[str]:
-    """Use the runtime resolver for UI status and permission commands too."""
+    """Same runtime resolver as the tool, so status/grant act on the binary computer_use invokes."""
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
     return resolve_cua_driver_cmd(override)
 
 def _child_env() -> Dict[str, str]:
-    """cua-driver child env (telemetry policy + provider secrets stripped);
-    degrades to ``os.environ`` on import error so probes never break."""
+    """cua-driver child env (telemetry policy + provider secrets stripped); degrades to
+    ``os.environ`` on import error so probes never break."""
     try:
         from tools.computer_use.cua_backend import sanitized_cua_driver_env
         return sanitized_cua_driver_env()
@@ -38,9 +37,8 @@ def _child_env() -> Dict[str, str]:
         return dict(os.environ)
 
 def _run(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run([binary, *args], capture_output=True, text=True, encoding='utf-8',
-                          errors='replace', timeout=timeout, env=_child_env(),
-                          stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+    return subprocess.run([binary, *args], capture_output=True, text=True, encoding='utf-8', errors='replace',
+                          timeout=timeout, env=_child_env(), stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
 
 def _json_out(binary: str, *args: str, timeout: float) -> Any:
     """Run ``binary args`` and parse stdout as JSON (``None`` on empty output)."""
@@ -48,19 +46,18 @@ def _json_out(binary: str, *args: str, timeout: float) -> Any:
     return json.loads(raw) if raw else None
 
 def _doctor(binary: str) -> Optional[Dict[str, Any]]:
-    """``cua-driver doctor --json`` → ``{ok, checks:[{label,status,message}]}``."""
+    """``cua-driver doctor --json`` → ``{ok, checks:[{label,status,message}]}`` (None on any failure)."""
     try:
         data = _json_out(binary, "doctor", "--json", timeout=12)
     except Exception:
         return None
     if not isinstance(data, dict):
         return None
-    return {"ok": bool(data.get("ok")),
-            "checks": [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
-                       for p in data.get("probes", []) if isinstance(p, dict)]}
+    return {"ok": bool(data.get("ok")), "checks": [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
+                                                    for p in data.get("probes", []) if isinstance(p, dict)]}
 
 def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
-    """Fold ``cua-driver permissions status --json`` booleans into ``out``."""
+    """Fold ``cua-driver permissions status --json`` booleans (+ ``source``) into ``out``."""
     try:
         data = _json_out(binary, "permissions", "status", "--json", timeout=10)
     except subprocess.TimeoutExpired:
@@ -74,20 +71,15 @@ def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
                 out["source"] = data["source"]
 
 def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
-    """Unified, OS-aware Computer Use readiness for the desktop card.
-
-    ``ready`` is the single signal the UI keys off: on macOS it's both TCC
-    grants; elsewhere it's driver health (no TCC model). ``None`` means
-    unknown (binary missing / probe failed). ``can_grant`` is macOS-only.
-    """
+    """Unified, OS-aware Computer Use readiness for the desktop card. ``ready`` is the single signal
+    the UI keys off: on macOS it's both TCC grants; elsewhere it's driver health (no TCC model).
+    ``None`` means unknown (binary missing / probe failed). ``can_grant`` is macOS-only.
+    Key order is an API payload contract."""
     plat = sys.platform
     binary = _resolve_driver_cmd(driver_cmd)
-    out: Dict[str, Any] = {
-        "platform": plat, "platform_supported": plat in _RUNTIME_PLATFORMS,
-        "installed": bool(binary), "version": None, "ready": None,
-        "can_grant": plat == "darwin", "checks": [], "source": None, "error": None,
-        **{k: None for k in _BOOLS},
-    }
+    out: Dict[str, Any] = {"platform": plat, "platform_supported": plat in _RUNTIME_PLATFORMS,
+                           "installed": bool(binary), "version": None, "ready": None, "can_grant": plat == "darwin",
+                           "checks": [], "source": None, "error": None, **{k: None for k in _BOOLS}}
     if not binary:
         return out
     try:
@@ -106,11 +98,8 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     return out
 
 def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
-    """Run ``cua-driver permissions grant`` (macOS); stream its output.
-
-    Returns the driver's exit code (0 ok), 2 if the binary is missing, 64 on a
-    non-macOS platform (no TCC model to grant).
-    """
+    """Run ``cua-driver permissions grant`` (macOS); stream its output. Returns the driver's exit
+    code (0 ok), 2 if the binary is missing, 64 on a non-macOS platform (no TCC model to grant)."""
     if sys.platform != "darwin":
         print("Computer Use permissions are a macOS concept; nothing to grant here.")
         return 64
@@ -119,11 +108,9 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
         print("cua-driver: not installed. Run: hermes computer-use install")
         return 2
     print("Requesting Accessibility + Screen Recording for CuaDriver.\n"
-          "macOS will show a dialog attributed to CuaDriver (com.trycua.driver) — "
-          "approve it, then return here.")
+          "macOS will show a dialog attributed to CuaDriver (com.trycua.driver) — approve it, then return here.")
     try:
-        return int(subprocess.run([binary, "permissions", "grant"], env=_child_env(),
-                                  stdin=subprocess.DEVNULL).returncode)
+        return int(subprocess.run([binary, "permissions", "grant"], env=_child_env(), stdin=subprocess.DEVNULL).returncode)
     except KeyboardInterrupt:  # pragma: no cover - interactive
         return 130
     except Exception as exc:  # pragma: no cover - defensive

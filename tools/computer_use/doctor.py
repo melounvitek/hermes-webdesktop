@@ -1,12 +1,10 @@
 """`hermes computer-use doctor` — thin client for cua-driver's `health_report` MCP tool.
 
-cua-driver owns the health model; we drive the stdio JSON-RPC handshake, call
-`health_report` and render the stable ``schema_version="1"`` payload. cua-driver 0.10.x
-marks `health_report` risk-unclassified (isError=true, structuredContent ``{"exit_code": 1}``)
-— we detect that and synthesize a composite report from working probes
-(check_permissions, list_apps, CLI --version).
-
-Exit codes: 0 overall=="ok"; 1 degraded/failed; 2 binary missing / protocol error.
+cua-driver owns the health model; we drive the stdio JSON-RPC handshake, call `health_report` and render the
+stable ``schema_version="1"`` payload. cua-driver 0.10.x marks `health_report` risk-unclassified (isError=true,
+structuredContent ``{"exit_code": 1}``) — we detect that and synthesize a composite report from working probes
+(check_permissions, list_apps, CLI --version). Exit codes: 0 overall=="ok"; 1 degraded/failed; 2 binary
+missing / protocol error.
 """
 
 from __future__ import annotations
@@ -22,8 +20,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.computer_use.permissions import _child_env as _sanitized_cua_env
 
-# Match the ALLOWED_STATUS_VALUES + ALLOWED_OVERALL_VALUES the cua-driver
-# integration test pins. If health_report widens its vocabulary, add here.
+# Match the ALLOWED_STATUS_VALUES + ALLOWED_OVERALL_VALUES the cua-driver integration test pins.
 _STATUS_GLYPH = {"pass": "✅", "fail": "❌", "skip": "⏭️"}
 _OVERALL_GLYPH = {"ok": "✅", "degraded": "⚠️", "failed": "❌"}
 _SUPPORTED_PLATFORMS = ("darwin", "linux", "windows")
@@ -32,23 +29,23 @@ _ZERO_DISPLAY_MSG = "ScreenCaptureKit reachable but 0 shareable display(s) — e
 _ZERO_DISPLAY_HINT = ("Wake the built-in display, connect a monitor or HDMI dummy dongle (e.g. Headless Ghost), "
                       "or enable a virtual display (Screen Sharing/VNC, BetterDisplay). "
                       "Verify with `system_profiler SPDisplaysDataType`.")
+_IO_EXC = (OSError, subprocess.TimeoutExpired)
 Report = Dict[str, Any]
-_Row = Tuple[str, str, Report]  # (status, message, extra kwargs for _check)
+_Row = Tuple[str, str, Report]  # (status, message, extra {hint?, data?}) for one check
 
 
 class HealthReportUnavailable(RuntimeError):
     """health_report denied or non-schema payload — ``run_doctor`` falls back to probes."""
 
 
-# ── CLI probes ───────────────────────────────────────────────────────────────
-
+# ── CLI probes ──
 def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
     """Run ``<binary> args`` with UTF-8 capture + sanitized env (raises on failure)."""
     return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, env=_sanitized_cua_env())
 
 def _cli_text(binary: str, *args: str, timeout: float,
-              exc_types: Tuple[type, ...]) -> Union[subprocess.CompletedProcess, BaseException]:
+              exc_types: Tuple[type, ...] = _IO_EXC) -> Union[subprocess.CompletedProcess, BaseException]:
     """``_run_cli`` that returns (not raises) any exception in *exc_types*."""
     try:
         return _run_cli(binary, *args, timeout=timeout)
@@ -59,19 +56,17 @@ def _combined_output(completed: subprocess.CompletedProcess) -> str:
     return ((completed.stdout or "") + (completed.stderr or "")).strip()
 
 def _first_line(text: str) -> Optional[str]:
-    text = text.strip()
-    return text.splitlines()[0].strip() if text else None
+    return text.strip().splitlines()[0].strip() if text.strip() else None
 
 def _read_cli_version(binary: str, *, timeout: float = 5.0) -> Optional[str]:
-    """First line of ``cua-driver --version`` or None. health_report's ``driver_version``
-    can disagree with the real binary (seen on Windows); doctor surfaces both."""
-    cp = _cli_text(binary, "--version", timeout=timeout,
-                   exc_types=(OSError, subprocess.TimeoutExpired, ValueError, TypeError))
+    """First line of ``cua-driver --version`` or None. health_report's ``driver_version`` can disagree with the
+    real binary (seen on Windows); doctor surfaces both."""
+    cp = _cli_text(binary, "--version", timeout=timeout, exc_types=_IO_EXC + (ValueError, TypeError))
     return None if isinstance(cp, BaseException) else _first_line(cp.stdout or cp.stderr or "")
 
 def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optional[str]]:
-    """Return (status, version_or_message) from ``cua-driver --version``."""
-    cp = _cli_text(binary, "--version", timeout=timeout, exc_types=(OSError, subprocess.TimeoutExpired))
+    """(status, version_or_message) from ``cua-driver --version``."""
+    cp = _cli_text(binary, "--version", timeout=timeout)
     if isinstance(cp, BaseException):
         return "fail", f"--version failed: {cp}"
     text, failed = _combined_output(cp), cp.returncode != 0
@@ -82,7 +77,7 @@ def _cli_driver_version(binary: str, timeout: float = 5.0) -> Tuple[str, Optiona
 
 def _cli_doctor_snippet(binary: str, timeout: float = 8.0) -> Optional[str]:
     """Optional one-shot ``cua-driver doctor`` text (best-effort, never fatal)."""
-    cp = _cli_text(binary, "doctor", timeout=timeout, exc_types=(OSError, subprocess.TimeoutExpired))
+    cp = _cli_text(binary, "doctor", timeout=timeout)
     return None if isinstance(cp, BaseException) else (_combined_output(cp) or None)
 
 def _build_identity(binary: str, report: Report) -> Report:
@@ -90,34 +85,27 @@ def _build_identity(binary: str, report: Report) -> Report:
     def token(text: str) -> str:  # dotted version-ish token out of a free-form string
         m = text and re.search(r"(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)", text)
         return m.group(1) if m else text.strip().lower()
-
-    cli = _read_cli_version(binary) or ""
-    report_v = str(report.get("driver_version") or "")
+    cli, report_v = _read_cli_version(binary) or "", str(report.get("driver_version") or "")
     cli_tok, report_tok = token(cli), token(report_v)
     return {"resolved_binary": binary, "cli_version": cli or None, "health_report_driver_version": report_v or None,
             "version_mismatch": bool(cli_tok and report_tok and cli_tok != report_tok)}
 
 
-# ── MCP transport ────────────────────────────────────────────────────────────
-
+# ── MCP transport ──
 def _is_valid_health_report(payload: Any) -> bool:
     """True when *payload* looks like a schema_version=1 health_report."""
     return isinstance(payload, dict) and {"schema_version", "overall"} <= payload.keys() and isinstance(payload.get("checks"), list)
 
 def _text_items(result: Report) -> Iterator[str]:
     """Text of every ``{"type": "text"}`` content item of an MCP tools/call result."""
-    for item in result.get("content") or []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            yield item.get("text") or ""
+    return (i.get("text") or "" for i in result.get("content") or [] if isinstance(i, dict) and i.get("type") == "text")
 
 def _first_text(result: Report, default: str) -> str:
-    """First non-empty text content item, else *default*."""
     return next((t.strip() for t in _text_items(result) if t.strip()), default)
 
 def _extract_health_report_from_result(result: Report) -> Report:
-    """schema_version=1 report from an MCP tools/call result. Raises
-    ``HealthReportUnavailable`` when the tool denied the call (isError) or the payload
-    is not a real report (0.10's ``{"exit_code": 1}``); ``RuntimeError`` when the
+    """schema_version=1 report from an MCP tools/call result. ``HealthReportUnavailable`` when the tool denied the
+    call (isError) or the payload is not a real report (0.10's ``{"exit_code": 1}``); ``RuntimeError`` when the
     response carries no content at all."""
     if result.get("isError") is True:
         raise HealthReportUnavailable(_first_text(result, "health_report returned isError=true"))
@@ -130,17 +118,15 @@ def _extract_health_report_from_result(result: Report) -> Report:
             if _is_valid_health_report(parsed):
                 return parsed
     if isinstance(sc, dict):  # present but not a real report — unavailable, not fatal
-        raise HealthReportUnavailable("health_report structuredContent lacks schema_version/overall/checks "
-                                      f"(keys={sorted(sc.keys())})")
-    raise RuntimeError("health_report response carried neither structuredContent nor a parseable "
-                       f"JSON text block. Result keys: {list(result.keys())}")
+        raise HealthReportUnavailable(f"health_report structuredContent lacks schema_version/overall/checks (keys={sorted(sc.keys())})")
+    raise RuntimeError(f"health_report response carried neither structuredContent nor a parseable JSON text block. Result keys: {list(result.keys())}")
 
 def _open_mcp(binary: str) -> subprocess.Popen:
-    """Spawn ``<binary> mcp``. cua-driver emits UTF-8 (emoji, arbitrary paths); the
-    locale default (`cp1252` on Windows) would raise UnicodeDecodeError, so pin the codec."""
-    return subprocess.Popen([binary, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-                            bufsize=1, creationflags=windows_hide_flags(), env=_sanitized_cua_env())
+    """Spawn ``<binary> mcp``. cua-driver emits UTF-8 (emoji, arbitrary paths); the locale default (`cp1252` on
+    Windows) would raise UnicodeDecodeError, so pin the codec."""
+    return subprocess.Popen([binary, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=windows_hide_flags(),
+                            env=_sanitized_cua_env())
 
 def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = None) -> Report:
     """Write one JSON-RPC request and read one response line."""
@@ -164,7 +150,7 @@ def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = Non
     return resp
 
 def _call_tool(proc: subprocess.Popen, msg_id: int, name: str, arguments: Any = None) -> Any:
-    """tools/call *name* and return the raw ``result`` value (``{}`` when absent)."""
+    """tools/call *name* → raw ``result`` value (``{}`` when absent)."""
     return _mcp_rpc(proc, msg_id, "tools/call", {"name": name, "arguments": arguments or {}}).get("result") or {}
 
 @contextmanager
@@ -184,8 +170,8 @@ def _mcp_session(binary: str, timeout: float) -> Iterator[subprocess.Popen]:
 
 def _drive_health_report(binary: str, *, include: Sequence[str] = (), skip: Sequence[str] = (),
                          timeout: float = 12.0) -> Report:
-    """Handshake + `health_report` → parsed report. Raises HealthReportUnavailable
-    (denied / non-schema — caller falls back) or RuntimeError (protocol failure)."""
+    """Handshake + `health_report` → parsed report. Raises HealthReportUnavailable (denied / non-schema — caller
+    falls back) or RuntimeError (protocol failure)."""
     args = {k: list(v) for k, v in (("include", include), ("skip", skip)) if v}
     with _mcp_session(binary, timeout) as proc:
         _mcp_rpc(proc, 1, "initialize", {})
@@ -195,28 +181,22 @@ def _drive_health_report(binary: str, *, include: Sequence[str] = (), skip: Sequ
     return _extract_health_report_from_result(result)
 
 
-# ── 0.10 fallback: compose a report from working probes ──────────────────────
-
+# ── 0.10 fallback: compose a report from working probes ──
 def _probe_tool(proc: subprocess.Popen, msg_id: int, name: str) -> Tuple[Optional[Report], Optional[str]]:
     """``(result, None)`` on success; ``(None, error_text)`` on isError or RPC failure."""
     try:
         result = _call_tool(proc, msg_id, name)
     except RuntimeError as e:
         return None, str(e)
-    if result.get("isError") is True:
-        return None, _first_text(result, f"{name} isError")
-    return result, None
+    return (None, _first_text(result, f"{name} isError")) if result.get("isError") is True else (result, None)
 
 def _structured(result: Report) -> Report:
     sc = result.get("structuredContent")
     return sc if isinstance(sc, dict) else {}
 
 def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
-    """Call working MCP tools (check_permissions, list_apps) in one session.
-
-    Returns init_version (initialize serverInfo), permissions (structuredContent
-    dict | None), permissions_error, list_apps_ok, list_apps_error, list_apps_count.
-    """
+    """Call working MCP tools (check_permissions, list_apps) in one session → init_version (initialize serverInfo),
+    permissions (structuredContent dict | None), permissions_error, list_apps_ok, list_apps_error, list_apps_count."""
     out: Report = dict.fromkeys(("init_version", "permissions", "permissions_error",
                                  "list_apps_ok", "list_apps_error", "list_apps_count"))
     with _mcp_session(binary, timeout) as proc:
@@ -237,15 +217,10 @@ def _drive_fallback_probes(binary: str, *, timeout: float = 12.0) -> Report:
 def _platform_name() -> str:
     return (_platform_mod.system() or "").lower() or "unknown"
 
-def _check(name: str, status: str, message: str, **extra: Any) -> Report:
-    """Build one health check dict (``hint`` / ``data`` only when given)."""
-    return {"name": name, "status": status, "message": message, **extra}
-
 def _tcc_row(field: str, label: str, platform_bound: bool, ctx: Report) -> _Row:
     """tcc_* row for one check_permissions boolean *field* (Accessibility / Screen Recording)."""
-    perms = ctx["perms"]
+    perms, err = ctx["perms"], ctx["perm_err"]
     if perms is None:
-        err = ctx["perm_err"]
         return ("fail" if err else "skip"), err or "check_permissions unavailable", {}
     granted = perms.get(field)
     if not isinstance(granted, bool):  # only real booleans select a branch; anything else is "absent"
@@ -258,9 +233,8 @@ def _tcc_row(field: str, label: str, platform_bound: bool, ctx: Report) -> _Row:
     if field == "screen_recording":  # the granted-but-not-capturable row wins over plain pass
         data["screen_recording_capturable"] = perms.get("screen_recording_capturable")
         if data["screen_recording_capturable"] is False:
-            return "fail", "Screen Recording granted but not capturable.", {
-                "hint": "Screen Recording permission may need a restart of CuaDriver or a re-grant in System Settings.",
-                "data": data}
+            return "fail", "Screen Recording granted but not capturable.", {"hint": (
+                "Screen Recording permission may need a restart of CuaDriver or a re-grant in System Settings."), "data": data}
     return "pass", f"{label} is granted.", {"data": data}
 
 def _ax_capability_row(ctx: Report) -> _Row:
@@ -272,9 +246,7 @@ def _ax_capability_row(ctx: Report) -> _Row:
     if list_ok is False:
         default = "list_apps failed despite accessibility grant" if ax_granted else "list_apps failed"
         return "fail", probes.get("list_apps_error") or default, {}
-    if ax_granted:
-        return "pass", "inferred from accessibility grant (list_apps not probed)", {}
-    return "skip", "not probed", {}
+    return ("pass", "inferred from accessibility grant (list_apps not probed)", {}) if ax_granted else ("skip", "not probed", {})
 
 def _cli_doctor_row(ctx: Report) -> Optional[_Row]:
     txt = ctx["doctor_txt"]
@@ -286,8 +258,8 @@ def _cli_doctor_row(ctx: Report) -> Optional[_Row]:
 # Fallback composite probe table, in emitted order: (check name, row builder(ctx) -> _Row | None to omit).
 _FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
     ("binary_version", lambda c: (c["ver_status"], c["ver_msg"], {})),
-    ("platform_supported", lambda c: (("pass", f"platform={c['plat']}", {}) if c["plat"] in _SUPPORTED_PLATFORMS
-                                      else ("fail", f"platform={c['plat']} (unsupported)", {}))),
+    ("platform_supported", lambda c: ("pass", f"platform={c['plat']}", {}) if c["plat"] in _SUPPORTED_PLATFORMS
+                                      else ("fail", f"platform={c['plat']} (unsupported)", {})),
     # doctor does not start a session, so session_active is never probed
     ("session_active", lambda c: ("skip", "not probed (doctor does not open a cua session)", {})),
     ("tcc_accessibility", lambda c: _tcc_row("accessibility", "Accessibility", False, c)),
@@ -299,8 +271,7 @@ _FALLBACK_PROBES: Tuple[Tuple[str, Callable[[Report], Optional[_Row]]], ...] = (
 )
 
 def _overall_from(checks: List[Report]) -> str:
-    """failed if binary missing/bad; ok if accessibility fine and nothing failed;
-    otherwise degraded (screen recording or accessibility problems)."""
+    """failed if binary missing/bad; ok if accessibility fine and nothing failed; else degraded."""
     by_name = {c.get("name"): c.get("status") for c in checks}
     if by_name.get("binary_version") != "pass":
         return "failed"
@@ -308,8 +279,8 @@ def _overall_from(checks: List[Report]) -> str:
     return "ok" if ax_ok and not any(c.get("status") == "fail" for c in checks) else "degraded"
 
 def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 12.0) -> Report:
-    """Build a schema_version=1 report from CLI + working MCP probes when
-    ``health_report`` is denied (0.10) or non-schema. Renders via ``_print_text_report``."""
+    """schema_version=1 report from CLI + working MCP probes (``_FALLBACK_PROBES``) when ``health_report`` is
+    denied (0.10) or non-schema. Renders via ``_print_text_report``."""
     plat = _platform_name()
     ver_status, ver_value = _cli_driver_version(binary)
     probes = _drive_fallback_probes(binary, timeout=timeout)
@@ -324,7 +295,7 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
                    "ver_msg": f"cua-driver {ver_value}" if ver_status == "pass" else (ver_value or "version unknown"),
                    "ax_granted": bool(perms and perms.get("accessibility") is True),
                    "doctor_txt": _cli_doctor_snippet(binary)}  # optional CLI doctor text (best-effort)
-    checks = [_check(name, row[0], row[1], **row[2])
+    checks = [{"name": name, "status": row[0], "message": row[1], **row[2]}  # hint/data only when present
               for name, build in _FALLBACK_PROBES if (row := build(ctx)) is not None]
     return {"schema_version": "1", "platform": plat,
             "driver_version": str(ver_value if ver_status == "pass" else (ver_value or "?")),
@@ -332,11 +303,10 @@ def _compose_fallback_report(binary: str, *, reason: str = "", timeout: float = 
             "fallback": True, "fallback_reason": reason or "health_report unavailable"}
 
 def _apply_display_count_guard(report: Report) -> Report:
-    """Downgrade an 'ok' report whose screen capture has zero displays: macOS
-    ScreenCaptureKit reports ``display_count=0`` on headless Macs / asleep panels — TCC
-    grants fine, health_report pass/ok, yet every capture comes back 0x0. Failing the
-    check turns a silent failure into an actionable one; applied at the report seam so
-    the real and the composed fallback path both get it."""
+    """Downgrade an 'ok' report whose screen capture has zero displays: macOS ScreenCaptureKit reports
+    ``display_count=0`` on headless Macs / asleep panels — TCC grants fine, health_report pass/ok, yet every capture
+    comes back 0x0. Failing the check turns a silent failure into an actionable one; applied at the report seam so
+    the real and the fallback path both get it."""
     checks = report.get("checks")
     for check in checks if isinstance(checks, list) else ():
         if not isinstance(check, dict) or check.get("name") != "screen_capture_capability":
@@ -349,36 +319,20 @@ def _apply_display_count_guard(report: Report) -> Report:
     return report
 
 
-# ── Rendering ────────────────────────────────────────────────────────────────
-
-def _check_lines(check: Report, status_cols: Dict[str, str], reset: str, dim: str) -> List[str]:
-    """One line per check, plus indented hint and ``data`` rows (structured payload
-    some checks attach — bundle id, AX state, version triple — support staff need it)."""
-    status = check.get("status", "?")
-    lines = [f"  {_STATUS_GLYPH.get(status, '•')} {status_cols.get(status, '')}{check.get('name', '?')}{reset}: "
-             f"{check.get('message') or ''}"]
-    if check.get("hint"):
-        lines.append(f"      → {dim}{check['hint']}{reset}")
-    data = check.get("data")
-    for key, value in (data.items() if isinstance(data, dict) else ()):
-        lines.append(f"      {dim}{key}={json.dumps(value) if isinstance(value, (dict, list)) else value}{reset}")
-    return lines
-
+# ── Rendering ──
 def _print_text_report(report: Report, color: bool, *, identity: Optional[Report] = None) -> None:
-    """Render the report like `cua-driver call health_report` (one line per check).
-    With *identity* (resolved binary + ``--version``) the header prefers the CLI
-    version over health_report's ``driver_version`` and prints an identity block."""
+    """Render like `cua-driver call health_report`: header, identity block, one line per check plus indented hint
+    and ``data`` rows (bundle id, AX state, version triple — support staff need it). With *identity* (resolved
+    binary + ``--version``) the header prefers the CLI version over health_report's ``driver_version``."""
     platform, report_v, overall = (report.get(k, "?") for k in ("platform", "driver_version", "overall"))
     identity = identity or {}
     cli_v = identity.get("cli_version") or ""
     header_v = cli_v or report_v  # binary's own --version wins when health_report is stale
-    # No external color library — inline ANSI keeps doctor self-contained.
-    # Colors only apply when overall is a known vocabulary value.
+    # No external color library — inline ANSI keeps doctor self-contained; colors only for known overall values.
     ansi = ("\033[31m", "\033[33m", "\033[32m", "\033[0m", "\033[2m")
     red, yellow, green, reset, dim = ansi if color and overall in _OVERALL_GLYPH else ("",) * 5
     col_for = {"failed": red, "degraded": yellow, "ok": green}.get(overall, "")
     status_cols = {"pass": green, "fail": red, "skip": dim}
-
     lines = [f"{_OVERALL_GLYPH.get(overall, '•')} cua-driver {header_v} on {platform} — {col_for}{overall}{reset}"]
     if identity.get("resolved_binary"):
         lines.append(f"  {dim}binary: {identity['resolved_binary']}{reset}")
@@ -389,20 +343,25 @@ def _print_text_report(report: Report, color: bool, *, identity: Optional[Report
         lines += [f"  {yellow}⚠️ version mismatch: health_report says {report_v!r} but binary --version is {cli_v!r}{reset}",
                   f"  {dim}→ trust --version / packages/current for debugging; health_report's binary_version check can lag on Windows{reset}"]
     for check in report.get("checks", []):
-        lines += _check_lines(check, status_cols, reset, dim)
+        status = check.get("status", "?")
+        lines.append(f"  {_STATUS_GLYPH.get(status, '•')} {status_cols.get(status, '')}{check.get('name', '?')}{reset}: "
+                     f"{check.get('message') or ''}")
+        if check.get("hint"):
+            lines.append(f"      → {dim}{check['hint']}{reset}")
+        data = check.get("data")
+        for key, value in (data.items() if isinstance(data, dict) else ()):
+            lines.append(f"      {dim}{key}={json.dumps(value) if isinstance(value, (dict, list)) else value}{reset}")
     print("\n".join(lines))
 
 def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (), skip: Sequence[str] = (),
                json_output: bool = False, color: Optional[bool] = None) -> int:
-    """Resolve the cua-driver binary (via the shared runtime resolver, so doctor
-    diagnoses what `computer_use` will actually invoke), call `health_report`, render.
-    On 0.10.x (health_report denied) a report is synthesized from probes."""
+    """Resolve the cua-driver binary (via the shared runtime resolver, so doctor diagnoses what `computer_use` will
+    actually invoke), call `health_report`, render. On 0.10.x (health_report denied) a report is synthesized."""
     # Windows' locale codec (cp1252, cp936, ...) cannot encode the ✅ ❌ ⚠️ ⏭️ glyphs — force UTF-8.
     for stream in (sys.stdout, sys.stderr):
         with suppress(AttributeError, OSError):
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
-
     binary = resolve_cua_driver_cmd(driver_cmd)
     if not binary:
         print(f"cua-driver: not installed (looked for {driver_cmd or 'cua-driver (PATH and canonical install paths)'!r}).")
@@ -419,8 +378,8 @@ def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (),
     report = _apply_display_count_guard(report)
     identity = _build_identity(binary, report)
     if json_output:
-        # Additive envelope: upstream health_report keys preserved, Hermes identity
-        # under hermes_identity so parsers that only read overall/checks keep working.
+        # Additive envelope: upstream health_report keys preserved, Hermes identity under hermes_identity so
+        # parsers that only read overall/checks keep working.
         json.dump({**report, "hermes_identity": identity}, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
     else:
