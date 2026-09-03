@@ -372,15 +372,14 @@ def _describe_toolsets(cfg):
     default_off = _try(lambda: _lazy("hermes_cli.tools_config", "_DEFAULT_OFF_TOOLSETS"), set())
     toolsets_out = []
     for ts_name, ts_label, ts_desc in _get_effective_configurable_toolsets():
-        if not _toolset_allowed_for_platform(ts_name, "cli"):
-            continue
-        enabled = ts_name in pinned_set if pinned_set is not None else ts_name in platform_enabled
+        enabled = ts_name in (pinned_set if pinned_set is not None else platform_enabled)
         # Default-off integrations (+ opt-in yuanbao) are noise unless already enabled.
-        if (ts_name in default_off or ts_name == "yuanbao") and not enabled:
+        if not _toolset_allowed_for_platform(ts_name, "cli") or (
+                (ts_name in default_off or ts_name == "yuanbao") and not enabled):
             continue
-        tool_count = _try(lambda: len(set(resolve_toolset(ts_name))), 0)
         toolsets_out.append({"name": ts_name, "label": ts_label, "description": ts_desc or "",
-                             "tool_count": tool_count, "enabled": enabled})
+                             "tool_count": _try(lambda: len(set(resolve_toolset(ts_name))), 0),
+                             "enabled": enabled})
     return toolsets_out, pinned_set
 
 

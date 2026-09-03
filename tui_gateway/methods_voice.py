@@ -87,8 +87,8 @@ def _any_session_running() -> bool:
         return False
 
 
-# ── Streaming TTS: one pipeline per process (one speaker); a new turn's pipeline barges in
-# on the previous. Token deltas feed a sentence-buffering consumer (stream_tts_to_speaker).
+# ── Streaming TTS: one pipeline per process (one speaker); a new turn's pipeline barges in on
+# the previous. Token deltas feed a sentence-buffering consumer (stream_tts_to_speaker).
 
 _tts_stream_lock = threading.Lock()
 _tts_stream_state: Optional[dict] = None
@@ -136,13 +136,13 @@ def _tts_stream_stop(user_barge: bool = True) -> None:
 
 
 # ── Full-duplex agent-turn listener: arms at utterance-submit, spans generation AND playback
-# (per-playback monitors were deaf during generation and mis-calibrated against speaker
-# bleed), disarms when no session runs, no TTS is pending, and no audio flows.
+# (per-playback monitors were deaf during generation and mis-calibrated against speaker bleed),
+# disarms when no session runs, no TTS is pending, and no audio flows. _fd_speak_pipelines holds
+# (stop, done) pairs of fallback whole-reply speak paths: the listener cuts their private stop
+# events too, and keeps listening while any is still speaking.
 
 _fd_listener_lock = threading.Lock()
 _fd_listener_active = False
-# (stop, done) pairs of fallback whole-reply speak paths: the listener cuts their private stop
-# events too, and keeps listening while any is still speaking.
 _fd_speak_pipelines: "set[tuple[threading.Event, threading.Event]]" = set()
 
 
@@ -235,11 +235,11 @@ def _fd_trip(phase: str) -> None:
     mark_speech_interrupted()
     if phase == "playback":
         logger.debug("TTS CUT: full-duplex listener tripped during playback")
-        _cut_all_tts()
     else:
         logger.debug("full-duplex listener tripped during generation — "
                      "interrupting running turn(s)")
-        _cut_all_tts()
+    _cut_all_tts()
+    if phase != "playback":
         try:
             for s in _running_sessions():
                 agent = s.get("agent")
@@ -259,12 +259,9 @@ def _deliver_fd_transcript(text: str) -> None:
         is_stop = is_voice_stop_phrase(text)
     except Exception:
         is_stop = False
-    if is_stop:
-        # Turn already interrupted / TTS cut at trip time; now end the chat.
+    if is_stop:  # turn already interrupted / TTS cut at trip time; now end the chat
         _end_voice_chat(stop_loop=True, stop_tts=False)
-        _voice_emit("voice.transcript", {"stop_phrase": True, "text": text})
-    else:
-        _voice_emit("voice.transcript", {"text": text})
+    _voice_emit("voice.transcript", {"stop_phrase": True, "text": text} if is_stop else {"text": text})
 
 
 def _speak_text_with_barge(text: str) -> None:
@@ -300,8 +297,8 @@ def _voice_cfg_number(value, default):
 
 
 def _voice_status_payload(**extra) -> dict:
-    """``{enabled, record_key, tts, **extra}``; record_key (documented default ``ctrl+b``) on every
-    voice.toggle branch so a tts toggle never resets a custom binding."""
+    """``{enabled, record_key, tts, **extra}``: record_key (default ``ctrl+b``) rides every voice.toggle
+    branch so a tts toggle never resets a custom binding."""
     record_key = _voice_cfg_dict().get("record_key")
     record_key = str(record_key) if isinstance(record_key, str) and record_key else "ctrl+b"
     return {"enabled": _voice_mode_enabled(), "record_key": record_key, "tts": _voice_tts_enabled(),
@@ -348,11 +345,10 @@ _wake_resume_retry_active = False
 
 def _wake_resume_if_owner(owner: "Transport", *, retry_seconds: float = 15.0,
                           retry_interval: float = 1.0) -> bool:
-    """Resume the wake detector for ``owner``; self-heal a busy microphone. Reopening the mic
-    right after a voice turn can fail while the device is still being released (browser WebRTC
-    tracks release async): on an exception retry in a background thread until it sticks, the
-    lease changes hands, or ``retry_seconds`` elapses. ``False`` from ``resume_listening``
-    (lease gone / other owner) is final — never retried, so this can't steal another's mic."""
+    """Resume the wake detector for ``owner``, self-healing a busy microphone: reopening right after
+    a voice turn can fail while the device is still being released (browser WebRTC tracks release
+    async), so an exception retries in a background thread until it sticks, the lease changes hands,
+    or ``retry_seconds`` elapses. ``False`` (lease gone / other owner) is final — never retried."""
     from tools.wake_word import resume_listening
     try:
         return resume_listening(owner=owner)
@@ -515,14 +511,13 @@ def _(rid, params: dict) -> dict:
     """Stop this surface's listener; ``persist: true`` also writes ``wake_word.enabled: false``."""
     stopped = _release_wake_for_transport(_caller_transport())
     disabled_persisted = False
-    if bool(params.get("persist")):
+    if params.get("persist"):
         try:
             from tools.wake_word import load_wake_word_config
             currently_enabled = bool(load_wake_word_config().get("enabled"))
         except Exception:
             currently_enabled = True
-        if currently_enabled:
-            disabled_persisted = _persist_wake_enabled(False)
+        disabled_persisted = currently_enabled and _persist_wake_enabled(False)
     return _owner_result(rid, "stopped", stopped, disabled_persisted=disabled_persisted)
 
 
@@ -649,8 +644,7 @@ def _voice_toggle_mode(rid, params: dict) -> dict:
             pass
         except Exception as e:
             logger.warning("voice: stop_continuous failed during toggle off: %s", e)
-        # Clear TTS so it can be toggled independently later; silence live speech.
-        os.environ["HERMES_VOICE_TTS"] = "0"
+        os.environ["HERMES_VOICE_TTS"] = "0"  # TTS is toggled independently later; silence live speech
         _tts_stream_stop(user_barge=False)
         _tts_lease_async("tui:voice-tts", False)
     return _ok(rid, _voice_status_payload(stop_hint=stop_hint))
