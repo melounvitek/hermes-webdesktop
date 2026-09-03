@@ -96,11 +96,10 @@ def resolve_copilot_token() -> tuple[str, str]:
 def _gh_cli_candidates() -> list[str]:
     """Candidate ``gh`` binary paths, including common Homebrew installs."""
     candidates: list[str] = [c for c in (shutil.which("gh"),) if c]
-    for candidate in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh",
-                      str(Path.home() / ".local" / "bin" / "gh")):
-        if (candidate not in candidates and os.path.isfile(candidate)
-                and os.access(candidate, os.X_OK)):
-            candidates.append(candidate)
+    candidates += [
+        c for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", str(Path.home() / ".local/bin/gh"))
+        if c not in candidates and os.path.isfile(c) and os.access(c, os.X_OK)
+    ]
     return candidates
 
 

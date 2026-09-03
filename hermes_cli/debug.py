@@ -56,11 +56,8 @@ def _pending_file() -> Path:
 
 
 def _load_pending() -> list[dict]:
-    path = _pending_file()
-    if not path.exists():
-        return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_pending_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
@@ -265,10 +262,8 @@ def _missing_log_note(log_name: str) -> str:
     reason = _CLIENT_SIDE_LOGS.get(log_name)
     if reason is None:
         return "(file not found)"
-
     primary = _primary_log_path(log_name)
-    where = f" — expected at {primary}" if primary else ""
-    return f"(not on this host: {reason}{where})"
+    return f"(not on this host: {reason}{f' — expected at {primary}' if primary else ''})"
 
 
 def _resolve_log_path(log_name: str) -> Optional[Path]:

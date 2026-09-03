@@ -243,13 +243,8 @@ def _exclude_pids_from_env() -> set[int]:
     """PIDs Desktop marks as live backends (``HERMES_DESKTOP_CHILD_PID``, comma-separated)."""
     out: set[int] = set()
     for part in os.environ.get("HERMES_DESKTOP_CHILD_PID", "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
+        with contextlib.suppress(ValueError):
             out.add(int(part))
-        except ValueError:
-            continue
     return out
 
 
@@ -265,18 +260,17 @@ def _kill_pids_windows(pids: list[int], killed: list[int], failed: list[tuple[in
             expected_start_time = pid_start_times.get(pid)
             if expected_start_time is None:
                 failed.append((pid, "could not verify process identity"))
-                continue
-            if not pid_is_hermes(pid, expected_start_time=expected_start_time):
+            elif not pid_is_hermes(pid, expected_start_time=expected_start_time):
                 failed.append((pid, "not hermes-owned or process identity changed"))
-                continue
-            result = subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
-                                    encoding="utf-8", errors="replace", timeout=10,
-                                    creationflags=windows_hide_flags())
-            if result.returncode == 0:
-                killed.append(pid)
             else:
-                failed.append((pid, (result.stderr or result.stdout or "").strip()))
+                result = subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                    errors="replace", timeout=10, creationflags=windows_hide_flags())
+                if result.returncode == 0:
+                    killed.append(pid)
+                else:
+                    failed.append((pid, (result.stderr or result.stdout or "").strip()))
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
             failed.append((pid, str(e)))
 
@@ -552,17 +546,15 @@ def _valid_lockfile_payload(parsed: object, ownership_id: str) -> bool:
         or not _is_hex(parsed.get("tokenFingerprint"), 32)
     ):
         return False
-    pid = parsed.get("pid")
-    port = parsed.get("port")
-    if not isinstance(pid, int) or not 0 < pid <= 4194304:
+    pid, port = parsed.get("pid"), parsed.get("port")
+    if not (isinstance(pid, int) and 0 < pid <= 4194304):
         return False
-    if not isinstance(port, int) or not 0 <= port <= 65535:
+    if not (isinstance(port, int) and 0 <= port <= 65535):
         return False
     # String fields must be present and bounded (the writer enforces <=1024).
-    for field in ("profile", "hermesPath", "hermesHome", "logPath", "startedAt"):
-        value = parsed.get(field)
-        if not isinstance(value, str) or len(value) > 1024:
-            return False
+    if any(not isinstance(parsed.get(f), str) or len(parsed[f]) > 1024
+           for f in ("profile", "hermesPath", "hermesHome", "logPath", "startedAt")):
+        return False
     # logPath is ``{lock_root}/{ownershipId}/{spawnNonce}.log``; only the suffix is checked so a
     # relocated HERMES_HOME can't falsely reject a legitimate backend (= re-introduce the kill).
     return parsed["logPath"].endswith(f"/{ownership_id}/{parsed['spawnNonce']}.log")
@@ -576,10 +568,8 @@ def _lock_owned_serve_pids(base_dir: Path | None = None) -> set[int]:
     import json
     root = base_dir if base_dir is not None else _hermes_home_dir() / _REMOTE_LOCK_SUBDIR
     owned: set[int] = set()
-    if not root.is_dir():
-        return owned
     try:
-        entries = list(root.iterdir())
+        entries = list(root.iterdir()) if root.is_dir() else []
     except OSError:
         return owned
     for entry in entries:
