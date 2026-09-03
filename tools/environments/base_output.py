@@ -26,12 +26,9 @@ _SPILL_MAX_AGE_S = 7 * 86400
 
 
 class _BoundedOutputCollector:
-    """Retain a bounded 40/60 head-tail window of streamed text.
-
-    When ``spill_path`` is set, the FULL stream is also teed to that file once
-    eviction begins (up to ``_SPILL_CAP_CHARS``) so a truncated foreground
-    result is recoverable without re-running. Memory stays bounded either way.
-    """
+    """Retain a bounded 40/60 head-tail window of streamed text. When ``spill_path`` is set,
+    the FULL stream is also teed to that file once eviction begins (up to ``_SPILL_CAP_CHARS``)
+    so a truncated foreground result is recoverable without re-running."""
 
     # Hard ceiling on spill file size; protects disk from runaway output.
     _SPILL_CAP_CHARS = 5_000_000
@@ -58,13 +55,10 @@ class _BoundedOutputCollector:
         try:
             if self._spill_fh is None:
                 from tools.spill_safety import ensure_spill_dir, open_exclusive
-
                 # Raw pre-redaction output: private perms + symlink-refusing
                 # exclusive create (a planted link must fail, never redirect).
                 ensure_spill_dir(self._spill_path.parent, private=True)
-                self._spill_fh = open_exclusive(
-                    self._spill_path, private=True, errors="replace"
-                )
+                self._spill_fh = open_exclusive(self._spill_path, private=True, errors="replace")
                 # Backfill what's retained so the file holds the stream from byte 0.
                 backlog = "".join(self._head) + "".join(self._tail)
                 self._spill_fh.write(backlog)
@@ -110,9 +104,7 @@ class _BoundedOutputCollector:
             text_len = len(text)
             # Spill tee activates at the first overflow, then mirrors every chunk.
             if self._spill_path is not None and (
-                self._spill_fh is not None
-                or self._total_chars + text_len > self.max_chars
-            ):
+                self._spill_fh is not None or self._total_chars + text_len > self.max_chars):
                 self._maybe_spill(text)
             self._total_chars += text_len
             start = 0
@@ -164,12 +156,10 @@ class _BoundedOutputCollector:
             for _ in range(4):
                 content_budget = max(0, available - len(notice))
                 head_chars = int(content_budget * 0.4)
-                tail_chars = content_budget - head_chars
-                omitted = max(0, self._total_chars - head_chars - tail_chars)
+                omitted = max(0, self._total_chars - content_budget)
                 updated = (
                     f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted "
-                    f"out of {self._total_chars:,} total] ...\n\n"
-                )
+                    f"out of {self._total_chars:,} total] ...\n\n")
                 if updated == notice:
                     break
                 notice = updated
@@ -182,20 +172,15 @@ class _BoundedOutputCollector:
 
 
 def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollector:
-    """Build the collector for one ``_wait_for_process`` call.
-
-    ``bounded_capture`` (foreground terminal path only) caps retention at
-    ``tool_output.max_bytes`` and tees overflow to a spill file under
-    ``$HERMES_HOME/cache/terminal-output`` (created only on actual overflow;
-    spills older than 7 days are pruned opportunistically). Otherwise the
-    collector is effectively unbounded so internal consumers (file-op ``cat``
-    reads, RPC reads) keep full-fidelity output.
-    """
+    """Build the collector for one ``_wait_for_process`` call. ``bounded_capture`` (foreground
+    terminal path only) caps retention at ``tool_output.max_bytes`` and tees overflow to a
+    spill file under ``$HERMES_HOME/cache/terminal-output`` (created only on actual overflow;
+    spills older than 7 days are pruned opportunistically). Otherwise the collector is
+    effectively unbounded so internal consumers keep full-fidelity output."""
     if not bounded_capture:
         return _BoundedOutputCollector(_UNBOUNDED_CAPTURE_CHARS)
     try:
         from tools.tool_output_limits import get_max_bytes
-
         capture_limit = get_max_bytes()
     except Exception:
         capture_limit = 50_000
@@ -216,9 +201,7 @@ def _new_output_collector(proc, bounded_capture: bool) -> _BoundedOutputCollecto
     return _BoundedOutputCollector(capture_limit, spill_path=spill_path)
 
 
-def _finalize_wait_result(
-    collector: _BoundedOutputCollector, rendered: str, returncode: int | None
-) -> dict:
+def _finalize_wait_result(collector: _BoundedOutputCollector, rendered: str, returncode: int | None) -> dict:
     """Assemble a wait result, attaching spill metadata when overflow occurred."""
     result = {"output": rendered, "returncode": returncode}
     spill = collector.close_spill()
@@ -236,16 +219,13 @@ def _finalize_wait_result(
 def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
     """Write *data* to proc.stdin on a daemon thread to avoid pipe-buffer deadlocks.
 
-    Writes go through ``proc.stdin.buffer`` as UTF-8 bytes we encode ourselves:
-    Windows text-mode stdin would translate ``\\n`` -> ``\\r\\n`` and corrupt
-    every write_file/patch payload (byte-identical on POSIX). Encoding uses
-    ``surrogateescape`` (exact inverse of the read-side decode). Surrogates
-    outside U+DC80-U+DCFF raise; the error is recorded on
-    ``proc._hermes_stdin_errors`` and stdin is still closed in ``finally`` so
-    the child sees EOF instead of hanging. ``_wait_for_process`` surfaces the
-    recorded error as ``stdin_error``.
+    Writes go through ``proc.stdin.buffer`` as UTF-8 bytes we encode ourselves: Windows
+    text-mode stdin would translate ``\\n`` -> ``\\r\\n`` and corrupt every write_file/patch
+    payload. Encoding uses ``surrogateescape`` (exact inverse of the read-side decode);
+    surrogates outside U+DC80-U+DCFF raise, the error is recorded on
+    ``proc._hermes_stdin_errors`` (surfaced by ``_wait_for_process`` as ``stdin_error``) and
+    stdin is still closed in ``finally`` so the child sees EOF instead of hanging.
     """
-
     errors: list[BaseException] = []
     proc._hermes_stdin_errors = errors
 
@@ -278,15 +258,10 @@ def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
     thread.start()
 
 
-def _popen_bash(
-    cmd: list[str], stdin_data: str | None = None, **kwargs
-) -> subprocess.Popen:
-    """Spawn a subprocess with standard stdout/stderr/stdin setup.
-
-    If *stdin_data* is provided, writes it asynchronously via :func:`_pipe_stdin`.
-    Backends with special Popen needs (e.g. local's ``preexec_fn``) can bypass
-    this and call :func:`_pipe_stdin` directly.
-    """
+def _popen_bash(cmd: list[str], stdin_data: str | None = None, **kwargs) -> subprocess.Popen:
+    """Spawn a subprocess with standard stdout/stderr/stdin setup; *stdin_data* is written
+    asynchronously via :func:`_pipe_stdin`. Backends with special Popen needs (e.g. local's
+    ``preexec_fn``) can bypass this and call :func:`_pipe_stdin` directly."""
     kwargs.setdefault("creationflags", windows_hide_flags())
     proc = subprocess.Popen(
         cmd,
@@ -294,8 +269,7 @@ def _popen_bash(
         stderr=subprocess.STDOUT,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
         text=True, encoding="utf-8", errors="replace",
-        **kwargs,
-    )
+        **kwargs)
     if stdin_data is not None:
         _pipe_stdin(proc, stdin_data)
     return proc
@@ -307,11 +281,8 @@ def _popen_bash(
 
 
 class ProcessHandle(Protocol):
-    """Duck type that every backend's _run_bash() must return.
-
-    subprocess.Popen satisfies this natively.  SDK backends (Modal, Daytona)
-    return _ThreadedProcessHandle which adapts their blocking calls.
-    """
+    """Duck type every backend's _run_bash() must return. subprocess.Popen satisfies this
+    natively; SDK backends (Modal, Daytona) return _ThreadedProcessHandle."""
 
     def poll(self) -> int | None: ...
     def kill(self) -> None: ...
@@ -325,19 +296,11 @@ class ProcessHandle(Protocol):
 
 
 class _ThreadedProcessHandle:
-    """Adapter for SDK backends (Modal, Daytona) that have no real subprocess.
+    """Adapter for SDK backends (Modal, Daytona) that have no real subprocess: runs a blocking
+    ``exec_fn() -> (output_str, exit_code)`` on a background thread behind a ProcessHandle
+    interface. ``cancel_fn`` is invoked on ``kill()`` for backend-specific cancellation."""
 
-    Wraps a blocking ``exec_fn() -> (output_str, exit_code)`` in a background
-    thread and exposes a ProcessHandle-compatible interface.  An optional
-    ``cancel_fn`` is invoked on ``kill()`` for backend-specific cancellation
-    (e.g. Modal sandbox.terminate, Daytona sandbox.stop).
-    """
-
-    def __init__(
-        self,
-        exec_fn: Callable[[], tuple[str, int]],
-        cancel_fn: Callable[[], None] | None = None,
-    ):
+    def __init__(self, exec_fn: Callable[[], tuple[str, int]], cancel_fn: Callable[[], None] | None = None):
         self._cancel_fn = cancel_fn
         self._done = threading.Event()
         self._returncode: int | None = None
@@ -366,8 +329,7 @@ class _ThreadedProcessHandle:
                     pass
                 self._done.set()
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+        threading.Thread(target=_worker, daemon=True).start()
 
     @property
     def stdout(self):
@@ -400,20 +362,15 @@ class _ThreadedProcessHandle:
 def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector) -> None:
     """Drain ``proc.stdout`` into *output* until EOF or shortly after exit.
 
-    ``for line in proc.stdout`` would block on ``readline()`` until EOF, and a
-    backgrounded grandchild (``cmd &``, ``setsid cmd & disown``) inherits the
-    pipe's write end — so the tool would hang for the grandchild's lifetime.
-    Instead we ``select()`` with a short poll and stop ~300ms after bash exits
-    even if the pipe has not EOF'd (later grandchild output goes to an orphaned
-    pipe, harmless). Raw 4096-byte ``os.read`` chunks can split a multibyte
-    UTF-8 sequence, so an incremental decoder with ``errors="replace"`` (same
-    as the Popen TextIOWrapper) buffers partial sequences across chunks.
-
-    Streams without a real integer ``fileno()`` (mocks, iterator-style stdout
-    from in-memory adapters) are iterated to EOF instead — otherwise the thread
-    would die silently and lose all output. ``select()`` does not work on pipe
-    fds on Windows, so a blocking ``os.read`` loop is used there (EOF arrives
-    promptly when bash exits).
+    ``for line in proc.stdout`` would block on ``readline()`` until EOF, and a backgrounded
+    grandchild (``cmd &``, ``setsid cmd & disown``) inherits the pipe's write end — so the
+    tool would hang for the grandchild's lifetime. Instead we ``select()`` with a short poll
+    and stop ~300ms after bash exits even if the pipe has not EOF'd. Raw 4096-byte ``os.read``
+    chunks can split a multibyte UTF-8 sequence, so an incremental decoder with
+    ``errors="replace"`` buffers partial sequences across chunks. Streams without a real
+    integer ``fileno()`` (mocks, in-memory adapters) are iterated to EOF instead — otherwise
+    the thread would die silently and lose all output. ``select()`` does not work on pipe fds
+    on Windows, so a blocking ``os.read`` loop is used there.
     """
     stream = proc.stdout
     if stream is None:
