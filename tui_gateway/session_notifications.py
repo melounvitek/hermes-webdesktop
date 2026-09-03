@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import contextlib
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 
 def _notif_locked_sessions(fn, default):
@@ -58,16 +56,16 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
             return False
         if _notif_locked_sessions(lambda ss: evt_ui_sid in ss and not ss[evt_ui_sid].get("_finalized"), False):
             return True
-        # Exact UI tab gone: fall through to durable session_key routing so a
-        # resumed continuation with the same key/lineage can still claim it.
+        # Exact UI tab gone: fall through to durable session_key routing so a resumed
+        # continuation with the same key/lineage can still claim it.
     evt_key = str(evt.get("session_key") or "")
     if not evt_key:
         return False
     current_keys = _notif_current_keys(sid, session)
-    # Compression can rotate AIAgent.session_id while the detached child is still running: map
-    # the event's original key to its continuation tip so it reaches the live session instead of
-    # becoming an orphan any poller may consume. A live continuation wins over the compressed
-    # parent, else a stale parent tab could consume the event before the current conversation.
+    # Compression can rotate AIAgent.session_id while the detached child is still running: map the
+    # event's original key to its continuation tip so it reaches the live session instead of becoming
+    # an orphan any poller may consume. A live continuation wins over the compressed parent, else a
+    # stale parent tab could consume the event before the current conversation.
     resolved_key = _notif_resolve_event_key(evt_key)
     if resolved_key != evt_key:
         if resolved_key in current_keys:
@@ -85,9 +83,9 @@ def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) ->
 
 def _session_owns_notification_event(sid: str, session: dict, evt: dict) -> bool:
     """True iff *this* session PROVABLY owns ``evt``: positive mirror of
-    ``_notification_event_belongs_elsewhere`` minus its orphan-adoption fallback (UI origin is
-    this live session, or ``session_key`` raw/compression-resolved matches this session). Fail-
-    closed gate for every addressed notification — "not provably elsewhere" is NOT enough."""
+    ``_notification_event_belongs_elsewhere`` minus its orphan-adoption fallback (UI origin is this
+    live session, or ``session_key`` raw/compression-resolved matches). Fail-closed gate for every
+    addressed notification — "not provably elsewhere" is NOT enough."""
     if session.get("_finalized"):
         return False
     if str(evt.get("origin_ui_session_id") or "") == str(sid or ""):
@@ -106,27 +104,28 @@ def _notification_event_requires_owner(evt: dict) -> bool:
     )
 
 
+# Extra dedup fields per event type. Completions are terminal (one-shot per process session); watch
+# events are not — one process can match patterns many times, so their content is part of the key.
+_DEDUP_EXTRA_FIELDS = {
+    "watch_match": ("command", "pattern", "output", "suppressed", "message_id"),
+    "watch_disabled": ("command", "message", "suppressed"),
+    "watch_overflow_": ("command", "message", "suppressed"),  # prefix match
+}
+
+
 def _notification_event_dedup_key(evt: dict) -> tuple:
-    """UI-emission identity for a process notification event. Completions are terminal (one-shot
-    per process session); watch events are not — one process can match patterns many times, so
-    include event content to avoid suppressing later distinct matches."""
+    """UI-emission identity for a process notification event."""
     evt_type = evt.get("type", "completion")
-    evt_sid = evt.get("session_id", "")
-    if evt_type == "watch_match":
-        return (evt_sid, evt_type, evt.get("command", ""), evt.get("pattern", ""), evt.get("output", ""),
-                evt.get("suppressed", 0), evt.get("message_id", ""))
-    if evt_type.startswith("watch_overflow_") or evt_type == "watch_disabled":
-        return (evt_sid, evt_type, evt.get("command", ""), evt.get("message", ""), evt.get("suppressed", 0))
     if evt_type == "async_delegation":
-        # No process session_id: without this every completion keys as
-        # ("", "async_delegation") and the second one is suppressed forever.
+        # No process session_id: without this every completion keys as ("", "async_delegation")
+        # and the second one is suppressed forever.
         return (evt.get("delegation_id", ""), evt_type)
-    return (evt_sid, evt_type)
+    extra = _DEDUP_EXTRA_FIELDS.get("watch_overflow_" if evt_type.startswith("watch_overflow_") else evt_type, ())
+    return (evt.get("session_id", ""), evt_type, *(evt.get(f, 0 if f == "suppressed" else "") for f in extra))
 
 
-# Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so
-# the cursor advances past them and they can't wedge a later completed/blocked event behind an
-# unclaimed row.
+# Mirror gateway/kanban_watchers.py TERMINAL_KINDS: claim silent kinds (archived/unblocked) too so the
+# cursor advances past them and they can't wedge a later completed/blocked event behind an unclaimed row.
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
 _KANBAN_POLL_SECONDS = 5.0
 _LOOP_POLL_SECONDS = 5.0
@@ -161,10 +160,14 @@ def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwa
         raise
 
 
+def _notif_loop_status(sid: str, text: str) -> None:
+    _emit("status.update", sid, {"kind": "loop", "text": text})
+
+
 def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
-    """Fire a due /loop wakeup for an idle TUI/Desktop/dashboard session (per-session poller,
-    coarse cadence). Claims the session under history_lock (running=True) before dispatching so
-    a racing user prompt wins cleanly; the turn dispatcher's post-turn hook completes the tick."""
+    """Fire a due /loop wakeup for an idle TUI/Desktop/dashboard session (per-session poller, coarse
+    cadence). Claims the session (running=True) before dispatching so a racing user prompt wins
+    cleanly; the turn dispatcher's post-turn hook completes the tick."""
     try:
         from hermes_cli.loops import LoopManager, goal_blocks_loop_tick
     except Exception:
@@ -179,16 +182,15 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
     if not wakeup:
         _notif_release_turn(session)
         return
-    tick_no = mgr.state.ticks_fired if mgr.state else "?"
     rid = f"__loop__{int(time.time() * 1000)}"
     try:
-        _emit("status.update", sid, {"kind": "loop", "text": f"↻ /loop wakeup #{tick_no} firing…"})
+        _notif_loop_status(sid, f"↻ /loop wakeup #{mgr.state.ticks_fired if mgr.state else '?'} firing…")
         if not wakeup.lstrip().startswith("/"):
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, wakeup)
             return
-        # Slash-command loop: route through the slash pipeline, not the model. No model reply
-        # to evaluate — complete immediately.
+        # Slash-command loop: route through the slash pipeline, not the model. No model reply to
+        # evaluate — complete immediately.
         _notif_release_turn(session)
         try:
             parts = wakeup.lstrip()[1:].split(None, 1)
@@ -198,10 +200,10 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
             payload = (resp or {}).get("result") or {}
             out = str(payload.get("output") or "").strip()
             if out:
-                _emit("status.update", sid, {"kind": "loop", "text": out})
+                _notif_loop_status(sid, out)
             if payload.get("type") == "send" and payload.get("message"):
-                # Command resolves to a prompt (skill command etc.) — run it as a normal turn;
-                # the post-turn hook completes the tick.
+                # Command resolves to a prompt (skill command etc.) — run it as a normal turn; the
+                # post-turn hook completes the tick.
                 if not _notif_claim_turn(session):
                     mgr.abandon_tick()
                     return
@@ -212,7 +214,7 @@ def _maybe_fire_tui_loop_tick(sid: str, session: dict) -> None:
             pass
         decision = mgr.complete_tick("")
         if decision.get("message"):
-            _emit("status.update", sid, {"kind": "loop", "text": decision["message"]})
+            _notif_loop_status(sid, decision["message"])
     except Exception as exc:
         _notif_log_failure("loop wakeup dispatch failed", exc)
         _notif_release_turn(session)
@@ -268,14 +270,49 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     return f"{glyph} {board_tag}{tag}Kanban {task_id}{fmt(task, getattr(ev, 'payload', None) or {}, title)}"
 
 
+def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
+    """(slug, resolved DB identity) — multiple slugs can point at one DB when HERMES_KANBAN_DB pins it."""
+    slug = (board_meta or {}).get("slug") or _kb.DEFAULT_BOARD
+    db_path = (board_meta or {}).get("db_path")
+    try:
+        return slug, str(Path(db_path).expanduser().resolve() if db_path else _kb.kanban_db_path(slug).resolve())
+    except Exception:
+        return slug, f"slug:{slug}"
+
+
+def _kb_poll_board(_kb, conn, slug: str, session_key: str) -> list:
+    """Claim + format this session's unseen events on one open board connection."""
+    try:
+        subs = _kb.list_notify_subs(conn)
+    except Exception:
+        return []
+    texts: list = []
+    for sub in subs:
+        if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
+            continue
+        sub_ident = dict(
+            task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or ""
+        )
+        _old, _new, events = _kb.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
+        if not events:
+            continue
+        task = _kb.get_task(conn, sub["task_id"])
+        texts.extend(t for t in (_format_kanban_event_text(sub, task, ev, slug) for ev in events) if t)
+        # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so keeping the
+        # sub lets a later reopen notify the same session. The claimed cursor prevents replay.
+        if task and getattr(task, "status", "") == "archived":
+            with contextlib.suppress(Exception):
+                _kb.remove_notify_sub(conn, **sub_ident)
+    return texts
+
+
 def _collect_kanban_notifications(session: dict) -> list:
     """Claim unseen terminal kanban events for this TUI session's subscriptions.
 
     ``kanban_create`` auto-subscribes TUI/desktop sessions with ``platform="tui"`` and
-    ``chat_id=HERMES_SESSION_KEY``; there is no "tui" messaging adapter, so this poller is the
-    delivery path. Same atomic cursor-claim (``claim_unseen_events_for_sub``) as the gateway
-    notifier, so a sub is delivered exactly once even if a gateway and a TUI poll the same board
-    DB. Returns formatted notification texts (may be empty)."""
+    ``chat_id=HERMES_SESSION_KEY``; there is no "tui" messaging adapter, so this poller is the delivery
+    path. Same atomic cursor-claim (``claim_unseen_events_for_sub``) as the gateway notifier, so a sub
+    is delivered exactly once even if a gateway and a TUI poll the same board DB."""
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
         return []
@@ -283,7 +320,6 @@ def _collect_kanban_notifications(session: dict) -> list:
         from hermes_cli import kanban_db as _kb
     except Exception:
         return []
-    texts: list = []
     try:
         boards = _kb.list_boards(include_archived=False)
     except Exception:
@@ -291,22 +327,15 @@ def _collect_kanban_notifications(session: dict) -> list:
             boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
         except Exception:
             return []
-    # Poll each resolved DB path once — multiple slugs can point at the same DB when
-    # HERMES_KANBAN_DB pins the board path (same guard as the gateway).
+    texts: list = []
     seen_db_paths: set = set()
     for board_meta in boards:
-        slug = (board_meta or {}).get("slug") or _kb.DEFAULT_BOARD
-        db_path = (board_meta or {}).get("db_path")
-        try:
-            resolved = str(Path(db_path).expanduser().resolve() if db_path else _kb.kanban_db_path(slug).resolve())
-        except Exception:
-            resolved = f"slug:{slug}"
+        slug, resolved = _kb_board_key(_kb, board_meta)
         if resolved in seen_db_paths:
             continue
         seen_db_paths.add(resolved)
-        # One poller per live session: don't open this board writable unless it has a subscription
-        # owned by this exact session. If the read-only probe fails (locked/corrupt DB), preserve
-        # delivery and fall through.
+        # One poller per live session: don't open this board writable unless it has a subscription owned
+        # by this exact session. If the read-only probe fails (locked/corrupt DB), preserve delivery.
         try:
             if _kb.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
                 continue
@@ -317,37 +346,15 @@ def _collect_kanban_notifications(session: dict) -> list:
         except Exception:
             continue
         try:
-            try:
-                subs = _kb.list_notify_subs(conn)
-            except Exception:
-                continue
-            for sub in subs:
-                if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
-                    continue
-                sub_ident = dict(
-                    task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
-                    thread_id=sub.get("thread_id") or "",
-                )
-                _old, _new, events = _kb.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
-                if not events:
-                    continue
-                task = _kb.get_task(conn, sub["task_id"])
-                texts.extend(t for t in (_format_kanban_event_text(sub, task, ev, slug) for ev in events) if t)
-                # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so
-                # keeping the sub lets a later reopen notify the same session. The claimed cursor
-                # prevents replay.
-                if task and getattr(task, "status", "") == "archived":
-                    with contextlib.suppress(Exception):
-                        _kb.remove_notify_sub(conn, **sub_ident)
+            texts.extend(_kb_poll_board(_kb, conn, slug, session_key))
         finally:
             conn.close()
     return texts
 
 
 def _notif_poll_kanban(sid: str, session: dict) -> None:
-    """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle.
-    Events are cursor-claimed (never re-queued), so they are buffered until the session is idle
-    instead of dropping the agent turn."""
+    """One kanban poll: emit new texts, buffer them, and run the buffered batch as a turn if idle. Events
+    are cursor-claimed (never re-queued), so they wait in the buffer instead of dropping the agent turn."""
     try:
         _kanban_texts = _collect_kanban_notifications(session)
     except Exception as _kb_exc:
@@ -357,27 +364,20 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
         _emit("status.update", sid, {"kind": "process", "text": _kb_text})
     if _kanban_texts:
         session.setdefault("_kanban_pending", []).extend(_kanban_texts)
-    _pending = session.get("_kanban_pending") or []
-    if not _pending:
+    if not session.get("_kanban_pending") or not _notif_claim_turn(session):
         return
-    _batch: list = []
     with session["history_lock"]:
-        if not session.get("running"):
-            session["running"] = True
-            _batch = list(_pending)
-            session["_kanban_pending"] = []
-    if _batch:
-        with contextlib.suppress(Exception):
-            _notif_submit(
-                f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch),
-                "kanban notification dispatch failed",
-            )
+        _batch, session["_kanban_pending"] = list(session.get("_kanban_pending") or []), []
+    with contextlib.suppress(Exception):
+        _notif_submit(
+            f"__notif__{int(time.time() * 1000)}", sid, session, "\n".join(_batch), "kanban notification dispatch failed"
+        )
 
 
 def _notif_render_event(sid: str, evt: dict, emitted: set, process_registry, format_process_notification) -> Optional[str]:
-    """Format ``evt`` and emit its status.update once; None means skip the event (consumed
-    completion or unformattable). Re-queued completions would otherwise re-emit every 0.5s while
-    the session is busy, while distinct watch_match events from one process must stay visible."""
+    """Format ``evt`` and emit its status.update once; None means skip the event (consumed completion
+    or unformattable). Re-queued completions would otherwise re-emit every 0.5s while the session is
+    busy, while distinct watch_match events from one process must stay visible."""
     if evt.get("type") == "completion" and process_registry.is_completion_consumed(evt.get("session_id", "")):
         return None
     text = format_process_notification(evt)
@@ -412,8 +412,8 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
 
 
 def _notif_classify_event(sid: str, session: dict, evt: dict) -> str:
-    """'foreign' (another live session owns it), 'unowned' (addressed but unprovable — never adopt
-    an orphan), or 'mine' (ours, or an ownerless legacy notification kept process-global)."""
+    """'foreign' (another live session owns it), 'unowned' (addressed but unprovable — never adopt an
+    orphan), or 'mine' (ours, or an ownerless legacy notification kept process-global)."""
     if _notification_event_belongs_elsewhere(sid, session, evt):
         return "foreign"
     if _notification_event_requires_owner(evt) and not _session_owns_notification_event(sid, session, evt):
@@ -422,15 +422,15 @@ def _notif_classify_event(sid: str, session: dict, evt: dict) -> str:
 
 
 def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> bool:
-    """Route one dequeued event. ``deferred`` is None in the live loop (foreign events go straight
-    back on the queue) and the shutdown-drain list otherwise (foreign + orphaned delegation
-    payloads are set aside for a resume). Returns False when the drain must stop (session busy)."""
+    """Route one dequeued event. ``deferred`` is None in the live loop (foreign events go straight back
+    on the queue) and the shutdown-drain list otherwise (foreign + orphaned delegation payloads are set
+    aside for a resume). Returns False when the drain must stop (session busy)."""
     queue = registry.completion_queue
     owner = _notif_classify_event(sid, session, evt)
     if owner == "foreign":
         if deferred is None:
-            # Leave foreign events for their owner — otherwise a process started in session A
-            # surfaces its completion in whichever poller wakes first.
+            # Leave foreign events for their owner — otherwise a process started in session A surfaces
+            # its completion in whichever poller wakes first.
             queue.put(evt)
             time.sleep(0.1)
         else:
@@ -459,8 +459,8 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> 
         queue.put(evt)
         if deferred is not None:
             return False
-        # Back off: the re-queued event keeps the queue non-empty, so without a sleep this loop
-        # spins at 100% CPU while busy.
+        # Back off: the re-queued event keeps the queue non-empty, so without a sleep this loop spins
+        # at 100% CPU while busy.
         time.sleep(0.25)
         return True
     _notif_dispatch_event(sid, session, evt, text)
@@ -470,10 +470,10 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> 
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     """Poll completion_queue and dispatch notifications autonomously (daemon thread started by
     _init_session()): emit a status.update (kind=process), then chain an agent turn via
-    _run_prompt_submit if the session is idle. The queue is process-global: each poller requeues
-    events owned by another live session and drops addressed events whose owner is gone;
-    ownerless legacy notifications remain global. Also polls ``kanban_notify_subs`` every
-    ``_KANBAN_POLL_SECONDS`` — the delivery path for platform="tui" rows."""
+    _run_prompt_submit if the session is idle. The queue is process-global: each poller requeues events
+    owned by another live session and drops addressed events whose owner is gone; ownerless legacy
+    notifications remain global. Also polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
+    delivery path for platform="tui" rows."""
     from tools.process_registry import process_registry, format_process_notification
 
     queue = process_registry.completion_queue
@@ -481,8 +481,8 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     _last_kanban_poll = _last_loop_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         _now = time.monotonic()
-        # /loop wakeup driver: fire a due tick for THIS session while idle (same claim-under-lock
-        # as kanban dispatch). An active non-parked /goal owns the idle boundary and defers it.
+        # /loop wakeup driver: fire a due tick for THIS session while idle (same claim-under-lock as
+        # kanban dispatch). An active non-parked /goal owns the idle boundary and defers it.
         if _now - _last_loop_poll >= _LOOP_POLL_SECONDS:
             _last_loop_poll = _now
             try:
@@ -497,7 +497,6 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
         except Exception:
             continue
         _notif_handle_event(sid, session, evt, _emitted, process_registry, format_process_notification, None)
-
     # Drain remaining events after the stop signal so nothing is lost on shutdown; foreign and
     # orphaned-delegation events are handed back to the shared queue afterwards.
     deferred: list = []
@@ -529,11 +528,17 @@ def _async_delegation_display_metadata(evt: dict) -> dict:
     return metadata
 
 
-def _wire_agent_terminal_output() -> None:
-    """Idempotently route background-process output (`agent.terminal.output` chunks) and
-    `process_registry.request_close_terminal` (`terminal.close`, drops a tab without killing the
-    process) to the window owning the process (its gateway session), keyed by process id.
-    `_emit` is `_stdout_lock`-guarded, so the registry's reader threads may call it."""
+_desktop_ui_wired = False
+
+
+def _wire_desktop_sinks() -> None:
+    """Idempotently wire process-registry and desktop-tool sinks to renderer events. Background-process
+    output (`agent.terminal.output` chunks) and `process_registry.request_close_terminal`
+    (`terminal.close`, drops a tab without killing the process) route to the window owning the process
+    (its gateway session), keyed by process id; desktop-only tools (open_preview, close_preview,
+    focus_pane) hand back the turn's ``HERMES_UI_SESSION_ID`` as ``sid`` so the event routes to the
+    window that asked. `_emit` is `_stdout_lock`-guarded, so registry reader / tool threads may call it."""
+    global _desktop_ui_wired
     from tools.process_registry import process_registry
 
     def _owner_sid_for_process(session) -> str:
@@ -541,52 +546,35 @@ def _wire_agent_terminal_output() -> None:
         if not session_key:
             return ""
         with _sessions_lock:
-            for sid, tui_session in _sessions.items():
-                if str(tui_session.get("session_key") or "") == session_key:
-                    return sid
-        return ""
-
-    def _emit_agent_terminal_close(session, process_id):
-        # session may be None (process already finished/pruned) — the tab can still linger and
-        # be closed; route to the owning window when we can.
-        _emit("terminal.close", _owner_sid_for_process(session) if session is not None else "", {"process_id": process_id})
+            return next((sid for sid, s in _sessions.items() if str(s.get("session_key") or "") == session_key), "")
 
     if getattr(process_registry, "on_output", None) is None:
         process_registry.on_output = lambda session, chunk: _emit(
             "agent.terminal.output", _owner_sid_for_process(session), {"process_id": session.id, "chunk": chunk}
         )
     if getattr(process_registry, "on_close", None) is None:
-        process_registry.on_close = _emit_agent_terminal_close
+        # session may be None (process already finished/pruned) — the tab can still linger and be closed.
+        process_registry.on_close = lambda session, process_id: _emit(
+            "terminal.close", _owner_sid_for_process(session) if session is not None else "", {"process_id": process_id}
+        )
+    if not _desktop_ui_wired:
+        try:
+            from tools import desktop_ui
+        except Exception:
+            return
+        desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
+        _desktop_ui_wired = True
 
 
-_desktop_ui_wired = False
-
-
-def _wire_desktop_ui() -> None:
-    """Bridge desktop-only tools (open_preview, close_preview, focus_pane) to renderer events.
-    Idempotent. The tool hands back the turn's ``HERMES_UI_SESSION_ID`` as ``sid`` so the event
-    routes to the window that asked (``_emit`` is ``_stdout_lock``-guarded; tool thread may call it)."""
-    global _desktop_ui_wired
-    if _desktop_ui_wired:
-        return
-    try:
-        from tools import desktop_ui
-    except Exception:
-        return
-    desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
-    _desktop_ui_wired = True
-
-
-# (stop_event, thread) for every poller started in this process, pruned of dead threads on each
-# spawn. Test teardowns reap leaked pollers through it: an unjoined poller steals events off the
-# process-global completion_queue mid-assertion in a LATER test.
+# (stop_event, thread) for every poller started in this process, pruned of dead threads on each spawn.
+# Test teardowns reap leaked pollers through it: an unjoined poller steals events off the process-global
+# completion_queue mid-assertion in a LATER test.
 _notification_pollers: list = []
 
 
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (thread name is greppable)."""
-    _wire_agent_terminal_output()
-    _wire_desktop_ui()
+    _wire_desktop_sinks()
     stop = threading.Event()
     t = threading.Thread(
         target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}"
@@ -607,10 +595,10 @@ def _hud_surface_note(session: dict) -> str:
 
 
 def _prepend_note(run_message: Any, note: str) -> Any:
-    """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone. Everything the model
-    must know about the turn that the user did not type (interrupted reply, reactions, surface)
-    arrives this way; persist_user_message keeps the clean prompt, so no scaffolding reaches the
-    transcript, and annotating the NEW turn never rewrites a sent message — cached prefix survives."""
+    """Prefix a per-turn note onto the MODEL INPUT, leaving the prompt alone. Everything the model must
+    know about the turn that the user did not type (interrupted reply, reactions, surface) arrives this
+    way; persist_user_message keeps the clean prompt, so no scaffolding reaches the transcript, and
+    annotating the NEW turn never rewrites a sent message — cached prefix survives."""
     if not note:
         return run_message
     if isinstance(run_message, str):

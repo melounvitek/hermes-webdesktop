@@ -120,14 +120,9 @@ def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | Non
     try:
         with _lock:
             entry = _load(_marker_path(home)).get(session_key)
-    except Exception:
-        return None
-    if not isinstance(entry, dict):
-        return None
-    prompt = str(entry.get("prompt") or "")
-    if not prompt.strip():
-        return None
-    try:
+        prompt = str(entry.get("prompt") or "") if isinstance(entry, dict) else ""
+        if not prompt.strip():
+            return None
         return {"attempts": max(0, int(entry.get("attempts") or 0)), "prompt": prompt, "started_at": _started_at(entry)}
-    except (TypeError, ValueError):
+    except Exception:
         return None
