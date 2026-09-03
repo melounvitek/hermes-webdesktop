@@ -234,7 +234,7 @@ _claude_code_version_cache: Optional[str] = None
 def _detect_claude_code_version() -> str:
     """Installed Claude Code version (``claude --version``), else the static fallback."""
     for cmd in ("claude", "claude-code"):
-        try:
+        with suppress(Exception):
             result = subprocess.run(
                 [cmd, "--version"],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
@@ -243,8 +243,6 @@ def _detect_claude_code_version() -> str:
                 version = result.stdout.strip().split()[0]  # "2.1.74 (Claude Code)" or "2.1.74"
                 if version and version[0].isdigit():
                     return version
-        except Exception:
-            pass
     return _CLAUDE_CODE_VERSION_FALLBACK
 
 

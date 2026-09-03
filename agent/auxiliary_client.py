@@ -170,12 +170,10 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
     # OpenCode Zen free tier: the keyless placeholder must never hit the wire (relay 401s any
     # unrecognized bearer) — blank the Authorization header.
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.models import OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER, opencode_zen_free_headers
         if api_key == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER:
             kwargs["default_headers"] = {**(kwargs.get("default_headers") or {}), **opencode_zen_free_headers()}
-    except Exception:
-        pass
     _apply_required_codex_headers(kwargs, access_token=api_key, base_url=base_url)
     # Hermes owns aux retry/fallback policy; the SDK default (max_retries=2) would triple
     # wall time on a hung endpoint before Hermes sees one failure.
@@ -730,11 +728,9 @@ def _get_aux_model_for_provider(provider_id: str, *, prefer_fast: bool = False) 
     so other callers keep their static behaviour and cache keys.
     """
     profile = None
-    try:
+    with contextlib.suppress(Exception):
         from providers import get_provider_profile
         profile = get_provider_profile(provider_id)
-    except Exception:
-        pass
     picked = ""
     if prefer_fast:
         picked = _fast_model_from_catalog(provider_id)
@@ -1048,14 +1044,10 @@ def _scoped_key_env(name: str) -> str:
     """
     if not name:
         return ""
-    try:
+    with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
-        try:
+        with contextlib.suppress(UnscopedSecretError):
             return (get_secret(name) or "").strip()
-        except UnscopedSecretError:
-            pass
-    except Exception:
-        pass
     return (os.getenv(name) or "").strip()
 
 
@@ -1533,12 +1525,10 @@ class _AnthropicCompletionsAdapter:
         if not self._base_url:
             candidate = str(getattr(real_client, "base_url", "") or "") or None
             if candidate:
-                try:
+                with contextlib.suppress(Exception):
                     from agent.anthropic_adapter import _is_nous_portal_endpoint
                     if _is_nous_portal_endpoint(candidate):
                         self._base_url = candidate
-                except Exception:
-                    pass
 
     def create(self, **kwargs) -> Any:
         from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
@@ -1953,12 +1943,10 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             continue
         if provider_id == "anthropic":
             # Explicit-config gate: Claude Code credentials must not silently become aux fallback.
-            try:
+            with contextlib.suppress(ImportError):
                 from hermes_cli.auth import is_provider_explicitly_configured
                 if not is_provider_explicitly_configured("anthropic"):
                     continue
-            except ImportError:
-                pass
             return _try_anthropic()
         pool_present, entry = _select_pool_entry(provider_id)
         if pool_present:
@@ -2030,13 +2018,11 @@ def _profile_default_headers(provider: str) -> Optional[dict]:
     """Client-level attribution headers from the provider profile (e.g. GMI User-Agent), or None."""
     if not provider:
         return None
-    try:
+    with contextlib.suppress(Exception):
         from providers import get_provider_profile
         profile = get_provider_profile(provider)
         if profile and profile.default_headers:
             return dict(profile.default_headers)
-    except Exception:
-        pass
     return None
 
 
@@ -2134,15 +2120,13 @@ def _describe_openrouter_unavailable(model: str = None) -> str:
 
 def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
     # Cross-session rate guard: another session's 429 means skip Nous rather than pile onto the tapped RPH bucket.
-    try:
+    with contextlib.suppress(Exception):
         from agent.nous_rate_guard import nous_rate_limit_remaining
         _remaining = nous_rate_limit_remaining()
         if _remaining is not None and _remaining > 0:
             logger.debug("Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)", _remaining)
             _mark_provider_unhealthy("nous", ttl=_remaining)
             return None, None
-    except Exception:
-        pass
     nous = _read_nous_auth()
     runtime = _resolve_nous_runtime_api(force_refresh=False)
     if runtime is None and not nous:
@@ -2217,7 +2201,7 @@ def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
     if isinstance(override, str) and override.strip():
         value = override.strip()
         return value.lower() if lower else value
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli import config as _cfg_mod
         cfg = (_cfg_mod.load_config_readonly if readonly else _cfg_mod.load_config)()
         model_cfg = cfg.get("model", {})
@@ -2228,8 +2212,6 @@ def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
             if isinstance(value, str) and value.strip():
                 value = value.strip()
                 return value.lower() if lower else value
-    except Exception:
-        pass
     return ""
 
 
@@ -2747,7 +2729,7 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     # Honor config.yaml model.base_url only when provider is anthropic AND the URL is
     # Anthropic-compatible; a foreign host (Codex, OpenRouter) would 401 every aux call.
     base_url = _pool_runtime_base_url(entry, _ANTHROPIC_DEFAULT_BASE_URL) if pool_present else _ANTHROPIC_DEFAULT_BASE_URL
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.config import load_config_readonly
         cfg = load_config_readonly()
         model_cfg = cfg.get("model")
@@ -2757,8 +2739,6 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
                 cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
                 if cfg_base_url and _is_anthropic_compatible_host(cfg_base_url):
                     base_url = cfg_base_url
-    except Exception:
-        pass
     from agent.anthropic_adapter import _is_oauth_token
     is_oauth = _is_oauth_token(token)
     model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
@@ -2948,23 +2928,19 @@ def _is_timeout_error(exc: Exception) -> bool:
     A timeout burns the whole ``timeout`` budget, so a same-provider retry on the compression
     path doubles wall time; fast drops stay on the retry path.
     """
-    try:
+    with contextlib.suppress(ImportError):
         from openai import APITimeoutError
         if isinstance(exc, APITimeoutError):
             return True
-    except ImportError:
-        pass
     return "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
 
 
 def _is_connection_error(exc: Exception) -> bool:
     """Connection/network errors (endpoint unreachable), as opposed to 4xx/5xx API errors."""
-    try:
+    with contextlib.suppress(ImportError):
         from openai import APIConnectionError, APITimeoutError
         if isinstance(exc, (APIConnectionError, APITimeoutError)):
             return True
-    except ImportError:
-        pass
     if _contains_any(type(exc).__name__, ("Connection", "Timeout", "DNS", "SSL")):
         return True
     return _contains_any(str(exc).lower(), (
@@ -3216,15 +3192,13 @@ def _recoverable_pool_provider(
     if main_runtime:
         rt_provider = _normalize_main_runtime(main_runtime).get("provider", "")
         if rt_provider and rt_provider not in {"", "auto", "custom"}:
-            try:
+            with contextlib.suppress(Exception):
                 from hermes_cli.auth import PROVIDER_REGISTRY
                 pconfig = PROVIDER_REGISTRY.get(rt_provider)
                 if pconfig and getattr(pconfig, "auth_type", None) == "api_key":
                     rt_base = str(getattr(pconfig, "inference_base_url", "") or "").rstrip("/")
                     if rt_base and base_url_host_matches(base, base_url_hostname(rt_base)):
                         return rt_provider
-            except Exception:
-                pass
     return None
 
 
@@ -3466,14 +3440,12 @@ def _complete_fallback_destination(
         if _endpoint_speaks_anthropic_messages(base_url):
             api_mode = "anthropic_messages"
         else:
-            try:
+            with contextlib.suppress(Exception):
                 from hermes_cli.runtime_provider import resolve_runtime_provider
                 runtime = resolve_runtime_provider(
                     requested=provider, explicit_base_url=base_url or None, target_model=model or ""
                 )
                 api_mode = str(runtime.get("api_mode") or "").strip() or None
-            except Exception:
-                pass
     return _FallbackDestination(provider, base_url, api_mode, model)
 
 
@@ -3866,10 +3838,8 @@ def _resolve_fallback_entry(entry: Dict[str, Any]) -> Tuple[Optional[Any], Optio
         api_mode=str(entry.get("api_mode") or entry.get("transport") or "").strip() or None,
     )
     if client is not None:
-        try:
+        with contextlib.suppress(Exception):
             client._hermes_fallback_destination = _fallback_destination_from_entry(entry, client, resolved_model)
-        except Exception:
-            pass
     return client, resolved_model
 
 
@@ -3988,11 +3958,9 @@ def _try_main_provider_route(
     elif main_provider.startswith("custom:"):
         # Named custom provider (custom_providers / providers dict entry).
         _has_named_entry = False
-        try:
+        with contextlib.suppress(ImportError):
             from hermes_cli.runtime_provider import _get_named_custom_provider
             _has_named_entry = _get_named_custom_provider(main_provider) is not None
-        except ImportError:
-            pass
         if _has_named_entry:
             # KEEP the full ``custom:<name>`` so the named arm honours the entry's api_mode
             # (collapsing to "custom" strips /anthropic → 404s). base_url/api_key come from the entry.
@@ -4103,12 +4071,10 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
         return AsyncAnthropicAuxiliaryClient(sync_client), model
     if isinstance(sync_client, BedrockAuxiliaryClient):
         return AsyncBedrockAuxiliaryClient(sync_client), model
-    try:
+    with contextlib.suppress(ImportError):
         from agent.gemini_native_adapter import GeminiNativeClient, AsyncGeminiNativeClient
         if isinstance(sync_client, GeminiNativeClient):
             return AsyncGeminiNativeClient(sync_client), model
-    except ImportError:
-        pass
     # ACP shims (subprocess, not an HTTP pool) are already async-safe and opt out of the wrapper.
     if _client_declares(sync_client, "HERMES_SKIP_ASYNC_WRAP"):
         return sync_client, model
@@ -4159,7 +4125,7 @@ def _named_custom_api_key(custom_entry: Dict[str, Any], provider: str, custom_ba
         from agent.command_token_source import build_command_token_provider
         custom_key = build_command_token_provider(custom_key_cmd, custom_entry.get("name") or provider) or custom_key
     if not custom_key:
-        try:
+        with contextlib.suppress(Exception):
             from agent.credential_pool import custom_provider_pool_key_candidates
             pool_name = custom_entry.get("provider_key") or custom_entry.get("name") or provider
             for pool_key in custom_provider_pool_key_candidates(custom_base, pool_name):
@@ -4176,8 +4142,6 @@ def _named_custom_api_key(custom_entry: Dict[str, Any], provider: str, custom_ba
                 if str(pool_api_key).strip():
                     custom_key = str(pool_api_key).strip()
                     break
-        except Exception:
-            pass
     return custom_key or "no-key-required"
 
 
@@ -4555,15 +4519,13 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
         api_key = _free_rt["api_key"]
         raw_base_url = str(_free_rt["base_url"]).rstrip("/")
     if provider == "actual":
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.auth import (
                 ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, is_actual_local_base_url, normalize_actual_base_url
             )
             raw_base_url = normalize_actual_base_url(raw_base_url)
             if not api_key and is_actual_local_base_url(raw_base_url):
                 api_key = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
-        except Exception:
-            pass
     if not api_key:
         tried_sources = list(pconfig.api_key_env_vars) + (["gh auth token"] if provider == "copilot" else [])
         logger.debug("resolve_provider_client: provider %s has no API key configured (tried: %s)",
@@ -4585,14 +4547,12 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
     # Copilot GPT-5+ models (except gpt-5-mini) are only reachable via the Responses API;
     # wrap so call_llm() transparently routes through responses.stream().
     if provider == "copilot" and final_model and not req.raw_codex:
-        try:
+        with contextlib.suppress(ImportError):
             from hermes_cli.models import _should_use_copilot_responses_api
             if _should_use_copilot_responses_api(final_model):
                 logger.debug("resolve_provider_client: copilot model %s needs "
                              "Responses API — wrapping with CodexAuxiliaryClient", final_model)
                 client = CodexAuxiliaryClient(client, final_model)
-        except ImportError:
-            pass
     # api_mode handling for any API-key provider (direct OpenAI + codex model) and Anthropic-wire
     # endpoints (api.kimi.com/coding, /anthropic gateways) without per-provider branches.
     client = _wrap_transport(req, client, final_model, raw_base_url, api_key)
@@ -5110,13 +5070,11 @@ def neuter_async_httpx_del() -> None:
 def _force_close_async_httpx(client: Any) -> None:
     """Mark the httpx AsyncClient inside an AsyncOpenAI client as closed so ``__del__`` won't
     schedule ``aclose()`` on a dead loop. Skips the full async close — the OS drops connections."""
-    try:
+    with contextlib.suppress(Exception):
         from httpx._client import ClientState
         inner = getattr(client, "_client", None)
         if inner is not None and not getattr(inner, "is_closed", True):
             inner._state = ClientState.CLOSED
-    except Exception:
-        pass
 
 
 def _schedule_async_close(close_result: Any, client: Any) -> None:
@@ -5139,18 +5097,14 @@ def _schedule_async_close(close_result: Any, client: Any) -> None:
             task = loop.create_task(runner)
 
             def _consume(completed_task) -> None:
-                try:
+                with contextlib.suppress(BaseException):
                     completed_task.exception()
-                except BaseException:
-                    pass
             task.add_done_callback(_consume)
             runner = None
     except Exception:
         if runner is not None:
-            try:
+            with contextlib.suppress(Exception):
                 runner.close()
-            except Exception:
-                pass
         _force_close_async_httpx(client)
 
 
@@ -5173,10 +5127,8 @@ def _close_cached_client(client: Any, *, close_async: bool = False) -> None:
         else:
             # Never await a client owned by another live loop; close the coroutine (no
             # unawaited warning) and neuter the transport.
-            try:
+            with contextlib.suppress(Exception):
                 close_result.close()
-            except Exception:
-                pass
             _force_close_async_httpx(client)
         return
     _force_close_async_httpx(client)
@@ -5508,10 +5460,8 @@ def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float
         return default
     raw = _get_auxiliary_task_config(task).get("timeout")
     if raw is not None:
-        try:
+        with contextlib.suppress(ValueError, TypeError):
             return float(raw)
-        except (ValueError, TypeError):
-            pass
     return default
 
 
@@ -6945,6 +6895,7 @@ def _call_llm_impl(
             # object Relay's managed stream would iterate; the MoA facade wraps it as one chunk.
             return client.chat.completions.create(**kwargs)
         return _relay_sync_stream(client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode)
+
     def _primary(**validate_kw: Any) -> Any:
         return _validate_llm_response(
             _relay_sync_completion(
@@ -7113,10 +7064,12 @@ async def _async_call_llm_impl(
             _provider_requires_stream(request_provider, req.base_info or req.resolved_base_url)
             and not isinstance(client, (
                 AsyncCodexAuxiliaryClient, AsyncAnthropicAuxiliaryClient, AsyncBedrockAuxiliaryClient)))
+
         async def _acreate(_kwargs: Dict[str, Any]) -> Any:
             if _force_stream_async:
                 return await _acreate_with_stream(client, _kwargs, task)
             return await client.chat.completions.create(**_kwargs)
+
         async def _primary(**validate_kw: Any) -> Any:
             return _validate_llm_response(
                 await _relay_async_completion(
