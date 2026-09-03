@@ -470,6 +470,12 @@ def _fail(fail_open: bool, open_summary: str, closed_summary: str) -> dict:
     return _verdict("allow", open_summary) if fail_open else _verdict("block", closed_summary)
 
 
+def _crash(fail_open: bool, open_summary: str, closed_summary: str) -> dict:
+    """An operational failure: count it toward the circuit breaker, then fail open/closed."""
+    _record_tirith_crash()
+    return _fail(fail_open, open_summary, closed_summary)
+
+
 def check_command_security(command: str) -> dict:
     """Run the tirith scan on a command -> ``{"action": allow|warn|block, "findings", "summary"}``.
     Exit code determines the action; JSON enriches. Spawn failures/timeouts respect fail_open."""
@@ -495,22 +501,19 @@ def check_command_security(command: str) -> dict:
     except OSError as exc:
         # FileNotFoundError / PermissionError / exec format error: dedupe by (class, errno)
         # so each failure mode surfaces once, not per command.
-        spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
-        _warn_once(spawn_key, "tirith spawn failed: %s", exc)
-        _record_tirith_crash()
-        return _fail(fail_open, f"tirith unavailable: {exc}", f"tirith spawn failed (fail-closed): {exc}")
+        _warn_once(f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}",
+                   "tirith spawn failed: %s", exc)
+        return _crash(fail_open, f"tirith unavailable: {exc}", f"tirith spawn failed (fail-closed): {exc}")
     except subprocess.TimeoutExpired:
         _warn_once(f"tirith_timeout:{timeout}", "tirith timed out after %ds", timeout)
-        _record_tirith_crash()
-        return _fail(fail_open, f"tirith timed out ({timeout}s)", "tirith timed out (fail-closed)")
+        return _crash(fail_open, f"tirith timed out ({timeout}s)", "tirith timed out (fail-closed)")
 
     exit_code = result.returncode
     if (action := _EXIT_ACTIONS.get(exit_code)) is None:
         # Unknown exit code (includes signal-killed, e.g. -11): respect fail_open.
         logger.warning("tirith returned unexpected exit code %d", exit_code)
-        _record_tirith_crash()
-        return _fail(fail_open, f"tirith exit code {exit_code} (fail-open)",
-                     f"tirith exit code {exit_code} (fail-closed)")
+        return _crash(fail_open, f"tirith exit code {exit_code} (fail-open)",
+                      f"tirith exit code {exit_code} (fail-closed)")
     if action == "allow":
         _crash_count = 0  # successful execution resets the circuit breaker
     # JSON enriches findings/summary; a parse failure never changes the verdict.

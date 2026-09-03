@@ -216,8 +216,7 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
 # Device label (commit ``author.device``; advisory, never an auth input)
 def _default_device_label() -> str:
     """Short hostname + random suffix (two machines can share a hostname); bare uuid if unusable."""
-    import socket
-    import uuid
+    import socket, uuid
     try:
         host = socket.gethostname() or ""
     except OSError:
@@ -246,7 +245,7 @@ def _device_id_path() -> Path:
 
 
 def _write_device_id(val: str) -> None:
-    _device_id_path().parent.mkdir(parents=True, exist_ok=True)
+    _skills_dir().mkdir(parents=True, exist_ok=True)
     _device_id_path().write_text(val, encoding="utf-8")
 
 
@@ -264,10 +263,6 @@ def set_device_name(name: str) -> str:
 _EMPTY_STATE: Dict[str, Any] = {"head": None, "skills": {}}
 
 
-def _sync_state_path() -> Path:
-    return _skills_dir() / ".sync_state"
-
-
 def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict[str, Any]]:
     """Parse a state file; None if missing / corrupt / not a dict."""
     try:
@@ -281,7 +276,7 @@ def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict
 def read_sync_state() -> Dict[str, Any]:
     """``{"head": "sha256:...|null", "skills": {...}}``; a default on missing/corrupt. A legacy
     ``.sync_manifest`` is migrated to ``.sync_state`` on read so no head record is lost."""
-    path = _sync_state_path()
+    path = _skills_dir() / ".sync_state"
     if path.exists():
         return _load_state_file(path) or dict(_EMPTY_STATE)
     legacy = _skills_dir() / ".sync_manifest"
@@ -297,7 +292,7 @@ def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
     try:
         from tools.skill_usage import _atomic_write
-        _atomic_write(_sync_state_path(), ".sync_state_",
+        _atomic_write(_skills_dir() / ".sync_state", ".sync_state_",
                       lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
