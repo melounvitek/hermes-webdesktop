@@ -590,6 +590,8 @@ def _shell_tokens_with_spans(segment: str, start: int):
     if token_start is not None:
         flush(len(segment))
     return tokens
+
+
 def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], bool]:
     """Structurally locate quoted grep PCRE operands -> (spans, malformed). On an ambiguous or
     malformed grep parse callers fail closed and use the original command: no text is hidden on
@@ -667,6 +669,8 @@ def _grep_safe_detection_variant(command: str) -> tuple[str, bool]:
     if malformed or not spans:
         return command, malformed
     return _splice(command, [(start, end, " " * (end - start)) for start, end in spans]), False
+
+
 def _interpreter_family(executable: str) -> str | None:
     name = os.path.basename(executable).lower()
     return next((family for family, name_re in _INTERPRETER_NAME_RES if name_re.fullmatch(name)), None)
@@ -724,6 +728,8 @@ def _interpreter_exec_flag(family: str, args: list[str]) -> str | None:
                 return bundled
         skip_value = comparable in with_arg and not equals
     return None
+
+
 def _bash_exec_payload(args: list[str]) -> tuple[bool, str | None]:
     """Return whether Bash ``-c`` occurs and the command string it owns.
     Bash's O/o options consume the following argument even when they precede a later ``-c`` or
@@ -819,7 +825,6 @@ def _skip_shell_whitespace(command: str, pos: int) -> int:
     while pos < len(command) and command[pos].isspace():
         pos += 1
     return pos
-
 
 
 def _scan_shell(text: str, start: int = 0, end: int | None = None, *, subst: str = "",
@@ -949,7 +954,6 @@ def _deobfuscate_shell_word_for_detection(word: str) -> str:
         if word == previous:
             break
     return word
-
 
 
 def _iter_shell_command_starts(command: str):
@@ -1101,6 +1105,8 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
         and os.path.dirname(os.path.realpath(operand)) == temp_dir
         and re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
     )
+
+
 def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
     """Catch gateway-lifecycle verbs spelled with quote splicing.
     Backslash splicing (``kick\\start``) is undone by normalization, but quote splicing is not:

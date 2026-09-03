@@ -258,22 +258,22 @@ def _release_permission_mode_dependents(session_key: str) -> None:
         logger.debug("Failed to release permission-mode dependent resources for %s", session_key, exc_info=True)
 
 
-def enable_session_yolo(session_key: str) -> None:
-    """Enable YOLO bypass for a single session key."""
+def _set_session_yolo(session_key: str, enabled: bool) -> None:
     if not session_key:
         return
     with _lock:
-        _session_yolo.add(session_key)
+        (_session_yolo.add if enabled else _session_yolo.discard)(session_key)
     _release_permission_mode_dependents(session_key)
+
+
+def enable_session_yolo(session_key: str) -> None:
+    """Enable YOLO bypass for a single session key."""
+    _set_session_yolo(session_key, True)
 
 
 def disable_session_yolo(session_key: str) -> None:
     """Disable YOLO bypass for a single session key."""
-    if not session_key:
-        return
-    with _lock:
-        _session_yolo.discard(session_key)
-    _release_permission_mode_dependents(session_key)
+    _set_session_yolo(session_key, False)
 
 
 def clear_session(session_key: str) -> None:
@@ -326,10 +326,8 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
     regex-derived key so existing command_allowlist entries survive key migrations."""
     aliases = _approval_key_aliases(pattern_key)
     with _lock:
-        if any(alias in _permanent_approved for alias in aliases):
-            return True
-        session_approvals = _session_approved.get(session_key, set())
-        return any(alias in session_approvals for alias in aliases)
+        approved = _permanent_approved | _session_approved.get(session_key, set())
+    return any(alias in approved for alias in aliases)
 
 
 def approve_permanent(pattern_key: str):
@@ -349,10 +347,10 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
     findings are session-max by design (no broad permanent allowlisting of content-level
     findings), so ``always`` downgrades them to session. ``once`` persists nothing."""
     for key, _, is_tirith in warnings:
-        if choice == "session" or (choice == "always" and is_tirith):
-            approve_session(session_key, key)
-        elif choice == "always":
-            approve_session(session_key, key)
+        if choice not in ("session", "always"):
+            continue
+        approve_session(session_key, key)
+        if choice == "always" and not is_tirith:
             approve_permanent(key)
             save_permanent_allowlist(_permanent_approved)
 
