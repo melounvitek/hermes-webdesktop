@@ -186,7 +186,7 @@ def test_conversation_loop_sanitizes_api_kwargs_after_build():
     sanitize_idx = src.index("_sanitize_structure_surrogates(api_kwargs)")
     assert build_idx < sanitize_idx
     loop_src = inspect.getsource(cl.run_conversation)
-    assert loop_src.index("build_api_request(") < loop_src.index("perform_api_call(")
+    assert loop_src.index("build_api_request,") < loop_src.index("perform_api_call,")
 
 
 # ---------------------------------------------------------------------------

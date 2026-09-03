@@ -7,10 +7,12 @@ retries, fallbacks, compression, post-turn hooks). Symbols that callers patch on
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
@@ -1593,6 +1595,120 @@ def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any
     }
 
 
+@dataclass
+class _LoopState:
+    """Every local the turn loop threads through the phase helpers in ``agent/turn_*.py``.
+
+    Each helper takes the loop locals it needs as keyword arguments named exactly like
+    these fields and returns a verdict dataclass whose non-``action``/``result`` fields
+    carry the same names; :func:`_run_phase` passes and copies them back by name, so a
+    field added to a helper's signature or verdict needs a field here and nothing else.
+    Per-iteration slots (``response`` … ``assistant_message``) are rebound by the phases
+    before any later phase reads them, exactly as the former inline locals were."""
+
+    # Fixed for the turn.
+    user_message: Any
+    system_message: Any
+    moa_config: Any
+    original_user_message: Any
+    conversation_history: Any
+    effective_task_id: Any
+    turn_id: Any
+    _should_review_memory: Any
+    _plugin_user_context: Any
+    _ext_prefetch_cache: Any
+    # Turn-scoped state (rebound by the phases).
+    messages: Any
+    active_system_prompt: Any
+    current_turn_user_idx: Any
+    _preflight_compression_blocked: Any
+    # Per-turn compression attempt cap shared by the pre-API gate, 413 handlers and
+    # post-tool compaction; a consecutive-ineffective-attempt backstop, rearmed only
+    # after a provider response reports a prompt below threshold. Default 3 if unset.
+    max_compression_attempts: Any
+    api_call_count: int = 0
+    final_response: Any = None
+    interrupted: bool = False
+    failed: bool = False
+    codex_ack_continuations: int = 0
+    length_continue_retries: int = 0
+    # Total outer-loop exceptions this turn (#92450) — see _MAX_OUTER_LOOP_ERRORS.
+    _outer_error_count: int = 0
+    truncated_tool_call_retries: int = 0
+    truncated_response_parts: List[str] = field(default_factory=list)
+    compression_attempts: int = 0
+    _last_preflight_pressure: Optional[int] = None
+    # A provider overflow outweighs the rough-estimate calibration that defers preflight
+    # after compaction: stay armed until the rebuilt request is below the threshold.
+    _provider_overflow_recovery_pending: bool = False
+    # Armed when a compression host-timeout ends the turn; finalize reuses the gateway
+    # context-recovery contract (error/partial/compression_exhausted) (#98722).
+    _compression_timeout_exhausted: bool = False
+    _turn_exit_reason: str = "unknown"  # Diagnostic: why the loop ended
+    # Last answer held back by a verification gate: if the continuation exhausts the
+    # budget this is the best user-facing result, distinct from error/recovery text.
+    _pending_verification_response: Any = None
+    # Whether that candidate was already streamed as interim; ``_response_was_previewed``
+    # is set ONLY if it becomes the final response (#65919).
+    _pending_verification_response_previewed: bool = False
+    # If pre-API compression fires after MoA advisors ran, retain their guidance and
+    # rebase it onto the compacted transcript next iteration — no second fan-out.
+    pending_moa_prepared_request: Any = None
+    # Per-iteration slots.
+    request_logger: Any = None
+    api_messages: Any = None
+    tools_for_api: Any = None
+    _moa_prepared_request: Any = None
+    approx_tokens: Any = None
+    request_pressure_tokens: Any = None
+    total_chars: Any = None
+    thinking_spinner: Any = None
+    api_start_time: Any = None
+    retry_count: int = 0
+    max_retries: Any = None
+    _retry: Any = None
+    finish_reason: str = "stop"
+    response: Any = None  # None when every retry failed
+    api_kwargs: Any = None  # None until built; read by the except handlers
+    api_request_id: Any = None
+    _original_api_kwargs: Any = None
+    _llm_middleware_trace: Any = None
+    api_duration: Any = None
+    assistant_message: Any = None
+
+
+# Keyword names each phase helper takes (minus ``agent``), cached per function object.
+_PHASE_PARAMS: Dict[Any, tuple] = {}
+# Verdict fields the loop latches (only ever sets True) instead of copying back:
+# ``handle_api_error`` reports overflow recovery per call and must not clear an earlier arm.
+_LATCHED_VERDICT_FIELDS = {"handle_api_error": frozenset({"_provider_overflow_recovery_pending"})}
+
+
+def _run_phase(fn, agent, state: _LoopState, **extra):
+    """Call phase helper ``fn`` with the loop locals it names, copy its verdict fields back.
+
+    ``extra`` supplies non-state arguments (the caught exception). Returns the verdict so
+    the caller can act on ``.action`` / ``.result``."""
+    params = _PHASE_PARAMS.get(fn)
+    if params is None:
+        params = _PHASE_PARAMS[fn] = tuple(
+            p for p in inspect.signature(fn).parameters if p != "agent"
+        )
+    verdict = fn(agent, **{
+        name: extra[name] if name in extra else getattr(state, name) for name in params
+    })
+    latched = _LATCHED_VERDICT_FIELDS.get(getattr(fn, "__name__", ""), ())
+    for f in fields(verdict):
+        if f.name in ("action", "result"):
+            continue
+        value = getattr(verdict, f.name)
+        if f.name not in latched:
+            setattr(state, f.name, value)
+        elif value:
+            setattr(state, f.name, True)
+    return verdict
+
+
 def run_conversation(
     agent,
     user_message: Any,
@@ -1637,9 +1753,8 @@ def run_conversation(
     except Exception:
         logger.debug("per-turn env credential refresh failed", exc_info=True)
 
-    # ── Per-turn setup (the prologue) ──
-    # All once-per-turn setup lives in ``build_turn_context`` (agent/turn_context.py);
-    # it mutates ``agent`` as the inline code did and returns the locals the loop reads.
+    # Per-turn setup (the prologue): ``build_turn_context`` (agent/turn_context.py)
+    # mutates ``agent`` as the inline code did and returns the locals the loop reads.
     try:
         _ctx = build_turn_context(
             agent,
@@ -1666,17 +1781,6 @@ def run_conversation(
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
-    user_message = _ctx.user_message
-    original_user_message = _ctx.original_user_message
-    messages = _ctx.messages
-    conversation_history = _ctx.conversation_history
-    active_system_prompt = _ctx.active_system_prompt
-    effective_task_id = _ctx.effective_task_id
-    turn_id = _ctx.turn_id
-    current_turn_user_idx = _ctx.current_turn_user_idx
-    _should_review_memory = _ctx.should_review_memory
-    _plugin_user_context = _ctx.plugin_user_context
-    _ext_prefetch_cache = _ctx.ext_prefetch_cache
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -1690,507 +1794,156 @@ def run_conversation(
     # Per-turn diagnostic: a failed compression-tip adoption in a previous
     # turn's flush must not be reported against this turn.
     agent._compression_adoption_failed = False
-
-    # Main conversation loop counters (pure locals consumed by the loop below).
-    api_call_count = 0
-    final_response = None
-    interrupted = False
-    failed = False
-    codex_ack_continuations = 0
-    length_continue_retries = 0
     # Turn-scoped one-shot: armed by a thinking-only truncation, consumed by
     # build_api_kwargs; must not survive an interrupted turn into the next one.
     agent._ephemeral_reasoning_off = False
-    # Total outer-loop exceptions this turn (#92450) — see _MAX_OUTER_LOOP_ERRORS.
-    _outer_error_count = 0
-    truncated_tool_call_retries = 0
-    truncated_response_parts: List[str] = []
-    compression_attempts = 0
-    # Per-turn compression attempt cap shared by the pre-API gate, 413 handlers and
-    # post-tool compaction; a consecutive-ineffective-attempt backstop, rearmed only
-    # after a provider response reports a prompt below threshold. Default 3 if unset.
-    max_compression_attempts = getattr(agent, "max_compression_attempts", 3)
-    _last_preflight_pressure: Optional[int] = None
-    _preflight_compression_blocked = _ctx.preflight_compression_blocked
-    # A provider overflow outweighs the rough-estimate calibration that defers preflight
-    # after compaction: stay armed until the rebuilt request is below the threshold.
-    _provider_overflow_recovery_pending = False
-    # Armed when a compression host-timeout ends the turn; finalize reuses the gateway
-    # context-recovery contract (error/partial/compression_exhausted) (#98722).
-    _compression_timeout_exhausted = False
-    _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
-    # Last answer held back by a verification gate: if the continuation exhausts the
-    # budget this is the best user-facing result, distinct from error/recovery text.
-    _pending_verification_response = None
-    # Whether the pending verification candidate was already streamed as interim.
-    # ``_response_was_previewed`` is set ONLY if it becomes the final response (#65919).
-    _pending_verification_response_previewed = False
-    # If pre-API compression fires after MoA advisors ran, retain their guidance and
-    # rebase it onto the compacted transcript next iteration — no second fan-out.
-    pending_moa_prepared_request = None
-
     # Per-turn tally of credential-pool refreshes by (provider, pool-entry-id): caps
     # same-entry refreshes on a persistent 401 so fallback takes over (#26080).
     agent._auth_pool_refresh_counts = {}
-
     # Per-turn usage forwarded to the context engine's on_turn_complete() hook; left
     # None on turns that never reach a response so the hook never sees stale usage.
     agent._last_turn_usage = None
+
+    s = _LoopState(
+        user_message=_ctx.user_message,
+        system_message=system_message,
+        moa_config=moa_config,
+        original_user_message=_ctx.original_user_message,
+        conversation_history=_ctx.conversation_history,
+        effective_task_id=_ctx.effective_task_id,
+        turn_id=_ctx.turn_id,
+        _should_review_memory=_ctx.should_review_memory,
+        _plugin_user_context=_ctx.plugin_user_context,
+        _ext_prefetch_cache=_ctx.ext_prefetch_cache,
+        messages=_ctx.messages,
+        active_system_prompt=_ctx.active_system_prompt,
+        current_turn_user_idx=_ctx.current_turn_user_idx,
+        _preflight_compression_blocked=_ctx.preflight_compression_blocked,
+        max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
+    )
 
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex
     # app-server subprocess (see agent/transports/codex_app_server_session.py).
     if agent.api_mode == "codex_app_server":
         return agent._run_codex_app_server_turn(
-            user_message=user_message,
-            original_user_message=original_user_message,
-            messages=messages,
-            effective_task_id=effective_task_id,
-            should_review_memory=_should_review_memory,
+            user_message=s.user_message,
+            original_user_message=s.original_user_message,
+            messages=s.messages,
+            effective_task_id=s.effective_task_id,
+            should_review_memory=s._should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
-        _it = begin_iteration(
-            agent,
-            messages=messages,
-            conversation_history=conversation_history,
-            original_user_message=original_user_message,
-            api_call_count=api_call_count,
-            interrupted=interrupted,
-            _turn_exit_reason=_turn_exit_reason,
-        )
-        original_user_message = _it.original_user_message
-        api_call_count = _it.api_call_count
-        interrupted = _it.interrupted
-        _turn_exit_reason = _it._turn_exit_reason
-        if _it.action == "break":
+    while (s.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+        if _run_phase(begin_iteration, agent, s).action == "break":
             break
-
-        _ip = prepare_iteration(
-            agent,
-            messages=messages,
-            api_call_count=api_call_count,
-        )
-        messages = _ip.messages
-        request_logger = _ip.request_logger
-
-        _rr = assemble_api_request(
-            agent,
-            messages=messages,
-            current_turn_user_idx=current_turn_user_idx,
-            _ext_prefetch_cache=_ext_prefetch_cache,
-            _plugin_user_context=_plugin_user_context,
-            moa_config=moa_config,
-            active_system_prompt=active_system_prompt,
-            original_user_message=original_user_message,
-            pending_moa_prepared_request=pending_moa_prepared_request,
-            request_logger=request_logger,
-        )
-        api_messages = _rr.api_messages
-        tools_for_api = _rr.tools_for_api
-        _moa_prepared_request = _rr._moa_prepared_request
-        pending_moa_prepared_request = _rr.pending_moa_prepared_request
-        approx_tokens = _rr.approx_tokens
-        request_pressure_tokens = _rr.request_pressure_tokens
-        total_chars = _rr.total_chars
-
-        _pg = run_preflight_gate(
-            agent,
-            request_pressure_tokens=request_pressure_tokens,
-            _moa_prepared_request=_moa_prepared_request,
-            pending_moa_prepared_request=pending_moa_prepared_request,
-            messages=messages,
-            system_message=system_message,
-            user_message=user_message,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            compression_attempts=compression_attempts,
-            max_compression_attempts=max_compression_attempts,
-            effective_task_id=effective_task_id,
-            final_response=final_response,
-            failed=failed,
-            _turn_exit_reason=_turn_exit_reason,
-            _compression_timeout_exhausted=_compression_timeout_exhausted,
-            _preflight_compression_blocked=_preflight_compression_blocked,
-            _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
-            _last_preflight_pressure=_last_preflight_pressure,
-        )
-        pending_moa_prepared_request = _pg.pending_moa_prepared_request
-        messages = _pg.messages
-        active_system_prompt = _pg.active_system_prompt
-        conversation_history = _pg.conversation_history
-        api_call_count = _pg.api_call_count
-        compression_attempts = _pg.compression_attempts
-        final_response = _pg.final_response
-        failed = _pg.failed
-        _turn_exit_reason = _pg._turn_exit_reason
-        _compression_timeout_exhausted = _pg._compression_timeout_exhausted
-        _preflight_compression_blocked = _pg._preflight_compression_blocked
-        _provider_overflow_recovery_pending = _pg._provider_overflow_recovery_pending
-        _last_preflight_pressure = _pg._last_preflight_pressure
+        _run_phase(prepare_iteration, agent, s)
+        _run_phase(assemble_api_request, agent, s)
+        _pg = _run_phase(run_preflight_gate, agent, s)
         if _pg.action == "return":
             return _pg.result
         if _pg.action == "break":
             break
         if _pg.action == "continue":
             continue
+        _run_phase(announce_api_call, agent, s)
 
-        _an = announce_api_call(
-            agent,
-            messages=messages,
-            api_messages=api_messages,
-            api_call_count=api_call_count,
-            approx_tokens=approx_tokens,
-            total_chars=total_chars,
-        )
-        thinking_spinner = _an.thinking_spinner
-        
-        api_start_time = time.time()
-        retry_count = 0
-        max_retries = agent._api_max_retries
-        _retry = TurnRetryState()
+        s.api_start_time = time.time()
+        s.retry_count = 0
+        s.max_retries = agent._api_max_retries
+        s._retry = TurnRetryState()
+        s.finish_reason = "stop"
+        s.response = None
+        s.api_kwargs = None
+        s.api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
+        agent._current_api_request_id = s.api_request_id
 
-        finish_reason = "stop"
-        response = None  # Guard against UnboundLocalError if all retries fail
-        api_kwargs = None  # Guard against UnboundLocalError in except handler
-        api_request_id = f"{turn_id}:api:{api_call_count}"
-        agent._current_api_request_id = api_request_id
-
-        while retry_count < max_retries:
-            _ng = nous_rate_limit_guard(
-                agent,
-                _retry=_retry,
-                api_messages=api_messages,
-                messages=messages,
-                conversation_history=conversation_history,
-                active_system_prompt=active_system_prompt,
-                retry_count=retry_count,
-                compression_attempts=compression_attempts,
-                api_call_count=api_call_count,
-            )
-            active_system_prompt = _ng.active_system_prompt
-            retry_count = _ng.retry_count
-            compression_attempts = _ng.compression_attempts
+        while s.retry_count < s.max_retries:
+            _ng = _run_phase(nous_rate_limit_guard, agent, s)
             if _ng.action == "return":
                 return _ng.result
             if _ng.action == "break":
                 break
 
             try:
-                _rq = build_api_request(
-                    agent,
-                    api_messages=api_messages,
-                    _moa_prepared_request=_moa_prepared_request,
-                    tools_for_api=tools_for_api,
-                    system_message=system_message,
-                    messages=messages,
-                    original_user_message=original_user_message,
-                    approx_tokens=approx_tokens,
-                    total_chars=total_chars,
-                    retry_count=retry_count,
-                    api_call_count=api_call_count,
-                    api_request_id=api_request_id,
-                    api_start_time=api_start_time,
-                    effective_task_id=effective_task_id,
-                    turn_id=turn_id,
-                )
-                api_messages = _rq.api_messages
-                _moa_prepared_request = _rq._moa_prepared_request
-                tools_for_api = _rq.tools_for_api
-                api_kwargs = _rq.api_kwargs
-                _original_api_kwargs = _rq._original_api_kwargs
-                _llm_middleware_trace = _rq._llm_middleware_trace
-
-                _ac = perform_api_call(
-                    agent,
-                    api_kwargs=api_kwargs,
-                    _original_api_kwargs=_original_api_kwargs,
-                    _llm_middleware_trace=_llm_middleware_trace,
-                    _moa_prepared_request=_moa_prepared_request,
-                    _retry=_retry,
-                    thinking_spinner=thinking_spinner,
-                    retry_count=retry_count,
-                    api_call_count=api_call_count,
-                    api_request_id=api_request_id,
-                    effective_task_id=effective_task_id,
-                    turn_id=turn_id,
-                    interrupted=interrupted,
-                )
-                response = _ac.response
-                thinking_spinner = _ac.thinking_spinner
-                interrupted = _ac.interrupted
-                if _ac.action == "break":
+                _run_phase(build_api_request, agent, s)
+                if _run_phase(perform_api_call, agent, s).action == "break":
                     break
-                
-                _rc = check_api_response(
-                    agent,
-                    response=response,
-                    _retry=_retry,
-                    thinking_spinner=thinking_spinner,
-                    messages=messages,
-                    api_messages=api_messages,
-                    api_kwargs=api_kwargs,
-                    active_system_prompt=active_system_prompt,
-                    conversation_history=conversation_history,
-                    finish_reason=finish_reason,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    compression_attempts=compression_attempts,
-                    max_compression_attempts=max_compression_attempts,
-                    length_continue_retries=length_continue_retries,
-                    truncated_response_parts=truncated_response_parts,
-                    truncated_tool_call_retries=truncated_tool_call_retries,
-                    current_turn_user_idx=current_turn_user_idx,
-                    api_call_count=api_call_count,
-                    api_request_id=api_request_id,
-                    api_start_time=api_start_time,
-                    effective_task_id=effective_task_id,
-                    turn_id=turn_id,
-                    _preflight_compression_blocked=_preflight_compression_blocked,
-                    _last_preflight_pressure=_last_preflight_pressure,
-                )
-                thinking_spinner = _rc.thinking_spinner
-                messages = _rc.messages
-                active_system_prompt = _rc.active_system_prompt
-                finish_reason = _rc.finish_reason
-                retry_count = _rc.retry_count
-                compression_attempts = _rc.compression_attempts
-                length_continue_retries = _rc.length_continue_retries
-                truncated_response_parts = _rc.truncated_response_parts
-                truncated_tool_call_retries = _rc.truncated_tool_call_retries
-                _preflight_compression_blocked = _rc._preflight_compression_blocked
-                _last_preflight_pressure = _rc._last_preflight_pressure
-                api_duration = _rc.api_duration
+                _rc = _run_phase(check_api_response, agent, s)
                 if _rc.action == "return":
                     return _rc.result
                 if _rc.action == "break":
                     break
                 if _rc.action == "continue":
                     continue
-
             except InterruptedError:
-                _ai = handle_api_interrupt(
-                    agent,
-                    _retry=_retry,
-                    thinking_spinner=thinking_spinner,
-                    messages=messages,
-                    conversation_history=conversation_history,
-                    api_start_time=api_start_time,
-                    interrupted=interrupted,
-                    final_response=final_response,
-                )
-                thinking_spinner = _ai.thinking_spinner
-                interrupted = _ai.interrupted
-                final_response = _ai.final_response
-                if _ai.action == "break":
+                if _run_phase(handle_api_interrupt, agent, s).action == "break":
                     break
-
             except Exception as api_error:
-                _ae = handle_api_error(
-                    agent,
-                    api_error=api_error,
-                    _retry=_retry,
-                    thinking_spinner=thinking_spinner,
-                    messages=messages,
-                    api_messages=api_messages,
-                    api_kwargs=api_kwargs,
-                    system_message=system_message,
-                    active_system_prompt=active_system_prompt,
-                    conversation_history=conversation_history,
-                    approx_tokens=approx_tokens,
-                    retry_count=retry_count,
-                    max_retries=max_retries,
-                    compression_attempts=compression_attempts,
-                    max_compression_attempts=max_compression_attempts,
-                    api_call_count=api_call_count,
-                    api_request_id=api_request_id,
-                    api_start_time=api_start_time,
-                    effective_task_id=effective_task_id,
-                    turn_id=turn_id,
-                )
-                thinking_spinner = _ae.thinking_spinner
-                messages = _ae.messages
-                active_system_prompt = _ae.active_system_prompt
-                conversation_history = _ae.conversation_history
-                approx_tokens = _ae.approx_tokens
-                retry_count = _ae.retry_count
-                max_retries = _ae.max_retries
-                compression_attempts = _ae.compression_attempts
-                if _ae._provider_overflow_recovery_pending:
-                    _provider_overflow_recovery_pending = True
+                _ae = _run_phase(handle_api_error, agent, s, api_error=api_error)
                 if _ae.action == "return":
                     return _ae.result
                 if _ae.action == "break":
                     break
                 if _ae.action == "continue":
                     continue
-        
-        _rs = apply_retry_restarts(
-            agent,
-            _retry=_retry,
-            response=response,
-            interrupted=interrupted,
-            messages=messages,
-            conversation_history=conversation_history,
-            user_message=user_message,
-            api_kwargs=api_kwargs,
-            current_turn_user_idx=current_turn_user_idx,
-            final_response=final_response,
-            retry_count=retry_count,
-            api_call_count=api_call_count,
-            length_continue_retries=length_continue_retries,
-            _preflight_compression_blocked=_preflight_compression_blocked,
-            _turn_exit_reason=_turn_exit_reason,
-        )
-        current_turn_user_idx = _rs.current_turn_user_idx
-        final_response = _rs.final_response
-        retry_count = _rs.retry_count
-        api_call_count = _rs.api_call_count
-        _preflight_compression_blocked = _rs._preflight_compression_blocked
-        _turn_exit_reason = _rs._turn_exit_reason
+
+        _rs = _run_phase(apply_retry_restarts, agent, s)
         if _rs.action == "break":
             break
         if _rs.action == "continue":
             continue
 
         try:
-            _ri = normalize_model_response(
-                agent,
-                response=response,
-                messages=messages,
-                api_messages=api_messages,
-                conversation_history=conversation_history,
-                api_call_count=api_call_count,
-                api_duration=api_duration,
-                api_start_time=api_start_time,
-                api_request_id=api_request_id,
-                effective_task_id=effective_task_id,
-                turn_id=turn_id,
-            )
-            assistant_message = _ri.assistant_message
-            finish_reason = _ri.finish_reason
+            _ri = _run_phase(normalize_model_response, agent, s)
             if _ri.action == "return":
                 return _ri.result
             if _ri.action == "continue":
                 continue
-            
-            # Check for tool calls
-            if assistant_message.tool_calls:
-                _tr = run_tool_round(
-                    agent,
-                    assistant_message=assistant_message,
-                    finish_reason=finish_reason,
-                    messages=messages,
-                    conversation_history=conversation_history,
-                    api_call_count=api_call_count,
-                    effective_task_id=effective_task_id,
-                    user_message=user_message,
-                    system_message=system_message,
-                    active_system_prompt=active_system_prompt,
-                    compression_attempts=compression_attempts,
-                    max_compression_attempts=max_compression_attempts,
-                    final_response=final_response,
-                    failed=failed,
-                    _turn_exit_reason=_turn_exit_reason,
-                    truncated_tool_call_retries=truncated_tool_call_retries,
-                )
-                messages = _tr.messages
-                conversation_history = _tr.conversation_history
-                active_system_prompt = _tr.active_system_prompt
-                compression_attempts = _tr.compression_attempts
-                final_response = _tr.final_response
-                failed = _tr.failed
-                _turn_exit_reason = _tr._turn_exit_reason
-                truncated_tool_call_retries = _tr.truncated_tool_call_retries
+            if s.assistant_message.tool_calls:
+                _tr = _run_phase(run_tool_round, agent, s)
                 if _tr.action == "return":
                     return _tr.result
                 if _tr.action == "break":
                     break
                 if _tr.action == "continue":
                     continue
-            
             else:
-                _fr = finish_text_response(
-                    agent,
-                    assistant_message=assistant_message,
-                    response=response,
-                    finish_reason=finish_reason,
-                    messages=messages,
-                    api_messages=api_messages,
-                    conversation_history=conversation_history,
-                    api_call_count=api_call_count,
-                    user_message=user_message,
-                    active_system_prompt=active_system_prompt,
-                    final_response=final_response,
-                    _turn_exit_reason=_turn_exit_reason,
-                    _preflight_compression_blocked=_preflight_compression_blocked,
-                    codex_ack_continuations=codex_ack_continuations,
-                    truncated_response_parts=truncated_response_parts,
-                    length_continue_retries=length_continue_retries,
-                    _pending_verification_response=_pending_verification_response,
-                    _pending_verification_response_previewed=_pending_verification_response_previewed,
-                )
-                active_system_prompt = _fr.active_system_prompt
-                final_response = _fr.final_response
-                _turn_exit_reason = _fr._turn_exit_reason
-                _preflight_compression_blocked = _fr._preflight_compression_blocked
-                codex_ack_continuations = _fr.codex_ack_continuations
-                truncated_response_parts = _fr.truncated_response_parts
-                length_continue_retries = _fr.length_continue_retries
-                _pending_verification_response = _fr._pending_verification_response
-                _pending_verification_response_previewed = _fr._pending_verification_response_previewed
+                _fr = _run_phase(finish_text_response, agent, s)
                 if _fr.action == "return":
                     return _fr.result
                 if _fr.action == "break":
                     break
                 if _fr.action == "continue":
                     continue
-            
         except Exception as e:
-            _oe = handle_outer_loop_error(
-                agent,
-                e=e,
-                _outer_error_count=_outer_error_count,
-                api_call_count=api_call_count,
-                messages=messages,
-                conversation_history=conversation_history,
-                _turn_exit_reason=_turn_exit_reason,
-                failed=failed,
-                final_response=final_response,
-            )
-            _outer_error_count = _oe._outer_error_count
-            _turn_exit_reason = _oe._turn_exit_reason
-            failed = _oe.failed
-            final_response = _oe.final_response
-            if _oe.action == "break":
+            if _run_phase(handle_outer_loop_error, agent, s, e=e).action == "break":
                 break
-    
+
     # Post-loop finalization lives in agent/turn_finalizer.finalize_turn.
     result = finalize_turn(
         agent,
-        final_response=final_response,
-        api_call_count=api_call_count,
-        interrupted=interrupted,
-        failed=failed,
-        messages=messages,
-        conversation_history=conversation_history,
-        effective_task_id=effective_task_id,
-        turn_id=turn_id,
-        user_message=user_message,
-        original_user_message=original_user_message,
-        _should_review_memory=_should_review_memory,
-        _turn_exit_reason=_turn_exit_reason,
-        _pending_verification_response=_pending_verification_response,
-        _pending_verification_response_previewed=_pending_verification_response_previewed,
+        final_response=s.final_response,
+        api_call_count=s.api_call_count,
+        interrupted=s.interrupted,
+        failed=s.failed,
+        messages=s.messages,
+        conversation_history=s.conversation_history,
+        effective_task_id=s.effective_task_id,
+        turn_id=s.turn_id,
+        user_message=s.user_message,
+        original_user_message=s.original_user_message,
+        _should_review_memory=s._should_review_memory,
+        _turn_exit_reason=s._turn_exit_reason,
+        _pending_verification_response=s._pending_verification_response,
+        _pending_verification_response_previewed=s._pending_verification_response_previewed,
     )
-    if _compression_timeout_exhausted:
+    if s._compression_timeout_exhausted:
         # Reuse the gateway's context-recovery contract: transcript stays intact while
         # future input can move to a clean session (#98722).
         result["error"] = _COMPRESSION_TIMEOUT_FINAL_RESPONSE
         result["partial"] = True
         result["compression_exhausted"] = True
     return result
-
 
 
 __all__ = ["run_conversation"]
