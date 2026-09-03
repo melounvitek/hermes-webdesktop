@@ -11,21 +11,21 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_config import (
+    _AUX_TASK_SLOTS, _apply_model_assignment_sync, _dashboard_code_skew_guard,
+)
+from starlette.concurrency import run_in_threadpool
 from hermes_cli.web_models import ModelAssignment, MoaConfigPayload, MoaModelSlot
 from hermes_cli.web_routers._common import http_failure
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_apply_model_assignment_sync = late("_apply_model_assignment_sync")
-_config_profile_scope = late("_config_profile_scope")
-_dashboard_code_skew_guard = late("_dashboard_code_skew_guard")
-_profile_scope = late("_profile_scope")
-load_config = late("load_config")
-run_in_threadpool = late("run_in_threadpool")
-save_config = late("save_config")
-_AUX_TASK_SLOTS = LateState("_AUX_TASK_SLOTS")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
 
 
 _EMPTY_MODEL_INFO: dict = {

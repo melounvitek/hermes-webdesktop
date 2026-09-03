@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_dashboard import _invalidate_plugins_hub_cache
+from hermes_cli.web_server_memory import (
+    _coerce_bool, _field_default, _field_is_set, _field_value, _field_visible, _load_memory_provider, _memory_provider_manifest, _memory_provider_setup_info, _memory_provider_setup_manifest, _normalize_memory_provider_schema, _read_memory_provider_existing_values, _require_memory_provider_ready, _run_setup_command,
+)
 from hermes_cli.web_models import MemoryProviderConfigUpdate, MemoryProviderSetupRequest
 from hermes_cli.web_routers._common import scoped_to_thread
 from plugins.memory.config_schema import (
@@ -26,29 +30,14 @@ from plugins.memory.config_schema import (
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_coerce_bool = late("_coerce_bool")
-_discover_memory_provider_statuses = late("_discover_memory_provider_statuses")
-_field_default = late("_field_default")
-_field_is_set = late("_field_is_set")
-_field_value = late("_field_value")
-_field_visible = late("_field_visible")
-_invalidate_plugins_hub_cache = late("_invalidate_plugins_hub_cache")
-_load_memory_provider = late("_load_memory_provider")
-_memory_provider_manifest = late("_memory_provider_manifest")
-_memory_provider_setup_info = late("_memory_provider_setup_info")
-_memory_provider_setup_manifest = late("_memory_provider_setup_manifest")
-_normalize_memory_provider_schema = late("_normalize_memory_provider_schema")
-_read_memory_provider_existing_values = late("_read_memory_provider_existing_values")
-_require_memory_provider_ready = late("_require_memory_provider_ready")
-_run_setup_command = late("_run_setup_command")
-get_hermes_home = late("get_hermes_home")
-load_config = late("load_config")
-save_config = late("save_config")
-save_env_value = late("save_env_value")
-_dependency_importable = late("_dependency_importable")
-load_env = late("load_env")
-
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_discover_memory_provider_statuses = late("_discover_memory_provider_statuses", "hermes_cli.web_server_memory")
+get_hermes_home = late("get_hermes_home", "hermes_cli.config")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
+save_env_value = late("save_env_value", "hermes_cli.config")
+_dependency_importable = late("_dependency_importable", "hermes_cli.web_server_memory")
+load_env = late("load_env", "hermes_cli.config")
 # Sentinel: remove this key so it falls back to the host or built-in default.
 _UNSET: Any = object()
 

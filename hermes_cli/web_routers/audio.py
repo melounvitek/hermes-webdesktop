@@ -19,6 +19,8 @@ import urllib.request
 from fastapi import APIRouter
 from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_chat import _ws_auth_ok, _ws_request_is_allowed
+from hermes_cli.web_server_gateway import _split_text_for_speak_stream
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect
 from hermes_cli.web_models import AudioTranscriptionRequest, TTSSpeakRequest, TTSLeaseRequest
 from typing import Any, Dict, Optional
@@ -26,13 +28,10 @@ from typing import Any, Dict, Optional
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_config_profile_scope = late("_config_profile_scope")
-_split_text_for_speak_stream = late("_split_text_for_speak_stream")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
 _voice_list_error_logged_once = late("_voice_list_error_logged_once")
-_ws_auth_ok = late("_ws_auth_ok")
-_ws_request_is_allowed = late("_ws_request_is_allowed")
-load_env = late("load_env")
+load_env = late("load_env", "hermes_cli.config")
 
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
     "audio/aac": ".aac", "audio/flac": ".flac", "audio/m4a": ".m4a", "audio/mp3": ".mp3",

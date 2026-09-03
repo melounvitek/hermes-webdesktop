@@ -1,6 +1,6 @@
 """Shared plumbing for the extracted dashboard routers — thin wrappers over the
 late-binding seam in :mod:`hermes_cli.web_deps` (web_server owns helpers/state;
-every access resolves at call time so ``monkeypatch.setattr(web_server, ...)`` wins)."""
+every access resolves at call time so ``monkeypatch.setattr(<owning module>, ...)`` wins)."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from typing import Any, Callable, Optional
 from fastapi import HTTPException
 
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_profiles import _profile_cli_args
 
 # Same logger the handlers used before extraction (identical logger object).
 log = logging.getLogger("hermes_cli.web_server")
 
-_profile_scope = late("_profile_scope")
-_spawn_hermes_action = late("_spawn_hermes_action")
-_profile_cli_args = late("_profile_cli_args")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+_spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gateway")
 # Config read-modify-write serialization for off-loop handlers (live lock —
 # LateState supports ``with``-blocks).
 _CONFIG_MUTATION_LOCK = LateState("_CONFIG_MUTATION_LOCK")

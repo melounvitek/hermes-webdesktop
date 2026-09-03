@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_profiles import _plugin_terminal_backend_rows
+from starlette.concurrency import run_in_threadpool
 from hermes_cli.web_models import (
     TerminalBackendSelect, ToolsetEnvUpdate, ToolsetModelSelect, ToolsetPostSetup,
     ToolsetProviderSelect, ToolsetToggle)
@@ -23,10 +25,8 @@ from hermes_cli.web_routers._common import (
 
 router = APIRouter()
 
-load_config = late("load_config")
-save_config = late("save_config")
-run_in_threadpool = late("run_in_threadpool")
-_plugin_terminal_backend_rows = late("_plugin_terminal_backend_rows")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
 
 
 def _env_value(name: str) -> str:
@@ -50,7 +50,7 @@ def _terminal_cfg_value(terminal_cfg: dict, key: str, env_var: str) -> str:
 def _terminal_backend_rows() -> List[Dict[str, str]]:
     """Built-in picker rows plus plugin-registered backends, computed per request
     so a plugin installed after server start still shows up."""
-    from hermes_cli.web_server import _TERMINAL_BACKENDS
+    from hermes_cli.web_server_profiles import _TERMINAL_BACKENDS
     return [*_TERMINAL_BACKENDS, *_plugin_terminal_backend_rows()]
 
 

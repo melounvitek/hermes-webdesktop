@@ -26,22 +26,19 @@ from fastapi.responses import FileResponse
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_files import (
+    _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+)
 from hermes_cli.web_models import (
     ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
 )
 
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_fs_path = late("_fs_path")
-_managed_file_entry = late("_managed_file_entry")
-_managed_response_meta = late("_managed_response_meta")
-_profile_scope = late("_profile_scope")
-_resolve_managed_path = late("_resolve_managed_path")
-get_hermes_home = late("get_hermes_home")
-load_config = late("load_config")
-
-
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+get_hermes_home = late("get_hermes_home", "hermes_cli.config")
+load_config = late("load_config", "hermes_cli.config")
 # Image types GET /api/media serves — extension-allowlisted so an authenticated
 # caller can't pull non-image files through it.
 _MEDIA_CONTENT_TYPES = {

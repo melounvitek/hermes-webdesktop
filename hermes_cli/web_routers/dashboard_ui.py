@@ -13,6 +13,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.config import cfg_get
+from hermes_cli.web_server_dashboard import (
+    _BUILTIN_DASHBOARD_THEMES, _discover_user_themes, _invalidate_plugins_hub_cache, _merged_plugins_hub,
+)
+from hermes_cli.web_server_memory import _normalize_memory_provider_name, _require_memory_provider_ready
 from hermes_cli.web_models import (
     FontSetBody, ThemeSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody,
 )
@@ -20,18 +25,11 @@ from hermes_cli.web_models import (
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers/state, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_discover_user_themes = late("_discover_user_themes")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
 _get_dashboard_plugins = late("_get_dashboard_plugins")
-_invalidate_plugins_hub_cache = late("_invalidate_plugins_hub_cache")
-_merged_plugins_hub = late("_merged_plugins_hub")
-_normalize_memory_provider_name = late("_normalize_memory_provider_name")
-_require_memory_provider_ready = late("_require_memory_provider_ready")
 _require_token = late("_require_token")
-cfg_get = late("cfg_get")
-load_config = late("load_config")
-save_config = late("save_config")
-_BUILTIN_DASHBOARD_THEMES = LateState("_BUILTIN_DASHBOARD_THEMES")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
 _CONFIG_MUTATION_LOCK = LateState("_CONFIG_MUTATION_LOCK")
 
 

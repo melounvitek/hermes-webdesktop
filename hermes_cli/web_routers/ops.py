@@ -22,6 +22,9 @@ from fastapi.responses import FileResponse
 
 from hermes_cli.config import redact_key
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_files import _path_is_under
+from hermes_cli.web_server_gateway import _restart_gateway_after
+from hermes_cli.web_server_memory import _normalize_memory_provider_name, _require_memory_provider_ready
 from hermes_cli.web_models import (
     BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
     MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
@@ -32,19 +35,15 @@ from hermes_cli.web_routers.files import stream_upload_to_path
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_discover_memory_provider_statuses = late("_discover_memory_provider_statuses")
-_gateway_subcommand = late("_gateway_subcommand")
-_normalize_memory_provider_name = late("_normalize_memory_provider_name")
-_path_is_under = late("_path_is_under")
-_require_memory_provider_ready = late("_require_memory_provider_ready")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_spawn_hermes_action = late("_spawn_hermes_action")
-_write_platform_enabled = late("_write_platform_enabled")
-get_hermes_home = late("get_hermes_home")
-load_config = late("load_config")
-save_config = late("save_config")
-_restart_gateway_after = late("_restart_gateway_after")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_discover_memory_provider_statuses = late("_discover_memory_provider_statuses", "hermes_cli.web_server_memory")
+_gateway_subcommand = late("_gateway_subcommand", "hermes_cli.web_server_gateway")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gateway")
+_write_platform_enabled = late("_write_platform_enabled", "hermes_cli.web_server_messaging")
+get_hermes_home = late("get_hermes_home", "hermes_cli.config")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
 
 
 def _spawn_action(argv: List[str], name: str, *, log_msg: str, prefix: str) -> dict:

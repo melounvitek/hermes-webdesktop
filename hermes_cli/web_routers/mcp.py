@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_mcp import _mcp_oauth_flows, _mcp_server_summary, _normalize_mcp_server_create
 from hermes_cli.web_models import MCPCatalogInstall, MCPEnabledToggle, MCPServerCreate, MCPServersReplace
 from hermes_cli.web_routers._common import (
     _profile_cli_args, _profile_scope, _spawn_hermes_action, config_write_scope, http_failure,
@@ -25,16 +26,13 @@ from hermes_cli.web_routers._common import (
 
 router = APIRouter()
 
-_config_profile_scope = late("_config_profile_scope")
-_mcp_server_summary = late("_mcp_server_summary")
-_normalize_mcp_server_create = late("_normalize_mcp_server_create")
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
 _require_token = late("_require_token")
-_run_dashboard_mcp_oauth = late("_run_dashboard_mcp_oauth")
-load_config = late("load_config")
-save_config = late("save_config")
-save_env_value = late("save_env_value")
+_run_dashboard_mcp_oauth = late("_run_dashboard_mcp_oauth", "hermes_cli.web_server_mcp")
+load_config = late("load_config", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
+save_env_value = late("save_env_value", "hermes_cli.config")
 
-_mcp_oauth_flows = LateState("_mcp_oauth_flows")
 _mcp_oauth_flows_lock = threading.Lock()
 _MCP_DASHBOARD_OAUTH_TTL = 15 * 60
 _MAX_PENDING_MCP_OAUTH_FLOWS = 8
@@ -67,7 +65,7 @@ def _mcp_install_action_name(name: str) -> str:
     """Unique per-entry mcp-install action name (+ registered log file), so a
     re-click or a second catalog install doesn't overwrite the first's tracked
     process/log while its git clone is still running."""
-    from hermes_cli.web_server import _ACTION_LOG_FILES
+    from hermes_cli.web_server_gateway import _ACTION_LOG_FILES
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:48] or "server"
     digest = hashlib.sha1(name.encode()).hexdigest()[:8]
     action = f"mcp-install-{slug}-{digest}"

@@ -18,6 +18,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_gateway import _strip_session_list_rows
+from hermes_cli.web_server_sessions import _maybe_auto_archive_for_profile, _session_latest_descendant
 from hermes_cli.web_models import (
     BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
 from hermes_cli.web_routers._common import log as _log, http_failure
@@ -28,12 +30,9 @@ list_router = APIRouter()
 search_router = APIRouter()
 manage_router = APIRouter()
 
-_cron_default_profile = late("_cron_default_profile")
-_cron_profile_home = late("_cron_profile_home")
-_maybe_auto_archive_for_profile = late("_maybe_auto_archive_for_profile")
-_open_session_db_for_profile = late("_open_session_db_for_profile")
-_session_latest_descendant = late("_session_latest_descendant")
-_strip_session_list_rows = late("_strip_session_list_rows")
+_cron_default_profile = late("_cron_default_profile", "hermes_cli.web_server_cron")
+_cron_profile_home = late("_cron_profile_home", "hermes_cli.web_server_cron")
+_open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.web_server_sessions")
 
 _NOT_FOUND = "Session not found"
 
@@ -71,7 +70,7 @@ _PRUNE_ROW_KEYS = ("id", "source", "title", "model", "started_at", "last_active"
 
 def _prune_sessions(body: SessionPrune):
     """Delete ended sessions matching filters (mirrors `hermes sessions prune`)."""
-    from hermes_cli.web_server import get_hermes_home
+    from hermes_cli.config import get_hermes_home
     has_window = body.started_before is not None or body.started_after is not None
     if body.older_than_days is not None and body.older_than_days < 1 and not has_window:
         raise HTTPException(status_code=400, detail="older_than_days must be >= 1")

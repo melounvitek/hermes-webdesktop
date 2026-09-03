@@ -5,8 +5,8 @@ projects/tree, pull-requests) was registered long before the generic
 ``/api/profiles/{name}`` routes on ``router``; the original global registration order is
 preserved rather than relying on Starlette's literal-before-param matching.
 
-web_server-owned helpers are reached via the late-binding seam in :mod:`hermes_cli.web_deps`
-so tests that ``monkeypatch.setattr(web_server, "_helper", ...)`` keep working.
+Shared helpers are reached via the late-binding seam in :mod:`hermes_cli.web_deps`
+so a test's ``monkeypatch.setattr(<owning module>, "_helper", ...)`` keeps working.
 """
 
 import contextlib
@@ -27,6 +27,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_config import _apply_main_model_assignment, _normalize_main_model_assignment
+from hermes_cli.web_server_gateway import _strip_session_list_rows
+from hermes_cli.web_server_profiles import (
+    _fallback_profile_dicts, _hub_action_name, _write_profile_mcp_servers,
+)
+from hermes_cli.web_server_sessions import _open_session_db_at_path
+from starlette.concurrency import run_in_threadpool
 from hermes_cli.web_models import (
     ProfileCreate, ProfileActiveUpdate, ProfileExport, ProfileImport, ProfileRename,
     ProfileSoulUpdate, ProfileDescriptionUpdate, ProfileModelUpdate, ProfileDescribeAuto,
@@ -54,18 +61,9 @@ sessions_router = APIRouter()
 router = APIRouter()
 
 # Late-bound web_server helpers (resolved at call time; cycle-safe, monkeypatch-transparent).
-_cron_profile_home = late("_cron_profile_home")
-_fallback_profile_dicts = late("_fallback_profile_dicts")
-_hub_action_name = late("_hub_action_name")
-_open_session_db_at_path = late("_open_session_db_at_path")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_spawn_hermes_action = late("_spawn_hermes_action")
-run_in_threadpool = late("run_in_threadpool")
-_strip_session_list_rows = late("_strip_session_list_rows")
-_write_profile_mcp_servers = late("_write_profile_mcp_servers")
-_apply_main_model_assignment = late("_apply_main_model_assignment")
-_normalize_main_model_assignment = late("_normalize_main_model_assignment")
-
+_cron_profile_home = late("_cron_profile_home", "hermes_cli.web_server_cron")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gateway")
 
 # ---------------------------------------------------------------------------
 # Profile management endpoints (minimal — list/create/rename/delete + SOUL.md)
@@ -99,7 +97,7 @@ def _profile_setup_command(name: str) -> str:
 def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
     """Write the main model assignment into ``profile_dir``'s config.yaml (HERMES_HOME-scoped);
     clears stale ``base_url`` / ``context_length`` like ``POST /api/model/set`` does."""
-    from hermes_cli.web_server import load_config, save_config
+    from hermes_cli.config import load_config, save_config
     with _hermes_home_scope(profile_dir):
         provider, model = _normalize_main_model_assignment(provider, model)
         cfg = load_config()
@@ -112,7 +110,7 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
     newly disabled. Profiles manage activation via a *disabled* list (everything installed is
     active by default); the builder's skill step has "replace" semantics. Hub skills are
     installed separately via subprocess and are active on install."""
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     from hermes_cli.skills_config import get_disabled_skills, save_disabled_skills
     keep_set = {s.strip() for s in keep if s and s.strip()}
     with _hermes_home_scope(profile_dir):

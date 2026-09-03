@@ -3,8 +3,8 @@
 Two routers because global route order matters: ``hub_router`` (skills-hub
 install/search/scan) was registered before the profiles router include in
 web_server, the plain skills CRUD ``router`` after it — each is mounted at its
-original registration point.  web_server-owned helpers are reached via the
-late-binding seam so ``monkeypatch.setattr(web_server, ...)`` keeps working.
+original registration point.  Shared helpers are reached via the late-binding
+seam so ``monkeypatch.setattr(<owning module>, ...)`` keeps working.
 """
 
 import asyncio

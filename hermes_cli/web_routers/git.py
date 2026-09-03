@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 
 from hermes_cli import web_git as _web_git
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_files import _fs_path
 from hermes_cli.web_models import (
     GitBranchSwitchBody,
     GitCommitBody,
@@ -28,8 +29,7 @@ from hermes_cli.web_models import (
 
 router = APIRouter()
 
-# web_server helper, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_fs_path = late("_fs_path")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
 
 
 async def _git_op(fn, *args):

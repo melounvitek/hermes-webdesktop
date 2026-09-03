@@ -13,6 +13,12 @@ import urllib.parse
 from fastapi import APIRouter
 from hermes_cli.web_routers._common import http_failure, scoped_to_thread
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_config import (
+    _apply_main_model_assignment, _denormalize_config_from_web, _normalize_config_for_web, _schema_with_dynamic_provider_options,
+)
+from hermes_cli.web_server_profiles import (
+    _approval_mode_of, _broadcast_gateway_session_info, _is_other_profile, _parse_model_ids,
+)
 from fastapi import HTTPException, Request
 from hermes_cli.config import DEFAULT_CONFIG, OPTIONAL_ENV_VARS, read_raw_config, custom_endpoint_key_env, coerce_provider_id, find_provider_entry, redact_key, _deep_merge
 from hermes_cli.web_models import ConfigUpdate, EnvVarUpdate, EnvVarDelete, EnvVarReveal, CustomEndpointUpdate
@@ -22,24 +28,16 @@ _log = logging.getLogger("hermes_cli.web_server")
 config_router = APIRouter()
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_apply_main_model_assignment = late("_apply_main_model_assignment")
-_approval_mode_of = late("_approval_mode_of")
-_broadcast_gateway_session_info = late("_broadcast_gateway_session_info")
-_channel_managed_env_keys = late("_channel_managed_env_keys")
-_config_profile_scope = late("_config_profile_scope")
-_denormalize_config_from_web = late("_denormalize_config_from_web")
-_is_other_profile = late("_is_other_profile")
-_normalize_config_for_web = late("_normalize_config_for_web")
-_parse_model_ids = late("_parse_model_ids")
-_profile_scope = late("_profile_scope")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_channel_managed_env_keys = late("_channel_managed_env_keys", "hermes_cli.web_server_messaging")
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
 _require_token = late("_require_token")
-_schema_with_dynamic_provider_options = late("_schema_with_dynamic_provider_options")
-load_config = late("load_config")
-load_env = late("load_env")
-remove_env_value = late("remove_env_value")
-save_config = late("save_config")
-save_env_value = late("save_env_value")
+load_config = late("load_config", "hermes_cli.config")
+load_env = late("load_env", "hermes_cli.config")
+remove_env_value = late("remove_env_value", "hermes_cli.config")
+save_config = late("save_config", "hermes_cli.config")
+save_env_value = late("save_env_value", "hermes_cli.config")
 _CONFIG_MUTATION_LOCK = LateState("_CONFIG_MUTATION_LOCK")
 
 # Simple rate limiter for the reveal endpoint

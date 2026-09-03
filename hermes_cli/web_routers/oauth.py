@@ -16,25 +16,20 @@ from typing import Any, Callable, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_oauth import (
+    _external_process_cli_command, _minimax_poller, _nous_poller, _oauth_profile_name, _oauth_sessions, _oauth_sessions_lock, _truncate_token, _xai_device_poller,
+)
 from hermes_cli.web_models import OAuthSubmitBody
 from hermes_cli.web_routers._common import scoped_to_thread
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers/state, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_external_process_cli_command = late("_external_process_cli_command")
-_oauth_profile_name = late("_oauth_profile_name")
-_profile_scope = late("_profile_scope")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
 _require_token = late("_require_token")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_minimax_poller = late("_minimax_poller")
-_nous_poller = late("_nous_poller")
-_truncate_token = late("_truncate_token")
-_xai_device_poller = late("_xai_device_poller")
-_oauth_sessions = LateState("_oauth_sessions")
-_oauth_sessions_lock = LateState("_oauth_sessions_lock")
-_OAUTH_PROVIDER_CATALOG = LateState("_OAUTH_PROVIDER_CATALOG")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_OAUTH_PROVIDER_CATALOG = LateState("_OAUTH_PROVIDER_CATALOG", "hermes_cli.web_server_oauth")
 
 _CODEX_ISSUER = "https://auth.openai.com"
 _JSON_HEADERS = {"Content-Type": "application/json"}

@@ -25,6 +25,10 @@ from gateway.status import resolve_gateway_liveness
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import OPTIONAL_ENV_VARS, get_env_path, redact_key
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_gateway import _restart_gateway_after
+from hermes_cli.web_server_messaging import (
+    _TelegramOnboardingPairing, _WhatsAppOnboardingSession, _messaging_platform_catalog, _telegram_onboarding_error_message, _telegram_onboarding_lock, _telegram_onboarding_pairings, _whatsapp_onboarding_payload, _whatsapp_onboarding_sessions,
+)
 from hermes_cli.web_routers._common import http_failure
 from hermes_cli.web_models import (
     MessagingPlatformUpdate, TelegramOnboardingApply, TelegramOnboardingStart,
@@ -34,35 +38,24 @@ from hermes_cli.web_models import (
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers/state, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_config_profile_scope = late("_config_profile_scope")
-_messaging_platform_catalog = late("_messaging_platform_catalog")
-_profile_scope = late("_profile_scope")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding")
-_restart_gateway_after = late("_restart_gateway_after")
-_telegram_onboarding_error_message = late("_telegram_onboarding_error_message")
-_telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync")
-_whatsapp_onboarding_payload = late("_whatsapp_onboarding_payload")
-_whatsapp_session_path = late("_whatsapp_session_path")
-_write_platform_enabled = late("_write_platform_enabled")
-load_env = late("load_env")
-load_config = late("load_config")
-read_runtime_status = late("read_runtime_status")
-remove_env_value = late("remove_env_value")
-save_env_value = late("save_env_value")
-_gateway_subcommand = late("_gateway_subcommand")
-_probe_gateway_health = late("_probe_gateway_health")
-get_running_pid_cached = late("get_running_pid_cached")
-get_runtime_status_running_pid = late("get_runtime_status_running_pid")
-_WhatsAppOnboardingSession = late("_WhatsAppOnboardingSession")
-_TelegramOnboardingPairing = late("_TelegramOnboardingPairing")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_restart_gateway_after_whatsapp_onboarding = late("_restart_gateway_after_whatsapp_onboarding", "hermes_cli.web_server_messaging")
+_telegram_onboarding_request_sync = late("_telegram_onboarding_request_sync", "hermes_cli.web_server_messaging")
+_whatsapp_session_path = late("_whatsapp_session_path", "hermes_cli.web_server_messaging")
+_write_platform_enabled = late("_write_platform_enabled", "hermes_cli.web_server_messaging")
+load_env = late("load_env", "hermes_cli.config")
+load_config = late("load_config", "hermes_cli.config")
+read_runtime_status = late("read_runtime_status", "gateway.status")
+remove_env_value = late("remove_env_value", "hermes_cli.config")
+save_env_value = late("save_env_value", "hermes_cli.config")
+_gateway_subcommand = late("_gateway_subcommand", "hermes_cli.web_server_gateway")
+_probe_gateway_health = late("_probe_gateway_health", "hermes_cli.web_server_gateway")
+get_running_pid_cached = late("get_running_pid_cached", "gateway.status")
+get_runtime_status_running_pid = late("get_runtime_status_running_pid", "gateway.status")
 _GATEWAY_HEALTH_URL = LateState("_GATEWAY_HEALTH_URL")
-_whatsapp_onboarding_sessions = LateState("_whatsapp_onboarding_sessions")
-_telegram_onboarding_lock = LateState("_telegram_onboarding_lock")
-_telegram_onboarding_pairings = LateState("_telegram_onboarding_pairings")
-
-
 # Display labels for env vars not in OPTIONAL_ENV_VARS (bridge toggles, Twilio, HASS, Email, ...)
 # so the UI can still render a friendly label. Rows: (key, description, prompt, extra flags).
 _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {

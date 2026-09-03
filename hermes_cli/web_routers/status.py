@@ -1,8 +1,8 @@
 """Status dashboard routes: health, /api/status, system stats, curator, learning graph,
 portal and diagnostics actions.
 
-Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+Extracted from ``hermes_cli.web_server``; app state and helpers are late-bound through
+:mod:`hermes_cli.web_deps` (cycle-safe, monkeypatch-friendly).
 """
 
 import concurrent.futures
@@ -15,6 +15,8 @@ import sys
 import time
 from fastapi import APIRouter
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_gateway import _display_system_platform
+from starlette.concurrency import run_in_threadpool
 from fastapi import HTTPException, Request
 from gateway.status import derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents, resolve_gateway_liveness
 from hermes_cli import __version__, __release_date__
@@ -29,28 +31,26 @@ router = APIRouter()
 # Mounted separately by web_server so /api/logs keeps its original route-table position.
 logs_router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_collect_profile_gateway_topology_cached = late("_collect_profile_gateway_topology_cached")
-_config_profile_scope = late("_config_profile_scope")
-_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally")
-_display_system_platform = late("_display_system_platform")
-_load_configured_gateway_platforms = late("_load_configured_gateway_platforms")
-_probe_gateway_health = late("_probe_gateway_health")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_collect_profile_gateway_topology_cached = late("_collect_profile_gateway_topology_cached", "hermes_cli.web_server_gateway")
+_config_profile_scope = late("_config_profile_scope", "hermes_cli.web_server_profiles")
+_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally", "hermes_cli.web_server_files")
+_load_configured_gateway_platforms = late("_load_configured_gateway_platforms", "hermes_cli.web_server_gateway")
+_probe_gateway_health = late("_probe_gateway_health", "hermes_cli.web_server_gateway")
 _require_token = late("_require_token")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_resolve_restart_drain_timeout = late("_resolve_restart_drain_timeout")
-_spawn_hermes_action = late("_spawn_hermes_action")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_resolve_restart_drain_timeout = late("_resolve_restart_drain_timeout", "hermes_cli.web_server_lifecycle")
+_spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gateway")
 _ssh_runtime_intact = late("_ssh_runtime_intact")
 app = LateState("app")  # the FastAPI instance (app.state.*)
-check_config_version = late("check_config_version")
-get_hermes_home = late("get_hermes_home")
+check_config_version = late("check_config_version", "hermes_cli.config")
+get_hermes_home = late("get_hermes_home", "hermes_cli.config")
 get_install_id = late("get_install_id")
-get_running_pid_cached = late("get_running_pid_cached")
-get_runtime_status_running_pid = late("get_runtime_status_running_pid")
-load_config = late("load_config")
-read_runtime_status = late("read_runtime_status")
-run_in_threadpool = late("run_in_threadpool")
-_open_session_db_for_profile = late("_open_session_db_for_profile")
+get_running_pid_cached = late("get_running_pid_cached", "gateway.status")
+get_runtime_status_running_pid = late("get_runtime_status_running_pid", "gateway.status")
+load_config = late("load_config", "hermes_cli.config")
+read_runtime_status = late("read_runtime_status", "gateway.status")
+_open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.web_server_sessions")
 
 
 _STATUS_ACTIVE_SESSIONS_TIMEOUT = 0.75
@@ -183,7 +183,7 @@ def _merge_profile_gateway_platforms(gateway_platforms: dict, profile_platforms:
 # status) are written to the per-profile home, not the process-level HERMES_HOME (see issue #69143). Plain
 # /api/status keeps the exact zero-arg call so its behavior (and cache signature) is unchanged. The
 # module-level probe references are handed to the resolver so the long-standing
-# `monkeypatch.setattr(web_server, "get_running_pid_cached", ...)` seam used across the test-suite still
+# `monkeypatch.setattr(gateway.status, "get_running_pid_cached", ...)` seam used across the test-suite still
 # intercepts them.
 def _bounded_health_probe():
     """Health probe with the route's blocking-call budget preserved. The resolver only
@@ -228,7 +228,7 @@ async def _resolve_gateway_status(profile_dir: Optional[Path], health_url) -> Di
     scoped to that profile's directory (gateway identity files live in the per-profile
     home); plain /api/status keeps the exact zero-arg call so its cache signature is
     unchanged. The module-level probe references are handed to the resolver so the
-    ``monkeypatch.setattr(web_server, "get_running_pid_cached", ...)`` seam still intercepts.
+    ``monkeypatch.setattr(gateway.status, "get_running_pid_cached", ...)`` seam still intercepts.
     """
     local_runtime = (read_runtime_status(path=profile_dir / "gateway_state.json")
                      if profile_dir else read_runtime_status())

@@ -19,30 +19,31 @@ from fastapi import APIRouter, HTTPException, Request
 from hermes_cli import __version__
 from hermes_cli.config import format_docker_update_message, recommended_update_command_for_method
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_gateway import _ACTION_LOG_FILES
 from hermes_cli.web_routers._common import http_failure
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 status_router = APIRouter()
 
-# web_server helpers/state, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_dashboard_local_update_managed_externally = late("_dashboard_local_update_managed_externally", "hermes_cli.web_server_files")
 _spawn_gateway_restart = late("_spawn_gateway_restart")
-_spawn_hermes_action = late("_spawn_hermes_action")
-detect_install_method = late("detect_install_method")
-get_hermes_home = late("get_hermes_home")
-_ACTION_COMMANDS = LateState("_ACTION_COMMANDS")
-_ACTION_IDS = LateState("_ACTION_IDS")
-_ACTION_LOG_FILES = LateState("_ACTION_LOG_FILES")
-_ACTION_PROCS = LateState("_ACTION_PROCS")
-_ACTION_RESULTS = LateState("_ACTION_RESULTS")
+_spawn_hermes_action = late("_spawn_hermes_action", "hermes_cli.web_server_gateway")
+detect_install_method = late("detect_install_method", "hermes_cli.config")
+get_hermes_home = late("get_hermes_home", "hermes_cli.config")
+_ACTION_COMMANDS = LateState("_ACTION_COMMANDS", "hermes_cli.web_server_gateway")
+_ACTION_IDS = LateState("_ACTION_IDS", "hermes_cli.web_server_gateway")
+_ACTION_PROCS = LateState("_ACTION_PROCS", "hermes_cli.web_server_gateway")
+_ACTION_RESULTS = LateState("_ACTION_RESULTS", "hermes_cli.web_server_gateway")
 
 
 def _server_path(name: str) -> Path:
-    """Live ``web_server.<name>`` Path value (``_ACTION_LOG_DIR`` / ``PROJECT_ROOT``; plain
-    values are not proxied by LateState)."""
+    """Live Path value (``_ACTION_LOG_DIR`` on web_server_gateway, ``PROJECT_ROOT`` on
+    web_server; plain values are not proxied by LateState)."""
     import hermes_cli.web_server as ws
-    return getattr(ws, name)
+    import hermes_cli.web_server_gateway as gw
+    return getattr(gw if name == "_ACTION_LOG_DIR" else ws, name)
 
 
 _ACTION_LOG_TAIL_MAX_BYTES = 256 * 1024

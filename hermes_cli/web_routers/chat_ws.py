@@ -17,23 +17,21 @@ from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisco
 
 from hermes_cli.pty_session import RegistryFull
 from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_server_chat import (
+    _build_sidecar_url, _get_console_executor, _legacy_pump, _ws_auth_ok, _ws_request_is_allowed,
+)
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_active_session_file_for_channel = late("_active_session_file_for_channel")
-_build_sidecar_url = late("_build_sidecar_url")
-_get_console_executor = late("_get_console_executor")
-_legacy_pump = late("_legacy_pump")
-_profile_scope = late("_profile_scope")
-_resolve_chat_argv_async = late("_resolve_chat_argv_async")
-_resolve_profile_dir = late("_resolve_profile_dir")
-_ws_auth_ok = late("_ws_auth_ok")
-_ws_auth_reason = late("_ws_auth_reason")
-_ws_client_reason = late("_ws_client_reason")
-_ws_host_origin_reason = late("_ws_host_origin_reason")
-_ws_request_is_allowed = late("_ws_request_is_allowed")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_active_session_file_for_channel = late("_active_session_file_for_channel", "hermes_cli.web_server_chat")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+_resolve_chat_argv_async = late("_resolve_chat_argv_async", "hermes_cli.web_server_chat")
+_resolve_profile_dir = late("_resolve_profile_dir", "hermes_cli.web_server_profiles")
+_ws_auth_reason = late("_ws_auth_reason", "hermes_cli.web_server_chat")
+_ws_client_reason = late("_ws_client_reason", "hermes_cli.web_server_chat")
+_ws_host_origin_reason = late("_ws_host_origin_reason", "hermes_cli.web_server_chat")
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = LateState("_DASHBOARD_EMBEDDED_CHAT_ENABLED")
 
 
@@ -54,7 +52,8 @@ _VALID_CHANNEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 def _ws_auth_mode() -> str:
     """Short label for the active WS auth mode — logged on every connection."""
-    from hermes_cli.web_server import _LOOPBACK_HOSTS, app
+    from hermes_cli.web_server_chat import _LOOPBACK_HOSTS
+    from hermes_cli.web_server import app
     if getattr(app.state, "auth_required", False):
         return "gated"
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
@@ -403,13 +402,7 @@ async def _pty_fail(ws: WebSocket, text: str) -> None:
 
 @router.websocket("/api/pty")
 async def pty_ws(ws: WebSocket) -> None:
-    from hermes_cli.web_server import (
-        PTY_REGISTRY,
-        PtyBridge,
-        PtyUnavailableError,
-        _PTY_BRIDGE_AVAILABLE,
-        _RESIZE_RE,
-    )
+    from hermes_cli.web_server_chat import PTY_REGISTRY, PtyBridge, PtyUnavailableError, _PTY_BRIDGE_AVAILABLE, _RESIZE_RE
     gate = await _ws_gate(ws, "pty")
     if gate is None:
         return

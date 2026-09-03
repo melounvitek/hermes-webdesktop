@@ -1,7 +1,7 @@
 """Raw-YAML config and token/cost analytics dashboard routes.
 
-Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+Extracted from ``hermes_cli.web_server``; app state and helpers are late-bound through
+:mod:`hermes_cli.web_deps` (cycle-safe, monkeypatch-friendly).
 """
 
 import asyncio
@@ -13,20 +13,17 @@ from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.config import get_config_path, read_raw_config
 from hermes_cli.web_deps import late
+from hermes_cli.web_server_profiles import (
+    _approval_mode_of, _aux_task_summary, _aux_usage_rows, _broadcast_gateway_session_info, _is_other_profile, _merge_aux_into_by_model,
+)
 from hermes_cli.web_models import RawConfigUpdate
 
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
-_approval_mode_of = late("_approval_mode_of")
-_aux_task_summary = late("_aux_task_summary")
-_aux_usage_rows = late("_aux_usage_rows")
-_broadcast_gateway_session_info = late("_broadcast_gateway_session_info")
-_is_other_profile = late("_is_other_profile")
-_merge_aux_into_by_model = late("_merge_aux_into_by_model")
-_open_session_db_for_profile = late("_open_session_db_for_profile")
-_profile_scope = late("_profile_scope")
-save_config = late("save_config")
+# Late-bound so a test's monkeypatch on the owning module wins at call time.
+_open_session_db_for_profile = late("_open_session_db_for_profile", "hermes_cli.web_server_sessions")
+_profile_scope = late("_profile_scope", "hermes_cli.web_server_profiles")
+save_config = late("save_config", "hermes_cli.config")
 
 # ── Raw YAML config ──────────────────────────────────────────────────────────
 
