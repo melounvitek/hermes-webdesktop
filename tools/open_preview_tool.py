@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Open a URL, dev server, or file in the Hermes desktop GUI's preview pane.
 
-Registration moved into the `desktop_preview` tool; this module keeps the normalizer +
-open action for ``tools.preview_tool``. Emits ``preview.open`` via ``desktop_ui``: the
-renderer opens the pane for the window that asked and never steals focus for a
-background session. The desktop_ui toolset reaches desktop clients on any backend.
+Registration lives in the `desktop_preview` tool (``tools.preview_tool``); this module keeps
+the normalizer + open action. Emits ``preview.open`` via ``desktop_ui``: the renderer opens
+the pane for the window that asked and never steals focus for a background session.
 """
 
 import re
@@ -37,7 +36,6 @@ def open_preview_tool(url: str, label: str = "") -> str:
             "url is required — a web URL (https://…), a localhost dev server, or a "
             "file path to show in the preview pane."
         )
-
     label = (label or "").strip()
     return desktop_ui.emit_or_error(
         "preview.open",
