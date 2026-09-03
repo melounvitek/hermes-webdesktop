@@ -277,8 +277,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
         BlueBubbles posts to the exact registered URL and its registration
         API cannot set custom headers, so this is the only way to
-        authenticate inbound webhooks without disabling auth.
-        """
+        authenticate inbound webhooks without disabling auth."""
         return self._webhook_register_url_with(quote(self.password, safe=""))
 
     @property
@@ -345,8 +344,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         membership is intentionally NOT a fallback: the same contact appears in
         a 1:1 DM and any number of groups, so a participant match could leak a
         DM reply into a group thread. Return ``None`` and let the caller create
-        a fresh DM via ``_create_chat_for_handle``.
-        """
+        a fresh DM via ``_create_chat_for_handle``."""
         target = (target or "").strip()
         if not target:
             return None

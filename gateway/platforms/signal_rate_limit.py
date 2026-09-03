@@ -56,8 +56,7 @@ def _extract_retry_after_seconds(err: Any) -> Optional[float]:
 
     Sources, in order: ``error.data.response.results[*].retryAfterSeconds`` (signal-cli
     ≥ v0.14.3), then "Retry after N seconds" parsed from the message (libsignal-net
-    RetryLaterException wrapped as AttachmentInvalidException, structured field null).
-    """
+    RetryLaterException wrapped as AttachmentInvalidException, structured field null)."""
     if isinstance(err, dict):
         results = ((err.get("data") or {}).get("response") or {}).get("results") or []
         candidates = [
@@ -105,8 +104,7 @@ class SignalAttachmentScheduler:
     Holds up to ``capacity`` tokens (default 50 = Signal's server bucket); each
     attachment consumes one. Tokens refill at ``refill_rate``/s, calibrated from the
     server's per-token Retry-After once a 429 has been observed (default 1 token / 4s).
-    ``acquire(n)`` calls serialize through an ``asyncio.Lock`` — FIFO across sessions.
-    """
+    ``acquire(n)`` calls serialize through an ``asyncio.Lock`` — FIFO across sessions."""
 
     def __init__(
         self,
@@ -145,8 +143,7 @@ class SignalAttachmentScheduler:
         capacity; call ``report_rpc_duration()`` after the RPC to sync. The lock is
         released during ``asyncio.sleep`` so other callers interleave, and the loop
         re-checks after each sleep in case the deadline was pessimistic. Signal's
-        server is ground truth and will 429 (→ requeue) if the model drifts.
-        """
+        server is ground truth and will 429 (→ requeue) if the model drifts."""
         if n <= 0:
             return 0.0
         if n > self.capacity:
@@ -178,8 +175,7 @@ class SignalAttachmentScheduler:
 
         No refill is credited for the upload window: Signal's server checks the bucket
         at RPC start and resumes refill only after the response, so crediting it causes
-        cumulative drift that eventually triggers 429s. Advances ``last_refill``.
-        """
+        cumulative drift that eventually triggers 429s. Advances ``last_refill``."""
         if n_attachments <= 0:
             return
         async with self._lock:

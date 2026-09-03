@@ -68,8 +68,7 @@ def _guess_extension(data: bytes) -> str:
     """Guess file extension from magic bytes.
 
     WEBP is claimed before the shared audio/AV sniffer (it shares RIFF with WAVE);
-    tools/audio_container.py owns the MP3-vs-ADTS-AAC sync-word disambiguation.
-    """
+    tools/audio_container.py owns the MP3-vs-ADTS-AAC sync-word disambiguation."""
     for magic, ext in _MAGIC_EXTENSIONS:
         if data.startswith(magic):
             return ext
@@ -98,8 +97,7 @@ def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
     """Losslessly remux raw ADTS AAC (Android voice notes, rejected by most STT APIs) to .m4a.
 
     Returns ``(m4a_bytes, ".m4a")`` or ``None`` when ffmpeg is missing or fails —
-    callers must then pass the input through unchanged.
-    """
+    callers must then pass the input through unchanged."""
     # Fall back to common Homebrew/local prefixes on macOS dev hosts.
     ffmpeg = shutil.which("ffmpeg") or next(
         (p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
@@ -415,8 +413,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Gate on require_mention (False = drop) and strip the bot's own @mention.
 
         The self-mention is stripped from every group message so the agent doesn't
-        read "@+155****4567 say hello" as a directive to contact that number.
-        """
+        read "@+155****4567 say hello" as a directive to contact that number."""
         account_norm = self._account_normalized
         if self.require_mention:
             mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
@@ -679,8 +676,7 @@ class SignalAdapter(BasePlatformAdapter):
 
         ``log_failures=False`` logs failures at DEBUG (typing path: silence repeated
         NETWORK_FAILURE spam). ``raise_on_rate_limit=True`` raises ``SignalRateLimitError``
-        on a 429 / RateLimitException instead of swallowing it (multi-attachment sends).
-        """
+        on a 429 / RateLimitException instead of swallowing it (multi-attachment sends)."""
         if not self.client:
             logger.warning("Signal: RPC called but client not connected")
             return None
@@ -770,8 +766,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Split converted Signal text into chunks, translating body ranges per chunk.
 
         Splitting after conversion (not before) keeps styles that cross a chunk boundary
-        intact instead of leaking literal Markdown markers.
-        """
+        intact instead of leaking literal Markdown markers."""
         if utf16_len(plain_text) <= max_length:
             return [(plain_text, text_styles)]
         indicator_reserve = 10  # Mirrors BasePlatformAdapter.truncate_message().
@@ -864,8 +859,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Send a typing indicator (called every ~2s by base.py's ``_keep_typing``).
 
         On NETWORK_FAILURE only the first consecutive failure logs at WARNING, and after
-        three failures the RPC is skipped for an exponential cooldown; success resets.
-        """
+        three failures the RPC is skipped for an exponential cooldown; success resets."""
         now = time.monotonic()
         if now < self._typing_skip_until.get(chat_id, 0.0):
             return
@@ -905,8 +899,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Send a batch of images via chunked Signal RPC calls.
 
         Alt texts are dropped (one shared body per send). Bad images are skipped with a
-        warning. ``human_delay`` is ignored: the rate-limit scheduler paces batches.
-        """
+        warning. ``human_delay`` is ignored: the rate-limit scheduler paces batches."""
         if not images:
             return
         scheduler = get_scheduler()
@@ -951,8 +944,7 @@ class SignalAdapter(BasePlatformAdapter):
         """Send one attachment batch with rate-limit pacing and a single transient retry.
 
         Tokens are deducted only on validated success (a None result means the server
-        never accepted the batch); 429s feed the scheduler before the retry.
-        """
+        never accepted the batch); 429s feed the scheduler before the retry."""
         send_timeout = _signal_send_timeout(n)
         max_attempts = SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
         for attempt in range(1, max_attempts + 1):

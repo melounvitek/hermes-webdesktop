@@ -58,8 +58,7 @@ def _parse_allowed_source_cidrs(raw: Any) -> list[ipaddress._BaseNetwork]:
 
     When populated, requests from source IPs outside every listed CIDR are
     rejected with 403 before the body is parsed (restrict to Microsoft
-    Graph's published webhook source ranges in production).
-    """
+    Graph's published webhook source ranges in production)."""
     if isinstance(raw, str):
         candidates = raw.split(",")
     elif isinstance(raw, (list, tuple, set)):

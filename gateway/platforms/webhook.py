@@ -76,8 +76,7 @@ def _hmac_str_equal(provided: str, expected: str) -> bool:
     """Timing-safe str equality tolerant of non-ASCII.
 
     ``compare_digest`` raises TypeError on non-ASCII str; ``provided`` is an
-    attacker-controlled header, so compare as UTF-8 bytes to fail closed.
-    """
+    attacker-controlled header, so compare as UTF-8 bytes to fail closed."""
     return hmac.compare_digest(provided.encode(), expected.encode())
 
 
@@ -402,8 +401,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         Returns None (no prefix, or multiplexing off and the prefix names this
         gateway's own profile), the profile name (served under multiplexing), or
-        ``_PROFILE_REJECTED`` (unknown / not served → 404).
-        """
+        ``_PROFILE_REJECTED`` (unknown / not served → 404)."""
         profile = (request.match_info.get("profile") or "").strip()
         if not profile:
             return None
@@ -642,8 +640,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
         ``prune_sessions`` only reaps rows with ``ended_at`` set, so unclosed webhook
         sessions leak unbounded. This hook fires at the true end of the run (success,
-        failure, cancellation); ``end_session()`` is first-reason-wins.
-        """
+        failure, cancellation); ``end_session()`` is first-reason-wins."""
         await self._end_webhook_session(event, event.source.chat_id)
 
     async def _end_webhook_session(self, event: "MessageEvent", session_chat_id: str) -> None:
@@ -756,8 +753,7 @@ class WebhookAdapter(BasePlatformAdapter):
     def _render_prompt(self, template: str, payload: dict, event_type: str, route_name: str) -> str:
         """Render a prompt template with dot-notation payload access (``{pull_request.title}``).
 
-        ``{__raw__}`` dumps the whole payload as indented JSON (truncated to 4000 chars).
-        """
+        ``{__raw__}`` dumps the whole payload as indented JSON (truncated to 4000 chars)."""
         if not template:
             truncated = json.dumps(payload, indent=2)[:4000]
             return f"Webhook event '{event_type}' on route '{route_name}':\n\n```json\n{truncated}\n```"

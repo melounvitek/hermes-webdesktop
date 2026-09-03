@@ -28,8 +28,7 @@ def _normalize_bullet_markers(source: str) -> str:
     """Replace Markdown bullet markers with plain Unicode bullets.
 
     Signal renders ``- item`` / ``* item`` literally. Fenced code blocks are kept
-    byte-for-byte; list-looking lines inside code are code, not prose bullets.
-    """
+    byte-for-byte; list-looking lines inside code are code, not prose bullets."""
     parts = re.split(r"(```.*?```)", source, flags=re.DOTALL)
     for idx, part in enumerate(parts):
         if idx % 2 == 0:
@@ -42,8 +41,7 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
 
     Signal uses ``bodyRanges`` (signal-cli ``textStyle`` / ``textStyles`` params) in
     the form ``start:length:STYLE``, positions in UTF-16 code units.
-    Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE.
-    """
+    Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE."""
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     text = _normalize_bullet_markers(text)
     styles: list[tuple[int, int, str]] = []
