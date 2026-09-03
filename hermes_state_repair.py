@@ -584,7 +584,8 @@ def _connect_repair_durable(db_path: Path, *, timeout: float = 5.0) -> sqlite3.C
 
 def _repair_conn(db_path: Path, *, timeout: float = 5.0):
     """A :func:`_connect_repair_durable` connection as a context manager, closed on exit."""
-    return contextlib.closing(_connect_repair_durable(db_path, timeout=timeout))
+    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
+    return contextlib.closing(_connect(db_path, timeout=timeout))
 
 
 def _reapply_durability_barriers(conn: sqlite3.Connection) -> bool:
@@ -623,7 +624,8 @@ def _close_unpinned(conn: sqlite3.Connection) -> None:
 def _open_exclusive(db_path: Path, begin: str) -> sqlite3.Connection:
     """Zero-timeout connection holding ``locking_mode=EXCLUSIVE`` after a rolled-back
     *begin*; closed (unpinned) and re-raised when exclusion cannot be taken."""
-    conn = _connect_repair_durable(db_path, timeout=0.0)
+    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
+    conn = _connect(db_path, timeout=0.0)
     try:
         for statement in ("PRAGMA locking_mode=EXCLUSIVE", begin, "ROLLBACK"):
             conn.execute(statement)
@@ -700,7 +702,8 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
     # of entries in index" when a B-tree index (e.g. idx_sessions_handoff_state) falls out of sync with its
     # base table. REINDEX rewrites the index b-tree from the canonical table rows using the existing index
     # definition, fixing the mismatch without touching data or FTS schema.
-    conn = _connect_repair_durable(db_path)
+    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
+    conn = _connect(db_path)
     try:
         with contextlib.closing(conn):
             # Best-effort tokenizer load: messages_fts_cjk needs cjk_unicode61 before any statement can touch it;
