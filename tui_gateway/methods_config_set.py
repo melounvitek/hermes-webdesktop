@@ -419,32 +419,34 @@ def _set_cwd(rid, params, key, value, session):
 
 
 @_cfgset_guarded
-def _set_prompt_like(rid, params, key, value, session):
-    cfg = _load_cfg_raw()  # write-back round-trip ("prompt" saves cfg)
-    resp = {"key": key, "value": value}
-    if key == "prompt":
-        if value == "clear":
-            cfg.pop("custom_prompt", None)
-            resp["value"] = ""
-        else:
-            cfg["custom_prompt"] = value
-        _save_cfg(cfg)
-    elif key == "personality":
-        pname, new_prompt = _validate_personality(str(value or ""), cfg)
-        # Persists via hermes_cli.personality (single owner), never the user-owned system prompt.
-        from hermes_cli.personality import persist_personality
-        persist_personality(pname)
-        resp["value"] = str(value or "none")
-        history_reset, info = _apply_personality_to_session(params.get("session_id", ""), session, new_prompt, pname)
-        resp["history_reset"] = history_reset
-        if info is not None:
-            resp["info"] = info
+def _set_prompt(rid, params, key, value, session):
+    cfg = _load_cfg_raw()  # write-back round-trip
+    if value == "clear":
+        cfg.pop("custom_prompt", None)
     else:
-        _write_config_key(f"display.{key}", value)
-        if key == "skin":  # every surface repaints; sync the watcher baseline (no re-broadcast)
-            _broadcast_global_event("skin.changed", resolve_skin())
-            _note_skin_broadcast()
-    return _ok(rid, resp)
+        cfg["custom_prompt"] = value
+    _save_cfg(cfg)
+    return _kv(rid, key, "" if value == "clear" else value)
+
+
+@_cfgset_guarded
+def _set_personality(rid, params, key, value, session):
+    pname, new_prompt = _validate_personality(str(value or ""), _load_cfg_raw())
+    # Persists via hermes_cli.personality (single owner), never the user-owned system prompt.
+    from hermes_cli.personality import persist_personality
+    persist_personality(pname)
+    history_reset, info = _apply_personality_to_session(params.get("session_id", ""), session, new_prompt, pname)
+    return _kv(rid, key, str(value or "none"), history_reset=history_reset,
+               **({"info": info} if info is not None else {}))
+
+
+@_cfgset_guarded
+def _set_skin(rid, params, key, value, session):
+    _write_config_key("display.skin", value)
+    # Every surface repaints; sync the watcher baseline so the poll loop doesn't re-broadcast.
+    _broadcast_global_event("skin.changed", resolve_skin())
+    _note_skin_broadcast()
+    return _kv(rid, key, value)
 
 
 def _set_display_toggle(rid, params, key, value, session):
@@ -464,7 +466,7 @@ _CONFIG_SETTERS = {
     "density": _set_display_bool, "battery": _set_display_bool, "theme": _set_theme,
     "statusbar": _set_statusbar, "mouse": _set_mouse, "indicator": _set_indicator,
     "cwd": _set_cwd, "terminal.cwd": _set_cwd, "workdir": _set_cwd,
-    "prompt": _set_prompt_like, "personality": _set_prompt_like, "skin": _set_prompt_like}
+    "prompt": _set_prompt, "personality": _set_personality, "skin": _set_skin}
 
 
 @method("config.set")

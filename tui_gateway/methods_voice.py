@@ -217,28 +217,24 @@ def _fd_barge_params(cfg: dict) -> tuple[float, int]:
     return mult, max(0, num(lambda v: int(float(v) * 1000), "barge_in_grace_seconds", 0.5))
 
 
-def _cut_all_tts() -> None:
-    """Cut streaming TTS, every fallback speak pipeline, and the file player."""
-    from tools.voice_mode import stop_playback
-    _tts_stream_stop(user_barge=True)
-    with _fd_listener_lock:
-        for _stop, _done in _fd_speak_pipelines:
-            _stop.set()
-    stop_playback()
-
-
 def _fd_trip(phase: str) -> None:
     """Listener tripped: latch the interruption, cut TTS FIRST (so a stale reply can never
     speak), and during generation also interrupt every running turn (the ``agent.interrupt()``
     seam ``session.interrupt`` uses)."""
     from tools.tts_streaming import mark_speech_interrupted
+    from tools.voice_mode import stop_playback
     mark_speech_interrupted()
     if phase == "playback":
         logger.debug("TTS CUT: full-duplex listener tripped during playback")
     else:
         logger.debug("full-duplex listener tripped during generation — "
                      "interrupting running turn(s)")
-    _cut_all_tts()
+    # Cut streaming TTS, every fallback speak pipeline, and the file player.
+    _tts_stream_stop(user_barge=True)
+    with _fd_listener_lock:
+        for _stop, _done in _fd_speak_pipelines:
+            _stop.set()
+    stop_playback()
     if phase != "playback":
         try:
             for s in _running_sessions():
@@ -300,9 +296,8 @@ def _voice_status_payload(**extra) -> dict:
     """``{enabled, record_key, tts, **extra}``: record_key (default ``ctrl+b``) rides every voice.toggle
     branch so a tts toggle never resets a custom binding."""
     record_key = _voice_cfg_dict().get("record_key")
-    record_key = str(record_key) if isinstance(record_key, str) and record_key else "ctrl+b"
-    return {"enabled": _voice_mode_enabled(), "record_key": record_key, "tts": _voice_tts_enabled(),
-            **extra}
+    record_key = record_key if isinstance(record_key, str) and record_key else "ctrl+b"
+    return {"enabled": _voice_mode_enabled(), "record_key": record_key, "tts": _voice_tts_enabled(), **extra}
 
 
 # ── Wake word ("Hey Hermes"): process-global detector (one mic). The first eligible transport
@@ -678,8 +673,8 @@ def _(rid, params: dict) -> dict:
     return handler(rid, params)
 
 
-# voice.record callbacks (module-level: they touch only process-global state). Each terminal
-# capture event resumes the wake detector so wake-triggered and manual captures coexist.
+# voice.record callbacks: each terminal capture event resumes the wake detector so wake-triggered
+# and manual captures coexist.
 def _vr_transcript(payload: dict) -> None:
     _voice_emit("voice.transcript", payload)
     _resume_voice_wake()
