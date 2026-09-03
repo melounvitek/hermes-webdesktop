@@ -60,12 +60,13 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
     )
     rescued = search_with_failover(provider_name, query, limit)
     if rescued.get("success"):
-        data = rescued.setdefault("data", {})
-        data["rescued_from"] = provider_name
-        data["backend_error"] = (
-            f"Configured backend '{provider_name}' failed this call "
-            f"({(original_error or 'unknown error')[:300]}); result served by the keyless free tier. "
-            f"The next call will use '{provider_name}' again."
+        rescued.setdefault("data", {}).update(
+            rescued_from=provider_name,
+            backend_error=(
+                f"Configured backend '{provider_name}' failed this call "
+                f"({(original_error or 'unknown error')[:300]}); result served by the keyless free tier. "
+                f"The next call will use '{provider_name}' again."
+            ),
         )
         return rescued
     # Ring also failed: the ORIGINAL error names the user's setup, so lead with it.
@@ -80,16 +81,19 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
 
 def _policy_blocked_result(result: dict) -> bool:
     """True for a website-policy refusal — intentional, never rescued (it would fetch blocked content)."""
-    if result.get("blocked_by_policy"):
-        return True
-    return "blocked by website policy" in str(result.get("error") or "").lower()
+    error = str(result.get("error") or "").lower()
+    return bool(result.get("blocked_by_policy")) or "blocked by website policy" in error
 
 
 def _rescue_extract(provider_name: str, urls: list, results: list) -> list:
-    """Rescue a whole-batch extract failure via the ring. Only genuine failures are re-fetched; policy-blocked
-    entries are preserved verbatim. If the provider broke url/result order parity, every entry is treated as
-    rescueable and the ring's list replaces the batch wholesale."""
+    """Rescue a whole-batch extract failure via the ring.
+
+    Only genuine failures are re-fetched; policy-blocked entries are preserved verbatim. If the provider
+    broke url/result order parity, every entry is treated as rescueable and the ring's list replaces the
+    batch wholesale.
+    """
     from plugins.web.keyless_mcp import extract_with_failover
+
     parity = len(results) == len(urls)
     rescue_idx = [i for i, r in enumerate(results) if not parity or not _policy_blocked_result(r)]
     if not rescue_idx:

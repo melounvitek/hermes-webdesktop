@@ -12,7 +12,7 @@ Debug: ``WEB_TOOLS_DEBUG=true`` writes ``logs/web_tools_debug_<UUID>.json``.
 import json
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Any, Optional
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 
 # Vendor helpers re-exported so external code and test patches of ``tools.web_tools.<name>`` keep working.
@@ -27,11 +27,7 @@ from plugins.web.parallel.provider import _get_async_parallel_client, _get_paral
 from plugins.web.exa.provider import _get_exa_client  # noqa: F401
 
 # Per-vendor client cache slots; plugins read/write these via tools.web_tools (tests reset them to None).
-_firecrawl_client: Optional[Any] = None
-_firecrawl_client_config: Optional[Any] = None
-_parallel_client: Optional[Any] = None
-_async_parallel_client: Optional[Any] = None
-_exa_client: Optional[Any] = None
+_firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
 from tools.debug_helpers import DebugSession
 from tools.managed_tool_gateway import (  # noqa: F401 — backward-compat names for tests
@@ -105,6 +101,11 @@ def _registered_web_provider(backend: str):
     return _registry_call("get_provider", None, backend) if backend else None
 
 
+def _list_registered_web_providers():
+    """All plugin-registered web providers (empty list on failure)."""
+    return _registry_call("list_providers", [])
+
+
 def _probe(provider, method: str, context: str = "") -> Optional[bool]:
     """``bool(provider.<method>())``, or ``None`` if it raised (a broken provider is unavailable; *context* is
     appended to the debug log line, e.g. " during readiness check")."""
@@ -116,38 +117,27 @@ def _probe(provider, method: str, context: str = "") -> Optional[bool]:
         return None
 
 
-def _list_registered_web_providers():
-    """All plugin-registered web providers (empty list on failure)."""
-    return _registry_call("list_providers", [])
-
-
 def _get_backend() -> str:
     """Shared web backend name. A stored ``web.backend`` is returned as-is — no availability probe, no
     fallback — so a broken selection surfaces the vendor's honest error rather than silently rerouting.
     Autodetect runs ONLY when no web selection has ever been stored."""
     configured = _configured_backend()
     if configured:
-        # "nous" (managed subscription) is serviced by the firecrawl provider, whose client
-        # resolver routes it through the managed Tool Gateway.
+        # "nous" (managed subscription) is serviced by firecrawl, routed through the managed Tool Gateway.
         return "firecrawl" if configured == NOUS_MANAGED_PROVIDER else configured
     if selection_exists("web"):
-        # Selection exists (use_gateway / per-capability keys) but no shared name: keep the
-        # firecrawl default rather than credential-laddering.
+        # Selection exists (use_gateway / per-capability keys) but no shared name: firecrawl, no ladder.
         return "firecrawl"
 
     # Never-configured install. Explicit user credentials beat the managed-gateway probe (a Nous OAuth
     # token's tier may not grant web access; the gateway then fails at runtime with no fallback).
     # Free tiers trail paid.
     backend_candidates = (
-        ("tavily", _has_env("TAVILY_API_KEY")),
-        ("exa", _has_env("EXA_API_KEY")),
-        ("parallel", _has_env("PARALLEL_API_KEY")),
-        ("keenable", _has_env("KEENABLE_API_KEY")),
+        ("tavily", _has_env("TAVILY_API_KEY")), ("exa", _has_env("EXA_API_KEY")),
+        ("parallel", _has_env("PARALLEL_API_KEY")), ("keenable", _has_env("KEENABLE_API_KEY")),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")),
-        ("firecrawl", _is_tool_gateway_ready()),
-        ("searxng", _has_env("SEARXNG_URL")),
-        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
-        ("ddgs", _ddgs_package_importable()),
+        ("firecrawl", _is_tool_gateway_ready()), ("searxng", _has_env("SEARXNG_URL")),
+        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")), ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
         if available:
@@ -184,15 +174,6 @@ def _get_extract_backend() -> str:
     return _configured_backend("extract_backend") or _get_backend()
 
 
-def _xai_available() -> bool:
-    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may hit the network.
-    try:
-        from tools.xai_http import has_xai_credentials
-        return has_xai_credentials()
-    except Exception:
-        return False
-
-
 def _ddgs_package_importable() -> bool:
     """ddgs is the only backend gated on package presence; single symbol so tests can patch it."""
     try:
@@ -202,11 +183,19 @@ def _ddgs_package_importable() -> bool:
         return False
 
 
-# Built-in backends and their cheap availability probes; any other name is a plugin-registered provider
-# resolved via the registry's ``is_available()``. Lambdas so test patches of module-level helpers (e.g.
-# _ddgs_package_importable, check_firecrawl_api_key) are honored at call time. Includes ``xai`` (probed via
-# has_xai_credentials(), not a registered provider) though the registry's _LEGACY_PREFERENCE omits it —
-# drop it here if xai ever registers.
+def _xai_available() -> bool:
+    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may hit the network.
+    try:
+        from tools.xai_http import has_xai_credentials
+        return has_xai_credentials()
+    except Exception:
+        return False
+
+
+# Built-in backends -> cheap availability probes; any other name is a plugin provider resolved via the
+# registry's ``is_available()``. Lambdas so test patches of module-level helpers (_ddgs_package_importable,
+# check_firecrawl_api_key) are honored at call time. ``xai`` is probed via has_xai_credentials(), not a
+# registered provider, though the registry's _LEGACY_PREFERENCE omits it — drop it if xai ever registers.
 _BUILTIN_AVAILABILITY = {
     "exa": lambda: _has_env("EXA_API_KEY"),
     "parallel": lambda: _has_env("PARALLEL_API_KEY"),
@@ -226,10 +215,9 @@ def _is_backend_available(backend: str) -> bool:
     """True when *backend* is usable — the single availability chokepoint. Non-legacy names delegate to the
     registered provider's ``is_available()`` (unregistered names fall through); built-ins use cheap probes."""
     backend = (backend or "").lower().strip()
-    if backend not in _LEGACY_WEB_BACKENDS:
-        provider = _registered_web_provider(backend)
-        if provider is not None:
-            return _probe(provider, "is_available") or False
+    provider = None if backend in _LEGACY_WEB_BACKENDS else _registered_web_provider(backend)
+    if provider is not None:
+        return _probe(provider, "is_available") or False
     probe = _BUILTIN_AVAILABILITY.get(backend)
     return probe() if probe else False
 
@@ -243,7 +231,6 @@ def _web_requires_env() -> list[str]:
         "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL", "TOOL_GATEWAY_DOMAIN", "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
     ]
-
 
 _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
 
@@ -262,17 +249,14 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
-def _finish_debug(call_name: str, debug_call_data: dict) -> None:
+def _finish_debug(call_name: str, debug_call_data: dict, error_msg: Optional[str] = None) -> Optional[str]:
+    """Log the call into the debug session; with *error_msg*, record it and return its ``tool_error`` envelope."""
+    if error_msg is not None:
+        logger.debug("%s", error_msg)
+        debug_call_data["error"] = error_msg
     _debug.log_call(call_name, debug_call_data)
     _debug.save()
-
-
-def _debug_error(call_name: str, debug_call_data: dict, error_msg: str) -> str:
-    """Record *error_msg* in the debug session and return the ``tool_error`` envelope for it."""
-    logger.debug("%s", error_msg)
-    debug_call_data["error"] = error_msg
-    _finish_debug(call_name, debug_call_data)
-    return tool_error(error_msg)
+    return None if error_msg is None else tool_error(error_msg)
 
 
 def web_search_tool(query: str, limit: int = 5) -> str:
@@ -308,12 +292,8 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             provider = get_active_search_provider()
 
         if provider is None:
-            response_data = {
-                "success": False,
-                "error": _no_provider_error(
-                    "search", "No web search provider configured. Run `hermes tools` to set one up."
-                ),
-            }
+            fallback = "No web search provider configured. Run `hermes tools` to set one up."
+            response_data = {"success": False, "error": _no_provider_error("search", fallback)}
         else:
             logger.info("Web search via %s: '%s' (limit: %d)", provider.name, query, limit)
             response_data = _memoized_search(provider, query, limit)
@@ -324,7 +304,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         _finish_debug("web_search_tool", debug_call_data)
         return result_json
     except Exception as e:
-        return _debug_error("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
+        return _finish_debug("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
 
 
 def _memoized_search(provider, query: str, limit: int) -> dict:
@@ -333,6 +313,7 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
     the caller's count is sliced out. Only successful, non-rescued responses are cached — caching a rescue
     would make the one-shot ring fallback sticky for a whole TTL."""
     from tools.web_result_cache import bucket_limit, search_memo, slice_search_response
+
     def _paid_search() -> tuple[dict, bool]:
         fetch_limit = bucket_limit(limit)
         try:
@@ -376,8 +357,7 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
     try:
         logger.info("Extracting content from %d URL(s)", len(normalized_urls))
         # SSRF protection — filter private/internal URLs before any backend.
-        safe_urls, safe_indices = [], []
-        ssrf_blocked: Dict[int, Dict[str, Any]] = {}
+        safe_urls, safe_indices, ssrf_blocked = [], [], {}
         for index, url in zip(normalized_indices, normalized_urls):
             if await async_is_safe_url(url):
                 safe_urls.append(url)
@@ -407,8 +387,9 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         debug_call_data["processing_applied"].append("truncate_and_store")
         _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
         trimmed = _trim_results(results)
-        result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed else tool_error(
-            "Content was inaccessible or not found"
+        result_json = (
+            json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed
+            else tool_error("Content was inaccessible or not found")
         )
         # Belt-and-suspenders sweep of the serialized JSON: a provider may tuck a base64 blob in metadata.
         cleaned_result = convert_base64_images_to_links(result_json)
@@ -417,7 +398,7 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         _finish_debug("web_extract_tool", debug_call_data)
         return cleaned_result
     except Exception as e:
-        return _debug_error("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
+        return _finish_debug("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
 
 
 def _provider_is_ready(provider) -> bool:
@@ -429,13 +410,10 @@ def _provider_is_ready(provider) -> bool:
     """
     if provider is None:
         return False
-    for method in ("is_available", "is_keyless_available"):
-        ready = _probe(provider, method, " during readiness check")
-        if ready is None:  # broken provider == not ready; don't try the next probe
-            return False
-        if ready:
-            return True
-    return False
+    ready = _probe(provider, "is_available", " during readiness check")
+    if ready is None:  # broken provider == not ready; don't try the keyless probe
+        return False
+    return bool(ready or _probe(provider, "is_keyless_available", " during readiness check"))
 
 
 def check_web_api_key() -> bool:
@@ -444,11 +422,9 @@ def check_web_api_key() -> bool:
     A plugin-registered provider reporting ``is_available()`` must light the tools up even with no
     built-in credentials; resolution funnels through :func:`_is_backend_available`.
     """
-    configured = _configured_backend()
-    if configured and _is_backend_available(configured):
-        return True
-    # Boolean OR over built-ins — probe order is irrelevant here.
-    if any(_is_backend_available(backend) for backend in _LEGACY_WEB_BACKENDS):
+    # Boolean OR over configured + built-ins — probe order is irrelevant here.
+    candidates = [c for c in (_configured_backend(),) if c] + list(_LEGACY_WEB_BACKENDS)
+    if any(_is_backend_available(backend) for backend in candidates):
         return True
     # Plugin path. Discovery must run first: check_fn fires at tool-registration time, before any dispatch.
     try:
@@ -510,27 +486,17 @@ WEB_EXTRACT_SCHEMA = {
 }
 
 registry.register(
-    name="web_search",
-    toolset="web",
-    schema=WEB_SEARCH_SCHEMA,
+    name="web_search", toolset="web", schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
-    requires_env=_web_requires_env(),
-    emoji="🔍",
+    check_fn=check_web_api_key, requires_env=_web_requires_env(), emoji="🔍",
     max_result_size_chars=100_000,
 )
 registry.register(
-    name="web_extract",
-    toolset="web",
-    schema=WEB_EXTRACT_SCHEMA,
+    name="web_extract", toolset="web", schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [],
-        "markdown",
+        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
         char_limit=args.get("char_limit"),
     ),
-    check_fn=check_web_api_key,
-    requires_env=_web_requires_env(),
-    is_async=True,
-    emoji="📄",
+    check_fn=check_web_api_key, requires_env=_web_requires_env(), is_async=True, emoji="📄",
     max_result_size_chars=100_000,
 )

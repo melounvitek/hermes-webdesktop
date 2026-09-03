@@ -34,7 +34,6 @@ MAX_HANDLES = 10
 def _load_x_search_config() -> Dict[str, Any]:
     try:
         from hermes_cli.config import load_config
-
         return load_config().get("x_search", {}) or {}
     except Exception:
         return {}
@@ -42,13 +41,11 @@ def _load_x_search_config() -> Dict[str, Any]:
 
 def _get_x_search_reasoning_effort() -> Optional[str]:
     raw_value = _load_x_search_config().get("reasoning_effort")
-    if raw_value is None or not str(raw_value).strip():
-        return None
-    effort = str(raw_value).strip().lower()
-    if effort not in X_SEARCH_REASONING_EFFORTS:
+    effort = str(raw_value).strip().lower() if raw_value is not None else ""
+    if effort and effort not in X_SEARCH_REASONING_EFFORTS:
         allowed = ", ".join(X_SEARCH_REASONING_EFFORTS)
         raise ValueError(f"x_search.reasoning_effort must be one of: {allowed} (got {raw_value!r})")
-    return effort
+    return effort or None
 
 
 def _get_x_search_int(key: str, default: int, floor: int) -> int:
@@ -59,11 +56,8 @@ def _get_x_search_int(key: str, default: int, floor: int) -> int:
 
 
 def _resolve_xai_bearer() -> Tuple[str, str, str]:
-    """Return ``(api_key, base_url, source)``; ``source`` is ``"xai-oauth"`` or ``"xai"``.
-
-    Raises ``RuntimeError`` when no credential is usable so a credential that expires between
-    registration and invocation yields a clean tool error, not a 401.
-    """
+    """Return ``(api_key, base_url, source)``; ``source`` is ``"xai-oauth"`` or ``"xai"``. Raises RuntimeError
+    when no credential is usable (expiry between registration and call -> clean tool error, not a 401)."""
     creds = resolve_xai_http_credentials(prefer_api_key=True)
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
@@ -126,25 +120,20 @@ def _extract_response_text(payload: Dict[str, Any]) -> str:
     output_text = str(payload.get("output_text") or "").strip()
     if output_text:
         return output_text
-    parts = [
-        str(content.get("text") or "").strip()
-        for content in _message_contents(payload)
-        if content.get("type") in {"output_text", "text"}
-    ]
+    contents = (c for c in _message_contents(payload) if c.get("type") in {"output_text", "text"})
+    parts = (str(c.get("text") or "").strip() for c in contents)
     return "\n\n".join(p for p in parts if p).strip()
 
 
 def _extract_inline_citations(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [
         {
-            "url": annotation.get("url", ""),
-            "title": annotation.get("title", ""),
-            "start_index": annotation.get("start_index"),
-            "end_index": annotation.get("end_index"),
+            "url": a.get("url", ""), "title": a.get("title", ""),
+            "start_index": a.get("start_index"), "end_index": a.get("end_index"),
         }
         for content in _message_contents(payload)
-        for annotation in content.get("annotations", []) or []
-        if annotation.get("type") == "url_citation"
+        for a in content.get("annotations", []) or []
+        if a.get("type") == "url_citation"
     ]
 
 
@@ -156,14 +145,12 @@ def _http_error_message(exc: requests.HTTPError) -> str:
         payload = response.json()
     except Exception:
         payload = None
-    if isinstance(payload, dict):
-        code = str(payload.get("code") or "").strip()
-        message = str(payload.get("error") or "").strip() or str(payload)
-        if code and code not in message:
-            message = f"{code}: {message}"
-        return message or str(exc)
-    text = str(getattr(response, "text", "") or "").strip()
-    return text[:500] if text else str(exc)
+    if not isinstance(payload, dict):
+        text = str(getattr(response, "text", "") or "").strip()
+        return text[:500] if text else str(exc)
+    code = str(payload.get("code") or "").strip()
+    message = str(payload.get("error") or "").strip() or str(payload)
+    return (f"{code}: {message}" if code and code not in message else message) or str(exc)
 
 
 def _error_json(error: str, exc: BaseException) -> str:
@@ -207,12 +194,9 @@ def _build_x_search_tool_def(
 
     tool_def: Dict[str, Any] = {"type": "x_search"}
     active_filters: List[str] = []
-    for key, value in (
-        ("allowed_x_handles", allowed),
-        ("excluded_x_handles", excluded),
-        ("from_date", from_date.strip()),
-        ("to_date", to_date.strip()),
-    ):
+    filters = (("allowed_x_handles", allowed), ("excluded_x_handles", excluded),
+               ("from_date", from_date.strip()), ("to_date", to_date.strip()))
+    for key, value in filters:
         if value:
             tool_def[key] = value
             active_filters.append(key)
@@ -238,16 +222,16 @@ def x_search_tool(
         api_key, base_url, source = _resolve_xai_bearer()
     except RuntimeError as exc:
         return tool_error(str(exc))
+    try:
+        tool_def, active_filters = _build_x_search_tool_def(
+            allowed_x_handles, excluded_x_handles, from_date, to_date,
+            enable_image_understanding, enable_video_understanding,
+        )
+        reasoning_effort = _get_x_search_reasoning_effort()
+    except ValueError as exc:
+        return tool_error(str(exc))
 
     try:
-        try:
-            tool_def, active_filters = _build_x_search_tool_def(
-                allowed_x_handles, excluded_x_handles, from_date, to_date,
-                enable_image_understanding, enable_video_understanding,
-            )
-            reasoning_effort = _get_x_search_reasoning_effort()
-        except ValueError as exc:
-            return tool_error(str(exc))
         payload = {
             "model": str(_load_x_search_config().get("model") or "").strip() or DEFAULT_X_SEARCH_MODEL,
             "input": [{"role": "user", "content": query.strip()}],
@@ -257,8 +241,7 @@ def x_search_tool(
         if reasoning_effort:
             payload["reasoning"] = {"effort": reasoning_effort}
         headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
             "User-Agent": hermes_xai_user_agent(),
         }
         data = _post_with_retries(f"{base_url}/responses", headers, payload).json()
@@ -267,24 +250,15 @@ def x_search_tool(
         # xAI returns 200 with a synthesized answer even when no posts match the narrowing
         # filters; with both citation channels empty the answer came from training data.
         degraded = bool(active_filters) and not citations and not inline_citations
-        return json.dumps(
-            {
-                "success": True,
-                "provider": "xai",
-                "credential_source": source,
-                "tool": "x_search",
-                "model": payload["model"],
-                "query": query.strip(),
-                "answer": _extract_response_text(data),
-                "citations": citations,
-                "inline_citations": inline_citations,
-                "degraded": degraded,
-                "degraded_reason": (
-                    f"no citations returned despite filters: {', '.join(active_filters)}" if degraded else None
-                ),
-            },
-            ensure_ascii=False,
-        )
+        result = {
+            "success": True, "provider": "xai", "credential_source": source, "tool": "x_search",
+            "model": payload["model"], "query": query.strip(), "answer": _extract_response_text(data),
+            "citations": citations, "inline_citations": inline_citations, "degraded": degraded,
+            "degraded_reason": (
+                f"no citations returned despite filters: {', '.join(active_filters)}" if degraded else None
+            ),
+        }
+        return json.dumps(result, ensure_ascii=False)
     except requests.HTTPError as e:
         logger.error("x_search failed: %s", e, exc_info=True)
         return _error_json(_http_error_message(e), e)

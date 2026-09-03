@@ -36,18 +36,12 @@ class WebsitePolicyError(Exception):
 
 def _normalize_rule(rule: Any) -> Optional[str]:
     """Reduce a rule (bare host, URL, or ``host/path``) to a lowercase host; None for blanks/comments."""
-    if not isinstance(rule, str):
-        return None
-    value = rule.strip().lower()
-    if not value or value.startswith("#"):
+    if not isinstance(rule, str) or not (value := rule.strip().lower()) or value.startswith("#"):
         return None
     if "://" in value:
         parsed = urlparse(value)
         value = parsed.netloc or parsed.path
-    value = value.split("/", 1)[0].strip().rstrip(".")
-    if value.startswith("www."):
-        value = value[4:]
-    return value or None
+    return value.split("/", 1)[0].strip().rstrip(".").removeprefix("www.") or None
 
 
 def _iter_blocklist_file_rules(path: Path) -> List[str]:
@@ -80,8 +74,7 @@ def _load_policy_config(config_path: Path) -> Dict[str, Any]:
         logger.debug("PyYAML not installed — website blocklist disabled")
         return dict(_DEFAULT_WEBSITE_BLOCKLIST)
     try:
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise WebsitePolicyError(f"Invalid config YAML at {config_path}: {exc}") from exc
     except OSError as exc:
@@ -116,20 +109,17 @@ def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]
             fresh = _cached_policy_path == resolved_path and (now - _cached_policy_time) < _CACHE_TTL_SECONDS
             if _cached_policy is not None and fresh:
                 return _cached_policy
-
     config_path = config_path or default_path
     policy = _load_policy_config(config_path)
-    raw_domains = _require_type(policy, "domains", list, [])
-    raw_shared_files = _require_type(policy, "shared_files", list, [])
+    domains = map(_normalize_rule, _require_type(policy, "domains", list, []))
+    pairs: List[Tuple[str, str]] = [(p, "config") for p in domains if p]
+    shared_files = _require_type(policy, "shared_files", list, [])
     enabled = _require_type(policy, "enabled", bool, True)
-
-    pairs: List[Tuple[str, str]] = [(p, "config") for p in map(_normalize_rule, raw_domains) if p]
-    for shared_file in raw_shared_files:
+    for shared_file in shared_files:
         if not isinstance(shared_file, str) or not shared_file.strip():
             continue
         path = Path(shared_file).expanduser()
-        if not path.is_absolute():
-            path = (get_hermes_home() / path).resolve()
+        path = path if path.is_absolute() else (get_hermes_home() / path).resolve()
         pairs += [(normalized, str(path)) for normalized in _iter_blocklist_file_rules(path)]
     # dict.fromkeys dedupes (pattern, source) while keeping first-seen order.
     result = {"enabled": enabled, "rules": [{"pattern": p, "source": s} for p, s in dict.fromkeys(pairs)]}
@@ -169,11 +159,9 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
         with _cache_lock:
             if _cached_policy is not None and not _cached_policy.get("enabled"):
                 return None
-
     host = _extract_host_from_urlish(url)
     if not host:
         return None
-
     try:
         policy = load_website_blocklist(config_path)
     except WebsitePolicyError as exc:
@@ -184,13 +172,11 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
     except Exception as exc:
         logger.warning("Unexpected error loading website policy (failing open): %s", exc)
         return None
-
     if not policy.get("enabled"):
         return None
     for rule in policy.get("rules", []):
-        pattern = rule.get("pattern", "")
+        pattern, source = rule.get("pattern", ""), rule.get("source", "config")
         if _match_host_against_rule(host, pattern):
-            source = rule.get("source", "config")
             logger.info("Blocked URL %s — matched rule '%s' from %s", url, pattern, source)
             return {
                 "url": url, "host": host, "rule": pattern, "source": source,

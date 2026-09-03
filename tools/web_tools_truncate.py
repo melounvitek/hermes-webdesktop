@@ -12,11 +12,11 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("tools.web_tools")
 
-# Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are
-# head+tail truncated and the full text stored on disk.
+# Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are head+tail
+# truncated, full text stored on disk.
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
-# Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes
-# on every extract; the model only ever sees char_limit.
+# Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes on
+# every extract; the model only ever sees char_limit.
 MAX_STORED_TEXT_CHARS = 2_000_000
 
 _CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
@@ -28,16 +28,18 @@ def _clamp_char_limit(value: Any) -> int:
     return max(_CHAR_LIMIT_FLOOR, min(int(value), _CHAR_LIMIT_CEILING))
 
 
+def _clamp_or_default(value: Any) -> int:
+    """``_clamp_char_limit(value)``; ``None`` or non-numeric input falls back to the default."""
+    try:
+        return DEFAULT_EXTRACT_CHAR_LIMIT if value is None else _clamp_char_limit(value)
+    except (TypeError, ValueError):
+        return DEFAULT_EXTRACT_CHAR_LIMIT
+
+
 def _get_extract_char_limit() -> int:
     """``web.extract_char_limit`` clamped to a sane range, else the default."""
     from tools.web_tools import _load_web_config  # lazy: tests patch tools.web_tools._load_web_config
-    try:
-        configured = _load_web_config().get("extract_char_limit")
-        if configured is not None:
-            return _clamp_char_limit(configured)
-    except (TypeError, ValueError):
-        pass
-    return DEFAULT_EXTRACT_CHAR_LIMIT
+    return _clamp_or_default(_load_web_config().get("extract_char_limit"))
 
 
 def convert_base64_images_to_links(text: str) -> str:
@@ -45,19 +47,17 @@ def convert_base64_images_to_links(text: str) -> str:
     (alt kept), parenthesised blobs, and bare ``data:image/...;base64,`` payloads. Real http(s) markdown
     image links are left untouched so the agent can ``web_extract`` / ``vision_analyze`` them."""
     def _md_repl(m: "re.Match[str]") -> str:
-        alt = (m.group("alt") or "").strip()
-        return f"[IMAGE: {alt}]" if alt else "[IMAGE]"
+        return f"[IMAGE: {alt}]" if (alt := (m.group("alt") or "").strip()) else "[IMAGE]"
 
     out = re.sub(r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", _md_repl, text)
     out = re.sub(r"\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", "[IMAGE]", out)
-    out = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
-    return out
+    return re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
 
 
 def _store_full_text(url: str, content: str) -> Optional[str]:
-    """Write the full page to cache/web; absolute path or None. cache/web is mounted read-only into remote
-    backends (credential_files _CACHE_DIRS) so read_file can page the complete text on any backend.
-    Best-effort: on failure the truncated content is still returned to the model."""
+    """Write the full page to cache/web; absolute path or None (best-effort: the truncated content is still
+    returned). cache/web is mounted read-only into remote backends (credential_files _CACHE_DIRS) so
+    read_file can page the complete text on any backend."""
     try:
         import hashlib
         from hermes_constants import get_hermes_dir
@@ -91,17 +91,14 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
     tail_budget = char_limit - head_budget
     head, tail = content[:head_budget], content[-tail_budget:]
     # Snap both cuts to line boundaries (head back, tail forward) so we never slice mid-line.
-    nl = head.rfind("\n")
-    if nl > head_budget * 0.5:
+    if (nl := head.rfind("\n")) > head_budget * 0.5:
         head = head[:nl]
-    nl = tail.find("\n")
-    if 0 <= nl < tail_budget * 0.5:
+    if 0 <= (nl := tail.find("\n")) < tail_budget * 0.5:
         tail = tail[nl + 1:]
 
     stored_path = _store_full_text(url, content)
     footer_lines = [
-        "",
-        "─" * 8 + " [TRUNCATED] " + "─" * 8,
+        "", "─" * 8 + " [TRUNCATED] " + "─" * 8,
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
         f"of {len(content):,} total clean characters.",
     ]
@@ -126,22 +123,16 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
 
 def _effective_char_limit(char_limit: Optional[int]) -> int:
     """Caller's ``char_limit`` (else config) clamped; non-numeric input falls back to the default."""
-    value = char_limit if char_limit is not None else _get_extract_char_limit()
-    try:
-        return _clamp_char_limit(value)
-    except (TypeError, ValueError):
-        return DEFAULT_EXTRACT_CHAR_LIMIT
+    return _clamp_or_default(char_limit) if char_limit is not None else _get_extract_char_limit()
 
 
 def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dict) -> None:
     """In place: replace each successful entry's content with its base64-cleaned, budgeted text;
     per-page truncation metrics go into ``debug_call_data``."""
     for result in results:
-        if result.get("error"):
-            continue
         url = result.get("url", "")
         raw_content = result.get("raw_content", "") or result.get("content", "")
-        if not raw_content:
+        if result.get("error") or not raw_content:
             continue
         clean = convert_base64_images_to_links(raw_content)
         model_text, truncated = _truncate_with_footer(clean, url, char_limit)

@@ -13,10 +13,9 @@ from tools.registry import registry, tool_error
 
 def _configured_for_xai_video() -> bool:
     try:
-        cfg = load_config()
+        section = load_config().get("video_gen")
     except Exception:
         return False
-    section = cfg.get("video_gen") if isinstance(cfg, dict) else None
     return isinstance(section, dict) and section.get("provider") == "xai"
 
 
@@ -79,9 +78,7 @@ def _xai_video_schema(name: str, verb: str, noun: str, prompt_verb: str, extra: 
     }
 
 
-XAI_VIDEO_EDIT_SCHEMA: Dict[str, Any] = _xai_video_schema(
-    "xai_video_edit", "Edit", "editing", "modify", {},
-)
+XAI_VIDEO_EDIT_SCHEMA: Dict[str, Any] = _xai_video_schema("xai_video_edit", "Edit", "editing", "modify", {})
 
 XAI_VIDEO_EXTEND_SCHEMA: Dict[str, Any] = _xai_video_schema(
     "xai_video_extend", "Extend", "extension", "continue", {
@@ -116,7 +113,6 @@ def _run_xai_video_tool(args: Dict[str, Any], op: str, run, **extra: Any) -> str
             "error_type": "provider_not_configured",
             "provider": "xai",
         })
-
     model = _clean_string(args.get("model"))
     return json.dumps(run(prompt=prompt, video_url=video_url, model=model, **extra))
 
