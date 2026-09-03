@@ -201,11 +201,7 @@ def _restored_python_paths(git_cmd: list[str], cwd: Path) -> tuple[str, ...] | N
 
 
 def _reject_unsafe_stash_restore(
-    git_cmd: list[str],
-    cwd: Path,
-    stash_ref: str,
-    preexisting_untracked: set[str],
-    failing_target: str,
+    git_cmd: list[str], cwd: Path, stash_ref: str, preexisting_untracked: set[str], failing_target: str,
     detail: str | None,
 ) -> None:
     """Restore the clean updated tree, preserve the stash, and abort the update."""
@@ -246,17 +242,10 @@ def _reject_unsafe_stash_restore(
 
 
 def _restore_stashed_changes(
-    git_cmd: list[str],
-    cwd: Path,
-    stash_ref: str,
-    prompt_user: bool = False,
-    input_fn=None,
+    git_cmd: list[str], cwd: Path, stash_ref: str, prompt_user: bool = False, input_fn=None,
 ) -> bool:
     from hermes_cli.update_cmd import (
-        _critical_module_import_failures,
-        _git_run,
-        _git_untracked_paths,
-        _restored_python_paths,
+        _critical_module_import_failures, _git_run, _git_untracked_paths, _restored_python_paths,
         _validate_python_files_syntax,
     )
     if prompt_user:

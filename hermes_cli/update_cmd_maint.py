@@ -693,10 +693,7 @@ def _verify_state_db_after_snapshot(snapshot_id: str) -> None:
     if not _src_path.exists():
         return
     _integrity = verify_sqlite_integrity(
-        _src_path,
-        check_header=True,
-        run_pragma=True,
-        max_bytes=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
+        _src_path, check_header=True, run_pragma=True, max_bytes=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
     )
     if _integrity.get("valid"):
         return
@@ -717,9 +714,7 @@ def _run_quick_snapshots() -> Optional[str]:
     from hermes_cli.update_cmd import _record_update_step
     from hermes_cli.backup import create_quick_snapshot
     snapshot_id = create_quick_snapshot(
-        label="pre-update",
-        keep=_PRE_UPDATE_SNAPSHOT_KEEP,
-        max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
+        label="pre-update", keep=_PRE_UPDATE_SNAPSHOT_KEEP, max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
     )
     if snapshot_id:
         _verify_state_db_after_snapshot(snapshot_id)
@@ -730,8 +725,7 @@ def _run_quick_snapshots() -> Optional[str]:
     with _best_effort('Sibling profile snapshots failed: %s'):
         from hermes_cli.backup import create_pre_update_snapshots_all_profiles
         _sibling_snaps = create_pre_update_snapshots_all_profiles(
-            keep=_PRE_UPDATE_SNAPSHOT_KEEP,
-            max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
+            keep=_PRE_UPDATE_SNAPSHOT_KEEP, max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
         )
         if _sibling_snaps:
             print(f"◆ Sibling profile snapshot(s): " + ", ".join(sorted(_sibling_snaps)))
@@ -925,13 +919,7 @@ def _print_post_update_notices_and_self_heals() -> None:
 
 
 def _run_post_update_maintenance(
-    *,
-    assume_yes,
-    gateway_mode,
-    pre_update_snapshot_id,
-    had_desktop_app_before_update,
-    node_failures,
-    desktop_build_ok,
+    *, assume_yes, gateway_mode, pre_update_snapshot_id, had_desktop_app_before_update, node_failures, desktop_build_ok,
     pre_update_version,
 ) -> bool:
     """Post-pull housekeeping: state.db restore, catalog/skills/profile syncs, config migration,
@@ -975,15 +963,11 @@ def _run_post_update_maintenance(
     _sync_profiles_after_update()
 
     _check_and_apply_config_migration(
-        assume_yes=assume_yes,
-        gateway_mode=gateway_mode,
-        pre_update_snapshot_id=pre_update_snapshot_id,
+        assume_yes=assume_yes, gateway_mode=gateway_mode, pre_update_snapshot_id=pre_update_snapshot_id,
     )
 
     update_complete = _print_update_summary(
-        node_failures=node_failures,
-        desktop_build_ok=desktop_build_ok,
-        pre_update_version=pre_update_version,
+        node_failures=node_failures, desktop_build_ok=desktop_build_ok, pre_update_version=pre_update_version,
     )
 
     _print_post_update_notices_and_self_heals()
