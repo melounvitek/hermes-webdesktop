@@ -345,7 +345,7 @@ class RuntimeMode:
         return prefix, [workspace] if workspace else [], trailing
 
     def system_blocks(self) -> list[str]:
-        """Posture blocks as one flat list in historical order (compat helper)."""
+        """Posture blocks as one flat list in historical order."""
         prefix, workspace, trailing = self.system_prompt_parts()
         return [*prefix, *workspace, *trailing]
 
@@ -381,7 +381,7 @@ def resolve_runtime_mode(
     )
 
 
-# ── Back-compat surface (thin wrappers over RuntimeMode) ────────────────────
+# ── Functional API (thin wrappers over RuntimeMode) ──────────────────────────
 
 def is_coding_context(*, platform: Optional[str] = None, cwd: Optional[str | Path] = None, config: Optional[dict[str, Any]] = None) -> bool:
     """Whether Hermes should operate in its coding posture right now."""

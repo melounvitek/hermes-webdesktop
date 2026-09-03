@@ -209,10 +209,6 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
 
 # --- ID helpers ---------------------------------------------------------------
 
-# Deterministic call_id fallback (random ids would break the prompt-cache prefix); re-exported for run_agent/tests.
-_deterministic_call_id = deterministic_call_id
-
-
 def _clamp_responses_call_id(call_id: str) -> str:
     """Keep ``call_id`` within the API's 64-char cap (the codex app-server namespaces MCP call ids past it). The
     surrogate is a pure function of the original so a ``function_call`` and its ``function_call_output`` agree."""
@@ -262,7 +258,7 @@ def _resolve_call_id(
     if not _nonblank(call_id) and canonicalize_fc:
         call_id = _canonical_call_id_from_fc(embedded_response_item_id)
     if not _nonblank(call_id):
-        call_id = _deterministic_call_id(fn_name, arguments, index)
+        call_id = deterministic_call_id(fn_name, arguments, index)
     return call_id.strip()
 
 

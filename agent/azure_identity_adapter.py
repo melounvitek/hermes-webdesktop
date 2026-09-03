@@ -120,11 +120,10 @@ def _install_failure(allow_install: bool) -> Optional[Dict[str, Any]]:
 
 
 def build_token_provider(scope: Optional[str] = None, *, config: Optional[EntraIdentityConfig] = None,
-                         base_url: Optional[str] = None, exclude_interactive_browser: bool = True,
-                         ) -> Callable[[], str]:
+                         exclude_interactive_browser: bool = True) -> Callable[[], str]:
     """Zero-arg callable minting a fresh Entra bearer JWT — pass as ``OpenAI(api_key=...)``. Scope precedence:
-    ``config.scope`` > ``scope`` kwarg > default; ``base_url`` is unused (back-compat). Not picklable: ship the
-    ``EntraIdentityConfig`` and rebuild in the worker."""
+    ``config.scope`` > ``scope`` kwarg > default. Not picklable: ship the ``EntraIdentityConfig`` and rebuild
+    in the worker."""
     ai = _require_azure_identity()
     config = _resolve_config(config, scope, exclude_interactive_browser=exclude_interactive_browser)
     return ai.get_bearer_token_provider(build_credential(config), config.scope)

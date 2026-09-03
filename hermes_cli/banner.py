@@ -710,7 +710,7 @@ def _mcp_configured() -> bool:
 
 
 def _probe_mcp_status() -> list:
-    from tools.mcp_tool import get_mcp_status
+    from tools.mcp_tool_discovery import get_mcp_status
     return get_mcp_status()
 
 

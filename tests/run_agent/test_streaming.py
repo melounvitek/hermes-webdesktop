@@ -962,7 +962,7 @@ class TestCodexStreamCallbacks:
         mock_client = MagicMock()
         mock_client.responses.create.return_value = mock_stream
 
-        agent._run_codex_create_stream_fallback(
+        agent._run_codex_stream(
             {"model": "test/model", "instructions": "hi", "input": []},
             client=mock_client,
         )

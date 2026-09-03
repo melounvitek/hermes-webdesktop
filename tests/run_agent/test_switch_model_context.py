@@ -6,7 +6,7 @@ import pytest
 
 from hermes_cli.models import LMStudioLoadResult
 from run_agent import AIAgent
-from agent.agent_init import _normalize_route_base_url
+from hermes_cli.route_identity import normalize_route_base_url
 from agent.context_compressor import ContextCompressor
 
 
@@ -26,9 +26,9 @@ class _StubStartupCompressor:
 
 def test_route_url_normalization_preserves_path_slash_before_query():
     """A path slash before a query changes OpenAI SDK URL joining."""
-    assert _normalize_route_base_url(
+    assert normalize_route_base_url(
         "https://example.com/v1/?tenant=large"
-    ) != _normalize_route_base_url("https://example.com/v1?tenant=large")
+    ) != normalize_route_base_url("https://example.com/v1?tenant=large")
 
 
 

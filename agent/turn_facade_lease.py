@@ -159,8 +159,7 @@ class DurableTurnLease:
         if not message:
             return
         agent = self.agent
-        # Lazy via the façade so ``patch("agent.turn_facade._set_interrupt")`` keeps intercepting.
-        from agent.turn_facade import _set_interrupt
+        from tools.interrupt import set_interrupt as _set_interrupt
 
         with getattr(agent, "_pending_redirect_lock", None) or nullcontext():
             if getattr(agent, "_interrupt_message", None) != message:

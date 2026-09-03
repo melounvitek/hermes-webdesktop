@@ -631,7 +631,7 @@ def _persist_system_prompt(agent, failure_message: str, *, persist_tools: bool =
     try:
         agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
         if persist_tools:
-            from tools.mcp_tool import persist_agent_tool_names
+            from tools.mcp_tool_agent import persist_agent_tool_names
             persist_agent_tool_names(agent)
     except Exception as exc:
         logger.warning(failure_message, agent.session_id, exc)
@@ -692,7 +692,7 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         try:
             saved_tools = session_row.get("tool_names") if session_row else None
             if saved_tools:
-                from tools.mcp_tool import restore_agent_tool_prefix
+                from tools.mcp_tool_agent import restore_agent_tool_prefix
                 restore_agent_tool_prefix(agent, json.loads(saved_tools))
         except Exception:
             logger.debug("tool prefix restore skipped", exc_info=True)

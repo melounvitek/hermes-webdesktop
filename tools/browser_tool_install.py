@@ -315,7 +315,7 @@ def check_browser_requirements() -> bool:
     # Cloud mode also requires provider credentials; no local Chromium needed.
     provider = _bt._get_cloud_provider()
     if provider is not None:
-        return provider.is_configured()
+        return provider.is_available()
     # Lightpanda provides text/navigation tools without Chromium; screenshots/vision still return install errors.
     if _bt._using_lightpanda_engine():
         return True

@@ -1,6 +1,6 @@
 """Codex API runtime — App Server and Responses-API streaming paths. Every entry point takes the parent
 AIAgent first: ``run_codex_app_server_turn`` drives one ``codex app-server`` subprocess turn;
-``run_codex_stream`` runs one streaming Codex Responses call (``run_codex_create_stream_fallback`` aliases it)."""
+``run_codex_stream`` runs one streaming Codex Responses call."""
 
 from __future__ import annotations
 
@@ -965,12 +965,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             _close_event_stream(event_stream)
 
 
-def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None):
-    """Backward-compatible alias kept for tests and a few call sites."""
-    return run_codex_stream(agent, api_kwargs, client=client)
-
-
 __all__ = [
-    "run_codex_app_server_turn", "run_codex_stream", "run_codex_create_stream_fallback",
+    "run_codex_app_server_turn", "run_codex_stream",
     "_consume_codex_event_stream", "make_codex_app_server_event_bridge",
 ]

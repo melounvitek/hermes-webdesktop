@@ -110,7 +110,7 @@ def _autodetect_cloud_provider() -> Optional[CloudBrowserProvider]:
     try:
         for cls in (_bt.BrowserUseProvider, _bt.BrowserbaseProvider):
             fallback_provider = cls()
-            if fallback_provider.is_configured():
+            if fallback_provider.is_available():
                 return fallback_provider
     except Exception:  # pragma: no cover - defensive: never poison cache
         _bt.logger.debug("Cloud provider auto-detect failed", exc_info=True)

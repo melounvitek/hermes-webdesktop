@@ -588,7 +588,7 @@ def _browser_status() -> None:
     else:
         provider = _probe("tools.browser_tool", "_get_cloud_provider", None)
         if provider is not None:
-            print(f"🌐 Browser: {provider.provider_name()} (cloud)")
+            print(f"🌐 Browser: {provider.display_name} (cloud)")
             _print_lightpanda_engine_status()
         else:
             engine = _probe("tools.browser_tool_cloud", "_get_browser_engine", "auto")

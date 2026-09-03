@@ -2230,7 +2230,7 @@ class GatewayTurnMixin:
         a history-destroying ``/new``. Each agent keeps its build-time toolset selection EXACTLY: a
         session built with restricted enabled_toolsets (e.g. ["safe"]) must NOT silently gain tools."""
         try:
-            from tools.mcp_tool import refresh_agent_mcp_tools
+            from tools.mcp_tool_agent import refresh_agent_mcp_tools
             _cache = getattr(self, "_agent_cache", None)
             _cache_lock = getattr(self, "_agent_cache_lock", None)
             if _cache_lock is None or not _cache:
@@ -2262,8 +2262,10 @@ class GatewayTurnMixin:
             with _profile_runtime_scope(Path(profile_home)):
                 return await self._execute_mcp_reload(event)
         try:
-            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
-            from tools.mcp_tool import _server_scope_keys, reprobe_tool_availability
+            from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+            from tools.mcp_tool_discovery import discover_mcp_tools
+            from tools.mcp_tool import _servers, _lock, _server_scope_keys
+            from tools.mcp_tool_agent import reprobe_tool_availability
             from tools.registry import registry
 
             reload_scope = registry.current_scope_key() if multiplex else None

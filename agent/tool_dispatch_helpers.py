@@ -75,7 +75,7 @@ def _is_destructive_command(cmd: str) -> bool:
 def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
     """Whether an MCP tool's server opted into parallel calls; False if MCP is unavailable."""
     try:
-        from tools.mcp_tool import is_mcp_tool_parallel_safe  # lazy: avoids import cycle
+        from tools.mcp_tool_discovery import is_mcp_tool_parallel_safe
         return is_mcp_tool_parallel_safe(tool_name)
     except Exception:
         return False

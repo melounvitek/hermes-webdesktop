@@ -20,7 +20,6 @@ import re
 import threading
 import time
 import uuid
-from pathlib import Path  # noqa: F401 — used by test mocks
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
@@ -443,10 +442,6 @@ def aux_stream_deadline(deadline: Optional[float]):
         yield
     finally:
         _aux_stream_deadline.value = previous
-
-
-# Back-compat alias — the timing hooks were introduced with this name.
-_aux_timing_hook = _aux_thread_local_hook
 
 
 def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]) -> Any:
@@ -915,9 +910,6 @@ def _nous_extra_body() -> dict:
     """Fresh Nous Portal ``extra_body`` (per call, so a hot-reloaded version is reflected)."""
     return {"tags": _nous_portal_tags()}
 
-
-# Back-compat snapshot; tests/plugins read ``NOUS_EXTRA_BODY`` directly.
-NOUS_EXTRA_BODY = _nous_extra_body()
 
 # Set at resolve time — True if the auxiliary client points to Nous Portal
 auxiliary_is_nous: bool = False
@@ -3101,11 +3093,6 @@ def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
     ))
 
 
-def _is_unsupported_temperature_error(exc: Exception) -> bool:
-    """Back-compat wrapper for ``temperature``; kept as a named symbol because tests/call sites import it."""
-    return _is_unsupported_parameter_error(exc, "temperature")
-
-
 def _is_structured_output_rejection(exc: Exception) -> bool:
     """Provider 400/422 rejecting the structured-output field, on either wire: OpenAI ``response_format``
     (incl. vLLM's ``guided_grammar``/xgrammar failures) or Anthropic ``output_config.format`` ("Extra inputs
@@ -4174,14 +4161,6 @@ def _resolve_auto_route(
     return _try_discovery_chain()
 
 
-def _resolve_auto(
-    main_runtime: Optional[Dict[str, Any]] = None, task: Optional[str] = None
-) -> Tuple[Optional[OpenAI], Optional[str]]:
-    """Backward-compatible auto resolver for callers that only need client/model."""
-    client, model, _provider = _resolve_auto_route(main_runtime=main_runtime, task=task)
-    return client, model
-
-
 def _effective_provider_for_client(client: Any, fallback: str) -> str:
     """Return the concrete provider selected for an auto-routed client."""
     effective_provider = getattr(client, "_hermes_aux_effective_provider", "")
@@ -4825,7 +4804,7 @@ def resolve_provider_client(
     # Excluded: ``auto`` (a stale main slug could pair with any picked provider) and Nous + vision (the
     # Portal's tier-aware vision recommendation must win over a text-only model).
     if not model and provider != "auto" and not (provider == "nous" and is_vision):
-        # ``auto`` is intentionally excluded: `_resolve_auto(main_runtime=...)` returns the model paired
+        # ``auto`` is intentionally excluded: `_resolve_auto_route(main_runtime=...)` returns the model paired
         # with the provider it actually selected. Pre-filling an auto call from `_read_main_model()` can
         # leak a stale process-global runtime into a different provider (for example Claude model slug on
         # Codex OAuth) and override that correctly resolved model. 1. ``model`` argument (caller knew what
@@ -4839,9 +4818,9 @@ def resolve_provider_client(
         # Each provider branch below sees a non-empty ``model`` whenever the user has *anything* configured
         # — no provider-specific empty-model guards needed. When the user has NOTHING configured (fresh
         # install, main_model also empty), the branches still hit their own missing-credentials returns and
-        # ``_resolve_auto`` falls through to the Step-2 chain as before. Do NOT pre-fill a blank ``auto``
+        # ``_resolve_auto_route`` falls through to the Step-2 chain as before. Do NOT pre-fill a blank ``auto``
         # request from the config/main default here. Claude model sent to Codex after the main lane fell
-        # back to gpt-5.5). Let _resolve_auto() return the actual current runtime model when the caller did
+        # back to gpt-5.5). Let _resolve_auto_route() return the actual current runtime model when the caller did
         # not explicitly request one. (# compression-current-model) Nous + vision is the one carve-out: the
         # branch below resolves its model from the Portal's tier-aware vision recommendation
         # (``_try_nous(vision= True)``), and ``final_model = model or default`` means anything pre-filled
@@ -5417,14 +5396,14 @@ _AUX_DIRECT_API_BASE_URLS: Dict[str, str] = {"openai": "https://api.openai.com/v
 
 # MoA virtual provider: an *explicit* `provider: moa` override (either the caller-passed `provider` arg or
 # `auxiliary.<task>.provider` in config.yaml) reaches this function directly — it never goes through
-# _resolve_auto(), which only unwraps the *implicit* "main provider is moa" case (#53827). Left as-is, "moa"
+# _resolve_auto_route(), which only unwraps the *implicit* "main provider is moa" case (#53827). Left as-is, "moa"
 # is returned verbatim and resolve_provider_client() looks it up in PROVIDER_REGISTRY (which has no "moa"
 # entry — it's not a real HTTP provider), falls to the unknown-provider dead end, and call_llm surfaces a
 # nonsensical "MOA_API_KEY environment variable" error for a provider that was never meant to be reached
 # over the wire. Auxiliary tasks don't need the reference fan-out — resolve to the preset's aggregator slot
 # instead, exactly like the implicit path does (shared helper: _resolve_moa_aggregator).
 def _unwrap_moa_provider(prov: str, mdl: Optional[str]) -> Tuple[str, Optional[str]]:
-    """Resolve an *explicit* ``provider: moa`` to its preset's aggregator slot (_resolve_auto()
+    """Resolve an *explicit* ``provider: moa`` to its preset's aggregator slot (_resolve_auto_route()
     only unwraps the implicit case; "moa" isn't in PROVIDER_REGISTRY and would dead-end)."""
     if prov.strip().lower() != "moa":
         return prov, mdl
@@ -5489,7 +5468,7 @@ def _resolve_task_provider_model(
         cfg_model = None
     resolved_model = model or cfg_model
     # Any moa:// facade endpoint belongs to the facade, not the aggregator's real provider —
-    # drop it (mirrors _resolve_auto()).
+    # drop it (mirrors _resolve_auto_route()).
     if provider and str(provider).strip().lower() == "moa":
         provider, resolved_model = _unwrap_moa_provider(provider, resolved_model)
         if provider and provider.lower() != "moa":
@@ -6663,7 +6642,7 @@ def _ladder_parameter_rungs(
     """Rungs 1-3: retry without temperature / structured-output format / max_tokens.
     Returns ``(response, None, kwargs)`` or ``(None, narrowed_err, stripped_kwargs)``."""
     client, task, tag = route.client, route.task, route.tag
-    if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
+    if "temperature" in kwargs and _is_unsupported_parameter_error(first_err, "temperature"):
         retry_kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
         logger.info("Auxiliary %s%s: provider rejected temperature; retrying once without it",
                     task or "call", tag)
@@ -6981,9 +6960,9 @@ def call_llm(
                 if callable(prior_progress_hook)
                 else ((lambda: None) if latency_info is not None else None)
             ),
-            _aux_timing_hook(_aux_dispatch, functools.partial(
+            _aux_thread_local_hook(_aux_dispatch, functools.partial(
                 _stamp_latency_once, latency_info, "provider_dispatch_ms", request_started_at)),
-            _aux_timing_hook(_aux_provider_response, functools.partial(
+            _aux_thread_local_hook(_aux_provider_response, functools.partial(
                 _stamp_latency_once, latency_info, "time_to_first_progress_ms", request_started_at)),
         ):
             response = _call_llm_impl(

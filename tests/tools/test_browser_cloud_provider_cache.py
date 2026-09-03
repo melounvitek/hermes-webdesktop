@@ -224,9 +224,9 @@ class TestCloudProviderCachePolicy:
         )
 
         bu_unconfigured = Mock()
-        bu_unconfigured.is_configured.return_value = False
+        bu_unconfigured.is_available.return_value = False
         bb_unconfigured = Mock()
-        bb_unconfigured.is_configured.return_value = False
+        bb_unconfigured.is_available.return_value = False
         monkeypatch.setattr(
             browser_tool, "BrowserUseProvider", lambda: bu_unconfigured
         )
@@ -239,7 +239,7 @@ class TestCloudProviderCachePolicy:
 
         # Credentials self-heal — next call must retry and pick up the provider.
         healed = Mock(name="healed-provider")
-        healed.is_configured.return_value = True
+        healed.is_available.return_value = True
         monkeypatch.setattr(browser_tool, "BrowserUseProvider", lambda: healed)
 
         assert browser_tool._get_cloud_provider() is healed

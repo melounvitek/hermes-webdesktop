@@ -149,7 +149,7 @@ def _run_dashboard_mcp_oauth(flow, cfg: dict) -> None:
                     flow.tools = [{"name": t, "description": d} for t, d in tools]
                     flow.mark_approved()
                     if flow.reconnect_live:
-                        from tools.mcp_tool import reconnect_mcp_server
+                        from tools.mcp_tool_loop import reconnect_mcp_server
 
                         reconnect_mcp_server(flow.server_name)
                 except Exception:

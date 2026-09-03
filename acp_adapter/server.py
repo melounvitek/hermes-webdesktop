@@ -409,7 +409,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if not mcp_servers:
             return
         try:
-            from tools.mcp_tool import register_mcp_servers
+            from tools.mcp_tool_discovery import register_mcp_servers
 
             await asyncio.to_thread(register_mcp_servers, {s.name: _mcp_server_config(s) for s in mcp_servers})
         except Exception:
@@ -479,7 +479,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                     if any(int(getattr(agent, k, 0) or 0) > 0 for k in ("_user_turn_count", "_api_call_count")):
                         return
 
-                    from tools.mcp_tool import refresh_agent_mcp_tools
+                    from tools.mcp_tool_agent import refresh_agent_mcp_tools
 
                     added = refresh_agent_mcp_tools(agent, quiet_mode=True)
                 if added:

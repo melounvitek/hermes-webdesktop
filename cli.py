@@ -783,7 +783,7 @@ def _interrupt_async_delegations() -> None:
 
 
 def _shutdown_mcp_servers() -> None:
-    from tools.mcp_tool import shutdown_mcp_servers
+    from tools.mcp_tool_lifecycle import shutdown_mcp_servers
     shutdown_mcp_servers()
 
 

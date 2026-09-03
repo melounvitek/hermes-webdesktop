@@ -2089,7 +2089,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
             info["skills"] = get_available_skills()
     info["mcp_servers"] = []
     with contextlib.suppress(Exception):
-        from tools.mcp_tool import get_mcp_status
+        from tools.mcp_tool_discovery import get_mcp_status
         info["mcp_servers"] = get_mcp_status()
     with contextlib.suppress(Exception):
         info["system_prompt"] = (
@@ -2153,7 +2153,7 @@ def _schedule_mcp_late_refresh(sid: str, agent) -> None:
             if int(getattr(agent, "_user_turn_count", 0) or 0) > 0 or int(getattr(agent, "_api_call_count", 0) or 0) > 0:
                 return  # conversation started: a rebuild would invalidate the cached prompt prefix
             try:
-                from tools.mcp_tool import refresh_agent_mcp_tools
+                from tools.mcp_tool_agent import refresh_agent_mcp_tools
                 added = refresh_agent_mcp_tools(agent, quiet_mode=True)
             except Exception as exc:
                 logger.warning("Late MCP refresh: tool snapshot rebuild failed for %s: %s", sid, exc)

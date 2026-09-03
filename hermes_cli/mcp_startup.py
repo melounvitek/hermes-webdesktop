@@ -61,7 +61,7 @@ def _has_configured_mcp_servers() -> bool:
 
 
 def _any_mcp_connected() -> bool:
-    from tools.mcp_tool import get_mcp_status
+    from tools.mcp_tool_discovery import get_mcp_status
 
     return any(entry.get("connected") for entry in (get_mcp_status() or []))
 
@@ -155,7 +155,7 @@ def _discover_mcp_tools_without_interactive_oauth() -> None:
         suppress_interactive_oauth = nullcontext
 
     with suppress_interactive_oauth():
-        from tools.mcp_tool import discover_mcp_tools
+        from tools.mcp_tool_discovery import discover_mcp_tools
 
         # Only pass the kwarg when a filter is set: many tests (and any
         # out-of-tree caller) stub discover_mcp_tools with a zero-arg

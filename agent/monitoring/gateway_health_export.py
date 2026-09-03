@@ -32,7 +32,6 @@ from agent.monitoring.otlp_exporter import (
     _otlp_config,
     _resolve_headers,
     _runtime_resource_attributes,
-    _safe_resource_attributes,  # noqa: F401 — re-exported for tests
     _signal_endpoint,
 )
 from agent.monitoring.redaction import redact_bounded

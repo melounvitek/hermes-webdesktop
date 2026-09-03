@@ -18,7 +18,8 @@ from hermes_cli.config import (
 from hermes_cli.colors import Colors, color
 from hermes_constants import display_hermes_home
 from hermes_cli.mcp_security import validate_mcp_server_entry
-from tools.mcp_tool import _ENV_VAR_PATTERN, _env_ref_name
+from tools.mcp_tool_config import _ENV_VAR_PATTERN
+from tools.mcp_tool_common import _env_ref_name
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def _resolve_mcp_server_config(config: dict) -> dict:
     probe sent the literal placeholder and auth-requiring servers (e.g. n8n) returned 401 — while runtime
     tool loading worked because it interpolates. (#37792)
     """
-    from tools.mcp_tool import _interpolate_env_vars
+    from tools.mcp_tool_config import _interpolate_env_vars
     from agent.secret_scope import current_secret_scope
 
     if current_secret_scope() is None:
@@ -264,8 +265,10 @@ def _probe_single_server(
     if issues:
         raise ValueError("; ".join(issues))
 
-    from tools.mcp_tool import (
-        _ensure_mcp_loop, _run_on_mcp_loop, _connect_server, _stop_mcp_loop_if_idle, _parse_boolish)
+    from tools.mcp_tool_loop import _ensure_mcp_loop, _run_on_mcp_loop
+    from tools.mcp_tool_discovery import _connect_server
+    from tools.mcp_tool_lifecycle import _stop_mcp_loop_if_idle
+    from tools.mcp_tool_common import _parse_boolish
 
     config = _resolve_mcp_server_config(config)
     if connect_timeout is None:
@@ -290,7 +293,7 @@ def _probe_single_server(
                 # the desktop can estimate per-call token cost. Best-effort, absent on failure.
                 try:
                     import json as _json
-                    from tools.mcp_tool import _convert_mcp_schema
+                    from tools.mcp_tool_schema import _convert_mcp_schema
 
                     details["schema_chars"] = {
                         t.name: len(_json.dumps(_convert_mcp_schema(name, t), separators=(",", ":"), default=str))
@@ -796,7 +799,7 @@ def cmd_mcp_configure(args):
 
     # Same matching semantics as runtime registration (tools/mcp_tool.py): exact names or globs.
     try:
-        from tools.mcp_tool import matches_name_filter
+        from tools.mcp_tool_schema import matches_name_filter
     except ImportError:  # pragma: no cover — defensive fallback
         def matches_name_filter(tool_name, patterns):
             return tool_name in patterns

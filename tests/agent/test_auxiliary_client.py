@@ -32,7 +32,7 @@ from agent.auxiliary_client import (
     _try_openrouter,
     _OPENROUTER_MODEL,
     OPENROUTER_BASE_URL,
-    _resolve_auto,
+    _resolve_auto_route,
     _resolve_task_provider_model,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
@@ -72,7 +72,7 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     # Module-level unhealthy cache (10-min TTL) leaks between tests;
     # earlier tests that call _mark_provider_unhealthy() poison the
-    # cache for later ones, causing _resolve_auto to skip providers
+    # cache for later ones, causing _resolve_auto_route to skip providers
     # that the test patched to return valid clients.
     import agent.auxiliary_client as _aux_mod
     _aux_mod._aux_unhealthy_until.clear()
@@ -166,7 +166,7 @@ class TestResolveTaskProviderModel:
         """An *explicit* `provider="moa"` arg (e.g. a per-task model override
         naming a MoA preset) must resolve to the preset's aggregator, not the
         literal "moa" string — mirrors #53827's fix for the implicit
-        "main provider is moa" case in _resolve_auto(), which this function
+        "main provider is moa" case in _resolve_auto_route(), which this function
         never went through."""
         preset = {
             "aggregator": {"provider": "openrouter", "model": "anthropic/claude-opus-4.8"},
@@ -796,7 +796,7 @@ class TestResolveProviderClientUniversalModelFallback:
     Pre-fix the OAuth providers (xai-oauth, openai-codex) returned
     ``(None, None)`` on an empty model — both lack a catalog default
     because their accepted-model lists drift on the backend.  That
-    silent failure caused ``_resolve_auto`` to drop to its Step-2
+    silent failure caused ``_resolve_auto_route`` to drop to its Step-2
     fallback chain (OpenRouter / Nous / etc.), so aux tasks billed
     against the wrong subscription.
     """
@@ -890,8 +890,8 @@ class TestExpiredCodexFallback:
         monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-fallback")
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
-            from agent.auxiliary_client import _resolve_auto
-            client, model = _resolve_auto()
+            from agent.auxiliary_client import _resolve_auto_route
+            client, model, _provider = _resolve_auto_route()
             # Should NOT be Codex, should be Anthropic (or another available provider)
             assert not isinstance(client, type(None)), "Should find a provider after expired Codex"
 
@@ -932,8 +932,8 @@ class TestExpiredCodexFallback:
 
         with patch("agent.auxiliary_client.OpenAI") as mock_openai:
             mock_openai.return_value = MagicMock()
-            from agent.auxiliary_client import _resolve_auto
-            client, model = _resolve_auto()
+            from agent.auxiliary_client import _resolve_auto_route
+            client, model, _provider = _resolve_auto_route()
             assert client is not None
             # OpenRouter is 1st in chain, should win
             mock_openai.assert_called()
@@ -2427,7 +2427,7 @@ class TestKimiTemperatureOmitted:
 
 
 class TestStaleBaseUrlWarning:
-    """_resolve_auto() warns when OPENAI_BASE_URL conflicts with config provider (#5161)."""
+    """_resolve_auto_route() warns when OPENAI_BASE_URL conflicts with config provider (#5161)."""
 
     def test_warns_when_openai_base_url_set_with_named_provider(self, monkeypatch, caplog):
         """Warning fires when OPENAI_BASE_URL is set but provider is a named provider."""
@@ -2440,7 +2440,7 @@ class TestStaleBaseUrlWarning:
         with patch("agent.auxiliary_client._read_main_provider", return_value="openrouter"), \
              patch("agent.auxiliary_client._read_main_model", return_value="google/gemini-flash"), \
              caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
-            _resolve_auto()
+            _resolve_auto_route()
 
         assert any("OPENAI_BASE_URL is set" in rec.message for rec in caplog.records), \
             "Expected a warning about stale OPENAI_BASE_URL"
@@ -2611,7 +2611,7 @@ class TestAuxiliaryTaskExtraBody:
              patch("agent.auxiliary_client.OpenAI") as mock_openai, \
              caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
             mock_openai.return_value = MagicMock()
-            _resolve_auto()
+            _resolve_auto_route()
 
         assert not any("OPENAI_BASE_URL is set" in rec.message for rec in caplog.records), \
             "Should NOT warn when provider is 'custom'"
@@ -3318,7 +3318,7 @@ class TestCodexAdapterGithubResponsesMessageIdDrop:
 
 
 class TestVisionAutoSkipsKimiCoding:
-    """_resolve_auto vision branch skips providers that have no vision on
+    """_resolve_auto_route vision branch skips providers that have no vision on
     their main endpoint (e.g. Kimi Coding Plan /coding) and falls through
     to the aggregator chain instead of handing back a client that will 404
     on every request (#17076).

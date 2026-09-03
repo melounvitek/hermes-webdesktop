@@ -1780,7 +1780,6 @@ class TestExecuteToolCalls:
             patch("model_tools.handle_function_call", side_effect=KeyboardInterrupt),
             patch("run_agent._set_interrupt"),
             patch("agent.interrupt_control._set_interrupt"),
-            patch("agent.turn_facade._set_interrupt"),
             pytest.raises(KeyboardInterrupt),
         ):
             agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
@@ -3411,7 +3410,6 @@ class TestRunConversation:
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent._set_interrupt"),
             patch("agent.interrupt_control._set_interrupt"),
-            patch("agent.turn_facade._set_interrupt"),
             patch.object(
                 agent, "_interruptible_api_call", side_effect=interrupt_side_effect
             ),

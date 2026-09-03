@@ -856,9 +856,10 @@ class CLIInfoMixin:
         """Reload MCP servers: disconnect all, re-read config.yaml, reconnect, then refresh the
         agent's tool list so the model sees the updated tools on the next turn."""
         try:
-            from tools.mcp_tool import (
-                shutdown_mcp_servers, discover_mcp_tools, reprobe_tool_availability, _servers, _lock,
-            )
+            from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+            from tools.mcp_tool_discovery import discover_mcp_tools
+            from tools.mcp_tool_agent import reprobe_tool_availability
+            from tools.mcp_tool import _servers, _lock
             with _lock:
                 old_servers = set(_servers.keys())
             if not self._command_running:
@@ -886,7 +887,7 @@ class CLIInfoMixin:
             # gateway reload / late-binding paths (name-diff, thread-safe, additive-preserving so
             # memory-provider and context-engine tools survive the rebuild).
             if self.agent is not None:
-                from tools.mcp_tool import refresh_agent_mcp_tools
+                from tools.mcp_tool_agent import refresh_agent_mcp_tools
                 # Pick up servers ENABLED in config this session: enabled_toolsets was resolved at
                 # startup, so merge now-connected names in (unless `all`/`*` is pinned) so a
                 # freshly-added server isn't filtered out. Mirrors startup (see __init__).

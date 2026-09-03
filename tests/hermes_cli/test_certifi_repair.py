@@ -167,7 +167,7 @@ class TestDoctorCertificates:
             return _R()
 
         monkeypatch.setattr(
-            "agent.ssl_guard.verify_ca_bundle_with_fallback", fake_verify
+            "agent.ssl_guard.verify_ca_bundle", fake_verify
         )
         monkeypatch.setattr(subprocess, "run", fake_run)
 

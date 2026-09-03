@@ -117,7 +117,6 @@ class ClientLifecycleMixin:
     _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers", "force_close_tcp_sockets")
     _cleanup_dead_connections = _forward("agent.agent_runtime_helpers", "cleanup_dead_connections")
     _run_codex_stream = _forward("agent.codex_runtime", "run_codex_stream")
-    _run_codex_create_stream_fallback = _forward("agent.codex_runtime", "run_codex_create_stream_fallback")
     _recover_with_credential_pool = _forward("agent.agent_runtime_helpers", "recover_with_credential_pool")
 
     def _close_openai_client(self, client: Any, *, reason: str, shared: bool) -> None:

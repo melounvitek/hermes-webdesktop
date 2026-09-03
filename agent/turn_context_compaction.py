@@ -394,7 +394,7 @@ def _run_preflight_passes(
         _preflight_tokens = _tc._preflight_request_tokens(
             agent, out.messages, out.active_system_prompt or ""
         )
-        if not _tc._compression_made_progress(
+        if not _tc.compression_made_progress(
             _orig_len, len(out.messages), _orig_tokens, _preflight_tokens
         ):
             _tc._fail_closed_after_preflight_timeout(agent, _preflight_tokens)

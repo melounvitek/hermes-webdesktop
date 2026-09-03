@@ -556,7 +556,7 @@ class TestLightpandaEngineStatus:
 
     def test_shadowed_by_cloud_provider(self, monkeypatch):
         provider = MagicMock()
-        provider.provider_name.return_value = "Browserbase"
+        provider.display_name = "Browserbase"
         bt = self._gates(monkeypatch, _get_cloud_provider=lambda: provider)
         used, reason = bt.lightpanda_engine_status()
         assert used is False and "Browserbase" in reason
@@ -578,7 +578,7 @@ class TestLightpandaEngineStatus:
         """browser_exec resolves real-profile before the backend, so with
         both set the real-profile toggle is the actual shadow."""
         provider = MagicMock()
-        provider.provider_name.return_value = "Browserbase"
+        provider.display_name = "Browserbase"
         bt = self._gates(
             monkeypatch,
             _use_real_profile=lambda: True,

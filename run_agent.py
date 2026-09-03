@@ -124,11 +124,11 @@ from agent.session_activity import ActivityProvenance
 from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
     coalesce_tool_call_id as _sanitize_coalesce_tool_call_id,
+    deterministic_call_id as _codex_deterministic_call_id,
     uniquify_tool_call_ids as _sanitize_uniquify_tool_call_ids,
 )
 from agent.codex_responses_adapter import (
     _derive_responses_function_call_id as _codex_derive_responses_function_call_id,
-    _deterministic_call_id as _codex_deterministic_call_id,
     _split_responses_tool_id as _codex_split_responses_tool_id,
     _summarize_user_message_for_log,
 )

@@ -60,8 +60,3 @@ def verify_ca_bundle() -> None:
     except Exception as exc:
         raise _ssl_err(f"certifi is not importable: {exc}") from exc
     _validate_bundle_path("certifi", str(certifi.where()), require_substantial=True)
-
-
-def verify_ca_bundle_with_fallback() -> None:
-    """Backward-compatible name for older call sites; a broken certifi bundle fails later anyway, so enforce the same check."""
-    verify_ca_bundle()

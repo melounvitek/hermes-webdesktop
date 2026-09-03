@@ -16,7 +16,7 @@ from tools.browser_tool_origin import origin as _bt
 
 def _vision_mode_label() -> str:
     _cp = _bt._get_cloud_provider()
-    return "local" if _cp is None else f"cloud ({_cp.provider_name()})"
+    return "local" if _cp is None else f"cloud ({_cp.display_name})"
 
 
 def _lightpanda_vision_preroute(

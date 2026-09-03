@@ -33,7 +33,6 @@ CODEX_GPT56_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh"
 CODEX_LEGACY_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh")
 
 #: xAI Responses — Grok 4.6+ accepts xhigh; older Grok tops out at high.
-# : Backward-compat alias (pre-#68365-verification name).
 XAI_GROK46_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 XAI_LEGACY_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 

@@ -294,8 +294,8 @@ def _digest_history(messages_snapshot: List[Dict], tail: int = 24) -> List[Dict]
     return [{"role": "user", "content": digest}] + keep
 
 
-# Review prompts. AIAgent exposes them as class attributes
-# (``_MEMORY_REVIEW_PROMPT`` etc.) for back-compat; the text lives here.
+# Review prompts. AIAgent exposes them as class attributes (``_MEMORY_REVIEW_PROMPT`` etc.) so
+# per-agent overrides work; the text lives here.
 _MEMORY_REVIEW_PROMPT = (
     "Review the conversation above and consider saving to memory if appropriate.\n\n"
     "Focus on:\n"

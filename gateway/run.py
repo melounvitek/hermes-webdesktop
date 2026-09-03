@@ -1719,7 +1719,7 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
     carry the scope into the executor thread with ``copy_context()`` (the same shape as
     ``_run_in_executor_with_context``). See #95518.
     """
-    from tools.mcp_tool import discover_mcp_tools
+    from tools.mcp_tool_discovery import discover_mcp_tools
     loop = asyncio.get_running_loop()
     if not getattr(config, "multiplex_profiles", False):
         await loop.run_in_executor(None, discover_mcp_tools)
@@ -4592,7 +4592,7 @@ async def _shutdown_mcp_servers_nonblocking(timeout: float = 5.0) -> bool:
     """
     def _do() -> None:
         try:
-            from tools.mcp_tool import shutdown_mcp_servers
+            from tools.mcp_tool_lifecycle import shutdown_mcp_servers
             shutdown_mcp_servers()
         except Exception:
             logger.debug("MCP shutdown raised", exc_info=True)

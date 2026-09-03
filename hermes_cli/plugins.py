@@ -524,7 +524,7 @@ class PluginContext:
         except (TypeError, ValueError):
             timeout = 30.0
         timeout = max(1.0, min(timeout, 600.0))
-        from tools.mcp_tool import _make_tool_handler
+        from tools.mcp_tool_handlers import _make_tool_handler
         raw = _make_tool_handler(server, tool, timeout)(dict(arguments or {}))
         logger.debug("Plugin %s called MCP %s/%s (timeout=%ss, %d chars returned)",
                      self.manifest.name, server, tool, timeout, len(raw or ""))

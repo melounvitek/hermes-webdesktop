@@ -11,7 +11,6 @@ from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.lazy_forward import forward as _forward
-from tools.interrupt import set_interrupt as _set_interrupt  # noqa: F401  (tests patch it here)
 
 # Same logger name as the origin module so log records / caplog filters are unchanged.
 logger = logging.getLogger("run_agent")

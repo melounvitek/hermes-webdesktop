@@ -38,7 +38,7 @@ def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response
     try:
         headers = getattr(http_response, "headers", None) or {}
         captured: Dict[str, str] = {}
-        for name in getattr(agent, "_STREAM_DIAG_HEADERS", STREAM_DIAG_HEADERS):  # per-agent override (back-compat)
+        for name in STREAM_DIAG_HEADERS:
             try:
                 if val := headers.get(name):
                     captured[name] = str(val)[:120]  # keep log lines bounded

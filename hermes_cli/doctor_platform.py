@@ -182,14 +182,14 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
     certifi into THIS interpreter's environment and re-verifying.
     """
     try:
-        from agent.ssl_guard import verify_ca_bundle_with_fallback
+        from agent.ssl_guard import verify_ca_bundle
         from agent.errors import SSLConfigurationError
     except Exception as e:
         return check_warn("SSL certificate check skipped", str(e))
     if issues is None:
         issues = []
     try:
-        verify_ca_bundle_with_fallback()
+        verify_ca_bundle()
         return check_ok("SSL CA certificate bundle is valid")
     except SSLConfigurationError as e:
         first_error = str(e)
@@ -215,7 +215,7 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
         sys.modules.pop(mod_name, None)
     importlib.invalidate_caches()
     try:
-        verify_ca_bundle_with_fallback()
+        verify_ca_bundle()
         check_ok("SSL CA certificate bundle repaired (certifi reinstalled)")
     except SSLConfigurationError as e:
         _fail_and_issue("SSL CA certificate bundle still broken after reinstall", str(e),

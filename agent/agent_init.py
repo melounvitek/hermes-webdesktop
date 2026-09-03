@@ -72,53 +72,12 @@ def _warn_memory_provider_unavailable(name: str, reason: str = "") -> None:
     )
 
 
-# Canonicalize an endpoint URL for model-route identity comparisons.
-_normalize_route_base_url = normalize_route_base_url
-
-
-def _moa_reference_output_allowed(agent: Any) -> bool:
-    """Keep MoA display events off only the machine-readable ``-Q`` surface."""
-    return not (
-        getattr(agent, "platform", None) == "cli"
-        and getattr(agent, "tool_progress_mode", "all") == "off"
-    )
-
-
-def _relay_moa_reference_event(agent: Any, event: str, **kwargs: Any) -> None:
-    """Relay MoA display events while preserving the ``-Q`` stdout contract."""
-    if not _moa_reference_output_allowed(agent):
-        return
-    cb = getattr(agent, "tool_progress_callback", None)
-    if cb is None:
-        return
-    try:
-        if event == "moa.reference":
-            cb(
-                "moa.reference",
-                str(kwargs.get("label") or ""),
-                str(kwargs.get("text") or ""),
-                None,
-                moa_index=kwargs.get("index"),
-                moa_count=kwargs.get("count"),
-            )
-        elif event == "moa.aggregating":
-            cb(
-                "moa.aggregating",
-                str(kwargs.get("aggregator") or ""),
-                None,
-                None,
-                moa_ref_count=kwargs.get("ref_count"),
-            )
-    except Exception:
-        pass
-
-
 def _provider_default_routes(provider: str) -> set[str]:
     """Return known exact default routes for a canonical provider id."""
     routes: set[str] = set()
 
     def add(value):
-        route = _normalize_route_base_url(value)
+        route = normalize_route_base_url(value)
         if route:
             routes.add(route)
 
@@ -151,7 +110,7 @@ def _context_route_mismatch(
     *, already_normalized: bool = False,
 ) -> bool:
     """Return whether a context pin's configured route differs from runtime."""
-    _norm = (lambda v: str(v or "")) if already_normalized else _normalize_route_base_url
+    _norm = (lambda v: str(v or "")) if already_normalized else normalize_route_base_url
     configured_route, active_route = _norm(configured_base_url), _norm(active_base_url)
     if configured_route:
         return configured_route != active_route
@@ -960,8 +919,8 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
     agent.api_key = client_kwargs.get("api_key", "")
     agent.base_url = client_kwargs.get("base_url", agent.base_url)
     try:
-        from agent.ssl_guard import verify_ca_bundle_with_fallback
-        verify_ca_bundle_with_fallback()
+        from agent.ssl_guard import verify_ca_bundle
+        verify_ca_bundle()
         agent.client = agent._create_openai_client(client_kwargs, reason="agent_init", shared=True)
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with model: {agent.model}")
@@ -1569,7 +1528,7 @@ def _custom_provider_configured_base_url(
                 _disabled_ids.update(_ids)
                 continue
             if _wanted in _ids:
-                _url = _normalize_route_base_url(
+                _url = normalize_route_base_url(
                     _entry.get("api") or _entry.get("url") or _entry.get("base_url")
                 )
                 if _url:
@@ -1581,7 +1540,7 @@ def _custom_provider_configured_base_url(
         if _key_ids & _disabled_ids:
             continue
         if _wanted in _key_ids | _custom_provider_runtime_ids(_entry.get("name")):
-            _url = _normalize_route_base_url(_entry.get("base_url"))
+            _url = normalize_route_base_url(_entry.get("base_url"))
             if _url:
                 return _url
     return ""
@@ -1596,7 +1555,7 @@ _RUNTIME_FIRST_PROVIDER_IDS = {
 def _configured_default_base_url(_agent_cfg, _model_cfg, _custom_providers) -> str:
     """Normalized route of the configured default model (``model.base_url``, else the named
     custom provider's URL when ``model.provider`` is not a first-class/auth provider)."""
-    _configured_base_url = _normalize_route_base_url(_model_cfg.get("base_url"))
+    _configured_base_url = normalize_route_base_url(_model_cfg.get("base_url"))
     _configured_provider = str(_model_cfg.get("provider") or "").strip()
     _norm = _normalize_custom_provider_name(_configured_provider)
     _custom_provider_candidate = bool(_norm)
@@ -1622,9 +1581,9 @@ def _active_route_url(agent, base_url) -> str:
     if "?" in _requested.split("#", 1)[0]:
         with suppress(TypeError, ValueError):
             _without_query = urlunparse(urlparse(_requested)._replace(query=""))
-            if _normalize_route_base_url(_without_query) == _normalize_route_base_url(_active):
+            if normalize_route_base_url(_without_query) == normalize_route_base_url(_active):
                 _active = _requested
-    return _normalize_route_base_url(_active)
+    return normalize_route_base_url(_active)
 
 
 def _scope_context_length_to_default_runtime(
@@ -1679,13 +1638,13 @@ _CTX_LEN_REQUIREMENT = "must be a positive integer (e.g. 256000, not '256K')"
 
 def _warn_invalid_custom_provider_context_length(agent, _custom_providers) -> None:
     """Surface a context_length the helper silently skipped (not a positive int)."""
-    _target = _normalize_route_base_url(agent.base_url)
+    _target = normalize_route_base_url(agent.base_url)
     if not _target:
         return
     for _cp_entry in _custom_providers:
         if not isinstance(_cp_entry, dict):
             continue
-        if _normalize_route_base_url(_cp_entry.get("base_url")) != _target:
+        if normalize_route_base_url(_cp_entry.get("base_url")) != _target:
             continue
         _cp_models = _cp_entry.get("models", {})
         _cp_model_cfg = _cp_models.get(agent.model, {}) if isinstance(_cp_models, dict) else None

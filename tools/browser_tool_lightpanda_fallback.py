@@ -47,7 +47,7 @@ def lightpanda_engine_status() -> Tuple[bool, str]:
         provider = None
     if provider is not None:
         try:
-            name = provider.provider_name()
+            name = provider.display_name
         except Exception:
             name = type(provider).__name__
         return False, f"cloud provider {name} is selected (browser.cloud_provider, or auto-detected from credentials)"

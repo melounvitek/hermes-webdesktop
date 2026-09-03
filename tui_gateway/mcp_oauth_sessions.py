@@ -104,7 +104,7 @@ def _probe_with_rollback(
             flow.tools = [{"name": t, "description": d} for t, d in tools]
             flow.mark_approved()
         if reconnect_live:
-            from tools.mcp_tool import reconnect_mcp_server
+            from tools.mcp_tool_loop import reconnect_mcp_server
             reconnect_mcp_server(server_name)
     except Exception:
         storage.restore(backup, only_if_absent=True)
