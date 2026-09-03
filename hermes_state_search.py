@@ -30,6 +30,7 @@ _FTS5_SPECIAL_RE = re.compile(f"[{re.escape(_FTS5_SPECIAL_CHARS)}]")
 _FTS_OPERATORS = frozenset({"AND", "OR", "NOT"})
 _LIKE_SKIP_TOKENS = _FTS_OPERATORS | {"NEAR"}
 _LIKE_TOKEN_RE = re.compile(r'"[^"]+"|\S+')
+_QUOTED_PHRASE_RE = re.compile(r'"[^"]*"')
 
 # Column list shared by every search route (snippet + metadata, never content).
 _SEARCH_SELECT_TAIL = "m.timestamp, m.tool_name, s.source, s.model, s.started_at AS session_started"
@@ -79,10 +80,6 @@ _CONTEXT_WINDOW_SQL = """WITH target AS (
 _CJK_RANGES = (
     (0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x20000, 0x2A6DF), (0x3000, 0x303F), (0x3040, 0x309F),
     (0x30A0, 0x30FF), (0xAC00, 0xD7AF),
-)
-_RESULT_FIELDS = (
-    "id", "session_id", "role", "snippet", "timestamp", "tool_name", "source", "model",
-    "session_started", "context",
 )
 
 
@@ -168,7 +165,10 @@ def _search_filter_clauses(
 class SessionSearchMixin:
     """See module docstring — mixin for SessionDB (Search cluster)."""
 
-    _SEARCH_MESSAGE_RESULT_FIELDS = _RESULT_FIELDS
+    _SEARCH_MESSAGE_RESULT_FIELDS = (
+        "id", "session_id", "role", "snippet", "timestamp", "tool_name", "source", "model",
+        "session_started", "context",
+    )
 
     @classmethod
     def _search_message_fields(cls, fields: Optional[Collection[str]]) -> Optional[Tuple[str, ...]]:
@@ -777,26 +777,15 @@ class SessionSearchMixin:
         # Cap before any regex processing so adversarial input stays bounded.
         query = query[:MAX_FTS5_QUERY_CHARS]
 
-        # 1. Protect balanced quoted phrases via numbered placeholders. Linear scan, not
-        # regex, so pathological quote runs cannot backtrack.
+        # 1. Protect balanced quoted phrases via numbered placeholders (``"[^"]*"`` pairs
+        # left-to-right without backtracking); a leftover unmatched quote becomes whitespace.
         _quoted_parts: list = []
-        pieces: list[str] = []
-        i = 0
-        while i < len(query):
-            ch = query[i]
-            if ch != '"':
-                pieces.append(ch)
-                i += 1
-                continue
-            end = query.find('"', i + 1)
-            if end == -1:
-                pieces.append(" ")  # unmatched quote -> whitespace
-                i += 1
-                continue
-            _quoted_parts.append(query[i:end + 1])
-            pieces.append(f"\x00Q{len(_quoted_parts) - 1}\x00")
-            i = end + 1
-        sanitized = "".join(pieces)
+
+        def _hold(m: "re.Match[str]") -> str:
+            _quoted_parts.append(m.group(0))
+            return f"\x00Q{len(_quoted_parts) - 1}\x00"
+
+        sanitized = _QUOTED_PHRASE_RE.sub(_hold, query).replace('"', " ")
 
         # 2. Strip FTS5-special characters (an unquoted ``TODO: fix`` parses as
         # ``column:term``). ``%`` is only spared for the CJK LIKE fallback.
@@ -816,12 +805,6 @@ class SessionSearchMixin:
         for i, quoted in enumerate(_quoted_parts):
             sanitized = sanitized.replace(f"\x00Q{i}\x00", quoted)
         return sanitized.strip()
-
-    _CJK_RANGES = _CJK_RANGES
-
-    @staticmethod
-    def _is_cjk_codepoint(cp: int) -> bool:
-        return _is_cjk(cp)
 
     @staticmethod
     def _contains_cjk(text: str) -> bool:
