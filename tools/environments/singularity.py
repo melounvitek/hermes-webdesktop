@@ -25,15 +25,13 @@ _SNAPSHOT_STORE = get_hermes_home() / "singularity_snapshots.json"
 
 def _find_singularity_executable() -> str:
     """Locate the apptainer or singularity CLI binary."""
-    if shutil.which("apptainer"):
-        return "apptainer"
-    if shutil.which("singularity"):
-        return "singularity"
+    for exe in ("apptainer", "singularity"):
+        if shutil.which(exe):
+            return exe
     raise RuntimeError(
         "Neither 'apptainer' nor 'singularity' was found in PATH. "
         "Install Apptainer (https://apptainer.org/docs/admin/main/installation.html) "
-        "or Singularity and ensure the CLI is available."
-    )
+        "or Singularity and ensure the CLI is available.")
 
 
 def _ensure_singularity_available() -> str:
@@ -45,7 +43,6 @@ def _ensure_singularity_available() -> str:
         raise RuntimeError(f"Singularity backend selected but '{exe}' could not be executed.")
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"'{exe} version' timed out.")
-
     if result.returncode != 0:
         stderr = result.stderr.strip()[:200]
         raise RuntimeError(f"'{exe} version' failed (exit code {result.returncode}): {stderr}")
@@ -61,24 +58,20 @@ def _save_snapshots(data: dict) -> None:
 
 
 def _get_scratch_dir() -> Path:
+    """``TERMINAL_SCRATCH_DIR`` override, else a writable ``/scratch`` (HPC), else the sandbox dir."""
     custom_scratch = os.getenv("TERMINAL_SCRATCH_DIR")
     if custom_scratch:
         scratch_path = Path(custom_scratch)
-        scratch_path.mkdir(parents=True, exist_ok=True)
-        return scratch_path
-
-    from tools.environments.base import get_sandbox_dir
-    sandbox = get_sandbox_dir() / "singularity"
-
-    scratch = Path("/scratch")
-    if scratch.exists() and os.access(scratch, os.W_OK):
-        user_scratch = scratch / os.getenv("USER", "hermes") / "hermes-agent"
-        user_scratch.mkdir(parents=True, exist_ok=True)
-        logger.info("Using /scratch for sandboxes: %s", user_scratch)
-        return user_scratch
-
-    sandbox.mkdir(parents=True, exist_ok=True)
-    return sandbox
+    else:
+        from tools.environments.base import get_sandbox_dir
+        scratch_path = get_sandbox_dir() / "singularity"
+        scratch = Path("/scratch")
+        if scratch.exists() and os.access(scratch, os.W_OK):
+            scratch_path = scratch / os.getenv("USER", "hermes") / "hermes-agent"
+            scratch_path.mkdir(parents=True, exist_ok=True)
+            logger.info("Using /scratch for sandboxes: %s", scratch_path)
+    scratch_path.mkdir(parents=True, exist_ok=True)
+    return scratch_path
 
 
 def _get_apptainer_cache_dir() -> Path:
@@ -92,9 +85,8 @@ _sif_build_lock = threading.Lock()
 
 
 def _get_or_build_sif(image: str, executable: str = "apptainer") -> str:
-    if image.endswith('.sif') and Path(image).exists():
-        return image
-    if not image.startswith('docker://'):
+    """Build (once, cached) a SIF from a ``docker://`` URL; falls back to the URL on failure."""
+    if (image.endswith('.sif') and Path(image).exists()) or not image.startswith('docker://'):
         return image
 
     image_name = image.replace('docker://', '').replace('/', '-').replace(':', '-')
@@ -160,11 +152,10 @@ class SingularityEnvironment(BaseEnvironment):
         self._memory = memory
 
         if self._persistent:
-            overlay_base = _get_scratch_dir() / "hermes-overlays"
-            overlay_base.mkdir(parents=True, exist_ok=True)
             # A raw session-key task_id carries colons etc. unsafe in host path components;
             # the shared sanitizer keeps all backends agreeing on the mapping.
-            self._overlay_dir = overlay_base / f"overlay-{sanitize_task_id_for_path(task_id)}"
+            self._overlay_dir = (
+                _get_scratch_dir() / "hermes-overlays" / f"overlay-{sanitize_task_id_for_path(task_id)}")
             self._overlay_dir.mkdir(parents=True, exist_ok=True)
 
         self._start_instance()
@@ -179,10 +170,8 @@ class SingularityEnvironment(BaseEnvironment):
 
         try:
             from tools.credential_files import get_credential_file_mounts, get_skills_directory_mount
-            for mount_entry in get_credential_file_mounts():
-                cmd.extend(["--bind", f"{mount_entry['host_path']}:{mount_entry['container_path']}:ro"])
-            for skills_mount in get_skills_directory_mount():
-                cmd.extend(["--bind", f"{skills_mount['host_path']}:{skills_mount['container_path']}:ro"])
+            for entry in (*get_credential_file_mounts(), *get_skills_directory_mount()):
+                cmd.extend(["--bind", f"{entry['host_path']}:{entry['container_path']}:ro"])
         except Exception as e:
             logger.debug("Singularity: could not load credential/skills mounts: %s", e)
 
@@ -194,12 +183,12 @@ class SingularityEnvironment(BaseEnvironment):
 
         try:
             result = run_capture(cmd, timeout=120)
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to start instance: {result.stderr}")
-            self._instance_started = True
-            logger.info("Singularity instance %s started (persistent=%s)", self.instance_id, self._persistent)
         except subprocess.TimeoutExpired:
             raise RuntimeError("Instance start timed out")
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to start instance: {result.stderr}")
+        self._instance_started = True
+        logger.info("Singularity instance %s started (persistent=%s)", self.instance_id, self._persistent)
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
