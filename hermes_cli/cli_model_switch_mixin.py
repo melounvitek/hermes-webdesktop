@@ -244,11 +244,18 @@ class CLIModelSwitchMixin:
                 current_model = canonical
                 changed = True
 
-        def _set_mode(resolved_mode) -> None:
+        def _adopt_with_mode(normalize, api_mode_of, notice) -> bool:
+            """Provider families that also own the wire protocol: adopt id, then sync api_mode."""
             nonlocal changed
-            if resolved_mode != self.api_mode:
-                self.api_mode = resolved_mode
-                changed = True
+            try:
+                _adopt(normalize(current_model), notice)
+                resolved_mode = api_mode_of(current_model)
+                if resolved_mode != self.api_mode:
+                    self.api_mode = resolved_mode
+                    changed = True
+            except Exception:
+                pass
+            return changed
 
         try:
             from hermes_cli.model_normalize import (
@@ -265,32 +272,24 @@ class CLIModelSwitchMixin:
             pass
 
         if resolved_provider == "copilot":
-            try:
-                from hermes_cli.models import copilot_model_api_mode, normalize_copilot_model_id
-                _adopt(
-                    normalize_copilot_model_id(current_model, api_key=self.api_key),
-                    lambda new: f"Normalized Copilot model '{current_model}' to '{new}'.",
-                )
-                _set_mode(copilot_model_api_mode(current_model, api_key=self.api_key))
-            except Exception:
-                pass
-            return changed
+            from hermes_cli.models import copilot_model_api_mode, normalize_copilot_model_id
+            return _adopt_with_mode(
+                lambda m: normalize_copilot_model_id(m, api_key=self.api_key),
+                lambda m: copilot_model_api_mode(m, api_key=self.api_key),
+                lambda new: f"Normalized Copilot model '{current_model}' to '{new}'.",
+            )
 
         from hermes_cli.models import opencode_provider_family
         if opencode_provider_family(resolved_provider) is not None:
-            try:
-                from hermes_cli.models import normalize_opencode_model_id, opencode_model_api_mode
-                _adopt(
-                    normalize_opencode_model_id(resolved_provider, current_model),
-                    lambda new: (
-                        f"Stripped provider prefix from '{current_model}'; "
-                        f"using '{new}' for {resolved_provider}."
-                    ),
-                )
-                _set_mode(opencode_model_api_mode(resolved_provider, current_model))
-            except Exception:
-                pass
-            return changed
+            from hermes_cli.models import normalize_opencode_model_id, opencode_model_api_mode
+            return _adopt_with_mode(
+                lambda m: normalize_opencode_model_id(resolved_provider, m),
+                lambda m: opencode_model_api_mode(resolved_provider, m),
+                lambda new: (
+                    f"Stripped provider prefix from '{current_model}'; "
+                    f"using '{new}' for {resolved_provider}."
+                ),
+            )
 
         if resolved_provider != "openai-codex":
             return changed

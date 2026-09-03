@@ -652,41 +652,37 @@ class CLIVoiceMixin:
     def _start_wake_word_listener(self, announce: bool = False) -> bool:
         """Build + start the hotword detector. Returns True on success."""
         from cli import _ACCENT, _DIM, _RST, _cprint
+        say = _cprint if announce else (lambda *_a: None)
         try:
             from tools.wake_word import (
                 check_wake_word_requirements, load_wake_word_config, owns_listener, start_listening
             )
         except Exception as e:
-            if announce:
-                _cprint(f"{_DIM}Wake word unavailable: {e}{_RST}")
+            say(f"{_DIM}Wake word unavailable: {e}{_RST}")
             return False
 
         if getattr(self, "_wake_word_active", False) and owns_listener(self):
-            if announce:
-                _cprint(f"{_DIM}Wake word is already listening.{_RST}")
+            say(f"{_DIM}Wake word is already listening.{_RST}")
             return True
         self._wake_word_active = False
 
         cfg = load_wake_word_config()
         reqs = check_wake_word_requirements(cfg)
         if not reqs["available"]:
-            if announce:
-                _cprint(f"\n{_ACCENT}Wake word requirements not met:{_RST}")
-                if reqs.get("hint"):
-                    _cprint(f"  {_DIM}{reqs['hint']}{_RST}")
+            say(f"\n{_ACCENT}Wake word requirements not met:{_RST}")
+            if reqs.get("hint"):
+                say(f"  {_DIM}{reqs['hint']}{_RST}")
             return False
-
-        if announce and not reqs.get("deps_available", True):
+        if not reqs.get("deps_available", True):
             # Fresh install: the engine constructor lazy-installs its deps (onnxruntime is
             # a large wheel) — tell the user why this is slow.
-            _cprint(f"{_DIM}Installing wake word engine (first use — this may take a minute)...{_RST}")
+            say(f"{_DIM}Installing wake word engine (first use — this may take a minute)...{_RST}")
 
         self._wake_start_new_session = bool(cfg.get("start_new_session", True))
         try:
             start_listening(self._on_wake_word, owner=self, config=cfg)
         except Exception as e:
-            if announce:
-                _cprint(f"\n{_DIM}Failed to start wake word: {e}{_RST}")
+            say(f"\n{_DIM}Failed to start wake word: {e}{_RST}")
             return False
 
         self._wake_word_active = True
@@ -694,9 +690,8 @@ class CLIVoiceMixin:
         import cli as _cli
         _cli._cli_wake_owner = self
         self._start_wake_watchdog()
-        if announce:
-            _cprint(f"\n{_ACCENT}Wake word listening{_RST} "
-                    f"{_DIM}(say \"{reqs['phrase']}\" — /wake off to stop){_RST}")
+        say(f"\n{_ACCENT}Wake word listening{_RST} "
+            f"{_DIM}(say \"{reqs['phrase']}\" — /wake off to stop){_RST}")
         return True
 
     def _stop_wake_word_listener(self, announce: bool = False):
@@ -714,10 +709,7 @@ class CLIVoiceMixin:
         if _cli._cli_wake_owner is self:
             _cli._cli_wake_owner = None
         if announce:
-            if was_active:
-                _cprint(f"{_DIM}Wake word stopped.{_RST}")
-            else:
-                _cprint(f"{_DIM}Wake word is not running.{_RST}")
+            _cprint(f"{_DIM}Wake word {'stopped' if was_active else 'is not running'}.{_RST}")
 
     def _on_wake_word(self):
         """Fired after the detector hears the wake phrase."""

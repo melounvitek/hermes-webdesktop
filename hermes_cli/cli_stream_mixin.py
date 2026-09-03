@@ -305,16 +305,11 @@ class CLIStreamMixin:
                     if idx == -1:
                         break
                     preceding = self._stream_prefilt[:idx]
-                    last_nl = preceding.rfind("\n")
-                    if last_nl == -1:
-                        # No newline in buffer — boundary only if the last emit was a
-                        # newline AND only whitespace precedes the tag (idx == 0 included).
-                        is_block_boundary = (
-                            getattr(self, "_stream_last_was_newline", True)
-                            and preceding.strip() == ""
-                        )
-                    else:
-                        is_block_boundary = preceding[last_nl + 1:].strip() == ""
+                    # Boundary: only whitespace since the last newline — or, with no newline
+                    # buffered yet, since the last emit (which must have ended a line).
+                    is_block_boundary = preceding[preceding.rfind("\n") + 1:].strip() == "" and (
+                        "\n" in preceding or getattr(self, "_stream_last_was_newline", True)
+                    )
                     if is_block_boundary:
                         if preceding:
                             self._emit_stream_text(preceding)
