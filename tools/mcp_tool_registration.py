@@ -5,6 +5,7 @@ live, ``_register_from_cache_sync`` lazy) build ``_Candidate`` records for ``_re
 
 import logging
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout
 from tools.mcp_tool_handlers import (
@@ -119,24 +120,13 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     return lambda tool_name: not (exclude_set and matches_name_filter(tool_name, exclude_set))
 
 
-class _CachedMCPTool:
-    """Stand-in for MCP Tool objects loaded from the schema cache. Missing or non-dict
-    ``annotations`` (older cache files) fail closed to write-capable."""
-
-    __slots__ = ("name", "description", "inputSchema", "annotations")
-
-    def __init__(self, name: str, description: str, inputSchema: dict, annotations: Optional[dict] = None):
-        self.name = name
-        self.description = description
-        self.inputSchema = inputSchema or {}
-        self.annotations = annotations if isinstance(annotations, dict) else None
-
-    @classmethod
-    def from_cache_dicts(cls, raws: Iterable[Any]) -> List["_CachedMCPTool"]:
-        """Cached rows -> stand-ins; rows that are not dicts or lack a name are dropped."""
-        return [cls(raw["name"], raw.get("description") or "",
-                    raw["inputSchema"] if isinstance(raw.get("inputSchema"), dict) else {}, raw.get("annotations"))
-                for raw in raws if isinstance(raw, dict) and raw.get("name")]
+def _cached_tools(raws: Iterable[Any]) -> List[SimpleNamespace]:
+    """Schema-cache rows -> stand-ins for MCP Tool objects; rows that are not dicts or lack a name
+    are dropped. Missing or non-dict ``annotations`` (older cache files) fail closed to write-capable."""
+    return [SimpleNamespace(name=raw["name"], description=raw.get("description") or "",
+                            inputSchema=raw["inputSchema"] if isinstance(raw.get("inputSchema"), dict) else {},
+                            annotations=raw["annotations"] if isinstance(raw.get("annotations"), dict) else None)
+            for raw in raws if isinstance(raw, dict) and raw.get("name")]
 
 
 @dataclass
@@ -156,8 +146,8 @@ class _Candidate:
 
 def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[[str], bool],
                      tool_timeout) -> List[_Candidate]:
-    """Native tools (live SDK objects or ``_CachedMCPTool``) -> candidates. The injection scan
-    runs on BOTH paths: the cache file is user-writable JSON."""
+    """Native tools (live SDK objects or cache stand-ins) -> candidates. The injection scan runs on
+    BOTH paths: the cache file is user-writable JSON."""
     out: List[_Candidate] = []
     for t in tools:
         if not should_register(t.name):
@@ -297,7 +287,7 @@ def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]
     call-time gate is identical for live and cached registrations."""
     from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
     tool_timeout = _resolve_tool_timeout(config)
-    cached_tools = _CachedMCPTool.from_cache_dicts(tools_from_cache_entry(entry))
+    cached_tools = _cached_tools(tools_from_cache_entry(entry))
     _record_tool_trust_metadata(name, config, cached_tools)
     candidates = _tool_candidates(name, cached_tools, _make_tool_filter(name, config), tool_timeout)
     candidates += _utility_candidates(name, utility_tools_from_cache_entry(entry), tool_timeout)
