@@ -661,6 +661,112 @@ def _probe_populated_edge(
         span *= 2
 
 
+class _RowidRangeSalvage:
+    """Bisecting rowid-range copy for one table; counters live on the shared ``result`` dict."""
+
+    def __init__(
+        self,
+        source: sqlite3.Connection,
+        destination: sqlite3.Connection,
+        table: str,
+        columns: list[str],
+        *,
+        chunk_size: int,
+        progress_cb: Optional[ProgressCallback],
+        source_rows: Optional[int],
+        insert_prefix: str,
+        row_filter: Optional[Callable[[tuple[Any, ...], tuple[str, ...]], bool]],
+        result: dict[str, Any],
+    ) -> None:
+        self.source, self.destination, self.table = source, destination, table
+        self.chunk_size, self.progress_cb, self.source_rows = chunk_size, progress_cb, source_rows
+        self.row_filter, self.result = row_filter, result
+        self.column_names = tuple(columns)
+        quoted, placeholders = _quoted_columns(columns)
+        self.select_sql = f'SELECT rowid, {quoted} FROM "{table}" WHERE rowid BETWEEN ? AND ? ORDER BY rowid'
+        self.insert_sql = f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})'
+        self.exact_sql = f'SELECT {quoted} FROM "{table}" WHERE rowid = ?'
+        self.stopped_at_query_limit = False
+
+    def _keep(self, values: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        if self.row_filter is None:
+            return values
+        return [row for row in values if self.row_filter(row, self.column_names)]
+
+    def _skip(self, low: int, high: int, error: str) -> None:
+        _append_skipped_range(self.result["skipped_rowid_ranges"], low, high, error)
+
+    def recover_exact_rowid(self, rowid: int) -> bool:
+        """Salvage one row by exact-key lookup (issue #80205).
+
+        A singleton range scan (``rowid BETWEEN x AND x ORDER BY rowid``) must advance the cursor
+        past ``x`` to prove the range is exhausted; when the *next* cell or page is damaged that
+        advance raises AFTER the row was produced, and the driver discards the already-fetched row.
+        """
+        result = self.result
+        result["range_queries"] += 1
+        try:
+            row = self.source.execute(self.exact_sql, (rowid,)).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        if row is None:
+            return True  # genuinely absent: nothing to skip
+        value = tuple(row)
+        if not self._keep([value]):
+            result["excluded_rows"] += 1
+            return True
+        with _immediate_transaction(self.destination):
+            self.destination.execute(self.insert_sql, value)
+        result["copied_rows"] += 1
+        result["exact_lookup_recovered"] += 1
+        return True
+
+    def copy_range(self, low: int, high: int) -> None:
+        """Copy ``[low, high]``; on a read error bisect the unread remainder, exact-lookup singletons."""
+        result = self.result
+        if low > high:
+            return
+        if result["range_queries"] >= _MAX_SALVAGE_RANGE_QUERIES:
+            self.stopped_at_query_limit = True
+            self._skip(low, high, "salvage range query limit reached")
+            return
+
+        result["range_queries"] += 1
+        last_committed_rowid: Optional[int] = None
+        try:
+            cursor = self.source.execute(self.select_sql, (low, high))
+            while True:
+                fetched = cursor.fetchmany(self.chunk_size)
+                if not fetched:
+                    return
+                values = [tuple(row[1:]) for row in fetched]
+                included = self._keep(values)
+                if included:
+                    with _immediate_transaction(self.destination):
+                        self.destination.executemany(self.insert_sql, included)
+                result["copied_rows"] += len(included)
+                result["excluded_rows"] += len(values) - len(included)
+                last_committed_rowid = int(fetched[-1][0])
+                if self.progress_cb is not None:
+                    self.progress_cb({
+                        "table": self.table,
+                        "copied_rows": result["copied_rows"],
+                        "source_rows": self.source_rows,
+                        "skipped_ranges": len(result["skipped_rowid_ranges"]),
+                    })
+        except sqlite3.DatabaseError as exc:
+            retry_low = last_committed_rowid + 1 if last_committed_rowid is not None else low
+            if retry_low > high:
+                return
+            if retry_low == high:
+                if not self.recover_exact_rowid(retry_low):
+                    self._skip(retry_low, high, str(exc))
+                return
+            midpoint = retry_low + (high - retry_low) // 2
+            self.copy_range(retry_low, midpoint)
+            self.copy_range(midpoint + 1, high)
+
+
 def _copy_table_salvage(
     source: sqlite3.Connection,
     destination: sqlite3.Connection,
@@ -703,102 +809,22 @@ def _copy_table_salvage(
             result["error"] += f": {details}"
         return result
 
-    quoted, placeholders = _quoted_columns(columns)
-    select_sql = (
-        f'SELECT rowid, {quoted} FROM "{table}" '
-        "WHERE rowid BETWEEN ? AND ? ORDER BY rowid"
+    salvage = _RowidRangeSalvage(
+        source,
+        destination,
+        table,
+        columns,
+        chunk_size=chunk_size,
+        progress_cb=progress_cb,
+        source_rows=source_rows,
+        insert_prefix=insert_prefix,
+        row_filter=row_filter,
+        result=result,
     )
-    insert_sql = (
-        f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})'
-    )
-    column_names = tuple(columns)
-    stopped_at_query_limit = False
-    exact_sql = f'SELECT {quoted} FROM "{table}" WHERE rowid = ?'
-
-    def recover_exact_rowid(rowid: int) -> bool:
-        """Issue #80205: salvage one row by exact-key lookup.
-
-        A singleton range scan (``rowid BETWEEN x AND x ORDER BY rowid``) must advance the cursor
-        past ``x`` to prove the range is exhausted; when the *next* cell or page is damaged that
-        advance raises AFTER the row was produced, and the driver discards the already-fetched row.
-        """
-        result["range_queries"] += 1
-        try:
-            row = source.execute(exact_sql, (rowid,)).fetchone()
-        except sqlite3.DatabaseError:
-            return False
-        if row is None:
-            return True  # genuinely absent: nothing to skip
-        value = tuple(row)
-        if row_filter is not None and not row_filter(value, column_names):
-            result["excluded_rows"] += 1
-            return True
-        with _immediate_transaction(destination):
-            destination.execute(insert_sql, value)
-        result["copied_rows"] += 1
-        result["exact_lookup_recovered"] += 1
-        return True
-
-    def copy_range(low: int, high: int) -> None:
-        nonlocal stopped_at_query_limit
-        if low > high:
-            return
-        if result["range_queries"] >= _MAX_SALVAGE_RANGE_QUERIES:
-            stopped_at_query_limit = True
-            _append_skipped_range(
-                result["skipped_rowid_ranges"], low, high, "salvage range query limit reached"
-            )
-            return
-
-        result["range_queries"] += 1
-        last_committed_rowid: Optional[int] = None
-        try:
-            cursor = source.execute(select_sql, (low, high))
-            while True:
-                fetched = cursor.fetchmany(chunk_size)
-                if not fetched:
-                    return
-
-                values = [tuple(row[1:]) for row in fetched]
-                if row_filter is not None:
-                    included = [
-                        row for row in values if row_filter(row, column_names)
-                    ]
-                    excluded_count = len(values) - len(included)
-                else:
-                    included = values
-                    excluded_count = 0
-
-                if included:
-                    with _immediate_transaction(destination):
-                        destination.executemany(insert_sql, included)
-
-                result["copied_rows"] += len(included)
-                result["excluded_rows"] += excluded_count
-                last_committed_rowid = int(fetched[-1][0])
-                if progress_cb is not None:
-                    progress_cb({
-                        "table": table,
-                        "copied_rows": result["copied_rows"],
-                        "source_rows": source_rows,
-                        "skipped_ranges": len(result["skipped_rowid_ranges"]),
-                    })
-        except sqlite3.DatabaseError as exc:
-            retry_low = last_committed_rowid + 1 if last_committed_rowid is not None else low
-            if retry_low > high:
-                return
-            if retry_low == high:
-                if not recover_exact_rowid(retry_low):
-                    _append_skipped_range(result["skipped_rowid_ranges"], retry_low, high, str(exc))
-                return
-            midpoint = retry_low + (high - retry_low) // 2
-            copy_range(retry_low, midpoint)
-            copy_range(midpoint + 1, high)
-
-    copy_range(int(bounds["low"]), int(bounds["high"]))
+    salvage.copy_range(int(bounds["low"]), int(bounds["high"]))
     skipped_ranges = result["skipped_rowid_ranges"]
     result["skipped_rowid_span"] = sum(item["high"] - item["low"] + 1 for item in skipped_ranges)
-    result["query_limit_reached"] = stopped_at_query_limit
+    result["query_limit_reached"] = salvage.stopped_at_query_limit
 
     if skipped_ranges:
         result["status"] = "partial" if result["copied_rows"] else "failed"
@@ -1052,19 +1078,68 @@ def _cleanup_partial_orphans(
     return result
 
 
-def _verify_recovered_database(
-    output: Path,
+def _verify_structure(conn: sqlite3.Connection, verification: dict[str, Any]) -> None:
+    """Integrity, foreign keys, journal mode, schema version and FTS meta of the recovered file."""
+    errors = verification["errors"]
+    integrity_rows = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
+    verification["integrity_check"] = integrity_rows
+    if integrity_rows != ["ok"]:
+        errors.append("PRAGMA integrity_check did not return exactly 'ok'")
+
+    foreign_key_rows = [list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
+    verification["foreign_key_check"] = foreign_key_rows
+    if foreign_key_rows:
+        errors.append("foreign key violations remain")
+
+    verification["journal_mode"] = _journal_mode(conn)
+
+    schema_row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+    verification["schema_version"] = int(schema_row[0]) if schema_row else None
+    if verification["schema_version"] != SCHEMA_VERSION:
+        errors.append(f"schema version is {verification['schema_version']}, expected {SCHEMA_VERSION}")
+
+    meta = {
+        str(row[0]): row[1]
+        for row in conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall()
+    }
+    verification["fts_meta"] = meta
+    if meta.get("fts_storage_version") != str(FTS_STORAGE_VERSION):
+        errors.append("fresh FTS storage version was not established")
+    pending_keys = sorted(
+        key
+        for key in _GENERATED_META_KEYS
+        if key.startswith("fts_") and key != "fts_storage_version" and key in meta
+    )
+    verification["pending_fts_keys"] = pending_keys
+    if pending_keys:
+        errors.append("derived FTS transition markers remain in the recovered database")
+
+
+def _verify_fts_indexes(conn: sqlite3.Connection, verification: dict[str, Any]) -> None:
+    fts_checks: dict[str, str] = {}
+    for table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
+        if not _table_columns(conn, table):
+            continue
+        try:
+            conn.execute(f'INSERT INTO "{table}" ("{table}") VALUES (\'integrity-check\')')
+            conn.execute(f'SELECT 1 FROM "{table}" WHERE "{table}" MATCH \'""\' LIMIT 1').fetchone()
+            fts_checks[table] = "ok"
+        except sqlite3.DatabaseError as exc:
+            fts_checks[table] = str(exc)
+            verification["errors"].append(f"{table} integrity check failed: {exc}")
+    verification["fts_checks"] = fts_checks
+
+
+def _verify_row_counts(
+    conn: sqlite3.Connection,
+    verification: dict[str, Any],
     *,
     expected_counts: dict[str, Optional[int]],
     copy_report: dict[str, dict[str, Any]],
-    allow_partial: bool = False,
-    orphan_cleanup: Optional[dict[str, Any]] = None,
-) -> dict[str, Any]:
-    verification: dict[str, Any] = {
-        "errors": [],
-        "warnings": [],
-        "loss_detected": False,
-    }
+    allow_partial: bool,
+    orphan_cleanup: Optional[dict[str, Any]],
+) -> None:
+    """Compare recovered counts and copy statuses against the source; classify shortfalls as loss."""
 
     def flag(message: str, *, soft: bool) -> None:
         """Record data loss as a warning (``soft``) or as a verification error."""
@@ -1074,6 +1149,69 @@ def _verify_recovered_database(
         else:
             verification["errors"].append(message)
 
+    counts: dict[str, int] = {}
+    for table in _INVENTORY_TABLES:
+        if _table_columns(conn, table):
+            counts[table] = _count_rows(conn, table)
+    verification["table_counts"] = counts
+
+    for table in ("sessions", "messages", *_AUXILIARY_TABLES):
+        expected = expected_counts.get(table)
+        if expected is not None and counts.get(table) != expected:
+            flag(f"{table} count is {counts.get(table)}, expected {expected}", soft=allow_partial)
+
+    cleanup = orphan_cleanup or {}
+    rebuilt_sessions = int(cleanup.get("sessions_reconstructed") or 0)
+    retained_messages = int(cleanup.get("messages_retained") or 0)
+    removed_messages = int(cleanup.get("messages_removed") or 0)
+    # A wholly unreadable sessions b-tree is recoverable when every output parent was rebuilt from
+    # the surviving messages and none were dropped: data loss, but not structural failure.
+    sessions_fully_reconstructed = bool(
+        rebuilt_sessions > 0
+        and counts.get("sessions") == rebuilt_sessions
+        and counts.get("messages") == retained_messages
+        and removed_messages == 0
+    )
+
+    for table, table_report in copy_report.items():
+        status = table_report.get("status")
+        if status not in {"failed", "partial"}:
+            continue
+        flag(
+            f"{table} copy status is {status}",
+            soft=allow_partial
+            and (
+                status == "partial"
+                or table not in {"sessions", "messages"}
+                or (table == "sessions" and sessions_fully_reconstructed)
+            ),
+        )
+
+    if orphan_cleanup:
+        orphan_count = int(orphan_cleanup.get("total_removed_or_relinked") or 0)
+        if orphan_count:
+            flag(f"{orphan_count} orphaned reference(s) were removed or relinked", soft=True)
+        if rebuilt_sessions:
+            # Not a clean recovery: the conversation text survived but its session metadata did not.
+            flag(
+                f"{rebuilt_sessions} session(s) could not be salvaged and "
+                f"were reconstructed as placeholders to retain "
+                f"{retained_messages} message(s); their metadata (title, model, "
+                "timestamps, cost) is lost",
+                soft=True,
+            )
+
+
+def _verify_recovered_database(
+    output: Path,
+    *,
+    expected_counts: dict[str, Optional[int]],
+    copy_report: dict[str, dict[str, Any]],
+    allow_partial: bool = False,
+    orphan_cleanup: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    verification: dict[str, Any] = {"errors": [], "warnings": [], "loss_detected": False}
+
     open_error = _db_opens_cleanly(output)
     verification["opens_cleanly"] = open_error is None
     if open_error is not None:
@@ -1081,112 +1219,16 @@ def _verify_recovered_database(
 
     conn = sqlite3.connect(str(output), isolation_level=None)
     try:
-        integrity_rows = [str(row[0]) for row in conn.execute("PRAGMA integrity_check").fetchall()]
-        verification["integrity_check"] = integrity_rows
-        if integrity_rows != ["ok"]:
-            verification["errors"].append("PRAGMA integrity_check did not return exactly 'ok'")
-
-        foreign_key_rows = [list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
-        verification["foreign_key_check"] = foreign_key_rows
-        if foreign_key_rows:
-            verification["errors"].append("foreign key violations remain")
-
-        verification["journal_mode"] = _journal_mode(conn)
-
-        schema_row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
-        verification["schema_version"] = int(schema_row[0]) if schema_row else None
-        if verification["schema_version"] != SCHEMA_VERSION:
-            verification["errors"].append(
-                f"schema version is {verification['schema_version']}, "
-                f"expected {SCHEMA_VERSION}"
-            )
-
-        meta = {
-            str(row[0]): row[1]
-            for row in conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall()
-        }
-        verification["fts_meta"] = meta
-        if meta.get("fts_storage_version") != str(FTS_STORAGE_VERSION):
-            verification["errors"].append("fresh FTS storage version was not established")
-        pending_keys = sorted(
-            key
-            for key in _GENERATED_META_KEYS
-            if key.startswith("fts_") and key != "fts_storage_version" and key in meta
+        _verify_structure(conn, verification)
+        _verify_row_counts(
+            conn,
+            verification,
+            expected_counts=expected_counts,
+            copy_report=copy_report,
+            allow_partial=allow_partial,
+            orphan_cleanup=orphan_cleanup,
         )
-        verification["pending_fts_keys"] = pending_keys
-        if pending_keys:
-            verification["errors"].append("derived FTS transition markers remain in the recovered database")
-
-        counts: dict[str, int] = {}
-        for table in _INVENTORY_TABLES:
-            if _table_columns(conn, table):
-                counts[table] = _count_rows(conn, table)
-        verification["table_counts"] = counts
-
-        for table in ("sessions", "messages", *_AUXILIARY_TABLES):
-            expected = expected_counts.get(table)
-            if expected is not None and counts.get(table) != expected:
-                flag(f"{table} count is {counts.get(table)}, expected {expected}", soft=allow_partial)
-
-        cleanup = orphan_cleanup or {}
-        rebuilt_sessions = int(cleanup.get("sessions_reconstructed") or 0)
-        retained_messages = int(cleanup.get("messages_retained") or 0)
-        removed_messages = int(cleanup.get("messages_removed") or 0)
-        # A wholly unreadable sessions b-tree is recoverable when every output
-        # parent was rebuilt from the surviving messages and none were dropped.
-        # This is still data loss, but it is not structural verification failure.
-        sessions_fully_reconstructed = bool(
-            rebuilt_sessions > 0
-            and counts.get("sessions") == rebuilt_sessions
-            and counts.get("messages") == retained_messages
-            and removed_messages == 0
-        )
-
-        for table, table_report in copy_report.items():
-            status = table_report.get("status")
-            if status not in {"failed", "partial"}:
-                continue
-            flag(
-                f"{table} copy status is {status}",
-                soft=allow_partial
-                and (
-                    status == "partial"
-                    or table not in {"sessions", "messages"}
-                    or (table == "sessions" and sessions_fully_reconstructed)
-                ),
-            )
-
-        if orphan_cleanup:
-            orphan_count = int(orphan_cleanup.get("total_removed_or_relinked") or 0)
-            if orphan_count:
-                flag(f"{orphan_count} orphaned reference(s) were removed or relinked", soft=True)
-            if rebuilt_sessions:
-                # Not a clean recovery: the conversation text survived but its
-                # session metadata did not, so these rows are placeholders.
-                flag(
-                    f"{rebuilt_sessions} session(s) could not be salvaged and "
-                    f"were reconstructed as placeholders to retain "
-                    f"{retained_messages} message(s); their metadata (title, model, "
-                    "timestamps, cost) is lost",
-                    soft=True,
-                )
-
-        fts_checks: dict[str, str] = {}
-        for table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
-            if not _table_columns(conn, table):
-                continue
-            try:
-                conn.execute(
-                    f'INSERT INTO "{table}" ("{table}") VALUES (\'integrity-check\')'
-                )
-                conn.execute(
-                    f'SELECT 1 FROM "{table}" WHERE "{table}" MATCH \'""\' LIMIT 1'
-                ).fetchone()
-                fts_checks[table] = "ok"
-            except sqlite3.DatabaseError as exc:
-                fts_checks[table] = str(exc)
-                verification["errors"].append(f"{table} integrity check failed: {exc}")
-        verification["fts_checks"] = fts_checks
+        _verify_fts_indexes(conn, verification)
     except sqlite3.DatabaseError as exc:
         verification["errors"].append(f"verification query failed: {exc}")
     finally:
