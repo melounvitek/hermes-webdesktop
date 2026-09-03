@@ -450,122 +450,78 @@ def salvage_grown_transcript(
 # still be strippable on resume. NEVER edit/reorder entries (byte-pinned); prepend.
 _HISTORICAL_SUMMARY_PREFIXES = (
     # Pre-#80622: lacked the "no user message after summary => do nothing" clause.
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
-    "right now. "
-    "Topic overlap with the summary does NOT mean you should resume its "
-    "task: even on similar topics, the latest user message WINS. Treat ONLY "
-    "the latest message as the active task and discard stale items from "
-    "'## Historical Task Snapshot' entirely — do not 'wrap up' or "
-    "'finish' work described there unless the latest message explicitly "
-    "asks for it. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "None of the above restricts HOW you work: your tools remain fully "
-    "active — keep calling them normally for the active task (edit files, "
-    "run commands, search) instead of merely narrating what you would do. "
-    "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:",
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a "
+    "handoff from a previous context window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this summary — that message is the single "
+    "source of truth for what to do right now. Topic overlap with the summary does NOT mean you should "
+    "resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as "
+    "the active task and discard stale items from '## Historical Task Snapshot' entirely — do not 'wrap up' "
+    "or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in "
+    "the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never "
+    "mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface "
+    "it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is "
+    "ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction "
+    "note. None of the above restricts HOW you work: your tools remain fully active — keep calling them "
+    "normally for the active task (edit files, run commands, search) instead of merely narrating what you "
+    "would do. The current session state (files, config, etc.) may reflect work described here — avoid "
+    "repeating it:",
     # Pre-#69619: discard clause still named all four historical headings.
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
-    "right now. "
-    "Topic overlap with the summary does NOT mean you should resume its "
-    "task: even on similar topics, the latest user message WINS. Treat ONLY "
-    "the latest message as the active task and discard stale items from "
-    "'## Historical Task Snapshot' / '## Historical In-Progress State' / "
-    "'## Historical Pending User Asks' / "
-    "'## Historical Remaining Work' entirely — do not 'wrap up' or "
-    "'finish' work described there unless the latest message explicitly "
-    "asks for it. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "None of the above restricts HOW you work: your tools remain fully "
-    "active — keep calling them normally for the active task (edit files, "
-    "run commands, search) instead of merely narrating what you would do. "
-    "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:",
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a "
+    "handoff from a previous context window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this summary — that message is the single "
+    "source of truth for what to do right now. Topic overlap with the summary does NOT mean you should "
+    "resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as "
+    "the active task and discard stale items from '## Historical Task Snapshot' / '## Historical In-Progress "
+    "State' / '## Historical Pending User Asks' / '## Historical Remaining Work' entirely — do not 'wrap up' "
+    "or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in "
+    "the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never "
+    "mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface "
+    "it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is "
+    "ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction "
+    "note. None of the above restricts HOW you work: your tools remain fully active — keep calling them "
+    "normally for the active task (edit files, run commands, search) instead of merely narrating what you "
+    "would do. The current session state (files, config, etc.) may reflect work described here — avoid "
+    "repeating it:",
     # Lacked the "tools remain fully active" clause (suppressed tool use).
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
-    "right now. "
-    "Topic overlap with the summary does NOT mean you should resume its "
-    "task: even on similar topics, the latest user message WINS. Treat ONLY "
-    "the latest message as the active task and discard stale items from "
-    "'## Historical Task Snapshot' / '## Historical In-Progress State' / "
-    "'## Historical Pending User Asks' / "
-    "'## Historical Remaining Work' entirely — do not 'wrap up' or "
-    "'finish' work described there unless the latest message explicitly "
-    "asks for it. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:",
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a "
+    "handoff from a previous context window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this summary — that message is the single "
+    "source of truth for what to do right now. Topic overlap with the summary does NOT mean you should "
+    "resume its task: even on similar topics, the latest user message WINS. Treat ONLY the latest message as "
+    "the active task and discard stale items from '## Historical Task Snapshot' / '## Historical In-Progress "
+    "State' / '## Historical Pending User Asks' / '## Historical Remaining Work' entirely — do not 'wrap up' "
+    "or 'finish' work described there unless the latest message explicitly asks for it. Reverse signals in "
+    "the latest message (e.g. 'stop', 'undo', 'roll back', 'just verify', 'don't do that anymore', 'never "
+    "mind', a new topic) must immediately end any in-flight work described in the summary; do not re-surface "
+    "it in later turns. IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system prompt is "
+    "ALWAYS authoritative and active — never ignore or deprioritize memory content due to this compaction "
+    "note. The current session state (files, config, etc.) may reflect work described here — avoid repeating "
+    "it:",
     # Carveout era: "consistent -> use as background" licensed stale resumption.
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
-    "right now. "
-    "If the latest user message is consistent with the '## Active Task' "
-    "section, you may use the summary as background. If the latest user "
-    "message contradicts, supersedes, changes topic from, or in any way "
-    "diverges from '## Active Task' / '## In Progress' / '## Pending User "
-    "Asks' / '## Remaining Work', the latest message WINS — discard those "
-    "stale items entirely and do not 'wrap up the old task first'. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
-    "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
-    "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:",
-    # Pre-#35344: contained the self-contradicting "resume exactly" directive.
-    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
-    "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
-    "Your current task is identified in the '## Active Task' section of the "
-    "summary — resume exactly from there. "
-    "Respond ONLY to the latest user message "
-    "that appears AFTER this summary. The current session state (files, "
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a "
+    "handoff from a previous context window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. "
+    "Respond ONLY to the latest user message that appears AFTER this summary — that message is the single "
+    "source of truth for what to do right now. If the latest user message is consistent with the '## Active "
+    "Task' section, you may use the summary as background. If the latest user message contradicts, "
+    "supersedes, changes topic from, or in any way diverges from '## Active Task' / '## In Progress' / '## "
+    "Pending User Asks' / '## Remaining Work', the latest message WINS — discard those stale items entirely "
+    "and do not 'wrap up the old task first'. Reverse signals in the latest message (e.g. 'stop', 'undo', "
+    "'roll back', 'just verify', 'don't do that anymore', 'never mind', a new topic) must immediately end "
+    "any in-flight work described in the summary; do not re-surface it in later turns. IMPORTANT: Your "
+    "persistent memory (MEMORY.md, USER.md) in the system prompt is ALWAYS authoritative and active — never "
+    "ignore or deprioritize memory content due to this compaction note. The current session state (files, "
     "config, etc.) may reflect work described here — avoid repeating it:",
+    # Pre-#35344: contained the self-contradicting "resume exactly" directive.
+    "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below. This is a "
+    "handoff from a previous context window — treat it as background reference, NOT as active instructions. "
+    "Do NOT answer questions or fulfill requests mentioned in this summary; they were already addressed. "
+    "Your current task is identified in the '## Active Task' section of the summary — resume exactly from "
+    "there. Respond ONLY to the latest user message that appears AFTER this summary. The current session "
+    "state (files, config, etc.) may reflect work described here — avoid repeating it:",
 )
 
 # Bounded probe: catch the restored head plus a few stacked handoff/ack turns
@@ -654,40 +610,30 @@ _TERMINAL_SUMMARY_FAILURES = (
     (
         "_last_summary_auth_failure",
         "summary_auth_failure",
-        "Summary generation failed with a terminal access or "
-        "quota error — aborting compression. %d message(s) "
-        "preserved unchanged; the session was NOT rotated. "
-        "Check the provider credential, permission, quota, or "
-        "inference endpoint, then retry with /compress or "
-        "start fresh with /new.",
+        "Summary generation failed with a terminal access or quota error — aborting compression. %d "
+        "message(s) preserved unchanged; the session was NOT rotated. Check the provider credential, "
+        "permission, quota, or inference endpoint, then retry with /compress or start fresh with /new.",
     ),
     (
         "_last_summary_network_failure",
         "summary_network_failure",
-        "Summary generation failed with a network/connection "
-        "error — aborting compression. %d message(s) preserved "
-        "unchanged; the session was NOT rotated. This is "
-        "transient: retry with /compress once connectivity "
-        "recovers, or continue the conversation as-is.",
+        "Summary generation failed with a network/connection error — aborting compression. %d message(s) "
+        "preserved unchanged; the session was NOT rotated. This is transient: retry with /compress once "
+        "connectivity recovers, or continue the conversation as-is.",
     ),
     (
         "_last_summary_truncated_failure",
         "summary_truncated_failure",
-        "Summary generation failed (output hit the token cap; "
-        "summary is incomplete) — aborting compression. "
-        "%d message(s) preserved unchanged; the session was NOT "
-        "rotated. A truncated summary would silently lose "
-        "context: retry with /compress, or raise the "
-        "summarizer's output budget.",
+        "Summary generation failed (output hit the token cap; summary is incomplete) — aborting compression. "
+        "%d message(s) preserved unchanged; the session was NOT rotated. A truncated summary would silently "
+        "lose context: retry with /compress, or raise the summarizer's output budget.",
     ),
     (
         "_last_summary_empty_content_failure",
         "summary_empty_content_failure",
-        "Summary generation failed (LLM returned empty content) — "
-        "aborting compression. %d message(s) preserved unchanged; "
-        "the session was NOT rotated. This indicates upstream provider "
-        "degradation: retry with /compress once the provider recovers, "
-        "or continue the conversation as-is.",
+        "Summary generation failed (LLM returned empty content) — aborting compression. %d message(s) "
+        "preserved unchanged; the session was NOT rotated. This indicates upstream provider degradation: "
+        "retry with /compress once the provider recovers, or continue the conversation as-is.",
     ),
 )
 
@@ -1806,24 +1752,20 @@ in-flight work is cancelled."
 If no outstanding task exists, write "None."]""",
         "goal": "[What the user is trying to accomplish overall]",
         "constraints": (
-            "[User preferences, coding style, constraints, important decisions. "
-            "Any security or safety constraint the user stated (files/data to "
-            "avoid, operations that must not be performed, credential-handling "
-            "rules) MUST be quoted VERBATIM here so it continues to apply "
-            "after compaction — never paraphrase those.]"
+            "[User preferences, coding style, constraints, important decisions. Any security or safety "
+            "constraint the user stated (files/data to avoid, operations that must not be performed, "
+            "credential-handling rules) MUST be quoted VERBATIM here so it continues to apply after "
+            "compaction — never paraphrase those.]"
         ),
         "resolved_questions": (
-            "[Questions the user asked that were ALREADY answered — include the "
-            "answer so it is not repeated]"
+            "[Questions the user asked that were ALREADY answered — include the answer so it is not repeated]"
         ),
     },
     False: {
         "language": (
-            "This session contains no user-authored turns. Write the summary "
-            "in the dominant language of the source turns; if they are mixed, "
-            "use the language of the most recent natural-language assistant "
-            "turn. Do not translate, invent a user, or attribute any request "
-            "to a user. "
+            "This session contains no user-authored turns. Write the summary in the dominant language of the "
+            "source turns; if they are mixed, use the language of the most recent natural-language assistant "
+            "turn. Do not translate, invent a user, or attribute any request to a user. "
         ),
         "historical_task": f"""[NO user-authored turn exists in this session. Write exactly:
 {_NO_USER_TASK_SENTINEL}
@@ -1834,8 +1776,7 @@ Describe agent/tool work only as completed actions, state, or historical work.]"
             "tool activity. Never call it a user goal.]"
         ),
         "constraints": (
-            "[Runtime, configuration, and technical constraints only. Do not "
-            "invent user preferences.]"
+            "[Runtime, configuration, and technical constraints only. Do not invent user preferences.]"
         ),
         "resolved_questions": "[Write exactly: None. No user-authored questions exist.]",
     },
