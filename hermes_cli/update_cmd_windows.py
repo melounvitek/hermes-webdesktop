@@ -37,10 +37,8 @@ def _write_update_planned_stop_marker(profile_path: Path, pid: int) -> bool:
         from utils import atomic_json_write
 
         record = {
-            "target_pid": pid,
-            "target_start_time": _get_process_start_time(pid),
-            "stopper_pid": os.getpid(),
-            "written_at": datetime.now(timezone.utc).isoformat(),
+            "target_pid": pid, "target_start_time": _get_process_start_time(pid),
+            "stopper_pid": os.getpid(), "written_at": datetime.now(timezone.utc).isoformat(),
         }
         atomic_json_write(Path(profile_path) / ".gateway-planned-stop.json", record, indent=None, separators=(",", ":"))
         return True
@@ -48,9 +46,7 @@ def _write_update_planned_stop_marker(profile_path: Path, pid: int) -> bool:
         return False
 
 
-def _wait_for_windows_update_gateway_exit(
-    pids: list[int], *, timeout: float
-) -> set[int]:
+def _wait_for_windows_update_gateway_exit(pids: list[int], *, timeout: float) -> set[int]:
     """Wait for the given gateway PIDs to exit, returning survivors."""
     if not pids:
         return set()
@@ -87,9 +83,8 @@ def _self_and_non_gateway_ancestor_pids(psutil) -> set[int]:
     with suppress(Exception):
         for anc in psutil.Process().parents():
             anc_cmdline = _cmdline_or_empty(anc)
-            if _is_gw is not None and anc_cmdline and _is_gw(anc_cmdline):
-                continue
-            skip.add(int(anc.pid))
+            if not (_is_gw is not None and anc_cmdline and _is_gw(anc_cmdline)):
+                skip.add(int(anc.pid))
     return skip
 
 
@@ -648,6 +643,28 @@ def _sc_exe(verb: str, name: str, service, settled_status: str) -> None:
         raise RuntimeError(detail or f"sc.exe {verb} failed with {result.returncode}")
 
 
+def _original_process_is_alive(psutil, pid: int, create_time: float) -> bool:
+    """Is the process with this exact ``(pid, create_time)`` identity still alive? AccessDenied/unknown reads
+    True (fail closed: the venv may still be locked)."""
+    try:
+        current = float(psutil.Process(pid).create_time())
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except Exception:
+        return True
+    return abs(current - create_time) <= 0.001
+
+
+def _poll_until(condition, timeout: float, interval: float = 0.2) -> bool:
+    """Poll *condition* every *interval* seconds until true (True) or *timeout* elapses (False)."""
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if condition():
+            return True
+        _time.sleep(interval)
+    return False
+
+
 def _process_create_time(psutil, pid: int, label: str, when: str) -> float:
     try:
         return float(psutil.Process(int(pid)).create_time())
@@ -698,30 +715,16 @@ def _stop_windows_gateway_service(
     _verify_service_identities(psutil, name, service, expected_service_identity, expected_gateway_identity)
     _sc_exe("stop", name, service, "stopped")
 
-    def _original_process_is_alive(pid: int, create_time: float) -> bool:
-        try:
-            current = float(psutil.Process(pid).create_time())
-        except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            return False
-        except Exception:
-            return True  # AccessDenied/unknown: fail closed, venv may still be locked
-        return abs(current - create_time) <= 0.001
-
     def _alive() -> list[int]:
-        return [pid for pid, create_time in expected_processes if _original_process_is_alive(pid, create_time)]
+        return [pid for pid, create_time in expected_processes if _original_process_is_alive(psutil, pid, create_time)]
 
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        if service.status() == "stopped" and not _alive():
-            return
-        _time.sleep(0.2)
-    if service.status() == "stopped":
+    if not _poll_until(lambda: service.status() == "stopped" and not _alive(), timeout):
+        if service.status() != "stopped":
+            raise RuntimeError(f"Windows service {name} did not stop within {timeout:.0f}s; venv mutation unsafe.")
         # Lingering matching-identity processes make venv mutation unsafe — fail closed.
         alive_after_stop = _alive()
         if alive_after_stop:
             raise RuntimeError(f"Windows service {name} stopped but its process tree is still alive: {alive_after_stop}")
-        return
-    raise RuntimeError(f"Windows service {name} did not stop within {timeout:.0f}s; venv mutation unsafe.")
 
 
 def _start_windows_gateway_service(name: str, *, timeout: float = 30.0) -> None:
@@ -730,12 +733,8 @@ def _start_windows_gateway_service(name: str, *, timeout: float = 30.0) -> None:
 
     service = psutil.win_service_get(name)
     _sc_exe("start", name, service, "running")
-    deadline = _time.monotonic() + timeout
-    while _time.monotonic() < deadline:
-        if service.status() == "running":
-            return
-        _time.sleep(0.2)
-    raise RuntimeError(f"Windows service {name} did not start within {timeout:.0f}s")
+    if not _poll_until(lambda: service.status() == "running", timeout):
+        raise RuntimeError(f"Windows service {name} did not start within {timeout:.0f}s")
 
 
 def _restore_windows_gateway_service(name: str, *, timeout: float = 60.0) -> None:
