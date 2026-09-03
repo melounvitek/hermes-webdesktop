@@ -7,6 +7,12 @@ from typing import Callable
 from hermes_cli.subcommands._shared import add_json_flag, add_yes_flag
 
 
+# Registry sources, then provider filters (GitHub taps stored under source="github").
+_SOURCE_CHOICES = [
+    "all", "official", "skills-sh", "well-known", "github", "clawhub", "lobehub", "browse-sh",
+    "nvidia", "openai", "anthropic", "huggingface", "voltagent", "gstack", "minimax"]
+
+
 def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     """Attach the ``skills`` subcommand to ``subparsers``."""
     skills_parser = subparsers.add_parser(
@@ -34,49 +40,13 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_browse.add_argument(
         "--size", type=int, default=20, help="Results per page (default: 20)")
     skills_browse.add_argument(
-        "--source",
-        default="all",
-        choices=[
-            "all",
-            "official",
-            "skills-sh",
-            "well-known",
-            "github",
-            "clawhub",
-            "lobehub",
-            "browse-sh",
-            # Provider filters (GitHub taps stored under source="github"):
-            "nvidia",
-            "openai",
-            "anthropic",
-            "huggingface",
-            "voltagent",
-            "gstack",
-            "minimax"],
+        "--source", default="all", choices=_SOURCE_CHOICES,
         help="Filter by source or provider (e.g. nvidia, openai) (default: all)")
 
     skills_search = skills_subparsers.add_parser("search", help="Search skill registries")
     skills_search.add_argument("query", help="Search query")
     skills_search.add_argument(
-        "--source",
-        default="all",
-        choices=[
-            "all",
-            "official",
-            "skills-sh",
-            "well-known",
-            "github",
-            "clawhub",
-            "lobehub",
-            "browse-sh",
-            # Provider filters (GitHub taps stored under source="github"):
-            "nvidia",
-            "openai",
-            "anthropic",
-            "huggingface",
-            "voltagent",
-            "gstack",
-            "minimax"],
+        "--source", default="all", choices=_SOURCE_CHOICES,
         help="Filter by source or provider (e.g. nvidia, openai)")
     skills_search.add_argument("--limit", type=int, default=25, help="Max results")
     add_json_flag(

@@ -23,60 +23,44 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         help="Only sessions in one workspace: a git repo root or project dir "
         "(matched by path substring or basename).")
 
+    _filter_args = (
+        ("--newer-than", dict(metavar="AGE", help="Only match sessions active within the last AGE "
+            "(e.g. '5h', '2d') or after an ISO timestamp")),
+        ("--before", dict(metavar="TIME", help="Only match sessions started before TIME "
+            "(duration ago like '5h', or ISO timestamp like '2026-07-05 14:30')")),
+        ("--after", dict(metavar="TIME", help="Only match sessions started at/after TIME "
+            "(duration ago like '5h', or ISO timestamp)")),
+        ("--source", dict(help="Only match sessions from this source")),
+        ("--title", dict(help="Only match sessions whose title contains this substring")),
+        ("--end-reason", dict(help="Only match sessions with this end reason")),
+        ("--cwd", dict(help="Only match sessions whose working directory is under this path")),
+        ("--min-messages", dict(type=int, help="Only match sessions with >= N messages")),
+        ("--max-messages", dict(type=int, help="Only match sessions with <= N messages")),
+        ("--model", dict(help="Only match sessions whose model name contains this substring "
+            "(e.g. 'sonnet', 'gpt-5', 'hermes')")),
+        ("--provider", dict(help="Only match sessions billed through this provider "
+            "(e.g. openrouter, anthropic, nous)")),
+        ("--user", dict(help="Only match sessions from this user ID")),
+        ("--chat-id", dict(help="Only match sessions from this chat/channel ID")),
+        ("--chat-type", dict(help="Only match sessions with this chat type (e.g. dm, group)")),
+        ("--branch", dict(help="Only match sessions whose git branch contains this substring")),
+        ("--min-tokens", dict(type=int,
+            help="Only match sessions with >= N total tokens (input+output)")),
+        ("--max-tokens", dict(type=int,
+            help="Only match sessions with <= N total tokens (input+output)")),
+        ("--min-cost", dict(type=float,
+            help="Only match sessions costing >= N USD (actual or estimated)")),
+        ("--max-cost", dict(type=float,
+            help="Only match sessions costing <= N USD (actual or estimated)")),
+        ("--min-tool-calls", dict(type=int, help="Only match sessions with >= N tool calls")),
+        ("--max-tool-calls", dict(type=int, help="Only match sessions with <= N tool calls")),
+        ("--dry-run", dict(action="store_true",
+            help="List matching sessions without changing anything")))
+
     def _add_session_filter_args(p, default_older_help):
         p.add_argument("--older-than", metavar="AGE", help=default_older_help)
-        p.add_argument(
-            "--newer-than", metavar="AGE",
-            help="Only match sessions active within the last AGE "
-            "(e.g. '5h', '2d') or after an ISO timestamp")
-        p.add_argument(
-            "--before", metavar="TIME",
-            help="Only match sessions started before TIME "
-            "(duration ago like '5h', or ISO timestamp like '2026-07-05 14:30')")
-        p.add_argument(
-            "--after", metavar="TIME",
-            help="Only match sessions started at/after TIME "
-            "(duration ago like '5h', or ISO timestamp)")
-        p.add_argument("--source", help="Only match sessions from this source")
-        p.add_argument("--title", help="Only match sessions whose title contains this substring")
-        p.add_argument("--end-reason", help="Only match sessions with this end reason")
-        p.add_argument(
-            "--cwd", help="Only match sessions whose working directory is under this path")
-        p.add_argument("--min-messages", type=int, help="Only match sessions with >= N messages")
-        p.add_argument("--max-messages", type=int, help="Only match sessions with <= N messages")
-        p.add_argument(
-            "--model",
-            help="Only match sessions whose model name contains this substring "
-            "(e.g. 'sonnet', 'gpt-5', 'hermes')")
-        p.add_argument(
-            "--provider",
-            help="Only match sessions billed through this provider "
-            "(e.g. openrouter, anthropic, nous)")
-        p.add_argument("--user", help="Only match sessions from this user ID")
-        p.add_argument("--chat-id", help="Only match sessions from this chat/channel ID")
-        p.add_argument(
-            "--chat-type", help="Only match sessions with this chat type (e.g. dm, group)")
-        p.add_argument(
-            "--branch", help="Only match sessions whose git branch contains this substring")
-        p.add_argument(
-            "--min-tokens", type=int,
-            help="Only match sessions with >= N total tokens (input+output)")
-        p.add_argument(
-            "--max-tokens", type=int,
-            help="Only match sessions with <= N total tokens (input+output)")
-        p.add_argument(
-            "--min-cost", type=float,
-            help="Only match sessions costing >= N USD (actual or estimated)")
-        p.add_argument(
-            "--max-cost", type=float,
-            help="Only match sessions costing <= N USD (actual or estimated)")
-        p.add_argument(
-            "--min-tool-calls", type=int, help="Only match sessions with >= N tool calls")
-        p.add_argument(
-            "--max-tool-calls", type=int, help="Only match sessions with <= N tool calls")
-        p.add_argument(
-            "--dry-run", action="store_true",
-            help="List matching sessions without changing anything")
+        for flag, kw in _filter_args:
+            p.add_argument(flag, **kw)
         add_yes_flag(p, "Skip confirmation")
 
     sessions_export = sessions_subparsers.add_parser(
