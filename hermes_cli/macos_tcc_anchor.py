@@ -11,6 +11,7 @@ and never raise to callers.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -100,17 +101,12 @@ def _interpreter_source(venv_dir: Path) -> str | None:
     cfg = venv_dir / "pyvenv.cfg"
     if not cfg.is_file():
         return None
-    home = ""
     try:
-        for line in cfg.read_text(encoding="utf-8").splitlines():
-            if line.lower().startswith("home"):
-                home = line.partition("=")[2].strip()
-                break
+        lines = cfg.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
-    if not home:
-        return None
-    interp = _interpreter_file(home)
+    home = next((l.partition("=")[2].strip() for l in lines if l.lower().startswith("home")), "")
+    interp = _interpreter_file(home) if home else None
     return str(interp) if interp is not None else None
 
 
@@ -207,10 +203,8 @@ def _stage_copy(venv_bin: Path, prefix: str, source: Path) -> Path:
 
 def _discard(tmp_path: Path | None) -> None:
     if tmp_path is not None:
-        try:
+        with contextlib.suppress(OSError):
             tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _copy_alias(venv_bin: Path, name: str, anchor: Path) -> bool:

@@ -93,8 +93,7 @@ def parse_loop_args(text: str) -> Dict[str, Any]:
     raw = (text or "").strip()
     result: Dict[str, Any] = {"interval_seconds": None, "prompt": "", "times": 0, "until": "", "error": None}
     if not raw:
-        result["error"] = "empty"
-        return result
+        return {**result, "error": "empty"}
 
     # Pull trailing flags first so an interval-looking token inside the --until clause can't
     # confuse the front parse. --until consumes to end-of-line (or to a following --times).
@@ -106,8 +105,7 @@ def parse_loop_args(text: str) -> Dict[str, Any]:
             if times < 1:
                 raise ValueError
         except ValueError:
-            result["error"] = f"--times expects a positive integer, got {m_times.group(1)!r}"
-            return result
+            return {**result, "error": f"--times expects a positive integer, got {m_times.group(1)!r}"}
         raw = (raw[: m_times.start()] + raw[m_times.end():]).strip()
 
     m_until = re.search(r"\s--until\s+(.+)$", raw, re.DOTALL)
@@ -121,19 +119,13 @@ def parse_loop_args(text: str) -> Dict[str, Any]:
         raw = tokens[1]
         tokens = raw.split(None, 1)
 
-    interval: Optional[int] = None
-    if tokens:
-        maybe = parse_interval_token(tokens[0])
-        if maybe is not None:
-            interval = maybe
-            raw = tokens[1].strip() if len(tokens) > 1 else ""
+    interval = parse_interval_token(tokens[0]) if tokens else None
+    if interval is not None:
+        raw = tokens[1].strip() if len(tokens) > 1 else ""
 
     if not raw:
-        result["error"] = "missing prompt (usage: /loop [interval] <prompt>)"
-        return result
-
-    result.update(interval_seconds=interval, prompt=raw, times=times, until=until)
-    return result
+        return {**result, "error": "missing prompt (usage: /loop [interval] <prompt>)"}
+    return {**result, "interval_seconds": interval, "prompt": raw, "times": times, "until": until}
 
 
 def format_interval(seconds: float) -> str:
@@ -226,16 +218,15 @@ class LoopState:
             "prompt": data.get("prompt", ""),
             "status": data.get("status", "active"),
             "mode": data.get("mode", "interval"),
-            "awaiting_response": bool(data.get("awaiting_response", False)),
             "paused_reason": data.get("paused_reason"),
             "last_stop_reason": data.get("last_stop_reason"),
             "route": route if isinstance(route, dict) else {},
         }
-        # Remaining numeric/str fields: missing key -> dataclass default; present-but-falsy -> zero.
+        # Remaining scalar fields: missing key -> dataclass default; present-but-falsy -> type zero.
+        casts = {"str": str, "int": int, "float": float, "bool": bool}
         for f in fields(cls):
             if f.name not in kwargs:
-                cast = {"str": str, "int": int, "float": float}[f.type]
-                kwargs[f.name] = cast(data.get(f.name, f.default) or cast())
+                kwargs[f.name] = casts[f.type](data.get(f.name, f.default) or casts[f.type]())
         return cls(**kwargs)
 
     def cadence_label(self) -> str:
@@ -371,6 +362,10 @@ def _ticks_label(n: int) -> str:
     return f"{n} tick{'s' if n != 1 else ''}"
 
 
+def _dash(reason: Optional[str]) -> str:
+    return f" — {reason}" if reason else ""
+
+
 def response_signals_complete(response: str) -> bool:
     """True when the agent ended its reply with the LOOP_COMPLETE marker."""
     return bool(response) and _LOOP_COMPLETE_RE.search(response) is not None
@@ -416,6 +411,10 @@ class LoopManager:
     def has_loop(self) -> bool:
         return self._state is not None and self._state.status in {"active", "paused"}
 
+    def _save(self) -> LoopState:
+        save_loop(self.session_id, self._state)
+        return self._state
+
     def status_line(self) -> str:
         s = self._state
         if s is None or s.status == "cleared":
@@ -435,11 +434,9 @@ class LoopManager:
             tail = ", wakeup running" if s.awaiting_response else (f", {remaining}" if remaining else "")
             return f"↻ Loop (active, {meta}{tail}): {s.prompt}"
         if s.status == "paused":
-            extra = f" — {s.paused_reason}" if s.paused_reason else ""
-            return f"⏸ Loop (paused, {meta}{extra}): {s.prompt}"
+            return f"⏸ Loop (paused, {meta}{_dash(s.paused_reason)}): {s.prompt}"
         if s.status == "done":
-            extra = f" — {s.last_stop_reason}" if s.last_stop_reason else ""
-            return f"✓ Loop finished ({fired}{extra}): {s.prompt}"
+            return f"✓ Loop finished ({fired}{_dash(s.last_stop_reason)}): {s.prompt}"
         return f"Loop ({s.status}, {meta}): {s.prompt}"
 
     def set(
@@ -473,10 +470,6 @@ class LoopManager:
         )
         self._state = state
         return self._save()
-
-    def _save(self) -> LoopState:
-        save_loop(self.session_id, self._state)
-        return self._state
 
     def pause(self, reason: str = "user-paused") -> Optional[LoopState]:
         s = self._state
@@ -659,16 +652,12 @@ def _resume_output(mgr: "LoopManager") -> str:
     return "No loop to resume." if state is None else f"▶ Loop resumed ({state.cadence_label()}): {state.prompt}"
 
 
-def _stop_output(mgr: "LoopManager") -> str:
-    return "✓ Loop stopped." if mgr.clear() else "No active loop."
-
-
 # Control words -> handler returning the output text. Anything else is a new loop spec.
 _CONTROL_COMMANDS = {
     **dict.fromkeys(("", "status"), lambda mgr: mgr.status_line()),
     "pause": _pause_output,
     "resume": _resume_output,
-    **dict.fromkeys(("stop", "clear", "cancel"), _stop_output),
+    **dict.fromkeys(("stop", "clear", "cancel"), lambda mgr: "✓ Loop stopped." if mgr.clear() else "No active loop."),
     **dict.fromkeys(("help", "--help", "-h"), lambda mgr: LOOP_HELP),
 }
 
@@ -724,10 +713,8 @@ def dispatch_loop_command(
         lines.append(f"Stops when: {state.until}")
     if not state.times and state.max_ticks:
         lines.append(f"Backstop budget: {state.max_ticks} ticks (loops.max_ticks; 0 = unlimited).")
-    if state.status == "active":
-        lines.append("First wakeup fires now, then on the cadence above. Controls: /loop status · pause · resume · stop.")
-    else:
-        lines.append(f"First wakeup {state.remaining_label()}. Controls: /loop status · pause · resume · stop.")
+    first = "fires now, then on the cadence above" if state.status == "active" else state.remaining_label()
+    lines.append(f"First wakeup {first}. Controls: /loop status · pause · resume · stop.")
     if replacing:
         lines.insert(1, "(replaced the previous loop for this session)")
     return {"output": "\n".join(lines), "created": True}
