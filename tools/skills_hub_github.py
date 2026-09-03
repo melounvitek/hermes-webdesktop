@@ -13,9 +13,9 @@ import httpx
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.skills_guard import TRUSTED_REPOS
 from tools.skills_hub_models import (
-    SkillBundle, SkillMeta, SkillSource, _dedupe_by_trust,
-    _hermes_tags, _matches_query, _parse_frontmatter, _referenced_support_paths, _skill_meta_to_dict,
-    _validate_bundle_rel_path, hub,
+    SkillBundle, SkillMeta, SkillSource, _cache_metas, _cached_metas, _dedupe_by_trust,
+    _hermes_tags, _matches_query, _parse_frontmatter, _referenced_support_paths,
+    _validate_bundle_rel_path,
 )
 
 logger = logging.getLogger("tools.skills_hub")
@@ -103,26 +103,24 @@ class GitHubAuth:
         ):
             return self._cached_token
 
-        # Profile-scoped secret lookup (multiplexed gateway safe).
-        from agent.secret_scope import get_secret
-        token = get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN")
-        if token:
-            self._cached_token, self._cached_method = token, "pat"
-            return token
-
-        token = self._try_gh_cli()
-        if token:
-            self._cached_token, self._cached_method = token, "gh-cli"
-            return token
-
-        token = self._try_github_app()
-        if token:
-            self._cached_token, self._cached_method = token, "github-app"
-            self._app_token_expiry = time.time() + 3500  # ~58 min (tokens last 1 hour)
-            return token
+        for method, resolve in (
+            ("pat", self._try_pat), ("gh-cli", self._try_gh_cli), ("github-app", self._try_github_app),
+        ):
+            token = resolve()
+            if token:
+                self._cached_token, self._cached_method = token, method
+                if method == "github-app":
+                    self._app_token_expiry = time.time() + 3500  # ~58 min (tokens last 1 hour)
+                return token
 
         self._cached_method = "anonymous"
         return None
+
+    @staticmethod
+    def _try_pat() -> Optional[str]:
+        # Profile-scoped secret lookup (multiplexed gateway safe).
+        from agent.secret_scope import get_secret
+        return get_secret("GITHUB_TOKEN") or get_secret("GH_TOKEN")
 
     def _try_gh_cli(self) -> Optional[str]:
         try:
@@ -183,6 +181,14 @@ class GitHubAuth:
 # GitHub source adapter
 # ---------------------------------------------------------------------------
 
+def _split_repo_id(identifier: str) -> Optional[Tuple[str, str]]:
+    """``owner/repo/path/to/skill`` -> ``(owner/repo, path/to/skill)``; None when too short."""
+    parts = identifier.split("/", 2)
+    if len(parts) < 3:
+        return None
+    return f"{parts[0]}/{parts[1]}", parts[2]
+
+
 def _skip_bundle_file(rel_path: str) -> bool:
     """Dotfiles, bytecode and __pycache__ never ship in a bundle."""
     base = rel_path.rsplit("/", 1)[-1]
@@ -207,6 +213,7 @@ class GitHubSource(SkillSource):
         {"repo": "garrytan/gstack", "path": ""},
     ]
 
+    SOURCE_ID = "github"
     _parse_frontmatter_quick = staticmethod(_parse_frontmatter)
 
     def __init__(self, auth: GitHubAuth, extra_taps: Optional[List[Dict]] = None):
@@ -221,9 +228,6 @@ class GitHubSource(SkillSource):
         # repo -> skills.sh.json grouping map; None = fetched, no sidecar.
         self._skillsh_groupings: Dict[str, Optional[Dict[str, str]]] = {}
         self._rate_limited: bool = False
-
-    def source_id(self) -> str:
-        return "github"
 
     @property
     def is_rate_limited(self) -> bool:
@@ -255,12 +259,10 @@ class GitHubSource(SkillSource):
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         """Download a skill; identifier format: "owner/repo/path/to/skill-dir"."""
-        parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(identifier)
+        if split is None:
             return None
-
-        repo = f"{parts[0]}/{parts[1]}"
-        skill_path = parts[2]
+        repo, skill_path = split
         skill_dir = skill_path.rstrip("/")
 
         # Resolve the tree FIRST so every byte fetch — SKILL.md included — is
@@ -366,12 +368,11 @@ class GitHubSource(SkillSource):
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         """Fetch just the SKILL.md metadata for preview."""
-        parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        split = _split_repo_id(identifier)
+        if split is None:
             return None
-
-        repo = f"{parts[0]}/{parts[1]}"
-        skill_path = parts[2].rstrip("/")
+        repo, skill_path = split
+        skill_path = skill_path.rstrip("/")
 
         content = self._fetch_file_content(repo, f"{skill_path}/SKILL.md")
         if not content:
@@ -401,9 +402,9 @@ class GitHubSource(SkillSource):
     def _list_skills_in_repo(self, repo: str, path: str) -> List[SkillMeta]:
         """List skill directories in a GitHub repo path, using cached index."""
         cache_key = f"{repo}_{path}".replace("/", "_").replace(" ", "_")
-        cached = self._read_cache(cache_key)
+        cached = _cached_metas(cache_key)
         if cached is not None:
-            return [SkillMeta(**s) for s in cached]
+            return cached
 
         url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
         resp = self._github_get(url)
@@ -431,7 +432,7 @@ class GitHubSource(SkillSource):
                         meta.extra["category"] = category
                 skills.append(meta)
 
-        self._write_cache(cache_key, [_skill_meta_to_dict(s) for s in skills])
+        _cache_metas(cache_key, skills)
         return skills
 
     def _get_repo_tree(self, repo: str) -> Optional[Tuple[str, List[dict]]]:
@@ -444,34 +445,18 @@ class GitHubSource(SkillSource):
         if repo in self._tree_cache:
             return self._tree_cache[repo]
 
-        headers = self.auth.get_headers()
-
-        try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{repo}",
-                headers=headers, timeout=15, follow_redirects=True,
-            )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
-                return None
-            default_branch = resp.json().get("default_branch", "main")
-        except (httpx.HTTPError, ValueError):
+        repo_data = self._github_json(f"https://api.github.com/repos/{repo}")
+        if repo_data is None:
             return None
-
-        try:
-            resp = httpx.get(
-                f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
-                params={"recursive": "1"},
-                headers=headers, timeout=30, follow_redirects=True,
-            )
-            if resp.status_code != 200:
-                self._check_rate_limit_response(resp)
-                return None
-            tree_data = resp.json()
-            if tree_data.get("truncated"):
-                logger.debug("Git tree truncated for %s, cannot cache", repo)
-                return None
-        except (httpx.HTTPError, ValueError):
+        default_branch = repo_data.get("default_branch", "main")
+        tree_data = self._github_json(
+            f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
+            params={"recursive": "1"}, timeout=30.0,
+        )
+        if tree_data is None:
+            return None
+        if tree_data.get("truncated"):
+            logger.debug("Git tree truncated for %s, cannot cache", repo)
             return None
 
         entries = tree_data.get("tree", [])
@@ -480,6 +465,16 @@ class GitHubSource(SkillSource):
             self._tree_revisions[repo] = revision
         self._tree_cache[repo] = (default_branch, entries)
         return (default_branch, entries)
+
+    def _github_json(self, url: str, **kwargs) -> Optional[dict]:
+        """Decoded JSON body of a 200 ``_github_get`` (which flags rate-limit exhaustion), else None."""
+        resp = self._github_get(url, **kwargs)
+        if resp is None or resp.status_code != 200:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            return None
 
     def _check_rate_limit_response(self, resp: httpx.Response) -> None:
         """Flag the instance as rate-limited when GitHub returns 403 + exhausted quota."""
@@ -514,6 +509,7 @@ class GitHubSource(SkillSource):
         last_resp: Optional[httpx.Response] = None
         for attempt in range(max_retries):
             last_attempt = attempt >= max_retries - 1
+            wait = backoff
             try:
                 resp = httpx.get(
                     url, params=params, headers=hdrs,
@@ -524,40 +520,30 @@ class GitHubSource(SkillSource):
                              url, attempt + 1, max_retries, e)
                 if last_attempt:
                     return None
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
-                continue
-
-            last_resp = resp
-            if resp.status_code == 200:
-                return resp
-
-            if resp.status_code in (403, 429):
-                if not _is_rate_limit_response(resp) or last_attempt:
-                    self._check_rate_limit_response(resp)
+            else:
+                last_resp = resp
+                if resp.status_code == 200:
                     return resp
-                wait = backoff
-                reset = resp.headers.get("X-RateLimit-Reset", "")
-                retry_after = resp.headers.get("Retry-After", "")
-                if retry_after.isdigit():
-                    wait = min(float(retry_after), 60.0)
-                elif reset.isdigit():
-                    delta = float(reset) - time.time()
-                    if 0 < delta <= 60.0:
-                        wait = delta
-                logger.debug(
-                    "GitHub rate limited on %s, waiting %.1fs (attempt %d/%d)",
-                    url, wait, attempt + 1, max_retries,
-                )
-                time.sleep(wait)
-                backoff = min(backoff * 2, 30.0)
-                continue
-
-            if 500 <= resp.status_code < 600 and not last_attempt:
-                time.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
-                continue
-            return resp
+                if resp.status_code in (403, 429):
+                    if not _is_rate_limit_response(resp) or last_attempt:
+                        self._check_rate_limit_response(resp)
+                        return resp
+                    reset = resp.headers.get("X-RateLimit-Reset", "")
+                    retry_after = resp.headers.get("Retry-After", "")
+                    if retry_after.isdigit():
+                        wait = min(float(retry_after), 60.0)
+                    elif reset.isdigit():
+                        delta = float(reset) - time.time()
+                        if 0 < delta <= 60.0:
+                            wait = delta
+                    logger.debug(
+                        "GitHub rate limited on %s, waiting %.1fs (attempt %d/%d)",
+                        url, wait, attempt + 1, max_retries,
+                    )
+                elif not (500 <= resp.status_code < 600) or last_attempt:
+                    return resp
+            time.sleep(wait)
+            backoff = min(backoff * 2, 30.0)
 
         return last_resp
 
@@ -581,21 +567,15 @@ class GitHubSource(SkillSource):
 
         return None
 
-    def _fetch_file_content(
-        self, repo: str, path: str, ref: Optional[str] = None
-    ) -> Optional[str]:
+    def _fetch_file_content(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[str]:
         """Fetch a single text file from GitHub (None on miss or non-UTF-8)."""
         content = self._fetch_file_bytes(repo, path, ref=ref)
-        if content is None:
-            return None
         try:
-            return content.decode("utf-8")
+            return None if content is None else content.decode("utf-8")
         except UnicodeDecodeError:
             return None
 
-    def _fetch_file_bytes(
-        self, repo: str, path: str, ref: Optional[str] = None
-    ) -> Optional[bytes]:
+    def _fetch_file_bytes(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[bytes]:
         """Fetch exact file bytes. ``ref`` pins to a tree SHA (see ``fetch`` on
         the TOCTOU); None keeps the legacy unpinned behavior."""
         encoded_path = quote(path, safe="/")
@@ -651,8 +631,3 @@ class GitHubSource(SkillSource):
                     mapping.setdefault(member, title)  # first grouping wins
         return mapping
 
-    def _read_cache(self, key: str) -> Optional[list]:
-        return hub()._read_index_cache(key)
-
-    def _write_cache(self, key: str, data: list) -> None:
-        hub()._write_index_cache(key, data)
