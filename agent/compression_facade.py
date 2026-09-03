@@ -47,18 +47,13 @@ def _report_compression_timeout(
     mark_context_compression_timed_out(agent)
     if total_exhausted:
         logger.warning(
-            "Context compression reached its total ceiling after %.1fs (progress observed=%s); continuing "
-            "without compression",
-            waited,
-            progress_observed,
+            "Context compression reached its total ceiling after %.1fs (progress observed=%s); continuing without compression",
+            waited, progress_observed,
         )
     else:
         logger.warning(
-            "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing "
-            "without compression",
-            since_progress,
-            waited,
-            total_ceiling,
+            "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing without compression",
+            since_progress, waited, total_ceiling,
         )
     touch = getattr(agent, "_touch_activity", None)
     if callable(touch):

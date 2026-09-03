@@ -305,8 +305,7 @@ def _restore_compressor_attempt_state(
     if attempt_generation is not None and not _compressor_attempt_is_current(compressor, attempt_generation):
         logger.warning(
             "Skipping stale compressor attempt-state restore: attempt "
-            "generation %s no longer owns the compressor (current: %s). A "
-            "newer (stall-fallback) attempt's state is preserved.",
+            "generation %s no longer owns the compressor (current: %s). A newer (stall-fallback) attempt's state is preserved.",
             attempt_generation,
             getattr(compressor, "_compression_attempt_generation", None),
         )
@@ -952,11 +951,8 @@ def _await_worker_within_budget(
             since_progress = fence.seconds_since_progress()
             if not fence.deadline_exceeded and since_progress < idle and waited < ceiling:
                 logger.info(
-                    "Context compression still streaming after %.0fs (last progress %.1fs ago) — extending wait "
-                    "(ceiling %.0fs)",
-                    waited,
-                    since_progress,
-                    ceiling,
+                    "Context compression still streaming after %.0fs (last progress %.1fs ago) — extending wait (ceiling %.0fs)",
+                    waited, since_progress, ceiling,
                 )
                 continue
             return False, None
@@ -1083,8 +1079,7 @@ def run_compress_context_with_progress_timeout(
     # its budget unstarted and run stale later. Skip compression this cycle.
     if not _try_admit_compression_job():
         logger.warning(
-            "Context compression pool saturated (%d workers busy) — "
-            "refusing new compression this cycle and continuing without "
+            "Context compression pool saturated (%d workers busy) — refusing new compression this cycle and continuing without "
             "compression. Wedged workers are fence-cancelled and free their "
             "slot when they return; if this persists, check the summary provider health.",
             _COMPRESS_EXECUTOR_MAX_WORKERS,
@@ -1872,8 +1867,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 )
             else:
                 msg = (
-                    "⚠ No auxiliary LLM provider configured — context "
-                    "compression will drop middle turns without a summary. "
+                    "⚠ No auxiliary LLM provider configured — context compression will drop middle turns without a summary. "
                     "Run `hermes setup` or set OPENROUTER_API_KEY."
                 )
             agent._compression_warning = msg
@@ -2519,11 +2513,8 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
             lease.db.release_compression_lock(lease.sid, lease.holder)
         lease.holder = None
         logger.warning(
-            "compression lock acquisition raised unexpectedly for "
-            "session=%s (%s: %s) — skipping compression this cycle",
-            lease.sid,
-            type(_lock_err).__name__,
-            _lock_err,
+            "compression lock acquisition raised unexpectedly for session=%s (%s: %s) — skipping compression this cycle",
+            lease.sid, type(_lock_err).__name__, _lock_err,
         )
         return False
 
@@ -2616,8 +2607,7 @@ def _acquire_compression_lease(
             if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
                 agent._last_compression_lock_error_sid = _lock_sid
                 logger.warning(
-                    "compression lock subsystem unavailable for session=%s "
-                    "— proceeding without lock. This usually means a stale "
+                    "compression lock subsystem unavailable for session=%s — proceeding without lock. This usually means a stale "
                     "in-memory module after an update; restart the process (or `hermes update`) to resync.",
                     _lock_sid,
                 )
@@ -2797,8 +2787,7 @@ def _resolve_compress_call(
         if getattr(agent, "_last_memory_context_unsupported_engine", None) != engine_name:
             agent._last_memory_context_unsupported_engine = engine_name
             logger.warning(
-                "context engine %s does not accept memory_context; continuing "
-                "without provider-supplied summary context",
+                "context engine %s does not accept memory_context; continuing without provider-supplied summary context",
                 engine_name,
             )
     return compress_fn, compress_kwargs
@@ -3357,14 +3346,12 @@ def _candidate_rejected(
 
     if not compressed:
         logger.error(
-            "context compression returned an empty transcript; refusing to "
-            "rotate session=%s so the parent remains resumable",
+            "context compression returned an empty transcript; refusing to rotate session=%s so the parent remains resumable",
             agent.session_id or "none",
         )
         with contextlib.suppress(Exception):
             agent._emit_warning(
-                "⚠ Compression returned an empty transcript. "
-                "No session split was performed; conversation continues unchanged."
+                "⚠ Compression returned an empty transcript. No session split was performed; conversation continues unchanged."
             )
         return True
 
@@ -3755,8 +3742,7 @@ def compress_context(
     if getattr(agent, "api_mode", None) == "codex_app_server":
         if checkpoint_required:
             raise _checkpoint_blocked(
-                "codex_app_server owns the authoritative thread and does not "
-                "expose a truthful pre-compaction transcript boundary"
+                "codex_app_server owns the authoritative thread and does not expose a truthful pre-compaction transcript boundary"
             )
         return _route_codex_compaction(
             agent, messages, system_message, commit_fence=commit_fence, attempt=attempt, approx_tokens=approx_tokens,
