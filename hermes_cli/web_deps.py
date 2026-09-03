@@ -1,14 +1,9 @@
-"""Shared late-binding dependency seam for extracted dashboard routers.
+"""Late-binding dependency seam for extracted dashboard routers.
 
-``hermes_cli/web_server.py`` owns all dashboard runtime state and most helper
-functions the route handlers call.  Extracted ``APIRouter`` modules under
-``hermes_cli/web_routers/`` cannot import it at module import time (web_server
-imports them to mount them — a cycle) and must not copy its state (tests
-``monkeypatch.setattr(web_server, "_helper", ...)`` and expect that to win).
-
-Design: **late binding, state stays in web_server.**  ``late(name)`` returns a
-proxy that resolves ``hermes_cli.web_server.<name>`` *at call time*, so
-monkeypatched replacements and module state are never frozen at import time.
+``web_server`` owns all dashboard state/helpers; routers under ``web_routers/`` cannot
+import it at import time (web_server imports them to mount them — a cycle) and must not
+copy its state (tests ``monkeypatch.setattr(web_server, ...)`` and expect that to win).
+``late(name)`` / ``LateState(name)`` resolve ``web_server.<name>`` *at call time*.
 """
 
 from __future__ import annotations
@@ -39,12 +34,9 @@ def late(name: str):
 class LateState:
     """Live proxy for module-level state owned by ``web_server``.
 
-    Forwards every operation the extracted handlers perform — attribute access,
-    item get/set/del, iteration, membership, ``len``/truthiness, ``with``-blocks
-    (locks), rich comparisons (numeric limits) — to ``web_server.<name>``
-    resolved at operation time.  Some of that state is defined *after* the
-    router's ``include_router`` point, so even a late module import would not
-    see it; this proxy does.
+    Forwards attribute/item access, iteration, membership, len/truthiness, ``with`` (locks)
+    and rich comparisons to ``web_server.<name>`` resolved at operation time — some state is
+    defined *after* the router's ``include_router`` point, so a late import would miss it.
     """
 
     __slots__ = ("_name",)
