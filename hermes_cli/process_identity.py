@@ -1,12 +1,10 @@
 """Process identity: spawn tags, the machine-wide spawn ledger, and the Windows job-object self-attach.
 
-Three layers that make every long-lived Hermes process positively identifiable, so reapers (``hermes
-update``, Desktop startup sweeps) never have to guess lineage from PPID archaeology or cmdline
-pattern-matching:
-
-3. **Job object self-attach** (Windows): a backend places itself in a job with ``KILL_ON_JOB_CLOSE``
-so its whole child tree dies atomically with it — no launcher→worker two-hop chains left holding
-``.pyd`` locks after the visible root is killed.
+Three layers make every long-lived Hermes process positively identifiable, so reapers (``hermes
+update``, Desktop startup sweeps) never guess lineage from PPID archaeology or cmdline matching:
+1. spawn tags (``HERMES_SPAWN`` env stamped by the spawner); 2. a ``(pid, create_time)`` ledger;
+3. Windows job-object self-attach with ``KILL_ON_JOB_CLOSE`` so the whole child tree dies with the
+root — no launcher→worker chains left holding ``.pyd`` locks.
 """
 
 from __future__ import annotations
@@ -60,18 +58,14 @@ def install_id(project_root: Optional[Path] = None) -> str:
     return hashlib.sha256(canonical.encode("utf-8", "replace")).hexdigest()[:12]
 
 
-def _process_create_time(pid: int) -> Optional[float]:
-    """``psutil`` create time for ``pid``; ``None`` when psutil can't say."""
+def _process_create_time(pid: Optional[int] = None) -> Optional[float]:
+    """``psutil`` create time for ``pid`` (default: this process); ``None`` when psutil can't say."""
     try:
         import psutil
 
-        return float(psutil.Process(pid).create_time())
+        return float(psutil.Process(os.getpid() if pid is None else pid).create_time())
     except Exception:
         return None
-
-
-def _own_create_time() -> Optional[float]:
-    return _process_create_time(os.getpid())
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +82,7 @@ class SpawnTag:
 
 def build_spawn_tag(purpose: str, *, project_root: Optional[Path] = None) -> str:
     """Value for the child's ``HERMES_SPAWN`` env var, stamped by the spawner."""
-    create = _own_create_time()
+    create = _process_create_time()
     create_part = f"{create:.3f}" if create is not None else "-"
     return ":".join((_TAG_VERSION, install_id(project_root), purpose, str(os.getpid()), create_part))
 
@@ -132,10 +126,8 @@ class LedgerEntry:
     spawner_create: Optional[float]
     registered_at: float
     argv: str
-    # Structured launch identity (#63206): what a relauncher needs to bring
-    # this runtime back after an update, without parsing argv. Empty for
-    # purposes that don't supply it; readers must use .get() — older ledger
-    # files on disk predate these keys.
+    # Structured launch identity a relauncher needs after an update, without parsing argv. Empty
+    # for purposes that don't supply it; readers must use .get() — older ledger files predate these.
     host: str = ""
     port: Optional[int] = None
     profile: str = ""
@@ -154,11 +146,7 @@ def _ledger_path() -> Path:
 
 
 def _read_ledger(path: Path) -> Optional[list[dict]]:
-    """Entries list, ``[]`` for empty/missing, ``None`` for CORRUPT.
-
-    Mirrors the #89298 contract: corrupt is a distinct state that must never be silently treated as
-    an empty roster.
-    """
+    """Entries list, ``[]`` for empty/missing, ``None`` for CORRUPT (never silently an empty roster)."""
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -216,19 +204,16 @@ def register_self(
 ) -> bool:
     """Record this process in the machine spawn ledger. Best-effort.
 
-    Called at the top of every long-lived entry point. Dead entries — ``(pid, create_time)`` no
-    longer live — are pruned on every write so the ledger tracks reality instead of growing
-    forever. ``detail`` may carry ``host``/``port``/``profile`` so the update pipeline can
-    relaunch a manually-started serve with its real bind address instead of guessing from argv.
+    Called at the top of every long-lived entry point; dead ``(pid, create_time)`` entries are
+    pruned on every write. ``detail`` may carry ``host``/``port``/``profile`` so the update
+    pipeline can relaunch a manually-started serve with its real bind address.
     """
     tag = parse_spawn_tag(os.environ.get(SPAWN_ENV_VAR))
     spawner_pid: Optional[int] = tag.spawner_pid if tag else None
     spawner_create: Optional[float] = tag.spawner_create if tag else None
     if spawner_pid is None:
-        # Desktop compatibility: the Electron app already stamps children with
-        # HERMES_PARENT_PID (+ optional `winms:<ms>` start marker) for its
-        # parent-death watchdog. Reuse it as spawner identity so ledger
-        # lineage works with every Desktop version, no TS change needed.
+        # Desktop compatibility: Electron stamps children with HERMES_PARENT_PID (+ optional
+        # `winms:<ms>` start marker) for its parent-death watchdog; reuse it as spawner identity.
         try:
             raw = int(os.environ.get("HERMES_PARENT_PID", ""))
             if raw > 0:
@@ -241,7 +226,7 @@ def register_self(
                 spawner_create = float(marker.split(":", 1)[1]) / 1000.0
             except (ValueError, IndexError):
                 spawner_create = None
-    entry = _new_entry(os.getpid(), _own_create_time(), purpose, project_root, spawner_pid, spawner_create)
+    entry = _new_entry(os.getpid(), _process_create_time(), purpose, project_root, spawner_pid, spawner_create)
     if detail:
         try:
             entry.host = str(detail.get("host") or "")
@@ -253,10 +238,8 @@ def register_self(
     try:
         import sys as _sys
 
-        # 10 tokens (was 6): enough for `hermes serve --host X --port N
-        # --profile P` — the relaunch shapes #63206 needs — while still
-        # bounding pathological argv. Structured detail above is the
-        # canonical identity; argv is the human-readable fallback.
+        # 10 tokens: enough for `hermes serve --host X --port N --profile P` while bounding
+        # pathological argv. Structured detail is canonical; argv is the human-readable fallback.
         entry.argv = " ".join(_sys.argv[:10])
     except Exception:
         pass
@@ -273,36 +256,26 @@ def _new_entry(
     spawner_create: Optional[float],
 ) -> LedgerEntry:
     return LedgerEntry(
-        pid=pid,
-        create_time=create_time,
-        purpose=purpose,
-        install=install_id(project_root),
-        spawner_pid=spawner_pid,
-        spawner_create=spawner_create,
-        registered_at=time.time(),
-        argv="",
+        pid, create_time, purpose, install_id(project_root), spawner_pid, spawner_create, time.time(), argv=""
     )
 
 
 def _append_entry(entry: LedgerEntry) -> bool:
     """Prune dead entries and append ``entry`` — the ONLY ledger write path.
 
-    Serialized under ``_LEDGER_LOCK`` with an atomic tmp+replace, exactly as ``register_self`` has
-    always written (kept single so #91660's lock- serialization guarantees hold: no writer ever
-    touches the file outside this function).
+    Serialized under ``_LEDGER_LOCK`` with an atomic tmp+replace; no writer touches the file
+    outside this function.
     """
     path = _ledger_path()
     with _LEDGER_LOCK:
         entries = _read_ledger_or_quarantine(path) or []
-        pruned: list[dict] = []
-        for e in entries:
-            pid = e.get("pid")
-            if not isinstance(pid, int) or pid == entry.pid:
-                continue
-            alive = _pid_alive_matches(pid, e.get("create_time"))
-            if alive is False:
-                continue  # provably dead → prune
-            pruned.append(e)
+        # Drop malformed entries, our own stale entry, and provably dead pids.
+        pruned = [
+            e for e in entries
+            if isinstance(e.get("pid"), int)
+            and e["pid"] != entry.pid
+            and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
+        ]
         pruned.append(asdict(entry))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,13 +296,10 @@ def register_child(
 ) -> bool:
     """Record a CHILD process this process just spawned. Best-effort.
 
-    Mirror of :func:`register_self` for children that cannot register themselves (stdio MCP helper
-    subprocesses, #61514: arbitrary ``npx``/binary servers never import Hermes code). The entry
-    records the child's ``(pid, create_time)`` with THIS process as the spawner, so reapers get the
-    same positive-identity contract:
-
-    - a live helper whose spawner is still alive is never reaped (``spawner_is_dead`` → ``False``);
-    - a helper whose spawner ``(pid, create_time)`` is provably gone is a reapable orphan.
+    Mirror of :func:`register_self` for children that cannot register themselves (stdio MCP
+    helpers: arbitrary ``npx``/binary servers never import Hermes code). Records the child's
+    ``(pid, create_time)`` with THIS process as spawner, so a helper whose spawner is provably gone
+    is a reapable orphan and one whose spawner is alive is never reaped.
     """
     try:
         pid = int(pid)
@@ -340,7 +310,7 @@ def register_child(
     child_create = _process_create_time(pid)
     if child_create is None:
         return False
-    entry = _new_entry(pid, child_create, purpose, project_root, os.getpid(), _own_create_time())
+    entry = _new_entry(pid, child_create, purpose, project_root, os.getpid(), _process_create_time())
     try:
         import psutil
 
@@ -351,12 +321,7 @@ def register_child(
 
 
 def ledger_entries(*, project_root: Optional[Path] = None) -> list[dict]:
-    """Live-verified ledger entries for THIS install.
-
-    A corrupt ledger is quarantined and read as empty — identical philosophy to the backend-
-    ownership fix (#89298): never let corruption erase or fake a roster; never let it block the
-    caller either.
-    """
+    """Live-verified ledger entries for THIS install (a corrupt ledger is quarantined, read as empty)."""
     want_install = install_id(project_root)
     with _LEDGER_LOCK:
         entries = _read_ledger_or_quarantine(_ledger_path())
@@ -387,13 +352,9 @@ def reap_orphaned_mcp_helpers(
 ) -> list[int]:
     """Kill ledger-registered stdio MCP helpers whose spawner is provably dead.
 
-    Startup-sweep rung mirroring ``_reap_orphaned_desktop_local_serves`` (dashboard_procs.py), but
-    ledger-driven instead of cmdline-heuristic: a helper is reaped ONLY when
-
-    - it has a live ``(pid, create_time)`` ledger entry for THIS install with purpose ``mcp-helper``
-    (``ledger_entries`` already excludes dead/ foreign entries), and - its recorded spawner is
-    **provably dead** (``spawner_is_dead`` is ``True`` — never ``None``/unprovable, never a live
-    spawner).
+    Ledger-driven startup-sweep rung (not cmdline-heuristic): a helper is reaped ONLY when it has a
+    live ``mcp-helper`` entry for THIS install AND ``spawner_is_dead`` is ``True`` — never
+    ``None``/unprovable, never a live spawner.
     """
     reaped: list[int] = []
     try:
@@ -437,11 +398,10 @@ def reap_orphaned_mcp_helpers(
 # ---------------------------------------------------------------------------
 
 def attach_self_to_kill_on_close_job() -> bool:
-    """Place this process in a job that dies (whole tree) when we die.
+    """Place this process in a job that dies (whole tree) when we die. Windows-only, idempotent.
 
-    Windows-only, best-effort, idempotent. ``BREAKAWAY_OK`` is included so children spawned with
-    ``CREATE_BREAKAWAY_FROM_JOB`` (gateway relaunch during update, detached watchers) keep escaping
-    exactly as they do today.
+    ``BREAKAWAY_OK`` keeps children spawned with ``CREATE_BREAKAWAY_FROM_JOB`` (gateway relaunch
+    during update, detached watchers) escaping exactly as before.
     """
     global _JOB_HANDLE
     if not _IS_WINDOWS or _JOB_HANDLE is not None:
