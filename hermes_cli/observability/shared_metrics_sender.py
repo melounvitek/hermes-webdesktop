@@ -275,7 +275,6 @@ class SharedMetricsSender:
             if derived is None:
                 # Unusable row, already marked rejected. Tell the caller to continue.
                 return {"package_id": package_id, "skip": True}
-
             token = str(uuid.uuid4())
             connection.execute(
                 """
@@ -291,11 +290,8 @@ class SharedMetricsSender:
                 (_isoformat(lease_until), token, package_id),
             )
             return {
-                "package_id": package_id,
-                "payload_json": str(row[1]),
-                "derived": str(derived),
-                "claim_token": token,
-                "skip": False,
+                "package_id": package_id, "payload_json": str(row[1]), "derived": str(derived),
+                "claim_token": token, "skip": False,
             }
 
     @staticmethod
@@ -314,15 +310,13 @@ class SharedMetricsSender:
             reason = "unreadable payload"
         else:
             # Valid JSON is not enough: a top-level array/string/number parses cleanly.
+            install_id = payload.get("install_id") if isinstance(payload, dict) else None
             if not isinstance(payload, dict):
                 reason = f"payload is {type(payload).__name__}, expected object"
+            elif not isinstance(install_id, str) or not install_id.strip():
+                reason = "payload has no usable install_id"
             else:
-                install_id = payload.get("install_id")
-                reason = (
-                    None
-                    if isinstance(install_id, str) and install_id.strip()
-                    else "payload has no usable install_id"
-                )
+                reason = None
 
         if reason is not None:
             logger.warning("Shared-metrics package %s cannot be sent (%s)", package_id, reason)
@@ -352,14 +346,7 @@ class SharedMetricsSender:
         payload["install_id"] = transmitted_id
         return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
-    def _mark(
-        self,
-        package_id: str,
-        *,
-        only_if_pending: bool = True,
-        token: str | None = None,
-        **columns,
-    ) -> None:
+    def _mark(self, package_id: str, *, token: str | None = None, **columns) -> None:
         """Write send state for one package.
 
         Guarded on send_state so a lapsed pass cannot resurrect a row another process already
@@ -367,7 +354,7 @@ class SharedMetricsSender:
         superseded claimant writes zero rows.
         """
         assignments = ", ".join(f"{name} = ?" for name in columns)
-        predicate = " AND (send_state IS NULL OR send_state = 'pending')" if only_if_pending else ""
+        predicate = " AND (send_state IS NULL OR send_state = 'pending')"
         params: list = [*columns.values(), package_id]
         if token is not None:
             predicate += " AND claim_token = ?"
