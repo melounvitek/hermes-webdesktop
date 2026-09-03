@@ -49,7 +49,8 @@ def _validate_cua_driver_app_signature(app_path: str) -> None:
     if not codesign:
         raise RuntimeError("codesign is required to verify CuaDriver.app before launching it.")
     try:
-        proc = subprocess.run([codesign, "-dv", app_path], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run([codesign, "-dv", app_path], capture_output=True, text=True, timeout=15,
+                              stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"could not verify CuaDriver.app signature: {exc}") from exc
     if proc.returncode != 0:

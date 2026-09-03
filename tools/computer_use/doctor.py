@@ -44,7 +44,7 @@ class HealthReportUnavailable(RuntimeError):
 def _run_cli(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
     """Run ``<binary> args`` with UTF-8 capture + sanitized env (raises on failure)."""
     return subprocess.run([binary, *args], capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=timeout, env=_sanitized_cua_env())
+                          errors="replace", timeout=timeout, env=_sanitized_cua_env(), stdin=subprocess.DEVNULL)
 
 def _combined_output(completed: subprocess.CompletedProcess) -> str:
     return ((completed.stdout or "") + (completed.stderr or "")).strip()
