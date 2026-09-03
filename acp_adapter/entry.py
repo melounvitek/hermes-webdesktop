@@ -52,8 +52,7 @@ class _BenignProbeMethodFilter(logging.Filter):
         if not isinstance(exc, RequestError) or getattr(exc, "code", None) != -32601:
             return True
         data = getattr(exc, "data", None)
-        method = data.get("method") if isinstance(data, dict) else None
-        return method not in _BENIGN_PROBE_METHODS
+        return not (isinstance(data, dict) and data.get("method") in _BENIGN_PROBE_METHODS)
 
 
 def _setup_logging() -> None:
@@ -61,9 +60,8 @@ def _setup_logging() -> None:
     from agent.redact import RedactingFormatter
 
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(RedactingFormatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    handler.setFormatter(RedactingFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                            datefmt="%Y-%m-%d %H:%M:%S"))
     handler.addFilter(_BenignProbeMethodFilter())
     root = logging.getLogger()
     root.handlers.clear()
@@ -80,18 +78,16 @@ def _load_env() -> None:
     hermes_home = get_hermes_home()
     loaded = load_hermes_dotenv(hermes_home=hermes_home)
     log = logging.getLogger(__name__)
-    if loaded:
-        for env_file in loaded:
-            log.info("Loaded env from %s", env_file)
-    else:
+    for env_file in loaded or ():
+        log.info("Loaded env from %s", env_file)
+    if not loaded:
         log.info("No .env found at %s, using system env", hermes_home / ".env")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="hermes-acp", description="Run Hermes Agent as an ACP stdio server.")
     parser.add_argument("--version", action="store_true", help="Print Hermes version and exit")
-    parser.add_argument("--check", action="store_true",
-                        help="Verify ACP dependencies and adapter imports, then exit")
+    parser.add_argument("--check", action="store_true", help="Verify ACP dependencies and adapter imports, then exit")
     parser.add_argument("--setup", action="store_true",
                         help="Run interactive Hermes provider/model setup for ACP terminal auth")
     parser.add_argument("--setup-browser", action="store_true",
@@ -164,15 +160,11 @@ def _run_setup_browser(assume_yes: bool = False) -> int:
 def main(argv: list[str] | None = None) -> None:
     """Entry point: load env, configure logging, run the ACP agent."""
     args = _parse_args(argv)
-    if args.version:
-        return _print_version()
-    if args.check:
-        return _run_check()
-    if args.setup:
-        return _run_setup()
+    for flag, action in (("version", _print_version), ("check", _run_check), ("setup", _run_setup)):
+        if getattr(args, flag):
+            return action()
     if args.setup_browser:
-        rc = _run_setup_browser(assume_yes=args.assume_yes)
-        if rc != 0:
+        if rc := _run_setup_browser(assume_yes=args.assume_yes):
             sys.exit(rc)
         return
 

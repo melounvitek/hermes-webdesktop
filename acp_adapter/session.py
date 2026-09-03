@@ -6,7 +6,7 @@ survive process restarts and appear in ``session_search``; ``load_session`` /
 """
 from __future__ import annotations
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, translate_cwd_for_wsl_backend, windows_path_to_wsl
 
 import copy
 import json
@@ -19,7 +19,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from threading import Lock
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -28,8 +27,6 @@ logger = logging.getLogger(__name__)
 def _translate_acp_cwd(cwd: str) -> str:
     """Translate Windows ACP cwd values (``E:\\Projects``, ``\\\\wsl.localhost\\``) to POSIX form
     when Hermes runs in WSL so agents, tools, and persisted sessions agree; no-op elsewhere."""
-    from hermes_constants import translate_cwd_for_wsl_backend
-
     return translate_cwd_for_wsl_backend(str(cwd))
 
 
@@ -37,8 +34,6 @@ def _normalize_cwd_for_compare(cwd: str | None) -> str:
     expanded = os.path.expanduser(str(cwd or ".").strip() or ".")
 
     # Windows drive paths -> WSL mount form so history filters match across hosts.
-    from hermes_constants import windows_path_to_wsl
-
     translated = windows_path_to_wsl(expanded)
     if translated is not None:
         expanded = translated
@@ -84,7 +79,6 @@ def _updated_at_sort_key(value: Any) -> float:
 
 def _acp_stderr_print(*args, **kwargs) -> None:
     """Route incidental AIAgent output to stderr; ACP reserves stdout for JSON-RPC."""
-    kwargs = dict(kwargs)
     kwargs.setdefault("file", sys.stderr)
     print(*args, **kwargs)
 
@@ -104,15 +98,9 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
 def _expand_acp_enabled_toolsets(toolsets: List[str] | None = None,
                                  mcp_server_names: List[str] | None = None) -> List[str]:
     """Return ACP toolsets plus explicit MCP server toolsets for this session."""
-    expanded: List[str] = []
-    for name in list(toolsets or ["hermes-acp"]):
-        if name and name not in expanded:
-            expanded.append(name)
-    for server_name in list(mcp_server_names or []):
-        toolset_name = f"mcp-{server_name}"
-        if server_name and toolset_name not in expanded:
-            expanded.append(toolset_name)
-    return expanded
+    names = [n for n in (toolsets or ["hermes-acp"]) if n]
+    names += [f"mcp-{s}" for s in (mcp_server_names or []) if s]
+    return list(dict.fromkeys(names))
 
 
 def _parse_model_config(mc: Any) -> dict:
@@ -126,14 +114,8 @@ def _parse_model_config(mc: Any) -> dict:
 
 def _session_info(sid: str, cwd: str, model: Any, history_len: int, title: Any, preview: Any,
                   updated_at: Any) -> Dict[str, Any]:
-    return {
-        "session_id": sid,
-        "cwd": cwd,
-        "model": model,
-        "history_len": history_len,
-        "title": _build_session_title(title, preview, cwd),
-        "updated_at": _format_updated_at(updated_at),
-    }
+    return {"session_id": sid, "cwd": cwd, "model": model, "history_len": history_len,
+            "title": _build_session_title(title, preview, cwd), "updated_at": _format_updated_at(updated_at)}
 
 
 def _first_user_preview(history: List[Dict[str, Any]], default: str) -> str:
@@ -153,7 +135,7 @@ class SessionState:
     cancel_event: Any = None  # threading.Event
     is_running: bool = False
     queued_prompts: List[str] = field(default_factory=list)
-    runtime_lock: Any = field(default_factory=Lock)
+    runtime_lock: Any = field(default_factory=threading.Lock)
     current_prompt_text: str = ""
     interrupted_prompt_text: str = ""
 
@@ -162,14 +144,13 @@ class SessionManager:
     """Thread-safe manager for ACP sessions backed by Hermes AIAgent instances.
 
     Sessions are held in-memory for fast access **and** persisted to the shared
-    SessionDB so they survive restarts and are searchable via ``session_search``.
-    """
+    SessionDB so they survive restarts and are searchable via ``session_search``."""
 
     def __init__(self, agent_factory=None, db=None):
         """``agent_factory``: AIAgent-like factory (tests); default builds a real AIAgent from
         the runtime provider config. ``db``: SessionDB; default lazily opens ``~/.hermes/state.db``."""
         self._sessions: Dict[str, SessionState] = {}
-        self._lock = Lock()
+        self._lock = threading.Lock()
         self._agent_factory = agent_factory
         self._db_instance = db  # None → lazy-init on first use
 
@@ -223,7 +204,7 @@ class SessionManager:
             seen_ids = set(self._sessions.keys())
             results = []
             for s in self._sessions.values():
-                if len(s.history) <= 0 or not _matches(s.cwd):
+                if not s.history or not _matches(s.cwd):
                     continue
                 persisted = persisted_rows.get(s.session_id, {})
                 results.append(_session_info(
@@ -320,8 +301,7 @@ class SessionManager:
             # active=0 rows; replace_messages() would DELETE those (and, after a compression
             # id rotation, clobber the ended parent transcript). Skip it in that case.
             agent = state.agent
-            agent_db = getattr(agent, "_session_db", None)
-            if agent_db is not None and agent_db is db and bool(getattr(agent, "_session_db_created", False)):
+            if getattr(agent, "_session_db", None) is db and getattr(agent, "_session_db_created", False):
                 return
             # A non-owning agent (model switch, /restore: fresh agent, _session_db_created=False)
             # may still sit on archived rows, so replace ONLY the active=1 set: on a fresh
@@ -358,10 +338,9 @@ class SessionManager:
 
         try:
             agent = self._make_agent(
-                session_id=session_id, cwd=cwd, model=model,
+                session_id=session_id, cwd=cwd, model=model, api_mode=meta.get("api_mode") or None,
                 requested_provider=meta.get("provider") or row.get("billing_provider"),
-                base_url=meta.get("base_url") or row.get("billing_base_url"),
-                api_mode=meta.get("api_mode") or None)
+                base_url=meta.get("base_url") or row.get("billing_base_url"))
         except Exception:
             logger.warning("Failed to recreate agent for ACP session %s", session_id, exc_info=True)
             return None
@@ -373,8 +352,7 @@ class SessionManager:
     # ---- internal -----------------------------------------------------------
 
     def _make_agent(self, *, session_id: str, cwd: str, model: str | None = None,
-                    requested_provider: str | None = None, base_url: str | None = None,
-                    api_mode: str | None = None):
+                    requested_provider: str | None = None, base_url: str | None = None, api_mode: str | None = None):
         if self._agent_factory is not None:
             return self._agent_factory()
 
@@ -387,7 +365,7 @@ class SessionManager:
         default_model, config_provider = "", None
         if isinstance(model_cfg, dict):
             default_model, config_provider = str(model_cfg.get("default") or ""), model_cfg.get("provider")
-        elif isinstance(model_cfg, str) and model_cfg.strip():
+        elif isinstance(model_cfg, str):
             default_model = model_cfg.strip()
 
         configured_mcp_servers = [
@@ -395,22 +373,16 @@ class SessionManager:
             if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
         ]
         kwargs = {
-            "platform": "acp",
+            "platform": "acp", "quiet_mode": True, "session_id": session_id, "session_db": self._get_db(),
             "enabled_toolsets": _expand_acp_enabled_toolsets(["hermes-acp"], mcp_server_names=configured_mcp_servers),
-            "quiet_mode": True,
-            "session_id": session_id,
-            "session_db": self._get_db(),
             "model": model or default_model,
         }
         try:
             runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
             kwargs.update({
-                "provider": runtime.get("provider"),
-                "api_mode": api_mode or runtime.get("api_mode"),
-                "base_url": base_url or runtime.get("base_url"),
-                "api_key": runtime.get("api_key"),
-                "command": runtime.get("command"),
-                "args": list(runtime.get("args") or []),
+                "provider": runtime.get("provider"), "api_mode": api_mode or runtime.get("api_mode"),
+                "base_url": base_url or runtime.get("base_url"), "api_key": runtime.get("api_key"),
+                "command": runtime.get("command"), "args": list(runtime.get("args") or []),
             })
         except Exception:
             logger.debug("ACP session falling back to default provider resolution", exc_info=True)

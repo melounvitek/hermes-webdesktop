@@ -15,11 +15,7 @@ logger = logging.getLogger(__name__)
 # ACP permission option id -> Hermes approval result. Ids are stable across the
 # ``allow_permanent=True`` and ``False`` paths even though the option list differs.
 _OPTION_ID_TO_HERMES = {
-    "allow_once": "once",
-    "allow_session": "session",
-    "allow_always": "always",
-    "deny": "deny",
-    "deny_always": "deny",
+    "allow_once": "once", "allow_session": "session", "allow_always": "always", "deny": "deny", "deny_always": "deny"
 }
 
 _PERMISSION_REQUEST_IDS = count(1)
@@ -29,9 +25,9 @@ def _permission_option_supports_kind(kind: str) -> bool:
     """Return whether the installed ACP SDK accepts a permission option kind."""
     try:
         PermissionOption(option_id="__probe__", kind=kind, name="probe")
+        return True
     except Exception:
         return False
-    return True
 
 
 def _build_permission_options(
@@ -61,11 +57,8 @@ def _build_permission_tool_call(command: str, description: str):
 
     content_text = f"{description}\n$ {command}" if description else f"$ {command}"
     return _acp.update_tool_call(
-        f"perm-check-{next(_PERMISSION_REQUEST_IDS)}",
-        title=f"{description}: {command}" if description else command,
-        kind="execute",
-        status="pending",
-        content=[_acp.tool_content(_acp.text_block(content_text))],
+        f"perm-check-{next(_PERMISSION_REQUEST_IDS)}", title=f"{description}: {command}" if description else command,
+        kind="execute", status="pending", content=[_acp.tool_content(_acp.text_block(content_text))],
         raw_input={"command": command, "description": description},
     )
 
@@ -80,6 +73,30 @@ def _map_outcome_to_hermes(outcome: object, *, allowed_option_ids: set[str]) -> 
     return _OPTION_ID_TO_HERMES.get(outcome.option_id, "deny")
 
 
+def await_permission(
+    request_permission_fn: Callable, loop: asyncio.AbstractEventLoop, session_id: str, *,
+    tool_call, options: list[PermissionOption], timeout: float, what: str,
+) -> tuple[object | None, bool]:
+    """Schedule ``request_permission`` on ``loop`` from a worker thread and block for the answer.
+    Returns ``(response, timed_out)``; ``(None, False)`` when scheduling or the request failed."""
+    from agent.async_utils import safe_schedule_threadsafe
+
+    coro = request_permission_fn(session_id=session_id, tool_call=tool_call, options=options)
+    future = safe_schedule_threadsafe(coro, loop, logger=logger, log_message=f"{what}: failed to schedule on loop")
+    if future is None:
+        return None, False
+    try:
+        return future.result(timeout=timeout), False
+    except FutureTimeout:
+        future.cancel()
+        logger.warning("%s timed out after %ss", what, timeout)
+        return None, True
+    except Exception as exc:
+        future.cancel()
+        logger.warning("%s failed: %s", what, exc)
+        return None, False
+
+
 def make_approval_callback(request_permission_fn: Callable, loop: asyncio.AbstractEventLoop,
                            session_id: str, timeout: float = 60.0) -> Callable[..., str]:
     """Return a Hermes approval callback (``command, description, **kw`` as used by
@@ -88,37 +105,18 @@ def make_approval_callback(request_permission_fn: Callable, loop: asyncio.Abstra
 
     def _callback(command: str, description: str, *, allow_permanent: bool = True,
                   allow_session: bool = True, smart_denied: bool = False, **_: object) -> str:
-        from agent.async_utils import safe_schedule_threadsafe
-
-        options = _build_permission_options(
-            allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied,
+        options = _build_permission_options(allow_permanent=allow_permanent, allow_session=allow_session,
+                                            smart_denied=smart_denied)
+        response, timed_out = await_permission(
+            request_permission_fn, loop, session_id, tool_call=_build_permission_tool_call(command, description),
+            options=options, timeout=timeout, what="Permission request",
         )
-        coro = request_permission_fn(
-            session_id=session_id,
-            tool_call=_build_permission_tool_call(command, description),
-            options=options,
-        )
-        future = safe_schedule_threadsafe(
-            coro, loop, logger=logger, log_message="Permission request: failed to schedule on loop",
-        )
-        if future is None:
-            return "deny"
-        try:
-            response = future.result(timeout=timeout)
-        except FutureTimeout:
-            future.cancel()
-            logger.warning("Permission request timed out after %ss", timeout)
+        if timed_out:
             # Distinct from an explicit deny: tools.approval reports "timed out
             # without user response" instead of a user denial.
             return "timeout"
-        except Exception as exc:
-            future.cancel()
-            logger.warning("Permission request failed: %s", exc)
-            return "deny"
         if response is None:
             return "deny"
-        return _map_outcome_to_hermes(
-            response.outcome, allowed_option_ids={option.option_id for option in options},
-        )
+        return _map_outcome_to_hermes(response.outcome, allowed_option_ids={option.option_id for option in options})
 
     return _callback

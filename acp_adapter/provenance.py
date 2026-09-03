@@ -30,19 +30,14 @@ def _is_compression_end(row: Any) -> bool:
 
 
 def build_session_provenance(
-    db: Any,
-    acp_session_id: str,
-    current_hermes_session_id: str,
-    *,
-    previous_hermes_session_id: Optional[str] = None,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *, previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build ``_meta.hermes.sessionProvenance`` for an ACP session.
 
     ``db`` must expose ``get_session``. ``current_hermes_session_id`` is the live
     internal id (``state.agent.session_id``); ``previous_hermes_session_id`` is
     the id before the most recent turn, supplied by ``prompt()`` to flag a
-    rotation. Returns ``None`` if the session can't be read.
-    """
+    rotation. Returns ``None`` if the session can't be read."""
     row = _get_row(db, current_hermes_session_id)
     if not row:
         return None
@@ -51,9 +46,7 @@ def build_session_provenance(
     # Walk parents to the lineage root. Only compression-split parents
     # (parent.end_reason == 'compression') count toward depth — delegate/branch
     # children share the parent_session_id column but are not compaction boundaries.
-    root_id = current_hermes_session_id
-    compression_depth = 0
-    cursor_parent = parent_id
+    root_id, compression_depth, cursor_parent = current_hermes_session_id, 0, parent_id
     seen = {current_hermes_session_id}
     for _ in range(_MAX_WALK):
         if not cursor_parent or cursor_parent in seen:
@@ -70,12 +63,9 @@ def build_session_provenance(
     is_continuation = bool(parent_id) and _is_compression_end(_get_row(db, parent_id))
 
     provenance: Dict[str, Any] = {
-        "acpSessionId": acp_session_id,
-        "currentHermesSessionId": current_hermes_session_id,
-        "rootHermesSessionId": root_id,
-        "parentHermesSessionId": parent_id,
-        "sessionKind": "continuation" if is_continuation else "root",
-        "compressionDepth": compression_depth,
+        "acpSessionId": acp_session_id, "currentHermesSessionId": current_hermes_session_id,
+        "rootHermesSessionId": root_id, "parentHermesSessionId": parent_id,
+        "sessionKind": "continuation" if is_continuation else "root", "compressionDepth": compression_depth,
     }
     if previous_hermes_session_id:
         provenance["previousHermesSessionId"] = previous_hermes_session_id
@@ -88,15 +78,9 @@ def build_session_provenance(
 
 
 def session_provenance_meta(
-    db: Any,
-    acp_session_id: str,
-    current_hermes_session_id: str,
-    *,
-    previous_hermes_session_id: Optional[str] = None,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *, previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a ready ``_meta`` payload: ``{"hermes": {"sessionProvenance": ...}}``."""
-    prov = build_session_provenance(
-        db, acp_session_id, current_hermes_session_id,
-        previous_hermes_session_id=previous_hermes_session_id,
-    )
+    prov = build_session_provenance(db, acp_session_id, current_hermes_session_id,
+                                    previous_hermes_session_id=previous_hermes_session_id)
     return None if prov is None else {"hermes": {"sessionProvenance": prov}}

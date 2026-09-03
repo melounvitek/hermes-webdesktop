@@ -14,18 +14,16 @@ def detect_provider() -> Optional[str]:
     A callable ``api_key`` (Azure Foundry Entra ID bearer-token provider, see
     :mod:`agent.azure_identity_adapter`) counts as a valid credential; otherwise
     Entra-configured Foundry deployments would default to ``"openrouter"`` and
-    the ACP auth handshake would reject the legitimate provider.
-    """
+    the ACP auth handshake would reject the legitimate provider."""
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         runtime = resolve_runtime_provider()
         api_key, provider = runtime.get("api_key"), runtime.get("provider")
-        if not isinstance(provider, str) or not provider.strip():
-            return None
-        if (isinstance(api_key, str) and api_key.strip()) or callable(api_key):
+        if isinstance(provider, str) and provider.strip() and (
+                (isinstance(api_key, str) and api_key.strip()) or callable(api_key)):
             return provider.strip().lower()
     except Exception:
-        return None
+        pass
     return None
 
 
@@ -35,26 +33,19 @@ def build_auth_methods() -> list[Any]:
     The ACP registry requires at least one usable auth method in the initial
     handshake. A fresh Zed install may have no Hermes credentials yet, so the
     terminal setup method is always advertised; when credentials resolve, the
-    provider is also advertised as the default agent-managed runtime method.
-    """
+    provider is also advertised as the default agent-managed runtime method."""
     from acp.schema import AuthMethodAgent, TerminalAuthMethod
 
     methods: list[Any] = []
     provider = detect_provider()
     if provider:
         methods.append(AuthMethodAgent(
-            id=provider,
-            name=f"{provider} runtime credentials",
+            id=provider, name=f"{provider} runtime credentials",
             description=f"Authenticate Hermes using the currently configured {provider} runtime credentials.",
         ))
     methods.append(TerminalAuthMethod(
-        id=TERMINAL_SETUP_AUTH_METHOD_ID,
-        name="Configure Hermes provider",
-        description=(
-            "Open Hermes' interactive model/provider setup in a terminal. "
-            "Use this when Hermes has not been configured on this machine yet."
-        ),
-        type="terminal",
-        args=["--setup"],
+        id=TERMINAL_SETUP_AUTH_METHOD_ID, name="Configure Hermes provider", type="terminal", args=["--setup"],
+        description=("Open Hermes' interactive model/provider setup in a terminal. "
+                     "Use this when Hermes has not been configured on this machine yet."),
     ))
     return methods

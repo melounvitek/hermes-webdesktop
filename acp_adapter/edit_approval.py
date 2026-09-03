@@ -12,7 +12,6 @@ import json
 import logging
 import re
 import tempfile
-from concurrent.futures import TimeoutError as FutureTimeout
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from itertools import count
@@ -59,11 +58,11 @@ def reset_edit_approval_requester(token: Token) -> None:
 
 def _read_text_if_exists(path: str) -> str | None:
     p = Path(path).expanduser()
-    if not p.exists():
-        return None
-    if not p.is_file():
+    if p.is_file():
+        return p.read_text(encoding="utf-8", errors="replace")
+    if p.exists():
         raise OSError(f"Cannot edit non-file path: {path}")
-    return p.read_text(encoding="utf-8", errors="replace")
+    return None
 
 
 def _required_path(arguments: dict[str, Any]) -> str:
@@ -93,8 +92,7 @@ def _proposal_for_patch_replace(arguments: dict[str, Any]) -> EditProposal:
     from tools.fuzzy_match import fuzzy_find_and_replace
 
     new_text, match_count, _strategy, error = fuzzy_find_and_replace(
-        old_text, str(old_string), str(new_string), bool(arguments.get("replace_all", False)),
-    )
+        old_text, str(old_string), str(new_string), bool(arguments.get("replace_all", False)))
     if error or match_count == 0:
         raise ValueError(error or f"Could not find match for old_string in {path}")
     return EditProposal("patch", path, old_text, new_text, dict(arguments))
@@ -115,8 +113,8 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
     if not paths:
         raise ValueError("no file paths found in V4A patch")
     single = len(paths) == 1
-    # ACP only supports a single diff payload: surface the exact V4A patch as
-    # new_text so patch-mode calls are permissioned and denied patches cannot mutate.
+    # ACP only supports a single diff payload: surface the exact V4A patch as new_text so
+    # patch-mode calls are permissioned and denied patches cannot mutate.
     return EditProposal(
         "patch", paths[0] if single else ", ".join(paths),
         _read_text_if_exists(paths[0]) if single else None, patch_body, dict(arguments),
@@ -125,8 +123,7 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
 
 # (tool_name, patch mode or None) -> proposal builder.
 _PROPOSAL_BUILDERS = {
-    ("write_file", None): _proposal_for_write_file,
-    ("patch", "replace"): _proposal_for_patch_replace,
+    ("write_file", None): _proposal_for_write_file, ("patch", "replace"): _proposal_for_patch_replace,
     ("patch", "patch"): _proposal_for_patch_v4a,
 }
 
@@ -143,19 +140,10 @@ def _is_sensitive_auto_approve_path(path: str) -> bool:
     return bool(lowered & {".git", ".ssh"}) or Path(path).name.lower() in SENSITIVE_AUTO_APPROVE_NAMES
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | None = None) -> bool:
     """Return whether an ACP edit proposal may bypass the prompt for this session.
 
-    Session-scoped and conservative: sensitive paths still ask under autonomous policies.
-    """
+    Session-scoped and conservative: sensitive paths still ask under autonomous policies."""
     policy = str(policy or AUTO_APPROVE_ASK).strip()
     if policy == AUTO_APPROVE_ASK or _is_sensitive_auto_approve_path(proposal.path):
         return False
@@ -165,10 +153,8 @@ def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | Non
     if policy == AUTO_APPROVE_WORKSPACE:
         # tempfile.gettempdir() is the real temp root on every platform
         # (``/private/tmp`` on macOS since resolve() follows the symlink).
-        if _is_under(path, Path(tempfile.gettempdir()).resolve(strict=False)):
-            return True
-        if cwd:
-            return _is_under(path, Path(cwd).expanduser().resolve(strict=False))
+        return path.is_relative_to(Path(tempfile.gettempdir()).resolve(strict=False)) or (
+            bool(cwd) and path.is_relative_to(Path(cwd).expanduser().resolve(strict=False)))
     return False
 
 
@@ -180,8 +166,7 @@ def maybe_require_edit_approval(tool_name: str, arguments: dict[str, Any]) -> st
     """Run ACP edit approval if bound.
 
     Returns a JSON tool-error string when the edit must be blocked, otherwise
-    ``None`` so dispatch can continue.  Requester exceptions deny by default.
-    """
+    ``None`` so dispatch can continue.  Requester exceptions deny by default."""
     requester = _EDIT_APPROVAL_REQUESTER.get()
     if requester is None:
         return None
@@ -205,9 +190,7 @@ def build_acp_edit_tool_call(proposal: EditProposal):
     import acp
 
     return acp.update_tool_call(
-        f"edit-approval-{next(_PERMISSION_REQUEST_IDS)}",
-        title=f"Approve edit: {proposal.path}",
-        kind="edit",
+        f"edit-approval-{next(_PERMISSION_REQUEST_IDS)}", title=f"Approve edit: {proposal.path}", kind="edit",
         status="pending",
         content=[acp.tool_diff_content(path=proposal.path, old_text=proposal.old_text, new_text=proposal.new_text)],
         raw_input={"tool": proposal.tool_name, "arguments": proposal.arguments},
@@ -222,7 +205,7 @@ def make_acp_edit_approval_requester(
 
     def _requester(proposal: EditProposal) -> bool:
         from acp.schema import PermissionOption
-        from agent.async_utils import safe_schedule_threadsafe
+        from acp_adapter.permissions import await_permission
 
         if auto_approve_getter is not None:
             try:
@@ -233,23 +216,12 @@ def make_acp_edit_approval_requester(
             except Exception:
                 logger.debug("ACP edit auto-approval policy check failed", exc_info=True)
 
-        coro = request_permission_fn(
-            session_id=session_id,
-            tool_call=build_acp_edit_tool_call(proposal),
+        response, _timed_out = await_permission(
+            request_permission_fn, loop, session_id, tool_call=build_acp_edit_tool_call(proposal),
             options=[PermissionOption(option_id="allow_once", kind="allow_once", name="Allow edit"),
                      PermissionOption(option_id="deny", kind="reject_once", name="Deny")],
+            timeout=timeout, what="Edit approval request",
         )
-        future = safe_schedule_threadsafe(
-            coro, loop, logger=logger, log_message="Edit approval request: failed to schedule on loop",
-        )
-        if future is None:
-            return False
-        try:
-            response = future.result(timeout=timeout)
-        except (FutureTimeout, Exception) as exc:
-            future.cancel()
-            logger.warning("Edit approval request timed out or failed: %s", exc)
-            return False
         outcome = getattr(response, "outcome", None)
         return getattr(outcome, "outcome", None) == "selected" and getattr(outcome, "option_id", None) == "allow_once"
 

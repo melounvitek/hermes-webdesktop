@@ -7,7 +7,6 @@ thread-safely onto the loop.
 """
 
 import asyncio
-import json
 import logging
 from collections import deque
 from typing import Any, Callable, Deque, Dict
@@ -15,7 +14,7 @@ from typing import Any, Callable, Deque, Dict
 import acp
 from acp.schema import AgentPlanUpdate, PlanEntry
 
-from .tools import _json_loads_maybe, build_tool_complete, build_tool_start, make_tool_call_id
+from .tools import _json_loads_maybe, build_tool_complete, build_tool_start, coerce_tool_args, make_tool_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +27,7 @@ def _build_plan_update_from_todo_result(result: Any) -> AgentPlanUpdate | None:
     """Translate Hermes' todo tool result into ACP's native plan update.
 
     Zed renders ``sessionUpdate: plan`` as its first-class task panel, so the
-    todo state is exposed natively rather than only as a tool-call transcript.
-    """
+    todo state is exposed natively rather than only as a tool-call transcript."""
     if not isinstance(result, str) or not result.strip():
         return None
     data = _json_loads_maybe(result)
@@ -65,20 +63,16 @@ def _send_update(conn: acp.Client, session_id: str, loop: asyncio.AbstractEventL
         logger.debug("Failed to send ACP update", exc_info=True)
 
 
-def _upgrade_queue(tool_call_ids: Dict[str, Deque[str]], key: Any, store_key: Any) -> Deque[str] | None:
+def _upgrade_queue(tool_call_ids: Dict[str, Deque[str]], name: str) -> Deque[str] | None:
     """Fetch the per-tool FIFO of pending call IDs, upgrading a legacy bare-string entry in place."""
-    queue = tool_call_ids.get(key)
+    queue = tool_call_ids.get(name)
     if isinstance(queue, str):
-        queue = deque([queue])
-        tool_call_ids[store_key] = queue
+        queue = tool_call_ids[name] = deque([queue])
     return queue
 
 
 def make_tool_progress_cb(
-    conn: acp.Client,
-    session_id: str,
-    loop: asyncio.AbstractEventLoop,
-    tool_call_ids: Dict[str, Deque[str]],
+    conn: acp.Client, session_id: str, loop: asyncio.AbstractEventLoop, tool_call_ids: Dict[str, Deque[str]],
     tool_call_meta: Dict[str, Dict[str, Any]],
     edit_approval_policy_getter: Callable[[], tuple[str, str | None]] | None = None,
 ) -> Callable:
@@ -87,22 +81,14 @@ def make_tool_progress_cb(
     Signature: ``tool_progress_callback(event_type, name, preview, args, **kwargs)``.
     Emits ``ToolCallStart`` for ``tool.started`` and tracks IDs in a FIFO per tool
     name so parallel same-name calls complete against the right ACP tool call.
-    Other event types (``tool.completed``, ``reasoning.available``) are ignored.
-    """
+    Other event types (``tool.completed``, ``reasoning.available``) are ignored."""
 
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:
         if event_type != "tool.started":
             return
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except (json.JSONDecodeError, TypeError):
-                args = {"raw": args}
-        if not isinstance(args, dict):
-            args = {}
-
+        args = coerce_tool_args(args)
         tc_id = make_tool_call_id()
-        queue = _upgrade_queue(tool_call_ids, name, name)
+        queue = _upgrade_queue(tool_call_ids, name)
         if queue is None:
             queue = tool_call_ids[name] = deque()
         queue.append(tc_id)
@@ -154,16 +140,13 @@ def make_message_cb(conn: acp.Client, session_id: str, loop: asyncio.AbstractEve
 
 
 def make_step_cb(
-    conn: acp.Client,
-    session_id: str,
-    loop: asyncio.AbstractEventLoop,
-    tool_call_ids: Dict[str, Deque[str]],
+    conn: acp.Client, session_id: str, loop: asyncio.AbstractEventLoop, tool_call_ids: Dict[str, Deque[str]],
     tool_call_meta: Dict[str, Dict[str, Any]],
 ) -> Callable:
     """Create a ``step_callback(api_call_count: int, prev_tools: list)`` for AIAgent."""
 
     def _step(api_call_count: int, prev_tools: Any = None) -> None:
-        if not prev_tools or not isinstance(prev_tools, list):
+        if not isinstance(prev_tools, list):
             return
         for tool_info in prev_tools:
             tool_name = result = function_args = None
@@ -174,8 +157,10 @@ def make_step_cb(
             elif isinstance(tool_info, str):
                 tool_name = tool_info
 
-            queue = _upgrade_queue(tool_call_ids, tool_name or "", tool_name)
-            if not tool_name or not queue:
+            if not tool_name:
+                continue
+            queue = _upgrade_queue(tool_call_ids, tool_name)
+            if not queue:
                 continue
             tc_id = queue.popleft()
             meta = tool_call_meta.pop(tc_id, {})
@@ -183,10 +168,8 @@ def make_step_cb(
                 tc_id, tool_name, result=str(result) if result is not None else None,
                 function_args=function_args or meta.get("args"), snapshot=meta.get("snapshot"),
             ))
-            if tool_name == "todo":
-                plan_update = _build_plan_update_from_todo_result(result)
-                if plan_update is not None:
-                    _send_update(conn, session_id, loop, plan_update)
+            if tool_name == "todo" and (plan_update := _build_plan_update_from_todo_result(result)) is not None:
+                _send_update(conn, session_id, loop, plan_update)
             if not queue:
                 tool_call_ids.pop(tool_name, None)
 
