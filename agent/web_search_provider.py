@@ -22,13 +22,9 @@ from agent.provider_base import ProviderBase
 
 
 def get_provider_env(name: str) -> str:
-    """Config-aware env lookup: ``os.environ`` first, then ``~/.hermes/.env``.
-
-    Credentials set through Hermes' config layer must be visible even when never
-    exported into the process environment (gateway sessions, delegate children,
-    subprocess agent runs). Falls back to bare ``os.getenv`` when the config
-    module is unavailable. Returns the stripped value, or ``""`` when unset.
-    """
+    """Config-aware env lookup (``os.environ`` first, then ``~/.hermes/.env``) so
+    credentials set through the config layer are visible in gateway sessions /
+    delegate children / subprocess runs. Stripped value, or ``""`` when unset."""
     try:
         from hermes_cli.config import get_env_value
 
@@ -41,36 +37,23 @@ def get_provider_env(name: str) -> str:
 
 
 class WebSearchProvider(ProviderBase):
-    """Abstract base class for a web search/extract backend.
-
-    Subclasses implement :meth:`is_available` and at least one of :meth:`search`
-    / :meth:`extract`; the :meth:`supports_search` / :meth:`supports_extract`
-    flags let the registry route each capability, so one class can serve both.
-    """
+    """Abstract base class for a web search/extract backend: implement :meth:`is_available`
+    and at least one of :meth:`search` / :meth:`extract`; the ``supports_*`` flags route each capability."""
 
     @abc.abstractmethod
     def is_available(self) -> bool:
-        """True when this provider can service calls.
-
-        Cheap check only (env var present, dep importable, instance URL set) —
-        must NOT make network calls; runs at tool-registration time and on every
-        ``hermes tools`` paint.
-        """
+        """True when this provider can service calls. Cheap check only (env var, importable
+        dep, instance URL) — NO network; runs at tool registration and on every ``hermes tools`` paint."""
 
     def supports_search(self) -> bool:
         """True if this provider implements :meth:`search`."""
         return True
 
     def is_keyless_available(self) -> bool:
-        """True when this provider can serve calls WITHOUT credentials.
-
-        A weaker tier than :meth:`is_available`, used only when NO provider is
-        configured or keyed (public anonymous free tiers such as Exa / Parallel
-        MCP). It must never make :meth:`is_available` True, or the legacy
-        preference walk would route users holding real credentials for a
-        lower-priority backend onto a higher-priority backend's free tier.
-        Cheap, no network. Default False.
-        """
+        """True when this provider can serve calls WITHOUT credentials (public anonymous
+        free tiers such as Exa / Parallel MCP); used only when NO provider is configured or
+        keyed. Must never make :meth:`is_available` True, or the legacy preference walk would
+        route keyed users onto a higher-priority backend's free tier. Cheap, no network."""
         return False
 
     def supports_extract(self) -> bool:
@@ -85,13 +68,9 @@ class WebSearchProvider(ProviderBase):
         )
 
     def extract(self, urls: List[str], **kwargs: Any) -> Any:
-        """Extract content from URLs. Callers gate on :meth:`supports_extract`.
-
-        Returns a list of ``{"url", "title", "content", "raw_content",
-        "metadata"?, "error"?}`` dicts (``error`` only on per-URL failure).
-        May be ``async def``. ``kwargs`` may carry forward-compat fields
-        (``format``, ``include_raw``, ``max_chars``) — ignore unknown keys.
-        """
+        """Extract content from URLs (callers gate on :meth:`supports_extract`); may be ``async def``.
+        Returns ``[{"url", "title", "content", "raw_content", "metadata"?, "error"?}, ...]`` (``error``
+        only on per-URL failure). Ignore unknown ``kwargs`` (``format``, ``include_raw``, ``max_chars``)."""
         raise NotImplementedError(
             f"{self.name} does not support extract (override supports_extract)"
         )

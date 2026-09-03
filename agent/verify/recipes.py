@@ -25,12 +25,9 @@ def _as_strings(value: Any) -> list[str]:
 
 @dataclass
 class Recipe:
-    """A runnable verification recipe for a project.
-
-    Mirrors grok-cli's ``VerifyRecipe`` (scoped): ``name`` is the human label
-    (``appLabel``), ``kind`` the detector id (``appKind``); command lists are
-    shell strings executed in the project root.
-    """
+    """A runnable verification recipe (grok-cli's ``VerifyRecipe``): ``name`` is the
+    human label (``appLabel``), ``kind`` the detector id (``appKind``); command
+    lists are shell strings executed in the project root."""
 
     name: str
     kind: str = "unknown"
@@ -287,12 +284,8 @@ def _detect_compose_recipe(root: Path) -> Recipe | None:
 
 
 def detect_recipe(root: Path) -> Recipe | None:
-    """Detect a verification recipe for the project at ``root``.
-
-    Order mirrors grok-cli's ``inferFallbackRecipe``: package.json wins, then
-    Python, Go, Rust, Java, then Makefile / docker-compose fallbacks. ``None``
-    when nothing recognizable is found.
-    """
+    """Detect a recipe for ``root`` (grok-cli's ``inferFallbackRecipe`` order): package.json
+    wins, then Python, Go, Rust, Java, then Makefile / docker-compose; ``None`` if nothing matches."""
     root = Path(root)
     pkg = _read_package_json(root)
     if pkg is not None:

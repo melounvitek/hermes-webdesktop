@@ -1,9 +1,6 @@
-"""Coding verification evidence ledger.
-
-Records what the agent actually proved while working in a code workspace. It is
-deliberately passive: it never decides to run a suite, never blocks completion,
-and never upgrades targeted checks into "repo green".
-"""
+"""Coding verification evidence ledger: records what the agent actually proved in
+a code workspace. Deliberately passive — it never runs a suite, never blocks
+completion, and never upgrades targeted checks into "repo green"."""
 
 from __future__ import annotations
 

@@ -1,9 +1,6 @@
-"""Turn-end verification guard for coding edits.
-
-Policy-only: it never runs checks itself. It turns the passive verification
-ledger into a bounded follow-up when the model tries to finish right after
-editing code without fresh evidence.
-"""
+"""Turn-end verification guard for coding edits. Policy-only: it never runs
+checks itself, it turns the passive verification ledger into a bounded follow-up
+when the model tries to finish right after editing code without fresh evidence."""
 
 from __future__ import annotations
 
@@ -98,10 +95,8 @@ def _candidate_cwds(paths: Iterable[str]) -> list[Path]:
 def _verification_snapshot(
     *, session_id: str | None, changed_paths: list[str]
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Return ``(status, facts)`` for the first edited workspace needing proof.
-
-    Falls back to the first recognized workspace when every one is ``passed``.
-    """
+    """``(status, facts)`` for the first edited workspace needing proof, else the
+    first recognized workspace when every one is ``passed``."""
     try:
         from agent.coding_context import project_facts_for
         from agent.verification_evidence import verification_status

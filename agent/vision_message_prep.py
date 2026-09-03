@@ -115,12 +115,8 @@ class VisionMessagePrepMixin:
         return note
 
     def _model_supports_vision(self) -> bool:
-        """Return True if the active provider+model reports native vision.
-
-        Resolution: ``model.supports_vision`` > ``providers.<p>.models.<m>.supports_vision`` > models.dev
-        lookup (see ``image_routing._supports_vision_override``). Custom/local models absent from models.dev
-        would otherwise be misclassified and have their images stripped.
-        """
+        """True if the active provider+model reports native vision (config override
+        > models.dev; see ``image_routing._supports_vision_override``)."""
         try:
             from hermes_cli.config import load_config
             from agent.image_routing import _lookup_supports_vision
@@ -131,11 +127,8 @@ class VisionMessagePrepMixin:
             return False
 
     def _provider_supports_vision_tool_messages(self) -> bool:
-        """Return True if the active provider accepts list-type tool content.
-
-        Some providers (Xiaomi MiMo) accept multimodal user messages but 400 on list-type tool content;
-        reads the provider profile's ``supports_vision_tool_messages``.
-        """
+        """True if the active provider accepts list-type tool content (some, e.g. Xiaomi MiMo, take
+        multimodal user messages but 400 on list-type tool content; profile ``supports_vision_tool_messages``)."""
         try:
             from providers import get_provider_profile
             profile = get_provider_profile((getattr(self, "provider", "") or "").strip())
@@ -190,11 +183,8 @@ class VisionMessagePrepMixin:
         return cache[mode]
 
     def _prepare_messages_for_non_vision_model(self, api_messages: list) -> list:
-        """Replace native image parts with cached vision_analyze text when the active model lacks vision.
-
-        Vision-capable models pass through unchanged (the provider adapter — including the Anthropic one —
-        handles image parts natively). The text fallback is the historically Anthropic-named preprocessor.
-        """
+        """Replace native image parts with cached vision_analyze text when the active model lacks vision;
+        vision-capable models pass through unchanged (the provider adapter handles image parts natively)."""
         if not any(
             isinstance(msg, dict) and self._content_has_image_parts(msg.get("content")) for msg in api_messages
         ) or self._model_supports_vision():
@@ -212,11 +202,8 @@ class VisionMessagePrepMixin:
     _prepare_anthropic_messages_for_api = _prepare_messages_for_non_vision_model
 
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
-        """Return the tool message content that is safe for the active model.
-
-        Text-only providers must not receive image parts: a rejected tool result becomes canonical history
-        and can make the next user turn fail before the agent can recover.
-        """
+        """Tool message content that is safe for the active model. Text-only providers must not receive
+        image parts: a rejected tool result becomes canonical history and can break the next user turn."""
         if not _is_multimodal_tool_result(result):
             return result
 
@@ -269,10 +256,10 @@ class VisionMessagePrepMixin:
     def _try_strip_image_parts_from_tool_messages(
         self, api_messages: list, *, remember_model: bool = True
     ) -> bool:
-        """Downgrade list-type tool messages to text summaries in place; returns True if any were downgraded.
+        """Downgrade list-type tool messages to text in place; True if any were downgraded.
 
         Recovery for providers that 400 on list-type tool content (e.g. MiMo "text is not set"). By default
-        records the (provider, model) in ``_no_list_tool_content_models`` so later results downgrade without a
+        records (provider, model) in ``_no_list_tool_content_models`` so later results downgrade without a
         round-trip; 413 recovery passes ``remember_model=False`` (body too large ≠ provider rejects lists).
         """
         if not isinstance(api_messages, list):
@@ -316,11 +303,8 @@ class VisionMessagePrepMixin:
         return changed
 
     def _anthropic_preserve_dots(self) -> bool:
-        """True when using an anthropic-compatible endpoint that preserves dots in model names.
-
-        DashScope, MiniMax, Xiaomi MiMo, OpenCode Go/Zen (non-Claude), ZAI/Zhipu keep dots; AWS Bedrock uses
-        dotted inference-profile IDs and rejects the hyphenated form with HTTP 400.
-        """
+        """True for anthropic-compatible endpoints that keep dots in model names (DashScope, MiniMax, Xiaomi
+        MiMo, OpenCode Go/Zen, ZAI/Zhipu; Bedrock's dotted inference-profile IDs 400 on the hyphenated form)."""
         if (getattr(self, "provider", "") or "").lower() in {
             "alibaba", "minimax", "minimax-cn", "opencode-go", "opencode-zen", "zai", "bedrock", "xiaomi", "vertex",
         }:

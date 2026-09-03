@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Literal, Optional
@@ -25,13 +25,9 @@ _INCLUDED_NOTE = "subscription-included; no provider invoice for usage"
 
 
 def format_cost_label(amount: Decimal) -> str:
-    """Format a cost as a display label, scaling precision to magnitude.
-
-    Zero → "$0.00"; sub-cent → "~$0.0046" (4 dp, or "~$<0.0001" when the
-    amount rounds to 0.0000 so the label never reads as zero); else "~$1.23".
-    Shared by per-response cost labels and the insights cost-bucket
-    formatters so sub-cent honesty cannot regress on one surface.
-    """
+    """Cost display label: zero → "$0.00"; sub-cent → "~$0.0046" (4 dp, or
+    "~$<0.0001" when it rounds to 0.0000 so the label never reads as zero);
+    else "~$1.23". Shared by per-response labels and insights cost buckets."""
     if amount == _ZERO:
         return "$0.00"
     if amount < _SUBCENT_THRESHOLD:
@@ -72,14 +68,10 @@ class CanonicalUsage:
         combined figure covers."""
         if not isinstance(other, CanonicalUsage):
             return NotImplemented
-        return CanonicalUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
-            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
-            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
-            request_count=self.request_count + other.request_count, raw_usage=None,
-        )
+        return CanonicalUsage(**{
+            f.name: getattr(self, f.name) + getattr(other, f.name)
+            for f in fields(CanonicalUsage) if f.name != "raw_usage"
+        })
 
 
 @dataclass(frozen=True)

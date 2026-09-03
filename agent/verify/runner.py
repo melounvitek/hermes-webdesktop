@@ -1,12 +1,9 @@
-"""Verification runner: execute a Recipe's phases and smoke-test the app.
+"""Verification runner: bootstrap -> build -> test -> start in background ->
+readiness loop -> teardown (scoped port of grok-cli's verify flow).
 
-Scoped port of grok-cli's verify sub-agent flow (bootstrap -> build -> test ->
-start in background -> readiness loop -> teardown) as a plain subprocess runner.
-
-Commands come from the project's own recipe (package.json scripts, Makefile
-targets, ...) and run with ``shell=True`` on purpose: this is a developer tool
-running the project's own build commands in its own checkout — the same trust
-level as the terminal tool.
+Commands come from the project's own recipe and run with ``shell=True`` on
+purpose: a developer tool running the project's own build commands in its own
+checkout — the same trust level as the terminal tool.
 """
 
 from __future__ import annotations
@@ -128,12 +125,8 @@ def _poll_readiness(url: str, timeout: float, interval: float = 1.0) -> tuple[bo
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Terminate the started app and its whole process group cleanly.
-
-    On POSIX the child is spawned with ``start_new_session=True`` so we can
-    signal the whole group; on Windows (no ``os.killpg``) we fall back to
-    terminating just the direct child. SIGTERM first, SIGKILL after 10s.
-    """
+    """SIGTERM the app's process group (``start_new_session=True`` on POSIX; just the
+    direct child on Windows, which lacks ``os.killpg``), SIGKILL after 10s."""
     if proc.poll() is not None:
         return
     killpg = getattr(os, "killpg", None)
@@ -195,12 +188,8 @@ def run_verify(
     skip_start: bool = False, port_override: int | None = None, stop_on_failure: bool = True,
     on_output: Callable[[str], None] | None = None,
 ) -> VerifyResult:
-    """Run a verify pass for ``recipe`` at project ``root``.
-
-    Executes the selected command phases sequentially, then (unless
-    ``skip_start`` or a phase failed) launches ``recipe.start`` in the
-    background, polls the readiness URL, and tears the process group down.
-    """
+    """Run the selected command phases sequentially, then (unless ``skip_start`` or a
+    phase failed) boot ``recipe.start``, poll readiness, and tear the process group down."""
     root = Path(root)
     selected = tuple(phases) if phases else PHASE_ORDER + ("start",)
     result = VerifyResult(recipe_name=recipe.name)

@@ -38,23 +38,14 @@ DEFAULT_RESOLUTION = "720p"
 
 
 class VideoGenProvider(CatalogProviderBase):
-    """Abstract base class for a video generation backend.
-
-    Subclasses must implement :attr:`name` and :meth:`generate`; everything else
-    has defaults. ``list_models`` entries are **model families** and may add
-    ``speed`` / ``strengths`` / ``price`` / advisory ``modalities``.
-    """
+    """Abstract base class for a video generation backend: implement :attr:`name`
+    and :meth:`generate`. ``list_models`` entries are **model families** and may
+    add ``speed`` / ``strengths`` / ``price`` / advisory ``modalities``."""
 
     def capabilities(self) -> Dict[str, Any]:
-        """What this provider supports (all keys optional): ``modalities``,
-        ``aspect_ratios``, ``resolutions``, ``max_duration`` / ``min_duration``,
-        ``supports_audio`` / ``supports_negative_prompt`` / ``supports_seed`` /
-        ``supports_upscale``, ``max_reference_images``.
-
-        Used for soft validation, capability-gated params in the dynamic
-        ``video_generate`` schema (args a backend can't honor aren't advertised),
-        and the picker. Default fails closed: text-only, no optional features.
-        """
+        """Supported features (keys below, all optional) used for soft validation,
+        capability-gated params in the dynamic ``video_generate`` schema, and the
+        picker. Default fails closed: text-only, no optional features."""
         return {
             "modalities": ["text"], "aspect_ratios": list(COMMON_ASPECT_RATIOS),
             "resolutions": list(COMMON_RESOLUTIONS), "max_duration": 10, "min_duration": 1,
@@ -70,13 +61,10 @@ class VideoGenProvider(CatalogProviderBase):
         negative_prompt: Optional[str] = None, audio: Optional[bool] = None,
         seed: Optional[int] = None, **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Generate a video from a prompt, or animate ``image_url`` when given.
-
-        Return :func:`success_response` / :func:`error_response`. Unknown
-        ``kwargs`` MUST be ignored (forward compat). Known optional kwarg:
-        ``upscale`` (bool) — a post-generation high-res pass; providers that
-        honor it report ``upscaled: True`` in ``extra``.
-        """
+        """Generate a video from a prompt, or animate ``image_url`` when given; return
+        :func:`success_response` / :func:`error_response`. Unknown ``kwargs`` MUST be
+        ignored. Known optional kwarg ``upscale`` (bool): a post-generation high-res
+        pass; providers that honor it report ``upscaled: True`` in ``extra``."""
 
 
 def save_b64_video(b64_data: str,*, prefix: str="video", extension: str="mp4") -> Path:
@@ -97,11 +85,8 @@ _URL_VIDEO_CONTENT_TYPES = {
 def save_url_video(
     url: str, *, prefix: str = "video", timeout: float = 180.0, max_bytes: int = 200 * 1024 * 1024
 ) -> Path:
-    """Download an (often ephemeral) video URL into ``$HERMES_HOME/cache/videos/``.
-
-    Raises on network / HTTP / oversize / empty errors so callers can fall back
-    to returning the bare URL. See :mod:`agent.provider_media`.
-    """
+    """Download an (often ephemeral) video URL into ``$HERMES_HOME/cache/videos/``;
+    raises on network / HTTP / oversize / empty errors so callers can fall back to the URL."""
     return provider_media.save_url(
         "videos", url, prefix=prefix, timeout=timeout, max_bytes=max_bytes,
         chunk_size=256 * 1024, content_types=_URL_VIDEO_CONTENT_TYPES,
@@ -139,19 +124,10 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
     """Generic text/image-to-video over the OpenAI ``client.videos`` API.
 
     DeepInfra, OpenAI/Sora, and OpenRouter share the ``POST /videos`` async-job
-    shape (``create`` → poll → ``download_content``), so the SDK call lives here
-    once; a concrete backend declares identity and credentials::
-
-        class FooVideoGenProvider(OpenAICompatibleVideoGenProvider):
-            name = "foo"
-            _env_key = "FOO_API_KEY"
-            _default_base_url = "https://api.foo.com/v1/openai"
-            def list_models(self):
-                return [...]   # entries with an "id" key; default_model() uses [0]
-
-    ``image_url`` routes to image-to-video; its absence routes to text-to-video.
-    Provider-specific fields (``image_url``/``negative_prompt``/``seed``) ride
-    in ``extra_body`` so they pass through the SDK unchanged.
+    shape (``create`` → poll → ``download_content``); a concrete backend sets
+    ``name``, ``_env_key``, ``_default_base_url`` and ``list_models()`` (entries
+    with an ``id`` key; ``default_model()`` uses ``[0]``). Provider-specific
+    fields (``image_url``/``negative_prompt``/``seed``) ride in ``extra_body``.
     """
 
     _env_key: str = "OPENAI_API_KEY"
