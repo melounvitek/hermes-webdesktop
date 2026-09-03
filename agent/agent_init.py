@@ -18,7 +18,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
-from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -91,7 +91,6 @@ def _provider_default_routes(provider: str) -> set[str]:
 
     try:
         from hermes_cli.providers import HERMES_OVERLAYS, get_provider
-
         overlay = HERMES_OVERLAYS.get(provider)
         provider_def = get_provider(provider, allow_network=False)
         add(getattr(overlay, "base_url_override", ""))
@@ -101,7 +100,6 @@ def _provider_default_routes(provider: str) -> set[str]:
 
     try:
         from providers import get_provider_profile
-
         add(getattr(get_provider_profile(provider), "base_url", ""))
     except Exception:
         pass
@@ -110,7 +108,6 @@ def _provider_default_routes(provider: str) -> set[str]:
         from hermes_cli.auth import PROVIDER_REGISTRY
         from hermes_cli.models import normalize_provider as normalize_model_provider
         from hermes_cli.providers import normalize_provider as normalize_registry_provider
-
         for provider_id, config in PROVIDER_REGISTRY.items():
             if normalize_registry_provider(normalize_model_provider(provider_id)) == provider:
                 add(getattr(config, "inference_base_url", ""))
@@ -142,7 +139,6 @@ def _context_route_mismatch(
         return False
     try:
         from hermes_cli.models import normalize_provider as normalize_model_provider
-
         configured_provider = normalize_model_provider(configured_provider)
         active_provider = normalize_model_provider(active_provider)
     except Exception:
@@ -150,7 +146,6 @@ def _context_route_mismatch(
         active_provider = active_provider.lower()
     try:
         from hermes_cli.providers import normalize_provider as normalize_registry_provider
-
         configured_provider = normalize_registry_provider(configured_provider)
         active_provider = normalize_registry_provider(active_provider)
     except Exception:
@@ -402,33 +397,8 @@ def _cfg_dict(cfg: Dict[str, Any], key: str) -> Dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
-@dataclass
-class CompressionSettings:
+class CompressionSettings(SimpleNamespace):
     """Parsed ``compression`` config section (see ``_parse_compression_config``)."""
-    threshold: Any
-    autoraise_notice_enabled: Any
-    enabled: Any
-    target_ratio: Any
-    protect_last: Any
-    tail_mode: Any
-    min_tail_users: Any
-    max_attempts: Any
-    proactive_prune_tokens: Any
-    proactive_prune_min_chars: Any
-    proactive_prune_min_reclaim: Any
-    protect_first: Any
-    abort_on_summary_failure: Any
-    model_thresholds: Any
-    threshold_tokens: Any
-    checkpoint_required: Any
-    in_place: Any
-    micro_compact: Any
-    micro_compact_every_n_turns: Any
-    micro_compact_defrag_tokens: Any
-    codex_app_server_auto: Any
-    codex_responses_native: Any
-    codex_responses_compact_threshold: Any
-    idle_compact_after_seconds: Any
 
 
 _EXPLICIT_API_MODES = {
@@ -464,7 +434,6 @@ def _resolve_api_mode(agent, api_mode, provider_name, base_url):
         # Portal is dual-wire (anthropic/* → Messages, else chat_completions); covers direct
         # AIAgent construction without a resolved runtime.
         from hermes_cli.providers import nous_api_mode
-
         agent.api_mode = nous_api_mode(agent.model)
     else:
         # Host-mandated wire check — LAST, so the provider-slug rewrites above always win.
@@ -472,7 +441,6 @@ def _resolve_api_mode(agent, api_mode, provider_name, base_url):
         # URL-driven, not provider-name-driven: `providers.meta` may point anywhere.
         try:
             from hermes_cli.providers import host_mandated_api_mode as _host_mandated_api_mode
-
             _mandated = _host_mandated_api_mode(base_url or "")
         except Exception:
             _mandated = None
@@ -485,7 +453,6 @@ def _finalize_routing(agent, api_mode, credential_pool):
     if credential_pool is not None:
         try:
             from agent.credential_pool import credential_pool_matches_provider
-
             if not credential_pool_matches_provider(
                 credential_pool, agent.provider, base_url=agent.base_url,
             ):
@@ -684,9 +651,7 @@ def _init_prompt_cache_config(agent):
     agent._cache_ttl = "5m"
     try:
         from hermes_cli.config import load_config_readonly as _load_pc_cfg
-
         from agent.agent_runtime_helpers import cache_ttl_means_disabled
-
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
         if _ttl in {"5m", "1h"}:
@@ -706,7 +671,6 @@ def _init_turn_state(agent, run_budget_seconds):
     # (in _apply_agent_section). None = fully off (no clock reads, injection, or capping).
     agent.run_budget_seconds = _normalize_run_budget_seconds(run_budget_seconds)
     from agent.credits_tracker import new_credits_latch
-
     agent._credits_latch = new_credits_latch()  # threshold-notice latch (sticky keys + gates)
 
 
@@ -733,7 +697,6 @@ def _print_key_banner(key, label: str, warn_missing: bool = False) -> None:
     """Masked credential line. ``key`` may be a callable Entra ID bearer provider (Azure
     Foundry) — never invoke or inspect it. Keys ≤ 12 chars (incl. "dummy-key") are not shown."""
     from agent.azure_identity_adapter import is_token_provider
-
     if is_token_provider(key):
         print("🔑 Using credentials: Microsoft Entra ID")
     elif isinstance(key, str) and len(key) > 12:
@@ -819,10 +782,9 @@ def _init_bedrock_client(agent, base_url):
                 "guardrailIdentifier": _gr["guardrail_identifier"],
                 "guardrailVersion": _gr["guardrail_version"],
             }
-            if _gr.get("stream_processing_mode"):
-                agent._bedrock_guardrail_config["streamProcessingMode"] = _gr["stream_processing_mode"]
-            if _gr.get("trace"):
-                agent._bedrock_guardrail_config["trace"] = _gr["trace"]
+            for _src, _dst in (("stream_processing_mode", "streamProcessingMode"), ("trace", "trace")):
+                if _gr.get(_src):
+                    agent._bedrock_guardrail_config[_dst] = _gr[_src]
     except Exception:
         pass
     agent.client = None
@@ -976,7 +938,6 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
     agent.base_url = client_kwargs.get("base_url", agent.base_url)
     try:
         from agent.ssl_guard import verify_ca_bundle_with_fallback
-
         verify_ca_bundle_with_fallback()
         agent.client = agent._create_openai_client(client_kwargs, reason="agent_init", shared=True)
         if not agent.quiet_mode:
@@ -1092,7 +1053,6 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
     # make sure this profile's plugins are discovered before the tool snapshot.
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()
     except Exception:
         logger.warning("Plugin discovery failed during agent setup", exc_info=True)
@@ -1157,12 +1117,10 @@ def _publish_session_id(session_id: str) -> None:
     """
     try:
         from gateway.session_context import set_current_session_id
-
         set_current_session_id(session_id)
     except Exception:
         try:
             from agent.delegation_context import is_delegated_child_context
-
             delegated_child = is_delegated_child_context()
         except Exception:
             delegated_child = False
@@ -1405,13 +1363,13 @@ def _apply_agent_section(agent, _agent_cfg):
     # "auto" (codex_responses only), true (all api_modes), false, or model substrings.
     agent._intent_ack_continuation = _agent_section.get("intent_ack_continuation", "auto")
 
-    # Anti-stall guards (identical-call notice + continue-intent recovery); notice-only.
-    agent._stall_guards = bool(_agent_section.get("stall_guards", True))
-
-    # Universal guidance toggles (ALL models, unlike enforcement).
-    agent._task_completion_guidance = bool(_agent_section.get("task_completion_guidance", True))
-    agent._parallel_tool_call_guidance = bool(_agent_section.get("parallel_tool_call_guidance", True))
-    agent._environment_probe = bool(_agent_section.get("environment_probe", True))
+    # Default-on boolean gates: anti-stall guards (notice-only), universal guidance toggles
+    # (ALL models, unlike enforcement), the local toolchain probe, Bot Mode protocol section.
+    for _key in (
+        "stall_guards", "task_completion_guidance", "parallel_tool_call_guidance",
+        "environment_probe", "bot_mode_protocol",
+    ):
+        setattr(agent, f"_{_key}", bool(_agent_section.get(_key, True)))
     # Warm the probe (~0.5s of subprocesses) off-thread so the first prompt build finds it cached.
     if agent._environment_probe:
         try:
@@ -1420,8 +1378,6 @@ def _apply_agent_section(agent, _agent_cfg):
         except Exception:
             pass
 
-    # Bot Mode teammate protocol section (tools/bot_mode_probe.py) — pure filesystem reads.
-    agent._bot_mode_protocol = bool(_agent_section.get("bot_mode_protocol", True))
     # "Bot Chat" gate hint for hosts that defer the DB title write past the first prompt build.
     agent._session_title_hint = None
 
@@ -1612,7 +1568,6 @@ def _custom_provider_configured_base_url(
     _disabled_ids: set[str] = set()
     if isinstance(_user_providers, dict):
         from hermes_cli.config import is_provider_enabled
-
         for _key, _entry in _user_providers.items():
             if not isinstance(_entry, dict):
                 continue
@@ -1657,7 +1612,6 @@ def _configured_default_base_url(_agent_cfg, _model_cfg, _custom_providers) -> s
     elif _custom_provider_candidate and _norm != "custom" and not _norm.startswith("custom:"):
         try:
             from hermes_cli.auth import resolve_provider as resolve_auth_provider
-
             _custom_provider_candidate = (
                 str(resolve_auth_provider(_norm) or "").strip().lower() != _norm
             )
@@ -1707,7 +1661,6 @@ def _scope_context_length_to_default_runtime(
     if _configured_default_model:
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
-
             _configured_default_runtime_model = normalize_model_for_provider(
                 _configured_default_model, agent.provider
             )
@@ -2019,7 +1972,6 @@ def _warn_nonagentic_hermes_model(agent):
         return
     try:
         from hermes_cli.model_switch import _check_hermes_model_warning
-
         _hermes_warn = _check_hermes_model_warning(agent.model or "")
         if _hermes_warn:
             _user_msg = (
@@ -2028,10 +1980,7 @@ def _warn_nonagentic_hermes_model(agent):
                 "cron, proactive tools). Consider an agentic model instead "
                 "(Claude, GPT, Gemini, Qwen-Coder, etc.)."
             )
-            if hasattr(agent, "_emit_warning"):
-                agent._emit_warning(_user_msg)
-            else:
-                print(f"\n{_user_msg}\n", file=sys.stderr)
+            agent._emit_warning(_user_msg)
             _ra().logger.warning(_hermes_warn)
     except Exception:
         pass
@@ -2207,7 +2156,6 @@ def _snapshot_primary_runtime(agent):
 
 def _init_usage_state(agent):
     from agent.runtime_cwd import scope_terminal_cwd as _scope_terminal_cwd
-
     agent._subdirectory_hints = SubdirectoryHintTracker(working_dir=_scope_terminal_cwd() or None)
     _set_defaults(agent, _USAGE_STATE)
 
