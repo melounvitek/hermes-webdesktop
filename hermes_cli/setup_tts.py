@@ -88,9 +88,8 @@ def _xai_oauth_logged_in_for_setup() -> bool:
 def _run_xai_oauth_login_from_setup() -> bool:
     """Run the xAI Grok OAuth device-code login from inside the setup wizard.
 
-    Saves OAuth tokens only — does **not** switch the active provider or rewrite
-    ``model.provider`` (callers only need credentials for side tools). Returns True on success,
-    False on any failure (the caller falls back, e.g. to Edge TTS).
+    Saves OAuth tokens only — does **not** switch the active provider or rewrite ``model.provider``
+    (callers only need credentials for side tools). False on any failure (caller falls back).
     """
     from hermes_cli.setup import _info, print_warning
     try:

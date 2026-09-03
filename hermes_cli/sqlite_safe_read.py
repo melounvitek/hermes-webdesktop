@@ -68,20 +68,19 @@ def track_connection(path: Path | str) -> None:
         _track_key(_key(path))
 
 
-def _track_key(key: str) -> None:
-    """Bump the live count for an already-canonical key (caller holds ``_live_lock``)."""
-    _live_connections[key] = _live_connections.get(key, 0) + 1
+def _track_key(key: str, delta: int = 1) -> None:
+    """Adjust the live count for an already-canonical key (caller holds ``_live_lock``)."""
+    remaining = _live_connections.get(key, 0) + delta
+    if remaining > 0:
+        _live_connections[key] = remaining
+    else:
+        _live_connections.pop(key, None)
 
 
 def untrack_connection(path: Path | str) -> None:
     """Record that one connection to *path* has been closed."""
-    key = _key(path)
     with _live_lock:
-        remaining = _live_connections.get(key, 0) - 1
-        if remaining > 0:
-            _live_connections[key] = remaining
-        else:
-            _live_connections.pop(key, None)
+        _track_key(_key(path), -1)
 
 
 def has_live_connection(path: Path | str) -> bool:

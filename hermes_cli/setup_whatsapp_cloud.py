@@ -312,24 +312,21 @@ def run_whatsapp_cloud_setup() -> int:
     print()
 
     _header("STEP 5 — Verify Token (auto-generated)")
-    current_verify = get_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN") or None
-    if current_verify:
-        print(f"  An existing verify token is already set ({current_verify[:8]}...).")
+    verify_token = get_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN") or None
+    regen = "y"
+    if verify_token:
+        print(f"  An existing verify token is already set ({verify_token[:8]}...).")
         try:
             regen = input("  Generate a new one? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             regen = "n"
-        if regen in {"y", "yes"}:
-            verify_token = secrets.token_urlsafe(32)
-            save_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN", verify_token)
-            print(f"  ✓ New verify token: {verify_token}")
-        else:
-            verify_token = current_verify
-            print("  ✓ Keeping existing verify token")
-    else:
+    if regen in {"y", "yes"}:
+        label = "New verify token" if verify_token else "Generated"
         verify_token = secrets.token_urlsafe(32)
         save_env_value("WHATSAPP_CLOUD_VERIFY_TOKEN", verify_token)
-        print(f"  ✓ Generated: {verify_token}")
+        print(f"  ✓ {label}: {verify_token}")
+    else:
+        print("  ✓ Keeping existing verify token")
     _lines("", "  → COPY THIS TOKEN NOW. You'll paste it into Meta's webhook",
            "    configuration dialog (next step).", "")
 

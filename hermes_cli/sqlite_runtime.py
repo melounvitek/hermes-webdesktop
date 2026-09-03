@@ -47,21 +47,15 @@ class SQLiteRuntimeInfo:
 
 
 _PROBE_SCRIPT = """
-import json
-import sqlite3
-import sys
-
+import json, sqlite3, sys
 conn = sqlite3.connect(":memory:")
 try:
     row = conn.execute("SELECT sqlite_source_id()").fetchone()
 finally:
     conn.close()
-
 print(json.dumps({
-    "base_prefix": sys.base_prefix,
-    "executable": sys.executable,
-    "python_version": list(sys.version_info[:3]),
-    "sqlite_version": list(sqlite3.sqlite_version_info),
+    "base_prefix": sys.base_prefix, "executable": sys.executable,
+    "python_version": list(sys.version_info[:3]), "sqlite_version": list(sqlite3.sqlite_version_info),
     "sqlite_version_string": sqlite3.sqlite_version,
     "sqlite_source_id": str(row[0]) if row and row[0] is not None else "",
 }))
@@ -91,8 +85,7 @@ def probe_sqlite_runtime(python: str | Path, *, timeout: float = 30.0) -> SQLite
     try:
         payload = json.loads(result.stdout)
         return SQLiteRuntimeInfo(
-            executable=Path(str(payload["executable"])),
-            base_prefix=Path(str(payload["base_prefix"])),
+            executable=Path(str(payload["executable"])), base_prefix=Path(str(payload["base_prefix"])),
             python_version=_version_tuple(payload["python_version"]),
             sqlite_version=_version_tuple(payload["sqlite_version"]),
             sqlite_version_string=str(payload["sqlite_version_string"]),

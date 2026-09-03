@@ -1,10 +1,7 @@
-"""Credential sections of `hermes status`: API keys, OAuth providers, Nous Tool Gateway,
-API-key providers. Split out of ``hermes_cli/status.py``; the renderers are re-imported there
-and run through ``status._SECTIONS`` with the shared ``_StatusContext``.
-
-Origin helpers (``_row``, ``_first_env_value``, ...) are imported lazily from
-``hermes_cli.status`` so tests that monkeypatch that module keep working.
-"""
+"""Credential sections of `hermes status` (API keys, OAuth providers, Nous Tool Gateway, API-key
+providers), run through ``status._SECTIONS`` with the shared ``_StatusContext``. Origin helpers
+(``_row``, ``_first_env_value``, ...) are imported lazily from ``hermes_cli.status`` so tests that
+monkeypatch that module keep working."""
 
 from hermes_cli.auth import AuthError
 from hermes_cli.nous_account import (
@@ -23,7 +20,9 @@ def _format_iso_timestamp(value) -> str:
         parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
     except Exception:
         return value
-    return (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _qwen_expiry(expires_at_ms) -> str:
@@ -117,14 +116,13 @@ def _render_auth_providers(ctx):
     _section("Auth Providers")
     import hermes_cli.auth as auth
     try:
-        # Read-only display: use the refresh-free snapshot so `hermes status`
-        # never performs an OAuth refresh or burns a single-use refresh token.
+        # Read-only display: the refresh-free snapshot, so `hermes status` never performs an OAuth
+        # refresh or burns a single-use refresh token.
         nous_status = auth.get_nous_auth_status_local()
         statuses = {getter: getattr(auth, getter)() for _, getter, _, _ in _OAUTH_BLOCKS[:3]}
     except Exception:
         nous_status, statuses = {}, {}
-    # xAI OAuth is guarded separately so an import failure there cannot disrupt
-    # the Nous/Codex/Qwen/MiniMax rows.
+    # xAI OAuth is guarded separately so an import failure there cannot disrupt the other rows.
     try:
         statuses["get_xai_oauth_auth_status"] = auth.get_xai_oauth_auth_status() or {}
     except Exception:
@@ -136,18 +134,16 @@ def _render_auth_providers(ctx):
         try:
             info = get_nous_portal_account_info()
         except Exception:
-            info = None
+            pass
     ctx.nous_account_info = info
     ctx.nous_logged_in = logged_in = bool(nous_status.get("logged_in") or (info and info.logged_in))
     ctx.nous_inference_present = inference = bool(
         nous_status.get("inference_credential_present") or (info and info.inference_credential_present)
     )
     nous_error = nous_status.get("error")
-    _row(
-        "Nous Portal", logged_in,
-        "logged in" if logged_in
-        else "not logged in (Nous inference key configured)" if inference
-        else "not logged in (run: hermes portal)")
+    _row("Nous Portal", logged_in,
+         "logged in" if logged_in else "not logged in (Nous inference key configured)" if inference
+         else "not logged in (run: hermes portal)")
     portal_url = nous_status.get("portal_base_url") or "(unknown)"
     inference_url = nous_status.get("inference_base_url") or (info.inference_base_url if info else None)
     for label, value, show in (
@@ -185,8 +181,8 @@ def _render_nous_gateway(ctx):
                 state = "not configured"
             print(f"  {f.label:<15} {check_mark(f.available or f.active or f.managed_by_nous)} {state}")
     elif ctx.nous_logged_in or ctx.nous_inference_present:
-        # Nous OAuth without entitlement, or an opaque inference key without
-        # Portal account information, cannot enable the Tool Gateway.
+        # Nous OAuth without entitlement, or an opaque inference key without Portal account
+        # information, cannot enable the Tool Gateway.
         _section("Nous Tool Gateway")
         message = format_nous_portal_entitlement_message(
             ctx.nous_account_info, capability="managed web, image, TTS, STT, browser, and Modal tools"
@@ -202,9 +198,8 @@ def _render_apikey_providers(ctx):
         configured = bool(_first_env_value(env_vars))
         print(f"  {pname:<16} {check_mark(configured)} {'configured' if configured else 'not configured (run: hermes model)'}")
 
-    # LM Studio reachability: probe only when it is the active provider so users
-    # with foreign configs see no noise. Auth rejection vs. a silent empty list
-    # is the most common LM Studio support case.
+    # LM Studio reachability: probe only when it is the active provider so users with foreign
+    # configs see no noise. Auth rejection vs. a silent empty list is the common support case.
     if _effective_provider_label() == "LM Studio":
         from hermes_cli.models import probe_lmstudio_models
         model_cfg = ctx.config.get("model")
