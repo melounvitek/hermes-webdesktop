@@ -119,9 +119,23 @@ async def _run_encode_on_cpu_executor(fn, *args, **kwargs):
     return await loop.run_in_executor(_vision_cpu_executor, functools.partial(fn, *args, **kwargs))
 
 
+def _image_url_shape_ok(url: str) -> bool:
+    """HTTP(S) shape check only (scheme, netloc). No DNS. Extension-less CDN URLs pass."""
+    return bool(isinstance(url, str) and url.startswith(("http://", "https://")) and urlparse(url).netloc)
+
+
+def _validate_image_url(url: str) -> bool:
+    """Validate image URL for sync callers and tests (SSRF via sync DNS check)."""
+    if not _image_url_shape_ok(url):
+        return False
+    # Block private/internal addresses to prevent SSRF
+    from tools.url_safety import is_safe_url
+    return is_safe_url(url)
+
+
 async def _validate_image_url_async(url: str) -> bool:
-    """HTTP(S) shape check (extension-less CDN URLs pass) + SSRF guard, DNS off the event loop."""
-    if not (isinstance(url, str) and url.startswith(("http://", "https://")) and urlparse(url).netloc):
+    """Shape check + SSRF guard with DNS off the event loop."""
+    if not _image_url_shape_ok(url):
         return False
     from tools.url_safety import async_is_safe_url
     return await async_is_safe_url(url)
