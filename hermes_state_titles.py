@@ -27,9 +27,8 @@ class SessionTitlesMixin:
     def _title_rank(cls, source: Optional[str]) -> int:
         """Rank a stored title_source. NULL (pre-provenance rows) is indistinguishable from a
         manual ``/title`` of that era, so it ranks as ``user``."""
-        if source is None:
-            return cls._TITLE_SOURCE_RANK[cls.TITLE_SOURCE_USER]
-        return cls._TITLE_SOURCE_RANK.get(str(source), 0)
+        rank = cls._TITLE_SOURCE_RANK
+        return rank[cls.TITLE_SOURCE_USER] if source is None else rank.get(str(source), 0)
 
     @staticmethod
     def sanitize_title(title: Optional[str]) -> Optional[str]:
@@ -53,8 +52,7 @@ class SessionTitlesMixin:
         if not ancestor_id or not descendant_id or ancestor_id == descendant_id:
             return False
         edge = _COMPRESSION_CHILD_SQL.format(a="child")
-        row = conn.execute(
-            f"""
+        return conn.execute(f"""
             WITH RECURSIVE ancestors(id) AS (
                 SELECT ?
                 UNION
@@ -65,10 +63,7 @@ class SessionTitlesMixin:
                 WHERE {edge}
             )
             SELECT 1 FROM ancestors WHERE id = ? AND id != ? LIMIT 1
-            """,
-            (descendant_id, ancestor_id, descendant_id),
-        ).fetchone()
-        return row is not None
+            """, (descendant_id, ancestor_id, descendant_id)).fetchone() is not None
 
     def _set_session_title(self, session_id: str, title: str, *, source: str) -> bool:
         """Write a title, enforcing provenance precedence. A ``user`` write always lands;
@@ -91,17 +86,12 @@ class SessionTitlesMixin:
             # exact-title lookup on every open), so a rename orphans the conversation. Hidden
             # is the discriminator: canonical chats are born hidden; a visible session merely
             # named "Bot Chat" stays renameable. Provenance-blind.
-            if (
-                (current["title"] or "") == self.CANONICAL_BOT_CHAT_TITLE
-                and bool(current["hidden"])
-                and title != self.CANONICAL_BOT_CHAT_TITLE
-            ):
+            if ((current["title"] or "") == self.CANONICAL_BOT_CHAT_TITLE and bool(current["hidden"])
+                    and title != self.CANONICAL_BOT_CHAT_TITLE):
                 if is_user:
-                    raise ValueError(
-                        "This is the bot's canonical Bot Chat — its name is its "
-                        "identity, and renaming it would orphan the conversation. "
-                        "To start fresh, create a new bot instead."
-                    )
+                    raise ValueError("This is the bot's canonical Bot Chat — its name is its "
+                                     "identity, and renaming it would orphan the conversation. "
+                                     "To start fresh, create a new bot instead.")
                 return 0
             if not is_user and current["title"] is not None and self._title_rank(current["title_source"]) >= new_rank:
                 return 0
@@ -119,11 +109,10 @@ class SessionTitlesMixin:
                         raise ValueError(f"Title '{title}' is already in use by session {conflict_id}")
             # CAS on the values just read (``IS`` is NULL-safe): a concurrent write between
             # the SELECT and here loses instead of being overwritten.
-            cursor = conn.execute(
+            return conn.execute(
                 "UPDATE sessions SET title = ?, title_source = ? WHERE id = ? AND title IS ? AND title_source IS ?",
                 (title, source if title else None, session_id, current["title"], current["title_source"]),
-            )
-            return cursor.rowcount
+            ).rowcount
 
         return self._execute_write(_do) > 0
 
@@ -150,9 +139,7 @@ class SessionTitlesMixin:
     def get_session_title_source(self, session_id: str) -> Optional[str]:
         """Get the provenance of a session's title, or None when untitled."""
         row = self._read_one("SELECT title, title_source FROM sessions WHERE id = ?", (session_id,))
-        if not row or row["title"] is None:
-            return None
-        return row["title_source"]
+        return row["title_source"] if row and row["title"] is not None else None
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
         """Overwrite a title's provenance without touching the text (a title copied across a
@@ -179,9 +166,7 @@ class SessionTitlesMixin:
             "SELECT id, title, started_at FROM sessions "
             "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
             (f"{_escape_like(title)} #%",))
-        if numbered:
-            return numbered[0]["id"]
-        return exact["id"] if exact else None
+        return numbered[0]["id"] if numbered else (exact["id"] if exact else None)
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
         """Next title in a lineage ("my session" -> "my session #2"): strip any " #N" suffix,

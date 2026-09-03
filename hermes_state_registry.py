@@ -20,6 +20,7 @@ Lifecycle rules:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from pathlib import Path
@@ -57,7 +58,7 @@ _opening: Dict[Path, threading.Event] = {}
 
 
 def _open_session_db(path: Path) -> "SessionDB":
-    """Construct the SessionDB for *path* (call-time import avoids cycles)."""
+    """Construct the SessionDB for *path* (call-time import avoids cycles; tests patch this)."""
     from hermes_state import SessionDB
 
     return SessionDB(db_path=path)
@@ -65,10 +66,8 @@ def _open_session_db(path: Path) -> "SessionDB":
 
 def _teardown(db: "SessionDB") -> None:
     """Close a shared instance, clearing its registry-owned flag first."""
-    try:
+    with contextlib.suppress(Exception):
         db._shared_registry_owned = False
-    except Exception:
-        pass
     try:
         db.close()
     except Exception:
@@ -78,10 +77,8 @@ def _teardown(db: "SessionDB") -> None:
 def _db_path_of(db: "SessionDB") -> Optional[Path]:
     """``Path(db.db_path)`` or None when absent/unconvertible."""
     path = getattr(db, "db_path", None)
-    if path is None:
-        return None
     try:
-        return Path(path)
+        return None if path is None else Path(path)
     except (TypeError, ValueError):
         return None
 
@@ -113,8 +110,12 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
             if generation is not None:
                 current = _stat_db_file_identity(path)
                 if current is not None and generation.identity is not None and current != generation.identity:
-                    # File replaced: retire, then elect one caller to open the replacement.
-                    _retire_generation_locked(path, generation)
+                    # File replaced: retire this generation so it is never lent again, then elect one
+                    # caller to open the replacement. It stays alive for its holders, tracked in
+                    # ``_retired`` by ``id(db)`` so their releases find it after the path remaps.
+                    generation.retired = True
+                    del _generations[path]
+                    _retired[id(generation.db)] = generation
                 else:
                     generation.refcount += 1
                     return generation.db
@@ -139,8 +140,7 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
 
     with _lock:
         existing = _generations.get(path)
-        if existing is not None:
-            # Defensive: installed by explicit registry manipulation mid-open.
+        if existing is not None:  # Defensive: installed by explicit registry manipulation mid-open.
             existing.refcount += 1
             winner = existing.db
         else:
@@ -150,16 +150,6 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
     if winner is not db:
         _teardown(db)
     return winner
-
-
-def _retire_generation_locked(path: Path, generation: _Generation) -> None:
-    """Retire *generation* so it is never lent again (caller holds _lock). It stays alive
-    for its holders, tracked in ``_retired`` by ``id(db)`` so their releases find it even
-    after the path maps to a new generation."""
-    generation.retired = True
-    if _generations.get(path) is generation:
-        del _generations[path]
-    _retired[id(generation.db)] = generation
 
 
 def release(db: "SessionDB") -> bool:
@@ -182,13 +172,10 @@ def release(db: "SessionDB") -> bool:
                 return False
         generation.refcount -= 1
         needs_teardown = generation.refcount <= 0
-        if needs_teardown:
-            if generation.retired:
-                _retired.pop(key, None)
-            else:
-                path = _db_path_of(db)
-                if path is not None:
-                    _generations.pop(path, None)
+        if needs_teardown and generation.retired:
+            _retired.pop(key, None)
+        elif needs_teardown and (path := _db_path_of(db)) is not None:
+            _generations.pop(path, None)
     # Teardown OUTSIDE the lock: stopping the token writer, WAL checkpoint and read-pool
     # drain must not block acquisition for every other state.db.
     if needs_teardown:
@@ -222,8 +209,7 @@ def stats() -> Dict[str, int]:
     """Registry census for tests and diagnostics (no locks held long)."""
     with _lock:
         return {
-            "live_generations": len(_generations),
-            "retired_generations": len(_retired),
+            "live_generations": len(_generations), "retired_generations": len(_retired),
             "total_refcounts": sum(g.refcount for g in _generations.values()),
         }
 

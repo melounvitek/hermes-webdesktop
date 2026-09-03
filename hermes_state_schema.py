@@ -4,6 +4,7 @@ Plain mixin for ``hermes_state.SessionDB`` (no ``__init__``/state of its own).
 Must never import hermes_state (cycle); shared constants live in hermes_state_common.
 """
 
+import contextlib
 import datetime
 import hashlib
 import logging
@@ -196,10 +197,8 @@ class SessionSchemaMixin:
     def _drop_all_fts_triggers(self, cursor: sqlite3.Cursor) -> None:
         self._drop_fts_triggers(cursor)
         for trigger in _FTS_CJK_TRIGGERS:
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-            except sqlite3.OperationalError:
-                pass
 
     @staticmethod
     def _fts_triggers_missing(cursor: sqlite3.Cursor, names: Sequence[str]) -> bool:
@@ -207,10 +206,8 @@ class SessionSchemaMixin:
         if not names:
             return False  # "name IN ()" is a SQLite syntax error
         placeholders = ",".join("?" for _ in names)
-        row = cursor.execute(
-            f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})", tuple(names),
-        ).fetchone()
-        return int(row[0]) < len(names)
+        sql = f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})"
+        return int(cursor.execute(sql, tuple(names)).fetchone()[0]) < len(names)
 
     @staticmethod
     def _fts_update_trigger_needs_narrowing(sql: Optional[str]) -> bool:
@@ -227,13 +224,12 @@ class SessionSchemaMixin:
         # CJK is v23-only. Decide the layout before selecting destructive candidates so the
         # legacy branch never drops a trigger it won't recreate.
         legacy_layout = self._db_has_legacy_inline_fts(cursor)
-        update_names = ("messages_fts_update", "messages_fts_trigram_update")
-        if not legacy_layout:
-            update_names += ("messages_fts_cjk_update",)
+        update_names = ("messages_fts_update", "messages_fts_trigram_update") + (
+            () if legacy_layout else ("messages_fts_cjk_update",)
+        )
         placeholders = ", ".join("?" for _ in update_names)
-        rows = cursor.execute(
-            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})", update_names,
-        ).fetchall()
+        sql = f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})"
+        rows = cursor.execute(sql, update_names).fetchall()
         to_drop = [name for name, sql in rows if self._fts_update_trigger_needs_narrowing(sql)]
         if not to_drop:
             return 0
@@ -253,7 +249,10 @@ class SessionSchemaMixin:
                 self._quarantine_cjk_after_update_of_migration(cursor)
                 logger.exception("CJK FTS re-ensure after UPDATE OF migration failed")
                 raise
-            if not self._cjk_update_trigger_is_narrowed(cursor):
+            row = cursor.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", ("messages_fts_cjk_update",),
+            ).fetchone()
+            if not row or self._fts_update_trigger_needs_narrowing(row[0]):
                 self._quarantine_cjk_after_update_of_migration(cursor)
                 logger.warning(
                     "CJK FTS UPDATE trigger missing or still broad after "
@@ -261,13 +260,6 @@ class SessionSchemaMixin:
                 )
         logger.info("Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop))
         return len(to_drop)
-
-    def _cjk_update_trigger_is_narrowed(self, cursor: sqlite3.Cursor) -> bool:
-        """True when messages_fts_cjk_update exists with AFTER UPDATE OF."""
-        row = cursor.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", ("messages_fts_cjk_update",),
-        ).fetchone()
-        return bool(row) and not self._fts_update_trigger_needs_narrowing(row[0])
 
     def _quarantine_cjk_after_update_of_migration(self, cursor: sqlite3.Cursor) -> None:
         """Fail closed after dropping the CJK UPDATE trigger mid-migration: clear availability,
@@ -284,22 +276,20 @@ class SessionSchemaMixin:
             logger.debug("Could not drop residual CJK UPDATE trigger after quarantine", exc_info=True)
 
     @staticmethod
-    def _rebuild_fts_indexes(cursor: sqlite3.Cursor, *, include_trigram: bool = True) -> None:
+    def _rebuild_fts_indexes(cursor: sqlite3.Cursor, *, legacy: bool = False, include_trigram: bool = True) -> None:
         """v23+ external-content 'rebuild'. It indexes EVERY row, so the deferred-backfill
-        markers are cleared or the worker would re-insert covered rows (duplicates)."""
-        cursor.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-        if include_trigram:
-            cursor.execute("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')")
-        cursor.execute(_CLEAR_REBUILD_MARKERS_SQL)
-
-    @staticmethod
-    def _rebuild_legacy_fts_indexes(cursor: sqlite3.Cursor, *, include_trigram: bool = True) -> None:
-        """Rebuild the LEGACY inline (pre-v23) FTS indexes: no external-content 'rebuild' source,
-        so DELETE + reinsert the concatenated content the legacy triggers produced."""
+        markers are cleared or the worker would re-insert covered rows (duplicates).
+        ``legacy`` (pre-v23 inline layout) has no external-content 'rebuild' source, so it
+        DELETEs + reinserts the concatenated content the legacy triggers produced."""
         tables = ("messages_fts", "messages_fts_trigram") if include_trigram else ("messages_fts",)
         for tbl in tables:
-            cursor.execute(f"DELETE FROM {tbl}")
-            cursor.execute(f"INSERT INTO {tbl}(rowid, content) SELECT id, {_LEGACY_INLINE_CONCAT_SQL}FROM messages")
+            if legacy:
+                cursor.execute(f"DELETE FROM {tbl}")
+                cursor.execute(f"INSERT INTO {tbl}(rowid, content) SELECT id, {_LEGACY_INLINE_CONCAT_SQL}FROM messages")
+            else:
+                cursor.execute(f"INSERT INTO {tbl}({tbl}) VALUES('rebuild')")
+        if not legacy:
+            cursor.execute(_CLEAR_REBUILD_MARKERS_SQL)
 
     def _fts_table_probe(self, cursor: sqlite3.Cursor, table_name: str) -> Optional[bool]:
         """True = queryable, False = absent, None = FTS module/tokenizer missing or content
@@ -328,9 +318,7 @@ class SessionSchemaMixin:
             decode_exc = exc
         logger.warning(
             "%s probe encountered invalid UTF-8 in FTS content; "
-            "search may return incomplete results until FTS is rebuilt: %s",
-            table_name,
-            decode_exc,
+            "search may return incomplete results until FTS is rebuilt: %s", table_name, decode_exc,
         )
         return None
 
@@ -342,17 +330,14 @@ class SessionSchemaMixin:
         ``_FTS_HOLDER_ESCALATE_SECONDS``, provably inactive orphan Desktop backends are
         reaped and the holders re-checked."""
         now = time.time()
-        record = {}
         try:
             row = cursor.execute(
                 "SELECT value FROM state_meta WHERE key = ? LIMIT 1", (FTS_REBUILD_DEFERRAL_KEY,),
             ).fetchone()
         except sqlite3.Error:
             row = None
-        if row:
-            parsed = safe_json_loads(row[0])
-            if isinstance(parsed, dict):
-                record = parsed
+        parsed = safe_json_loads(row[0]) if row else None
+        record = parsed if isinstance(parsed, dict) else {}
         try:
             first_seen = float(record.get("first_seen", now))
             attempts = int(record.get("attempts", 0)) + 1
@@ -375,9 +360,7 @@ class SessionSchemaMixin:
             if reaped:
                 logger.error(
                     "Reaped inactive orphan Desktop backend(s) %s after %d "
-                    "state.db FTS rebuild deferrals; checking holders again.",
-                    reaped,
-                    attempts,
+                    "state.db FTS rebuild deferrals; checking holders again.", reaped, attempts,
                 )
                 foreign_holders = self._foreign_state_db_holders()
             if foreign_holders:
@@ -385,17 +368,14 @@ class SessionSchemaMixin:
                     "state.db FTS repair remains blocked after %d deferrals "
                     "by holder(s) %s. Stop the listed processes, then run "
                     "`hermes sessions optimize-storage` with the gateway stopped. "
-                    "`hermes doctor` reports this degraded state.",
-                    attempts,
-                    foreign_holders,
+                    "`hermes doctor` reports this degraded state.", attempts, foreign_holders,
                 )
         if not foreign_holders:
             return False
         logger.warning(
             "Deferred stale state.db FTS rebuild while foreign processes "
             "hold the database or WAL sidecars (%s); canonical writes and LIKE search remain available (deferral %d).",
-            foreign_holders,
-            attempts,
+            foreign_holders, attempts,
         )
         return True
 
@@ -409,8 +389,8 @@ class SessionSchemaMixin:
         with fts_rebuild_admission(self.db_path, timeout_seconds=timeout_seconds) as admitted:
             if not admitted:
                 logger.warning(
-                    "Deferred stale state.db FTS rebuild: another process "
-                    "holds the rebuild authority; canonical writes and LIKE search remain available."
+                    "Deferred stale state.db FTS rebuild: another process holds the rebuild authority; "
+                    "canonical writes and LIKE search remain available."
                 )
                 return False
             return self._recover_stale_fts_locked(cursor, legacy=legacy)
@@ -445,10 +425,8 @@ class SessionSchemaMixin:
                     # decides when it comes back online.
                     self._ensure_fts_cjk_schema(cursor)
                     self._fts_stale_retry_interval = 0.0
-                try:
+                with contextlib.suppress(sqlite3.Error):
                     self._conn.commit()
-                except sqlite3.Error:
-                    pass
                 return recovered
         except Exception:  # noqa: BLE001 - background retry must never raise
             logger.warning(
@@ -460,59 +438,43 @@ class SessionSchemaMixin:
         """Body of :meth:`_recover_stale_fts`; caller holds rebuild authority. One write
         transaction, so no canonical writer slips between rebuild and trigger restoration."""
         try:
-            trigram_status = self._fts_table_probe(cursor, "messages_fts_trigram")
+            include_trigram = self._fts_table_probe(cursor, "messages_fts_trigram") is True
         except (sqlite3.DatabaseError, UnicodeDecodeError):
             # A corrupt vtable may fail even a LIMIT 0 probe; still include it in the drop-and-recreate.
-            trigram_status = True
-        include_trigram = trigram_status is True
+            include_trigram = True
 
         drop_sql = "".join(f"DROP TRIGGER IF EXISTS {trigger};" for trigger in _FTS_TRIGGERS)
         if include_trigram:
             drop_sql += "DROP TABLE IF EXISTS messages_fts_trigram;"
-        drop_sql += "DROP VIEW IF EXISTS messages_fts_trigram_src;"
-        drop_sql += "DROP TABLE IF EXISTS messages_fts;"
-
+        drop_sql += "DROP VIEW IF EXISTS messages_fts_trigram_src;DROP TABLE IF EXISTS messages_fts;"
         if legacy:
-            schema_sql = LEGACY_FTS_SQL
-            if include_trigram:
-                schema_sql += LEGACY_FTS_TRIGRAM_SQL
-            rebuild_sql = schema_sql + _legacy_inline_reinsert_sql("messages_fts", 16)
+            rebuild_sql = LEGACY_FTS_SQL + (LEGACY_FTS_TRIGRAM_SQL if include_trigram else "")
+            rebuild_sql += _legacy_inline_reinsert_sql("messages_fts", 16)
             if include_trigram:
                 rebuild_sql += _legacy_inline_reinsert_sql("messages_fts_trigram", 20, delete_first=True)
         else:
-            schema_sql = FTS_SQL
-            if include_trigram:
-                schema_sql += FTS_TRIGRAM_SQL
-            rebuild_sql = schema_sql + "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');"
+            rebuild_sql = FTS_SQL + (FTS_TRIGRAM_SQL if include_trigram else "")
+            rebuild_sql += "INSERT INTO messages_fts(messages_fts) VALUES('rebuild');"
             if include_trigram:
                 rebuild_sql += "INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild');"
             rebuild_sql += _CLEAR_REBUILD_MARKERS_SQL + ";"
-
         recovery_sql = (
-            "BEGIN IMMEDIATE;"
-            + drop_sql
-            + rebuild_sql
-            + "DELETE FROM state_meta WHERE key IN "
-            + f"('{FTS_STALE_KEY}', '{FTS_REBUILD_DEFERRAL_KEY}');"
-            + "COMMIT;"
+            "BEGIN IMMEDIATE;" + drop_sql + rebuild_sql
+            + f"DELETE FROM state_meta WHERE key IN ('{FTS_STALE_KEY}', '{FTS_REBUILD_DEFERRAL_KEY}');COMMIT;"
         )
         try:
             cursor.executescript(recovery_sql)
         except sqlite3.DatabaseError as exc:
-            try:
+            with contextlib.suppress(sqlite3.Error):
                 self._conn.rollback()
-            except sqlite3.Error:
-                pass
             # Stale indexes must stay detached even on builds whose DDL transaction behavior differs.
             self._drop_all_fts_triggers(cursor)
             self._conn.commit()
             logger.error(
                 "Automatic rebuild of stale FTS indexes failed (%s); "
-                "canonical writes remain enabled with FTS detached.",
-                exc,
+                "canonical writes remain enabled with FTS detached.", exc,
             )
             return False
-
         self._fts_stale = False
         self._fts_enabled = True
         self._trigram_available = include_trigram
@@ -529,7 +491,7 @@ class SessionSchemaMixin:
         database still runs every startup. A corrupt/stale cache degrades to recomputation."""
         cache_path = None
         schema_hash = hashlib.sha256(schema_sql.encode("utf-8")).hexdigest()
-        try:
+        with contextlib.suppress(Exception):  # missing/corrupt cache → recompute below
             # Late import: resolves a test-patched hermes_constants.get_hermes_home.
             from hermes_constants import get_hermes_home as _home
             cache_path = _home() / "cache" / "schema_columns.json"
@@ -539,8 +501,6 @@ class SessionSchemaMixin:
                 isinstance(cols, dict) and all(isinstance(v, str) for v in cols.values()) for cols in tables.values()
             ):
                 return tables
-        except Exception:
-            pass  # missing/corrupt cache → recompute below
 
         ref = sqlite3.connect(":memory:")
         try:
@@ -550,9 +510,8 @@ class SessionSchemaMixin:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall():
                 cols: Dict[str, str] = {}
-                for _cid, col_name, col_type, notnull, default, pk in ref.execute(
-                    f'PRAGMA table_info("{tbl}")'
-                ).fetchall():
+                info = ref.execute(f'PRAGMA table_info("{tbl}")').fetchall()
+                for _cid, col_name, col_type, notnull, default, pk in info:
                     # Reconstruct the type expression for ALTER TABLE ADD COLUMN
                     parts = [col_type] if col_type else []
                     if notnull and not pk:
@@ -565,14 +524,12 @@ class SessionSchemaMixin:
             ref.close()
 
         if cache_path is not None:
-            try:
+            with contextlib.suppress(Exception):  # cache write is best-effort
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 fd, tmp = tempfile.mkstemp(dir=str(cache_path.parent), prefix=".schema_columns.")
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump({"schema_hash": schema_hash, "tables": table_columns}, fh)
                 os.replace(tmp, cache_path)
-            except Exception:
-                pass  # cache write is best-effort
         return table_columns
 
     def _reconcile_columns(self, cursor: sqlite3.Cursor) -> None:
@@ -613,7 +570,7 @@ class SessionSchemaMixin:
         try:
             rows = cursor.execute(f'PRAGMA table_info("{table}")').fetchall()
         except sqlite3.OperationalError:
-            return None
+            rows = None
         if not rows:
             return None
         # row: (cid, name, type, notnull, dflt_value, pk)
@@ -730,15 +687,12 @@ class SessionSchemaMixin:
         # Heal NULL ``active`` rows on every startup: older reconciler builds added ``active``
         # without NOT NULL DEFAULT 1, so ``WHERE active = 1`` loaders hid whole histories. A
         # ``current_version < 12`` gate never re-ran for already-v12+ databases.
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
-        except sqlite3.OperationalError:
-            pass
 
         fts5_available = self._sqlite_supports_fts5(cursor)
-        self._fts_stale = cursor.execute(
-            "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_STALE_KEY,)
-        ).fetchone() is not None
+        stale_row = cursor.execute("SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_STALE_KEY,)).fetchone()
+        self._fts_stale = stale_row is not None
         if self._fts_stale:
             # A prior process detached FTS after corruption; stay detached until a full rebuild.
             self._drop_all_fts_triggers(cursor)
@@ -752,10 +706,9 @@ class SessionSchemaMixin:
             cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
             # Store provenance so fresh vs wiped stores are distinguishable.
             now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            instance_id = str(uuid.uuid4())
             cursor.executemany(
                 "INSERT OR IGNORE INTO state_meta (key, value) VALUES (?, ?)",
-                [("store_instance_id", instance_id), ("store_created_at_utc", now_iso)],
+                [("store_instance_id", str(uuid.uuid4())), ("store_created_at_utc", now_iso)],
             )
         else:
             self._run_data_migrations(cursor, row[0], fts5_available)
@@ -773,7 +726,7 @@ class SessionSchemaMixin:
         # (v10 trigram backfill and v11 inline FTS re-index were superseded by v23 and removed.)
         if current_version < 16:
             # v16: tag delegate subagent rows so pickers stay clean after parent deletes orphan them.
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(
                     "UPDATE sessions SET model_config = json_set("
                     "COALESCE(model_config, '{}'), '$._delegate_from', parent_session_id) "
@@ -791,8 +744,6 @@ class SessionSchemaMixin:
                     "AND NOT EXISTS (SELECT 1 FROM sessions ch "
                     "                WHERE ch.parent_session_id = sessions.id)"
                 )
-            except sqlite3.OperationalError:
-                pass
         if current_version < 18:
             # v18: best-effort gateway metadata backfill from sessions.json.
             try:
@@ -801,10 +752,8 @@ class SessionSchemaMixin:
                 logger.debug("v18 gateway metadata backfill skipped: %s", exc)
         if current_version < 20:
             # v20: seed session_model_usage from sessions aggregates (OR IGNORE: newer rows win).
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 cursor.execute(_SESSION_MODEL_USAGE_V20_SEED_SQL)
-            except sqlite3.OperationalError:
-                pass
         if current_version < 22:
             self._migrate_v22_session_model_usage(cursor)
         # v23: FTS storage redesign (external-content tables). OPT-IN, NOT AUTOMATIC: the
@@ -875,16 +824,14 @@ class SessionSchemaMixin:
             cursor.execute(_TITLE_UNIQUE_INDEX_SQL)
         except sqlite3.IntegrityError:
             try:
-                cursor.execute(
-                    """UPDATE sessions AS older
+                cursor.execute("""UPDATE sessions AS older
                        SET title = NULL
                        WHERE title IS NOT NULL
                          AND EXISTS (
                              SELECT 1 FROM sessions AS newer
                              WHERE newer.title = older.title
                                AND newer.rowid > older.rowid
-                         )"""
-                )
+                         )""")
                 logger.warning(
                     "Cleared %d duplicate session title(s) while restoring the unique index", cursor.rowcount,
                 )
@@ -905,12 +852,9 @@ class SessionSchemaMixin:
                 # CJK was detached alongside the base indexes; its ensure path decides when it returns.
                 self._ensure_fts_cjk_schema(cursor)
             else:
-                self._fts_enabled = False
-                self._trigram_available = False
-                self._fts_cjk_available = False
+                self._fts_enabled = self._trigram_available = self._fts_cjk_available = False
         else:
             base_sql, trigram_sql = _FTS_DDL[legacy_fts]
-            rebuild = self._rebuild_legacy_fts_indexes if legacy_fts else self._rebuild_fts_indexes
             # Measure BEFORE the DDL below runs (pre-repair state). Whether the trigram half is
             # creatable is only known AFTER _ensure_fts_schema, hence the halves combine at the `if`.
             base_triggers_missing = self._fts_triggers_missing(cursor, _FTS_BASE_TRIGGERS)
@@ -922,7 +866,8 @@ class SessionSchemaMixin:
                 self._trigram_available = trigram_enabled
                 if base_triggers_missing or (trigram_enabled and trigram_triggers_missing):
                     self._run_admitted_startup_rebuild(
-                        cursor, lambda: rebuild(cursor, include_trigram=trigram_enabled),
+                        cursor,
+                        lambda: self._rebuild_fts_indexes(cursor, legacy=legacy_fts, include_trigram=trigram_enabled),
                     )
                 if not legacy_fts:
                     # CJK-bigram index: strictly additive, gated on the loadable tokenizer.
@@ -950,9 +895,7 @@ class SessionSchemaMixin:
         cursor.execute(_STALE_KEY_UPSERT_SQL, (FTS_STALE_KEY,))
         self._drop_all_fts_triggers(cursor)
         self._fts_stale = True
-        self._fts_enabled = False
-        self._trigram_available = False
-        self._fts_cjk_available = False
+        self._fts_enabled = self._trigram_available = self._fts_cjk_available = False
 
     def _backfill_gateway_metadata_from_sessions_json(self, cursor: sqlite3.Cursor) -> None:
         """One-time v18 backfill of gateway metadata from sessions.json. Only fills NULL
@@ -986,13 +929,9 @@ class SessionSchemaMixin:
                        END
                    WHERE id = ?""",
                 (
-                    entry.get("session_key") or key,
-                    origin_dict.get("chat_id") if origin_dict is not None else None,
-                    entry.get("chat_type"),
-                    origin_dict.get("thread_id") if origin_dict is not None else None,
-                    entry.get("display_name"),
-                    json.dumps(origin) if origin_dict is not None else None,
-                    1 if entry.get("expiry_finalized") or entry.get("memory_flushed") else 0,
-                    str(session_id),
+                    entry.get("session_key") or key, origin_dict.get("chat_id") if origin_dict is not None else None,
+                    entry.get("chat_type"), origin_dict.get("thread_id") if origin_dict is not None else None,
+                    entry.get("display_name"), json.dumps(origin) if origin_dict is not None else None,
+                    1 if entry.get("expiry_finalized") or entry.get("memory_flushed") else 0, str(session_id),
                 ),
             )
