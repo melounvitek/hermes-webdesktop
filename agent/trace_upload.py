@@ -90,9 +90,7 @@ def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
 def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]:
     """Convert OpenAI tool_calls into Anthropic ``tool_use`` content blocks."""
     blocks: List[Dict[str, Any]] = []
-    if not isinstance(tool_calls, list):
-        return blocks
-    for tc in tool_calls:
+    for tc in tool_calls if isinstance(tool_calls, list) else ():
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function") or {}
@@ -134,8 +132,7 @@ def _git_branch(cwd: str) -> str:
 
 
 def _assistant_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
-    blocks = _content_to_blocks(msg.get("content"), redact)
-    blocks.extend(_tool_calls_to_blocks(msg.get("tool_calls"), redact))
+    blocks = _content_to_blocks(msg.get("content"), redact) + _tool_calls_to_blocks(msg.get("tool_calls"), redact)
     return {"role": "assistant", "model": model or "unknown", "content": blocks or [{"type": "text", "text": ""}]}
 
 
@@ -216,9 +213,9 @@ def build_trace_jsonl(
 def _resolve_hf_token() -> Optional[str]:
     """Return the user's Hugging Face token from the usual env vars."""
     for var in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
-        val = os.getenv(var)
-        if val and val.strip():
-            return val.strip()
+        val = (os.getenv(var) or "").strip()
+        if val:
+            return val
     return None
 
 
@@ -240,7 +237,7 @@ def _do_upload(
     try:
         from huggingface_hub import HfApi
     except ImportError:
-        return ("Hugging Face upload needs the `huggingface_hub` package " "(`pip install huggingface_hub`).")
+        return "Hugging Face upload needs the `huggingface_hub` package (`pip install huggingface_hub`)."
 
     api = HfApi(token=token)
     try:
