@@ -79,8 +79,7 @@ class SessionTitlesMixin:
         nothing overwrites a user name, re-running the titler on an llm row is a no-op).
         No writer may move a hidden canonical Bot Chat off its title. Read and write are
         one compare-and-swap transaction, so a manual ``/title`` racing an in-flight
-        generation is not clobbered.
-        """
+        generation is not clobbered."""
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
         new_rank = self._title_rank(source) if not is_user else None
@@ -166,20 +165,16 @@ class SessionTitlesMixin:
         if source not in self._TITLE_SOURCE_RANK:
             raise ValueError(f"invalid title source: {source!r}")
         return self._write_rowcount(
-            "UPDATE sessions SET title_source = ? "
-            "WHERE id = ? AND title IS NOT NULL",
+            "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL",
             (source, session_id),
         ) > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
         row = self._read_one(
-            "SELECT s.*, "
-            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
-            "FROM sessions s "
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-            "WHERE s.title = ?",
-            (title,),
+            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "WHERE s.title = ?", (title,),
         )
         return self._session_row_dict(row) if row else None
 
