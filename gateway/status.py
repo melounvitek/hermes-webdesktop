@@ -73,10 +73,8 @@ def record_start_and_check_storm(
         existing: list[float] = []
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
-                try:
+                with contextlib.suppress(ValueError):
                     existing.append(float(line))
-                except ValueError:
-                    continue
         existing.append(now)
         recent = [ts for ts in existing if now - ts <= window_s]
         # Ring-buffer the persisted file so it stays bounded.
@@ -84,10 +82,10 @@ def record_start_and_check_storm(
         tmp = path.with_suffix(".tmp")
         tmp.write_text("\n".join(repr(ts) for ts in to_write) + "\n", encoding="utf-8")
         os.replace(tmp, path)
-        if len(recent) > max_starts:
-            backoff = min(backoff_cap_s, 5.0 * (2 ** min(len(recent) - max_starts, 6)))
-            return StormInfo(count=len(recent), window_s=window_s, backoff_s=backoff)
-        return None
+        if len(recent) <= max_starts:
+            return None
+        backoff = min(backoff_cap_s, 5.0 * (2 ** min(len(recent) - max_starts, 6)))
+        return StormInfo(count=len(recent), window_s=window_s, backoff_s=backoff)
     except Exception as _e:
         logger.debug("respawn-storm breaker bookkeeping failed (non-fatal): %s", _e)
         return None
@@ -228,15 +226,11 @@ def normalize_updated_at(value: Any) -> Optional[str]:
             parsed = datetime.fromisoformat(raw)
         except ValueError:
             return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.isoformat()
+        return (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)).isoformat()
     if isinstance(value, (int, float)):
         seconds = float(value)
-        if not math.isfinite(seconds):
-            return None
         now = datetime.now(timezone.utc).timestamp()
-        if seconds < _EPOCH_MIN_PLAUSIBLE or seconds > now + 86400:
+        if not math.isfinite(seconds) or seconds < _EPOCH_MIN_PLAUSIBLE or seconds > now + 86400:
             return None
         try:
             return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
@@ -419,10 +413,8 @@ def _looks_like_gateway_process(pid: int) -> bool:
 
 def _record_looks_like_gateway(record: dict[str, Any]) -> bool:
     """Validate gateway identity from PID-file metadata when cmdline is unavailable."""
-    if record.get("kind") != _GATEWAY_KIND:
-        return False
     argv = record.get("argv")
-    if not isinstance(argv, list) or not argv:
+    if record.get("kind") != _GATEWAY_KIND or not isinstance(argv, list) or not argv:
         return False
     return looks_like_gateway_runtime_command_line(" ".join(str(part) for part in argv))
 
@@ -635,15 +627,6 @@ def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
             path.unlink(missing_ok=True)
 
 
-def _write_gateway_lock_record(handle) -> None:
-    handle.seek(0)
-    handle.truncate()
-    json.dump(_build_pid_record(), handle)
-    handle.flush()
-    with contextlib.suppress(OSError):
-        os.fsync(handle.fileno())
-
-
 def _try_acquire_file_lock(handle) -> bool:
     try:
         if _IS_WINDOWS:
@@ -743,14 +726,6 @@ def _pid_exists_win32_ctypes(pid: int) -> bool:
         return False
 
 
-def _lock_is_held(handle) -> bool:
-    """Probe: True when another process holds the lock (a won probe is released)."""
-    if _try_acquire_file_lock(handle):
-        _release_file_lock(handle)
-        return False
-    return True
-
-
 def _release_file_lock(handle) -> None:
     with contextlib.suppress(OSError):
         if _IS_WINDOWS:
@@ -780,7 +755,12 @@ def acquire_gateway_runtime_lock() -> bool:
     if not _try_acquire_file_lock(handle):
         handle.close()
         return False
-    _write_gateway_lock_record(handle)
+    handle.seek(0)
+    handle.truncate()
+    json.dump(_build_pid_record(), handle)
+    handle.flush()
+    with contextlib.suppress(OSError):
+        os.fsync(handle.fileno())
     _gateway_lock_handle = handle
     _clear_running_pid_cache()
     return True
@@ -809,8 +789,12 @@ def owns_gateway_runtime_lock() -> bool:
 
 
 def _probe_lock_file(handle) -> bool:
+    """True when another process holds the lock (a won probe is released); closes ``handle``."""
     try:
-        return _lock_is_held(handle)
+        if _try_acquire_file_lock(handle):
+            _release_file_lock(handle)
+            return False
+        return True
     finally:
         with contextlib.suppress(OSError):
             handle.close()
@@ -862,13 +846,17 @@ def write_pid_file() -> None:
     """Write this process's PID record via O_CREAT|O_EXCL (concurrent racers get FileExistsError)."""
     path = _get_pid_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = json.dumps(_build_pid_record())
     # FileExistsError propagates: another gateway is racing us; caller decides.
+    _write_json_excl(path, _build_pid_record())
+    _clear_running_pid_cache()
+
+
+def _write_json_excl(path: Path, record: dict[str, Any]) -> None:
+    """Create ``path`` with O_CREAT|O_EXCL and dump ``record``; unlinks on a failed write."""
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(record)
-        _clear_running_pid_cache()
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
     except Exception:
         _unlink_quietly(path)
         raise
@@ -1104,8 +1092,8 @@ def get_runtime_status_running_pid(
 def remove_pid_file() -> None:
     """Remove the PID file only if it belongs to this process.
 
-    During --replace the old process's atexit can fire AFTER the new process
-    wrote its own record; blind removal would leave the gateway invisible.
+    During --replace the old process's atexit can fire AFTER the new process wrote
+    its own record; blind removal would leave the gateway invisible.
     """
     try:
         path = _get_pid_path()
@@ -1200,15 +1188,9 @@ def acquire_scoped_lock(
             _unlink_quietly(tombstone)
 
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        _write_json_excl(lock_path, record)
     except FileExistsError:
         return False, _read_json_file(lock_path)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(record, handle)
-    except Exception:
-        _unlink_quietly(lock_path)
-        raise
     return True, None
 
 
@@ -1250,14 +1232,12 @@ def release_all_scoped_locks(
 
 
 # ── --replace takeover marker ─────────────────────────────────────────
-#
 # SIGTERM exits the gateway with code 1 so Restart=on-failure revives it after
-# unexpected kills -- which would also revive a --replace target and start a
-# flap loop against the replacer. The replacer therefore writes a short-lived
-# marker naming the target PID + start_time BEFORE SIGTERM; the target's
-# shutdown handler treats a matching marker as a planned takeover and exits 0.
-# The marker is unlinked once consumed, so a stale one can grief at most one
-# future shutdown on the same PID, within _TAKEOVER_MARKER_TTL_S.
+# unexpected kills -- which would also revive a --replace target (flap loop against
+# the replacer). The replacer therefore writes a short-lived marker naming the target
+# PID + start_time BEFORE SIGTERM; the target's shutdown handler treats a matching
+# marker as a planned takeover and exits 0. Unlinked once consumed, so a stale one can
+# grief at most one future shutdown on the same PID, within _TAKEOVER_MARKER_TTL_S.
 
 _TAKEOVER_MARKER_FILENAME = ".gateway-takeover.json"
 _TAKEOVER_MARKER_TTL_S = 60  # Marker older than this is treated as stale
@@ -1283,10 +1263,10 @@ def _marker_is_stale(written_at: str, ttl_s: int) -> bool:
 
 
 def _read_live_pid_marker(path: Path, ttl_s: int) -> Optional[tuple[dict[str, Any], int, Any]]:
-    """Return ``(record, target_pid, target_start_time)`` for a usable marker.
+    """``(record, target_pid, target_start_time)`` for a usable marker, else None.
 
-    Malformed or expired markers can never match anyone, so they are unlinked
-    here (a stale file left by a previous instance must not wedge a new one).
+    Malformed/expired markers can never match anyone, so they are unlinked here (a
+    stale file left by a previous instance must not wedge a new one).
     """
     record = _read_json_file(path)
     if not record:
@@ -1325,10 +1305,10 @@ def _consume_pid_marker_for_self(path: Path, *, ttl_s: int) -> bool:
     if parsed is None:
         return False
     record, target_pid, target_start_time = parsed
-    # Cross-profile guard: new markers name the verified TARGET home, which
-    # permits a deliberate cross-HERMES_HOME --replace while ignoring a marker
-    # accidentally written into another profile's directory. Legacy markers have
-    # no target field, so keep the original same-replacer-home rule.
+    # Cross-profile guard: new markers name the verified TARGET home, which permits a
+    # deliberate cross-HERMES_HOME --replace while ignoring a marker accidentally
+    # written into another profile's directory. Legacy markers have no target field,
+    # so keep the original same-replacer-home rule.
     our_home = _get_process_hermes_home()
     target_home = record.get("target_hermes_home")
     if target_home is not None:
@@ -1370,10 +1350,7 @@ def write_takeover_marker(
 
 
 def consume_takeover_marker_for_self() -> bool:
-    """Consume the takeover marker; True means this SIGTERM is a planned takeover (exit 0).
-
-    Always unlinks on match or staleness so later unrelated signals don't re-trigger.
-    """
+    """Consume the takeover marker; True => planned takeover (exit 0). Unlinks on match/staleness."""
     return _consume_pid_marker_for_self(_get_takeover_marker_path(), ttl_s=_TAKEOVER_MARKER_TTL_S)
 
 
@@ -1385,9 +1362,9 @@ def clear_takeover_marker(target_home: Optional[Path] = None) -> None:
 def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tuple[int, int, Path]]:
     """Resolve a live scoped-lock owner to a verified ``(pid, start_time, home)``.
 
-    A lock file is only a claim: the record, the target home's PID record, and
-    the live process must agree on PID, start-time, gateway identity, and home.
-    Missing legacy metadata fails closed (normal retryable conflict path).
+    A lock file is only a claim: the record, the target home's PID record, and the live
+    process must agree on PID, start-time, gateway identity, and home. Missing legacy
+    metadata fails closed (normal retryable conflict path).
     """
     if not isinstance(record, dict) or not _record_looks_like_gateway(record):
         return None
@@ -1407,7 +1384,7 @@ def _validated_scoped_lock_gateway_owner(record: dict[str, Any]) -> Optional[tup
     if live_cmdline is not None and not looks_like_gateway_runtime_command_line(live_cmdline):
         return None
     pid_record = _read_json_file(target_home / "gateway.pid")
-    if not isinstance(pid_record, dict) or not _record_looks_like_gateway(pid_record):
+    if pid_record is None or not _record_looks_like_gateway(pid_record):
         return None
     if _pid_from_record(pid_record) != owner_pid or pid_record.get("start_time") != owner_start_time:
         return None
@@ -1445,8 +1422,8 @@ def _wait_for_scoped_lock_owner_exit(
 def _snapshot_gateway_children(pid: int) -> list:
     """Best-effort snapshot of ``pid``'s live descendants (POSIX only; never raises).
 
-    Take it while the parent is alive -- once it exits the children are
-    reparented and undiscoverable. ``[]`` on Windows (taskkill /T tree-kills).
+    Take it while the parent is alive -- once it exits the children are reparented
+    and undiscoverable. ``[]`` on Windows (taskkill /T tree-kills).
     """
     if _IS_WINDOWS:
         return []
@@ -1581,8 +1558,8 @@ def _terminate_scoped_lock_owner_once(
 def write_planned_stop_marker(target_pid: int) -> bool:
     """Record that ``target_pid`` is being stopped intentionally.
 
-    Unexpected SIGTERM exits non-zero so service managers revive the gateway;
-    the CLI writes this marker first so a deliberate stop exits cleanly.
+    Unexpected SIGTERM exits non-zero so service managers revive the gateway; the
+    CLI writes this marker first so a deliberate stop exits cleanly.
     """
     try:
         _write_json_file(_get_planned_stop_marker_path(), {
