@@ -76,6 +76,43 @@ def _warn_memory_provider_unavailable(name: str, reason: str = "") -> None:
 _normalize_route_base_url = normalize_route_base_url
 
 
+def _moa_reference_output_allowed(agent: Any) -> bool:
+    """Keep MoA display events off only the machine-readable ``-Q`` surface."""
+    return not (
+        getattr(agent, "platform", None) == "cli"
+        and getattr(agent, "tool_progress_mode", "all") == "off"
+    )
+
+
+def _relay_moa_reference_event(agent: Any, event: str, **kwargs: Any) -> None:
+    """Relay MoA display events while preserving the ``-Q`` stdout contract."""
+    if not _moa_reference_output_allowed(agent):
+        return
+    cb = getattr(agent, "tool_progress_callback", None)
+    if cb is None:
+        return
+    try:
+        if event == "moa.reference":
+            cb(
+                "moa.reference",
+                str(kwargs.get("label") or ""),
+                str(kwargs.get("text") or ""),
+                None,
+                moa_index=kwargs.get("index"),
+                moa_count=kwargs.get("count"),
+            )
+        elif event == "moa.aggregating":
+            cb(
+                "moa.aggregating",
+                str(kwargs.get("aggregator") or ""),
+                None,
+                None,
+                moa_ref_count=kwargs.get("ref_count"),
+            )
+    except Exception:
+        pass
+
+
 def _provider_default_routes(provider: str) -> set[str]:
     """Return known exact default routes for a canonical provider id."""
     routes: set[str] = set()
