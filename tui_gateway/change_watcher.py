@@ -6,7 +6,6 @@ method_ctx.bind_module), so they reference server.py globals bare.
 
 from __future__ import annotations
 
-
 from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
@@ -19,23 +18,18 @@ def resolve_skin() -> dict:
         init_skin_from_config(_load_cfg())
         skin = get_active_skin()
         return {
-            "name": skin.name,
-            "colors": skin.colors,
+            "name": skin.name, "colors": skin.colors,
             # Paired palettes: the TUI prefers the block matching terminal polarity.
-            "light_colors": skin.light_colors,
-            "dark_colors": skin.dark_colors,
-            "branding": skin.branding,
-            "banner_logo": skin.banner_logo,
-            "banner_hero": skin.banner_hero,
-            "tool_prefix": skin.tool_prefix,
-            "help_header": (skin.branding or {}).get("help_header", ""),
-        }
+            "light_colors": skin.light_colors, "dark_colors": skin.dark_colors,
+            "branding": skin.branding, "banner_logo": skin.banner_logo,
+            "banner_hero": skin.banner_hero, "tool_prefix": skin.tool_prefix,
+            "help_header": (skin.branding or {}).get("help_header", "")}
     except Exception:
         return {}
 
 
-# (name, user-file mtime) of the last skin broadcast: ``skin.changed`` fires on a
-# name switch OR a live color edit of the active skin, and nothing else.
+# (name, user-file mtime) of the last skin broadcast: ``skin.changed`` fires on a name
+# switch OR a live color edit of the active skin, and nothing else.
 _last_skin_sig: tuple[str, float | None] | None = None
 
 
@@ -53,13 +47,18 @@ def _watcher_mtime_ns(path: Path):
         return None
 
 
+def _newest_mtime_ns(paths) -> int | None:
+    """Max ``st_mtime_ns`` across ``paths`` (unstat-able ignored); None when none stat'ed."""
+    mtimes = (_watcher_mtime_ns(p) for p in paths)
+    return max((m for m in mtimes if m is not None), default=None)
+
+
 def _skin_sig() -> tuple[str, float | None]:
     """(active skin name, its user-file mtime). Built-ins have no file, so only
     their name moves; a user skin's mtime lets an in-place color edit repaint too."""
     name = str((_load_cfg().get("display") or {}).get("skin") or "default")
-    home = _watcher_home()
     try:
-        mtime: float | None = (home / "skins" / f"{name}.yaml").stat().st_mtime
+        mtime: float | None = (_watcher_home() / "skins" / f"{name}.yaml").stat().st_mtime
     except OSError:
         mtime = None
     return name, mtime
@@ -68,10 +67,8 @@ def _skin_sig() -> tuple[str, float | None]:
 def _note_skin_broadcast() -> None:
     """Sync the baseline after the /skin RPC emits so the watcher doesn't re-broadcast it."""
     global _last_skin_sig
-    try:
+    with contextlib.suppress(Exception):
         _last_skin_sig = _skin_sig()
-    except Exception:
-        pass
 
 
 def _broadcast_skin_if_changed() -> None:
@@ -85,10 +82,14 @@ def _broadcast_skin_if_changed() -> None:
     if sig == _last_skin_sig:
         return
     _last_skin_sig = sig
-    try:
+    with contextlib.suppress(Exception):
         _broadcast_global_event("skin.changed", resolve_skin())
-    except Exception:
-        pass
+
+
+def _active_pet():
+    """(pet, scale) when an enabled pet with an existing sheet is selected, else None."""
+    enabled, pet, scale = _pet_active_selection()
+    return (pet, scale) if enabled and pet is not None and pet.exists else None
 
 
 def _pet_sig() -> tuple:
@@ -98,9 +99,10 @@ def _pet_sig() -> tuple:
     if not pet_cfg or not is_truthy_value(pet_cfg.get("enabled"), default=False):
         return ("off",)
     try:
-        enabled, pet, scale = _pet_active_selection()
-        if not enabled or pet is None or not pet.exists:
+        active = _active_pet()
+        if not active:
             return ("off",)
+        pet, scale = active
         return (pet.slug, _pet_sheet_revision(pet.spritesheet), scale)
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
         return ("off",)
@@ -109,16 +111,13 @@ def _pet_sig() -> tuple:
 def _pet_changed_payload() -> dict:
     """``pet.info.meta``-shaped payload so the renderer can decide whether to refetch sprites."""
     try:
-        enabled, pet, scale = _pet_active_selection()
-        if not enabled or pet is None or not pet.exists:
+        active = _active_pet()
+        if not active:
             return {"enabled": False}
+        pet, scale = active
         return {
-            "enabled": True,
-            "slug": pet.slug,
-            "displayName": pet.display_name,
-            "scale": scale,
-            "spritesheetRevision": _pet_sheet_revision(pet.spritesheet),
-        }
+            "enabled": True, "slug": pet.slug, "displayName": pet.display_name, "scale": scale,
+            "spritesheetRevision": _pet_sheet_revision(pet.spritesheet)}
     except Exception:  # noqa: BLE001 - cosmetic, never break the watcher
         return {"enabled": False}
 
@@ -132,12 +131,11 @@ def _sessions_sig():
     """Newest mtime across state.db + WAL: the one thing messaging-gateway turns and
     cron runs (which never touch this gateway's transports) all move. Served sibling
     profile homes are probed too, else a routed profile's Bot Chat never refreshes."""
-    mtimes = [
-        _watcher_mtime_ns(root / name)
+    return _newest_mtime_ns(
+        root / name
         for root in (_watcher_home(), *_served_profile_homes)
         for name in ("state.db", "state.db-wal")
-    ]
-    return max((m for m in mtimes if m is not None), default=None)
+    )
 
 
 def _platforms_sig():
@@ -147,32 +145,21 @@ def _platforms_sig():
 
 
 def _pairing_sig():
-    """Newest mtime across every profile's pairing store (legacy ``pairing/`` and
+    """Newest mtime across every profile's pairing ledgers (legacy ``pairing/`` and
     ``platforms/pairing/``). Pending codes are written by the gateway process, so the
     files are the only shared signal; a pairing request moves nothing in gateway_state.json."""
     home = _watcher_home()
     roots = [home / "pairing", home / "platforms" / "pairing"]
-    try:
+    with contextlib.suppress(OSError):
         for profile_dir in (home / "profiles").iterdir():
-            roots.append(profile_dir / "pairing")
-            roots.append(profile_dir / "platforms" / "pairing")
-    except OSError:
-        pass
-
-    sig = None
+            roots += [profile_dir / "pairing", profile_dir / "platforms" / "pairing"]
+    entries = []
     for root in roots:
-        try:
-            entries = list(root.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
+        with contextlib.suppress(OSError):
             # Only the ledgers: _rate_limits.json moves on every unauthorized DM.
-            if not entry.name.endswith(("-pending.json", "-approved.json")):
-                continue
-            mtime = _watcher_mtime_ns(entry)
-            if mtime is not None:
-                sig = mtime if sig is None else max(sig, mtime)
-    return sig
+            entries += [
+                e for e in root.iterdir() if e.name.endswith(("-pending.json", "-approved.json"))]
+    return _newest_mtime_ns(entries)
 
 
 # Newest outbox-envelope mtime EVER seen (monotone): a drain empties the outbox,
@@ -188,12 +175,10 @@ def _bot_relay_outbox_sig():
     home = _watcher_home()
     root = home.parent.parent if home.parent.name == "profiles" else home
     newest = 0
-    try:
+    with contextlib.suppress(OSError):
         for entry in (root / "bot_relay" / "outbox").iterdir():
             if entry.name.endswith(".json"):
                 newest = max(newest, _watcher_mtime_ns(entry) or 0)
-    except OSError:
-        pass
     if newest > _bot_relay_outbox_seen:
         _bot_relay_outbox_seen = newest
     return _bot_relay_outbox_seen or None
@@ -208,8 +193,7 @@ _CHANGE_WATCHES: dict[str, tuple[float, Any, Any]] = {
     "platforms.changed": (2.0, _platforms_sig, lambda: {}),
     "pairing.changed": (2.0, _pairing_sig, lambda: {}),
     # 1s so a queued DM envelope reaches the Desktop's push-triggered drain fast.
-    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {}),
-}
+    "bot_relay.outbox.pending": (1.0, _bot_relay_outbox_sig, lambda: {})}
 
 # state.db moves on every append of a streaming turn and gateway_state.json on
 # in-flight bookkeeping; the floor coalesces bursts to one broadcast per window,
@@ -243,10 +227,8 @@ def _broadcast_watched_changes(now: float | None = None) -> None:
             continue  # floored: old signature stays so it re-fires when the window opens
         _change_sigs[event] = sig
         _change_broadcast_at[event] = now
-        try:
+        with contextlib.suppress(Exception):
             _broadcast_global_event(event, payload_fn())
-        except Exception:  # noqa: BLE001
-            pass
 
 
 _skin_watcher_started = False

@@ -6,26 +6,24 @@ Published onto ``tui_gateway.server`` as ``_mcp_reset_profile`` /
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Dict
 
 
 def reset_profile(token) -> None:
     if token is None:
         return
-    try:
+    with contextlib.suppress(Exception):
         from hermes_constants import reset_hermes_home_override
 
         reset_hermes_home_override(token)
-    except Exception:
-        pass
 
 
 def summarize_server(name: str, cfg: dict) -> Dict[str, Any]:
     """Serialize one server's config for a UI (no secret values).
 
-    Mirrors web_server._mcp_server_summary plus ``oauth_tokens_present`` so a UI
-    can tell an OAuth server that still needs authentication from one already
-    authenticated.
+    Mirrors web_server._mcp_server_summary plus ``oauth_tokens_present`` so a UI can
+    tell an OAuth server that still needs authentication from one already authenticated.
     """
     from hermes_cli.mcp_config import _oauth_tokens_present
 
@@ -45,5 +43,4 @@ def summarize_server(name: str, cfg: dict) -> Dict[str, Any]:
         "auth": auth,
         "oauth_tokens_present": _oauth_tokens_present(name) if auth == "oauth" else None,
         "enabled": cfg.get("enabled", True) is not False,
-        "tools": cfg.get("tools"),
-    }
+        "tools": cfg.get("tools")}

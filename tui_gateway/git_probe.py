@@ -1,19 +1,10 @@
-"""Git working-tree probing for the gateway: run git, resolve repo roots, fold
-linked worktrees under their common root.
+"""Git working-tree probing for the gateway: run git, resolve repo roots, fold linked worktrees.
 
-Probing runs where the gateway runs, so it covers local and remote backends
-(the desktop's electron probe only sees the local fs). Roots go through a
-thread-safe single-flight cache: gateway handlers run on worker threads, so
-concurrent identical probes share one ``git`` spawn instead of racing a dict.
-
-Positive results are cached for the process lifetime; negatives (not a repo, or
-a deleted dir) only for ``_NEG_TTL``. Caching negatives matters: ``build_tree``
-resolves a cwd once *per session*, so hundreds of sessions in non-git/deleted
-dirs would otherwise re-spawn ``git`` on every sidebar open (multi-second
-"Projects" load). The TTL keeps a not-yet-repo cwd re-probable — we ``git init``
-a new project's folder on its first worktree, and a frozen "" would mislabel its
-main lane by dir basename. ``invalidate()`` drops everything after a known
-mutation.
+Probing runs where the gateway runs (covers remote backends). Roots go through a thread-safe
+single-flight cache so concurrent identical probes share one ``git`` spawn. Positives are cached
+for the process lifetime; negatives (not a repo / deleted dir) only for ``_NEG_TTL`` —
+``build_tree`` resolves a cwd once *per session*, so hundreds of non-git cwds would otherwise
+re-spawn ``git`` on every sidebar open, while the TTL keeps a fresh ``git init`` re-probable.
 """
 
 from __future__ import annotations
@@ -28,23 +19,20 @@ from hermes_cli._subprocess_compat import bounded_git_probe
 
 _GIT_TIMEOUT = 1.5
 _WARM_WORKERS = 8
-
-# "Not a git repo" cache TTL: short enough that a freshly `git init`-ed folder
-# shows correctly within seconds, long enough to collapse a tree build's
-# hundreds of redundant probes.
+# "Not a git repo" TTL: short enough that a fresh `git init` shows within seconds,
+# long enough to collapse a tree build's hundreds of redundant probes.
 _NEG_TTL = 30.0
 
 
 def run_git(cwd: str, *args: str) -> str:
     """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure.
 
-    Uses :func:`bounded_git_probe` so post-kill cleanup is bounded on Windows —
-    a plain ``subprocess.run(timeout=...)`` deadlocked Desktop session readiness
-    when a killed git left a suspended descendant holding the pipe handles.
+    ``bounded_git_probe`` bounds post-kill cleanup on Windows — a plain ``subprocess.run(timeout)``
+    deadlocked Desktop readiness when a killed git left a suspended descendant holding the pipes.
     """
+    # `git -C` on a missing dir can only fail, at the price of a fork; deleted worktrees
+    # dominate a long session history's cwds, so the stat pays off.
     if not cwd or not os.path.isdir(cwd):
-        # `git -C` on a missing dir can only fail, at the price of a fork; deleted
-        # worktrees dominate a long session history's cwds, so the stat pays off.
         return ""
     return bounded_git_probe(["git", "-C", cwd, *args], timeout=_GIT_TIMEOUT)
 
@@ -84,12 +72,10 @@ class _RootCache:
                 leader = gate is None
                 if leader:
                     gate = self._inflight[key] = threading.Event()
-
             if not leader:
                 # Another thread is probing this key — wait, then re-read.
                 gate.wait(timeout=_GIT_TIMEOUT + 0.5)
                 continue
-
             value = ""
             try:
                 value = probe()
@@ -122,19 +108,13 @@ def repo_root(cwd: str) -> str:
 def common_repo_root(cwd: str) -> str:
     """The MAIN (common) repo root for ``cwd``, folding linked worktrees.
 
-    ``--show-toplevel`` returns a linked worktree's OWN root, splitting every
-    worktree into its own "repo"; the parent of the shared ``--git-common-dir``
-    is the one true root (fallback: the toplevel root).
-
-    The result is normalized to git's forward-slash spelling so it compares
-    equal to :func:`repo_root` (raw ``--show-toplevel``). ``os.path.realpath``
-    uses native ``\\`` on Windows, so without this the main checkout compared
-    unequal to its own common root, was misread as a linked worktree, and the
-    desktop sidebar rendered it twice.
+    ``--show-toplevel`` returns a linked worktree's OWN root; the parent of the shared
+    ``--git-common-dir`` is the one true root (fallback: the toplevel root). Normalized to git's
+    forward-slash spelling so it compares equal to :func:`repo_root` — with native ``\\`` on
+    Windows the main checkout was misread as a linked worktree and the sidebar rendered it twice.
     """
-    # Not a repo: nothing to fold. Checking the (warmed, negative-cached)
-    # toplevel first spares every non-repo cwd a second `git` spawn that the
-    # parallel warm can't absorb (`resolve()` only reaches here for repos).
+    # Not a repo: nothing to fold. Checking the (warmed, negative-cached) toplevel first spares
+    # every non-repo cwd a second `git` spawn the parallel warm can't absorb.
     if not cwd or not repo_root(cwd):
         return ""
 
@@ -150,12 +130,8 @@ def common_repo_root(cwd: str) -> str:
 
 
 def resolve(cwd: str) -> dict | None:
-    """Inject-able resolver for ``project_tree.build_tree``.
-
-    Returns ``{"repo_root": <common root>, "worktree_root": <this checkout>}``
-    or ``None`` when ``cwd`` is not in a git repo. ``build_tree`` treats
-    ``worktree_root == repo_root`` as the main checkout.
-    """
+    """Inject-able resolver for ``project_tree.build_tree``: ``{repo_root: <common root>,
+    worktree_root: <this checkout>}`` or None outside a repo (equal roots = main checkout)."""
     worktree_root = repo_root(cwd)
     if not worktree_root:
         return None

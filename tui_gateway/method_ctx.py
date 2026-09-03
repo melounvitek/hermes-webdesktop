@@ -1,15 +1,11 @@
 """Seam for the server.py handler/helper split.
 
-server.py's JSON-RPC handlers and many helpers close over its module globals
-(``_sessions``, ``_ok``, ``_err``, config helpers, ...).  To move them out
-without rewriting a single body, each split module defines its code normally
-and server.py calls :func:`bind_module` at the end of its own import, once
-every global the code closes over exists.  Function bodies are re-created with
-``types.FunctionType`` against server.py's namespace, so they stay
-byte-identical and ``global X`` statements keep mutating server.py state.
-
-No import cycle: split modules never import server at module level — server
-imports them and passes itself in.
+server.py's JSON-RPC handlers and helpers close over its module globals (``_sessions``,
+``_ok``, ``_err``, ...). Split modules define their code normally and server.py calls
+:func:`bind_module` at the end of its own import, once every global exists: bodies are
+re-created with ``types.FunctionType`` against server.py's namespace, so they stay
+byte-identical and ``global X`` statements keep mutating server.py state. No import
+cycle: split modules never import server at module level — server passes itself in.
 """
 
 import contextlib
@@ -21,11 +17,8 @@ _CM_HELPER_CODE = contextlib.contextmanager(lambda: (yield)).__code__
 
 
 def rebind(fn, g: dict, _seen=None):
-    """Copy ``fn`` with globals ``g``.
-
-    Closure cells holding functions from the same module are rebound too, so
-    handlers produced by import-time decorator factories keep working.
-    """
+    """Copy ``fn`` with globals ``g``; closure cells holding same-module functions are rebound too
+    (so handlers produced by import-time decorator factories keep working)."""
     _seen = {} if _seen is None else _seen
     if id(fn) in _seen:
         return _seen[id(fn)]
@@ -90,14 +83,13 @@ _PLUMBING = {"HandlerRegistry", "method", "_profile_scoped", "register", "rebind
 def bind_module(module_globals: dict, server, *, skip=()) -> None:
     """Publish everything a split module defines onto ``server``, rebound to its globals.
 
-    ``module_globals`` is the caller's ``globals()`` (not ``sys.modules[__name__]``:
-    tests that ``patch.dict(sys.modules)`` around the server import drop the
-    submodule entries while the package attribute survives, so a re-import would
-    KeyError).  Functions are rebound; classes get their methods rebound in place;
-    other values (constants, ``global``-mutated state seeds) are copied as-is.
-    Imported modules/functions, dunders and registry plumbing are skipped, so a
-    split module needs no hand-maintained export list.  Dispatch tables (dicts
-    whose values are this module's functions) get their values rebound too.
+    ``module_globals`` is the caller's ``globals()`` (not ``sys.modules[__name__]``: tests
+    that ``patch.dict(sys.modules)`` around the server import drop the submodule entries
+    while the package attribute survives, so a re-import would KeyError). Functions are
+    rebound; classes get their methods rebound in place; dispatch tables (dict/tuple/list
+    holding this module's functions) get their values rebound; other values (constants,
+    ``global``-mutated state seeds) are copied as-is. Imported modules/functions, dunders
+    and registry plumbing are skipped, so no hand-maintained export list is needed.
     Finally the module's ``_registry`` (if any) installs its @method handlers.
     """
     g = vars(server)
@@ -108,7 +100,6 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
         return isinstance(v, types.FunctionType) and v.__module__ == mod_name
 
     def _rebind_in(v):
-        """Rebind own functions nested in dict/tuple/list constants (dispatch tables)."""
         if _own_fn(v):
             return rebind(v, g, seen)
         if isinstance(v, dict):
@@ -118,13 +109,8 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
         return v
 
     def _has_own_fn(v):
-        if _own_fn(v):
-            return True
-        if isinstance(v, dict):
-            return any(_has_own_fn(x) for x in v.values())
-        if isinstance(v, (tuple, list)):
-            return any(_has_own_fn(x) for x in v)
-        return False
+        items = v.values() if isinstance(v, dict) else v if isinstance(v, (tuple, list)) else None
+        return _own_fn(v) if items is None else any(_has_own_fn(x) for x in items)
 
     for name, obj in list(module_globals.items()):
         if name.startswith("__") or name in _PLUMBING or name in skip:
@@ -132,15 +118,12 @@ def bind_module(module_globals: dict, server, *, skip=()) -> None:
         if isinstance(obj, (types.ModuleType, HandlerRegistry)):
             continue
         if isinstance(obj, types.FunctionType):
-            if obj.__module__ != mod_name:
-                if name == obj.__name__:
-                    continue  # plain import; server already has its own
-                # ``_alias = other_module.fn`` — publish as-is, no rebind
-            else:
+            if obj.__module__ == mod_name:
                 obj = rebind(obj, g, seen)
+            elif name == obj.__name__:
+                continue  # plain import; server has its own (``_alias = other.fn`` publishes as-is)
         elif isinstance(obj, (dict, tuple, list)) and _has_own_fn(obj):
-            obj = _rebind_in(obj)
-            module_globals[name] = obj  # keep the split module's own view consistent
+            obj = module_globals[name] = _rebind_in(obj)  # keep the split module's own view in sync
         elif isinstance(obj, type):
             if obj.__module__ != mod_name:
                 continue
