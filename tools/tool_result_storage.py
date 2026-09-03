@@ -1,11 +1,10 @@
 """Tool result persistence -- preserves large outputs instead of truncating.
-
 Layers against context overflow: (1) per-tool caps inside each tool; (2)
-``maybe_persist_tool_result`` — output over the tool's threshold is persisted and
-replaced by a preview + path. Canonical home is ALWAYS host-side
-``$HERMES_HOME/cache/spillover/{id}.txt`` (works for sessions that never ran a
-terminal); remote backends get the translated in-sandbox path (probed for
-readability) else a copy in the sandbox temp dir. (3) ``enforce_turn_budget``."""
+``maybe_persist_tool_result`` — output over the tool's threshold is persisted and replaced
+by a preview + path. Canonical home is ALWAYS host-side ``$HERMES_HOME/cache/spillover/
+{id}.txt`` (works for sessions that never ran a terminal); remote backends get the
+translated in-sandbox path (probed for readability) else a copy in the sandbox temp dir.
+(3) ``enforce_turn_budget``."""
 
 import hashlib
 import logging
@@ -34,13 +33,12 @@ _spillover_pruned_once = False
 def get_spillover_dir():
     """Return $HERMES_HOME/cache/spillover as a Path (not created)."""
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / SPILLOVER_SUBDIR
 
 
 def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int:
-    """Delete spillover files older than *max_age_hours*; returns count removed.
-    Same contract as the ``cleanup_*_cache`` helpers the gateway housekeeping loop prunes hourly."""
+    """Delete spillover files older than *max_age_hours*; returns count removed (same
+    contract as the ``cleanup_*_cache`` helpers the gateway housekeeping loop runs hourly)."""
     cutoff = time.time() - (max_age_hours * 3600)
     removed = 0
     try:
@@ -73,14 +71,12 @@ def _prune_spillover_once() -> None:
 
 
 def _is_host_side_env(env) -> bool:
-    """True when this process should write the spill file directly: ``env=None``
-    (no sandbox yet) or the local backend. Remote backends resolve ``read_file``
-    inside the sandbox, so the spill must be written there."""
+    """True when this process should write the spill file directly: ``env=None`` (no sandbox
+    yet) or the local backend. Remote backends resolve ``read_file`` inside the sandbox."""
     if env is None:
         return True
     try:
         from tools.environments.local import LocalEnvironment
-
         return isinstance(env, LocalEnvironment)
     except Exception:
         return False
@@ -101,13 +97,12 @@ def _write_to_spillover(content: str, filename: str):
 
 
 def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
-    """Path where a remote backend can read *host_path*, or None. Translates via
-    the image tools' helper, forces a sync for synced backends, then PROBES
-    readability — a persistent container created before spillover joined the
-    mount list lacks the bind mount and must fall back to the in-sandbox write."""
+    """Path where a remote backend can read *host_path*, or None. Translates via the image
+    tools' helper, forces a sync for synced backends, then PROBES readability — a persistent
+    container created before spillover joined the mount list lacks the bind mount and must
+    fall back to the in-sandbox write."""
     try:
         from tools.credential_files import to_agent_visible_cache_path
-
         visible = to_agent_visible_cache_path(host_path)
     except Exception as exc:
         logger.debug("Spillover path translation failed: %s", exc)
@@ -119,8 +114,7 @@ def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
         except Exception as exc:
             logger.debug("Spillover sync failed: %s", exc)
     try:
-        result = env.execute(f"test -r {shlex.quote(visible)}", timeout=15)
-        if result.get("returncode", 1) == 0:
+        if env.execute(f"test -r {shlex.quote(visible)}", timeout=15).get("returncode", 1) == 0:
             return visible
     except Exception as exc:
         logger.debug("Spillover readability probe failed: %s", exc)
@@ -130,15 +124,13 @@ def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
 def _resolve_storage_dir(env) -> str:
     """Return the best temp-backed storage dir for this environment."""
     get_temp_dir = getattr(env, "get_temp_dir", None)
+    temp_dir = None
     if callable(get_temp_dir):
         try:
             temp_dir = get_temp_dir()
         except Exception as exc:
             logger.debug("Could not resolve env temp dir: %s", exc)
-        else:
-            if temp_dir:
-                return f"{temp_dir.rstrip('/') or '/'}/hermes-results"
-    return STORAGE_DIR
+    return f"{temp_dir.rstrip('/') or '/'}/hermes-results" if temp_dir else STORAGE_DIR
 
 
 def _safe_result_filename(tool_use_id: str) -> str:
@@ -146,9 +138,7 @@ def _safe_result_filename(tool_use_id: str) -> str:
     raw_id = str(tool_use_id or "tool_result")
     safe_stem = _UNSAFE_RESULT_FILENAME_CHARS.sub("_", raw_id).strip("._-")
     changed = safe_stem != raw_id
-    if not safe_stem:
-        safe_stem = "tool_result"
-        changed = True
+    safe_stem = safe_stem or "tool_result"
     if changed or len(safe_stem) > _MAX_RESULT_FILENAME_STEM:
         digest = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()[:12]
         safe_stem = safe_stem[:_MAX_RESULT_FILENAME_STEM].rstrip("._-") or "tool_result"
@@ -168,14 +158,12 @@ def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) 
 
 
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
-    """Write content into the sandbox via env.execute(). Returns True on success.
-    Content goes through stdin, not the command string: Linux ``MAX_ARG_STRLEN``
-    caps one argv element at 128 KB, so a heredoc-in-command silently failed
-    for exactly the oversized results persistence exists to handle."""
+    """Write content into the sandbox via env.execute(); True on success. Content goes through
+    stdin, not the command string: Linux ``MAX_ARG_STRLEN`` caps one argv element at 128 KB,
+    so a heredoc-in-command silently failed for exactly the oversized results this handles."""
     storage_dir = os.path.dirname(remote_path)
     cmd = f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)}"
-    result = env.execute(cmd, timeout=30, stdin_data=content)
-    return result.get("returncode", 1) == 0
+    return env.execute(cmd, timeout=30, stdin_data=content).get("returncode", 1) == 0
 
 
 def _build_persisted_message(
@@ -200,9 +188,8 @@ _PERSISTED_PATH_RE = re.compile(r"^Full output saved to: (.+)$", re.MULTILINE)
 
 
 def extract_persisted_path(content: str) -> str | None:
-    """Return the file path from a <persisted-output> block, or None. Lets the
-    result-reference stubbing guard (agent/tool_guardrails.py) carry the
-    spillover path in a stub instead of leaving it dangling."""
+    """File path from a <persisted-output> block, or None (lets the result-reference stubbing
+    guard in agent/tool_guardrails.py carry the spillover path instead of leaving it dangling)."""
     if not isinstance(content, str) or PERSISTED_OUTPUT_TAG not in content:
         return None
     match = _PERSISTED_PATH_RE.search(content)
@@ -216,13 +203,13 @@ def maybe_persist_tool_result(
     env=None,
     config: BudgetConfig = DEFAULT_BUDGET,
     threshold: int | float | None = None) -> str:
-    """Layer 2: persist an oversized result, return preview + path.
-    ``threshold`` overrides ``config.resolve_threshold(tool_name)``. Falls back
-    to inline truncation when no write location succeeds."""
-    effective_threshold = threshold if threshold is not None else config.resolve_threshold(tool_name)
-    if effective_threshold == float("inf") or len(content) <= effective_threshold:
+    """Layer 2: persist an oversized result, return preview + path. ``threshold`` overrides
+    ``config.resolve_threshold(tool_name)``; falls back to inline truncation when no write
+    location succeeds."""
+    if threshold is None:
+        threshold = config.resolve_threshold(tool_name)
+    if threshold == float("inf") or len(content) <= threshold:
         return content
-
     filename = _safe_result_filename(tool_use_id)
     preview, has_more = generate_preview(content, max_chars=config.preview_size)
 
@@ -238,9 +225,8 @@ def maybe_persist_tool_result(
         if host_path is not None:
             return _persisted(host_path)
     else:
-        # Remote backend: reference the mounted/synced path when the sandbox can
-        # actually read it, else write into the sandbox temp dir (pre-existing
-        # containers without the spillover mount, translation/probe failures).
+        # Remote backend: reference the mounted/synced path when the sandbox can actually read
+        # it, else write into the sandbox temp dir (containers without the spillover mount).
         if host_path is not None:
             visible = _sandbox_visible_spillover_path(host_path, env)
             if visible is not None:
@@ -252,19 +238,16 @@ def maybe_persist_tool_result(
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
 
-    logger.info(
-        "Inline-truncating large tool result: %s (%d chars, no sandbox write)",
-        tool_name, len(content))
-    return (
-        f"{preview}\n\n"
-        f"[Truncated: tool response was {len(content):,} chars. "
-        f"Full output could not be saved to sandbox.]")
+    logger.info("Inline-truncating large tool result: %s (%d chars, no sandbox write)",
+                tool_name, len(content))
+    return (f"{preview}\n\n[Truncated: tool response was {len(content):,} chars. "
+            "Full output could not be saved to sandbox.]")
 
 
 def enforce_turn_budget(
     tool_messages: list[dict], env=None, config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
-    """Layer 3: persist the largest non-persisted results first until the turn's
-    aggregate is under budget. Mutates the list in-place and returns it."""
+    """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
+    under budget. Mutates the list in-place and returns it."""
     candidates = []
     total_size = 0
     for i, msg in enumerate(tool_messages):
@@ -274,7 +257,6 @@ def enforce_turn_budget(
             candidates.append((i, size))
     if total_size <= config.turn_budget:
         return tool_messages
-
     candidates.sort(key=lambda x: x[1], reverse=True)
     for idx, size in candidates:
         if total_size <= config.turn_budget:
