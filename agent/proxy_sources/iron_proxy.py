@@ -275,14 +275,19 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
         _release_asset(_IRON_PROXY_CHECKSUM_SIG_NAME, sig_path)
         _release_asset(_IRON_PROXY_PUBKEY_NAME, pubkey_path)
     except RuntimeError as exc:
-        logger.warning("iron-proxy release signature assets unavailable (%s) — skipping GPG verification (SHA-256 checksum check still enforced).", exc)
+        logger.warning(
+            "iron-proxy release signature assets unavailable (%s) — skipping GPG verification (SHA-256 checksum check still enforced).", exc,
+        )
         return False
     gnupg_home = tmp / "gnupg"
     gnupg_home.mkdir(mode=0o700, exist_ok=True)
     gpg_base = [gpg, "--homedir", str(gnupg_home), "--batch", "--no-tty"]
     imp = _run([*gpg_base, "--import", str(pubkey_path)], timeout=60)
     if imp.returncode != 0:
-        logger.warning("Could not import iron-proxy signing key — skipping GPG verification (SHA-256 still enforced): %s", imp.stderr.decode("utf-8", "replace")[:200])
+        logger.warning(
+            "Could not import iron-proxy signing key — skipping GPG verification (SHA-256 still enforced): %s",
+            imp.stderr.decode("utf-8", "replace")[:200],
+        )
         return False
     verify = _run([*gpg_base, "--verify", str(sig_path), str(checksum_path)], timeout=60)
     if verify.returncode != 0:
@@ -944,7 +949,10 @@ def _write_pidfile_safely(pidfile: Path, pid: int) -> None:
     except FileExistsError:
         existing_pid = _read_pid()
         if existing_pid and _pid_alive(existing_pid):
-            raise RuntimeError(f"Another iron-proxy start appears to be in progress (pidfile {pidfile} -> pid {existing_pid}).  Run `hermes egress stop` if that proxy is stuck.")
+            raise RuntimeError(
+                f"Another iron-proxy start appears to be in progress (pidfile {pidfile} -> pid {existing_pid}).  "
+                f"Run `hermes egress stop` if that proxy is stuck."
+            )
         pidfile.unlink(missing_ok=True)
         fd = os.open(str(pidfile), open_flags, 0o600)
     except OSError as exc:
@@ -1025,7 +1033,8 @@ def _refresh_secrets_from_bitwarden(env: Dict[str, str], needed: set, bitwarden_
                 allow_env_fallback,
                 "credential_source=bitwarden but the access-token env or project_id is empty.  Either set both, switch to "
                 "credential_source: env, or set `proxy.allow_env_fallback: true` to opt into the legacy fallback behaviour.",
-                "credential_source=bitwarden but access-token env or project_id is empty — proxy will fall back to parent env (allow_env_fallback=true).",
+                "credential_source=bitwarden but access-token env or project_id is empty — "
+                "proxy will fall back to parent env (allow_env_fallback=true).",
             )
             return
         secrets, warnings = bw.fetch_bitwarden_secrets(access_token=access_token, project_id=project_id, cache_ttl_seconds=0, use_cache=False)
