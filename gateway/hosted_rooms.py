@@ -213,8 +213,6 @@ _room_id = partial(_validate_identifier, label="room_id", max_chars=MAX_ROOM_ID_
 _event_id = partial(_validate_identifier, label="event_id", max_chars=MAX_EVENT_ID_CHARS)
 _actor_json = partial(_canonical_json, label="actor", max_bytes=4 * 1024)
 _payload_json = partial(_canonical_json, label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
-
-
 _bounded_int = partial(bounded_int, error=HostedRoomError)
 _validate_room_name = partial(
     _validate_identifier, label="name", max_chars=MAX_ROOM_NAME_CHARS, pattern=None, invalid="invalid room name")
@@ -309,8 +307,6 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
 
 
 # --- schema / connections -------------------------------------------------------
-
-
 def _remote_run_schema_current(conn: sqlite3.Connection, columns: frozenset[str]) -> bool:
     if not _REMOTE_RUN_SCHEMA_COLUMNS.issubset(columns):
         return False
@@ -411,8 +407,7 @@ def default_db_path() -> Path:
     """Return the gateway-wide state database for the active install."""
     from hermes_constants import get_hermes_home
     home = get_hermes_home()
-    root = home.parent.parent if home.parent.name == "profiles" else home
-    return root / "state.db"
+    return (home.parent.parent if home.parent.name == "profiles" else home) / "state.db"
 
 
 def local_authority_gateway_id() -> str:
@@ -424,10 +419,9 @@ def local_authority_gateway_id() -> str:
     return _actor_id(f"install:{install_id}", "authority_gateway_id")
 
 
-def _connect(db_path: DbPath) -> sqlite3.Connection:
-    return connect(
-        db_path, db_label="state.db (hosted_rooms)", ready=_schema_is_current,
-        initialize=lambda conn: _initialize_schema(conn), lock_retries=_JOURNAL_MODE_LOCK_RETRIES)
+_connect = partial(
+    connect, db_label="state.db (hosted_rooms)", ready=_schema_is_current,
+    initialize=lambda conn: _initialize_schema(conn), lock_retries=_JOURNAL_MODE_LOCK_RETRIES)
 
 
 def _read_connection(db_path: DbPath) -> sqlite3.Connection:
@@ -447,8 +441,6 @@ _transaction = partial(transaction, _connect, immediate=False)
 
 
 # --- row helpers ------------------------------------------------------------------
-
-
 def _is_retired(conn: sqlite3.Connection, room_id: str) -> bool:
     return conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone() is not None
 
@@ -534,8 +526,7 @@ def _prepare_event(
     allow_control: bool = False) -> int:
     """Size one pending event and enforce per-room and gateway capacity; returns its bytes."""
     additional_bytes = len((event_id + kind + actor_json + payload_json).encode("utf-8"))
-    count_reserve = CONTROL_EVENT_COUNT_RESERVE if allow_control else 0
-    byte_reserve = CONTROL_EVENT_BYTE_RESERVE if allow_control else 0
+    count_reserve, byte_reserve = (CONTROL_EVENT_COUNT_RESERVE, CONTROL_EVENT_BYTE_RESERVE) if allow_control else (0, 0)
     gateway_byte_limit = MAX_GATEWAY_EVENT_BYTES + byte_reserve
     if int(room["next_seq"]) - 1 >= MAX_EVENTS_PER_ROOM + count_reserve:
         raise HostedRoomError("This Group Chat reached its history limit. Start a new Group Chat to continue.")
@@ -604,8 +595,6 @@ def prune_disbanded_rooms(db_path: DbPath, *, now: float | None = None) -> int:
 
 
 # --- room links / grants / reservations / remote runs ---------------------------------
-
-
 def list_room_link_records(db_path: DbPath) -> list[dict[str, Any]]:
     """Return private RoomLink records without logging or formatting grants."""
     with _transaction(db_path) as conn:
@@ -623,10 +612,8 @@ def upsert_room_link_record(db_path: DbPath, *, record: Mapping[str, Any], max_l
         existing = conn.execute(
             "SELECT 1 FROM hosted_room_links WHERE room_id=? AND member_id=?", (record["room_id"], record["member_id"])
         ).fetchone()
-        if existing is None:
-            count = int(conn.execute("SELECT COUNT(*) FROM hosted_room_links").fetchone()[0])
-            if count >= max_links:
-                raise HostedRoomError("too many stored room links")
+        if existing is None and int(conn.execute("SELECT COUNT(*) FROM hosted_room_links").fetchone()[0]) >= max_links:
+            raise HostedRoomError("too many stored room links")
         conn.execute("""INSERT INTO hosted_room_links(
                    room_id, member_id, target_url, target_profile, grant,
                    catalog_json, cancellation_scope_id, trace_id,
@@ -649,10 +636,9 @@ def update_room_link_status(
     db_path: DbPath, *, room_id: str, member_id: str, status: str, now: float | None = None) -> bool:
     """Persist a non-secret route health classification."""
     with _transaction(db_path, immediate=True) as conn:
-        cursor = conn.execute(
+        return conn.execute(
             "UPDATE hosted_room_links SET status=?, updated_at=? WHERE room_id=? AND member_id=?",
-            (status, _now(now), room_id, member_id))
-        return cursor.rowcount == 1
+            (status, _now(now), room_id, member_id)).rowcount == 1
 
 
 def delete_room_link_records(db_path: DbPath, *, room_id: str) -> int:
@@ -833,8 +819,6 @@ def remote_run_receipt(db_path: DbPath, *, record: Mapping[str, Any]) -> dict[st
 
 
 # --- rooms and events -------------------------------------------------------------
-
-
 def _adopt_legacy_room(
     conn: sqlite3.Connection, existing: sqlite3.Row, *, room_id: str, members_json: str, authority_gateway_id: str,
     now: float) -> dict[str, Any]:
@@ -1034,10 +1018,7 @@ def room_state(db_path: DbPath, *, room_id: Any, include_disbanded: bool = False
             f"""SELECT {_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=?
                 AND kind='authority.claimed' AND authority_epoch=? ORDER BY seq DESC LIMIT 1""",
             (room_id, int(row["authority_epoch"]))).fetchone()
-    state = _room_from_row(row)
-    if claim_row is not None:
-        state["authority_claim"] = _event_from_row(claim_row)
-    return state
+    return {**_room_from_row(row), **({"authority_claim": _event_from_row(claim_row)} if claim_row is not None else {})}
 
 
 def request_room_stop(
@@ -1116,10 +1097,9 @@ def _disband_replay(conn: sqlite3.Connection, room_id: str, room: sqlite3.Row | 
         return None
     conn.execute(_INSERT_RETIRED, (room_id, float(room["disbanded_at"])))
     event = _load_event(conn, room_id, "system:room-disbanded")
-    result = {"room_id": room_id, "disbanded_at": float(room["disbanded_at"]), "idempotent": True}
-    if event is not None:
-        result["event"] = _event_from_row(event, idempotent=True)
-    return result
+    return {
+        "room_id": room_id, "disbanded_at": float(room["disbanded_at"]), "idempotent": True,
+        **({"event": _event_from_row(event, idempotent=True)} if event is not None else {})}
 
 
 def disband_room(
@@ -1190,9 +1170,8 @@ def read_events(
     events = [_event_from_row(row) for row in rows]
     def build_page(page_events: list[dict[str, Any]]) -> dict[str, Any]:
         cursor = page_events[-1]["seq"] if page_events else since_seq
-        return {
-            "events": page_events, "cursor": cursor, "latest_seq": latest_seq, "has_more": cursor < latest_seq,
-            "authority": authority}
+        return {"events": page_events, "cursor": cursor, "latest_seq": latest_seq, "has_more": cursor < latest_seq,
+                "authority": authority}
     def page_bytes(page: dict[str, Any]) -> int:
         return len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     page = build_page(events)
