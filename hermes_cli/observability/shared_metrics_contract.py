@@ -100,6 +100,7 @@ _ARCHITECTURE_ALIASES = {
     "aarch64": "arm64", "arm64": "arm64",
     "i386": "x86", "i486": "x86", "i586": "x86", "i686": "x86", "x86": "x86",
 }
+_OS_FAMILIES = {"darwin": "macos", "linux": "linux", "macos": "macos", "windows": "windows"}
 
 
 def _norm(value: Any) -> str:
@@ -112,9 +113,7 @@ def _allowlisted(normalized: str, allowed: frozenset[str]) -> str:
 
 def client_os_family(value: Any) -> str:
     """Map a platform system name to the shared-metrics OS taxonomy."""
-    return {"darwin": "macos", "linux": "linux", "macos": "macos", "windows": "windows"}.get(
-        _norm(value), "unknown"
-    )
+    return _OS_FAMILIES.get(_norm(value), "unknown")
 
 
 def client_architecture(value: Any) -> str:
@@ -279,24 +278,25 @@ def _event_shape_matches(
     """Match the coarse Relay event shape.
 
     A ``str`` expectation compares against the stringified attribute; ``None`` requires the
-    attribute itself to be ``None``; ``_ANY`` skips the check. ``category_profile`` compares
-    with plain equality (marks carry ``None``, tool scopes ``{}``).
+    attribute itself to be ``None``; ``_ANY`` skips the check. Anything else (the
+    ``category_profile`` dict) compares with plain equality.
     """
     if _event_text(event, "kind") != kind:
         return False
-    for attr, expected, as_text in (
-        ("name", name, True),
-        ("category", category, True),
-        ("scope_category", scope_category, True),
-        ("category_profile", category_profile, False),
-    ):
+    expectations = {
+        "name": name, "category": category, "scope_category": scope_category,
+        "category_profile": category_profile,
+    }
+    for attr, expected in expectations.items():
         if expected is _ANY:
             continue
-        actual = getattr(event, attr, None)
-        if expected is None:
-            if actual is not None:
-                return False
-        elif (_event_text(event, attr) if as_text else actual) != expected:
+        if isinstance(expected, str):
+            matched = _event_text(event, attr) == expected
+        elif expected is None:
+            matched = getattr(event, attr, None) is None
+        else:
+            matched = getattr(event, attr, None) == expected
+        if not matched:
             return False
     return True
 
@@ -453,6 +453,7 @@ _SURFACE_ALIASES = {
     "api_server": "api",
     **dict.fromkeys(("cron", "scheduler", "scheduled"), "scheduled_task"),
 }
+_KNOWN_GATEWAY_PLATFORMS = frozenset({"discord", "email", "slack", "telegram", "teams", "whatsapp"})
 
 
 def execution_surface(kwargs: dict[str, Any]) -> str:
@@ -469,7 +470,7 @@ def execution_surface(kwargs: dict[str, Any]) -> str:
             return "gateway"
     except Exception:
         pass
-    if value in {"discord", "email", "slack", "telegram", "teams", "whatsapp"}:
+    if value in _KNOWN_GATEWAY_PLATFORMS:
         return "gateway"
     return "unknown" if value == "unknown" else "other"
 
@@ -477,10 +478,7 @@ def execution_surface(kwargs: dict[str, Any]) -> str:
 def task_start_fields(kwargs: dict[str, Any]) -> dict[str, str]:
     """Build the bounded fields recorded on a task scope start event."""
     surface = execution_surface(kwargs)
-    return {
-        "entrypoint": task_entrypoint(kwargs, surface),
-        "execution_surface": surface,
-    }
+    return {"entrypoint": task_entrypoint(kwargs, surface), "execution_surface": surface}
 
 
 _SURFACE_ENTRYPOINTS = {
@@ -495,10 +493,9 @@ def task_entrypoint(kwargs: dict[str, Any], surface: str | None = None) -> str:
     declared = _norm(kwargs.get("entrypoint"))
     if declared in TASK_ENTRYPOINTS:
         return declared
-    resolved_surface = surface or execution_surface(kwargs)
     if kwargs.get("parent_task_id") or kwargs.get("parent_session_id"):
         return "delegated"
-    return _SURFACE_ENTRYPOINTS.get(resolved_surface, "other")
+    return _SURFACE_ENTRYPOINTS.get(surface or execution_surface(kwargs), "other")
 
 
 def task_terminal_fields(
@@ -524,7 +521,7 @@ def task_terminal_fields(
 
 
 def task_terminal_state(kwargs: dict[str, Any]) -> tuple[str, str, str]:
-    """Map Hermes terminal state to bounded task outcome dimensions."""
+    """Map Hermes terminal state to bounded (outcome, end_reason, termination)."""
     reason = _norm(kwargs.get("turn_exit_reason"))
     if kwargs.get("interrupted") or "interrupt" in reason or "cancel" in reason:
         return "cancelled", "user_cancelled", "user_cancelled"
@@ -558,10 +555,7 @@ _LATENCY_THRESHOLDS = (
 
 
 def _bucket(value: float, thresholds: tuple[tuple[float, str], ...], last: str) -> str:
-    for upper, label in thresholds:
-        if value < upper:
-            return label
-    return last
+    return next((label for upper, label in thresholds if value < upper), last)
 
 
 def duration_bucket(duration_ms: int) -> str:
@@ -636,9 +630,7 @@ def tool_terminal_fields(
 ) -> dict[str, str]:
     """Build one bounded tool-call terminal payload."""
     return {
-        "approval_outcome": (
-            approval_outcome if approval_outcome in TOOL_APPROVAL_OUTCOMES else "unknown"
-        ),
+        "approval_outcome": _allowlisted(approval_outcome, TOOL_APPROVAL_OUTCOMES),
         "latency_bucket": tool_latency_bucket(
             kwargs.get("duration_ms"), fallback_duration_ms=fallback_duration_ms
         ),
