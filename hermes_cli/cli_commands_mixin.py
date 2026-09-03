@@ -2666,9 +2666,8 @@ class CLICommandsMixin:
             print(f"  ✗ {format_managed_message('update Hermes Agent')}")
             return False
         # prompt_toolkit-native modal: renders above the composer, no raw input() races.
-        choices = [
-            ("once", "Update Now", "exit the current session and update Hermes Agent"),
-            ("cancel", "Cancel", "keep the current session")]
+        choices = [("once", "Update Now", "exit the current session and update Hermes Agent"),
+                   ("cancel", "Cancel", "keep the current session")]
         raw = self._prompt_text_input_modal(
             title="⚕  Update Hermes Agent",
             detail="This will exit the current session and run `hermes update`.", choices=choices)
@@ -2710,10 +2709,9 @@ class CLICommandsMixin:
 
     def _persist_wake_word_enabled(self, enabled: bool):
         """Save ``wake_word.enabled`` so the /wake toggle sticks for future sessions."""
-        with suppress(Exception):
-            from tools.wake_word import load_wake_word_config
-            if bool(load_wake_word_config().get("enabled")) == enabled:
-                return  # already persisted — don't rewrite config or re-announce
+        persisted = _probe("tools.wake_word", "load_wake_word_config", None)
+        if isinstance(persisted, dict) and bool(persisted.get("enabled")) == enabled:
+            return  # already persisted — don't rewrite config or re-announce
         if _save("wake_word.enabled", enabled):
             _cp(_dim(f"Wake word {'enabled' if enabled else 'disabled'} in config "
                      f"(wake_word.enabled: {str(enabled).lower()})."))
