@@ -6,6 +6,7 @@ headers. Extracted from ``run_agent.py``; every method resolves through ``AIAgen
 """
 import logging
 import threading
+from contextlib import suppress
 from typing import Any, Optional
 
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static, lazy_attr as _lazy_attr
@@ -34,9 +35,7 @@ def _qwen_portal_headers() -> dict:
     import platform as _plat
     _ua = f"QwenCode/{_QWEN_CODE_VERSION} ({_plat.system().lower()}; {_plat.machine()})"
     return {
-        "User-Agent": _ua,
-        "X-DashScope-CacheControl": "enable",
-        "X-DashScope-UserAgent": _ua,
+        "User-Agent": _ua, "X-DashScope-CacheControl": "enable", "X-DashScope-UserAgent": _ua,
         "X-DashScope-AuthType": "qwen-oauth",
     }
 
@@ -84,11 +83,9 @@ class ClientLifecycleMixin:
         return f"provider={getattr(self, 'provider', None)} model={getattr(self, 'model', None)}"
 
     def _openai_client_lock(self) -> threading.RLock:
-        lock = getattr(self, "_client_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._client_lock = lock
-        return lock
+        if getattr(self, "_client_lock", None) is None:
+            self._client_lock = threading.RLock()
+        return self._client_lock
 
     @staticmethod
     def _is_openai_client_closed(client: Any) -> bool:
@@ -260,7 +257,6 @@ class ClientLifecycleMixin:
                     _contains_image(v) for v in value.values()
                 )
             return isinstance(value, list) and any(_contains_image(v) for v in value)
-
         return any(
             _contains_image(item)
             for field in ("messages", "input")
@@ -281,8 +277,8 @@ class ClientLifecycleMixin:
         # Lazy init — tests build agents via AIAgent.__new__ without __init__.
         cache = getattr(self, slot_attr, None)
         if cache is None:
-            cache = {"client": None, "key": None, "poisoned": False, "in_use": False}
-            setattr(self, slot_attr, cache)
+            setattr(self, slot_attr, cache := {})
+            _reset_slot(cache)
         return cache
 
     def _checkout_request_slot(self, slot_attr: str, key: Any) -> tuple:
@@ -328,7 +324,7 @@ class ClientLifecycleMixin:
                 _reset_slot(cache)
         return client, in_use
 
-    def _abort_request_slot_client(self, slot_attr: str, client: Any, *, reason: str, label: str, context: str) -> None:
+    def _abort_request_slot_client(self, slot_attr: str, client: Any, *, reason: str) -> None:
         """Cross-thread abort: shut sockets down without releasing FDs.
 
         For stranger-thread callers (interrupt loop, stale detector). ``close()`` from a non-owning
@@ -337,6 +333,10 @@ class ClientLifecycleMixin:
         """
         if client is None:
             return
+        if slot_attr == _ANTHROPIC_SLOT:
+            label, context = "Anthropic", self._anthropic_log_context()
+        else:
+            label, context = "OpenAI", self._client_log_context()
         with self._openai_client_lock():
             cache = self._request_slot(slot_attr)
             if cache["client"] is client:
@@ -362,10 +362,8 @@ class ClientLifecycleMixin:
         # Per-request clients must not run the SDK retry loop: the outer loop owns retries/rotation/
         # fallback, and SDK retries stretch a hung request ~3x past our stale detector.
         request_kwargs["max_retries"] = 0
-        if (
-            base_url_host_matches(str(request_kwargs.get("base_url", "")), "githubcopilot.com")
-            and self._api_kwargs_have_image_parts(api_kwargs or {})
-        ):
+        is_copilot = base_url_host_matches(str(request_kwargs.get("base_url", "")), "githubcopilot.com")
+        if is_copilot and self._api_kwargs_have_image_parts(api_kwargs or {}):
             from hermes_cli.copilot_auth import copilot_request_headers
             request_kwargs["default_headers"] = copilot_request_headers(is_agent_turn=True, is_vision=True)
         cached, stale = self._checkout_request_slot(_OPENAI_SLOT, request_kwargs)
@@ -396,10 +394,7 @@ class ClientLifecycleMixin:
             self._close_openai_client(client, reason=reason, shared=False)
 
     def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:
-        if client is not None:
-            self._abort_request_slot_client(
-                _OPENAI_SLOT, client, reason=reason, label="OpenAI", context=self._client_log_context(),
-            )
+        self._abort_request_slot_client(_OPENAI_SLOT, client, reason=reason)
 
     def _request_anthropic_client_key(self) -> tuple:
         """Cache key covering everything that forces a fresh client: credential rotation, base URL /
@@ -407,12 +402,19 @@ class ClientLifecycleMixin:
         if getattr(self, "provider", None) == "bedrock":
             return ("bedrock", getattr(self, "_bedrock_region", "us-east-1") or "us-east-1")
         return (
-            "direct",
-            self._anthropic_api_key,
-            getattr(self, "_anthropic_base_url", None),
-            get_provider_request_timeout(self.provider, self.model),
-            bool(getattr(self, "_oauth_1m_beta_disabled", False)),
+            "direct", self._anthropic_api_key, getattr(self, "_anthropic_base_url", None),
+            get_provider_request_timeout(self.provider, self.model), bool(getattr(self, "_oauth_1m_beta_disabled", False)),
         )
+
+    def _build_direct_anthropic_client(self, token: str, base_url: Any) -> Any:
+        """Native Anthropic client for ``token``/``base_url`` with the provider/model request timeout."""
+        from agent.anthropic_adapter import build_anthropic_client
+        return build_anthropic_client(token, base_url, timeout=get_provider_request_timeout(self.provider, self.model))
+
+    def _anthropic_oauth_flag(self, token: str) -> bool:
+        """OAuth flag only on native Anthropic; third-party Anthropic-protocol endpoints must not trip OAuth paths."""
+        from agent.anthropic_adapter import _is_oauth_token
+        return _is_oauth_token(token) if self.provider == "anthropic" else False
 
     def _build_anthropic_client_for_key(self, key: tuple) -> Any:
         if key[0] == "bedrock":
@@ -467,26 +469,25 @@ class ClientLifecycleMixin:
             # A worker thread has this client checked out — same reasoning as the OpenAI teardown hook.
             self._abort_request_anthropic_client(client, reason=f"{reason}_in_flight")
             return
-        try:
+        with suppress(Exception):
             self._force_close_tcp_sockets(client)
             client.close()
-        except Exception:
-            pass
 
     def _abort_request_anthropic_client(self, client: Any, *, reason: str) -> None:
-        if client is not None:
-            self._abort_request_slot_client(
-                _ANTHROPIC_SLOT, client, reason=reason, label="Anthropic", context=self._anthropic_log_context(),
-            )
+        self._abort_request_slot_client(_ANTHROPIC_SLOT, client, reason=reason)
 
     # ------------------------------------------------------------------ credential refresh
+
+    def _sync_client_kwargs_credentials(self) -> None:
+        """Mirror ``self.api_key`` / ``self.base_url`` into the OpenAI-style client kwargs."""
+        self._client_kwargs["api_key"] = self.api_key
+        self._client_kwargs["base_url"] = self.base_url
 
     def _adopt_openai_credentials(self, api_key: str, base_url: str, *, reason: str) -> bool:
         """Apply a fresh key/base_url to the OpenAI-style kwargs and rebuild the shared client."""
         self.api_key = api_key.strip()
         self.base_url = base_url.strip().rstrip("/")
-        self._client_kwargs["api_key"] = self.api_key
-        self._client_kwargs["base_url"] = self.base_url
+        self._sync_client_kwargs_credentials()
         return self._replace_primary_openai_client(reason=reason)
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
@@ -569,16 +570,9 @@ class ClientLifecycleMixin:
         except ImportError:
             return None
         pconfig = PROVIDER_REGISTRY.get(self.provider)
-        if (
-            pconfig
-            and getattr(pconfig, "auth_type", "") == "api_key"
-            and getattr(pconfig, "api_key_env_vars", ())
-        ):
-            api_key = ""
-            for env_var in pconfig.api_key_env_vars:
-                api_key = get_env_prefer_dotenv(env_var).strip()
-                if api_key:
-                    break
+        if pconfig and getattr(pconfig, "auth_type", "") == "api_key" and getattr(pconfig, "api_key_env_vars", ()):
+            # First non-empty env var wins (lazy: later vars are not read).
+            api_key = next((k for k in (get_env_prefer_dotenv(v).strip() for v in pconfig.api_key_env_vars) if k), "")
             if not api_key:
                 return None
             env_url = ""
@@ -621,15 +615,11 @@ class ClientLifecycleMixin:
         if prev is None:
             # First look — adopt only the boot-default case; anything else is unattributable on turn one.
             # A pool-rotated key is not a boot-time env adoption; don't stomp it.
-            return (
-                current_base == default_base
-                and not unchanged
-                and not (
-                    api_key != self.api_key
-                    and getattr(self, "_credential_pool", None) is not None
-                    and getattr(self, "_credential_pool_entry_id", None)
-                )
+            pool_rotated = (
+                api_key != self.api_key and getattr(self, "_credential_pool", None) is not None
+                and getattr(self, "_credential_pool_entry_id", None)
             )
+            return current_base == default_base and not unchanged and not pool_rotated
         # Adopt only while the session still runs on the registry default or the previously-seen env value.
         return (base_url, api_key) != prev and current_base in {default_base, prev[0]} and not unchanged
 
@@ -654,8 +644,7 @@ class ClientLifecycleMixin:
         prior_client_kwargs = dict(self._client_kwargs)
         self.api_key = api_key
         self.base_url = base_url
-        self._client_kwargs["api_key"] = self.api_key
-        self._client_kwargs["base_url"] = self.base_url
+        self._sync_client_kwargs_credentials()
         # A base-url change moves the route: recompute TLS material and default headers.
         self._reapply_route_client_config(route_changed=route_changed)
         if not self._replace_primary_openai_client(reason="env_credential_refresh"):
@@ -696,8 +685,7 @@ class ClientLifecycleMixin:
         self.api_key = token
         if enterprise_base_url:
             self.base_url = enterprise_base_url.rstrip("/")
-        self._client_kwargs["api_key"] = self.api_key
-        self._client_kwargs["base_url"] = self.base_url
+        self._sync_client_kwargs_credentials()
         self._apply_client_headers_for_base_url(str(self.base_url or ""))
         return self._replace_primary_openai_client(reason=reason)
 
@@ -769,17 +757,17 @@ class ClientLifecycleMixin:
         return False
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
-        if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
-            return False
         # Only the native Anthropic provider rotates OAuth tokens; other anthropic_messages providers
         # (MiniMax, Alibaba, ...) use their own keys, and Azure endpoints use static API keys (a refresh
         # would pick up the ~/.claude OAuth token and break auth).
-        if self.provider != "anthropic":
-            return False
-        if base_url_host_matches(getattr(self, "_anthropic_base_url", "") or "", "azure.com"):
+        if (
+            self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key")
+            or self.provider != "anthropic"
+            or base_url_host_matches(getattr(self, "_anthropic_base_url", "") or "", "azure.com")
+        ):
             return False
         try:
-            from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
+            from agent.anthropic_adapter import resolve_anthropic_token
             new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
@@ -789,23 +777,15 @@ class ClientLifecycleMixin:
         new_token = new_token.strip()
         if new_token == self._anthropic_api_key:
             return False
-        try:
+        with suppress(Exception):
             self._anthropic_client.close()
-        except Exception:
-            pass
         try:
-            self._anthropic_client = build_anthropic_client(
-                new_token,
-                getattr(self, "_anthropic_base_url", None),
-                timeout=get_provider_request_timeout(self.provider, self.model),
-            )
+            self._anthropic_client = self._build_direct_anthropic_client(new_token, getattr(self, "_anthropic_base_url", None))
         except Exception as exc:
             logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
             return False
         self._anthropic_api_key = new_token
-        # OAuth flag only on native Anthropic; third-party Anthropic-protocol endpoints must not trip OAuth paths.
-        from agent.anthropic_adapter import _is_oauth_token
-        self._is_anthropic_oauth = _is_oauth_token(new_token) if self.provider == "anthropic" else False
+        self._is_anthropic_oauth = self._anthropic_oauth_flag(new_token)
         return True
 
     # ------------------------------------------------------------------ route-derived client config
@@ -818,13 +798,11 @@ class ClientLifecycleMixin:
         else:
             # No URL-specific headers — fall back to profile.default_headers before clearing.
             profile_headers = None
-            try:
+            with suppress(Exception):
                 from providers import get_provider_profile
                 profile = get_provider_profile(self.provider)
                 if profile and profile.default_headers:
                     profile_headers = dict(profile.default_headers)
-            except Exception:
-                pass
             if profile_headers:
                 self._client_kwargs["default_headers"] = profile_headers
             else:
@@ -861,23 +839,18 @@ class ClientLifecycleMixin:
         route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(runtime_base)
         stripped_base = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
         if self.api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
-            try:
+            with suppress(Exception):
                 self._anthropic_client.close()
-            except Exception:
-                pass
             self._anthropic_api_key = runtime_key
             self._anthropic_base_url = stripped_base
-            self._anthropic_client = build_anthropic_client(
-                runtime_key, self._anthropic_base_url,
-                timeout=get_provider_request_timeout(self.provider, self.model),
-            )
-            self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
+            self._anthropic_client = self._build_direct_anthropic_client(runtime_key, self._anthropic_base_url)
+            self._is_anthropic_oauth = self._anthropic_oauth_flag(runtime_key)
             self.api_key = runtime_key
             self.base_url = stripped_base
             return
         self.api_key = runtime_key
         self.base_url = stripped_base
+        # Inlined (not _sync_client_kwargs_credentials): tests call this unbound on a SimpleNamespace agent.
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
         self._reapply_route_client_config(route_changed=route_changed)
@@ -893,14 +866,10 @@ class ClientLifecycleMixin:
         self._client_kwargs.pop("ssl_ca_cert", None)
         try:
             from hermes_cli.config import (
-                apply_custom_provider_tls_to_client_kwargs,
-                get_compatible_custom_providers,
-                load_config_readonly,
+                apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers, load_config_readonly,
             )
             apply_custom_provider_tls_to_client_kwargs(
-                self._client_kwargs,
-                str(self.base_url or ""),
-                get_compatible_custom_providers(load_config_readonly()),
+                self._client_kwargs, str(self.base_url or ""), get_compatible_custom_providers(load_config_readonly()),
             )
         except Exception:
             logger.debug("custom-provider TLS resolution skipped on credential rotation", exc_info=True)
@@ -912,12 +881,10 @@ class ClientLifecycleMixin:
             self._try_refresh_anthropic_client_credentials()
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
         from agent.anthropic_adapter import create_anthropic_message
+        # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.
         return create_anthropic_message(
-            client or self._anthropic_client,
-            api_kwargs,
-            log_prefix=getattr(self, "log_prefix", ""),
+            client or self._anthropic_client, api_kwargs, log_prefix=getattr(self, "log_prefix", ""),
             prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
-            # Rate-limit + credits state live in response headers, which the parsed Message drops.
             on_response=self._capture_anthropic_response_headers,
         )
 
