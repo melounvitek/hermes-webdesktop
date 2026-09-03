@@ -459,8 +459,7 @@ def _probe_populated_edge(source: sqlite3.Connection, table: str, *, edge: str, 
             span *= 2
             continue
         if row is None:  # nothing beyond candidate: the synthetic domain tail is provably empty
-            result["bound"] = candidate
-            result["capped"] = True
+            result.update(bound=candidate, capped=True)
             return result
         position = int(row[0])  # rows exist beyond; advance. Span never resets -> O(log range)
         span *= 2
@@ -485,9 +484,7 @@ class _RowidRangeSalvage:
         self.stopped_at_query_limit = False
 
     def _keep(self, values: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
-        if self.row_filter is None:
-            return values
-        return [row for row in values if self.row_filter(row, self.column_names)]
+        return values if self.row_filter is None else [r for r in values if self.row_filter(r, self.column_names)]
 
     def _skip(self, low: int, high: int, error: str) -> None:
         _append_skipped_range(self.result["skipped_rowid_ranges"], low, high, error)
