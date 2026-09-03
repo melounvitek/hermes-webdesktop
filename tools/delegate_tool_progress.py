@@ -117,11 +117,8 @@ def _normalize_event(event_type: Any) -> Any:
     → dispatch key; None for unknown events."""
     if isinstance(event_type, DelegateEvent) or (isinstance(event_type, str) and event_type in _LIFECYCLE_EVENTS):
         return event_type
-    event = _LEGACY_EVENT_MAP.get(event_type)
-    if event is not None:
-        return event
     try:
-        return DelegateEvent(event_type)
+        return _LEGACY_EVENT_MAP.get(event_type) or DelegateEvent(event_type)
     except (ValueError, TypeError):
         return None
 
@@ -214,15 +211,11 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
         os.getenv("TERMINAL_CWD"), getattr(getattr(parent_agent, "_subdirectory_hints", None), "working_dir", None),
         getattr(parent_agent, "terminal_cwd", None), getattr(parent_agent, "cwd", None),
     ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
+    for candidate in filter(None, candidates):
+        with _quiet(None):
             text = os.path.abspath(os.path.expanduser(str(candidate)))
-        except Exception:
-            continue
-        if os.path.isabs(text) and os.path.isdir(text):
-            return text
+            if os.path.isabs(text) and os.path.isdir(text):
+                return text
     return None
 
 _BATCH_ORDINALS: Dict[str, int] = {}
@@ -294,7 +287,8 @@ class _ChildProgressRelay:
         subagent_id, parent_id, depth, model, toolsets, session_ref,
     ) -> None:
         self.task_index, self.task_count, self.goal_label = task_index, task_count, (goal or "").strip()
-        self.spinner, self.parent_cb, self.session_ref = spinner, parent_cb, session_ref
+        # session_ref is a SHARED dict filled in later by the caller — keep the identity.
+        self.spinner, self.parent_cb, self.session_ref = spinner, parent_cb, session_ref if session_ref is not None else {}
         self.subagent_id, self.parent_id, self.depth, self.model, self.toolsets = (
             subagent_id, parent_id, depth, model, toolsets
         )
@@ -304,31 +298,26 @@ class _ChildProgressRelay:
     def _prefix(self) -> str:
         # The batch tag is resolved lazily from session_ref: the relay is built
         # before delegate_task stamps ``_delegation_id`` on the child.
-        deleg = self.session_ref.get("delegation_id") if self.session_ref else None
-        return _batch_prefix(deleg, self.task_index, self.task_count)
+        return _batch_prefix(self.session_ref.get("delegation_id"), self.task_index, self.task_count)
 
     def _identity_kwargs(self) -> Dict[str, Any]:
         kw: Dict[str, Any] = {"task_index": self.task_index, "task_count": self.task_count, "goal": self.goal_label}
-        for key in ("subagent_id", "parent_id", "depth", "model"):
-            if getattr(self, key) is not None:
-                kw[key] = getattr(self, key)
+        kw.update({k: getattr(self, k) for k in ("subagent_id", "parent_id", "depth", "model") if getattr(self, k) is not None})
         if self.toolsets is not None:
             kw["toolsets"] = list(self.toolsets)
         # child_session_id / delegation_id are filled into the shared ref once
         # the child exists, so every relayed event lets UIs open its session.
         for src, dst in (("session_id", "child_session_id"), ("delegation_id", "delegation_id")):
-            if self.session_ref and self.session_ref.get(src):
+            if self.session_ref.get(src):
                 kw[dst] = str(self.session_ref[src])
         kw["tool_count"] = self.tool_count
         return kw
 
     def _relay(self, event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
-        if not self.parent_cb:
-            return
-        payload = self._identity_kwargs()
-        payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
-        with _quiet("Parent callback failed: %s"):
-            self.parent_cb(event_type, tool_name, preview, args, **payload)
+        if self.parent_cb:
+            # kwargs override identity (e.g. status, duration_seconds).
+            with _quiet("Parent callback failed: %s"):
+                self.parent_cb(event_type, tool_name, preview, args, **{**self._identity_kwargs(), **kwargs})
 
     def _tree_line(self, text: str) -> None:
         """Print one tree-view line above the CLI spinner (no-op without a spinner)."""
@@ -401,9 +390,7 @@ class _ChildProgressRelay:
 
     def __call__(self, event_type, tool_name: str = None, preview: str = None, args=None, **kwargs):
         key = _normalize_event(event_type)
-        if key is None:
-            return
-        method = _EVENT_HANDLERS.get(key, "_on_tool_started")
+        method = None if key is None else _EVENT_HANDLERS.get(key, "_on_tool_started")
         if method is not None:
             getattr(self, method)(tool_name, preview, args, kwargs)
 
