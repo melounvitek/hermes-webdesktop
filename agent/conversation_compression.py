@@ -2780,15 +2780,13 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
     cached_system_prompt = agent._cached_system_prompt
     agent._invalidate_system_prompt()
 
-    # Refresh tool schemas at the commit boundary: forever-sessions never restart,
-    # so config reaches agent.tools here. Keep list identity if byte-equal (cache).
+    # Refresh dynamic tool schemas at the same admitted-commit boundary that rebuilds the system prompt
+    # (maintainer-directed, #95681 arc): forever-sessions (Bot Mode chats, gateway channels) never
+    # restart, so compaction is the ONLY point where a config change — image model swap, delegation
+    # depth, code_execution mode — can reach agent.tools. The prompt cache is already broken here, so
+    # the refresh is free; when nothing changed the snapshot is byte-equal and we keep the existing list
+    # object (identity matters to provider-side tool-block caching on some backends).
     try:
-        # Refresh dynamic tool schemas at the same admitted-commit boundary that rebuilds the system prompt
-        # (maintainer-directed, #95681 arc): forever-sessions (Bot Mode chats, gateway channels) never
-        # restart, so compaction is the ONLY point where a config change — image model swap, delegation
-        # depth, code_execution mode — can reach agent.tools. The prompt cache is already broken here, so
-        # the refresh is free; when nothing changed the snapshot is byte-equal and we keep the existing list
-        # object (identity matters to provider-side tool-block caching on some backends).
         _refresh_agent_tool_definitions(agent)
     except Exception:  # noqa: BLE001
         logger.warning(
