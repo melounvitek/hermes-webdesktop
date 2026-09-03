@@ -297,6 +297,17 @@ def _db_flush_failed(agent, e: Exception, batch_rows: List[Dict[str, Any]], adop
     return False
 
 
+def _session_log_entry(agent, msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy of ``msg`` with scratchpad tags normalised and credentials redacted (respects HERMES_REDACT_SECRETS)."""
+    if msg.get("role") == "assistant" and msg.get("content"):
+        msg = dict(msg)
+        msg["content"] = agent._clean_session_content(msg["content"])
+    if "content" in msg:
+        msg = dict(msg)
+        msg["content"] = agent._redact_message_content(msg.get("content"))
+    return msg
+
+
 class SessionPersistenceMixin:
     """Session DB flush, session log and trajectory persistence (see module docstring)."""
 
@@ -446,16 +457,6 @@ class SessionPersistenceMixin:
             redacted.append(part)
         return redacted
 
-    def _session_log_entry(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Copy of ``msg`` with scratchpad tags normalised and credentials redacted (respects HERMES_REDACT_SECRETS)."""
-        if msg.get("role") == "assistant" and msg.get("content"):
-            msg = dict(msg)
-            msg["content"] = self._clean_session_content(msg["content"])
-        if "content" in msg:
-            msg = dict(msg)
-            msg["content"] = self._redact_message_content(msg.get("content"))
-        return msg
-
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
         """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False) for
         external tooling; state.db is canonical. Rewrites the full list after every persistence point,
@@ -474,7 +475,7 @@ class SessionPersistenceMixin:
 
         try:
             # Mirror the SQLite flush: scaffolding is never durable transcript content.
-            cleaned = [self._session_log_entry(msg) for msg in messages if not _is_ephemeral_scaffolding(msg)]
+            cleaned = [_session_log_entry(self, msg) for msg in messages if not _is_ephemeral_scaffolding(msg)]
 
             if log_file.exists():
                 try:
