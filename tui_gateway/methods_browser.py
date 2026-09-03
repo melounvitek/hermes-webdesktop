@@ -129,7 +129,8 @@ def _browser_connect(rid, params: dict) -> dict:
         if parsed.scheme in {"ws", "wss"} and parsed.path.startswith("/devtools/browser/"):
             import socket
             try:
-                socket.create_connection((parsed.hostname, port), timeout=2.0).close()
+                with socket.create_connection((parsed.hostname, port), timeout=2.0):
+                    pass
             except OSError as e:
                 return _err(rid, 5031, f"could not reach browser CDP at {url}: {e}")
         elif _is_default_local_cdp(parsed):
