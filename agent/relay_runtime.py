@@ -934,24 +934,20 @@ class RelaySessionCoordinator:
         )
         session = None
         if isinstance(host, RelayRuntime):
-            session = _warn_on_error(
-                "conversation initialization", self._open_conversation_session, host, profile_key=profile_key,
-                session_id=session_id, platform=platform, parent_session_id=parent_session_id, model=model,
-            )
+            context = {
+                "profile_key": profile_key, "session_id": session_id, "platform": platform,
+                "parent_session_id": parent_session_id, "model": model,
+            }
+            session = _warn_on_error("conversation initialization", self._open_conversation_session, host, context)
         return ConversationLease(
             profile_key=profile_key, session_id=session_id, platform=platform, host=host,
             session=session, parent_session_id=parent_session_id,
         )
 
-    def _open_conversation_session(
-        self, host: RelayRuntime, *, profile_key: str, session_id: str, platform: str,
-        parent_session_id: str, model: str,
-    ) -> RelaySession | None:
-        self._prepare_session(host, {
-            "profile_key": profile_key, "session_id": session_id, "platform": platform,
-            "parent_session_id": parent_session_id, "model": model,
-        })
-        metadata = {"hermes.execution_surface": platform or "unknown"}
+    def _open_conversation_session(self, host: RelayRuntime, context: dict[str, Any]) -> RelaySession | None:
+        self._prepare_session(host, context)
+        session_id, parent_session_id = context["session_id"], context["parent_session_id"]
+        metadata = {"hermes.execution_surface": context["platform"] or "unknown"}
         if parent_session_id and parent_session_id != session_id:
             return host.register_subagent(
                 {"parent_session_id": parent_session_id, "child_session_id": session_id}, metadata=metadata,
