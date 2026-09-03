@@ -1,8 +1,6 @@
-"""Per-session gateway state consolidated into one container.
-
-Replaces ~19 separate session_key-keyed dicts on GatewayRunner that bred boundary drift,
-turn-release drift and wholesale-reset races.  Scopes follow where each dict was CLEARED:
-``turn`` at the end of every turn; ``conversation`` at conversation boundaries (/new,
+"""Per-session gateway state in one container (replaces ~19 session_key-keyed dicts on
+GatewayRunner that bred boundary drift and wholesale-reset races).  Scopes follow where each dict
+was CLEARED: ``turn`` at the end of every turn; ``conversation`` at conversation boundaries (/new,
 /resume, auto-reset, expiry); ``persistent`` fields have their own lifecycles."""
 
 from __future__ import annotations
@@ -11,8 +9,7 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-# Presence-sensitive sentinel: /fast stores "priority" or None (explicit normal), so key
-# PRESENCE — not value truthiness — decides whether the override applies.
+# /fast stores "priority" or None (explicit normal), so key PRESENCE decides, not truthiness.
 _UNSET_TIER = object()
 SERVICE_TIER_UNSET = _UNSET_TIER  # public alias
 
@@ -26,8 +23,8 @@ class TurnState:
     started_ts: float = 0.0  # 0.0 = not running
     lease: Any = None  # cross-process active-session slot lease
     busy_ack_ts: float = 0.0  # debounce; 0.0 = never acked
-    # Held turn-lease token + the generation that acquired it: release/rebind only match
-    # when the generation is current, so a stale unwind can never free a newer turn's lease.
+    # Held turn-lease token + acquiring generation: release/rebind match only when the
+    # generation is current, so a stale unwind can never free a newer turn's lease.
     lease_token: Any = None
     lease_generation: Optional[int] = None
 
@@ -64,14 +61,11 @@ class PersistentState:
     approvals: Optional[Dict[str, Any]] = None  # {"command": ..., "pattern_key": ...}
     update_prompt_pending: bool = False  # /update prompt awaiting a reply
     native_image_paths: List[str] = field(default_factory=list)  # consumed one-shot
-    # Legacy runner-level pending text (flushed on shutdown); distinct from gateway/base.py's
-    # adapter-level ``_pending_messages``.
+    # Legacy runner-level pending text (flushed on shutdown); not the adapter-level one.
     pending_command_text: Optional[str] = None
-    # Monotonic run-generation counter.  NEVER reset: stale-run detection depends on it.
-    run_generation: int = 0
-    # Consecutive hygiene compression failures, so hygiene can escalate its cooldown (the
-    # in-agent compressor's ladder is unreachable: hygiene builds a FRESH AIAgent per run).
-    # Reset only on success.  PROCESS-LOCAL; gateway.run mirrors it to the DB by session_key.
+    run_generation: int = 0  # monotonic; NEVER reset (stale-run detection depends on it)
+    # Consecutive hygiene compression failures (the in-agent ladder is unreachable: hygiene builds
+    # a FRESH AIAgent per run).  Reset on success; process-local, mirrored to the DB by run.py.
     hygiene_failure_streak: int = 0
 
 
@@ -84,9 +78,8 @@ class SessionState:
     persistent: PersistentState = field(default_factory=PersistentState)
 
 
-# --- Legacy dict-view adapters ---------------------------------------------
-# Dozens of tests read/write the old dict attributes directly (``runner._running_agents =
-# {}``).  Each view is a LIVE MutableMapping over one SessionState field across sessions.
+# --- Legacy dict-view adapters: tests read/write the old dict attributes directly
+# (``runner._running_agents = {}``); each view is a LIVE MutableMapping over one field.
 
 
 class _FieldSpec(NamedTuple):
@@ -145,7 +138,8 @@ class SessionFieldView(_RunnerView):
         return state if state is not None and self._spec.is_present(self._value(state)) else None
 
     def _held(self, key: str) -> SessionState:
-        if (state := self._present(key)) is None:
+        state = self._present(key)
+        if state is None:
             raise KeyError(key)
         return state
 
@@ -173,9 +167,8 @@ class SessionFieldView(_RunnerView):
 
 
 class TurnLeaseTokenView(_RunnerView):
-    """Legacy view of ``_turn_lease_tokens``, keyed by (session_key, generation).  The lease
-    registry serializes acquisition per session, so the single ``TurnState`` slot per key
-    equals the old tuple-keyed dict."""
+    """Legacy (session_key, generation)-keyed view of ``_turn_lease_tokens``; the lease registry
+    serializes acquisition per session, so one ``TurnState`` slot per key equals the old dict."""
 
     __slots__ = ()
 
@@ -234,8 +227,9 @@ LEGACY_FIELD_SPECS: Dict[str, _FieldSpec] = {
 
 
 def _legacy_property(make_view: Callable[[Any], MutableMapping], doc: str) -> property:
-    """Dict-shaped @property over a live view.  The setter takes a plain dict (test pattern
+    """Dict-shaped @property over a live view; the setter takes a plain dict (test pattern
     ``runner._X = {...}``): reset the field on every session, then apply the entries."""
+
     def fset(self: Any, mapping: Optional[Dict[Any, Any]]) -> None:
         view = make_view(self)
         view.clear()
@@ -249,8 +243,7 @@ def legacy_dict_property(attr_name: str) -> property:
     spec = LEGACY_FIELD_SPECS[attr_name]
     return _legacy_property(
         lambda self: SessionFieldView(self, spec),
-        f"Legacy dict view over SessionState.{spec.scope}.{spec.name} "
-        "(kept for tests that access the pre-SessionState attribute).",
+        f"Legacy dict view over SessionState.{spec.scope}.{spec.name} (for pre-SessionState tests).",
     )
 
 

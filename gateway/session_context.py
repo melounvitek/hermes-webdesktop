@@ -10,13 +10,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
 
-# "Never set in this context" (fall back to os.environ for CLI/cron compat), as distinct
-# from "explicitly set to empty" by clear_session_vars (no fallback).
+# "Never set here" (falls back to os.environ for CLI/cron) vs "" = explicitly cleared (no fallback).
 _UNSET: Any = object()
 
-# Process-level monotonic latch: has any code bound a session via set_session_vars()?  The
-# subprocess-env bridge reads it: when engaged, ContextVars are authoritative and an _UNSET
-# var means "no session bound in THIS task", so the os.environ mirror must NOT leak to a child.
+# Process-level latch: has set_session_vars() ever bound a session?  When engaged, the subprocess
+# env bridge treats ContextVars as authoritative and an _UNSET var as "no session in THIS task".
 _session_context_engaged: bool = False
 
 
@@ -25,17 +23,14 @@ def session_context_engaged() -> bool:
     return _session_context_engaged
 
 
-# --- Per-task session variables --------------------------------------------
-# Bound by set_session_vars / cleared to "" by clear_session_vars; tuple ORDER is the
-# positional order of ``values`` in set_session_vars (they are zipped).
-# * SCOPE_ID: platform-neutral scope (guild / workspace / Matrix server), captured so async
-#   producers can persist a completion's full routing origin (relay egress guards need it).
-# * UI_SESSION_ID: in-process UI tab id, separate from the durable SESSION_ID: a precise
-#   return address so a stale/rotated durable key is not consumed by the wrong poller.
-# * MESSAGE_ID: reply anchor keeping background notifications inside the originating
-#   Telegram private-chat topic.
-# * CRON_SESSION: tri-state — _UNSET keeps the legacy env fallback for CLI/tests; "1"
-#   marks cron; "" explicitly marks non-cron and masks leaked env.
+# --- Per-task session variables: bound by set_session_vars / cleared to "" by clear_session_vars;
+# tuple ORDER is the positional order of ``values`` in set_session_vars (zipped).
+# * SCOPE_ID: platform-neutral scope (guild / workspace / Matrix server) so async producers can
+#   persist a completion's full routing origin (relay egress guards need it).
+# * UI_SESSION_ID: in-process UI tab id, separate from the durable SESSION_ID, so a stale/rotated
+#   durable key is not consumed by the wrong poller.
+# * MESSAGE_ID: reply anchor keeping notifications inside the originating Telegram topic.
+# * CRON_SESSION: tri-state — _UNSET = legacy env fallback; "1" = cron; "" = non-cron, masks env.
 _SESSION_VARS = (
     _SESSION_PLATFORM, _SESSION_SOURCE, _SESSION_CHAT_ID, _SESSION_CHAT_TYPE,
     _SESSION_CHAT_NAME, _SESSION_THREAD_ID, _SESSION_USER_ID, _SESSION_USER_ID_ALT,
@@ -52,11 +47,9 @@ _SESSION_VARS = (
     "HERMES_CRON_SESSION",
 ))
 
-# Whether this channel can route an ASYNC completion back AFTER the turn ends (read via
-# ``async_delivery_supported()``).  False for finite runtimes that may exit first (stateless
-# API-server requests, Kanban workers).  Default _UNSET => supported, so the CLI and
-# contextvar-unaware paths keep working; stateless adapters opt OUT via
-# ``supports_async_delivery = False``, propagated at bind time.
+# Whether this channel can route an ASYNC completion back AFTER the turn ends (see
+# ``async_delivery_supported()``).  _UNSET => supported (CLI, contextvar-unaware paths); stateless
+# adapters (API server, Kanban workers) opt OUT via ``supports_async_delivery = False`` at bind.
 _SESSION_ASYNC_DELIVERY = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
 
 # Cron auto-delivery vars, set per-job in run_job() so concurrent jobs don't clobber.
@@ -64,8 +57,8 @@ _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", de
 _CRON_AUTO_DELIVER_CHAT_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
 
-# Legacy env-var name -> ContextVar, for get_session_env.  _SESSION_ASYNC_DELIVERY is
-# deliberately absent: it is a bool capability read via async_delivery_supported.
+# Legacy env-var name -> ContextVar for get_session_env (_SESSION_ASYNC_DELIVERY deliberately
+# absent: it is a bool capability, read via async_delivery_supported).
 _VAR_MAP = {var.name: var for var in (
     *_SESSION_VARS, _CRON_AUTO_DELIVER_PLATFORM, _CRON_AUTO_DELIVER_CHAT_ID,
     _CRON_AUTO_DELIVER_THREAD_ID,
@@ -162,11 +155,9 @@ def get_session_env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
-# Surfaces that are not a human chat channel (the gateway binds HERMES_SESSION_PLATFORM,
-# CLI/TUI/desktop bind HERMES_SESSION_SOURCE, so both are consulted).  ``local``,
-# ``api_server``, ``webhook``, ``msgraph_webhook`` are real Platform values with no
-# attachment channel.  Default-deny: an unrecognized identity counts as messaging.
-# Mirrors LOCAL_SESSION_SOURCE_IDS in apps/desktop/src/lib/session-source.ts.
+# Surfaces that are not a human chat channel (gateway binds HERMES_SESSION_PLATFORM, CLI/TUI/
+# desktop bind HERMES_SESSION_SOURCE, so both are consulted).  Default-deny: an unrecognized
+# identity counts as messaging.  Mirrors LOCAL_SESSION_SOURCE_IDS in apps/desktop session-source.ts.
 NON_MESSAGING_SESSION_SURFACES = frozenset({
     "", "api_server", "cli", "codex", "desktop", "gateway", "kanban", "local",
     "msgraph_webhook", "tool", "tui", "webhook",

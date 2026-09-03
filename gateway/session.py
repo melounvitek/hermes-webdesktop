@@ -745,6 +745,12 @@ class _RouteDecision:
     reset_had_activity: bool = False
     prev_session_id: Optional[str] = None
 
+    def schedule_reset(self, reason: str, ended: "SessionEntry", had_activity: bool) -> None:
+        """Record that *ended* is auto-reset for *reason* (ends its row, seeds the successor)."""
+        self.reset_reason = reason
+        self.reset_had_activity = had_activity
+        self.prev_session_id = ended.session_id
+
 
 class AsyncSessionStore:
     """Async boundary for the synchronous, thread-safe SessionStore."""
@@ -773,22 +779,20 @@ class SessionStore(
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
-        # A fallback-only initial load must be reconciled with state.db once the handle recovers,
-        # before a whole-index save can replace DB rows.
+        # A fallback-only initial load is reconciled with state.db once the handle recovers.
         self._routing_db_loaded = False
         self._routing_fallback_baseline: Optional[Dict[str, Any]] = None
-        self._lock = threading.Lock()
-        # Serializes whole-index persistence without holding ``_lock`` across SQLite/fsync.
-        self._save_lock = threading.Lock()
+        self._lock = threading.Lock()  # guards _entries / _loaded only
+        self._save_lock = threading.Lock()  # whole-index persistence, never held with _lock
+        # Fast (single-entry) and full saves share one generation counter so they are totally
+        # ordered; _fast_persisted_entries: key -> (revision, entry_json) since the last rewrite.
         self._routing_generation = 0
         self._persisted_routing_generation = 0
-        # Single-entry upserts since the last full rewrite: key -> (revision, entry_json).
-        # Revisions share _routing_generation so fast and full saves are totally ordered.
         self._fast_persisted_entries: Dict[str, tuple[int, str]] = {}
         self._inflight_lock = threading.Lock()
         self._inflight_sessions: Dict[str, _SessionFlight] = {}
-        # An unscoped legacy Slack key is claimed once per process so two workspaces cannot both
-        # revive the same session.
+        # An unscoped legacy Slack key is claimed once per process (two workspaces must not both
+        # revive one session).
         self._legacy_slack_claim_lock = threading.Lock()
         self._claimed_legacy_slack_keys: set[str] = set()
         self._transcript_retry_lock = threading.Lock()
@@ -799,27 +803,25 @@ class SessionStore(
         self._transcript_append_failures: Dict[str, int] = {}
         self._fts_rebuild_attempted = False
         self._has_active_processes_fn = has_active_processes_fn
-        # Keep the legacy sessions.json mirror (disable via gateway.write_sessions_json).
         self._write_sessions_json = bool(getattr(config, "write_sessions_json", True))
 
-        # SQLite handles are cached per path and resolved through the ``_db`` property, never
-        # bound once here: a multiplexed gateway serves every profile from ONE process and a handle
-        # frozen to the root home would land every profile's rows in the root state.db.
+        # SQLite handles are cached per path and resolved through ``_db`` per call, never bound
+        # once: a multiplexed gateway serves every profile from ONE process and a handle frozen to
+        # the root home would land every profile's rows in the root state.db.
         self._db_pinned = _DB_UNPINNED
         self._db_handles: Dict[Path, Any] = {}
         self._db_handles_lock = threading.Lock()
-        # profile name -> HERMES_HOME; memoized so per-key store lookup is a dict hit.
-        self._profile_home_cache: Dict[str, Optional[Path]] = {}
-        # session_id -> owning key for ids proven but not yet published in ``_entries``
-        # (a compression child row is written before its reroute is published).
+        self._profile_home_cache: Dict[str, Optional[Path]] = {}  # profile -> HERMES_HOME (hits)
+        # session_id -> owning key for ids proven but not yet published in ``_entries`` (a
+        # compression child row is written before its reroute is published).
         self._session_owner_hints: Dict[str, str] = {}
         from gateway.session_db_recovery import RecoverableHandleCache
 
         self._db_handle_cache = RecoverableHandleCache(
             handles=self._db_handles, lock=self._db_handles_lock,
         )
-        # The routing index is one process-wide structure and needs exactly one home for its
-        # lifetime: the gateway's own, captured before any profile scope exists (``_routing_db``).
+        # The routing index needs exactly one home for its lifetime: the gateway's own, captured
+        # before any profile scope exists (see ``_routing_db``).
         try:
             from hermes_constants import get_hermes_home
 
@@ -838,7 +840,7 @@ class SessionStore(
         return value
 
     def _has_active_processes_safe(self, session_key: str, *, context: str) -> bool:
-        """Whether a session has active work, failing closed on registry errors."""
+        """Whether a session has active work, failing closed (True) on registry errors."""
         if self._has_active_processes_fn is None:
             return False
         try:
@@ -851,11 +853,8 @@ class SessionStore(
             return True
 
     def has_any_sessions(self) -> bool:
-        """Whether any session has ever been created (across all platforms).
-
-        SQLite is the source of truth (ended sessions count; ``_entries`` is replaced on reset).
-        The current session is already in the DB when this runs, hence ``> 1``.
-        """
+        """Whether any session has ever been created. SQLite is the source of truth (ended sessions
+        count); the current session is already in the DB when this runs, hence ``> 1``."""
         if self._db:
             try:
                 return self._db.session_count_ge(2)
@@ -868,12 +867,9 @@ class SessionStore(
     def get_or_create_session(
         self, source: SessionSource, force_new: bool = False, touch_activity: bool = True,
     ) -> SessionEntry:
-        """Single-flight session lookup/create per routing key.
-
-        Overlapping calls for the same key (even concurrent ``force_new``) share the owner's
-        result so only one routing transition and SQLite row is created. ``touch_activity=False``
-        still evaluates reset policy but preserves the user-activity clock (internal events).
-        """
+        """Single-flight session lookup/create per routing key: overlapping calls for one key (even
+        concurrent ``force_new``) share the owner's result so only one transition and SQLite row is
+        created. ``touch_activity=False`` (internal events) preserves the user-activity clock."""
         session_key = self._generate_session_key(source)
         inflight_lock = self._lazy("_inflight_lock", threading.Lock)
         self._lazy("_inflight_sessions", dict)
@@ -924,7 +920,11 @@ class SessionStore(
         # Phase 1b (no lock): compression tip + stale check + reset policy.
         checks = None
         if not force_new and observed is not None:
-            checks = self._route_checks(observed, source, now)
+            sid = observed.session_id
+            checks = _RouteChecks(
+                sid, self._compression_tip_for_session_id(sid), self._is_session_ended_in_db(sid),
+                self._route_reset_reason(observed, source, now),
+            )
         # Phase 2 (lock): apply the decisions to _entries.
         decision = self._apply_route_checks(session_key, checks, force_new, touch_activity, now)
 
@@ -949,15 +949,6 @@ class SessionStore(
             origin=source, display_name=decision.entry.display_name,
         )
         return decision.entry
-
-    def _route_checks(
-        self, entry: SessionEntry, source: SessionSource, now: datetime
-    ) -> _RouteChecks:
-        """Lock-free DB/config I/O for an existing route."""
-        sid = entry.session_id
-        canonical = self._compression_tip_for_session_id(sid)
-        is_stale = self._is_session_ended_in_db(sid)
-        return _RouteChecks(sid, canonical, is_stale, self._route_reset_reason(entry, source, now))
 
     def _apply_route_checks(
         self, session_key: str, checks: Optional[_RouteChecks], force_new: bool,
@@ -994,9 +985,7 @@ class SessionStore(
             if stale_hit or reset_reason:
                 # Honour an expiry/reset decision instead of silently reopening via recovery.
                 if reset_reason:
-                    decision.reset_reason = reset_reason
-                    decision.reset_had_activity = entry.last_prompt_tokens > 0
-                    decision.prev_session_id = entry.session_id
+                    decision.schedule_reset(reset_reason, entry, entry.last_prompt_tokens > 0)
                 self._entries.pop(session_key, None)
                 decision.needs_recover = True
             else:
@@ -1017,9 +1006,7 @@ class SessionStore(
             return
         reset_reason = self._should_reset(recovered, source)
         if reset_reason:
-            decision.reset_reason = reset_reason
-            decision.reset_had_activity = recovered.reset_had_activity
-            decision.prev_session_id = recovered.session_id
+            decision.schedule_reset(reset_reason, recovered, recovered.reset_had_activity)
             return
         self._reopen_session_row(session_key, recovered.session_id)
         with self._lock:
