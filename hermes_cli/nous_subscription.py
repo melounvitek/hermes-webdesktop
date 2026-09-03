@@ -25,9 +25,7 @@ from tools.tool_backend_helpers import (
 )
 
 
-_DEFAULT_PLATFORM_TOOLSETS = {
-    "cli": "hermes-cli",
-}
+_DEFAULT_PLATFORM_TOOLSETS = {"cli": "hermes-cli"}
 
 
 @dataclass(frozen=True)
@@ -36,20 +34,16 @@ class _FeatureSpec:
 
     label: str
     included_by_default: bool
-    # Tool-pool coverage category (nous_account.TOOL_COVERAGE_CATEGORIES): lets the `hermes tools`
-    # picker gate per backend (free pool: image yes, video no). STT shares the TTS category —
-    # both ride the managed "openai-audio" endpoint.
+    # Tool-pool coverage category (nous_account.TOOL_COVERAGE_CATEGORIES) gating per backend:
+    # the free pool funds image but NOT video; STT shares TTS's "openai-audio" category.
     coverage: str
-    # Managed gateway probed for readiness. Video rides image's fal-queue gateway but is gated on
-    # its own coverage category: the free tool pool funds image and NOT video.
-    gateway: str
-    # Config section + selection field written by apply_gateway_defaults and read by
-    # get_nous_subscription_features. None = not offered by the Tool Gateway prompt (modal).
+    gateway: str  # managed gateway probed for readiness (video rides image's fal-queue)
+    # Config (section, selection field) written by apply_gateway_defaults; None = not offered (modal).
     section_field: Optional[tuple[str, str]] = None
     offer_label: str = ""
     direct_label: str = ""
-    # Direct-credential env vars that keep apply_nous_managed_defaults from switching the
-    # category to the managed selection (tts/stt also honour resolve_openai_audio_api_key()).
+    # Direct-credential env vars that stop apply_nous_managed_defaults switching the category to
+    # managed (tts/stt also honour resolve_openai_audio_api_key()).
     default_direct_env: tuple[str, ...] = ()
 
 
@@ -180,22 +174,19 @@ def _norm(value: object, default: str = "") -> str:
 
 
 def _toolset_enabled(config: Dict[str, object], toolset_key: str) -> bool:
+    """True when some platform's configured toolsets cover every tool of ``toolset_key``."""
     from toolsets import resolve_toolset
 
     platform_toolsets = config.get("platform_toolsets")
     if not isinstance(platform_toolsets, dict) or not platform_toolsets:
         platform_toolsets = {"cli": [_DEFAULT_PLATFORM_TOOLSETS["cli"]]}
-
     target_tools = set(resolve_toolset(toolset_key))
     if not target_tools:
         return False
-
     for platform, raw_toolsets in platform_toolsets.items():
         toolset_names = list(raw_toolsets) if isinstance(raw_toolsets, list) else []
         if not toolset_names:
-            default_toolset = _DEFAULT_PLATFORM_TOOLSETS.get(platform)
-            toolset_names = [default_toolset] if default_toolset else []
-
+            toolset_names = [t for t in (_DEFAULT_PLATFORM_TOOLSETS.get(platform),) if t]
         available_tools: Set[str] = set()
         for toolset_name in toolset_names:
             if isinstance(toolset_name, str) and toolset_name:
@@ -203,10 +194,8 @@ def _toolset_enabled(config: Dict[str, object], toolset_key: str) -> bool:
                     available_tools.update(resolve_toolset(toolset_name))
                 except Exception:
                     continue
-
         if target_tools.issubset(available_tools):
             return True
-
     return False
 
 
@@ -271,26 +260,18 @@ def _local_browser_runnable() -> bool:
     return _using_lightpanda_engine() or _chromium_installed()
 
 
+# kind -> (default provider, provider -> display label)
 _PROVIDER_LABELS = {
     "browser": ("local", {
-        "browserbase": "Browserbase",
-        "browser-use": "Browser Use",
-        "firecrawl": "Firecrawl",
-        "camofox": "Camofox",
-        "local": "Local browser",
+        "browserbase": "Browserbase", "browser-use": "Browser Use", "firecrawl": "Firecrawl",
+        "camofox": "Camofox", "local": "Local browser",
     }),
     "tts": ("edge", {
-        "openai": "OpenAI TTS",
-        "elevenlabs": "ElevenLabs",
-        "edge": "Edge TTS",
-        "xai": "xAI TTS",
-        "mistral": "Mistral Voxtral TTS",
-        "neutts": "NeuTTS",
+        "openai": "OpenAI TTS", "elevenlabs": "ElevenLabs", "edge": "Edge TTS", "xai": "xAI TTS",
+        "mistral": "Mistral Voxtral TTS", "neutts": "NeuTTS",
     }),
     "stt": ("local", {
-        "openai": "OpenAI Whisper",
-        "groq": "Groq Whisper",
-        "mistral": "Mistral Voxtral Transcribe",
+        "openai": "OpenAI Whisper", "groq": "Groq Whisper", "mistral": "Mistral Voxtral Transcribe",
         "local": "Local faster-whisper",
     }),
 }
@@ -302,11 +283,7 @@ def _provider_label(kind: str, current_provider: str) -> str:
 
 
 def _local_stt_backend_available() -> bool:
-    """Whether a local STT backend could serve transcription right now.
-
-    True when faster-whisper imports or a custom local STT command is configured. Also stops
-    ``apply_nous_managed_defaults`` from flipping a working local setup to the managed gateway.
-    """
+    """True when faster-whisper imports or a custom local STT command is configured."""
     if get_env_value("HERMES_LOCAL_STT_COMMAND"):
         return True
     try:
@@ -526,13 +503,14 @@ def _modal_feature(
     modal_state = resolve_modal_backend_state(
         modal_mode, has_direct=direct_modal, managed_ready=managed, managed_enabled=managed_tools_flag
     )
+    is_modal = terminal_backend == "modal"
     # A non-modal terminal backend, or a resolved managed/direct selection, is always "available";
     # otherwise report what the mode could use.
-    selected = modal_state["selected_backend"] if terminal_backend == "modal" else None
-    if terminal_backend != "modal" or selected in ("managed", "direct"):
+    selected = modal_state["selected_backend"] if is_modal else None
+    if not is_modal or selected in ("managed", "direct"):
         available, active = True, bool(tool_enabled)
         managed_now = selected == "managed" and bool(tool_enabled)
-        direct_override = selected == "direct" and bool(tool_enabled)
+        direct_override = is_modal and selected == "direct" and bool(tool_enabled)
     else:
         managed_now = direct_override = active = False
         available = bool({"managed": managed, "direct": direct_modal}.get(modal_mode, managed or direct_modal))
@@ -541,10 +519,10 @@ def _modal_feature(
         available=available,
         active=active,
         managed_by_nous=managed_now,
-        direct_override=terminal_backend == "modal" and direct_override,
+        direct_override=direct_override,
         toolset_enabled=tool_enabled,
-        current_provider="Modal" if terminal_backend == "modal" else terminal_backend or "local",
-        explicit_configured=terminal_backend == "modal",
+        current_provider="Modal" if is_modal else terminal_backend or "local",
+        explicit_configured=is_modal,
     )
 
 
@@ -617,9 +595,7 @@ def get_nous_subscription_features(
 
 
 def _has_managed_default_direct(key: str) -> bool:
-    if key in ("tts", "stt") and resolve_openai_audio_api_key():
-        return True
-    return _any_env(*_FEATURES[key].default_direct_env)
+    return bool(key in ("tts", "stt") and resolve_openai_audio_api_key()) or _any_env(*_FEATURES[key].default_direct_env)
 
 
 def apply_nous_managed_defaults(
@@ -630,12 +606,7 @@ def apply_nous_managed_defaults(
 ) -> set[str]:
     features = get_nous_subscription_features(config, force_fresh=force_fresh)
     account_info = features.account_info
-    if not (
-        account_info
-        and account_info.logged_in
-        and account_info.tool_gateway_entitled
-        and features.provider_is_nous
-    ):
+    if not (account_info and account_info.logged_in and account_info.tool_gateway_entitled and features.provider_is_nous):
         return set()
 
     selected_toolsets = set(enabled_toolsets or ())
@@ -726,9 +697,7 @@ def get_gateway_eligible_tools(
         return [], [], [], []
 
     direct = _get_gateway_direct_credentials()
-    buckets: Dict[str, list[str]] = {
-        "unconfigured": [], "has_direct": [], "explicit_configured": [], "already_managed": [],
-    }
+    unconfigured, has_direct, explicit_configured, already_managed = [], [], [], []
     for key in _ALL_GATEWAY_KEYS:
         # Only offer tools the entitlement covers (free pool: image but not video).
         if not account_info.tool_gateway_entitled_for(_FEATURES[key].coverage):
@@ -736,18 +705,14 @@ def get_gateway_eligible_tools(
         section_key, field = _GATEWAY_SECTION_FIELDS[key]
         selected = _selected_provider(config.get(section_key), field)
         if _uses_gateway(config.get(key)):
-            bucket = "already_managed"
+            already_managed.append(key)
         elif selected is not None and selected != "nous":
-            bucket = "explicit_configured"
+            explicit_configured.append(key)
         elif direct.get(key):
-            bucket = "has_direct"
+            has_direct.append(key)
         else:
-            bucket = "unconfigured"
-        buckets[bucket].append(key)
-    return (
-        buckets["unconfigured"], buckets["has_direct"],
-        buckets["explicit_configured"], buckets["already_managed"],
-    )
+            unconfigured.append(key)
+    return unconfigured, has_direct, explicit_configured, already_managed
 
 
 def apply_gateway_defaults(
@@ -755,17 +720,12 @@ def apply_gateway_defaults(
     tool_keys: list[str],
 ) -> set[str]:
     """Store the managed selection for ``tool_keys``; returns the set of tools actually changed."""
-    changed: set[str] = set()
-
     for key in _DEFAULT_SECTIONS:
         _ensure_section(config, key)
-
-    for key in _ALL_GATEWAY_KEYS:
-        if key in tool_keys:
-            _select_nous(config, key)
-            changed.add(key)
-
-    return changed
+    changed = [key for key in _ALL_GATEWAY_KEYS if key in tool_keys]  # table order: config key order
+    for key in changed:
+        _select_nous(config, key)
+    return set(changed)
 
 
 def prompt_enable_tool_gateway(
@@ -778,9 +738,8 @@ def prompt_enable_tool_gateway(
     Triggered by a live free tool pool or paid access. explicit_configured tools (e.g. an explicit
     ``web.backend: searxng``) are configured on purpose and never offered, like already_managed.
     """
-    unconfigured, has_direct, _explicit_configured, already_managed = get_gateway_eligible_tools(
-        config,
-        force_fresh=force_fresh,
+    unconfigured, has_direct, _explicit_configured, _already_managed = get_gateway_eligible_tools(
+        config, force_fresh=force_fresh
     )
     if not unconfigured and not has_direct:
         return set()
@@ -793,10 +752,8 @@ def prompt_enable_tool_gateway(
     # Frame the offer by entitlement: a $0 free-tool-pool user is not on a paid plan.
     account_info = _account_info_or_none(force_fresh=False)
     pool_only = bool(
-        account_info
-        and account_info.paid_service_access is not True
-        and account_info.tool_access is not None
-        and account_info.tool_access.enabled
+        account_info and account_info.paid_service_access is not True
+        and account_info.tool_access is not None and account_info.tool_access.enabled
     )
     source_label = "free tool pool" if pool_only else "Nous subscription"
 
@@ -805,20 +762,13 @@ def prompt_enable_tool_gateway(
     # in ``tool_gateway_declined_tools`` and never pre-checked again, so the identical checklist
     # doesn't re-fire on every Nous model swap.
     declined_raw = config.get("tool_gateway_declined_tools")
-    declined: set[str] = (
-        {str(k) for k in declined_raw} if isinstance(declined_raw, list) else set()
-    )
+    declined: set[str] = {str(k) for k in declined_raw} if isinstance(declined_raw, list) else set()
 
     offer_keys: list[str] = list(unconfigured) + list(has_direct)
-    labels: list[str] = [_GATEWAY_TOOL_LABELS[k] for k in unconfigured]
-    labels += [
-        f"{_GATEWAY_TOOL_LABELS[k]} — keep using your {_FEATURES[k].direct_label}"
-        for k in has_direct
+    labels = [_GATEWAY_TOOL_LABELS[k] for k in unconfigured] + [
+        f"{_GATEWAY_TOOL_LABELS[k]} — keep using your {_FEATURES[k].direct_label}" for k in has_direct
     ]
-    pre_selected = [
-        i for i, k in enumerate(unconfigured) if k not in declined
-    ]
-
+    pre_selected = [i for i, k in enumerate(unconfigured) if k not in declined]
     title = (
         "Your free Nous tool pool — pick the tools to enable:"
         if pool_only
@@ -835,11 +785,8 @@ def prompt_enable_tool_gateway(
     # Every offered unconfigured tool NOT chosen is a decline; choosing a previously-declined tool
     # clears it. Cancel paths above return before this and record nothing.
     newly_declined = [k for k in unconfigured if k not in chosen_keys and k not in declined]
-    undeclined = declined & set(chosen_keys)
-    if newly_declined or undeclined:
-        config["tool_gateway_declined_tools"] = sorted(
-            (declined | set(newly_declined)) - set(chosen_keys)
-        )
+    if newly_declined or (declined & set(chosen_keys)):
+        config["tool_gateway_declined_tools"] = sorted((declined | set(newly_declined)) - set(chosen_keys))
 
     changed = apply_gateway_defaults(config, chosen_keys) if chosen_keys else set()
     if changed or newly_declined:
@@ -847,8 +794,7 @@ def prompt_enable_tool_gateway(
 
         save_config(config)
         for key in sorted(changed):
-            label = _GATEWAY_TOOL_LABELS.get(key, key)
-            print(f"  ✓ {label}: enabled via {source_label}")
+            print(f"  ✓ {_GATEWAY_TOOL_LABELS.get(key, key)}: enabled via {source_label}")
     return changed
 
 
@@ -889,12 +835,9 @@ def ensure_nous_portal_access(
         return True
 
     # Logged in but not entitled for this capability — neutral billing guidance, do not enable.
-    message = format_nous_portal_entitlement_message(
-        info, capability=capability, coverage_category=coverage_category
-    )
-    if message:
-        for line in message.splitlines():
-            print(f"  {line}")
+    message = format_nous_portal_entitlement_message(info, capability=capability, coverage_category=coverage_category)
+    for line in (message or "").splitlines():
+        print(f"  {line}")
     return False
 
 
@@ -929,9 +872,7 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
         auth_state = None
         if auth._read_shared_nous_state():
             try:
-                do_import = input(
-                    "  Found existing Nous OAuth credentials. Import them? [Y/n]: "
-                ).strip().lower()
+                do_import = input("  Found existing Nous OAuth credentials. Import them? [Y/n]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 do_import = "y"
             if do_import in {"", "y", "yes"}:
