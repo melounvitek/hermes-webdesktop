@@ -622,9 +622,7 @@ class AnthropicStreamAccumulator:
     def _on_message_start(self, payload: dict[str, Any]) -> None:
         message = payload.get("message")
         if isinstance(message, dict):
-            for key in ("id", "type", "role", "model", "usage"):
-                if key in message:
-                    self._message[key] = message[key]
+            self._message.update({k: message[k] for k in ("id", "type", "role", "model", "usage") if k in message})
 
     def _on_content_block_start(self, payload: dict[str, Any]) -> None:
         index = payload.get("index")
@@ -652,9 +650,7 @@ class AnthropicStreamAccumulator:
     def _on_message_delta(self, payload: dict[str, Any]) -> None:
         delta = payload.get("delta")
         if isinstance(delta, dict):
-            for key in ("stop_reason", "stop_sequence"):
-                if key in delta:
-                    self._message[key] = delta[key]
+            self._message.update({k: delta[k] for k in ("stop_reason", "stop_sequence") if k in delta})
         if "usage" in payload:
             usage = payload["usage"]
             current_usage = self._message.get("usage")
@@ -681,9 +677,8 @@ class AnthropicStreamAccumulator:
     def response(self, base: Any = None) -> Any:
         """Return the attribute-shaped response consumed by Hermes."""
         assembled = self.finalize()
-        base_payload = _jsonable_dict(base)
         content = assembled.pop("content", [])
-        merged = {**base_payload, **assembled}
+        merged = {**_jsonable_dict(base), **assembled}
         if content or "content" not in merged:
             merged["content"] = content
         return _namespace(merged)
@@ -703,17 +698,11 @@ def _logical_parent(
         with turn.logical_llm_lock:
             handle = turn.logical_llm_calls.get(request_id)
             if handle is None:
+                call_role = str((metadata or {}).get("call_role") or "primary")
                 handle = runtime.run_in_session(
-                    session,
-                    runtime.relay.scope.push,
-                    relay_runtime.LOGICAL_LLM_SCOPE,
-                    runtime.relay.ScopeType.Function,
-                    handle=parent,
-                    input={},
-                    metadata=relay_runtime.runtime_metadata(
-                        runtime.runtime_id,
-                        **{"hermes.call_role": str((metadata or {}).get("call_role") or "primary")},
-                    ),
+                    session, runtime.relay.scope.push, relay_runtime.LOGICAL_LLM_SCOPE,
+                    runtime.relay.ScopeType.Function, handle=parent, input={},
+                    metadata=relay_runtime.runtime_metadata(runtime.runtime_id, **{"hermes.call_role": call_role}),
                 )
                 turn.logical_llm_calls[request_id] = handle
     return turn, handle, request_id
@@ -742,9 +731,7 @@ def _complete_logical(
                 output.update({"model": model_name, "provider": provider_name})
                 if response_model_name is not None:
                     output["response_model"] = response_model_name
-            callback = lease.host.run_in_session
-            if operation_lease is not None:
-                callback = operation_lease.run_in_session
+            callback = (operation_lease or lease.host).run_in_session
             callback(
                 lease.session, relay_runtime.pop_relay_scope, lease.host.relay, handle,
                 output=output, metadata=relay_runtime.runtime_metadata(lease.host.runtime_id),
@@ -808,10 +795,7 @@ def _provider_request(
         _restore_provider_message_extensions(original, final, baseline=baseline, intercepted=intercepted)
     headers = getattr(request, "headers", None)
     if isinstance(headers, dict):
-        headers = {
-            key: value for key,
-            value in headers.items() if str(key).lower() not in _RELAY_INTERNAL_PROVIDER_HEADERS
-        }
+        headers = {k: v for k, v in headers.items() if str(k).lower() not in _RELAY_INTERNAL_PROVIDER_HEADERS}
     if headers:
         final["extra_headers"] = {**dict(final.get("extra_headers") or {}), **headers}
     return final
@@ -860,9 +844,7 @@ def _restore_provider_message_extensions(
 ) -> None:
     """Restore provider wire fields that Relay's typed codec cannot represent."""
     message_lists = tuple(body.get("messages") for body in (original, final, baseline, intercepted))
-    if not all(isinstance(messages, list) for messages in message_lists):
-        return
-    if len({len(messages) for messages in message_lists}) != 1:
+    if not all(isinstance(m, list) for m in message_lists) or len({len(m) for m in message_lists}) != 1:
         return
     for messages in zip(*message_lists, strict=True):
         if not all(isinstance(message, dict) for message in messages):

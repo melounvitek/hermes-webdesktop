@@ -98,10 +98,8 @@ def pop_relay_scope(
     ``scope.pop`` gained ``metadata`` in nemo-relay 0.4+; older wheels raise TypeError.
     """
     pop = relay.scope.pop
-    kwargs = {
-        key: value for key,
-        value in (("output", output), ("metadata", metadata), ("timestamp", timestamp)) if value is not None
-    }
+    candidates = (("output", output), ("metadata", metadata), ("timestamp", timestamp))
+    kwargs = {key: value for key, value in candidates if value is not None}
     try:
         params = inspect.signature(pop).parameters
     except (TypeError, ValueError):
