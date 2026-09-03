@@ -811,16 +811,54 @@ class _InlineRequest:
     ``stale`` is the one-shot transition.
     """
 
-    def __init__(self, agent, api_kwargs: dict, stale_timeout: float):
+    def __init__(self, agent, api_kwargs: dict, stale_timeout: float, call_start: float):
         self.agent = agent
         self.api_kwargs = api_kwargs
         self.stale_timeout = stale_timeout
+        self.call_start = call_start
         self.client = None
         self.done = False
         self.stale = False
         self.cancelled = False
         self.lock = threading.Lock()
         self.abort_hook = self.abort  # single bound object: identity-checked on cleanup
+        self._hb_stop = threading.Event()
+        self._hb = threading.Thread(target=self._activity_heartbeat, name="direct-api-activity-hb", daemon=True)
+        self._watchdog = None
+
+    def _activity_heartbeat(self) -> None:
+        # Do not put the API call itself on another worker thread — that is
+        # the nested-pool deadlock this path exists to avoid (#60203). This
+        # ticker only refreshes the activity clock.
+        while not self._hb_stop.wait(_DIRECT_API_ACTIVITY_HEARTBEAT_SECONDS):
+            with contextlib.suppress(Exception):
+                self.agent._touch_activity("waiting for non-streaming API response")
+
+    def _on_stale(self) -> None:
+        # Timer thread: aborts sockets only, never issues a request (keeps
+        # the no-worker property). False = request finished or an interrupt
+        # owns the outcome; stay silent.
+        if not self.abort("stale_call_kill"):
+            return
+        elapsed = time.time() - self.call_start
+        _report_stale_nonstream_kill(self.agent, self.api_kwargs, elapsed, self.stale_timeout, inline=True)
+        _touch_stale_kill_activity(self.agent, elapsed)
+
+    def start_watchdogs(self) -> None:
+        """Start the activity heartbeat and (for a finite budget) the stale timer."""
+        self._hb.start()
+        if math.isfinite(self.stale_timeout) and self.stale_timeout > 0:
+            self._watchdog = threading.Timer(self.stale_timeout, self._on_stale)
+            self._watchdog.name = "direct-api-stale-watchdog"
+            self._watchdog.daemon = True
+            self._watchdog.start()
+
+    def stop_watchdogs(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+        self.mark_done()
+        self._hb_stop.set()
+        self._hb.join(timeout=2.0)
 
     def _abort_client(self, client, reason: str, log_msg: str) -> None:
         try:
@@ -904,19 +942,8 @@ def direct_api_call(agent, api_kwargs: dict):
     """
     _check_stale_giveup(agent)
     agent._touch_activity("waiting for non-streaming API response")
-    activity_hb_stop = threading.Event()
-
-    def _activity_heartbeat() -> None:
-        # Do not put the API call itself on another worker thread — that is
-        # the nested-pool deadlock this path exists to avoid (#60203). This
-        # ticker only refreshes the activity clock.
-        while not activity_hb_stop.wait(_DIRECT_API_ACTIVITY_HEARTBEAT_SECONDS):
-            with contextlib.suppress(Exception):
-                agent._touch_activity("waiting for non-streaming API response")
-
-    activity_hb = threading.Thread(target=_activity_heartbeat, name="direct-api-activity-hb", daemon=True)
-    # Resolve the budget BEFORE start(): the resolver may raise (fail-closed),
-    # and a leaked heartbeat thread would mask real stalls forever.
+    # Resolve the budget BEFORE the heartbeat starts: the resolver may raise
+    # (fail-closed), and a leaked heartbeat thread would mask real stalls forever.
     call_start = time.time()
     stale_timeout = _resolve_direct_stale_timeout(agent, api_kwargs)
     # Never override an explicit per-call timeout; otherwise pin
@@ -925,25 +952,8 @@ def direct_api_call(agent, api_kwargs: dict):
     hard_timeout = _inline_nonstream_hard_timeout(stale_timeout)
     if hard_timeout is not None and "timeout" not in api_kwargs:
         api_kwargs = {**api_kwargs, "timeout": hard_timeout}
-    activity_hb.start()
-    request = _InlineRequest(agent, api_kwargs, stale_timeout)
-
-    def _on_stale() -> None:
-        # Timer thread: aborts sockets only, never issues a request (keeps
-        # the no-worker property). False = request finished or an interrupt
-        # owns the outcome; stay silent.
-        if not request.abort("stale_call_kill"):
-            return
-        elapsed = time.time() - call_start
-        _report_stale_nonstream_kill(agent, api_kwargs, elapsed, stale_timeout, inline=True)
-        _touch_stale_kill_activity(agent, elapsed)
-
-    stale_watchdog = None
-    if math.isfinite(stale_timeout) and stale_timeout > 0:
-        stale_watchdog = threading.Timer(stale_timeout, _on_stale)
-        stale_watchdog.name = "direct-api-stale-watchdog"
-        stale_watchdog.daemon = True
-        stale_watchdog.start()
+    request = _InlineRequest(agent, api_kwargs, stale_timeout, call_start)
+    request.start_watchdogs()
 
     # Only a clean return reports the reuse reason; errors/interrupts really
     # close the client so the retry builds a fresh pool.
@@ -974,11 +984,7 @@ def direct_api_call(agent, api_kwargs: dict):
         succeeded = True
         return response
     finally:
-        if stale_watchdog is not None:
-            stale_watchdog.cancel()
-        request.mark_done()
-        activity_hb_stop.set()
-        activity_hb.join(timeout=2.0)
+        request.stop_watchdogs()
         if getattr(agent, "_active_request_abort", None) is request.abort_hook:
             agent._active_request_abort = None
         request_client = request.pop_client()
