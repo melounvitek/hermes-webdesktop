@@ -103,9 +103,8 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
             delay = _telegram_retry_delay(exc, attempt)
             if delay is None or attempt >= attempts - 1:
                 raise
-            logger.warning(
-                "Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
-                attempt + 1, attempts, delay, _sanitize_error_text(exc))
+            logger.warning("Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
+                           attempt + 1, attempts, delay, _sanitize_error_text(exc))
             await asyncio.sleep(delay)
 
 
@@ -188,23 +187,20 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
     without ``message_thread_id`` (dropped from ``text_kwargs`` for later chunks too);
     parse failure -> plain text."""
     async def send(text, mode):
-        return await _send_telegram_message_with_retry(
-            bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
+        return await _send_telegram_message_with_retry(bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
 
     try:
         return await send(chunk, parse_mode)
     except Exception as md_error:
         if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
-            logger.warning(
-                "Thread %s not found in _send_telegram, retrying without message_thread_id",
-                text_kwargs.get("message_thread_id"))
+            logger.warning("Thread %s not found in _send_telegram, retrying without message_thread_id",
+                           text_kwargs.get("message_thread_id"))
             text_kwargs.pop("message_thread_id", None)
             return await send(chunk, parse_mode)
         err_text = str(md_error).lower()
         if "parse" in err_text or "markdown" in err_text or "html" in err_text:
-            logger.warning(
-                "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
-                parse_mode, _sanitize_error_text(md_error))
+            logger.warning("Parse mode %s failed in _send_telegram, falling back to plain text: %s",
+                           parse_mode, _sanitize_error_text(md_error))
             return await send(chunk if has_html else _strip_mdv2_safe(chunk), None)
         raise
 
@@ -237,13 +233,11 @@ async def _telegram_send_one_media(
         except Exception as media_err:
             err_text = str(media_err).lower()
             if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
-                logger.warning(
-                    "Thread %s not found for media send, retrying without message_thread_id",
-                    media_kwargs.pop("message_thread_id"))
+                logger.warning("Thread %s not found for media send, retrying without message_thread_id",
+                               media_kwargs.pop("message_thread_id"))
             elif media_kwargs.get("parse_mode") and ("parse" in err_text or "caption" in err_text):
-                logger.warning(
-                    "Caption parse failed for media send, retrying plain: %s",
-                    _sanitize_error_text(media_err))
+                logger.warning("Caption parse failed for media send, retrying plain: %s",
+                               _sanitize_error_text(media_err))
                 media_kwargs.pop("parse_mode", None)
                 if not has_html and media_kwargs.get("caption"):
                     media_kwargs["caption"] = _strip_mdv2_safe(media_kwargs["caption"])
@@ -520,16 +514,14 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                 return await client.post(f"{http_url}/api/v1/rpc", json=payload)
 
         async def _post(batch_attachments, batch_message):
-            resp = await _rpc_send(
-                batch_message, id_prefix="send", timeout=rl._signal_send_timeout(len(batch_attachments)),
-                attachments=batch_attachments, styled=True)
+            resp = await _rpc_send(batch_message, id_prefix="send", attachments=batch_attachments, styled=True,
+                                   timeout=rl._signal_send_timeout(len(batch_attachments)))
             resp.raise_for_status()
             return resp.json()
 
         scheduler = rl.get_scheduler()
-        logger.info(
-            "send_message Signal: scheduler state=%s, %d attachment(s) in %d batch(es)",
-            scheduler.state(), len(attachment_paths), n_batches)
+        logger.info("send_message Signal: scheduler state=%s, %d attachment(s) in %d batch(es)",
+                    scheduler.state(), len(attachment_paths), n_batches)
         failed_batches: list[int] = []
         for idx, att_batch in enumerate(att_batches):
             n = len(att_batch)
@@ -542,8 +534,8 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                     await _rpc_send(notice, id_prefix="notice", timeout=30.0)
                 except Exception as _e:
                     logger.warning("Signal: inline notice failed: %s", _e)
-            outcome = await _signal_send_batch(
-                _post, scheduler, rl, idx, n_batches, att_batch, plain_text if idx == 0 else "")
+            outcome = await _signal_send_batch(_post, scheduler, rl, idx, n_batches, att_batch,
+                                               plain_text if idx == 0 else "")
             if outcome is False:
                 failed_batches.append(idx + 1)
             elif outcome is not None:
