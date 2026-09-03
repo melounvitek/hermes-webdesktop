@@ -109,23 +109,13 @@ def _resolve_lineage(db, session_id: str) -> str:
     return _resolve_to_parent(db, session_id)[0]
 
 
-def _session_end_reason(db, session_id: str) -> Optional[str]:
-    """Return the session's ``end_reason``, or None if missing/unended/error."""
-    if not session_id:
-        return None
-    try:
-        s = db.get_session(session_id)
-    except Exception:
-        return None
-    return (s.get("end_reason") or None) if s else None
-
-
 def _session_left_live_context(db, session_id: str) -> bool:
     """True when the transcript left everyone's live context: ``compression``
     (summarised into the child) or a fresh reset (child starts empty). Live delegation
     children (``end_reason is None``) and ``branched`` parents (copied verbatim into
     the branch) ARE the current context, so they stay excluded from recall."""
-    end_reason = _session_end_reason(db, session_id)
+    s = session_id and _quiet(lambda: db.get_session(session_id), None, "get_session failed for %s", session_id)
+    end_reason = (s.get("end_reason") or None) if s else None
     return end_reason == "compression" or end_reason in _FRESH_RESET_END_REASONS
 
 
@@ -139,7 +129,6 @@ def _get_message_storage_state(db, message_id) -> Optional[Dict[str, Any]]:
             return db._conn.execute(
                 "SELECT session_id, active, compacted FROM messages WHERE id = ?", (message_id,)
             ).fetchone()
-
     row = _quiet(_lookup, None, "message storage-state lookup failed for %s", message_id)
     return dict(row) if row is not None else None
 
@@ -208,14 +197,9 @@ def _session_link(session_id: str, profile: str = None) -> str:
     return f"@session:{name}/{session_id}" if name else f"@session:{session_id}"
 
 
-def _normalize_title_query(query: str) -> str:
-    """Strip common quoting the model may include around a remembered title."""
-    return query.strip().strip("`'\"")
-
-
 def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return a discovery-shaped result when the query matches a session title."""
-    title_query = _normalize_title_query(query)
+    title_query = query.strip().strip("`'\"")  # models often quote a remembered title
     if not title_query:
         return None
     session_id = _quiet(lambda: db.resolve_session_by_title(title_query), None,
@@ -225,12 +209,8 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
     lineage_root = _resolve_lineage(db, session_id)
     # Same-lineage title hits are in-context only while the session is live;
     # /new-reset and compression-ended parents are not.
-    if (
-        current_lineage_root
-        and lineage_root == current_lineage_root
-        and not _session_left_live_context(db, session_id)):
+    if current_lineage_root and lineage_root == current_lineage_root and not _session_left_live_context(db, session_id):
         return None
-
     session_meta = _quiet(lambda: db.get_session(lineage_root) or db.get_session(session_id), None,
                           "get_session failed for title match %s", session_id) or {}
     if session_meta.get("source") in _HIDDEN_SESSION_SOURCES:
@@ -286,10 +266,7 @@ def _dedupe_by_lineage(db, raw_results, limit, seen_sessions, current_session_id
         resolved_sid, _ = _resolve_to_parent(db, raw_sid)
         is_compacted_hit = _is_compacted_message(db, r.get("id"))
         is_ended_session = _session_left_live_context(db, raw_sid)
-        if (
-            current_lineage_root
-            and resolved_sid == current_lineage_root
-            and not (is_ended_session or is_compacted_hit)):
+        if current_lineage_root and resolved_sid == current_lineage_root and not (is_ended_session or is_compacted_hit):
             continue
         if current_session_id and raw_sid == current_session_id and not is_compacted_hit:
             continue
@@ -313,9 +290,7 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
         return None
     session_meta = _quiet(lambda: db.get_session(lineage_root), None, "get_session failed for %s", lineage_root) or {}
     full = result_detail == "full"
-    window_messages = view.get("window") or []
-    if not full:
-        window_messages = [m for m in window_messages if m.get("id") == msg_id]
+    window_messages = [m for m in (view.get("window") or []) if full or m.get("id") == msg_id]
     return _discovery_entry(
         lineage_root, session_id=hit_sid,
         when=_format_timestamp(session_meta.get("started_at") or match_info.get("session_started")),
@@ -333,22 +308,18 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str = None, link_profile: str = None) -> str:
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
-    role_list = role_filter if role_filter else ["user", "assistant"]
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     title_result = _title_match_result(db, query, current_lineage_root)
-
     try:
         raw_results = db.search_messages(
-            query=query, role_filter=role_list, exclude_sources=list(_HIDDEN_SESSION_SOURCES),
+            query=query, role_filter=role_filter or ["user", "assistant"], exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=_DISCOVER_SCAN_LIMIT, offset=0, sort=sort, fields=_DISCOVER_SEARCH_FIELDS)
     except Exception as e:
         logging.error("FTS5 search failed: %s", e, exc_info=True)
         return tool_error(f"Search failed: {e}", success=False)
-
-    # Demote cron rows below interactive ones BEFORE dedup so a high-volume
-    # cron corpus can't starve the user's own sessions out of the top `limit`.
+    # Demote cron rows below interactive ones BEFORE dedup so a high-volume cron
+    # corpus can't starve the user's own sessions out of the top `limit`.
     raw_results = _order_for_recall(raw_results)
-
     if not raw_results and not title_result:
         return _discover_payload(db, query, detail, [], message=(
             "No matching sessions found. FTS5 ANDs all terms by default — "
@@ -363,7 +334,6 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             seen_sessions[title_lineage] = {"_title_only": True}
         results.append(title_result)
     _dedupe_by_lineage(db, raw_results, limit, seen_sessions, current_session_id, current_lineage_root)
-
     for lineage_root, match_info in seen_sessions.items():
         if match_info.get("_title_only"):
             continue
@@ -436,13 +406,11 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
     meta = _get_session_meta(db, session_id)
     if not meta:
         return tool_error(f"session_id not found: {session_id}", success=False)
-
     try:
         rows = db.get_messages(session_id)
     except Exception as e:
         logging.error("get_messages failed for %s: %s", session_id, e, exc_info=True)
         return tool_error(f"failed to load session: {e}", success=False)
-
     shaped = [_shape_message(m) for m in rows]
     total = len(shaped)
     truncated = total > head + tail
@@ -477,9 +445,8 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
                 continue
             results.append({
                 "session_id": sid, "link": _session_link(sid, link_profile), "title": s.get("title") or None,
-                "source": s.get("source", ""), "started_at": s.get("started_at", ""),
-                "last_active": s.get("last_active", ""), "message_count": s.get("message_count", 0),
-                "preview": s.get("preview", "")})
+                **{k: s.get(k, "") for k in ("source", "started_at", "last_active")},
+                "message_count": s.get("message_count", 0), "preview": s.get("preview", "")})
             if len(results) >= limit:
                 break
         return _ok(mode="browse", results=results, count=len(results), message=(
@@ -540,39 +507,30 @@ def _scroll(db, session_id: str, around_message_id: int, window: int = 5,
     except (TypeError, ValueError):
         return tool_error("scroll requires integer around_message_id", success=False)
     window = _clamp_int(window, 5, 1, 20)
-
     # Locate the anchor BEFORE the current-lineage guard (see _anchor_in_live_context).
     anchor_state = _get_message_storage_state(db, around_message_id)
     owning_session_id = anchor_state.get("session_id") if anchor_state is not None else None
-
     if current_session_id and _anchor_in_live_context(
         db, anchor_state, owning_session_id or session_id, current_session_id):
         return tool_error("scroll rejected: anchor lives in the current session lineage (already in your active context)", success=False)
-
     session_meta = _get_session_meta(db, session_id)
     if not session_meta:
         return tool_error(f"session_id not found: {session_id}", success=False)
-
     try:
         view = db.get_messages_around(session_id, around_message_id, window=window)
     except Exception as e:
         logging.error("get_messages_around failed: %s", e, exc_info=True)
         return tool_error(f"failed to load messages: {e}", success=False)
-
     messages = view.get("window") or []
     rebind_warning = None
     if not messages and owning_session_id and owning_session_id != session_id:
-        rebind_view, rebind_warning = _rebind_to_owner(
-            db, session_id, owning_session_id, around_message_id, window)
+        rebind_view, rebind_warning = _rebind_to_owner(db, session_id, owning_session_id, around_message_id, window)
         if rebind_view is not None:
-            view = rebind_view
-            messages = view["window"]
+            view, messages = rebind_view, rebind_view["window"]
             session_meta = _get_session_meta(db, owning_session_id) or session_meta
             session_id = owning_session_id
-
     if not messages:
         return tool_error(f"around_message_id {around_message_id} not in session_id {session_id}", success=False)
-
     return _ok(
         mode="scroll", session_id=session_id, around_message_id=around_message_id,
         session_meta=_session_meta_block(session_meta), window=window,
@@ -615,7 +573,6 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
             session_id = emb_id
             if emb_profile and (profile is None or not str(profile).strip()):
                 profile = emb_profile
-
     # Cross-profile: swap in the named profile's DB (read-only) for every shape;
     # current-lineage guards key off ids that won't collide, so they stay inert.
     try:
@@ -625,17 +582,13 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     if profile_db is not None:
         db, current_session_id = profile_db, None
         owned_dbs.append(profile_db)
-
-    has_session = isinstance(session_id, str) and bool(session_id.strip())
-    if has_session and around_message_id is not None:
-        return _scroll(db, session_id, around_message_id, window, current_session_id)
-    if has_session:
+    if isinstance(session_id, str) and session_id.strip():
+        if around_message_id is not None:
+            return _scroll(db, session_id, around_message_id, window, current_session_id)
         return _read_with_profile_fallback(db, session_id.strip(), profile)
-
     limit = _clamp_int(limit, 3, 1, 10)
     if not query or not isinstance(query, str) or not query.strip():
         return _list_recent_sessions(db, limit, current_session_id, link_profile=profile)
-
     role_list = ([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     sort_norm = sort_norm if sort_norm in ("newest", "oldest") else None
@@ -661,7 +614,6 @@ def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=
             from hermes_state import format_session_db_unavailable
 
             return tool_error(format_session_db_unavailable(), success=False)
-
     try:
         return _dispatch(query, role_filter, limit, db, current_session_id, session_id,
                          around_message_id, window, sort, profile, detail, owned_dbs)
