@@ -83,20 +83,14 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     timestamps. Pure stdlib, never raises, never blocks."""
     pid, ppid = os.getpid(), os.getppid()
     ctx: Dict[str, Any] = {
-        "ts": time.time(),
-        "ts_monotonic": time.monotonic(),
+        "ts": time.time(), "ts_monotonic": time.monotonic(),
         "signal": _signal_name(received_signal),
         "signal_num": int(received_signal) if received_signal is not None else None,
-        "pid": pid,
-        "ppid": ppid,
-        "parent": _proc_summary(ppid),
-        "self": _proc_summary(pid),
+        "pid": pid, "ppid": ppid, "parent": _proc_summary(ppid), "self": _proc_summary(pid),
     }
-    # INVOCATION_ID is set by systemd units; ppid==1 also strongly suggests systemd forwarded the
-    # SIGTERM.
-    for ctx_key, env_key in (
-        ("systemd_invocation_id", "INVOCATION_ID"), ("systemd_journal_stream", "JOURNAL_STREAM"),
-    ):
+    # INVOCATION_ID is set by systemd units; ppid==1 also suggests systemd forwarded the SIGTERM.
+    for ctx_key, env_key in (("systemd_invocation_id", "INVOCATION_ID"),
+                             ("systemd_journal_stream", "JOURNAL_STREAM")):
         if os.environ.get(env_key):
             ctx[ctx_key] = os.environ[env_key]
     ctx["under_systemd"] = bool(os.environ.get("INVOCATION_ID")) or ppid == 1
@@ -117,18 +111,16 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
             raw = _read_marker(Path(hermes_home_str) / ".gateway-takeover.json")
             if raw is not None:
                 ctx["takeover_marker"] = raw[:300]
-                ctx["takeover_marker_for_self"] = (
-                    f'"target_pid": {pid}' in raw or f"'target_pid': {pid}" in raw
-                )
+                ctx["takeover_marker_for_self"] = (f'"target_pid": {pid}' in raw
+                                                   or f"'target_pid': {pid}" in raw)
             raw = _read_marker(Path(hermes_home_str) / ".gateway-planned-stop.json")
             if raw is not None:
                 ctx["planned_stop_marker"] = raw[:300]
     return ctx
 
 
-def spawn_async_diagnostic(
-    log_path: Path, signal_name: str, *, timeout_seconds: float = 5.0
-) -> Optional[int]:
+def spawn_async_diagnostic(log_path: Path, signal_name: str, *,
+                           timeout_seconds: float = 5.0) -> Optional[int]:
     """Fire-and-forget ``ps``-style snapshot appended to ``log_path``: a detached subprocess (own
     ``timeout`` so a wedged ``ps`` self-cleans) rather than a blocking ``ps aux`` in the signal
     handler, which can freeze the loop >2s on a busy host. Returns the subprocess PID, or ``None``
@@ -154,14 +146,11 @@ def spawn_async_diagnostic(
         fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     except OSError:
         return None
-    try:
-        # start_new_session: survive systemd killing our cgroup (KillMode=control-group) long enough
-        # to flush.
+    try:  # start_new_session: outlive systemd killing our cgroup (KillMode=control-group) to flush
         return subprocess.Popen(
             ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script], stdout=fd,
             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
-            close_fds=True,
-        ).pid
+            close_fds=True).pid
     except OSError:
         return None
     finally:
@@ -170,16 +159,13 @@ def spawn_async_diagnostic(
 
 
 def format_context_for_log(ctx: Dict[str, Any]) -> str:
-    """Render a shutdown context dict as a single, scannable log line (parent cmdline is the key
-    signal).
-    """
+    """Render a shutdown context dict as one scannable log line (parent cmdline is key)."""
     parent = ctx.get("parent") or {}
     load_str = f"{load:.2f}" if isinstance(load := ctx.get("loadavg_1m"), (int, float)) else "?"
     extras: List[str] = []
     if ctx.get("takeover_marker") is not None:
-        extras.append(
-            f"takeover_marker_present={'self' if ctx.get('takeover_marker_for_self') else 'other'}"
-        )
+        who = 'self' if ctx.get('takeover_marker_for_self') else 'other'
+        extras.append(f"takeover_marker_present={who}")
     if ctx.get("planned_stop_marker") is not None:
         extras.append("planned_stop_marker_present=yes")
     if ctx.get("tracer_pid"):
@@ -215,29 +201,21 @@ def check_systemd_timing_alignment(
     unit_name: Optional[str] = None
     with contextlib.suppress(OSError), open("/proc/self/cgroup", encoding="utf-8") as fh:
         for line in fh:
-            unit_name = next(
-                (p for p in reversed(line.strip().split("/")) if p.endswith(".service")), None
-            )
+            parts = reversed(line.strip().split("/"))
+            unit_name = next((p for p in parts if p.endswith(".service")), None)
             if unit_name:
                 break
     if (timeout_us := _systemd_timeout_stop_us(unit_name) if unit_name else None) is None:
         return None
     timeout_stop_sec = timeout_us / 1_000_000.0
     expected = float(resolve_systemd_timeout_stop_sec(drain_timeout, cron_drain_timeout))
-    return {
-        "unit": unit_name,
-        "timeout_stop_sec": timeout_stop_sec,
-        "drain_timeout": drain_timeout,
-        "cron_drain_timeout": cron_drain_timeout,
-        "expected_min": expected,
-        "mismatch": timeout_stop_sec < expected,
-    }
+    return {"unit": unit_name, "timeout_stop_sec": timeout_stop_sec, "drain_timeout": drain_timeout,
+            "cron_drain_timeout": cron_drain_timeout, "expected_min": expected,
+            "mismatch": timeout_stop_sec < expected}
 
 
 def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:
-    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' common case),
-    then system.
-    """
+    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' usual)."""
     for flag in (["--user"], []):
         try:
             result = subprocess.run(

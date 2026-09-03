@@ -5,8 +5,7 @@ KeepAlive only restarts a *dead* process. Hence: (1) an OS-thread shutdown watch
 stacks and ``os._exit``s past ``restart_drain_timeout + grace``; (2) a heartbeat file at
 ``<HERMES_HOME>/state/gateway.heartbeat`` so supervisors can tell "process alive" from "loop
 frozen"; (3) a lifetime thread watchdog that hard-exits when the loop is too frozen to run its
-own callbacks; (4) a self-rescheduling floor timer that keeps the selector timeout finite.
-"""
+own callbacks; (4) a self-rescheduling floor timer that keeps the selector timeout finite."""
 
 from __future__ import annotations
 
@@ -35,8 +34,8 @@ DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S = 5.0
 DEFAULT_LOOP_WATCHDOG_INTERVAL_S = 30.0
 DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
-# 3 sustained misses (~90-120s of loop block) escalate; stays tight because the heartbeat
-# write is off-loop. Slow loops tune gateway.loop_watchdog_* in config.yaml.
+# 3 sustained misses (~90-120s of loop block) escalate; stays tight because the heartbeat write is
+# off-loop. Slow loops tune gateway.loop_watchdog_* in config.yaml.
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
@@ -68,7 +67,6 @@ class _LoopFloorTimerHandle:
 
 
 class _LoopLivenessWatchdogHandle:
-    """Small lifecycle handle for the daemon liveness thread."""
     def __init__(self, stop_event: threading.Event, thread: threading.Thread):
         self._stop_event = stop_event
         self.stop, self.join, self.is_alive = stop_event.set, thread.join, thread.is_alive
@@ -78,10 +76,8 @@ def _arm_loop_floor_timer(
     loop: asyncio.AbstractEventLoop, interval: float = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S
 ) -> _LoopFloorTimerHandle:
     """Keep at least one timer pending so selector waits remain bounded."""
-    resolved = _coerce_float(interval, 0.0)
-    return _LoopFloorTimerHandle(
-        loop, resolved if resolved > 0 else DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S
-    )
+    iv = _coerce_float(interval, 0.0)
+    return _LoopFloorTimerHandle(loop, iv if iv > 0 else DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S)
 
 
 def start_loop_liveness_watchdog(
@@ -90,22 +86,10 @@ def start_loop_liveness_watchdog(
     max_strikes: int = DEFAULT_LOOP_WATCHDOG_MAX_STRIKES,
     exit_code: int = GATEWAY_SERVICE_RESTART_EXIT_CODE,
 ) -> Optional[_LoopLivenessWatchdogHandle]:
-    """Start an out-of-loop watchdog that hard-exits after missed probes. The
-    ``gateway.loop_watchdog: false`` opt-out is enforced by the caller
-    (``GatewayRunner._start_loop_liveness_guards``).
-    """
+    """Start an out-of-loop watchdog that hard-exits after missed probes. The caller
+    (``GatewayRunner._start_loop_liveness_guards``) enforces the ``gateway.loop_watchdog: false``
+    opt-out."""
     stop_event = threading.Event()
-
-    def _wait_for_probe(probe_event: threading.Event) -> Optional[bool]:
-        """True/False = probe answered / timed out; None = stop requested mid-wait."""
-        deadline = time.monotonic() + probe_timeout
-        while not stop_event.is_set():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return probe_event.is_set()
-            if probe_event.wait(timeout=min(remaining, 0.05)):
-                return True
-        return None
 
     def _watchdog() -> None:
         strikes = 0
@@ -118,15 +102,17 @@ def start_loop_liveness_watchdog(
             except Exception:
                 logger.debug("Failed to schedule gateway loop liveness probe", exc_info=True)
                 return
-            responded = _wait_for_probe(probe_event)
-            if responded is None:
+            deadline = time.monotonic() + probe_timeout
+            while not stop_event.is_set():  # poll so a stop() mid-wait is honoured within ~50ms
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or probe_event.wait(timeout=min(remaining, 0.05)):
+                    break
+            else:
                 return
-            if responded:
+            if probe_event.is_set():
                 strikes = 0
                 continue
-            # Re-check stop_event between each irreversible step: a late stop() during the dump must
-            # win.
-            if stop_event.is_set():
+            if stop_event.is_set():  # re-checked before each irreversible step: a late stop() wins
                 return
             strikes += 1
             if strikes < max_strikes:
@@ -137,17 +123,13 @@ def start_loop_liveness_watchdog(
                 logger.critical(
                     "Gateway event loop missed %d consecutive liveness probes; dumping all thread "
                     "stacks and exiting with code %d so the service supervisor can restart it.",
-                    strikes,
-                    exit_code,
-                )
+                    strikes, exit_code)
             try:
                 faulthandler.dump_traceback(all_threads=True)
             except Exception:
                 logger.debug("Loop liveness faulthandler dump failed", exc_info=True)
             if stop_event.is_set():
                 return
-            # Stamp the lifecycle sentinel so the next boot reports "watchdog hard-exit", not
-            # SIGKILL/OOM.
             _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
             os._exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
@@ -177,43 +159,33 @@ def _home(home: Optional[Path]) -> Path:
 
 
 def get_loop_heartbeat_path(home: Optional[Path] = None) -> Path:
-    """Return ``<HERMES_HOME>/state/gateway.heartbeat``."""
     return _home(home).joinpath(*_HEARTBEAT_RELATIVE)
 
 
 def get_loop_tick_socket_path(home: Optional[Path] = None, pid: Optional[int] = None) -> Path:
     """``<HERMES_HOME>/state/gateway.loop-tick.<pid>.sock`` — PID-suffixed so a stale node from a
     dead process is never mistaken for this gateway's witness. Served by the loop itself
-    (``_tick_socket_handler``), so an answer proves the loop dispatches — what the heartbeat can't.
-    """
-    return (
-        _home(home)
-        / "state"
-        / f"gateway.loop-tick.{int(pid if pid is not None else os.getpid())}.sock"
-    )
+    (``_tick_socket_handler``), so an answer proves the loop dispatches; the heartbeat cannot."""
+    pid = int(pid if pid is not None else os.getpid())
+    return _home(home) / "state" / f"gateway.loop-tick.{pid}.sock"
 
 
 def get_shutdown_watchdog_dump_path(home: Optional[Path] = None) -> Path:
-    """Return the faulthandler / metadata dump path for a fired watchdog."""
     return _home(home).joinpath(*_WATCHDOG_DUMP_RELATIVE)
 
 
 def write_loop_heartbeat(
     *, pid: Optional[int] = None, start_time: Optional[float] = None,
-    home: Optional[Path] = None, extra: Optional[Dict[str, Any]] = None,
-) -> Path:
+    home: Optional[Path] = None, extra: Optional[Dict[str, Any]] = None) -> Path:
     """Atomically rewrite the loop-liveness heartbeat file; never raises.
     ``start_time`` (process start, epoch seconds) lets supervisors detect PID reuse."""
     path = get_loop_heartbeat_path(home)
-    payload: Dict[str, Any] = {
-        "pid": int(pid if pid is not None else os.getpid()),
-        "updated_at": datetime.now(timezone.utc).isoformat(), "monotonic": time.monotonic(),
-    }
+    payload: Dict[str, Any] = {"pid": int(pid if pid is not None else os.getpid()),
+                               "updated_at": datetime.now(timezone.utc).isoformat(),
+                               "monotonic": time.monotonic()}
     if start_time is not None:
         payload["start_time"] = float(start_time)
-    # Cheap memory sample: after an unclean death the last heartbeat is the closest record of memory
-    # pressure.
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception):  # after an unclean death this is the last memory record
         from gateway.lifecycle_ledger import sample_memory
         if mem := sample_memory():
             payload["mem"] = mem
@@ -229,14 +201,12 @@ def write_loop_heartbeat(
 def resolve_shutdown_watchdog_delay(
     drain_timeout: float, *, grace_s: float = DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S) -> float:
     """Return the wall-clock leash for the shutdown watchdog thread."""
-    return _coerce_float(drain_timeout, 0.0) + _coerce_float(
-        grace_s, DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S
-    )
+    grace = _coerce_float(grace_s, DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S)
+    return _coerce_float(drain_timeout, 0.0) + grace
 
 
-def _write_watchdog_dump(
-    dump_path: Path, *, delay_s: float, snapshot: Optional[Dict[str, Any]]
-) -> None:
+def _write_watchdog_dump(dump_path: Path, *, delay_s: float,
+                         snapshot: Optional[Dict[str, Any]]) -> None:
     """Best-effort faulthandler + metadata dump before hard-exit."""
     try:
         dump_path.parent.mkdir(parents=True, exist_ok=True)
@@ -253,8 +223,7 @@ def _write_watchdog_dump(
             fh.write("(faulthandler.dump_traceback failed)\n")
         fh.write("--- end dump ---\n")
         fh.flush()
-    # Also to stderr so journald/launchd capture it even if the disk is wedged.
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(Exception):  # stderr too: journald/launchd get it if disk is wedged
         sys.stderr.write(f"Gateway shutdown watchdog fired after {delay_s:.0f}s "
                          f"(pid={os.getpid()}); dumping all thread stacks.\n")
         sys.stderr.flush()
@@ -264,11 +233,10 @@ def _write_watchdog_dump(
 def arm_shutdown_watchdog(
     delay_s: float, *, done_event: Optional[threading.Event] = None,
     snapshot_fn: Optional[Callable[[], Dict[str, Any]]] = None, exit_code: int = 1,
-    dump_path: Optional[Path] = None, name: str = "gateway-shutdown-watchdog",
-) -> threading.Event:
-    """Arm a daemon-thread hard-exit backstop for a wedged shutdown path.
-    Exits quietly if ``done_event`` is set within ``delay_s``, else dumps diagnostics and
-    ``os._exit(exit_code)``. Never raises; returns ``done_event`` for disarming."""
+    dump_path: Optional[Path] = None, name: str = "gateway-shutdown-watchdog") -> threading.Event:
+    """Arm a daemon-thread hard-exit backstop for a wedged shutdown path: exits quietly if
+    ``done_event`` is set within ``delay_s``, else dumps diagnostics and ``os._exit(exit_code)``.
+    Never raises; returns ``done_event`` for disarming."""
     done = done_event if done_event is not None else threading.Event()
     delay = _coerce_float(delay_s, DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S)
     if delay <= 0:
@@ -281,12 +249,10 @@ def arm_shutdown_watchdog(
                 return
         if done.is_set():
             return
-        snapshot: Optional[Dict[str, Any]] = None
-        if snapshot_fn is not None:
-            try:
-                snapshot = snapshot_fn()
-            except Exception as exc:
-                snapshot = {"snapshot_error": repr(exc)}
+        try:
+            snapshot = snapshot_fn() if snapshot_fn is not None else None
+        except Exception as exc:
+            snapshot = {"snapshot_error": repr(exc)}
         target = dump_path if dump_path is not None else get_shutdown_watchdog_dump_path()
         _write_watchdog_dump(target, delay_s=delay, snapshot=snapshot)
         with contextlib.suppress(Exception):
@@ -296,8 +262,7 @@ def arm_shutdown_watchdog(
             with contextlib.suppress(Exception):
                 stream.flush()
         # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock BEFORE the log drain
-        # (locks must never be stranded), then drain the async log queue so logger.critical
-        # reaches the file before os._exit skips atexit.
+        # (never strand locks), then drain the log queue so logger.critical lands before os._exit.
         with contextlib.suppress(Exception):
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
             remove_pid_file()
@@ -333,9 +298,7 @@ def _sweep_stale_tick_sockets(own_path: Path) -> None:
     try:
         for stale in (p for p in own_path.parent.glob("gateway.loop-tick.*.sock") if p != own_path):
             try:
-                os.kill(
-                    int(stale.name.split(".")[-2]), 0
-                )  # windows-footgun: ok — POSIX-only caller
+                os.kill(int(stale.name.split(".")[-2]), 0)  # windows-footgun: ok — POSIX-only
             except (ValueError, IndexError, OSError):
                 stale.unlink(missing_ok=True)
     except Exception:
@@ -344,22 +307,18 @@ def _sweep_stale_tick_sockets(own_path: Path) -> None:
 
 async def loop_heartbeat_forever(
     *, interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S, start_time: Optional[float] = None,
-    home: Optional[Path] = None, should_continue: Optional[Callable[[], bool]] = None,
-) -> None:
-    """Rewrite the loop heartbeat file on a cadence until cancelled / gated off.
-
-    Runs on the gateway loop so a frozen loop lets the file age for monitors. The write
-    (``atomic_json_write`` -> ``os.fsync``) goes to a thread: inline, a stalled filesystem blocked
-    the loop inside its own heartbeat and the liveness watchdog killed it (WSL2 fsync stalls p99 31s
-    / max 112s vs a ~90-120s budget). The thread write is *awaited*, never fire-and-forget: an
-    unawaited task would keep the file fresh while the loop was wedged, and one in-flight write at a
-    time keeps a long stall from queuing a thread per interval. Off-loop, file freshness alone no
-    longer proves loop schedulability, so this task also arms a loop-scheduling witness
-    (``_tick_socket_handler``) recorded as ``loop_tick_socket``; probes must require the witness to
-    agree before classifying WEDGED.
-    """
+    home: Optional[Path] = None, should_continue: Optional[Callable[[], bool]] = None) -> None:
+    """Rewrite the loop heartbeat file on a cadence until cancelled / gated off. Runs on the
+    gateway loop so a frozen loop lets the file age for monitors. The fsync write goes to a thread
+    (inline, a stalled filesystem blocked the loop inside its own heartbeat and the liveness
+    watchdog killed it: WSL2 fsync stalls p99 31s / max 112s vs a ~90-120s budget) but is *awaited*,
+    never fire-and-forget: an unawaited task would keep the file fresh while the loop was wedged,
+    and one in-flight write at a time keeps a long stall from queuing a thread per interval.
+    Off-loop, file freshness no longer proves loop schedulability, so this task also arms a
+    loop-scheduling witness (``_tick_socket_handler``, flagged as ``loop_tick_socket``); probes must
+    require the witness to agree before classifying WEDGED."""
     interval = _coerce_float(interval_s, DEFAULT_HEARTBEAT_INTERVAL_S, floor=1.0)
-    # Arm the witness. Best-effort: a failed bind only disables it, and the payload flag makes
+    # Arm the witness, best-effort: a failed bind only disables it and the payload flag makes
     # probes classify UNKNOWN, never WEDGED (drain backstop stays). asyncio AF_UNIX is POSIX-only
     # (ungated it raised AttributeError on native Windows), so non-POSIX binds TCP loopback and
     # publishes ``loop_tick_tcp_port``.
@@ -369,9 +328,8 @@ async def loop_heartbeat_forever(
             tick_socket_path = get_loop_tick_socket_path(home)
             tick_socket_path.parent.mkdir(parents=True, exist_ok=True)
             _sweep_stale_tick_sockets(tick_socket_path)
-            tick_server = await asyncio.start_unix_server(
-                _tick_socket_handler, path=str(tick_socket_path)
-            )
+            tick_server = await asyncio.start_unix_server(_tick_socket_handler,
+                                                          path=str(tick_socket_path))
         else:
             tick_server = await asyncio.start_server(_tick_socket_handler, host="127.0.0.1", port=0)
             for _s in tick_server.sockets or []:
@@ -381,34 +339,22 @@ async def loop_heartbeat_forever(
                         break
     except Exception:
         tick_server = tick_tcp_port = None
-        logger.warning(
-            "Loop tick socket unavailable — liveness probes will have no "
-            "loop-scheduling witness and will not escalate on a stale heartbeat",
-            exc_info=True,
-        )
-
-    async def _write_off_loop() -> None:
-        # write_loop_heartbeat never raises, so a failure here is an executor problem and must not
-        # kill the task.
-        try:
-            await asyncio.to_thread(
-                write_loop_heartbeat,
-                start_time=start_time,
-                home=home,
-                extra={
-                    "loop_tick_socket": tick_server is not None,
-                    "loop_tick_tcp_port": tick_tcp_port,
-                },
-            )
-        except Exception:
-            logger.debug("Loop heartbeat write failed off-loop", exc_info=True)
+        logger.warning("Loop tick socket unavailable — liveness probes will have no "
+                       "loop-scheduling witness and will not escalate on a stale heartbeat",
+                       exc_info=True)
+    extra = {"loop_tick_socket": tick_server is not None, "loop_tick_tcp_port": tick_tcp_port}
     try:
-        await _write_off_loop()  # immediate first write so monitors see a fresh file at once
-        while should_continue is None or should_continue():
+        while True:  # first write is immediate so monitors see a fresh file at once
+            try:
+                await asyncio.to_thread(write_loop_heartbeat, start_time=start_time, home=home,
+                                        extra=extra)
+            except Exception:  # write_loop_heartbeat never raises: executor problem, keep the task
+                logger.debug("Loop heartbeat write failed off-loop", exc_info=True)
+            if should_continue is not None and not should_continue():
+                return
             await asyncio.sleep(interval)
             if should_continue is not None and not should_continue():
                 return
-            await _write_off_loop()
     finally:
         if tick_server is not None:
             tick_server.close()

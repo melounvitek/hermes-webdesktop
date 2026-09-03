@@ -76,9 +76,7 @@ def _flush_value(flush_dir: Path, kind: str, session_key: str, value: Any, **ext
 
 
 def flush_pending_to_file(pending: Dict[str, Any], *, reason: str = "shutdown") -> int:
-    """Serialise non-empty ``_pending_messages`` slots (``MessageEvent`` or str) to disk; return
-    sessions flushed.
-    """
+    """Serialise non-empty ``_pending_messages`` slots (``MessageEvent`` or str); return count."""
     if not pending:
         return 0
     flush_dir, ts, flushed = _get_flush_dir(), int(time.time()), 0
@@ -105,31 +103,22 @@ def flush_overflow_to_file(overflow_by_session: Dict[str, Any], *, reason: str =
             continue
         for seq, value in enumerate(list(events)):
             if value is not None:
-                flushed += _flush_value(
-                    flush_dir, "overflow", session_key, value, reason=reason, ts=ts, seq=seq
-                )
+                flushed += _flush_value(flush_dir, "overflow", session_key, value, reason=reason,
+                                        ts=ts, seq=seq)
     if flushed:
-        logger.info(
-            "Flushed %d queued overflow message(s) to %s (reason=%s)", flushed, flush_dir, reason
-        )
+        logger.info("Flushed %d queued overflow message(s) to %s (reason=%s)", flushed, flush_dir,
+                    reason)
     return flushed
 
 
 def spool_dropped_transcript_message(session_id: str, message: Dict[str, Any]) -> Optional[Path]:
-    """Spool a cap-evicted transcript message; ``None`` on failure (callers degrade to drop-and-
-    log).
-    """
+    """Spool a cap-evicted transcript message; ``None`` on failure (callers degrade to drop+log)."""
     try:
-        return _write_payload(
-            _get_flush_dir(),
-            {
-                "session_key": session_id,
-                "reason": TRANSCRIPT_CAP_DROP_REASON,
-                "ts": int(time.time()),
-                "seq": next(_TRANSCRIPT_SPOOL_SEQ),
-                "data": {"session_id": session_id, "message": message},
-            },
-        )
+        return _write_payload(_get_flush_dir(), {
+            "session_key": session_id, "reason": TRANSCRIPT_CAP_DROP_REASON, "ts": int(time.time()),
+            "seq": next(_TRANSCRIPT_SPOOL_SEQ),
+            "data": {"session_id": session_id, "message": message},
+        })
     except Exception as exc:
         logger.debug("Failed to spool cap-dropped transcript message for %s: %s", session_id, exc)
         return None
@@ -152,10 +141,8 @@ def drain_transcript_spool(session_id: str, replay) -> tuple[int, int]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if (
-            payload.get("reason") != TRANSCRIPT_CAP_DROP_REASON
-            or payload.get("session_key") != session_id
-        ):
+        if (payload.get("reason") != TRANSCRIPT_CAP_DROP_REASON
+                or payload.get("session_key") != session_id):
             continue
         message = (payload.get("data") or {}).get("message")
         if not isinstance(message, dict):
@@ -175,10 +162,8 @@ def drain_transcript_spool(session_id: str, replay) -> tuple[int, int]:
         path.unlink(missing_ok=True)
         replayed += 1
     if replayed:
-        logger.info(
-            "Replayed %d spooled transcript message(s) for %s after DB recovery", replayed,
-            session_id,
-        )
+        logger.info("Replayed %d spooled transcript message(s) for %s after DB recovery", replayed,
+                    session_id)
     return replayed, remaining
 
 
@@ -194,9 +179,8 @@ def _serialise_value(value: Any) -> Optional[dict]:
     """Convert a pending message value to a JSON-serialisable dict."""
     if hasattr(value, "text"):  # MessageEvent-like object
         result: Dict[str, Any] = {"text": getattr(value, "text", "")}
-        for attr in (
-            "session_id", "platform", "sender_id", "sender_name", "reply_to", "media", "raw_event",
-        ):
+        for attr in ("session_id", "platform", "sender_id", "sender_name", "reply_to", "media",
+                     "raw_event"):
             val = getattr(value, attr, None)
             if val is not None:
                 result[attr] = val if _json_safe(val) else str(val)
@@ -242,8 +226,7 @@ def recover_pending_to_db(session_db=None) -> int:
 
 
 def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> bool:
-    """Append one flush payload to ``session_db``; False (file preserved) when structurally invalid.
-    """
+    """Append one flush payload to ``session_db``; False (file kept) when structurally invalid."""
     if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:
         # Cap-dropped payloads carry the full message dict keyed by session_id — replay directly.
         data = payload.get("data", {}) or {}
@@ -252,11 +235,9 @@ def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> boo
             logger.warning("Cannot recover structurally invalid transcript spool "
                            "file %s; preserved for manual inspection", path)
             return False
-        session_db.append_message(
-            session_id=spooled_sid, role=message.get("role", "unknown"),
-            content=message.get("content") or "",
-            timestamp=message.get("timestamp") or payload.get("ts"),
-        )
+        session_db.append_message(session_id=spooled_sid, role=message.get("role", "unknown"),
+                                  content=message.get("content") or "",
+                                  timestamp=message.get("timestamp") or payload.get("ts"))
         return True
     session_key, data = payload.get("session_key", ""), payload.get("data", {})
     text = data.get("text", "")
@@ -272,10 +253,8 @@ def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> boo
                        "session_key-to-id resolution is not available at this recovery stage. "
                        "The message text is preserved in %s", session_key, path)
         return False
-    session_db.append_message(
-        session_id=session_id, role="user", content=text,
-        timestamp=payload.get("ts", int(time.time())),
-    )
+    session_db.append_message(session_id=session_id, role="user", content=text,
+                              timestamp=payload.get("ts", int(time.time())))
     return True
 
 
@@ -291,24 +270,17 @@ def flush_agent_history_to_file(session_id: Optional[str], history: list) -> Non
         snapshot = []
         for _m in history:
             try:
-                snapshot.append(
-                    _m
-                    if isinstance(_m, (dict, list, str, int, float, bool, type(None)))
-                    else str(_m)
-                )
+                plain = isinstance(_m, (dict, list, str, int, float, bool, type(None)))
+                snapshot.append(_m if plain else str(_m))
             except Exception:
                 continue
         _write_payload(flush_dir, {
             "reason": "shutdown-with-unpersisted-agent-history", "issue": "#72680",
             "session_id": session_id, "count": len(snapshot), "messages": snapshot,
         })
-        logger.warning(
-            "Preserved %d in-memory message(s) for session %s "
-            "(possible FTS corruption — recover after repairing state.db)",
-            len(snapshot),
-            session_id,
-        )
+        logger.warning("Preserved %d in-memory message(s) for session %s "
+                       "(possible FTS corruption — recover after repairing state.db)",
+                       len(snapshot), session_id)
     except Exception as _e:
-        logger.warning(
-            "Agent-history shutdown preservation failed for session %s: %s", session_id, _e
-        )
+        logger.warning("Agent-history shutdown preservation failed for session %s: %s", session_id,
+                       _e)
