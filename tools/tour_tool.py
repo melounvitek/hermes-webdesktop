@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI. Generic:
-the agent discovers targets (``action="targets"``), then highlights one step at a
-time (``show``) or hands over a step list the user pages (``start``). Round-trips
-through the gateway blocking-prompt bridge (``tour.request``/``tour.respond``) so the
-agent learns whether the selector matched. Lives in ``desktop_ui`` and withdraws
-itself when tours are off: a tour takes the whole screen, so "off" must mean the
-model is never told the tool exists rather than offered a call that fails."""
+"""Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI: the agent discovers
+targets (``action="targets"``), then highlights one step at a time (``show``) or hands over a
+step list the user pages (``start``). Round-trips through the gateway blocking-prompt bridge
+(``tour.request``/``tour.respond``) so the agent learns whether the selector matched. Lives in
+``desktop_ui`` and withdraws itself when tours are off: a tour takes the whole screen, so "off"
+must mean the model is never told the tool exists rather than offered a call that fails."""
 
 import json
 from typing import Callable, Optional
@@ -18,36 +16,24 @@ SURFACES = ("app", "preview")
 SIDES = ("top", "right", "bottom", "left")
 
 
-def tour_tool(
-    action: str = "",
-    surface: Optional[str] = None,
-    selector: Optional[str] = None,
-    title: Optional[str] = None,
-    text: Optional[str] = None,
-    side: Optional[str] = None,
-    steps: Optional[list] = None,
-    step_index: Optional[int] = None,
-    callback: Optional[Callable] = None,
-) -> str:
+def tour_tool(action: str = "", surface: Optional[str] = None, selector: Optional[str] = None,
+              title: Optional[str] = None, text: Optional[str] = None, side: Optional[str] = None,
+              steps: Optional[list] = None, step_index: Optional[int] = None,
+              callback: Optional[Callable] = None) -> str:
     """Dispatch one tour action to the desktop renderer and return its outcome."""
     if callback is None:
         return tool_error("tour is only available in the Hermes desktop app.")
-
     verb = (action or "").strip().lower()
     if verb not in ACTIONS:
         return tool_error(f"action must be one of: {', '.join(ACTIONS)}.")
-
     where = (surface or "app").strip().lower()
     if where not in SURFACES:
         return tool_error(f"surface must be one of: {', '.join(SURFACES)}.")
-
     if side is not None and side not in SIDES:
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
-
     # Every highlighted moment needs something to point at or something to say.
     if verb == "show" and not (selector or title or text):
         return tool_error("show needs a selector (and/or title/text for the popover).")
-
     if verb == "start":
         if not isinstance(steps, list) or not steps:
             return tool_error("start needs a non-empty steps array.")
@@ -56,24 +42,15 @@ def tour_tool(
                 return tool_error(f"steps[{i}] must be an object.")
             if not (step.get("selector") or step.get("title") or step.get("text")):
                 return tool_error(f"steps[{i}] needs a selector and/or title/text.")
-
-    fields = {
-        "action": verb, "surface": where, "selector": selector, "title": title,
-        "text": text, "side": side, "steps": steps, "step_index": step_index,
-    }
-    payload = {key: val for key, val in fields.items() if val is not None}
-
+    fields = {"action": verb, "surface": where, "selector": selector, "title": title,
+              "text": text, "side": side, "steps": steps, "step_index": step_index}
     try:
-        raw = callback(payload)
+        raw = callback({key: val for key, val in fields.items() if val is not None})
     except Exception as exc:
         return tool_error(f"Tour action failed: {exc}")
-
     if not raw:
-        return tool_error(
-            "The tour request timed out, or no GUI window answered. "
-            "For surface='preview' open a page in the preview pane first."
-        )
-
+        return tool_error("The tour request timed out, or no GUI window answered. "
+                          "For surface='preview' open a page in the preview pane first.")
     # The renderer answers with a JSON object; pass it through, else wrap it.
     try:
         return json.dumps(json.loads(raw), ensure_ascii=False)
@@ -159,14 +136,9 @@ def check_tours_enabled() -> bool:
 
 
 registry.register(
-    name="gui_tour",
-    toolset="desktop_ui",
-    schema=TOUR_SCHEMA,
+    name="gui_tour", toolset="desktop_ui", schema=TOUR_SCHEMA, check_fn=check_tours_enabled,
     handler=lambda args, **kw: tour_tool(
-        action=args.get("action", ""),
-        **{k: args.get(k) for k in ("surface", "selector", "title", "text", "side", "steps", "step_index")},
-        callback=kw.get("callback"),
-    ),
-    check_fn=check_tours_enabled,
-    emoji="🧭",
-)
+        action=args.get("action", ""), callback=kw.get("callback"),
+        **{k: args.get(k) for k in ("surface", "selector", "title", "text", "side", "steps",
+                                    "step_index")}),
+    emoji="🧭")
