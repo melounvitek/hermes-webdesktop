@@ -351,17 +351,15 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     tokens = [t.strip("\"'").replace("\\", "/").lower() for t in raw_tokens]
     if not tokens:
         return None
+    basenames = [t.rsplit("/", 1)[-1] for t in tokens]
     # Gateway-dedicated entrypoints carry no subcommand to inspect.
-    for token in tokens:
-        if token == "gateway/run.py" or token.endswith("/gateway/run.py"):
-            return "run"
-        if token.rsplit("/", 1)[-1] in ("hermes-gateway", "hermes-gateway.exe"):
-            return "run"
+    if any(t == "gateway/run.py" or t.endswith("/gateway/run.py") for t in tokens):
+        return "run"
+    if any(b in ("hermes-gateway", "hermes-gateway.exe") for b in basenames):
+        return "run"
     joined = " ".join(tokens)
-    if not (
-        "hermes_cli.main" in joined
-        or "hermes_cli/main.py" in joined
-        or any(t.rsplit("/", 1)[-1] in ("hermes", "hermes.exe") for t in tokens)
+    if "hermes_cli.main" not in joined and "hermes_cli/main.py" not in joined and not any(
+        b in ("hermes", "hermes.exe") for b in basenames
     ):
         return None
     # Drop --profile X / -p X / --profile=X / -p=X (consumes a VALUE of "gateway" too).
@@ -862,15 +860,14 @@ def write_runtime_status(
     current_record = _build_pid_record()
     payload.setdefault("platforms", {})
     if clear_profile_platforms:
-        # Secondary-profile entries are keyed ``<profile>:<platform>``. A fresh
-        # process must not inherit them or /api/status stays degraded until every
-        # old adapter re-emits (removed profiles: forever).
+        # Secondary-profile entries are keyed ``<profile>:<platform>``. A fresh process must not
+        # inherit them or /api/status stays degraded until every old adapter re-emits.
         platforms = payload["platforms"] if isinstance(payload["platforms"], dict) else {}
         payload["platforms"] = {
             k: v for k, v in platforms.items() if not isinstance(k, str) or ":" not in k
         }
-    # Re-stamp identity + code fields on every write: the file can outlive its
-    # creator and the top-level record must describe the CURRENT writer.
+    # Re-stamp identity + code fields on every write: the file can outlive its creator and the
+    # top-level record must describe the CURRENT writer.
     payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
     payload["updated_at"] = _utc_now_iso()
     payload.update(_get_code_identity_fields())
@@ -889,9 +886,8 @@ def write_runtime_status(
             ("state", platform_state, None),
             ("error_code", error_code, None),
             ("error_message", error_message, None),
-            # Reconnect-loop escalation past the attention threshold: a signal for
-            # owners/fleet monitoring, not a circuit breaker (retry never stops).
-            # Cleared on successful reconnect.
+            # Reconnect-loop escalation past the attention threshold: a signal for owners/fleet
+            # monitoring, not a circuit breaker (retry never stops). Cleared on reconnect.
             ("needs_attention", needs_attention, bool),
             # ISO start of the current retry episode; None clears it.
             ("retrying_since", retrying_since, None),
