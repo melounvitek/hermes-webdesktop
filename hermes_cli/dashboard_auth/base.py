@@ -42,11 +42,10 @@ class TokenPrincipal:
 class LoginStart:
     """First leg of the OAuth round trip.
 
-    ``redirect_url`` is where the browser goes (the IDP's authorize endpoint);
-    ``cookie_payload`` maps cookie name -> serialised PKCE/CSRF state that the
-    auth route sets (HttpOnly, Secure over HTTPS, TTL <= 10 min). The PKCE
-    cookie is ``SameSite=None; Secure`` over HTTPS so it survives the cross-site
-    redirect chain — see :func:`hermes_cli.dashboard_auth.cookies.set_pkce_cookie`.
+    ``redirect_url`` is the IDP's authorize endpoint; ``cookie_payload`` maps
+    cookie name -> serialised PKCE/CSRF state that the auth route sets
+    (HttpOnly, Secure over HTTPS, TTL <= 10 min, ``SameSite=None`` over HTTPS
+    so it survives the cross-site redirect chain — see ``cookies.set_pkce_cookie``).
     """
 
     redirect_url: str
@@ -76,11 +75,10 @@ def classify_jwks_lookup_error(exc: BaseException) -> Exception:
     """Map a ``PyJWKClient.get_signing_key_from_jwt`` failure to the protocol.
 
     Only a genuine transport failure (``PyJWKClientConnectionError``, or an
-    unexpected JWKS shape = IDP misbehaving) is a :class:`ProviderError` (503,
-    never forces logout). A non-JWT bearer (``DecodeError``), a JWKS with no key
-    for this ``kid`` (``PyJWKSetError``) or any other invalid token means the
-    token is simply not verifiable by this provider -> :class:`InvalidCodeError`
-    (``verify_session`` returns ``None``; next provider / refresh / 401).
+    unexpected JWKS shape) is a :class:`ProviderError` (503, never forces logout).
+    A non-JWT bearer (``DecodeError``), a JWKS with no key for this ``kid``
+    (``PyJWKSetError``) or any other invalid token is simply not verifiable by this
+    provider -> :class:`InvalidCodeError` (``verify_session`` returns ``None``).
     Folding "cannot parse" into "cannot reach" once made every opaque bearer a
     fast 503 against a healthy Portal.
     """
@@ -88,6 +86,8 @@ def classify_jwks_lookup_error(exc: BaseException) -> Exception:
         import jwt
     except Exception:  # pragma: no cover - jwt is a hard dep of these providers
         return ProviderError(f"JWKS lookup failed: {exc!r}")
+    # Order matters: DecodeError/PyJWKSetError are checked before their
+    # PyJWKClientError / InvalidTokenError parents.
     if isinstance(exc, jwt.PyJWKClientConnectionError):
         return ProviderError(f"JWKS lookup failed: {exc}")
     if isinstance(exc, (jwt.DecodeError, jwt.PyJWKSetError)):
@@ -102,31 +102,27 @@ def classify_jwks_lookup_error(exc: BaseException) -> Exception:
 class DashboardAuthProvider(ABC):
     """Protocol every dashboard-auth provider plugin implements.
 
-    Lifecycle: ``start_login`` (redirect URL + PKCE state for cookies) ->
-    IDP -> ``complete_login`` (code + verifier -> Session) ->
-    ``verify_session`` on every request -> ``refresh_session`` near expiry ->
-    ``revoke_session`` on logout (best-effort, must not raise).
+    Lifecycle: ``start_login`` (redirect URL + PKCE state) -> IDP ->
+    ``complete_login`` (code + verifier -> Session) -> ``verify_session`` per
+    request -> ``refresh_session`` near expiry -> ``revoke_session`` on logout
+    (best-effort, must not raise).
 
     Failure semantics:
-      * ``start_login`` / ``complete_login`` raise ``ProviderError`` when the
-        IDP is unreachable; ``complete_login`` raises ``InvalidCodeError`` on
-        a bad code/state.
-      * ``verify_session`` returns ``None`` for expired/unknown tokens and
-        raises ``ProviderError`` when unreachable — middleware refreshes on
-        the former and answers 503 on the latter.
-      * ``refresh_session`` raises ``RefreshExpiredError`` when the token is
-        invalid for that provider (an opaque foreign token is
-        indistinguishable from an expired one, so middleware tries the rest)
-        and ``ProviderError`` on network failure (503 without clearing cookies
-        if none succeeds).
+      * ``start_login`` / ``complete_login`` raise ``ProviderError`` when the IDP
+        is unreachable; ``complete_login`` raises ``InvalidCodeError`` on a bad
+        code/state.
+      * ``verify_session`` returns ``None`` for expired/unknown tokens (middleware
+        refreshes) and raises ``ProviderError`` when unreachable (503).
+      * ``refresh_session`` raises ``RefreshExpiredError`` when the token is invalid
+        for that provider (an opaque foreign token looks expired, so middleware
+        tries the rest) and ``ProviderError`` on network failure (503, cookies kept).
 
     Subclasses MUST set ``name`` (stable lowercase id) and ``display_name``.
-    Capability flags: ``supports_password`` (renders a credential form and
-    implements ``complete_password_login``; ``start_login``/``complete_login``
-    may be ``NotImplementedError`` stubs), ``supports_token`` (implements
-    ``verify_token`` for the token-auth seam), ``supports_session`` (False for
-    token-only credentials such as drain, which are never offered a login).
-    Everything downstream of login is identical for every kind of session.
+    Capability flags: ``supports_password`` (credential form +
+    ``complete_password_login``; OAuth methods may be ``NotImplementedError``
+    stubs), ``supports_token`` (``verify_token`` for the token-auth seam),
+    ``supports_session`` (False for token-only credentials such as drain, never
+    offered a login). Everything downstream of login is identical for every session.
     """
 
     name: str = ""
@@ -140,12 +136,7 @@ class DashboardAuthProvider(ABC):
 
     @abstractmethod
     def complete_login(
-        self,
-        *,
-        code: str,
-        state: str,
-        code_verifier: str,
-        redirect_uri: str,
+        self, *, code: str, state: str, code_verifier: str, redirect_uri: str,
     ) -> Session: ...
 
     @abstractmethod
@@ -157,57 +148,43 @@ class DashboardAuthProvider(ABC):
     @abstractmethod
     def revoke_session(self, *, refresh_token: str) -> None: ...
 
-    def complete_password_login(
-        self, *, username: str, password: str
-    ) -> "Session":
+    def complete_password_login(self, *, username: str, password: str) -> "Session":
         """Verify a username/password pair and mint a :class:`Session`.
 
         Only called when ``supports_password`` is True. Raise
-        ``InvalidCredentialsError`` on rejection (SHOULD spend constant time
-        on unknown users to avoid a timing oracle) and ``ProviderError`` when
-        the credential store is unreachable. The default raises so a provider
-        that forgets the flag fails loudly rather than accepting credentials.
+        ``InvalidCredentialsError`` on rejection (SHOULD be constant time for
+        unknown users — no timing oracle) and ``ProviderError`` when the store is
+        unreachable. The default raises so a mis-flagged provider fails loudly.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support password login "
             "(set supports_password = True and override "
-            "complete_password_login)"
-        )
+            "complete_password_login)")
 
     def verify_token(self, *, token: str) -> "Optional[TokenPrincipal]":
         """Verify a non-interactive bearer token; return its principal.
 
-        Stacking mirrors ``verify_session``: return ``None`` (never raise) for
-        a token this provider does not recognise so the seam falls through;
-        raise ``ProviderError`` ONLY for a genuine backing-store outage (the
-        seam surfaces 503 only if no provider accepts the token). Shared
-        secrets MUST be compared with ``hmac.compare_digest``. The default
-        raises so a mis-flagged provider fails loudly.
+        Mirrors ``verify_session``: return ``None`` (never raise) for an
+        unrecognised token so the seam falls through; raise ``ProviderError`` ONLY
+        for a genuine backing-store outage. Shared secrets MUST be compared with
+        ``hmac.compare_digest``. The default raises so a mis-flagged provider fails
+        loudly.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support token auth "
-            "(set supports_token = True and override verify_token)"
-        )
+            "(set supports_token = True and override verify_token)")
 
 
 def assert_protocol_compliance(cls: type) -> None:
-    """Raise ``TypeError`` if ``cls`` doesn't fully implement the provider protocol.
-
-    Call it from every provider plugin's unit tests.
-    """
+    """Raise ``TypeError`` if ``cls`` doesn't fully implement the provider protocol
+    (call it from every provider plugin's unit tests)."""
     for attr in ("name", "display_name"):
         if not getattr(cls, attr, ""):
-            raise TypeError(
-                f"{cls.__name__} missing or empty attribute: {attr!r}"
-            )
-    for method in (
-        "start_login", "complete_login", "verify_session",
-        "refresh_session", "revoke_session",
-    ):
+            raise TypeError(f"{cls.__name__} missing or empty attribute: {attr!r}")
+    for method in ("start_login", "complete_login", "verify_session", "refresh_session",
+                   "revoke_session"):
         if not callable(getattr(cls, method, None)):
             raise TypeError(f"{cls.__name__} missing method: {method}")
     if getattr(cls, "__abstractmethods__", None):
         raise TypeError(
-            f"{cls.__name__} has unimplemented abstract methods: "
-            f"{sorted(cls.__abstractmethods__)}"
-        )
+            f"{cls.__name__} has unimplemented abstract methods: {sorted(cls.__abstractmethods__)}")

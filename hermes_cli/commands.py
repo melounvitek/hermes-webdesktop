@@ -1,11 +1,8 @@
-"""Slash command definitions and autocomplete for the Hermes CLI.
+"""Slash command registry for the Hermes CLI and gateway.
 
-Central registry for all slash commands. Every consumer -- CLI help, gateway
-dispatch, Telegram BotCommands, Slack subcommand mapping, autocomplete --
-derives its data from ``COMMAND_REGISTRY``.
-
-To add a command: add a ``CommandDef`` entry to ``COMMAND_REGISTRY``.
-To add an alias: set ``aliases=("short",)`` on the existing ``CommandDef``.
+Every consumer -- CLI help, gateway dispatch, Telegram BotCommands, Slack
+subcommand mapping, autocomplete -- derives from ``COMMAND_REGISTRY``. To add a
+command, append a ``CommandDef``; to add an alias, set ``aliases=("short",)``.
 """
 
 from __future__ import annotations
@@ -20,9 +17,6 @@ from hermes_constants import INDICATOR_STYLES
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# CommandDef dataclass
-# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CommandDef:
@@ -36,42 +30,27 @@ class CommandDef:
     subcommands: tuple[str, ...] = ()  # tab-completable subcommands
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
-    gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
-    # Mid-run (agent busy) gateway behavior, driving the Guard-2 dispatcher in
-    # gateway/run.py (_dispatch_busy_slash_command):
-    #   "dispatch"                — run while busy (normal handler, or the
-    #                               mid-run variant named by ``busy_handler``).
-    #   "reject"                  — refuse mid-run; generic "Agent is running"
-    #                               catch-all unless ``busy_handler`` names a
-    #                               command-specific reject message.
-    #   "interrupt_then_dispatch" — interrupt the agent first (/stop, /new,
-    #                               /reset); Guard 1 (platforms/base.py) routes
-    #                               these via is_interrupt_then_dispatch().
+    gateway_config_gate: str | None = None  # config dotpath; truthy overrides cli_only for gateway
+    # Mid-run (agent busy) gateway behavior for gateway/run.py's Guard-2 dispatcher:
+    #   "dispatch"                — run while busy (normal handler, or the mid-run
+    #                               variant named by ``busy_handler``).
+    #   "reject"                  — refuse mid-run; generic "Agent is running" unless
+    #                               ``busy_handler`` names a specific reject message.
+    #   "interrupt_then_dispatch" — interrupt the agent first (/stop, /new, /reset);
+    #                               Guard 1 (platforms/base.py) routes these.
     busy_policy: str = "reject"
-    # Key of a special mid-run handler in gateway/run.py's Guard-2 table for
-    # commands whose busy behavior differs from their normal handler.
-    busy_handler: str | None = None
-    # Key in ``hermes_cli.slash_exec.EXECUTORS`` — a pure formatter producing
-    # the surface-independent core text; surfaces apply only their decoration.
-    # A string key (not a callable) keeps this module import-light for the
-    # gateway (no prompt_toolkit, no executor dependencies).
+    busy_handler: str | None = None  # key of a special mid-run handler in Guard-2 table
+    # Key in ``hermes_cli.slash_exec.EXECUTORS`` (pure formatter of the core text). A
+    # string key, not a callable, keeps this module import-light for the gateway.
     execute: str | None = None
-    # Desktop composer: ``options`` | ``text`` | ``mixed``. ``None`` is inferred.
-    argument_mode: str | None = None
-    # Desktop availability. ``None`` = offered; ``hidden`` = runs but stays out
-    # of the popover; otherwise a reason (terminal / messaging / settings / …).
+    argument_mode: str | None = None  # desktop composer: options|text|mixed; None inferred
+    # Desktop availability: None = offered; "hidden" = runs but out of the popover;
+    # otherwise a reason (terminal / messaging / settings / …).
     desktop: str | None = None
 
 
-# Valid values for CommandDef.busy_policy (see field docs above).
-VALID_BUSY_POLICIES: frozenset[str] = frozenset(
-    {"dispatch", "reject", "interrupt_then_dispatch"}
-)
+VALID_BUSY_POLICIES: frozenset[str] = frozenset({"dispatch", "reject", "interrupt_then_dispatch"})
 
-
-# ---------------------------------------------------------------------------
-# Central registry -- single source of truth
-# ---------------------------------------------------------------------------
 
 COMMAND_REGISTRY: list[CommandDef] = [
     # Session
@@ -347,9 +326,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
 ]
 
 
-# Used only to distinguish ``mixed`` (subcommands plus free-text) from
-# ``options`` (subcommand list only). A bare ``args_hint`` with no
-# subcommands is always ``text`` — do not add tokens here for that path.
+# Distinguishes ``mixed`` (subcommands plus free-text) from ``options``. A bare
+# ``args_hint`` with no subcommands is always ``text`` — no tokens needed for that.
 _PROSE_HINTS = ("<prompt>", "[text", "instructions", "[interval]", "<what")
 
 
@@ -358,13 +336,10 @@ def infer_argument_mode(cmd: CommandDef) -> str | None:
     if cmd.argument_mode in {"options", "text", "mixed"}:
         return cmd.argument_mode
     hint = (cmd.args_hint or "").strip()
-    if cmd.subcommands and hint and any(token in hint.lower() for token in _PROSE_HINTS):
-        return "mixed"
     if cmd.subcommands:
-        return "options"
-    if hint:
-        return "text"
-    return None
+        prose = hint and any(token in hint.lower() for token in _PROSE_HINTS)
+        return "mixed" if prose else "options"
+    return "text" if hint else None
 
 
 def command_desktop_meta(cmd: CommandDef) -> dict[str, str | None]:
@@ -372,47 +347,36 @@ def command_desktop_meta(cmd: CommandDef) -> dict[str, str | None]:
     return {"argument_mode": infer_argument_mode(cmd), "desktop": cmd.desktop}
 
 
-# ---------------------------------------------------------------------------
-# Derived lookups -- rebuilt once at import time, refreshed by rebuild_lookups()
-# ---------------------------------------------------------------------------
+# --- Derived lookups (built once at import) ---------------------------------
 
-def _build_command_lookup() -> dict[str, CommandDef]:
-    """Map every name and alias to its CommandDef."""
-    lookup: dict[str, CommandDef] = {}
-    for cmd in COMMAND_REGISTRY:
-        lookup[cmd.name] = cmd
-        for alias in cmd.aliases:
-            lookup[alias] = cmd
-    return lookup
-
-
-_COMMAND_LOOKUP: dict[str, CommandDef] = _build_command_lookup()
+# Every name and alias -> its CommandDef.
+_COMMAND_LOOKUP: dict[str, CommandDef] = {
+    key: cmd for cmd in COMMAND_REGISTRY for key in (cmd.name, *cmd.aliases)
+}
 
 
 def resolve_command(name: str) -> CommandDef | None:
-    """Resolve a command name or alias to its CommandDef.
-
-    Accepts names with or without the leading slash.
-    """
+    """Resolve a command name or alias (leading slash optional) to its CommandDef."""
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
-    if cmd.args_hint:
-        return f"{cmd.description} (usage: /{cmd.name} {cmd.args_hint})"
-    return cmd.description
+    if not cmd.args_hint:
+        return cmd.description
+    return f"{cmd.description} (usage: /{cmd.name} {cmd.args_hint})"
 
 
 # Backwards-compatible flat dict ("/command" -> description) and the same
 # grouped by category. Both exclude gateway_only commands.
 COMMANDS: dict[str, str] = {}
 COMMANDS_BY_CATEGORY: dict[str, dict[str, str]] = {}
-# Subcommands lookup: "/cmd" -> ["sub1", "sub2", ...]
-SUBCOMMANDS: dict[str, list[str]] = {}
+# Subcommands lookup: "/cmd" -> ["sub1", ...]; explicit ``subcommands`` first (in
+# registry order), then pipe patterns in args_hint ("[on|off|status]") as fallback.
+SUBCOMMANDS: dict[str, list[str]] = {
+    f"/{_cmd.name}": list(_cmd.subcommands) for _cmd in COMMAND_REGISTRY if _cmd.subcommands
+}
 for _cmd in COMMAND_REGISTRY:
-    if _cmd.subcommands:
-        SUBCOMMANDS[f"/{_cmd.name}"] = list(_cmd.subcommands)
     if _cmd.gateway_only:
         continue
     _entries = {f"/{_cmd.name}": _build_description(_cmd)}
@@ -420,6 +384,12 @@ for _cmd in COMMAND_REGISTRY:
         _entries[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
     COMMANDS.update(_entries)
     COMMANDS_BY_CATEGORY.setdefault(_cmd.category, {}).update(_entries)
+
+_PIPE_SUBS_RE = re.compile(r"[a-z]+(?:\|[a-z]+)+")
+for _cmd in COMMAND_REGISTRY:
+    _m = _PIPE_SUBS_RE.search(_cmd.args_hint) if _cmd.args_hint else None
+    if _m and f"/{_cmd.name}" not in SUBCOMMANDS:
+        SUBCOMMANDS[f"/{_cmd.name}"] = _m.group(0).split("|")
 
 
 # /help renderer sub-groups for the ~46-command "Session" category. Category
@@ -436,21 +406,7 @@ HELP_SESSION_SUBGROUPS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Fallback: derive subcommands from pipe patterns in args_hint ("[on|off|status]")
-# for commands without an explicit ``subcommands`` field.
-_PIPE_SUBS_RE = re.compile(r"[a-z]+(?:\|[a-z]+)+")
-for _cmd in COMMAND_REGISTRY:
-    key = f"/{_cmd.name}"
-    if key in SUBCOMMANDS or not _cmd.args_hint:
-        continue
-    m = _PIPE_SUBS_RE.search(_cmd.args_hint)
-    if m:
-        SUBCOMMANDS[key] = m.group(0).split("|")
-
-
-# ---------------------------------------------------------------------------
-# Gateway helpers
-# ---------------------------------------------------------------------------
+# --- Gateway helpers --------------------------------------------------------
 
 # All names + aliases the gateway dispatches. Config-gated commands are
 # included; their handler checks the gate at runtime.
@@ -463,12 +419,8 @@ GATEWAY_KNOWN_COMMANDS: frozenset[str] = frozenset(
 
 
 def is_gateway_known_command(name: str | None) -> bool:
-    """Return True if ``name`` is a built-in or plugin gateway slash command.
-
-    Plugin commands are looked up lazily so importing this module never forces
-    plugin discovery. Gateway code uses this to decide whether to emit
-    ``command:<name>`` hooks — plugins get the same lifecycle events as built-ins.
-    """
+    """True if ``name`` is a built-in or plugin gateway slash command (plugins looked
+    up lazily); decides whether the gateway emits ``command:<name>`` hooks."""
     if not name:
         return False
     return name in GATEWAY_KNOWN_COMMANDS or any(
@@ -485,32 +437,26 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
 
 
 def is_interrupt_then_dispatch(command_name: str | None) -> bool:
-    """True when *command_name* (or alias) has busy_policy "interrupt_then_dispatch".
-
-    Guard 1 (gateway/platforms/base.py) routes these through the cancel-handoff
-    path that serializes cancellation + runner response + pending drain.
-    """
-    if not command_name:
-        return False
-    cmd = resolve_command(command_name)
+    """True when *command_name* (or alias) has busy_policy "interrupt_then_dispatch";
+    Guard 1 (gateway/platforms/base.py) routes these through the cancel-handoff path."""
+    cmd = resolve_command(command_name) if command_name else None
     return cmd is not None and cmd.busy_policy == "interrupt_then_dispatch"
 
 
 def should_bypass_active_session(command_name: str | None) -> bool:
-    """Return True for any resolvable slash command.
+    """True for any resolvable slash command.
 
-    Every recognized slash command is dispatched mid-run — either by its
-    Level-2 handler in gateway/run.py or by the "busy — wait or /stop first"
-    catch-all — never queued: gateway.run's safety net discards command text
-    that reaches the pending queue, so a queued mid-run /model would interrupt
-    the agent AND vanish with a zero-char response.
-    ACTIVE_SESSION_BYPASS_COMMANDS is the subset with explicit handlers.
+    Every recognized command is dispatched mid-run (by its Guard-2 handler or the
+    "busy — wait or /stop first" catch-all), never queued: gateway.run's safety net
+    discards command text reaching the pending queue, so a queued /model would
+    interrupt the agent AND vanish with a zero-char response.
     """
     return resolve_command(command_name) is not None if command_name else False
 
 
 def _resolve_config_gates() -> set[str]:
-    """Return canonical names of commands whose ``gateway_config_gate`` dotpath is truthy in config.yaml (empty set on any error)."""
+    """Canonical names of commands whose ``gateway_config_gate`` dotpath is truthy in
+    config.yaml (empty set on any error)."""
     gated = [c for c in COMMAND_REGISTRY if c.gateway_config_gate]
     if not gated:
         return set()
@@ -519,32 +465,31 @@ def _resolve_config_gates() -> set[str]:
         cfg = read_raw_config()
     except Exception:
         return set()
-    result: set[str] = set()
-    for cmd in gated:
+
+    def _lookup(dotpath: str) -> Any:
         val: Any = cfg
-        for key in cmd.gateway_config_gate.split("."):
-            if isinstance(val, dict):
-                val = val.get(key)
-            else:
-                val = None
-                break
-        if is_truthy_value(val, default=False):
-            result.add(cmd.name)
-    return result
+        for key in dotpath.split("."):
+            if not isinstance(val, dict):
+                return None
+            val = val.get(key)
+        return val
+
+    return {
+        cmd.name for cmd in gated
+        if is_truthy_value(_lookup(cmd.gateway_config_gate), default=False)
+    }
 
 
 def _is_gateway_available(cmd: CommandDef, config_overrides: set[str] | None = None) -> bool:
-    """True if *cmd* appears in gateway surfaces: not ``cli_only``, or its config gate is truthy.
-
-    Pass *config_overrides* from ``_resolve_config_gates()`` to avoid
-    re-reading config per command.
-    """
+    """True if *cmd* appears in gateway surfaces: not ``cli_only``, or its config gate
+    is truthy. Pass *config_overrides* from ``_resolve_config_gates()`` to avoid
+    re-reading config per command."""
     if not cmd.cli_only:
         return True
-    if cmd.gateway_config_gate:
-        overrides = config_overrides if config_overrides is not None else _resolve_config_gates()
-        return cmd.name in overrides
-    return False
+    if not cmd.gateway_config_gate:
+        return False
+    overrides = config_overrides if config_overrides is not None else _resolve_config_gates()
+    return cmd.name in overrides
 
 
 def gateway_help_lines() -> list[str]:
@@ -555,53 +500,38 @@ def gateway_help_lines() -> list[str]:
         if not _is_gateway_available(cmd, overrides):
             continue
         args = f" {cmd.args_hint}" if cmd.args_hint else ""
-        alias_parts: list[str] = []
-        for a in cmd.aliases:
-            # Skip internal aliases like reload_mcp (underscore variant)
-            if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
-                continue
-            alias_parts.append(f"`/{a}`")
+        # Skip internal aliases like reload_mcp (underscore variant of the name).
+        alias_parts = [
+            f"`/{a}`" for a in cmd.aliases
+            if not (a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name)
+        ]
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
         lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
     return lines
 
 
 def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
-    """Return (name, description, args_hint) tuples for all plugin slash commands.
-
-    Registered via :func:`hermes_cli.plugins.PluginContext.register_command`;
-    surfaced like ``CommandDef`` entries (Telegram menu, Slack ``/hermes``
-    map, Discord picker). Lookup is lazy so importing this module never
-    forces plugin discovery (filesystem scans, env-dependent behavior).
-    """
+    """(name, description, args_hint) for plugin slash commands registered via
+    ``PluginContext.register_command``; surfaced like ``CommandDef`` entries. Lazy so
+    importing this module never forces plugin discovery."""
     try:
         from hermes_cli.plugins import get_plugin_commands
-    except Exception:
-        return []
-    try:
         commands = get_plugin_commands() or {}
     except Exception:
         return []
-    entries: list[tuple[str, str, str]] = []
-    for name, meta in commands.items():
-        if not isinstance(name, str) or not isinstance(meta, dict):
-            continue
-        description = str(meta.get("description") or f"Run /{name}")
-        args_hint = str(meta.get("args_hint") or "").strip()
-        entries.append((name, description, args_hint))
-    return entries
+    return [
+        (name, str(meta.get("description") or f"Run /{name}"),
+         str(meta.get("args_hint") or "").strip())
+        for name, meta in commands.items()
+        if isinstance(name, str) and isinstance(meta, dict)
+    ]
 
 
-
-
-# ---------------------------------------------------------------------------
-# Lazy re-exports (PEP 562) of the extracted modules
-# ---------------------------------------------------------------------------
-# Platform derivations and the prompt_toolkit completer live in sibling
-# modules; their names stay importable from here so every existing
-# ``from hermes_cli.commands import X`` and ``patch("hermes_cli.commands.X")``
-# keeps working. Resolving lazily keeps this registry module import-light for
-# the gateway (no prompt_toolkit, no skill/plugin discovery at import time).
+# --- Lazy re-exports (PEP 562) ----------------------------------------------
+# Platform derivations and the prompt_toolkit completer live in sibling modules;
+# their names stay importable from here so ``from hermes_cli.commands import X``
+# and ``patch("hermes_cli.commands.X")`` keep working, while this registry module
+# stays import-light for the gateway (no prompt_toolkit, no plugin discovery).
 _LAZY_EXPORTS: dict[str, str] = {
     name: "hermes_cli.commands_platforms"
     for name in (
@@ -625,5 +555,4 @@ def __getattr__(name: str):
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     import importlib
-
     return getattr(importlib.import_module(module), name)
