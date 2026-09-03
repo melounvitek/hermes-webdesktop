@@ -25,8 +25,8 @@ logger = logging.getLogger("hermes_state")
 
 
 def workspace_key(row: Dict[str, Any]) -> Optional[str]:
-    """Workspace grouping key: git repo root, else cwd, else None (branch is
-    deliberately excluded so a checkout doesn't fragment history)."""
+    """Workspace grouping key: git repo root, else cwd, else None (branch excluded: a checkout must not
+    fragment history)."""
     return (row.get("git_repo_root") or "").strip() or (row.get("cwd") or "").strip() or None
 
 
@@ -61,8 +61,8 @@ def _cwd_prefix_clause(cwd_prefix: str) -> Tuple[str, List[str]]:
 
 
 def _workspace_key_clause(key: str) -> Tuple[str, List[str]]:
-    """WHERE for ``workspace_key(row) == key``: git_repo_root equals ``key``, or
-    (rows predating per-session git metadata) cwd is at/under ``key``."""
+    """WHERE for ``workspace_key(row) == key``: git_repo_root equals ``key``, or (rows predating
+    per-session git metadata) cwd is at/under ``key``."""
     prefix = key.rstrip("/\\") or key
     cwd_clause, cwd_params = _cwd_prefix_clause(prefix)
     return (
@@ -93,11 +93,9 @@ def _session_filter_where(
     session_key: str = None, exclude_sources: List[str] = None, cwd_prefix: str = None,
     min_message_count: int = 0, archived_only: bool = False, include_archived: bool = False,
 ) -> Tuple[List[str], List[Any]]:
-    """Shared ``sessions s`` WHERE builder so counts line up with listed rows.
-    ``exclude_children`` hides sub-agent runs and compression continuations but
-    keeps branch/reset children (``_LISTABLE_CHILD_SQL``: stable ``_branched_from``
-    marker OR the legacy heuristic for pre-marker rows). Clause order is part of
-    the SQL text contract."""
+    """Shared ``sessions s`` WHERE builder so counts line up with listed rows. ``exclude_children``
+    hides sub-agent runs and compression continuations but keeps branch/reset children
+    (``_LISTABLE_CHILD_SQL``). Clause order is part of the SQL text contract."""
     where: List[str] = []
     params: List[Any] = []
     if exclude_children:
@@ -121,8 +119,8 @@ def _session_filter_where(
 
 
 def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
-    """Delegate-subagent ids (``_delegate_from`` marker, walked recursively) to
-    cascade-delete with *parent_ids*; untagged children stay orphaned, not deleted."""
+    """Delegate-subagent ids (``_delegate_from`` marker, walked recursively) to cascade-delete with
+    *parent_ids*; untagged children stay orphaned, not deleted."""
     df = _delegate_from_json()
     seeds = {sid for sid in parent_ids if sid}
     # Seed visited with the parents: a marker chain can loop back onto a parent,
@@ -163,9 +161,8 @@ _ERROR_FINISH_REASONS = frozenset({"error", "agent_error", "content_filter"})
 
 
 def classify_session_status(role: Optional[str], has_tool_calls: bool, finish_reason: Optional[str]) -> str:
-    """Error finish → ``error``; assistant with pending tool_calls or a trailing
-    user/tool row → ``interrupted``; otherwise ``complete`` (benign default:
-    pickers must not alarm on unknown shapes)."""
+    """Error finish → ``error``; assistant with pending tool_calls or a trailing user/tool row →
+    ``interrupted``; otherwise ``complete`` (benign default: pickers must not alarm on unknown shapes)."""
     if (finish_reason or "").strip().lower() in _ERROR_FINISH_REASONS:
         return SESSION_STATUS_ERROR
     r = (role or "").strip().lower()
@@ -229,17 +226,17 @@ class SessionSessionsMixin:
     """Session rows: create/inherit, lifecycle flags, model_config, listing, deletion."""
 
     def _own_profile_name(self) -> Optional[str]:
-        """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db``
-        → default, ``<root>/profiles/<name>/state.db`` → name); path-based because a
-        gateway serving a NON-launch profile opens that profile's store. None
-        outside the profile tree — NULL beats a fabricated owner."""
+        """The profile owning THIS store, from ``db_path`` alone (``<root>/state.db`` → default,
+        ``<root>/profiles/<name>/state.db`` → name): a gateway serving a NON-launch profile opens that
+        profile's store. None outside the profile tree — NULL beats a fabricated owner."""
         try:
             from hermes_constants import get_default_hermes_root
             root = get_default_hermes_root().resolve()
             parent = Path(self.db_path).resolve().parent
             if parent == root:
                 return "default"
-            if parent.parent == root / "profiles" and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", parent.name):
+            is_profile_dir = parent.parent == root / "profiles"
+            if is_profile_dir and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", parent.name):
                 return parent.name
         except Exception:
             logger.debug("own-profile derivation failed", exc_info=True)
@@ -247,12 +244,10 @@ class SessionSessionsMixin:
 
     @staticmethod
     def _inherit_parent_session_metadata(conn, session_id: str) -> None:
-        """NULL-fill a child's cwd/git/profile from its parent (profile_name only
-        within the same ``agent:<ns>:`` namespace). The second UPDATE inherits
-        gateway routing columns ONLY for compression forks (a crash before the
-        gateway re-records the peer would strand the child unroutable); delegate
-        children must NOT inherit them (peer recovery could repoint gateway
-        traffic into a subagent's session)."""
+        """NULL-fill a child's cwd/git/profile from its parent (profile_name only within the same
+        ``agent:<ns>:`` namespace). Gateway routing columns are inherited ONLY by compression forks
+        (a crash before the gateway re-records the peer would strand the child unroutable); delegate
+        children must NOT inherit them (peer recovery could repoint traffic into a subagent's session)."""
         conn.execute(_INHERIT_PARENT_META_SQL, (session_id,))
         conn.execute(_INHERIT_PARENT_ROUTING_SQL, (session_id,))
 
@@ -263,11 +258,10 @@ class SessionSessionsMixin:
         parent_session_id: str = None, cwd: str = None, profile_name: Optional[str] = None,
         git_repo_root: str = None, origin_json: str = None, display_name: str = None,
     ) -> None:
-        """Upsert a session row, COALESCE-filling NULL columns and never overwriting
-        what an earlier writer set (the gateway creates a bare row before
-        create_session carries the real model/prompt). chat_id/thread_id scope
-        gateway /resume (IDOR). Children backfill from the parent; a missing
-        profile_name is stamped with THIS store's own (NULL reads as unowned)."""
+        """Upsert a session row, never overwriting what an earlier writer set (the gateway creates a
+        bare row before create_session carries the real model/prompt). chat_id/thread_id scope gateway
+        /resume (IDOR). Children backfill from the parent; a missing profile_name is stamped with THIS
+        store's own (NULL reads as unowned)."""
         if not (profile_name or "").strip():
             profile_name = self._own_profile_name()
         def _do(conn):
@@ -348,9 +342,8 @@ class SessionSessionsMixin:
         self, *, platform: str, chat_id: str, thread_id: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> Optional[str]:
-        """Most recent live session_id for source + chat_id (+ thread_id). With
-        ``user_id`` exact sender matches win; several distinct users and no match
-        → None rather than contaminating another participant's session."""
+        """Most recent live session_id for source + chat_id (+ thread_id). With ``user_id`` exact sender
+        matches win; several distinct users and no match → None (never another participant's session)."""
         if not platform or chat_id in (None, ""):
             return None
         query = """
@@ -377,14 +370,13 @@ class SessionSessionsMixin:
             return None
         return str(rows[0]["id"])
 
-    # Orphaned gateway-session repair: widest plausible gap between a keyed
-    # predecessor going quiet and its unkeyed successor (incident was ~60s; 15 min
-    # stays generous without spanning unrelated conversations).
+    # Orphaned gateway-session repair: widest plausible gap between a keyed predecessor going
+    # quiet and its unkeyed successor (incident was ~60s; 15 min without spanning conversations).
     _ORPHAN_ADOPTION_MAX_GAP_S = 900.0
 
-    # Children that are NOT compression continuations (branches, delegates, tool
-    # sessions). Markers are bound to the queried parent id: continuations inherit
-    # model_config verbatim, so presence-matching misclassified them as delegates.
+    # Children that are NOT compression continuations (branches, delegates, tool sessions). Markers
+    # are bound to the queried parent id: continuations inherit model_config verbatim, so
+    # presence-matching misclassified them as delegates.
     _NON_CONTINUATION_CHILD_FILTER_SQL = (
         "  AND COALESCE(json_extract(COALESCE({alias}model_config, '{{}}'),"
         " '$._branched_from'), '') != ?\n"
@@ -393,9 +385,8 @@ class SessionSessionsMixin:
     )
 
     def end_session(self, session_id: str, end_reason: str) -> None:
-        """Mark a session ended; the first end_reason wins (a compression split must
-        keep ``'compression'`` even if a stale end_session() targets it later).
-        reopen_session() first to deliberately re-end with a new reason."""
+        """Mark a session ended; the first end_reason wins (a compression split must keep
+        ``'compression'`` even if a stale end_session() lands later); reopen_session() to re-end."""
         self._execute_write(lambda conn: self._end_and_bump(
             conn, "UPDATE sessions SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL",
             (time.time(), end_reason, session_id), session_id, end_reason,
@@ -410,9 +401,9 @@ class SessionSessionsMixin:
         return changed
 
     def reopen_session(self, session_id: str) -> None:
-        """Clear ended_at/end_reason so a session can be resumed; first stamp
-        markerless legacy reset children that depend on the parent's mutable
-        end_reason (WHERE shared with the listing predicate so they cannot drift)."""
+        """Clear ended_at/end_reason so a session can be resumed; first stamp markerless legacy reset
+        children that depend on the parent's mutable end_reason (WHERE shared with the listing predicate
+        so they cannot drift)."""
         def _do(conn):
             conn.execute(
                 "UPDATE sessions AS child SET model_config = json_set("
@@ -428,10 +419,9 @@ class SessionSessionsMixin:
         self._execute_write(_do)
 
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
-        """Durably mark an intentional reset boundary on live rows or rows with a
-        *recoverable* accidental end_reason (explicit boundaries are preserved):
-        an ``agent_close`` row left recoverable would be resurrected by
-        stale-route recovery. Keep in sync with find_latest_gateway_session_for_peer."""
+        """Durably mark an intentional reset boundary on live rows or rows with a *recoverable* accidental
+        end_reason (explicit boundaries are preserved): an ``agent_close`` row left recoverable would be
+        resurrected by stale-route recovery. Keep in sync with find_latest_gateway_session_for_peer."""
         if not session_id:
             return False
         now = time.time()
@@ -450,11 +440,10 @@ class SessionSessionsMixin:
         self, session_id: str, cwd: str, git_branch: Optional[str] = None,
         git_repo_root: Optional[str] = None, replace_git_meta: bool = False,
     ) -> Optional[int]:
-        """Persist the authoritative cwd and claim a Git metadata generation. git
-        fields are written only when non-empty (a probe failure never clobbers a
-        value) except under ``replace_git_meta`` (a workspace MOVE overwrites the
-        old repo identity). Async probes publish with the returned generation so an
-        older worker cannot overwrite a newer claim (A -> B -> A)."""
+        """Persist the authoritative cwd and claim a Git metadata generation. git fields are written
+        only when non-empty (a probe failure never clobbers a value) except under ``replace_git_meta``
+        (a workspace MOVE overwrites the old repo identity). Async probes publish with the returned
+        generation so an older worker cannot overwrite a newer claim (A -> B -> A)."""
         if not session_id or not cwd:
             return None
         branch = (git_branch or "").strip()
@@ -514,9 +503,8 @@ class SessionSessionsMixin:
         self, session_id: str, ts: Optional[float] = None, *, description: Optional[str] = None,
         provenance: Optional[ActivityProvenance] = None,
     ) -> None:
-        """Stamp durable mid-turn activity (observation-only; rate-limited by the
-        caller) so surfaces see activity before any message row lands. Never moves
-        ``last_activity_at`` backwards."""
+        """Stamp durable mid-turn activity (observation-only; rate-limited by the caller) so surfaces see
+        activity before any message row lands. Never moves ``last_activity_at`` backwards."""
         if not session_id:
             return
         when = float(ts if ts is not None else time.time())
@@ -532,8 +520,8 @@ class SessionSessionsMixin:
         )
 
     def clear_session_activity_labels(self, session_id: str) -> None:
-        """Clear activity labels after a turn (``last_activity_at`` is kept so idle /
-        watchdog clocks stay continuous). A no-op clear skips the write transaction."""
+        """Clear activity labels after a turn (``last_activity_at`` is kept so idle / watchdog clocks stay
+        continuous). A no-op clear skips the write transaction."""
         if not session_id:
             return
         try:
@@ -571,18 +559,17 @@ class SessionSessionsMixin:
         self._execute_write(_do)
 
     def update_session_tool_names(self, session_id: str, tool_names: Optional[List[str]]) -> None:
-        """Persist the resolved ``tools[]`` name order so a rebuilt AIAgent can't
-        fork the cached tool prefix on a flipped check_fn verdict; ``None`` clears."""
+        """Persist the resolved ``tools[]`` name order so a rebuilt AIAgent can't fork the cached tool
+        prefix on a flipped check_fn verdict; ``None`` clears."""
         payload = json.dumps(list(tool_names)) if tool_names is not None else None
         self._write_sql("UPDATE sessions SET tool_names = ? WHERE id = ?", (payload, session_id))
 
     def update_session_model(self, session_id: str, model: str, provider: Optional[str] = None) -> None:
-        """Set the model after a mid-session /model switch (unconditionally), null
-        system_prompt so stale Model:/Provider: footers rebuild, and drop any
-        Browser runtime lock (lineage markers survive). *provider* is merged into
-        model_config so resume recombines the model with the provider that serves it."""
-        # Flush first: a still-queued pre-switch delta applied after this UPDATE
-        # would trip the first_accounted_route overwrite and resurrect the old route.
+        """Set the model after a mid-session /model switch (unconditionally), null system_prompt so
+        stale Model:/Provider: footers rebuild, and drop any Browser runtime lock (lineage markers
+        survive). *provider* is merged into model_config so resume recombines model and provider."""
+        # Flush first: a still-queued pre-switch delta applied after this UPDATE would trip the
+        # first_accounted_route overwrite and resurrect the old route.
         self.flush_token_counts()
         patch: Dict[str, Any] = {"browser_model_lock": None}
         if model:
@@ -600,9 +587,8 @@ class SessionSessionsMixin:
         sql: str = "UPDATE sessions SET model_config = ? WHERE id = ?",
         params: Optional[Callable[[Optional[str]], tuple]] = None,
     ) -> None:
-        """Merge ``patch`` into model_config then run ``sql`` with ``params(merged)``
-        in one write transaction; no-op when the row doesn't exist. A custom ``sql``
-        (the prompt-nulling variants) also GCs unreferenced system_prompts."""
+        """Merge ``patch`` into model_config then run ``sql`` with ``params(merged)`` in one write
+        transaction; no-op when the row doesn't exist. Custom ``sql`` (prompt-nulling) also GCs prompts."""
         def _do(conn):
             merged = self._merge_model_config_json(conn, session_id, patch)
             if merged is _MODEL_CONFIG_ROW_MISSING:
@@ -615,10 +601,9 @@ class SessionSessionsMixin:
     def _merge_model_config_json(
         self, conn, session_id: str, patch: Dict[str, Any], *, on_missing: str = "skip",
     ):
-        """SELECT + tolerant-parse + merge ``patch`` into model_config (the one place
-        that keeps ``_branched_from``/``_delegate_from`` alive); ``None`` deletes a
-        key. Returns serialized JSON (``None`` when empty, matching create_session's
-        NULL) or ``_MODEL_CONFIG_ROW_MISSING`` (``on_missing="raise"`` → ValueError)."""
+        """SELECT + tolerant-parse + merge ``patch`` into model_config (the one place that keeps
+        ``_branched_from``/``_delegate_from`` alive); ``None`` deletes a key. Returns serialized JSON
+        (``None`` when empty) or ``_MODEL_CONFIG_ROW_MISSING`` (``on_missing="raise"`` → ValueError)."""
         row = conn.execute("SELECT model_config FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             if on_missing == "raise":
@@ -649,8 +634,8 @@ class SessionSessionsMixin:
         model_options: Optional[Dict[str, Any]] = None, route_source: Optional[str] = None,
         confirmed: bool = False,
     ) -> None:
-        """Persist a Browser / API-client runtime lock into model_config (lineage
-        markers survive); null system_prompt so cached footers cannot lie."""
+        """Persist a Browser / API-client runtime lock into model_config (lineage markers survive); null
+        system_prompt so cached footers cannot lie."""
         lock = {
             "provider": provider or "", "model": model or "", "model_options": model_options or {},
             "route_source": route_source or "", "confirmed": bool(confirmed), "updated_at": time.time(),
@@ -667,16 +652,14 @@ class SessionSessionsMixin:
         )
 
     def set_session_yolo(self, session_id: str, enabled: bool) -> None:
-        """Persist the per-session YOLO flag so ``/yolo`` survives ``--resume``;
-        no-op when the row doesn't exist yet."""
+        """Persist the per-session YOLO flag so ``/yolo`` survives ``--resume``; no-op without a row."""
         if not session_id:
             return
         self._write_model_config_patch(session_id, {"yolo_mode": bool(enabled)})
 
     @staticmethod
     def session_yolo_enabled(session_meta: Optional[Dict[str, Any]]) -> bool:
-        """Persisted YOLO flag; False on any parse failure (resume must never
-        enable the bypass by accident)."""
+        """Persisted YOLO flag; False on any parse failure (resume must never enable the bypass)."""
         return bool(_parse_model_config((session_meta or {}).get("model_config")).get("yolo_mode"))
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -690,8 +673,8 @@ class SessionSessionsMixin:
         return self._session_row_dict(row) if row else None
 
     def get_dominant_session_model_route(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Main-loop model route that served most API calls (``session_model_usage``
-        keeps the coherent per-call tuple; ``sessions`` mixes route changes)."""
+        """Main-loop model route that served most API calls (``session_model_usage`` keeps the coherent
+        per-call tuple; ``sessions`` mixes route changes)."""
         self.flush_token_counts()
         row = self._read_one(
             """SELECT model, billing_provider, billing_base_url, billing_mode,
@@ -722,9 +705,8 @@ class SessionSessionsMixin:
         return matches[0]["id"] if len(matches) == 1 else None
 
     def backfill_null_session_profiles(self, profile_name: str) -> int:
-        """Stamp this store's own profile onto legacy ``profile_name IS NULL`` rows,
-        which the fail-closed owner ladder cannot route (a store belongs to exactly
-        one profile). Never overwrites a non-NULL owner. Returns rows stamped."""
+        """Stamp this store's own profile onto legacy ``profile_name IS NULL`` rows, which the fail-closed
+        owner ladder cannot route. Never overwrites a non-NULL owner. Returns rows stamped."""
         stamp = (profile_name or "").strip()
         if not stamp:
             return 0
@@ -736,9 +718,8 @@ class SessionSessionsMixin:
         ) or 0)
 
     def _set_lineage_column(self, column: str, session_id: str, value: Any) -> bool:
-        """Set one ``sessions`` column across a whole compression lineage: Desktop
-        projects roots forward to their tip, so updating only the displayed tip
-        would let the untouched root resurrect it on refresh."""
+        """Set one ``sessions`` column across a whole compression lineage: Desktop projects roots
+        forward to their tip, so updating only the tip would let the root resurrect it on refresh."""
         return self._write_rowcount(
             f"""
             WITH RECURSIVE
@@ -781,8 +762,8 @@ class SessionSessionsMixin:
     RECOVERABLE_END_REASONS = _RECOVERABLE_END_REASONS
 
     def unarchive_recoverable_session(self, session_id: str) -> bool:
-        """Un-archive a session archived by a recoverable accident (ws_orphan_reap,
-        agent_close); deliberate archives are left alone. True when un-archived."""
+        """Un-archive a session archived by a recoverable accident (ws_orphan_reap, agent_close);
+        deliberate archives are left alone. True when un-archived."""
         if not session_id:
             return False
         try:
@@ -811,19 +792,16 @@ class SessionSessionsMixin:
         return True
 
     def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
-        """Pin/unpin a session and its compression lineage (pins are exempt from the
-        ``sessions.auto_archive`` sweep)."""
+        """Pin/unpin a session and its compression lineage (pins are exempt from the auto_archive sweep)."""
         return self._set_lineage_column("pinned", session_id, int(pinned))
 
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
-        """Hide/unhide a session and its compression lineage from the default listing;
-        it stays resumable by the owning surface."""
+        """Hide/unhide a session and its compression lineage from the default listing; still resumable."""
         return self._set_lineage_column("hidden", session_id, int(hidden))
 
     def set_session_read(self, session_id: str, read: bool = True) -> bool:
-        """Mark read/unread across the compression lineage. ``last_read_at`` is a
-        watermark: unread when activity postdates it (no write on the message
-        path). NULL = never tracked = read; 0 = explicitly unread."""
+        """Mark read/unread across the compression lineage. ``last_read_at`` is a watermark: unread when
+        activity postdates it (no write on the message path). NULL = never tracked = read; 0 = unread."""
         return self._set_lineage_column("last_read_at", session_id, time.time() if read else 0.0)
 
     @staticmethod
@@ -843,10 +821,9 @@ class SessionSessionsMixin:
 
     @staticmethod
     def _chain_search_where(where_sql: str, id_needle: str, search_needle: str) -> Tuple[str, List[Any]]:
-        """Extend ``where_sql`` with the id_query / search_query filters: a row is
-        admitted when its own id or any id in its forward compression chain matches
-        (search also matches titles and a punctuation-stripped form so ``an94``
-        finds ``AN-94``); chain membership keeps the leading-wildcard LIKE bounded."""
+        """Extend ``where_sql`` with the id_query / search_query filters: a row is admitted when its own
+        id or any id in its forward compression chain matches (search also matches titles and a
+        punctuation-stripped form so ``an94`` finds ``AN-94``); chain membership bounds the LIKE."""
         params: List[Any] = []
         clauses: List[str] = []
         def like(needle: str) -> str:
@@ -878,9 +855,9 @@ class SessionSessionsMixin:
         return (f"{where_sql} AND {combined}" if where_sql else f"WHERE {combined}"), params
 
     def _project_compression_tips(self, sessions: List[Dict[str, Any]], compact_rows: bool) -> List[Dict[str, Any]]:
-        """Replace each compression root's surfaced fields with its live tip's (root
-        ``started_at`` kept for stable ordering), one batched query. ``_lineage_ids``
-        carries every id on the chain: a persisted tile can hold a MIDDLE segment's id."""
+        """Replace each compression root's surfaced fields with its live tip's (root ``started_at`` kept
+        for stable ordering), one batched query. ``_lineage_ids`` carries every chain id (a tile may
+        hold a MIDDLE segment's id)."""
         chain_by_root: Dict[str, List[str]] = {}  # only roots whose tip differs from themselves
         for s in sessions:
             if s.get("end_reason") == "compression":
@@ -927,10 +904,9 @@ class SessionSessionsMixin:
         id_query: str = None, search_query: str = None, compact_rows: bool = False,
         include_pinned: bool = False, session_key: str = None, include_hidden: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List sessions with preview and ``last_active`` in one query.
-        ``order_by_last_active`` sorts by the chain TIP via a recursive CTE (the only
-        path honouring ``id_query`` / ``search_query``); ``include_pinned`` back-fills
-        pins the page missed, still obeying the other filters."""
+        """List sessions with preview and ``last_active`` in one query. ``order_by_last_active`` sorts
+        by the chain TIP via a recursive CTE (the only path honouring ``id_query`` / ``search_query``);
+        ``include_pinned`` back-fills pins the page missed, still obeying the other filters."""
         self.flush_token_counts()  # rows carry token/cost totals
         where_clauses, params = _session_filter_where(
             exclude_children=not include_children, source=source, sources=sources, session_key=session_key,
@@ -947,7 +923,9 @@ class SessionSessionsMixin:
             + ("" if compact_rows else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved")
             + f",\n                    {_PREVIEW_COL_SQL},\n                    "
         )
-        prompt_join = "" if compact_rows else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        prompt_join = (
+            "" if compact_rows else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        )
         from_sessions = f"FROM sessions s\n                {prompt_join}"
         if order_by_last_active:
             # The CTE walks compression-continuation edges forward from the admitted
@@ -1024,8 +1002,8 @@ class SessionSessionsMixin:
         return sessions
 
     def session_lifecycle_statuses(self, session_ids: List[str]) -> Dict[str, str]:
-        """``{session_id: status}`` from each session's LAST message row (``'empty'``
-        when none); one query, MAX(id) per session joined back — never scans transcripts."""
+        """``{session_id: status}`` from each session's LAST message row (``'empty'`` when none); one
+        query, MAX(id) per session joined back — never scans transcripts."""
         ids = [sid for sid in (session_ids or []) if sid]
         if not ids:
             return {}
@@ -1050,9 +1028,9 @@ class SessionSessionsMixin:
         return statuses
 
     def assert_export_safe(self, session_id: str, max_messages: Optional[int] = None) -> int:
-        """Active row count of this segment, or raise SessionExportTooLargeError (the
-        LIMITed subquery stops once the bound is exceeded). ``None`` resolves
-        ``sessions.max_export_messages``; 0 disables the guard."""
+        """Active row count of this segment, or raise SessionExportTooLargeError (the LIMITed subquery
+        stops once the bound is exceeded). ``None`` resolves ``sessions.max_export_messages``; 0 disables
+        the guard."""
         from hermes_state import SessionExportTooLargeError, resolved_max_export_messages
         if max_messages is None:
             max_messages = resolved_max_export_messages()
@@ -1070,8 +1048,8 @@ class SessionSessionsMixin:
         return message_count
 
     def _is_explicit_branch_session(self, session_id: str) -> bool:
-        """Copied user-facing branch (``_branched_from``)? Branches own a copied
-        transcript; compression continuations need the parent's archived rows."""
+        """Copied user-facing branch (``_branched_from``)? Branches own a copied transcript;
+        compression continuations need the parent's archived rows."""
         if not session_id:
             return False
         row = self._read_one("SELECT model_config FROM sessions WHERE id = ?", (session_id,))
@@ -1096,8 +1074,8 @@ class SessionSessionsMixin:
     def search_sessions(
         self, source: str = None, limit: int = 20, offset: int = 0, workspace_key: str = None,
     ) -> List[Dict[str, Any]]:
-        """Sessions MRU-first with a computed ``last_active``; ``workspace_key`` scopes
-        to one workspace so ``hermes -c``/``--resume`` picks its last session."""
+        """Sessions MRU-first with a computed ``last_active``; ``workspace_key`` scopes to one workspace
+        so ``hermes -c``/``--resume`` picks its last session."""
         where_clauses = []
         params: list = []
         if source:
@@ -1121,8 +1099,7 @@ class SessionSessionsMixin:
         min_message_count: int = 0, include_archived: bool = False, archived_only: bool = False,
         exclude_children: bool = False, exclude_sources: List[str] = None,
     ) -> int:
-        """Count sessions with list_sessions_rich's filters so a paired "load more"
-        total matches the listable rows."""
+        """Count sessions with list_sessions_rich's filters so a paired "load more" total matches."""
         where_clauses, params = _session_filter_where(
             exclude_children=exclude_children, source=source, sources=sources,
             exclude_sources=exclude_sources, cwd_prefix=cwd_prefix, min_message_count=min_message_count,
@@ -1131,8 +1108,7 @@ class SessionSessionsMixin:
         return self._read_one(f"SELECT COUNT(*) FROM sessions s{_where_sql(where_clauses, ' ')}", params)[0]
 
     def session_count_ge(self, n: int = 1) -> bool:
-        """At least N sessions exist (archived included); LIMIT short-circuits
-        instead of session_count()'s index scan."""
+        """At least N sessions exist (archived included); LIMIT short-circuits session_count()'s scan."""
         return len(self._read_all("SELECT 1 FROM sessions LIMIT ?", (n,))) >= n
 
     def session_count_by_source(
@@ -1155,8 +1131,8 @@ class SessionSessionsMixin:
         return {str(row["source"]): int(row["count"] or 0) for row in rows}
 
     def declared_scope_identity(self, session_id: str) -> Tuple[bool, str]:
-        """(is_fork_child, source) in ONE read (prompt_cache_scope needs both from the
-        same row). Missing row → (False, ""); DB errors propagate (fail closed)."""
+        """(is_fork_child, source) in ONE read (prompt_cache_scope needs both from the same row).
+        Missing row → (False, ""); DB errors propagate (fail closed)."""
         session = self.get_session(session_id)
         if not session:
             return False, ""
@@ -1164,8 +1140,8 @@ class SessionSessionsMixin:
 
     @staticmethod
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
-        """Remove ``<id>.json``/``.jsonl`` and gateway ``request_dump_<id>_*.json``;
-        OSError is swallowed so a filesystem hiccup never blocks a DB operation."""
+        """Remove ``<id>.json``/``.jsonl`` and gateway ``request_dump_<id>_*.json``; OSError is swallowed
+        so a filesystem hiccup never blocks a DB operation."""
         if sessions_dir is None:
             return
         targets = [sessions_dir / f"{session_id}{suffix}" for suffix in (".json", ".jsonl")]
@@ -1180,8 +1156,8 @@ class SessionSessionsMixin:
                 pass
 
     def get_session_delete_targets(self, session_id: str) -> List[str]:
-        """Rows :meth:`delete_session` would remove: the session, then its recursive
-        delegate children (branch/compression children are orphaned, not deleted)."""
+        """Rows :meth:`delete_session` would remove: the session, then its recursive delegate children
+        (branch/compression children are orphaned, not deleted)."""
         with self._read_ctx() as conn:
             if not conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone():
                 return []
@@ -1192,10 +1168,9 @@ class SessionSessionsMixin:
         self, session_id: str, sessions_dir: Optional[Path] = None,
         expected_delete_ids: Optional[List[str]] = None,
     ) -> bool:
-        """Delete a session and its messages; delegate children cascade,
-        branch/compression children are orphaned. *expected_delete_ids*: proceed
-        only if parent + delegate cascade still equals that set (re-walked inside
-        the transaction on purpose: export-before-delete fails closed)."""
+        """Delete a session and its messages; delegate children cascade, branch/compression children
+        are orphaned. *expected_delete_ids*: proceed only if parent + delegate cascade still equals that
+        set (re-walked inside the transaction on purpose: export-before-delete fails closed)."""
         removed_ids: List[str] = []
         expected_ids = set(expected_delete_ids) if expected_delete_ids is not None else None
         def _do(conn):
@@ -1220,8 +1195,8 @@ class SessionSessionsMixin:
         return bool(deleted)
 
     def delete_session_if_empty(self, session_id: str, sessions_dir: Optional[Path] = None) -> bool:
-        """Delete *session_id* only if it has no messages, no title and no children;
-        check and delete share one transaction so a concurrent flush can't be lost."""
+        """Delete *session_id* only if it has no messages, no title and no children; check and delete
+        share one transaction so a concurrent flush can't be lost."""
         def _do(conn):
             cursor = conn.execute(
                 """
@@ -1247,9 +1222,8 @@ class SessionSessionsMixin:
         return deleted
 
     def delete_sessions(self, session_ids: List[str], sessions_dir: Optional[Path] = None) -> int:
-        """Bulk delete with :meth:`delete_session` semantics per row, in ONE
-        transaction. Unknown ids are skipped (UI selection can race another tab's
-        delete). Returns the number that existed and were deleted."""
+        """Bulk delete with :meth:`delete_session` semantics per row, in ONE transaction. Unknown ids
+        are skipped (UI selection can race another tab's delete). Returns the number deleted."""
         unique_ids = list({sid for sid in session_ids or () if isinstance(sid, str) and sid})
         if not unique_ids:
             return 0
@@ -1276,22 +1250,20 @@ class SessionSessionsMixin:
             self._remove_session_files(sessions_dir, sid)
         return count
 
-    #: Shared by count_empty_sessions / delete_empty_sessions so badge and sweep
-    #: agree. ``message_count`` counts live rows only (rewind/compaction keep
-    #: dropped turns as ``active = 0``), so NOT EXISTS is the authority.
+    # Shared by count_empty_sessions / delete_empty_sessions so badge and sweep agree. message_count
+    # counts live rows only (rewind/compaction keep dropped turns as active = 0): NOT EXISTS is authority.
     _EMPTY_SESSION_WHERE = (
         "message_count = 0 AND ended_at IS NOT NULL AND archived = 0 AND NOT EXISTS ("
         "SELECT 1 FROM messages WHERE messages.session_id = sessions.id)"
     )
 
     def count_empty_sessions(self) -> int:
-        """Count of empty, ended, non-archived sessions; the ended_at guard means a
-        fresh session whose first message hasn't landed is never sniped."""
+        """Count of empty, ended, non-archived sessions; ended_at guards a fresh session's first message."""
         return self._read_one(f"SELECT COUNT(*) FROM sessions WHERE {self._EMPTY_SESSION_WHERE}")[0]
 
     def delete_empty_sessions(self, sessions_dir: Optional[Path] = None) -> int:
-        """Delete every empty, ended, non-archived session in one transaction,
-        orphaning (not cascading) children; transcript files are swept too."""
+        """Delete every empty, ended, non-archived session in one transaction, orphaning (not cascading)
+        children; transcript files are swept too."""
         removed_ids: list[str] = []
         def _do(conn):
             session_ids = {row["id"] for row in conn.execute(
@@ -1319,8 +1291,8 @@ class SessionSessionsMixin:
     def archive_sessions(
         self, older_than_days: Optional[float] = None, source: str = None, **filters,
     ) -> int:
-        """Bulk soft-hide with prune_sessions' filter surface, via set_session_archived
-        so each lineage flips as a unit; idempotent. Returns matches."""
+        """Bulk soft-hide with prune_sessions' filter surface, via set_session_archived so each lineage
+        flips as a unit; idempotent. Returns matches."""
         filters.setdefault("archived", False)
         rows = self.list_prune_candidates(older_than_days=older_than_days, source=source, **filters)
         for row in rows:
@@ -1330,9 +1302,8 @@ class SessionSessionsMixin:
     def maybe_auto_archive(
         self, idle_days: float = 3, min_interval_hours: int = 24, exclude_pinned: bool = True,
     ) -> Dict[str, Any]:
-        """Idempotent, non-destructive auto-archive of sessions idle for ``idle_days``;
-        ``state_meta['last_auto_archive']`` gates runs within ``min_interval_hours``.
-        Never raises: {"skipped", "archived", "error"?}."""
+        """Idempotent, non-destructive auto-archive of sessions idle for ``idle_days``; state_meta
+        ``last_auto_archive`` gates runs within ``min_interval_hours``. Never raises."""
         result: Dict[str, Any] = {"skipped": False, "archived": 0}
         try:
             now = time.time()
