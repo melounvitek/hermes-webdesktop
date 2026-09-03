@@ -161,8 +161,7 @@ def _set_fast(rid, params, key, value, session):
         current_tier = _load_service_tier()
     if raw == "status":
         return _kv(rid, key, {"priority": "fast", None: "normal"}.get(current_tier, current_tier))
-    toggled = ("normal" if current_tier == "priority" else "fast") if raw in {"", "toggle"} else None
-    nv = _FAST_WORDS.get(raw, toggled)
+    nv = _FAST_WORDS.get(raw, ("normal" if current_tier == "priority" else "fast") if raw in {"", "toggle"} else None)
     if nv is None:
         return _err(rid, 4002, f"unknown fast mode: {value}")
     overrides = None
@@ -180,9 +179,8 @@ def _set_fast(rid, params, key, value, session):
         if overrides is None:
             return _err(rid, 4002, "fast mode is not available for this model")
     if session is not None:
-        # Session-scoped like `reasoning` (global = `--global` / Settings → Model): writing
-        # config.yaml here flipped fast mode for every surface. The create override survives lazy
-        # builds and rebuilds; "" pins normal.
+        # Session-scoped like `reasoning` (global = `--global` / Settings → Model): writing config.yaml
+        # here flipped fast mode for every surface. The create override survives rebuilds; "" pins normal.
         session["create_service_tier_override"] = {"fast": "priority", "normal": ""}.get(nv, nv)
     else:
         _write_config_key("agent.service_tier", nv)
@@ -257,23 +255,20 @@ def _set_yolo(rid, params, key, value, session):
     scope = _word(params.get("scope") or "session")
     from tools.approval import disable_session_yolo, enable_session_yolo, is_session_yolo_enabled
     raw = _word(value)
-
-    def _resolve_toggle(current: bool) -> bool:
-        return _BOOL_WORDS.get(raw, not current)
     if scope == "global":
         from tools.approval import _normalize_approval_mode
         appr = _load_cfg().get("approvals")
         appr = appr if isinstance(appr, dict) else {}
-        enable = _resolve_toggle(_normalize_approval_mode(appr.get("mode", "manual")) == "off")
+        enable = _BOOL_WORDS.get(raw, _normalize_approval_mode(appr.get("mode", "manual")) != "off")
         _write_config_key("approvals.mode", "off" if enable else "manual")  # binary: no "smart" restore
         _emit_all_session_info()  # reflect the flip in every live indicator
     elif session:
         skey = session["session_key"]
-        enable = _resolve_toggle(is_session_yolo_enabled(skey))
+        enable = _BOOL_WORDS.get(raw, not is_session_yolo_enabled(skey))
         (enable_session_yolo if enable else disable_session_yolo)(skey)
         _emit_session_info(params.get("session_id", ""), session)
     else:
-        enable = _resolve_toggle(is_truthy_value(os.environ.get("HERMES_YOLO_MODE")))
+        enable = _BOOL_WORDS.get(raw, not is_truthy_value(os.environ.get("HERMES_YOLO_MODE")))
         if enable:
             os.environ["HERMES_YOLO_MODE"] = "1"
         else:
