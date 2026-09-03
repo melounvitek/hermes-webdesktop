@@ -17,12 +17,8 @@ from agent.skill_utils import is_excluded_skill_path
 from tools.skills_guard import ScanResult, content_hash
 from tools.skills_hub_github import GitHubAuth
 from tools.skills_hub_models import (
-    SkillBundle,
-    SkillSource,
-    _normalize_lock_install_path,
-    _validate_bundle_rel_path,
-    _validate_install_parent_path,
-    _validate_skill_name,
+    SkillBundle, SkillSource, _normalize_lock_install_path, _validate_bundle_rel_path,
+    _validate_install_parent_path, _validate_skill_name,
 )
 
 if TYPE_CHECKING:  # origin class; runtime use is via the lazy origin import
@@ -49,15 +45,12 @@ def _resolve_lock_install_path(install_path: str, skill_name: str) -> Path:
     """
     from tools.skills_hub import _skills_dir
     normalized = _normalize_lock_install_path(install_path, skill_name)
-    skills_dir = _skills_dir()
+    target = skills_dir = _skills_dir()
     skills_root = skills_dir.resolve()
-
-    target = skills_dir
     for part in normalized.split("/"):
         target = target / part
         if _is_path_redirect(target):
             raise ValueError(f"Unsafe install path: {install_path}")
-
     target = target.resolve()
     if target == skills_root or not target.is_relative_to(skills_root):
         raise ValueError(f"Unsafe install path: {install_path}")
@@ -70,16 +63,11 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
     ensure_hub_dirs()
     skill_name = _validate_skill_name(bundle.name)
     # Validate every path before touching disk so a bad member aborts cleanly.
-    validated_files = [
-        (_validate_bundle_rel_path(rel_path), file_content)
-        for rel_path, file_content in bundle.files.items()
-    ]
-
+    validated_files = [(_validate_bundle_rel_path(rel_path), content) for rel_path, content in bundle.files.items()]
     dest = _quarantine_dir() / skill_name
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-
     for rel_path, file_content in validated_files:
         file_dest = dest.joinpath(*rel_path.split("/"))
         file_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +75,6 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
             file_dest.write_bytes(file_content)
         else:
             file_dest.write_text(file_content, encoding="utf-8")
-
     return dest
 
 
@@ -100,16 +87,13 @@ def _category_skill_dirs(directory: Path) -> List[str]:
     ``references/pkg/SKILL.md`` does not make the directory a category.
     Shared with ``hermes_cli.skills_hub._existing_categories``.
     """
-    skill_dirs: List[str] = []
-    for entry in directory.iterdir():
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        if any(
+    return [
+        entry.name for entry in directory.iterdir()
+        if entry.is_dir() and not entry.name.startswith(".") and any(
             not is_excluded_skill_path(skill_md.relative_to(directory), root=directory)
             for skill_md in entry.rglob("SKILL.md")
-        ):
-            skill_dirs.append(entry.name)
-    return skill_dirs
+        )
+    ]
 
 
 def _check_install_target(install_dir: Path) -> None:
@@ -127,38 +111,24 @@ def _check_install_target(install_dir: Path) -> None:
     ancestor = install_dir.parent
     while ancestor != skills_root and ancestor.is_relative_to(skills_root):
         if (ancestor / "SKILL.md").is_file():
-            raise ValueError(
-                f"Refusing to install into '{ancestor.name}': it is an "
-                f"existing skill directory, not a category. Choose a "
-                f"different category."
-            )
+            raise ValueError(f"Refusing to install into '{ancestor.name}': it is an "
+                             f"existing skill directory, not a category. Choose a different category.")
         ancestor = ancestor.parent
-
     if not install_dir.exists():
         return
     if not install_dir.is_dir():
-        raise ValueError(
-            f"Refusing to install: '{install_dir.name}' already exists "
-            f"and is not a directory. Remove it or choose a different "
-            f"skill name."
-        )
+        raise ValueError(f"Refusing to install: '{install_dir.name}' already exists "
+                         f"and is not a directory. Remove it or choose a different skill name.")
     if not (install_dir / "SKILL.md").exists():
         skill_dirs_in = _category_skill_dirs(install_dir)
         if skill_dirs_in:
-            raise ValueError(
-                f"Refusing to overwrite category directory '{install_dir}' "
-                f"which contains {len(skill_dirs_in)} skill(s): "
-                f"{', '.join(sorted(skill_dirs_in))}. "
-                f"Use a different --name or install into a subcategory."
-            )
+            raise ValueError(f"Refusing to overwrite category directory '{install_dir}' "
+                             f"which contains {len(skill_dirs_in)} skill(s): {', '.join(sorted(skill_dirs_in))}. "
+                             f"Use a different --name or install into a subcategory.")
 
 
 def install_from_quarantine(
-    quarantine_path: Path,
-    skill_name: str,
-    category: str,
-    bundle: SkillBundle,
-    scan_result: ScanResult,
+    quarantine_path: Path, skill_name: str, category: str, bundle: SkillBundle, scan_result: ScanResult,
     scan_provenance: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Move a scanned skill from quarantine into the skills directory."""
@@ -186,8 +156,7 @@ def install_from_quarantine(
             "Skill '%s' has a large SKILL.md (%s chars). "
             "Large skills consume significant context when loaded. "
             "Consider asking the author to split it into smaller files.",
-            safe_skill_name,
-            f"{skill_size:,}",
+            safe_skill_name, f"{skill_size:,}",
         )
 
     # A symlink in the bundle would copy its target into skills/ and leak it
@@ -202,33 +171,21 @@ def install_from_quarantine(
 
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(quarantine_path), str(install_dir))
-
     installed_hash = content_hash(install_dir)
     HubLockFile().record_install(
-        name=safe_skill_name,
-        source=bundle.source,
-        identifier=bundle.identifier,
-        trust_level=bundle.trust_level,
-        scan_verdict=scan_result.verdict,
-        skill_hash=installed_hash,
+        name=safe_skill_name, source=bundle.source, identifier=bundle.identifier, trust_level=bundle.trust_level,
+        scan_verdict=scan_result.verdict, skill_hash=installed_hash,
         install_path=install_dir.resolve().relative_to(_skills_dir().resolve()).as_posix(),
-        files=list(bundle.files.keys()),
-        metadata=bundle.metadata,
+        files=list(bundle.files.keys()), metadata=bundle.metadata,
         scan_provenance=scan_provenance or getattr(scan_result, "scan_provenance", None),
     )
-
-    append_audit_log(
-        "INSTALL", safe_skill_name, bundle.source,
-        bundle.trust_level, scan_result.verdict,
-        installed_hash,
-    )
-
+    append_audit_log("INSTALL", safe_skill_name, bundle.source, bundle.trust_level, scan_result.verdict,
+                     installed_hash)
     try:
         from tools.skill_usage import record_installed
         record_installed(safe_skill_name)
     except Exception:
         logger.debug("Unable to record skill install lifecycle for %s", safe_skill_name, exc_info=True)
-
     return install_dir
 
 
@@ -239,20 +196,16 @@ def uninstall_skill(skill_name: str) -> Tuple[bool, str]:
     entry = lock.get_installed(skill_name)
     if not entry:
         return False, f"'{skill_name}' is not a hub-installed skill (may be a builtin)"
-
     # The destructive boundary: whatever reaches rmtree MUST be inside
     # SKILLS_DIR and MUST NOT be SKILLS_DIR itself (see _resolve_lock_install_path).
     try:
         install_path = _resolve_lock_install_path(entry.get("install_path", ""), skill_name)
     except ValueError as exc:
         return False, f"Refusing to uninstall '{skill_name}': {exc}"
-
     if install_path.exists():
         shutil.rmtree(install_path)
-
     lock.record_uninstall(skill_name)
     append_audit_log("UNINSTALL", skill_name, entry["source"], entry["trust_level"], "n/a", "user_request")
-
     return True, f"Uninstalled '{skill_name}' from {entry['install_path']}"
 
 
@@ -266,10 +219,7 @@ def bundle_content_hash(bundle: SkillBundle) -> str:
     path is hashed too so swapping contents between two files changes the hash.
     """
     h = hashlib.sha256()
-    normalized = {
-        rel_path.replace("\\", "/"): content
-        for rel_path, content in bundle.files.items()
-    }
+    normalized = {rel_path.replace("\\", "/"): content for rel_path, content in bundle.files.items()}
     for rel_path in sorted(normalized):
         h.update(rel_path.encode("utf-8"))
         h.update(b"\x00")
@@ -286,11 +236,8 @@ def _source_matches(source: SkillSource, source_name: str) -> bool:
 
 
 def check_for_skill_updates(
-    name: Optional[str] = None,
-    *,
-    lock: Optional[HubLockFile] = None,
-    sources: Optional[List[SkillSource]] = None,
-    auth: Optional[GitHubAuth] = None,
+    name: Optional[str] = None, *, lock: Optional[HubLockFile] = None,
+    sources: Optional[List[SkillSource]] = None, auth: Optional[GitHubAuth] = None,
 ) -> List[dict]:
     """Check installed hub skills for upstream changes.
 
@@ -304,16 +251,13 @@ def check_for_skill_updates(
     installed = lock.list_installed()
     if name:
         installed = [entry for entry in installed if entry.get("name") == name]
-
     if sources is None:
         sources = create_source_router(auth=auth)
 
     results: List[dict] = []
     for entry in installed:
-        identifier = entry.get("identifier", "")
-        source_name = entry.get("source", "")
+        identifier, source_name = entry.get("identifier", ""), entry.get("source", "")
         row = {"name": entry.get("name", ""), "identifier": identifier, "source": source_name}
-
         bundle = None
         for src in filter(lambda s: _source_matches(s, source_name), sources):
             try:
@@ -322,19 +266,12 @@ def check_for_skill_updates(
                 bundle = None
             if bundle:
                 break
-
         if not bundle:
             results.append({**row, "status": "unavailable"})
             continue
-
-        current_hash = entry.get("content_hash", "")
-        latest_hash = bundle_content_hash(bundle)
+        current_hash, latest_hash = entry.get("content_hash", ""), bundle_content_hash(bundle)
         results.append({
-            **row,
-            "status": "up_to_date" if current_hash == latest_hash else "update_available",
-            "current_hash": current_hash,
-            "latest_hash": latest_hash,
-            "bundle": bundle,
+            **row, "status": "up_to_date" if current_hash == latest_hash else "update_available",
+            "current_hash": current_hash, "latest_hash": latest_hash, "bundle": bundle,
         })
-
     return results

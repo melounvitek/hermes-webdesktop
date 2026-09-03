@@ -20,19 +20,13 @@ from tools.skills_hub_models import (
 
 logger = logging.getLogger("tools.skills_hub")
 
-
-# Maps a GitHub tap repo (owner/repo) to the provider label used by the
-# docs-site catalog (website/scripts/extract-skills.py::GITHUB_TAP_LABELS).
-# The runtime index collapses every tap into source="github"; the label in
-# ``extra.provider`` keeps per-tap identity searchable/filterable without
-# disturbing the dedup / floor / index-skip logic keyed on the bare source id.
+# GitHub tap repo (owner/repo) -> provider label used by the docs-site catalog
+# (website/scripts/extract-skills.py::GITHUB_TAP_LABELS). The runtime index collapses every tap into
+# source="github"; ``extra.provider`` keeps per-tap identity searchable/filterable without disturbing
+# dedup / floor / index-skip logic keyed on the bare source id.
 GITHUB_TAP_PROVIDERS = {
-    "openai/skills": "OpenAI",
-    "anthropics/skills": "Anthropic",
-    "huggingface/skills": "HuggingFace",
-    "nvidia/skills": "NVIDIA",
-    "voltagent/awesome-agent-skills": "VoltAgent",
-    "garrytan/gstack": "gstack",
+    "openai/skills": "OpenAI", "anthropics/skills": "Anthropic", "huggingface/skills": "HuggingFace",
+    "nvidia/skills": "NVIDIA", "voltagent/awesome-agent-skills": "VoltAgent", "garrytan/gstack": "gstack",
     "minimax-ai/cli": "MiniMax",
 }
 
@@ -40,20 +34,19 @@ GITHUB_TAP_PROVIDERS = {
 # they narrow merged results to GitHub-tap skills carrying that ``extra.provider``.
 _PROVIDER_FILTER_VALUES = frozenset(v.lower() for v in GITHUB_TAP_PROVIDERS.values())
 
+_API = "https://api.github.com/repos"
+_ACCEPT_JSON = "application/vnd.github.v3+json"
+
 
 def github_provider_for(repo: str) -> Optional[str]:
     """Provider label for an ``owner/repo`` tap (case-insensitive), or None."""
-    if not repo:
-        return None
-    return GITHUB_TAP_PROVIDERS.get(repo.strip().lower())
+    return GITHUB_TAP_PROVIDERS.get(repo.strip().lower()) if repo else None
 
 
 def _filter_results_by_provider(results: List[SkillMeta], provider: str) -> List[SkillMeta]:
-    """Keep only results whose ``extra.provider`` matches ``provider``.
-
-    An explicit provider filter (``--source nvidia``) narrows to exactly that
-    provider — the official catalog is NOT injected the way unfiltered browse does.
-    """
+    """Keep only results whose ``extra.provider`` matches ``provider``. An explicit provider filter
+    (``--source nvidia``) narrows to exactly that provider — the official catalog is NOT injected the
+    way unfiltered browse does."""
     want = provider.strip().lower()
     return [r for r in results if str((r.extra or {}).get("provider", "")).lower() == want]
 
@@ -65,17 +58,9 @@ def _is_rate_limit_response(resp: httpx.Response) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# GitHub Authentication
-# ---------------------------------------------------------------------------
-
 class GitHubAuth:
-    """GitHub API authentication, tried in priority order:
-      1. GITHUB_TOKEN / GH_TOKEN (PAT)
-      2. `gh auth token` (gh CLI)
-      3. GitHub App JWT + installation token
-      4. Unauthenticated (60 req/hr, public repos only)
-    """
+    """GitHub API authentication, tried in priority order: GITHUB_TOKEN / GH_TOKEN (PAT), `gh auth token`
+    (gh CLI), GitHub App JWT + installation token, then unauthenticated (60 req/hr, public repos only)."""
 
     def __init__(self):
         self._cached_token: Optional[str] = None
@@ -84,10 +69,7 @@ class GitHubAuth:
 
     def get_headers(self) -> Dict[str, str]:
         token = self._resolve_token()
-        headers = {"Accept": "application/vnd.github.v3+json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
-        return headers
+        return {"Accept": _ACCEPT_JSON, **({"Authorization": f"token {token}"} if token else {})}
 
     def is_authenticated(self) -> bool:
         return self._resolve_token() is not None
@@ -98,11 +80,8 @@ class GitHubAuth:
         return self._cached_method or "anonymous"
 
     def _resolve_token(self) -> Optional[str]:
-        if self._cached_token and (
-            self._cached_method != "github-app" or time.time() < self._app_token_expiry
-        ):
+        if self._cached_token and (self._cached_method != "github-app" or time.time() < self._app_token_expiry):
             return self._cached_token
-
         for method, resolve in (
             ("pat", self._try_pat), ("gh-cli", self._try_gh_cli), ("github-app", self._try_github_app),
         ):
@@ -112,7 +91,6 @@ class GitHubAuth:
                 if method == "github-app":
                     self._app_token_expiry = time.time() + 3500  # ~58 min (tokens last 1 hour)
                 return token
-
         self._cached_method = "anonymous"
         return None
 
@@ -125,10 +103,8 @@ class GitHubAuth:
     def _try_gh_cli(self) -> Optional[str]:
         try:
             result = subprocess.run(
-                ["gh", "auth", "token"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
-                stdin=subprocess.DEVNULL,
-                creationflags=windows_hide_flags(),
+                ["gh", "auth", "token"], capture_output=True, text=True, encoding='utf-8', errors='replace',
+                timeout=5, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -138,19 +114,15 @@ class GitHubAuth:
 
     def _try_github_app(self) -> Optional[str]:
         from agent.secret_scope import get_secret
-        app_id = get_secret("GITHUB_APP_ID")
-        key_path = get_secret("GITHUB_APP_PRIVATE_KEY_PATH")
+        app_id, key_path = get_secret("GITHUB_APP_ID"), get_secret("GITHUB_APP_PRIVATE_KEY_PATH")
         installation_id = get_secret("GITHUB_APP_INSTALLATION_ID")
-
         if not all([app_id, key_path, installation_id]):
             return None
-
         try:
             import jwt  # PyJWT
         except ImportError:
             logger.debug("PyJWT not installed, skipping GitHub App auth")
             return None
-
         try:
             key_file = Path(key_path)
             if not key_file.exists():
@@ -162,27 +134,19 @@ class GitHubAuth:
             )
             resp = httpx.post(
                 f"https://api.github.com/app/installations/{installation_id}/access_tokens",
-                headers={"Authorization": f"Bearer {encoded_jwt}", "Accept": "application/vnd.github.v3+json"},
-                timeout=10,
+                headers={"Authorization": f"Bearer {encoded_jwt}", "Accept": _ACCEPT_JSON}, timeout=10,
             )
             if resp.status_code == 201:
                 return resp.json().get("token")
         except Exception as e:
             logger.debug("GitHub App auth failed: %s", e)
-
         return None
 
-
-# ---------------------------------------------------------------------------
-# GitHub source adapter
-# ---------------------------------------------------------------------------
 
 def _split_repo_id(identifier: str) -> Optional[Tuple[str, str]]:
     """``owner/repo/path/to/skill`` -> ``(owner/repo, path/to/skill)``; None when too short."""
     parts = identifier.split("/", 2)
-    if len(parts) < 3:
-        return None
-    return f"{parts[0]}/{parts[1]}", parts[2]
+    return (f"{parts[0]}/{parts[1]}", parts[2]) if len(parts) >= 3 else None
 
 
 def _skip_bundle_file(rel_path: str) -> bool:
@@ -192,32 +156,27 @@ def _skip_bundle_file(rel_path: str) -> bool:
 
 
 def _tree_members(entries: List[dict], prefix: str):
-    """``(rel_path, item_path, is_regular_blob)`` for every git-tree entry under ``prefix``.
-
-    Symlinks (mode 120000) and non-blobs report ``is_regular_blob=False`` so callers
-    can reject a SKILL.md-linked symlink instead of silently following it.
-    """
+    """``(rel_path, item_path, is_regular_blob)`` for every git-tree entry under ``prefix``. Symlinks
+    (mode 120000) and non-blobs report ``is_regular_blob=False`` so callers can reject a SKILL.md-linked
+    symlink instead of silently following it."""
     for item in entries:
         item_path = item.get("path", "")
         if item_path.startswith(prefix):
-            regular = item.get("type") == "blob" and item.get("mode") != "120000"
-            yield item_path[len(prefix):], item_path, regular
+            yield item_path[len(prefix):], item_path, item.get("type") == "blob" and item.get("mode") != "120000"
 
 
 class GitHubSource(SkillSource):
     """Fetch skills from GitHub repos via the Contents API."""
 
     DEFAULT_TAPS = [
-        # openai/skills keeps its content under skills/.curated/ and
-        # skills/.system/; _list_skills_in_repo skips "."/"_" directories,
-        # so both entries point at the inner paths directly.
+        # openai/skills keeps content under skills/.curated/ + skills/.system/; _list_skills_in_repo
+        # skips "."/"_" directories, so both entries point at the inner paths.
         {"repo": "openai/skills", "path": "skills/.curated/"},
         {"repo": "openai/skills", "path": "skills/.system/"},
         {"repo": "anthropics/skills", "path": "skills/"},
         {"repo": "huggingface/skills", "path": "skills/"},
-        # NVIDIA-verified skills (CUDA-X, NeMo, cuOpt, ...), each with a
-        # signed skill.oms.sig + governance card; `trusted` via
-        # tools/skills_guard.py::TRUSTED_REPOS.
+        # NVIDIA-verified skills (CUDA-X, NeMo, cuOpt, ...), each with a signed skill.oms.sig
+        # + governance card; `trusted` via tools/skills_guard.py::TRUSTED_REPOS.
         {"repo": "NVIDIA/skills", "path": "skills/"},
         {"repo": "garrytan/gstack", "path": ""},
     ]
@@ -227,9 +186,7 @@ class GitHubSource(SkillSource):
 
     def __init__(self, auth: GitHubAuth, extra_taps: Optional[List[Dict]] = None):
         self.auth = auth
-        self.taps = list(self.DEFAULT_TAPS)
-        if extra_taps:
-            self.taps.extend(extra_taps)
+        self.taps = list(self.DEFAULT_TAPS) + list(extra_taps or [])
         # Per-instance repo -> (default_branch, tree_entries); lives for one
         # search/install flow so repeated tree lookups cost no API calls.
         self._tree_cache: Dict[str, Tuple[str, List[dict]]] = {}
@@ -239,22 +196,18 @@ class GitHubSource(SkillSource):
         self._rate_limited: bool = False
 
     @property
-    def is_rate_limited(self) -> bool:
-        """Whether GitHub API rate limit was hit during operations."""
+    def is_rate_limited(self) -> bool:  # whether the GitHub API rate limit was hit during operations
         return self._rate_limited
 
     def trust_level_for(self, identifier: str) -> str:
         # identifier format: "owner/repo/path/to/skill"
         parts = identifier.split("/", 2)
-        if len(parts) >= 2 and f"{parts[0]}/{parts[1]}" in TRUSTED_REPOS:
-            return "trusted"
-        return "community"
+        return "trusted" if len(parts) >= 2 and f"{parts[0]}/{parts[1]}" in TRUSTED_REPOS else "community"
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         """Substring-match all taps; dedupe by identifier preferring higher trust."""
         results: List[SkillMeta] = []
         query_lower = query.lower()
-
         for tap in self.taps:
             try:
                 for skill in self._list_skills_in_repo(tap["repo"], tap.get("path", "")):
@@ -262,22 +215,17 @@ class GitHubSource(SkillSource):
                         results.append(skill)
             except Exception as e:
                 logger.debug("Failed to search %s: %s", tap['repo'], e)
-                continue
-
         return _dedupe_by_trust(results)[:limit]
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         """Download a skill; identifier format: "owner/repo/path/to/skill-dir"."""
-        split = _split_repo_id(identifier)
-        if split is None:
+        if (split := _split_repo_id(identifier)) is None:
             return None
         repo, skill_path = split
         skill_dir = skill_path.rstrip("/")
-
-        # Resolve the tree FIRST so every byte fetch — SKILL.md included — is
-        # pinned to the same revision; an unpinned /contents fetch floats to
-        # HEAD and can serve bytes newer than the tree the paths were
-        # validated against (TOCTOU). Idempotent + cached.
+        # Resolve the tree FIRST so every byte fetch — SKILL.md included — is pinned to the
+        # same revision; an unpinned /contents fetch floats to HEAD and can serve bytes newer
+        # than the tree the paths were validated against (TOCTOU). Idempotent + cached.
         tree = self._get_repo_tree(repo)
         pinned_ref = self._tree_revisions.get(repo)
         skill_md = self._fetch_file_content(repo, f"{skill_dir}/SKILL.md", ref=pinned_ref)
@@ -286,57 +234,39 @@ class GitHubSource(SkillSource):
         referenced = _referenced_support_paths(skill_md)
         if referenced is None:
             return None
-
         files: Dict[str, Union[str, bytes]] = {"SKILL.md": skill_md}
         if tree is not None:
-            branch, entries = tree
-            if not self._collect_tree_files(repo, skill_dir, entries, pinned_ref, referenced, files):
+            if not self._collect_tree_files(repo, skill_dir, tree[1], pinned_ref, referenced, files):
                 return None
-            revision = pinned_ref or branch
+            revision = pinned_ref or tree[0]
         else:
             for rel_path in referenced:
-                content = self._fetch_file_bytes(repo, f"{skill_dir}/{rel_path}")
-                if content is None:
-                    logger.warning("Failed to fetch referenced skill support "
-                                   "file; continuing without it: %s", rel_path)
-                    continue
-                files[rel_path] = content
+                self._add_support_file(repo, f"{skill_dir}/{rel_path}", rel_path, files, rel_path)
             revision = ""
-
+        url = f"https://github.com/{repo}/" + (f"tree/{revision}/{skill_path}" if revision else skill_path)
         return SkillBundle(
-            name=skill_dir.split("/")[-1],
-            files=files,
-            source="github",
-            identifier=identifier,
-            trust_level=self.trust_level_for(identifier),
-            metadata={
-                "source_url": (
-                    f"https://github.com/{repo}/tree/{revision}/{skill_path}"
-                    if revision else f"https://github.com/{repo}/{skill_path}"
-                ),
-                "source_revision": revision,
-            },
+            name=skill_dir.split("/")[-1], files=files, source="github", identifier=identifier,
+            trust_level=self.trust_level_for(identifier), metadata={"source_url": url, "source_revision": revision},
         )
 
+    def _add_support_file(self, repo: str, item_path: str, rel_path: str, files: dict, shown: str, **kw) -> None:
+        """Fetch one support file into ``files``; a failed fetch warns (naming ``shown``) and is skipped."""
+        content = self._fetch_file_bytes(repo, item_path, **kw)
+        if content is None:
+            logger.warning("Failed to fetch referenced skill support file; continuing without it: %s", shown)
+        else:
+            files[rel_path] = content
+
     def _collect_tree_files(
-        self,
-        repo: str,
-        skill_path: str,
-        entries: List[dict],
-        ref: Optional[str],
-        referenced: set,
+        self, repo: str, skill_path: str, entries: List[dict], ref: Optional[str], referenced: set,
         files: Dict[str, Union[str, bytes]],
     ) -> bool:
-        """Download the FULL skill directory from the pinned tree into ``files``.
-
-        Link-driven fetching silently dropped support files under non-canonical
-        dirs (``reference/``, ``agents/``, root LICENSE); everything still goes
-        through quarantine + scan, and the scanner sees MORE this way.
-        Returns False (bundle rejected) on an unsafe path or a SKILL.md-linked
-        path that exists in the tree as a symlink/non-blob — that shape is an
-        escape attempt. A linked path that is simply absent is a dangling link
-        (repo-only dev tool, prose over-match): warn and install without it.
-        """
+        """Download the FULL skill directory from the pinned tree into ``files``. Link-driven fetching
+        silently dropped support files under non-canonical dirs (``reference/``, ``agents/``, root
+        LICENSE); everything still goes through quarantine + scan, and the scanner sees MORE this way.
+        Returns False (bundle rejected) on an unsafe path or a SKILL.md-linked path that exists in the
+        tree as a symlink/non-blob — that shape is an escape attempt. A linked path that is simply absent
+        is a dangling link (repo-only dev tool, prose over-match): warn and install without it."""
         prefix = f"{skill_path}/"
         symlinked: set = set()
         for rel_path, item_path, regular in _tree_members(entries, prefix):
@@ -350,55 +280,31 @@ class GitHubSource(SkillSource):
             except ValueError:
                 logger.warning("Rejected unsafe file path in skill bundle: %s", item_path)
                 return False
-            content = self._fetch_file_bytes(repo, item_path, ref=ref)
-            if content is None:
-                logger.warning("Failed to fetch referenced skill support "
-                               "file; continuing without it: %s", item_path)
-                continue
-            files[rel_path] = content
+            self._add_support_file(repo, item_path, rel_path, files, item_path, ref=ref)
         for rel_path in sorted(referenced):
             if rel_path in symlinked:
-                logger.warning(
-                    "Rejected non-regular referenced file in skill "
-                    "bundle: %s%s", prefix, rel_path,
-                )
+                logger.warning("Rejected non-regular referenced file in skill bundle: %s%s", prefix, rel_path)
                 return False
             if rel_path not in files:
                 logger.warning(
-                    "Referenced skill support file is missing; "
-                    "continuing without it: %s%s",
-                    prefix, rel_path,
-                )
+                    "Referenced skill support file is missing; continuing without it: %s%s", prefix, rel_path)
         return True
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         """Fetch just the SKILL.md metadata for preview."""
-        split = _split_repo_id(identifier)
-        if split is None:
+        if (split := _split_repo_id(identifier)) is None:
             return None
-        repo, skill_path = split
-        skill_path = skill_path.rstrip("/")
-
+        repo, skill_path = split[0], split[1].rstrip("/")
         content = self._fetch_file_content(repo, f"{skill_path}/SKILL.md")
         if not content:
             return None
-
         fm = _parse_frontmatter(content)
-        tags = _hermes_tags(fm)
-        if not tags:
-            raw_tags = fm.get("tags", [])
-            tags = raw_tags if isinstance(raw_tags, list) else []
-
+        tags = _hermes_tags(fm) or (fm["tags"] if isinstance(fm.get("tags"), list) else [])
         provider = github_provider_for(repo)
         return SkillMeta(
-            name=fm.get("name", skill_path.split("/")[-1]),
-            description=str(fm.get("description", "")),
-            source="github",
-            identifier=identifier,
-            trust_level=self.trust_level_for(identifier),
-            repo=repo,
-            path=skill_path,
-            tags=[str(t) for t in tags],
+            name=fm.get("name", skill_path.split("/")[-1]), description=str(fm.get("description", "")),
+            source="github", identifier=identifier, trust_level=self.trust_level_for(identifier),
+            repo=repo, path=skill_path, tags=[str(t) for t in tags],
             extra={"provider": provider} if provider else {},
         )
 
@@ -410,105 +316,69 @@ class GitHubSource(SkillSource):
         cached = _cached_metas(cache_key)
         if cached is not None:
             return cached
-
-        url = f"https://api.github.com/repos/{repo}/contents/{path.rstrip('/')}"
-        resp = self._github_get(url)
+        resp = self._github_get(f"{_API}/{repo}/contents/{path.rstrip('/')}")
         if resp is None or resp.status_code != 200:
             return []
-
         entries = resp.json()
         if not isinstance(entries, list):
             return []
-
         skills: List[SkillMeta] = []
         groupings = self._get_skillsh_groupings(repo)
         prefix = path.rstrip("/")
         for entry in entries:
-            if entry.get("type") != "dir":
+            if entry.get("type") != "dir" or entry["name"].startswith((".", "_")):
                 continue
             dir_name = entry["name"]
-            if dir_name.startswith((".", "_")):
-                continue
             meta = self.inspect(f"{repo}/{prefix}/{dir_name}" if prefix else f"{repo}/{dir_name}")
             if meta:
-                if groupings:
-                    category = groupings.get(meta.name) or groupings.get(dir_name)
-                    if category:
-                        meta.extra["category"] = category
+                category = groupings and (groupings.get(meta.name) or groupings.get(dir_name))
+                if category:
+                    meta.extra["category"] = category
                 skills.append(meta)
-
         _cache_metas(cache_key, skills)
         return skills
 
     def _get_repo_tree(self, repo: str) -> Optional[Tuple[str, List[dict]]]:
-        """Cached ``(default_branch, tree_entries)`` for a repo, or None.
-
-        One install may need the tree several times; caching saves the
-        ``GET /repos/{repo}`` + ``GET .../git/trees/{branch}`` pair each time
-        (~12 of the 60/hr unauthenticated budget before).
-        """
+        """Cached ``(default_branch, tree_entries)`` for a repo, or None. One install may need the tree
+        several times; caching saves the ``GET /repos/{repo}`` + ``GET .../git/trees/{branch}`` pair each
+        time (~12 of the 60/hr unauthenticated budget before)."""
         if repo in self._tree_cache:
             return self._tree_cache[repo]
-
-        repo_data = self._github_json(f"https://api.github.com/repos/{repo}")
+        repo_data = self._github_json(f"{_API}/{repo}")
         if repo_data is None:
             return None
         default_branch = repo_data.get("default_branch", "main")
         tree_data = self._github_json(
-            f"https://api.github.com/repos/{repo}/git/trees/{default_branch}",
-            params={"recursive": "1"}, timeout=30.0,
+            f"{_API}/{repo}/git/trees/{default_branch}", params={"recursive": "1"}, timeout=30.0,
         )
         if tree_data is None:
             return None
         if tree_data.get("truncated"):
             logger.debug("Git tree truncated for %s, cannot cache", repo)
             return None
-
-        entries = tree_data.get("tree", [])
-        revision = tree_data.get("sha")
-        if isinstance(revision, str) and revision:
-            self._tree_revisions[repo] = revision
-        self._tree_cache[repo] = (default_branch, entries)
-        return (default_branch, entries)
+        if isinstance(tree_data.get("sha"), str) and tree_data["sha"]:
+            self._tree_revisions[repo] = tree_data["sha"]
+        self._tree_cache[repo] = tree = (default_branch, tree_data.get("tree", []))
+        return tree
 
     def _github_json(self, url: str, **kwargs) -> Optional[dict]:
         """Decoded JSON body of a 200 ``_github_get`` (which flags rate-limit exhaustion), else None."""
         resp = self._github_get(url, **kwargs)
-        if resp is None or resp.status_code != 200:
-            return None
         try:
-            return resp.json()
+            return resp.json() if resp is not None and resp.status_code == 200 else None
         except ValueError:
             return None
 
-    def _check_rate_limit_response(self, resp: httpx.Response) -> None:
-        """Flag the instance as rate-limited when GitHub returns 403 + exhausted quota."""
-        if _is_rate_limit_response(resp):
-            self._rate_limited = True
-            logger.warning(
-                "GitHub API rate limit exhausted (unauthenticated: 60 req/hr). "
-                "Set GITHUB_TOKEN or install the gh CLI to raise the limit to 5,000/hr."
-            )
-
     def _github_get(
-        self,
-        url: str,
-        *,
-        params: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        timeout: float = 15.0,
-        max_retries: int = 3,
+        self, url: str, *, params: Optional[Dict] = None, headers: Optional[Dict] = None,
+        timeout: float = 15.0, max_retries: int = 3,
     ) -> Optional[httpx.Response]:
-        """GET against the GitHub API with retry/backoff on transient failures.
-
-        Returns the final response (caller inspects status) or None when every
-        attempt raised a transport error. Retries rate-limit 403/429 (waiting
-        until ``Retry-After``/``X-RateLimit-Reset`` when present, capped 60s —
-        one shared limit zeroes every GitHub tap at once during an index build),
-        5xx, and transport errors with exponential backoff. Terminal rate-limit
-        exhaustion flags the instance so an index build fails loud instead of
-        silently shipping zero GitHub skills.
-        """
+        """GET against the GitHub API with retry/backoff on transient failures. Returns the final
+        response (caller inspects status) or None when every attempt raised a transport error.
+        Retries rate-limit 403/429 (waiting until ``Retry-After`` / ``X-RateLimit-Reset`` when present,
+        capped 60s — one shared limit zeroes every GitHub tap at once during an index build), 5xx, and
+        transport errors with exponential backoff. Terminal rate-limit exhaustion flags the instance so
+        an index build fails loud instead of silently shipping zero GitHub skills."""
         hdrs = headers if headers is not None else self.auth.get_headers()
         backoff = 1.0
         last_resp: Optional[httpx.Response] = None
@@ -516,13 +386,9 @@ class GitHubSource(SkillSource):
             last_attempt = attempt >= max_retries - 1
             wait = backoff
             try:
-                resp = httpx.get(
-                    url, params=params, headers=hdrs,
-                    timeout=timeout, follow_redirects=True,
-                )
+                resp = httpx.get(url, params=params, headers=hdrs, timeout=timeout, follow_redirects=True)
             except httpx.HTTPError as e:
-                logger.debug("GitHub GET %s failed (attempt %d/%d): %s",
-                             url, attempt + 1, max_retries, e)
+                logger.debug("GitHub GET %s failed (attempt %d/%d): %s", url, attempt + 1, max_retries, e)
                 if last_attempt:
                     return None
             else:
@@ -530,8 +396,12 @@ class GitHubSource(SkillSource):
                 if resp.status_code == 200:
                     return resp
                 if resp.status_code in (403, 429):
-                    if not _is_rate_limit_response(resp) or last_attempt:
-                        self._check_rate_limit_response(resp)
+                    limited = _is_rate_limit_response(resp)
+                    if not limited or last_attempt:
+                        if limited:  # terminal exhaustion: flag the instance so callers fail loud
+                            self._rate_limited = True
+                            logger.warning("GitHub API rate limit exhausted (unauthenticated: 60 req/hr). "
+                                           "Set GITHUB_TOKEN or install the gh CLI to raise the limit to 5,000/hr.")
                         return resp
                     reset = resp.headers.get("X-RateLimit-Reset", "")
                     retry_after = resp.headers.get("Retry-After", "")
@@ -541,35 +411,23 @@ class GitHubSource(SkillSource):
                         delta = float(reset) - time.time()
                         if 0 < delta <= 60.0:
                             wait = delta
-                    logger.debug(
-                        "GitHub rate limited on %s, waiting %.1fs (attempt %d/%d)",
-                        url, wait, attempt + 1, max_retries,
-                    )
+                    logger.debug("GitHub rate limited on %s, waiting %.1fs (attempt %d/%d)",
+                                 url, wait, attempt + 1, max_retries)
                 elif not (500 <= resp.status_code < 600) or last_attempt:
                     return resp
             time.sleep(wait)
             backoff = min(backoff * 2, 30.0)
-
         return last_resp
 
     def _find_skill_in_repo_tree(self, repo: str, skill_name: str) -> Optional[str]:
-        """Locate ``<skill_name>/SKILL.md`` anywhere in the repo tree (one API call).
-
-        Returns the full identifier (``repo/path/to/skill``) or None.
-        """
-        cached = self._get_repo_tree(repo)
-        if cached is None:
+        """Locate ``<skill_name>/SKILL.md`` anywhere in the repo tree (one API call); full identifier or None."""
+        if (cached := self._get_repo_tree(repo)) is None:
             return None
-        _default_branch, tree_entries = cached
-
         skill_md_suffix = f"/{skill_name}/SKILL.md"
-        for entry in tree_entries:
-            if entry.get("type") != "blob":
-                continue
+        for entry in cached[1]:
             path = entry.get("path", "")
-            if path.endswith(skill_md_suffix) or path == f"{skill_name}/SKILL.md":
+            if entry.get("type") == "blob" and (path.endswith(skill_md_suffix) or path == skill_md_suffix[1:]):
                 return f"{repo}/{path[: -len('/SKILL.md')]}"
-
         return None
 
     def _fetch_file_content(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[str]:
@@ -583,32 +441,20 @@ class GitHubSource(SkillSource):
     def _fetch_file_bytes(self, repo: str, path: str, ref: Optional[str] = None) -> Optional[bytes]:
         """Fetch exact file bytes. ``ref`` pins to a tree SHA (see ``fetch`` on
         the TOCTOU); None keeps the legacy unpinned behavior."""
-        encoded_path = quote(path, safe="/")
-        url = f"https://api.github.com/repos/{repo}/contents/{encoded_path}"
         resp = self._github_get(
-            url,
-            params={"ref": ref} if ref else None,
+            f"{_API}/{repo}/contents/{quote(path, safe='/')}", params={"ref": ref} if ref else None,
             headers={**self.auth.get_headers(), "Accept": "application/vnd.github.v3.raw"},
         )
-        if resp is not None and resp.status_code == 200:
-            return resp.content
-        return None
+        return resp.content if resp is not None and resp.status_code == 200 else None
 
     def _get_skillsh_groupings(self, repo: str) -> Optional[Dict[str, str]]:
-        """Repo-root ``skills.sh.json`` groupings flattened to ``{skill_name: title}``.
-
-        ``skills.sh.json`` is a cross-ecosystem standard
-        (``$schema: https://skills.sh/schemas/skills.sh.schema.json``); any tap
-        shipping it gets category pills for free. None when absent/unparsable.
-        Cached per repo on the instance.
-        """
-        if repo in self._skillsh_groupings:
-            return self._skillsh_groupings[repo]
-
-        content = self._fetch_file_content(repo, "skills.sh.json")
-        groupings = self._parse_skillsh_groupings(content) if content else None
-        self._skillsh_groupings[repo] = groupings
-        return groupings
+        """Repo-root ``skills.sh.json`` groupings flattened to ``{skill_name: title}``. ``skills.sh.json``
+        is a cross-ecosystem standard (``$schema: https://skills.sh/schemas/skills.sh.schema.json``); any
+        tap shipping it gets category pills for free. None when absent/unparsable; cached per repo."""
+        if repo not in self._skillsh_groupings:
+            content = self._fetch_file_content(repo, "skills.sh.json")
+            self._skillsh_groupings[repo] = self._parse_skillsh_groupings(content) if content else None
+        return self._skillsh_groupings[repo]
 
     @staticmethod
     def _parse_skillsh_groupings(content: str) -> Optional[Dict[str, str]]:
@@ -617,22 +463,17 @@ class GitHubSource(SkillSource):
             data = json.loads(content)
         except (json.JSONDecodeError, TypeError):
             return None
-        if not isinstance(data, dict):
-            return None
-        groupings = data.get("groupings")
+        groupings = data.get("groupings") if isinstance(data, dict) else None
         if not isinstance(groupings, list):
             return None
-
         mapping: Dict[str, str] = {}
         for group in groupings:
             if not isinstance(group, dict):
                 continue
-            title = group.get("title")
-            members = group.get("skills")
+            title, members = group.get("title"), group.get("skills")
             if not isinstance(title, str) or not isinstance(members, list):
                 continue
             for member in members:
                 if isinstance(member, str) and member:
                     mapping.setdefault(member, title)  # first grouping wins
         return mapping
-

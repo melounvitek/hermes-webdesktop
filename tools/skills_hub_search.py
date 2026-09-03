@@ -25,7 +25,6 @@ if TYPE_CHECKING:  # runtime use resolves through the origin (test patch target)
 logger = logging.getLogger("tools.skills_hub")
 
 HERMES_INDEX_URL = "https://hermes-agent.nousresearch.com/docs/api/skills-index.json"
-
 HERMES_INDEX_TTL = 6 * 3600  # 6 hours
 
 
@@ -49,16 +48,11 @@ def _load_hermes_index() -> Optional[dict]:
     cached = _read_json_if_fresh(cache_file, HERMES_INDEX_TTL)
     if cached is not None:
         return cached
-
     data = None
     for accept_encoding in ("gzip, deflate", "identity"):
         try:
-            resp = httpx.get(
-                HERMES_INDEX_URL,
-                timeout=15,
-                follow_redirects=True,
-                headers={"Accept-Encoding": accept_encoding},
-            )
+            resp = httpx.get(HERMES_INDEX_URL, timeout=15, follow_redirects=True,
+                             headers={"Accept-Encoding": accept_encoding})
             if resp.status_code != 200:
                 logger.debug("Hermes index fetch returned %d", resp.status_code)
                 return _load_stale_index_cache()
@@ -69,16 +63,13 @@ def _load_hermes_index() -> Optional[dict]:
         except (httpx.HTTPError, json.JSONDecodeError) as e:
             logger.debug("Hermes index fetch failed: %s", e)
             return _load_stale_index_cache()
-
     if not isinstance(data, dict) or "skills" not in data:
         return _load_stale_index_cache()
-
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass
-
     return data
 
 
@@ -102,7 +93,6 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
     )
     if auth is None:
         auth = GitHubAuth()
-
     return [
         OptionalSkillSource(auth=auth),   # official optional skills (highest priority)
         HermesIndexSource(auth=auth),     # centralized index (search + resolved install paths)
@@ -116,9 +106,7 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
     ]
 
 
-def _search_one_source(
-    src: SkillSource, query: str, limit: int
-) -> Tuple[str, List[SkillMeta]]:
+def _search_one_source(src: SkillSource, query: str, limit: int) -> Tuple[str, List[SkillMeta]]:
     """Search a single source.  Runs in a thread for parallelism."""
     try:
         return src.source_id(), src.search(query, limit=limit)
@@ -137,8 +125,7 @@ def _select_active_sources(sources: List[SkillSource], source_filter: str) -> Li
     """
     effective = "all" if source_filter.strip().lower() in _PROVIDER_FILTER_VALUES else source_filter
     index_available = effective == "all" and any(
-        src.source_id() == "hermes-index" and getattr(src, "is_available", False)
-        for src in sources
+        src.source_id() == "hermes-index" and getattr(src, "is_available", False) for src in sources
     )
     active: List[SkillSource] = []
     for src in sources:
@@ -152,12 +139,8 @@ def _select_active_sources(sources: List[SkillSource], source_filter: str) -> Li
 
 
 def parallel_search_sources(
-    sources: List[SkillSource],
-    query: str = "",
-    per_source_limits: Optional[Dict[str, int]] = None,
-    source_filter: str = "all",
-    overall_timeout: float = 30,
-    on_source_done: Optional[Any] = None,
+    sources: List[SkillSource], query: str = "", per_source_limits: Optional[Dict[str, int]] = None,
+    source_filter: str = "all", overall_timeout: float = 30, on_source_done: Optional[Any] = None,
 ) -> Tuple[List[SkillMeta], Dict[str, int], List[str]]:
     """Search all sources in parallel with an overall timeout.
 
@@ -168,11 +151,9 @@ def parallel_search_sources(
 
     per_source_limits = per_source_limits or {}
     active = _select_active_sources(sources, source_filter)
-
     all_results: List[SkillMeta] = []
     source_counts: Dict[str, int] = {}
     timed_out_ids: List[str] = []
-
     if not active:
         return all_results, source_counts, timed_out_ids
 
@@ -185,7 +166,6 @@ def parallel_search_sources(
         pool.submit(_search_one_source, src, query, per_source_limits.get(src.source_id(), 50)): src.source_id()
         for src in active
     }
-
     try:
         for fut in as_completed(futures, timeout=overall_timeout):
             try:
@@ -202,7 +182,6 @@ def parallel_search_sources(
             logger.debug("Skills browse timed out waiting for: %s", ", ".join(timed_out_ids))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
-
     return all_results, source_counts, timed_out_ids
 
 
@@ -210,17 +189,10 @@ def unified_search(query: str, sources: List[SkillSource],
                    source_filter: str = "all", limit: int = 10) -> List[SkillMeta]:
     """Search all sources (in parallel) and merge results."""
     from tools.skills_hub import _filter_results_by_provider, parallel_search_sources
-    all_results, _, _ = parallel_search_sources(
-        sources,
-        query=query,
-        source_filter=source_filter,
-        overall_timeout=30,
-    )
-
+    all_results, _, _ = parallel_search_sources(sources, query=query, source_filter=source_filter, overall_timeout=30)
     # Provider filters target ``extra.provider`` on the merged set, not a source id.
     if source_filter.strip().lower() in _PROVIDER_FILTER_VALUES:
         all_results = _filter_results_by_provider(all_results, source_filter)
-
     deduped = _dedupe_by_trust(all_results)
     # Stable-sort by trust before truncating so the limit cut never drops a
     # builtin/official entry because a high-volume community source finished
