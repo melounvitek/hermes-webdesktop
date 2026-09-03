@@ -286,6 +286,15 @@ def notify_task_updated(
         _log.debug("kanban task updated hook failed: %s", exc)
 
 
+# DispatchResult counters whose non-zero value means the tick did something.
+_TICK_ACTIVITY_FIELDS = (
+    "spawned", "reclaimed", "promoted", "reconciled_orphans", "crashed", "stale",
+    "timed_out", "auto_blocked", "rate_limited", "auto_assigned_default",
+    "respawn_guarded", "skipped_per_profile_capped", "skipped_unassigned",
+    "skipped_nonspawnable",
+)
+
+
 def _fire_dispatch_tick_hook(
     result: "DispatchResult",
     *,
@@ -311,22 +320,7 @@ def _fire_dispatch_tick_hook(
         outcome = "ok"
         if result.skipped_locked:
             outcome = "skipped_locked"
-        elif not any((
-            result.spawned,
-            result.reclaimed,
-            result.promoted,
-            result.reconciled_orphans,
-            result.crashed,
-            result.stale,
-            result.timed_out,
-            result.auto_blocked,
-            result.rate_limited,
-            result.auto_assigned_default,
-            result.respawn_guarded,
-            result.skipped_per_profile_capped,
-            result.skipped_unassigned,
-            result.skipped_nonspawnable,
-        )):
+        elif not any(getattr(result, f) for f in _TICK_ACTIVITY_FIELDS):
             outcome = "idle"
         invoke_hook(
             "on_kanban_dispatch_tick",
@@ -415,19 +409,13 @@ def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
     if now is None:
         now = int(time.time())
     delta = now - ts
-    if delta < 0:
-        # Clock skew across machines/profiles — don't claim "in the future".
-        return "just now"
-    if delta < 60:
+    if delta < 60:  # includes negative = clock skew across machines; never claim "in the future"
         return "just now"
     if delta < 3600:
-        m = delta // 60
-        return f"{m}m ago"
+        return f"{delta // 60}m ago"
     if delta < 86400:
-        h = delta // 3600
-        return f"{h}h ago"
-    d = delta // 86400
-    return f"{d}d ago"
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
 
 
 # ---------------------------------------------------------------------------
@@ -461,9 +449,7 @@ _BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,63}$")
 
 def _normalize_board_slug(slug: Optional[str]) -> Optional[str]:
     """Lowercase + strip a slug; validate; return ``None`` for empty."""
-    if slug is None:
-        return None
-    s = str(slug).strip().lower()
+    s = str(slug).strip().lower() if slug is not None else ""
     if not s:
         return None
     if not _BOARD_SLUG_RE.match(s):
@@ -472,6 +458,17 @@ def _normalize_board_slug(slug: Optional[str]) -> Optional[str]:
             f"alphanumerics / hyphens / underscores, not starting with '-' or '_'"
         )
     return s
+
+
+def _slug_or_default(board: Optional[str]) -> str:
+    return _normalize_board_slug(board) or DEFAULT_BOARD
+
+
+def _require_slug(slug: str) -> str:
+    normed = _normalize_board_slug(slug)
+    if not normed:
+        raise ValueError("board slug is required")
+    return normed
 
 
 def kanban_home() -> Path:
@@ -556,9 +553,7 @@ def set_current_board(slug: str) -> Path:
     instead of silently pointing at nothing.
     """
     _assert_not_delegated_child_mutation()
-    normed = _normalize_board_slug(slug)
-    if not normed:
-        raise ValueError("board slug is required")
+    normed = _require_slug(slug)
     path = current_board_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(normed + "\n", encoding="utf-8")
@@ -577,8 +572,7 @@ def board_dir(board: Optional[str] = None) -> Path:
     only (board.json, workspaces/, logs/) — its DB stays at ``<root>/kanban.db``
     for back-compat (:func:`kanban_db_path`).
     """
-    slug = _normalize_board_slug(board) or DEFAULT_BOARD
-    return boards_root() / slug
+    return boards_root() / _slug_or_default(board)
 
 
 def board_exists(board: Optional[str] = None) -> bool:
@@ -588,10 +582,13 @@ def board_exists(board: Optional[str] = None) -> bool:
     on first :func:`connect` and there's no way for it to be missing
     in a configuration where the kanban feature is usable at all.
     """
-    slug = _normalize_board_slug(board) or DEFAULT_BOARD
+    slug = _slug_or_default(board)
     if slug == DEFAULT_BOARD:
         return True
-    d = board_dir(slug)
+    return _dir_holds_board(board_dir(slug))
+
+
+def _dir_holds_board(d: Path) -> bool:
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
 
@@ -665,8 +662,7 @@ def board_metadata_path(board: Optional[str] = None) -> Path:
     created_at). The on-disk slug is the canonical identity; this file
     is purely for presentation in the CLI / dashboard.
     """
-    slug = _normalize_board_slug(board) or DEFAULT_BOARD
-    return board_dir(slug) / "board.json"
+    return board_dir(_slug_or_default(board)) / "board.json"
 
 
 def _default_board_display_name(slug: str) -> str:
@@ -687,7 +683,7 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
     Includes the canonical ``slug`` and ``db_path`` so the caller
     doesn't need to reconstruct them.
     """
-    slug = _normalize_board_slug(board) or DEFAULT_BOARD
+    slug = _slug_or_default(board)
     meta: dict[str, Any] = {
         "slug": slug,
         "name": _default_board_display_name(slug),
@@ -739,25 +735,20 @@ def write_board_metadata(
     it against ``projects_db``).
     """
     _assert_not_delegated_child_mutation()
-    slug = _normalize_board_slug(board) or DEFAULT_BOARD
+    slug = _slug_or_default(board)
     meta = read_board_metadata(slug)
-    # Preserve existing DB-derived fields — they get re-computed each
-    # read but shouldn't be written into board.json.
+    # db_path is derived on every read; never persist it into board.json.
     meta.pop("db_path", None)
     if name is not None:
         meta["name"] = str(name).strip() or _default_board_display_name(slug)
-    if description is not None:
-        meta["description"] = str(description)
-    if icon is not None:
-        meta["icon"] = str(icon)
-    if color is not None:
-        meta["color"] = str(color)
+    for key, value in (("description", description), ("icon", icon), ("color", color)):
+        if value is not None:
+            meta[key] = str(value)
     if archived is not None:
         meta["archived"] = bool(archived)
-    if default_workdir is not None:
-        meta["default_workdir"] = str(default_workdir) if default_workdir else None
-    if project_id is not None:
-        meta["project_id"] = str(project_id) if project_id else None
+    for key, value in (("default_workdir", default_workdir), ("project_id", project_id)):
+        if value is not None:
+            meta[key] = str(value) if value else None
     if not meta.get("created_at"):
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
@@ -786,9 +777,7 @@ def create_board(
     malformed slug; returns the existing metadata (not an error) if the
     board already exists — matching ``mkdir -p`` semantics.
     """
-    normed = _normalize_board_slug(slug)
-    if not normed:
-        raise ValueError("board slug is required")
+    normed = _require_slug(slug)
     meta = write_board_metadata(
         normed,
         name=name,
@@ -828,11 +817,7 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
                 normed = _normalize_board_slug(slug)
             except ValueError:
                 continue
-            if not normed or normed in seen:
-                continue
-            has_db = (child / "kanban.db").exists()
-            has_meta = (child / "board.json").exists()
-            if not (has_db or has_meta):
+            if not normed or normed in seen or not _dir_holds_board(child):
                 continue
             meta = read_board_metadata(normed)
             if meta.get("archived") and not include_archived:
@@ -848,9 +833,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     (ValueError). Returns ``{"slug", "action", "new_path"}``.
     """
     _assert_not_delegated_child_mutation()
-    normed = _normalize_board_slug(slug)
-    if not normed:
-        raise ValueError("board slug is required")
+    normed = _require_slug(slug)
     if normed == DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
     d = board_dir(normed)
@@ -1630,7 +1613,7 @@ def create_task(
                 # Parent ids are validated in every mode (even triage) so the
                 # eventual link rows don't dangle.
                 if parents:
-                    missing = _find_missing_parents(conn, parents)
+                    missing = _missing_task_ids(conn, parents)
                     if missing:
                         raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                 # Determine task status from parent status, unless the caller
@@ -1751,17 +1734,15 @@ def _link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     )
 
 
-def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> list[str]:
-    parents = list(parents)
-    if not parents:
+def _missing_task_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> list[str]:
+    """Subset of ``ids`` (order kept) with no ``tasks`` row."""
+    ids = list(ids)
+    if not ids:
         return []
-    placeholders = ",".join("?" * len(parents))
-    rows = conn.execute(
-        f"SELECT id FROM tasks WHERE id IN ({placeholders})",
-        parents,
-    ).fetchall()
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(f"SELECT id FROM tasks WHERE id IN ({placeholders})", ids).fetchall()
     present = {r["id"] for r in rows}
-    return [p for p in parents if p not in present]
+    return [p for p in ids if p not in present]
 
 
 def _inherit_notify_subs(
@@ -1847,28 +1828,18 @@ def list_tasks(
     workflow_template_id: Optional[str] = None,
     current_step_key: Optional[str] = None,
 ) -> list[Task]:
+    if status is not None and status not in VALID_STATUSES:
+        raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
-    if assignee is not None:
-        query += " AND assignee = ?"
-        params.append(_canonical_assignee(assignee))
-    if status is not None:
-        if status not in VALID_STATUSES:
-            raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
-        query += " AND status = ?"
-        params.append(status)
-    if tenant is not None:
-        query += " AND tenant = ?"
-        params.append(tenant)
-    if session_id is not None:
-        query += " AND session_id = ?"
-        params.append(session_id)
-    if workflow_template_id is not None:
-        query += " AND workflow_template_id = ?"
-        params.append(workflow_template_id)
-    if current_step_key is not None:
-        query += " AND current_step_key = ?"
-        params.append(current_step_key)
+    for col, val in (
+        ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
+        ("session_id", session_id), ("workflow_template_id", workflow_template_id),
+        ("current_step_key", current_step_key),
+    ):
+        if val is not None:
+            query += f" AND {col} = ?"
+            params.append(val)
     if not include_archived and status != "archived":
         query += " AND status != 'archived'"
     if order_by is not None:
@@ -2013,7 +1984,7 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     with write_txn(conn):
-        missing = _find_missing_parents(conn, [parent_id, child_id])
+        missing = _missing_task_ids(conn, [parent_id, child_id])
         if missing:
             raise ValueError(f"unknown task(s): {', '.join(missing)}")
         if _would_cycle(conn, parent_id, child_id):
@@ -2063,12 +2034,9 @@ def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
             "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
             (parent_id, child_id),
         )
-        if cur.rowcount:
-            _append_event(
-                conn, child_id, "unlinked",
-                {"parent": parent_id, "child": child_id},
-            )
         removed = cur.rowcount > 0
+        if removed:
+            _append_event(conn, child_id, "unlinked", {"parent": parent_id, "child": child_id})
     if removed:
         # Dependency edge removed — re-evaluate promotion eligibility for the
         # child immediately.  Matches the contract of complete_task and
@@ -2106,28 +2074,16 @@ def task_graph_contexts(
         return contexts
 
     placeholders = ",".join("?" for _ in ordered_ids)
-    for row in conn.execute(
-        "SELECT l.child_id AS owner_id, t.id, t.title, t.status "
-        "FROM task_links l JOIN tasks t ON t.id = l.parent_id "
-        f"WHERE l.child_id IN ({placeholders}) ORDER BY l.child_id, t.id",
-        tuple(ordered_ids),
-    ).fetchall():
-        contexts[row["owner_id"]]["parents"].append({
-            "id": row["id"],
-            "title": row["title"],
-            "status": row["status"],
-        })
-    for row in conn.execute(
-        "SELECT l.parent_id AS owner_id, t.id, t.title, t.status "
-        "FROM task_links l JOIN tasks t ON t.id = l.child_id "
-        f"WHERE l.parent_id IN ({placeholders}) ORDER BY l.parent_id, t.id",
-        tuple(ordered_ids),
-    ).fetchall():
-        contexts[row["owner_id"]]["children"].append({
-            "id": row["id"],
-            "title": row["title"],
-            "status": row["status"],
-        })
+    for bucket, own, other in (("parents", "child_id", "parent_id"), ("children", "parent_id", "child_id")):
+        for row in conn.execute(
+            f"SELECT l.{own} AS owner_id, t.id, t.title, t.status "
+            f"FROM task_links l JOIN tasks t ON t.id = l.{other} "
+            f"WHERE l.{own} IN ({placeholders}) ORDER BY l.{own}, t.id",
+            tuple(ordered_ids),
+        ).fetchall():
+            contexts[row["owner_id"]][bucket].append(
+                {"id": row["id"], "title": row["title"], "status": row["status"]}
+            )
     return contexts
 
 
@@ -2151,10 +2107,7 @@ def add_comment(
     # ``allow_nested=True``: graph builders (kanban_swarm blackboard seeding)
     # compose comment writes under one outer commit.
     with write_txn(conn, allow_nested=True):
-        if not conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone():
-            raise ValueError(f"unknown task {task_id}")
+        _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) "
             "VALUES (?, ?, ?, ?)",
@@ -2162,6 +2115,11 @@ def add_comment(
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
         return int(cur.lastrowid or 0)
+
+
+def _require_task(conn: sqlite3.Connection, task_id: str) -> None:
+    if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+        raise ValueError(f"unknown task {task_id}")
 
 
 def _task_rows(conn: sqlite3.Connection, table: str, task_id: str, order: str) -> list[sqlite3.Row]:
@@ -2327,10 +2285,7 @@ def add_attachment(
         raise ValueError("attachment stored_path is required")
     now = int(time.time())
     with write_txn(conn):
-        if not conn.execute(
-            "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
-        ).fetchone():
-            raise ValueError(f"unknown task {task_id}")
+        _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_attachments "
             "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
@@ -2423,12 +2378,10 @@ def _append_event(
     (task created/edited/archived, dependency promotion) leave it None
     and the row carries NULL.
     """
-    now = int(time.time())
-    pl = json.dumps(payload, ensure_ascii=False) if payload else None
     conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
-        (task_id, run_id, kind, pl, now),
+        (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
     )
 
 
@@ -2475,7 +2428,7 @@ def _end_run(
             outcome,
             summary,
             error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            _json_or_null(metadata),
             now,
             run_id,
         ),
@@ -2486,9 +2439,20 @@ def _end_run(
     return run_id
 
 
+def _first_line(text: Optional[str], limit: int) -> str:
+    """First non-blank-stripped line of ``text`` capped at ``limit`` chars; "" when empty."""
+    lines = (text or "").strip().splitlines()
+    return lines[0][:limit] if lines else ""
+
+
 def _opt_int(value: Any) -> Optional[int]:
     """``int(value)`` or ``None`` when ``value`` is ``None`` (NULL column passthrough)."""
     return int(value) if value is not None else None
+
+
+def _json_or_null(obj: Any) -> Optional[str]:
+    """JSON text for a payload/metadata column; falsy -> NULL."""
+    return json.dumps(obj, ensure_ascii=False) if obj else None
 
 
 def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
@@ -2548,7 +2512,7 @@ def _synthesize_ended_run(
             task_id, profile, step_key,
             outcome, outcome,
             summary, error,
-            json.dumps(metadata, ensure_ascii=False) if metadata else None,
+            _json_or_null(metadata),
             now, now,
         ),
     )
@@ -2899,6 +2863,16 @@ def _retry_status_for_run(
     return "review" if payload.get("source_status") == "review" else "ready"
 
 
+# Run outcome -> lifecycle status a goal loop should report for a handed-off run.
+_RUN_OUTCOME_TERMINAL_STATUS = {
+    "completed": "done",
+    "review_requested": "review",
+    "changes_requested": "changes_requested",
+    "blocked": "blocked",
+    "dependency_wait": "blocked",
+}
+
+
 def goal_run_status(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2919,22 +2893,8 @@ def goal_run_status(
             "SELECT outcome FROM task_runs WHERE id = ? AND task_id = ?",
             (int(expected_run_id), task_id),
         ).fetchone()
-        outcome = (
-            str(row["outcome"])
-            if row and row["outcome"] is not None
-            else None
-        )
-        terminal_status = (
-            {
-                "completed": "done",
-                "review_requested": "review",
-                "changes_requested": "changes_requested",
-                "blocked": "blocked",
-                "dependency_wait": "blocked",
-            }.get(outcome)
-            if outcome is not None
-            else None
-        )
+        outcome = str(row["outcome"]) if row and row["outcome"] is not None else None
+        terminal_status = _RUN_OUTCOME_TERMINAL_STATUS.get(outcome)
         if terminal_status is not None:
             return terminal_status
         if outcome is not None or task.current_run_id != int(expected_run_id):
@@ -2971,14 +2931,17 @@ def heartbeat_claim(
             (expires, task_id, lock),
         )
         if cur.rowcount == 1:
-            run_id = _current_run_id(conn, task_id)
-            if run_id is not None:
-                conn.execute(
-                    "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
-                    (expires, run_id),
-                )
+            _extend_run_claim(conn, task_id, expires)
             return True
         return False
+
+
+def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
+    """Mirror a task claim extension onto its active run row; returns that run id."""
+    run_id = _current_run_id(conn, task_id)
+    if run_id is not None:
+        conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (expires, run_id))
+    return run_id
 
 
 def release_stale_claims(
@@ -3045,12 +3008,7 @@ def release_stale_claims(
                 )
                 if cur.rowcount != 1:
                     continue
-                run_id = _current_run_id(conn, row["id"])
-                if run_id is not None:
-                    conn.execute(
-                        "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
-                        (new_expires, run_id),
-                    )
+                run_id = _extend_run_claim(conn, row["id"], new_expires)
                 _append_event(
                     conn, row["id"], "claim_extended",
                     {
@@ -3087,27 +3045,19 @@ def release_stale_claims(
             )
             if cur.rowcount != 1:
                 continue
-            run_id = _end_run(
-                conn, row["id"],
-                outcome="reclaimed", status="reclaimed",
+            run_id = _record_reclaim(
+                conn, row["id"], termination,
                 error=f"stale_lock={row['claim_lock']}",
-                metadata=termination,
-            )
-            payload = {
-                "stale_lock": row["claim_lock"],
-                "worker_pid": _opt_int(row["worker_pid"]),
-                "claim_expires": int(row["claim_expires"]),
-                "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
-                "now": now,
-                "host_local": host_local,
-                "heartbeat_stale": bool(heartbeat_stale),
-                "retry_status": retry_status,
-            }
-            payload.update(termination)
-            _append_event(
-                conn, row["id"], "reclaimed",
-                payload,
-                run_id=run_id,
+                payload={
+                    "stale_lock": row["claim_lock"],
+                    "worker_pid": _opt_int(row["worker_pid"]),
+                    "claim_expires": int(row["claim_expires"]),
+                    "last_heartbeat_at": _opt_int(row["last_heartbeat_at"]),
+                    "now": now,
+                    "host_local": host_local,
+                    "heartbeat_stale": bool(heartbeat_stale),
+                    "retry_status": retry_status,
+                },
             )
             reclaimed += 1
         # Worker-lifecycle observer (RFC #58548): the reclaim txn above has
@@ -3126,6 +3076,19 @@ def release_stale_claims(
                 retry_status=retry_status,
             )
     return reclaimed
+
+
+def _record_reclaim(
+    conn: sqlite3.Connection, task_id: str, termination: dict, *, error: str, payload: dict,
+) -> Optional[int]:
+    """Close the active run as ``reclaimed`` and emit the ``reclaimed`` event
+    (payload merged with the termination report). Caller holds the txn."""
+    run_id = _end_run(
+        conn, task_id, outcome="reclaimed", status="reclaimed", error=error, metadata=termination,
+    )
+    payload.update(termination)
+    _append_event(conn, task_id, "reclaimed", payload, run_id=run_id)
+    return run_id
 
 
 def reclaim_task(
@@ -3164,26 +3127,10 @@ def reclaim_task(
         )
         if cur.rowcount != 1:
             return False
-        run_id = _end_run(
-            conn, task_id,
-            outcome="reclaimed", status="reclaimed",
-            error=(
-                f"manual_reclaim: {reason}" if reason
-                else f"manual_reclaim lock={prev_lock}"
-            ),
-            metadata=termination,
-        )
-        payload = {
-            "manual": True,
-            "reason": reason,
-            "prev_lock": prev_lock,
-            "retry_status": retry_status,
-        }
-        payload.update(termination)
-        _append_event(
-            conn, task_id, "reclaimed",
-            payload,
-            run_id=run_id,
+        _record_reclaim(
+            conn, task_id, termination,
+            error=f"manual_reclaim: {reason}" if reason else f"manual_reclaim lock={prev_lock}",
+            payload={"manual": True, "reason": reason, "prev_lock": prev_lock, "retry_status": retry_status},
         )
     # Operator intervention — they've looked at the task, so the
     # consecutive-failures counter is now stale. Give the next retry
@@ -3243,16 +3190,9 @@ def _verify_created_cards(
     but don't satisfy any of the three trust conditions. The caller
     decides what to do with each bucket; this helper never mutates.
     """
-    claimed = [str(x).strip() for x in (claimed_ids or []) if str(x).strip()]
-    if not claimed:
+    ordered = list(dict.fromkeys(str(x).strip() for x in (claimed_ids or []) if str(x).strip()))
+    if not ordered:
         return [], []
-    # Dedupe while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for cid in claimed:
-        if cid not in seen:
-            seen.add(cid)
-            ordered.append(cid)
 
     row = conn.execute(
         "SELECT assignee FROM tasks WHERE id = ?", (completing_task_id,),
@@ -3313,23 +3253,7 @@ def _scan_prose_for_phantom_ids(
     """
     if not text:
         return []
-    matches = _TASK_ID_PROSE_RE.findall(text)
-    if not matches:
-        return []
-    # Dedupe preserving order.
-    seen: set[str] = set()
-    unique: list[str] = []
-    for m in matches:
-        if m not in seen:
-            seen.add(m)
-            unique.append(m)
-    placeholders = ",".join(["?"] * len(unique))
-    rows = conn.execute(
-        f"SELECT id FROM tasks WHERE id IN ({placeholders})",
-        tuple(unique),
-    ).fetchall()
-    existing = {r["id"] for r in rows}
-    return [m for m in unique if m not in existing]
+    return _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
 
 
 class HallucinatedCardsError(ValueError):
@@ -3419,11 +3343,7 @@ def complete_task(
                     {
                         "phantom_cards": phantom_cards,
                         "verified_cards": verified_cards,
-                        "summary_preview": (
-                            (summary or result or "").strip().splitlines()[0][:200]
-                            if (summary or result)
-                            else None
-                        ),
+                        "summary_preview": _first_line(summary or result, 200) or None,
                     },
                 )
             raise HallucinatedCardsError(phantom_cards, task_id)
@@ -3506,11 +3426,9 @@ def complete_task(
         event_summary = summary if summary is not None else result
         if prior_status == "review" and not event_summary:
             event_summary = "Review approved without additional evidence."
-        _ev_lines = (event_summary or "").strip().splitlines()
-        ev_summary = _ev_lines[0][:400] if _ev_lines else ""
         completed_payload: dict = {
             "result_len": len(result) if result else 0,
-            "summary": ev_summary or None,
+            "summary": _first_line(event_summary, 400) or None,
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
@@ -3819,17 +3737,12 @@ def edit_completed_task_result(
                     "UPDATE task_runs SET metadata = ? WHERE id = ?",
                     (json.dumps(metadata, ensure_ascii=False), run_id),
                 )
-        _ev_lines = (handoff_summary or "").strip().splitlines()
-        ev_summary = _ev_lines[0][:400] if _ev_lines else ""
         _append_event(
             conn, task_id, "edited",
             {
-                "fields": (
-                    ["result", "summary"]
-                    + (["metadata"] if metadata is not None else [])
-                ),
+                "fields": ["result", "summary"] + (["metadata"] if metadata is not None else []),
                 "result_len": len(result) if result else 0,
-                "summary": ev_summary or None,
+                "summary": _first_line(handoff_summary, 400) or None,
             },
             run_id=run_id,
         )
@@ -4101,14 +4014,12 @@ def request_review(
                 summary=summary,
                 metadata=metadata,
             )
-        lines = (summary or "").strip().splitlines()
-        event_summary = lines[0][:400] if lines else ""
         _append_event(
             conn,
             task_id,
             "review_requested",
             {
-                "summary": event_summary or None,
+                "summary": _first_line(summary, 400) or None,
                 "implementer": implementer,
                 "reviewer": reviewer,
             },
@@ -5189,8 +5100,7 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         if role_rows:
             lines.append(f"## Recent work by @{task.assignee}")
             for row in role_rows:
-                s = (row["summary"] or "").strip().splitlines()
-                first = s[0][:200] if s else "(no summary)"
+                first = _first_line(row["summary"], 200) or "(no summary)"
                 lines.append(
                     f"- {row['id']} — {row['title']} ({_stamp(int(row['ended_at']))}): {first}"
                 )
