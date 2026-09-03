@@ -15,11 +15,7 @@ logger = logging.getLogger(__name__)
 # ACP permission option id -> Hermes approval result. Ids are stable across the
 # ``allow_permanent=True`` and ``False`` paths even though the option list differs.
 _OPTION_ID_TO_HERMES = {
-    "allow_once": "once",
-    "allow_session": "session",
-    "allow_always": "always",
-    "deny": "deny",
-    "deny_always": "deny",
+    "allow_once": "once", "allow_session": "session", "allow_always": "always", "deny": "deny", "deny_always": "deny"
 }
 
 _PERMISSION_REQUEST_IDS = count(1)
@@ -61,11 +57,8 @@ def _build_permission_tool_call(command: str, description: str):
 
     content_text = f"{description}\n$ {command}" if description else f"$ {command}"
     return _acp.update_tool_call(
-        f"perm-check-{next(_PERMISSION_REQUEST_IDS)}",
-        title=f"{description}: {command}" if description else command,
-        kind="execute",
-        status="pending",
-        content=[_acp.tool_content(_acp.text_block(content_text))],
+        f"perm-check-{next(_PERMISSION_REQUEST_IDS)}", title=f"{description}: {command}" if description else command,
+        kind="execute", status="pending", content=[_acp.tool_content(_acp.text_block(content_text))],
         raw_input={"command": command, "description": description},
     )
 
@@ -125,8 +118,6 @@ def make_approval_callback(request_permission_fn: Callable, loop: asyncio.Abstra
             return "timeout"
         if response is None:
             return "deny"
-        return _map_outcome_to_hermes(
-            response.outcome, allowed_option_ids={option.option_id for option in options},
-        )
+        return _map_outcome_to_hermes(response.outcome, allowed_option_ids={option.option_id for option in options})
 
     return _callback

@@ -144,8 +144,7 @@ def _is_sensitive_auto_approve_path(path: str) -> bool:
 def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | None = None) -> bool:
     """Return whether an ACP edit proposal may bypass the prompt for this session.
 
-    Session-scoped and conservative: sensitive paths still ask under autonomous policies.
-    """
+    Session-scoped and conservative: sensitive paths still ask under autonomous policies."""
     policy = str(policy or AUTO_APPROVE_ASK).strip()
     if policy == AUTO_APPROVE_ASK or _is_sensitive_auto_approve_path(proposal.path):
         return False
@@ -170,8 +169,7 @@ def maybe_require_edit_approval(tool_name: str, arguments: dict[str, Any]) -> st
     """Run ACP edit approval if bound.
 
     Returns a JSON tool-error string when the edit must be blocked, otherwise
-    ``None`` so dispatch can continue.  Requester exceptions deny by default.
-    """
+    ``None`` so dispatch can continue.  Requester exceptions deny by default."""
     requester = _EDIT_APPROVAL_REQUESTER.get()
     if requester is None:
         return None
@@ -195,9 +193,7 @@ def build_acp_edit_tool_call(proposal: EditProposal):
     import acp
 
     return acp.update_tool_call(
-        f"edit-approval-{next(_PERMISSION_REQUEST_IDS)}",
-        title=f"Approve edit: {proposal.path}",
-        kind="edit",
+        f"edit-approval-{next(_PERMISSION_REQUEST_IDS)}", title=f"Approve edit: {proposal.path}", kind="edit",
         status="pending",
         content=[acp.tool_diff_content(path=proposal.path, old_text=proposal.old_text, new_text=proposal.new_text)],
         raw_input={"tool": proposal.tool_name, "arguments": proposal.arguments},

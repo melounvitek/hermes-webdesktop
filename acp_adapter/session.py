@@ -156,8 +156,7 @@ class SessionManager:
     """Thread-safe manager for ACP sessions backed by Hermes AIAgent instances.
 
     Sessions are held in-memory for fast access **and** persisted to the shared
-    SessionDB so they survive restarts and are searchable via ``session_search``.
-    """
+    SessionDB so they survive restarts and are searchable via ``session_search``."""
 
     def __init__(self, agent_factory=None, db=None):
         """``agent_factory``: AIAgent-like factory (tests); default builds a real AIAgent from

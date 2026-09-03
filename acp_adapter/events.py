@@ -27,8 +27,7 @@ def _build_plan_update_from_todo_result(result: Any) -> AgentPlanUpdate | None:
     """Translate Hermes' todo tool result into ACP's native plan update.
 
     Zed renders ``sessionUpdate: plan`` as its first-class task panel, so the
-    todo state is exposed natively rather than only as a tool-call transcript.
-    """
+    todo state is exposed natively rather than only as a tool-call transcript."""
     if not isinstance(result, str) or not result.strip():
         return None
     data = _json_loads_maybe(result)
@@ -82,8 +81,7 @@ def make_tool_progress_cb(
     Signature: ``tool_progress_callback(event_type, name, preview, args, **kwargs)``.
     Emits ``ToolCallStart`` for ``tool.started`` and tracks IDs in a FIFO per tool
     name so parallel same-name calls complete against the right ACP tool call.
-    Other event types (``tool.completed``, ``reasoning.available``) are ignored.
-    """
+    Other event types (``tool.completed``, ``reasoning.available``) are ignored."""
 
     def _tool_progress(event_type: str, name: str = None, preview: str = None, args: Any = None, **kwargs) -> None:
         if event_type != "tool.started":

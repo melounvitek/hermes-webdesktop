@@ -30,16 +30,14 @@ def _is_compression_end(row: Any) -> bool:
 
 
 def build_session_provenance(
-    db: Any, acp_session_id: str, current_hermes_session_id: str, *,
-    previous_hermes_session_id: Optional[str] = None,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *, previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build ``_meta.hermes.sessionProvenance`` for an ACP session.
 
     ``db`` must expose ``get_session``. ``current_hermes_session_id`` is the live
     internal id (``state.agent.session_id``); ``previous_hermes_session_id`` is
     the id before the most recent turn, supplied by ``prompt()`` to flag a
-    rotation. Returns ``None`` if the session can't be read.
-    """
+    rotation. Returns ``None`` if the session can't be read."""
     row = _get_row(db, current_hermes_session_id)
     if not row:
         return None
@@ -85,8 +83,7 @@ def build_session_provenance(
 
 
 def session_provenance_meta(
-    db: Any, acp_session_id: str, current_hermes_session_id: str, *,
-    previous_hermes_session_id: Optional[str] = None,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *, previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a ready ``_meta`` payload: ``{"hermes": {"sessionProvenance": ...}}``."""
     prov = build_session_provenance(

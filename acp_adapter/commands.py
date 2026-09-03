@@ -203,16 +203,14 @@ class SlashCommandsMixin:
                 else:
                     remaining = max(threshold_tokens - approx_tokens, 0)
                     lines.append(
-                        f"Compression: ~{remaining:,} tokens until threshold "
-                        f"(~{threshold_tokens:,}{pct_note})."
+                        f"Compression: ~{remaining:,} tokens until threshold (~{threshold_tokens:,}{pct_note})."
                     )
             else:
                 lines.append(f"Compression threshold: ~{threshold_tokens:,} tokens")
 
         if getattr(agent, "compression_enabled", True) is False:
             lines.append(
-                "Auto-compaction is disabled (compression.enabled: false); "
-                "/compress still compresses manually."
+                "Auto-compaction is disabled (compression.enabled: false); /compress still compresses manually."
             )
         else:
             lines.append("Tip: run /compress to compress manually before the threshold.")

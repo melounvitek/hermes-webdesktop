@@ -23,8 +23,7 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
     Models = the entry's declared models, refreshed from the live ``/models`` listing when a
     credential exists and ``discover_models`` isn't disabled; declared models survive a failed
     discovery (some endpoints have no ``/models`` route). Slugs use the ``custom:<name>`` shape
-    ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip.
-    """
+    ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip."""
     try:
         from hermes_cli.config import (get_compatible_custom_providers, is_provider_enabled, load_config)
         from hermes_cli.model_switch import (
@@ -165,8 +164,7 @@ class _ModelCatalog:
 
     Dedupes on the encoded choice id AND a semantic ``provider:model`` id (``ollama`` ==
     ``custom:ollama``). A bare/``custom`` current provider whose base_url matches an ollama
-    inventory row is resolved to ``custom:ollama``.
-    """
+    inventory row is resolved to ``custom:ollama``."""
 
     normalize_provider: Callable[[str], str]
     current_model: str
@@ -265,8 +263,7 @@ def build_model_state(model: str, provider: str, base_url: str) -> SessionModelS
     payload = build_models_payload(
         context, explicit_only=True, include_unconfigured=False, picker_hints=False,
         canonical_order=True, pricing=False, capabilities=False, refresh=False,
-        probe_custom_providers=False, probe_current_custom_provider=False,
-        max_models=ACP_MAX_MODELS_PER_PROVIDER,
+        probe_custom_providers=False, probe_current_custom_provider=False, max_models=ACP_MAX_MODELS_PER_PROVIDER,
     )
 
     cat = _ModelCatalog(

@@ -16,11 +16,7 @@ from acp.schema import (
 logger = logging.getLogger("acp_adapter.server")
 
 PromptBlock = (
-    TextContentBlock
-    | ImageContentBlock
-    | AudioContentBlock
-    | ResourceContentBlock
-    | EmbeddedResourceContentBlock
+    TextContentBlock | ImageContentBlock | AudioContentBlock | ResourceContentBlock | EmbeddedResourceContentBlock
 )
 
 _MAX_ACP_RESOURCE_BYTES = 512 * 1024

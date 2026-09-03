@@ -144,8 +144,7 @@ def _json_loads_maybe(value: Optional[str]) -> Any:
     """Decode a JSON string; non-strings pass through, undecodable strings yield None.
 
     Some Hermes tools append a human hint after the payload (``{...}\\n\\n[Hint: ...]``),
-    so fall back to decoding the first JSON value to keep the structured rendering path.
-    """
+    so fall back to decoding the first JSON value to keep the structured rendering path."""
     if not isinstance(value, str):
         return value
     try:
@@ -175,8 +174,7 @@ def _tool_result_failed(result: Optional[str], tool_name: str | None = None) -> 
     """Return True when a structured Hermes tool result clearly failed.
 
     Deliberately conservative: plain text may legitimately contain "error", so
-    only structured tool-level failures map to ACP failed status.
-    """
+    only structured tool-level failures map to ACP failed status."""
     # The agent's tool executor wraps raised exceptions in a canonical
     # "Error executing tool '<name>': ..." prefix that well-behaved tool output
     # cannot produce; catch it so a tool that blew up is not shown green.
@@ -362,8 +360,7 @@ def _format_execute_code_result(tool_name: str, data: Args, args: Args) -> Optio
             parts.extend(["", "Output truncated."])
     for key, label, value in (
         ("warning", "Warning:", str(data.get("warning") or "").strip()),
-        ("output", "Output:", str(data.get("output") or "")),
-        ("error", "Error:", str(data.get("error") or "")),
+        ("output", "Output:", str(data.get("output") or "")), ("error", "Error:", str(data.get("error") or "")),
     ):
         if value:
             parts.extend(["", label, value])
@@ -921,8 +918,7 @@ def build_tool_start(tool_call_id: str, tool_name: str, arguments: Args, *, edit
     ignoring the schema) must never abort the render — this runs on the live
     tool-progress callback and during history replay — so any failure in the
     title/content/location builders falls back to a minimal valid start event
-    (mirrors ``get_cute_tool_message`` in ``agent/display.py``).
-    """
+    (mirrors ``get_cute_tool_message`` in ``agent/display.py``)."""
     try:
         return _build_tool_start(tool_call_id, tool_name, arguments, edit_diff=edit_diff)
     except Exception as exc:  # noqa: BLE001 — a tool-call render must never abort the turn

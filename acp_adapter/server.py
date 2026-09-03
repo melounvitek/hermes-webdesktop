@@ -27,8 +27,7 @@ from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, 
 from acp_adapter.commands import HERMES_VERSION, SlashCommandsMixin, _estimate_tokens
 from acp_adapter.content import PromptBlock, _content_blocks_to_openai_user_content, _extract_text
 from acp_adapter.events import (
-    _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb,
-    make_tool_progress_cb,
+    _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb, make_tool_progress_cb,
 )
 from acp_adapter.model_catalog import (  # noqa: F401  (ACP_MAX_MODELS_PER_PROVIDER re-exported for tests)
     ACP_MAX_MODELS_PER_PROVIDER, build_model_state, encode_model_choice,
@@ -86,8 +85,7 @@ def _history_summary_meta(message: dict[str, Any], text: str) -> dict[str, Any] 
     Summaries persist as ordinary messages, standalone (either role) or merged into the first
     preserved tail message. Two keys so clients can't hide real content: ``compactionSummary``
     (whole chunk; safe to collapse) vs ``containsCompactionSummary`` (real content + summary).
-    Uses the in-process flag, falling back to content classification for DB-reloaded sessions.
-    """
+    Uses the in-process flag, falling back to content classification for DB-reloaded sessions."""
     kind = ContextCompressor.classify_summary_content(text)
     if kind is None and message.get(COMPRESSED_SUMMARY_METADATA_KEY):
         # Flagged but unclassified (prefix drift): the flag only marks summaries -> standalone.
@@ -101,8 +99,7 @@ def _history_summary_meta(message: dict[str, Any], text: str) -> dict[str, Any] 
 
 # role -> (chunk class, session_update tag) for history replay.
 _HISTORY_CHUNK_TYPES = {
-    "user": (UserMessageChunk, "user_message_chunk"),
-    "assistant": (AgentMessageChunk, "agent_message_chunk"),
+    "user": (UserMessageChunk, "user_message_chunk"), "assistant": (AgentMessageChunk, "agent_message_chunk")
 }
 
 
@@ -341,8 +338,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         endpoint: dict[str, Any] = {}
         if keep_endpoint and not (current_provider and target_provider != current_provider):
             endpoint = {
-                "base_url": getattr(state.agent, "base_url", None),
-                "api_mode": getattr(state.agent, "api_mode", None),
+                "base_url": getattr(state.agent, "base_url", None), "api_mode": getattr(state.agent, "api_mode", None)
             }
         state.agent = self.session_manager._make_agent(
             session_id=state.session_id, cwd=state.cwd, model=new_model,
@@ -472,8 +468,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         Cache safety: only pre-first-turn (nothing cached yet); afterwards the snapshot stays
         frozen and late servers land via the between-turns prologue refresh
         (``agent/turn_context.py``). No-op if discovery finished, join timed out, registry
-        unchanged, or session closed.
-        """
+        unchanged, or session closed."""
         try:
             from hermes_cli.mcp_startup import mcp_discovery_in_flight
         except Exception:
@@ -518,9 +513,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             except Exception:
                 logger.debug("Session %s: late MCP refresh failed", session_id, exc_info=True)
 
-        threading.Thread(
-            target=_wait_then_refresh, name=f"acp-mcp-late-refresh-{session_id}", daemon=True
-        ).start()
+        threading.Thread(target=_wait_then_refresh, name=f"acp-mcp-late-refresh-{session_id}", daemon=True).start()
 
     # ---- ACP lifecycle ------------------------------------------------------
 
@@ -530,8 +523,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
     ) -> InitializeResponse:
         auth_methods = build_auth_methods()
         logger.info(
-            "Initialize from %s (protocol v%s)",
-            client_info.name if client_info else "unknown",
+            "Initialize from %s (protocol v%s)", client_info.name if client_info else "unknown",
             protocol_version if isinstance(protocol_version, int) else acp.PROTOCOL_VERSION,
         )
 
@@ -583,9 +575,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         except Exception:
             logger.warning(
                 f"ACP history replay raised during session/{verb} for %s — "
-                f"{verb} will still succeed, partial transcript may be missing",
-                state.session_id,
-                exc_info=True,
+                f"{verb} will still succeed, partial transcript may be missing", state.session_id, exc_info=True,
             )
 
     def _session_response_fields(self, state: SessionState) -> dict[str, Any]:
@@ -759,8 +749,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         Approval routing is thread-local, so it MUST be bound here, not on the loop thread.
         Interactive routing is a ``tools.approval`` contextvar, not ``HERMES_INTERACTIVE`` in
         os.environ, so concurrent workers can't race a global flag onto the non-interactive
-        auto-approve path (GHSA-96vc-wcxf-jjff).
-        """
+        auto-approve path (GHSA-96vc-wcxf-jjff)."""
         agent = state.agent
         with contextlib.ExitStack() as stack:
             # HERMES_SESSION_KEY scopes per-session caches (interactive sudo password) to this
@@ -828,9 +817,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if not has_content:
             return PromptResponse(stop_reason="end_turn")
 
-        user_text, user_content = self._rewrite_prompt_for_interrupt(
-            state, user_text, user_content, text_only_prompt
-        )
+        user_text, user_content = self._rewrite_prompt_for_interrupt(state, user_text, user_content, text_only_prompt)
 
         # Slash commands are text-only; a prompt with media goes to the agent even if it starts with "/".
         if text_only_prompt and isinstance(user_content, str) and user_text.startswith("/"):

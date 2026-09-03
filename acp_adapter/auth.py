@@ -14,8 +14,7 @@ def detect_provider() -> Optional[str]:
     A callable ``api_key`` (Azure Foundry Entra ID bearer-token provider, see
     :mod:`agent.azure_identity_adapter`) counts as a valid credential; otherwise
     Entra-configured Foundry deployments would default to ``"openrouter"`` and
-    the ACP auth handshake would reject the legitimate provider.
-    """
+    the ACP auth handshake would reject the legitimate provider."""
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         runtime = resolve_runtime_provider()
@@ -35,8 +34,7 @@ def build_auth_methods() -> list[Any]:
     The ACP registry requires at least one usable auth method in the initial
     handshake. A fresh Zed install may have no Hermes credentials yet, so the
     terminal setup method is always advertised; when credentials resolve, the
-    provider is also advertised as the default agent-managed runtime method.
-    """
+    provider is also advertised as the default agent-managed runtime method."""
     from acp.schema import AuthMethodAgent, TerminalAuthMethod
 
     methods: list[Any] = []
