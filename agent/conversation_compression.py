@@ -16,6 +16,7 @@ context engines and memory providers included, runs on a pooled daemon thread.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import copy
 import dataclasses
 import inspect
@@ -261,11 +262,9 @@ def _compressor_attempt_is_current(compressor: Any, generation: int) -> bool:
 def _install_compression_cancelled_check(compressor: Any, check: Any, generation: int) -> None:
     """Install the F4 cancellation consult, stamped with its owner attempt."""
     with _COMPRESSOR_ATTEMPT_LOCK:
-        try:
+        with contextlib.suppress(Exception):
             compressor._compression_cancelled_check = check
             compressor._compression_cancelled_check_owner = generation
-        except Exception:
-            pass
 
 
 def _clear_compression_cancelled_check_if_owner(compressor: Any, generation: int) -> bool:
@@ -278,11 +277,9 @@ def _clear_compression_cancelled_check_if_owner(compressor: Any, generation: int
         owner = getattr(compressor, "_compression_cancelled_check_owner", None)
         if owner is not None and generation and owner != generation:
             return False
-        try:
+        with contextlib.suppress(Exception):
             compressor._compression_cancelled_check = None
             compressor._compression_cancelled_check_owner = None
-        except Exception:
-            pass
         return True
 
 
@@ -1522,10 +1519,8 @@ def _mark_compression_blocked_transient(agent: Any, compressor: Any) -> None:
             getattr(agent, "session_id", None) or "none",
             getattr(compressor, "_last_summary_error", None) or "unknown",
         )
-        try:
+        with contextlib.suppress(Exception):
             agent._compression_blocked_transient = reason
-        except Exception:
-            pass
 
 
 def _rebind_session_context(session_id: str) -> None:
@@ -1536,12 +1531,10 @@ def _rebind_session_context(session_id: str) -> None:
         set_current_session_id(session_id)
     except Exception:
         os.environ["HERMES_SESSION_ID"] = session_id
-    try:
+    with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
 
         set_session_context(session_id)
-    except Exception:
-        pass
 
 
 def _adopt_live_compression_child(
@@ -1600,10 +1593,8 @@ def _adopt_live_compression_child(
     else:
         bind_state = getattr(agent.context_compressor, "bind_session_state", None)
         if callable(bind_state):
-            try:
+            with contextlib.suppress(Exception):
                 bind_state(session_db=session_db, session_id=child_session_id)
-            except Exception:
-                pass
     try:
         if agent._memory_manager:
             agent._memory_manager.on_session_switch(
@@ -2066,10 +2057,8 @@ def replay_compression_warning(agent: Any) -> None:
     """
     msg = getattr(agent, "_compression_warning", None)
     if msg and agent.status_callback:
-        try:
+        with contextlib.suppress(Exception):
             agent.status_callback("lifecycle", msg)
-        except Exception:
-            pass
 
 
 def conversation_history_after_compression(
@@ -2731,19 +2720,15 @@ def _sit_out_lock_contention(
     # Surface to the user once — quiet for downstream auto-compress loops
     if getattr(agent, "_last_compression_lock_warning_sid", None) != lease.sid:
         agent._last_compression_lock_warning_sid = lease.sid
-        try:
+        with contextlib.suppress(Exception):
             agent._emit_warning(
                 "⚠ Skipping concurrent compression — another path is already compressing this session. Will retry "
                 "after it finishes."
             )
-        except Exception:
-            pass
     _existing_sp = _existing_system_prompt(agent, system_message)
-    try:
+    with contextlib.suppress(Exception):
         if hasattr(agent.context_compressor, "_begin_compression_telemetry"):
             agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
-    except Exception:
-        pass
     return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "lock_contended", _existing_sp)
 
 
@@ -2966,12 +2951,10 @@ def _pre_compress_memory_context(agent: Any, messages: list, checkpoint_required
         if isinstance(_maybe_ctx, str):
             memory_context = sanitize_memory_context(_maybe_ctx)
     elif memory_manager:
-        try:
+        with contextlib.suppress(Exception):
             _maybe_ctx = memory_manager.on_pre_compress(messages, evidence_messages=evidence_messages)
             if isinstance(_maybe_ctx, str):
                 memory_context = sanitize_memory_context(_maybe_ctx)
-        except Exception:
-            pass
     return memory_context
 
 
@@ -3215,17 +3198,13 @@ def _salvage_or_refuse_grown_transcript(
         )
         # Flag the refusal on compressor state so /compress feedback reports it instead
         # of comparing list lengths (adoption can change the count), claiming success.
-        try:
+        with contextlib.suppress(Exception):
             agent.context_compressor._last_compress_refused_would_grow = True
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             agent._emit_warning(
                 "⚠️ Compression refused: the generated summary would have GROWN the conversation instead of "
                 "shrinking it. No messages were dropped — conversation continues unchanged."
             )
-        except Exception:
-            pass
         _existing_sp = _existing_system_prompt(agent, system_message)
         _emit_aborted_attempt_telemetry(agent, attempt_started_at, "would_grow")
         # Count the refusal as an ineffective-compaction strike so the anti-thrash
@@ -3333,10 +3312,8 @@ def _publish_rotated_compaction(
         # No trustworthy ceiling: the clone could duplicate the handoff, so skip tail
         # preservation this rotation.
         _foreign_tail_ceiling = None
-    try:
+    with contextlib.suppress(Exception):  # best-effort — don't block compression on a flush error
         agent._flush_messages_to_session_db(messages, conversation_history=persisted_history)
-    except Exception:
-        pass  # best-effort — don't block compression on a flush error
     # Publish closure + child + handoff in one transaction so no reader sees an
     # empty child. Child stays on the parent's profile ("default" persists as NULL);
     # publish also COALESCEs from the parent row for threads lacking HERMES_HOME.
@@ -3428,20 +3405,16 @@ def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
     Original read content was summarized away, so a re-read must return full content,
     not a "file unchanged" stub.
     """
-    try:
+    with contextlib.suppress(Exception):
         from tools.file_tools import reset_file_dedup
 
         reset_file_dedup(task_id)
-    except Exception:
-        pass
     if not skills:
         return
-    try:
+    with contextlib.suppress(Exception):
         from tools.skills_tool import reset_skill_view_dedup
 
         reset_skill_view_dedup(task_id)
-    except Exception:
-        pass
 
 
 def _finish_compaction_boundary(
@@ -3627,13 +3600,11 @@ def _candidate_rejected(
             "rotate session=%s so the parent remains resumable",
             agent.session_id or "none",
         )
-        try:
+        with contextlib.suppress(Exception):
             agent._emit_warning(
                 "⚠ Compression returned an empty transcript. "
                 "No session split was performed; conversation continues unchanged."
             )
-        except Exception:
-            pass
         return True
 
     # A newer attempt claiming this compressor supersedes us; discard the late
@@ -3971,7 +3942,7 @@ def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: b
     agent._compression_blocked_transient = None
     started_at = time.monotonic()
     attempt_id = uuid.uuid4().hex
-    try:
+    with contextlib.suppress(Exception):
         agent._compression_attempt_id = attempt_id
         setattr(
             agent.context_compressor,
@@ -3982,8 +3953,6 @@ def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: b
                 "trigger_source": "manual" if force else "auto",
             },
         )
-    except Exception:
-        pass
     return snapshot, generation, started_at
 
 
@@ -4377,10 +4346,8 @@ def _compress_context_via_codex_app_server(
         return messages, _existing_system_prompt(agent, system_message)
 
     logger.info("codex app-server compaction started: session=%s messages=%d tokens=~%s", _sid, len(messages), _tokens)
-    try:
+    with contextlib.suppress(Exception):
         agent._emit_status(COMPACTION_STATUS)
-    except Exception:
-        pass
 
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     try:
@@ -4395,17 +4362,13 @@ def _compress_context_via_codex_app_server(
     _activity_heartbeat.stop("context compression failed" if failed else "context compression completed")
 
     if getattr(result, "should_retire", False):
-        try:
+        with contextlib.suppress(Exception):
             codex_session.close()
-        except Exception:
-            pass
         agent._codex_session = None
 
     if failed:
-        try:
+        with contextlib.suppress(Exception):
             agent._emit_warning(f"⚠ Codex app-server compaction failed: {result.error}")
-        except Exception:
-            pass
         # The transcript is returned unchanged, so the session is still over
         # threshold. Without a brake the next turn retries immediately.
         _record_codex_compaction_failure(agent, str(getattr(result, "error", None) or "compaction interrupted"))
@@ -4513,10 +4476,8 @@ def _shrink_data_url(url: str, *, max_dimension: int, resize_fn: Any) -> tuple:
                 Path(tmp.name), mime_type=mime, max_base64_bytes=target_bytes, max_dimension=max_dimension
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 Path(tmp.name).unlink(missing_ok=True)
-            except Exception:
-                pass
         if not resized:
             return None, True  # Pillow couldn't help
         new_dims = _decode_pixels(resized)

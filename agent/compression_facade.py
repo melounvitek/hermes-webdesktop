@@ -5,6 +5,7 @@ timeout, mirrors ``_DB_PERSISTED_MARKER`` stamps back onto the live lists and re
 Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO unchanged.
 """
 
+import contextlib
 import logging
 import copy
 import threading
@@ -202,12 +203,10 @@ def _rebind_caller_session_context(agent) -> None:
     The worker thread rotated hermes_logging's thread-local id; post-compression tools must
     resolve HERMES_SESSION_ID to the child id.
     """
-    try:
+    with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
 
         set_session_context(agent.session_id)
-    except Exception:
-        pass
     try:
         from gateway.session_context import set_current_session_id
 
