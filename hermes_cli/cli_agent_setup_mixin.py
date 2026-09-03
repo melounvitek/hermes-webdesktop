@@ -144,9 +144,10 @@ class CLIAgentSetupMixin:
         api_key = runtime.get("api_key")
         base_url = runtime.get("base_url")
         resolved_provider = runtime.get("provider", "openrouter")
-        resolved_api_mode = runtime.get("api_mode", self.api_mode)
-        resolved_acp_command = runtime.get("command")
-        resolved_acp_args = list(runtime.get("args") or [])
+        resolved_routing = (
+            resolved_provider, runtime.get("api_mode", self.api_mode), runtime.get("command"),
+            list(runtime.get("args") or []),
+        )
         # A callable api_key is a bearer-token provider (Azure Entra ID): the OpenAI SDK
         # invokes it per request, so skip string validation / placeholder substitution.
         _is_callable_provider = callable(api_key) and not isinstance(api_key, str)
@@ -174,16 +175,8 @@ class CLIAgentSetupMixin:
             return False
 
         credentials_changed = api_key != self.api_key or base_url != self.base_url
-        routing_changed = (
-            resolved_provider != self.provider
-            or resolved_api_mode != self.api_mode
-            or resolved_acp_command != self.acp_command
-            or resolved_acp_args != self.acp_args
-        )
-        self.provider = resolved_provider
-        self.api_mode = resolved_api_mode
-        self.acp_command = resolved_acp_command
-        self.acp_args = resolved_acp_args
+        routing_changed = resolved_routing != (self.provider, self.api_mode, self.acp_command, self.acp_args)
+        self.provider, self.api_mode, self.acp_command, self.acp_args = resolved_routing
         self._credential_pool = runtime.get("credential_pool")
         self._provider_source = runtime.get("source")
         self.api_key = api_key
@@ -315,12 +308,9 @@ class CLIAgentSetupMixin:
             from hermes_cli.config import load_config
             _model_cfg = (load_config().get("model") or {})
             if isinstance(_model_cfg, dict):
-                _new_provider = (_model_cfg.get("provider") or "").strip()
-                if _new_provider:
-                    self.requested_provider = _new_provider
+                self.requested_provider = (_model_cfg.get("provider") or "").strip() or self.requested_provider
                 _new_model = (_model_cfg.get("default") or _model_cfg.get("model") or "").strip()
-                if _new_model:
-                    self.model = _new_model
+                self.model = _new_model or self.model
         except Exception as exc:
             logger.debug("first-run config re-sync failed: %s", exc)
         # Force credential re-resolution + agent rebuild on next use.
@@ -466,7 +456,6 @@ class CLIAgentSetupMixin:
                 self._session_db = SessionDB()
             except Exception as e:
                 logger.warning("SQLite session store not available — session will NOT be indexed: %s", e)
-
         if (
             self._resumed and self._session_db and not self.conversation_history
             and not self._load_resumed_history_late()
@@ -671,7 +660,6 @@ class CLIAgentSetupMixin:
             display_kind = msg.get("display_kind")
             content = msg.get("content")
             tool_calls = msg.get("tool_calls") or []
-
             if display_kind == "hidden":
                 continue
             if display_kind in _RESUME_EVENT_TEXT:
@@ -702,9 +690,8 @@ class CLIAgentSetupMixin:
                         text = text[:MAX_ASST_LEN] + "..."
                     parts.append(text)
                 if tool_calls:
-                    tc_summary = _tool_calls_summary(tool_calls)
-                    parts.append(tc_summary)
-                    full_parts.append(tc_summary)
+                    parts.append(_tool_calls_summary(tool_calls))
+                    full_parts.append(parts[-1])
                 # Skip pure-reasoning messages with no visible output, and tool-call-only
                 # entries when SKIP_TOOL_ONLY is enabled.
                 if not text and (SKIP_TOOL_ONLY or not tool_calls):
@@ -716,10 +703,8 @@ class CLIAgentSetupMixin:
         if not entries:
             return
 
-        skipped = 0
-        if len(entries) > MAX_DISPLAY_EXCHANGES * 2:
-            skipped = len(entries) - MAX_DISPLAY_EXCHANGES * 2
-            entries = entries[skipped:]
+        skipped = max(0, len(entries) - MAX_DISPLAY_EXCHANGES * 2)
+        entries = entries[skipped:]
 
         # Show the last assistant entry in full so the user sees where they left off.
         if _last_asst_idx is not None and _last_asst_full:

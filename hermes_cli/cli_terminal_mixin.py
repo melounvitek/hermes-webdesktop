@@ -270,6 +270,21 @@ class CLITerminalMixin:
         original_on_resize()
         self._schedule_status_bar_unsuppress(app)
 
+    def _restart_debounce_timer(self, attr: str, delay: float, fn) -> None:
+        """Cancel the daemon Timer stored on ``self.<attr>`` (if any) and start a new one.
+
+        ``fn`` receives the new Timer so it can detect being superseded."""
+        old_timer = getattr(self, attr, None)
+        if old_timer is not None:
+            try:
+                old_timer.cancel()
+            except Exception:
+                pass
+        timer = threading.Timer(delay, lambda: fn(timer))
+        timer.daemon = True
+        setattr(self, attr, timer)
+        timer.start()
+
     def _schedule_status_bar_unsuppress(self, app, delay: float = 0.35) -> None:
         """Clear the post-resize status-bar suppression after the reflow settles.
 
@@ -277,13 +292,6 @@ class CLITerminalMixin:
         the bar only once it stops.
         """
         try:
-            old_timer = getattr(self, "_status_bar_unsuppress_timer", None)
-            if old_timer is not None:
-                try:
-                    old_timer.cancel()
-                except Exception:
-                    pass
-
             def _clear():
                 self._status_bar_suppressed_after_resize = False
                 try:
@@ -291,10 +299,9 @@ class CLITerminalMixin:
                 except Exception:
                     pass
 
-            timer = threading.Timer(delay, lambda: _run_on_app_loop(app, _clear))
-            timer.daemon = True
-            self._status_bar_unsuppress_timer = timer
-            timer.start()
+            self._restart_debounce_timer(
+                "_status_bar_unsuppress_timer", delay, lambda _t: _run_on_app_loop(app, _clear)
+            )
         except Exception:
             # Fail open: never leave the bar stuck hidden.
             self._status_bar_suppressed_after_resize = False
@@ -302,7 +309,6 @@ class CLITerminalMixin:
     def _schedule_resize_recovery(self, app, original_on_resize, delay: float = 0.12) -> None:
         """Debounce resize redraws so footer chrome is not stamped into scrollback."""
         try:
-            old_timer = getattr(self, "_resize_recovery_timer", None)
             lock = getattr(self, "_resize_recovery_lock", None)
             if lock is None:
                 lock = threading.Lock()
@@ -312,7 +318,7 @@ class CLITerminalMixin:
                 def _run_recovery():
                     with lock:
                         if getattr(self, "_resize_recovery_timer", None) is not timer_ref:
-                            return
+                            return  # superseded by a newer resize
                         self._resize_recovery_timer = None
                         self._resize_recovery_pending = False
                     self._recover_after_resize(app, original_on_resize)
@@ -320,16 +326,8 @@ class CLITerminalMixin:
                 _run_on_app_loop(app, _run_recovery)
 
             with lock:
-                if old_timer is not None:
-                    try:
-                        old_timer.cancel()
-                    except Exception:
-                        pass
                 self._resize_recovery_pending = True
-                timer = threading.Timer(delay, lambda: _timer_fired(timer))
-                timer.daemon = True
-                self._resize_recovery_timer = timer
-                timer.start()
+                self._restart_debounce_timer("_resize_recovery_timer", delay, _timer_fired)
         except Exception:
             self._resize_recovery_pending = False
             self._recover_after_resize(app, original_on_resize)

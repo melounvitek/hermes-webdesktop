@@ -170,8 +170,7 @@ def _quote_key(key: str) -> str:
 
 
 def render_codex_toml_section(
-    servers: dict[str, dict],
-    plugins: Optional[list[dict]] = None,
+    servers: dict[str, dict], plugins: Optional[list[dict]] = None,
     default_permission_profile: Optional[str] = None,
 ) -> str:
     """Render the managed [mcp_servers.<n>] / [plugins.<id>] / default_permissions block.
@@ -288,8 +287,7 @@ def _strip_existing_managed_block(toml_text: str) -> str:
 
 
 def _query_codex_plugins(
-    codex_home: Optional[Path] = None,
-    timeout: float = 8.0,
+    codex_home: Optional[Path] = None, timeout: float = 8.0
 ) -> tuple[list[dict], Optional[str]]:
     """Query codex's `plugin/list` for installed curated plugins.
 
@@ -410,12 +408,8 @@ def _write_atomic(target: Path, text: str) -> None:
 
 
 def migrate(
-    hermes_config: dict,
-    *,
-    codex_home: Optional[Path] = None,
-    dry_run: bool = False,
-    discover_plugins: bool = True,
-    default_permission_profile: Optional[str] = ":workspace",
+    hermes_config: dict, *, codex_home: Optional[Path] = None, dry_run: bool = False,
+    discover_plugins: bool = True, default_permission_profile: Optional[str] = ":workspace",
     expose_hermes_tools: bool = True,
 ) -> MigrationReport:
     """Translate Hermes mcp_servers config + Codex curated plugins into ~/.codex/config.toml.
