@@ -70,8 +70,7 @@ def _print_config(config: dict[str, Any]) -> None:
     print(f"Default: {cfg['default_preset']}")
     print(f"Active in config: {cfg.get('active_preset') or '(off)'}")
     for name, preset in cfg["presets"].items():
-        marker = "*" if name == cfg["default_preset"] else " "
-        print(f"\n{marker} {name}")
+        print(f"\n{'*' if name == cfg['default_preset'] else ' '} {name}")
         print("  Reference models:")
         for idx, slot in enumerate(preset["reference_models"], start=1):
             print(f"    {idx}. {_format_slot(slot)}")

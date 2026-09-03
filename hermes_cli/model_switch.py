@@ -355,7 +355,6 @@ def _may_reuse_session_credential(session_base_url: str, alias_base_url: str) ->
 
 class StartupModelRoute(NamedTuple):
     """Model/provider pair resolved before an agent is constructed."""
-
     model: str
     provider: str = ""
     base_url: str = ""
@@ -436,7 +435,6 @@ def resolve_startup_model_route(
 @dataclass
 class ModelSwitchResult:
     """Result of a model switch attempt."""
-
     success: bool
     new_model: str = ""
     target_provider: str = ""
@@ -458,7 +456,6 @@ class ModelSwitchResult:
 @dataclass(frozen=True)
 class ModelFlagParseResult:
     """Parsed flags for a /model command."""
-
     model_input: str
     explicit_provider: str = ""
     is_global: bool = False
@@ -499,7 +496,6 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
         else:
             filtered.append(parts[i])
         i += 1
-
     return ModelFlagParseResult(model_input=" ".join(filtered).strip(), explicit_provider=explicit_provider, **flags)
 
 
@@ -563,7 +559,6 @@ class ModelSwitchRequest:
     via :data:`MODEL_SWITCH_ERROR_TEXT`. ``model_input`` keeps it a drop-in for
     :class:`ModelFlagParseResult` consumers.
     """
-
     raw: str
     target: str
     explicit_provider: str = ""
@@ -601,7 +596,6 @@ def parse_model_switch_args(raw: str) -> ModelSwitchRequest:
     # First matching flag wins: once > session > global > default.
     scope = next((name for name, on in (("once", parsed.is_once), ("session", parsed.is_session),
                                         ("global", parsed.is_global)) if on), "default")
-
     return ModelSwitchRequest(
         raw=raw, target=parsed.model_input, explicit_provider=parsed.explicit_provider,
         is_global=parsed.is_global, is_session=parsed.is_session, is_once=parsed.is_once,
@@ -717,7 +711,6 @@ class AmbiguousAliasError(Exception):
     Raised by :func:`resolve_alias` instead of silently picking one via version-sort heuristics.
     ``candidates`` is sorted best-guess-first (see :func:`_model_sort_key`) for display only.
     """
-
     def __init__(self, alias: str, provider: str, candidates: list[str]):
         self.alias = alias
         self.provider = provider
@@ -1091,7 +1084,6 @@ class _Switch:
     resolves its block); the credential step fills ``api_key`` / ``base_url`` / ``api_mode`` /
     ``validation_headers``.
     """
-
     raw_input: str
     current_provider: str
     current_model: str
@@ -1500,7 +1492,6 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
         request_overrides = _custom_provider_request_overrides(cp_for_ro) or None if cp_for_ro else None
     except Exception:
         request_overrides = None
-
     return ModelSwitchResult(
         success=True, new_model=st.new_model, target_provider=st.target_provider,
         provider_changed=st.provider_changed, api_key=st.api_key, base_url=st.base_url, api_mode=st.api_mode,

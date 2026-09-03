@@ -204,7 +204,6 @@ def validate_moa_payload(raw: Any) -> list[str]:
         agg_issue = _slot_problem(preset.get("aggregator"))
         if agg_issue:
             problems.append(f"preset '{label}' aggregator: {agg_issue}")
-
     return problems
 
 
@@ -215,7 +214,6 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
     cleaned = (_clean_slot(item, include_enabled=True) for item in _reference_slots(raw.get("reference_models")))
     refs = [item for item in cleaned if item is not None]
     policy = str(raw.get("degraded_reference_policy") or "loud").strip().lower()
-
     return {
         "enabled": _coerce_bool(raw.get("enabled"), True),
         "reference_models": refs or _default_reference_models(),
@@ -268,7 +266,6 @@ def normalize_moa_config(raw: Any) -> dict[str, Any]:
     active_name = str(raw.get("active_preset") or "").strip()
     if active_name not in presets:
         active_name = ""
-
     return {
         "default_preset": default_name,
         "active_preset": active_name,

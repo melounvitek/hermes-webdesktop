@@ -362,7 +362,6 @@ def _has_fast_aws_sdk_signal() -> bool:
     """
     def _set(name: str) -> bool:
         return bool(os.environ.get(name, "").strip())
-
     return (
         _set("AWS_BEARER_TOKEN_BEDROCK")
         or (_set("AWS_ACCESS_KEY_ID") and _set("AWS_SECRET_ACCESS_KEY"))
@@ -595,7 +594,6 @@ class _PickerBuild:
     3 ``providers:`` entries + 3b the bare active custom endpoint, 4 ``custom_providers:`` entries.
     Every ``hermes_cli.auth/models`` import in the row builders stays lazy so tests can patch
     those modules."""
-
     current_provider: str
     current_base_url: str
     current_model: str
@@ -626,10 +624,7 @@ class _PickerBuild:
     def record_builtin_endpoint(self, slug: str) -> None:
         """Prefer the live env override (e.g. DASHSCOPE_BASE_URL) over the static inference_base_url
         so dedup matches what a user typing that URL into custom_providers would actually hit."""
-        try:
-            from hermes_cli.auth import PROVIDER_REGISTRY
-        except Exception:
-            return
+        from hermes_cli.auth import PROVIDER_REGISTRY
         pcfg = PROVIDER_REGISTRY.get(slug)
         if not pcfg:
             return
@@ -717,7 +712,7 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
     """Section-2 credential ladder: env/SDK, external-process executable, auth store, pool,
     anthropic's external credential files."""
     from hermes_cli.model_switch import _credential_pool_is_usable
-    if getattr(overlay, "keyless", False):
+    if overlay.keyless:
         return True  # served anonymously (opencode-free)
     if overlay.auth_type == "aws_sdk":
         has_creds = _has_aws_sdk_creds_for_listing(hermes_slug, b.current_provider)
@@ -799,11 +794,7 @@ def _lap_overlay_rows(b: _PickerBuild, data: dict) -> None:
 def _lap_canonical_rows(b: _PickerBuild) -> None:
     """Section 2b: CANONICAL_PROVIDERS missed by sections 1/2."""
     from hermes_cli.auth import PROVIDER_REGISTRY
-    try:
-        from hermes_cli.models import CANONICAL_PROVIDERS
-    except ImportError:
-        CANONICAL_PROVIDERS = []
-
+    from hermes_cli.models import CANONICAL_PROVIDERS
     for cp in CANONICAL_PROVIDERS:
         if _skip(b.seen_slugs, b.excluded, cp.slug):
             continue
@@ -1231,5 +1222,4 @@ def list_picker_providers(
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if p.get("models") or is_custom_endpoint:
             filtered.append(p)
-
     return filtered
