@@ -178,11 +178,11 @@ def _deactivate(on_status: Optional[Callable[[str], None]] = None) -> None:
     _safe_call(on_status, "idle")
 
 
-# ── Push-to-talk state ───────────────────────────────────────────────
+# Push-to-talk state.
 _recorder = None
 _recorder_lock = threading.Lock()
 
-# ── Continuous (VAD) state ───────────────────────────────────────────
+# Continuous (VAD) state.
 _continuous_lock = threading.Lock()
 _continuous_active = False
 _continuous_stopping = False
@@ -214,11 +214,8 @@ def _voice_activity_held() -> bool:
     mid-turn). Fail-open to "not held" so a broken probe can never make the voice chat immortal."""
     if not _tts_playing.is_set():
         return True
-    probe = _voice_busy_probe
-    if probe is None:
-        return False
     try:
-        return bool(probe())
+        return _voice_busy_probe is not None and bool(_voice_busy_probe())
     except Exception:
         return False
 
@@ -234,14 +231,14 @@ _CONTINUOUS_NO_SPEECH_LIMIT = 3
 
 
 def _turn_transcript(
-    wav_path: Optional[str], fail_msg: str, where: str, tail: str, debug_prefix: Optional[str] = None
+    wav_path: Optional[str], fail_msg: str, where: str, tail: str, trace: bool = False
 ) -> tuple[Optional[str], bool, str]:
     """Transcribe a finished capture → (deliverable text, is_stop_phrase, stop_text).
 
     A bare stop phrase ("stop") is explicit user intent to end the voice chat: it is never sent
-    to the agent, so the deliverable text becomes None.
+    to the agent, so the deliverable text becomes None. ``trace`` adds transcription breadcrumbs.
     """
-    transcript = _transcribe_wav(wav_path, fail_msg, debug_prefix) if wav_path else None
+    transcript = _transcribe_wav(wav_path, fail_msg, where if trace else None) if wav_path else None
     if not (transcript and is_voice_stop_phrase(transcript)):
         return transcript, False, ""
     _debug(f"{where}: stop phrase {transcript!r} — {tail}")
@@ -285,7 +282,7 @@ def start_recording() -> None:
         if _recorder is not None and getattr(_recorder, "is_recording", False):
             return
         rec = create_audio_recorder()
-        rec.start()
+        rec.start()  # only publish a recorder that actually started
         _recorder = rec
 
 
@@ -467,8 +464,7 @@ def _continuous_on_silence() -> None:
     _play_beep(frequency=660, count=2)
 
     transcript, stop_phrase, stop_text = _turn_transcript(
-        wav_path, "continuous transcription failed: %s", "_continuous_on_silence", "ending loop",
-        debug_prefix="_continuous_on_silence",
+        wav_path, "continuous transcription failed: %s", "_continuous_on_silence", "ending loop", trace=True
     )
     # Held check runs outside the lock (the probe may call into the host surface).
     held = transcript is None and not stop_phrase and _voice_activity_held()
@@ -630,8 +626,6 @@ def speak_text(text: str, stop_event: Optional[threading.Event] = None) -> None:
     _tts_playing.clear()
     _debug(f"speak_text: TTS begin (paused_recording={paused_recording})")
     try:
-        from tools.tts_tool import text_to_speech_tool  # noqa: F401  (fail early, before streaming)
-
         # One dispatcher: streaming when a chunked streamer resolves, else the whole-file path.
         try:
             if _speak_streaming(text, stop_event):
