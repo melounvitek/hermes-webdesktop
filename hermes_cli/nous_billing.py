@@ -36,17 +36,10 @@ class BillingError(Exception):
     """
 
     def __init__(
-        self,
-        message: str,
-        *,
-        status: Optional[int] = None,
-        error: Optional[str] = None,
-        portal_url: Optional[str] = None,
-        retry_after: Optional[int] = None,
-        payload: Optional[dict[str, Any]] = None,
-        actor: Optional[str] = None,
-        code: Optional[str] = None,
-        recovery: Optional[str] = None,
+        self, message: str, *, status: Optional[int] = None, error: Optional[str] = None,
+        portal_url: Optional[str] = None, retry_after: Optional[int] = None,
+        payload: Optional[dict[str, Any]] = None, actor: Optional[str] = None,
+        code: Optional[str] = None, recovery: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -170,11 +163,7 @@ def invalidate_cached_token() -> None:
 
 def _billing_not_logged_in(exc: Optional[BaseException] = None) -> "BillingAuthError":
     """Build the canonical 'not logged in' BillingAuthError (single source)."""
-    err = BillingAuthError(
-        "Not logged into Nous Portal — run `hermes portal` to log in.",
-        status=401,
-        error="invalid_token",
-    )
+    err = BillingAuthError("Not logged into Nous Portal — run `hermes portal` to log in.", status=401, error="invalid_token")
     if exc is not None:
         err.__cause__ = exc
     return err
@@ -191,16 +180,13 @@ def _resolve_token_and_base(*, use_cache: bool = True) -> tuple[str, str]:
         cached_at, token, base = _token_cache
         if (time.time() - cached_at) < _TOKEN_CACHE_TTL_SECONDS:
             return token, base
-
     try:
         from hermes_cli.auth import get_provider_auth_state
 
         state = get_provider_auth_state("nous") or {}
     except Exception:
         state = {}
-
     base = resolve_portal_base_url(state)
-
     try:
         from hermes_cli.auth import AuthError, resolve_nous_access_token
     except ImportError:
@@ -259,14 +245,9 @@ def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) 
     error = p.get("error")
     message = p.get("message")
     common = {
-        "status": status,
-        "error": error,
-        "portal_url": _absolutize_portal_url(p.get("portalUrl")),
-        "retry_after": _retry_after_seconds(headers),
-        "payload": p,
-        "actor": p.get("actor"),
-        "code": p.get("code"),
-        "recovery": p.get("recovery"),
+        "status": status, "error": error, "portal_url": _absolutize_portal_url(p.get("portalUrl")),
+        "retry_after": _retry_after_seconds(headers), "payload": p,
+        "actor": p.get("actor"), "code": p.get("code"), "recovery": p.get("recovery"),
     }
     key = error if isinstance(error, str) else None
     cls, fallback = (
@@ -279,13 +260,8 @@ def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) 
 
 
 def _request(
-    method: str,
-    path: str,
-    *,
-    body: Optional[dict[str, Any]] = None,
-    extra_headers: Optional[dict[str, str]] = None,
-    timeout: float = DEFAULT_TIMEOUT,
-    _retried_auth: bool = False,
+    method: str, path: str, *, body: Optional[dict[str, Any]] = None,
+    extra_headers: Optional[dict[str, str]] = None, timeout: float = DEFAULT_TIMEOUT, _retried_auth: bool = False,
 ) -> dict[str, Any]:
     """Authenticated billing request -> parsed JSON dict (``{}`` for an empty 2xx body).
 
@@ -297,12 +273,9 @@ def _request(
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
-    if extra_headers:
-        headers.update(extra_headers)
-
+    headers.update(extra_headers or {})
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
@@ -314,10 +287,8 @@ def _request(
                 # A 2xx non-JSON body (SPA/reverse-proxy fallback HTML when the route isn't
                 # deployed) is a typed non-auth error so callers degrade to "unavailable".
                 raise BillingError(
-                    "Billing endpoint returned a non-JSON response "
-                    "(it may not be available on this deployment).",
-                    error="endpoint_unavailable",
-                    status=getattr(resp, "status", None),
+                    "Billing endpoint returned a non-JSON response (it may not be available on this deployment).",
+                    error="endpoint_unavailable", status=getattr(resp, "status", None),
                 ) from exc
     except urllib.error.HTTPError as exc:
         # 401 on a cached token → drop the cache and retry once with a fresh (refresh-aware) resolve.
@@ -366,11 +337,7 @@ def get_billing_state(*, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
 
 
 def patch_auto_top_up(
-    *,
-    enabled: bool,
-    threshold: float | str,
-    top_up_amount: float | str,
-    timeout: float = DEFAULT_TIMEOUT,
+    *, enabled: bool, threshold: float | str, top_up_amount: float | str, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, Any]:
     """``PATCH /api/billing/auto-top-up`` — configure auto-reload (scope required).
 
@@ -380,12 +347,7 @@ def patch_auto_top_up(
     return _request("PATCH", "/api/billing/auto-top-up", body=body, timeout=timeout)
 
 
-def post_charge(
-    *,
-    amount_usd: float | str,
-    idempotency_key: str,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> dict[str, Any]:
+def post_charge(*, amount_usd: float | str, idempotency_key: str, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
     """``POST /api/billing/charge`` — buy credits (scope required).
 
     Generate a UUID ``idempotency_key`` per user-confirmed purchase and reuse it on retry. Returns
@@ -430,10 +392,7 @@ def post_subscription_preview(*, subscription_type_id: str, timeout: float = DEF
 
 
 def put_subscription_pending_change(
-    *,
-    subscription_type_id: str | None = None,
-    cancel: bool = False,
-    timeout: float = DEFAULT_TIMEOUT,
+    *, subscription_type_id: str | None = None, cancel: bool = False, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, Any]:
     """``PUT /api/billing/subscription/pending-change`` — set the single end-of-period intent.
 
@@ -460,10 +419,7 @@ def delete_subscription_pending_change(*, timeout: float = DEFAULT_TIMEOUT) -> d
 
 
 def post_subscription_upgrade(
-    *,
-    subscription_type_id: str,
-    idempotency_key: str,
-    timeout: float = DEFAULT_TIMEOUT,
+    *, subscription_type_id: str, idempotency_key: str, timeout: float = DEFAULT_TIMEOUT
 ) -> dict[str, Any]:
     """``POST /api/billing/subscription/upgrade`` — immediate paid upgrade, the SINGLE money route.
 

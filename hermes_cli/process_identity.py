@@ -196,12 +196,7 @@ def _pid_alive_matches(pid: int, create_time: Optional[float]) -> Optional[bool]
         return None
 
 
-def register_self(
-    purpose: str,
-    *,
-    project_root: Optional[Path] = None,
-    detail: Optional[dict] = None,
-) -> bool:
+def register_self(purpose: str, *, project_root: Optional[Path] = None, detail: Optional[dict] = None) -> bool:
     """Record this process in the machine spawn ledger. Best-effort.
 
     Called at the top of every long-lived entry point; dead ``(pid, create_time)`` entries are
@@ -230,8 +225,7 @@ def register_self(
     if detail:
         try:
             entry.host = str(detail.get("host") or "")
-            port = detail.get("port")
-            entry.port = int(port) if port is not None else None
+            entry.port = int(detail["port"]) if detail.get("port") is not None else None
             entry.profile = str(detail.get("profile") or "")
         except (TypeError, ValueError):
             pass
@@ -248,12 +242,8 @@ def register_self(
 
 
 def _new_entry(
-    pid: int,
-    create_time: Optional[float],
-    purpose: str,
-    project_root: Optional[Path],
-    spawner_pid: Optional[int],
-    spawner_create: Optional[float],
+    pid: int, create_time: Optional[float], purpose: str, project_root: Optional[Path],
+    spawner_pid: Optional[int], spawner_create: Optional[float],
 ) -> LedgerEntry:
     return LedgerEntry(
         pid, create_time, purpose, install_id(project_root), spawner_pid, spawner_create, time.time(), argv=""
@@ -288,12 +278,7 @@ def _append_entry(entry: LedgerEntry) -> bool:
             return False
 
 
-def register_child(
-    pid: int,
-    purpose: str,
-    *,
-    project_root: Optional[Path] = None,
-) -> bool:
+def register_child(pid: int, purpose: str, *, project_root: Optional[Path] = None) -> bool:
     """Record a CHILD process this process just spawned. Best-effort.
 
     Mirror of :func:`register_self` for children that cannot register themselves (stdio MCP
@@ -328,8 +313,7 @@ def ledger_entries(*, project_root: Optional[Path] = None) -> list[dict]:
     if entries is None:
         return []
     return [
-        e
-        for e in entries
+        e for e in entries
         if e.get("install") == want_install
         and isinstance(e.get("pid"), int)
         and _pid_alive_matches(e["pid"], e.get("create_time")) is not False
@@ -345,11 +329,7 @@ def spawner_is_dead(entry: dict) -> Optional[bool]:
     return None if alive is None else not alive
 
 
-def reap_orphaned_mcp_helpers(
-    *,
-    project_root: Optional[Path] = None,
-    kill_fn=None,
-) -> list[int]:
+def reap_orphaned_mcp_helpers(*, project_root: Optional[Path] = None, kill_fn=None) -> list[int]:
     """Kill ledger-registered stdio MCP helpers whose spawner is provably dead.
 
     Ledger-driven startup-sweep rung (not cmdline-heuristic): a helper is reaped ONLY when it has a
@@ -377,9 +357,8 @@ def reap_orphaned_mcp_helpers(
                 import psutil
 
                 proc = psutil.Process(pid)
-                # Re-verify identity at the moment of kill (PID-reuse guard).
                 if not _same_incarnation(proc, entry.get("create_time")):
-                    continue
+                    continue  # PID reused since registration
                 proc.terminate()
                 try:
                     proc.wait(timeout=2.0)
@@ -424,14 +403,10 @@ def attach_self_to_kill_on_close_job() -> bool:
 
         class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
             _fields_ = [
-                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
-                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
-                ("LimitFlags", wintypes.DWORD),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", wintypes.DWORD),
-                ("Affinity", ctypes.POINTER(wintypes.ULONG)),
-                ("PriorityClass", wintypes.DWORD),
+                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER), ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.POINTER(wintypes.ULONG)), ("PriorityClass", wintypes.DWORD),
                 ("SchedulingClass", wintypes.DWORD),
             ]
 
@@ -448,9 +423,7 @@ def attach_self_to_kill_on_close_job() -> bool:
             return False
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = (
-            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            | JOB_OBJECT_LIMIT_BREAKAWAY_OK
-            | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
         )
         ok = kernel32.SetInformationJobObject(
             job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
