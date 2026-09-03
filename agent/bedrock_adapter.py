@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from contextlib import suppress
 from types import SimpleNamespace
@@ -86,9 +87,7 @@ def reset_client_cache():
 
 def invalidate_runtime_client(region: str) -> bool:
     """Evict one region's cached ``bedrock-runtime`` client (stale HTTP pool); True if evicted."""
-    existed = region in _bedrock_runtime_client_cache
-    _bedrock_runtime_client_cache.pop(region, None)
-    return existed
+    return _bedrock_runtime_client_cache.pop(region, None) is not None
 
 
 # --- Bedrock Mantle / OpenAI Responses support ---
@@ -178,10 +177,10 @@ def configure_bedrock_openai_client_kwargs(
     """Install SigV4 auth on OpenAI SDK kwargs for Bedrock Mantle. Real API keys keep the
     SDK's bearer auth; the ``aws-sdk``/``no-key-required`` placeholders mean IAM chain auth."""
     base_url = str(client_kwargs.get("base_url") or "")
-    if not is_bedrock_openai_base_url(base_url):
-        return client_kwargs
     api_key = client_kwargs.get("api_key")
-    if isinstance(api_key, str) and api_key.strip() and api_key not in {"aws-sdk", "no-key-required"}:
+    if not is_bedrock_openai_base_url(base_url) or (
+        isinstance(api_key, str) and api_key.strip() and api_key not in {"aws-sdk", "no-key-required"}
+    ):
         return client_kwargs
     region = bedrock_openai_region_from_base_url(base_url) or resolve_bedrock_runtime_region()
     client_kwargs["api_key"] = "aws-sdk"
@@ -206,8 +205,7 @@ def _stale_error_types() -> tuple:
         ("urllib3.exceptions", ("ProtocolError", "NewConnectionError", "ConnectionError")),
     ):
         with suppress(ImportError):  # pragma: no cover — both present with boto3
-            mod = importlib.import_module(module)
-            types += [getattr(mod, name) for name in names]
+            types += [getattr(importlib.import_module(module), name) for name in names]
     return tuple(types)
 
 
@@ -389,12 +387,6 @@ def _without_cache_points(blocks: Any) -> Optional[list]:
 def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]:
     """Copy of Converse kwargs with ``placement``'s cachePoint removed; the SAME object
     back when nothing was stripped (callers use identity to decide a retry cannot help)."""
-    if placement in ("system", "tools"):
-        tool_config = kwargs.get("toolConfig")
-        cleaned = _without_cache_points(kwargs.get("system") if placement == "system" else (tool_config or {}).get("tools"))
-        if cleaned is None:
-            return kwargs
-        return {**kwargs, "system": cleaned} if placement == "system" else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
     if placement == "messages":
         messages = kwargs.get("messages")
         cleaned_contents = [
@@ -405,6 +397,13 @@ def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]
         return {**kwargs, "messages": [
             msg if content is None else {**msg, "content": content} for msg, content in zip(messages, cleaned_contents)
         ]}
+    if placement == "system":
+        cleaned = _without_cache_points(kwargs.get("system"))
+        return kwargs if cleaned is None else {**kwargs, "system": cleaned}
+    if placement == "tools":
+        tool_config = kwargs.get("toolConfig")
+        cleaned = _without_cache_points((tool_config or {}).get("tools"))
+        return kwargs if cleaned is None else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
     return kwargs
 
 
@@ -481,11 +480,9 @@ def _convert_content_to_converse(content) -> List[Dict]:
     for part in content:
         if isinstance(part, str):
             blocks.append({"text": _safe_text(part)})
-        elif not isinstance(part, dict):
-            continue
-        elif part.get("type", "") == "text":
+        elif isinstance(part, dict) and part.get("type", "") == "text":
             blocks.append({"text": _safe_text(part.get("text", ""))})
-        elif part.get("type", "") == "image_url":
+        elif isinstance(part, dict) and part.get("type", "") == "image_url":
             image_url = part.get("image_url", {})
             url = image_url.get("url", "") if isinstance(image_url, dict) else ""
             blocks.append(_image_block_from_data_url(url) if url.startswith("data:") else {"text": f"[Image: {url}]"})
@@ -509,10 +506,8 @@ def _tool_use_block_from(tu: Dict) -> Dict:
 
 def _decode_redacted(encoded) -> Optional[bytes]:
     """Strict base64 → bytes; None for empty/non-str/undecodable input."""
-    if not isinstance(encoded, str) or not encoded:
-        return None
     try:
-        return base64.b64decode(encoded, validate=True)
+        return base64.b64decode(encoded, validate=True) if isinstance(encoded, str) and encoded else None
     except (ValueError, TypeError):
         return None
 
@@ -559,12 +554,11 @@ def _assistant_blocks(msg: Dict, content) -> List[Dict]:
     ordered_blocks = msg.get("bedrock_content_blocks")
     if isinstance(ordered_blocks, list) and (content_blocks := _replay_ordered_blocks(ordered_blocks)):
         return content_blocks
-    content_blocks = []
-    for detail in (msg.get("reasoning_details") or []):
-        if isinstance(detail, dict) and detail.get("type") == "redacted_thinking":
-            redacted = _decode_redacted(detail.get("data") or detail.get("redactedContentBase64"))
-            if redacted is not None:
-                content_blocks.append({"reasoningContent": {"redactedContent": redacted}})
+    redacted = [
+        _decode_redacted(d.get("data") or d.get("redactedContentBase64"))
+        for d in (msg.get("reasoning_details") or []) if isinstance(d, dict) and d.get("type") == "redacted_thinking"
+    ]
+    content_blocks: List[Dict] = [{"reasoningContent": {"redactedContent": r}} for r in redacted if r is not None]
     if isinstance(content, str) and content.strip():
         content_blocks.append({"text": content})
     elif isinstance(content, list):
@@ -818,10 +812,7 @@ def build_converse_kwargs(
         kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if cache_here("system") else system_prompt
     from agent.anthropic_adapter import _forbids_sampling_params
     if not _forbids_sampling_params(model):
-        if temperature is not None:
-            inference_config["temperature"] = temperature
-        if top_p is not None:
-            inference_config["topP"] = top_p
+        inference_config.update({k: v for k, v in (("temperature", temperature), ("topP", top_p)) if v is not None})
     if stop_sequences:
         inference_config["stopSequences"] = stop_sequences
     converse_tools = convert_tools_to_converse(tools) if tools else []
@@ -930,7 +921,6 @@ def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any
 def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Discover foundation models + inference profiles (cached 1h per region/filter), sorted
     ``global.`` profiles first then by name; [] when the client cannot be built."""
-    import time
     cache_key = f"{region}:{','.join(sorted(provider_filter or []))}"
     cached = _discovery_cache.get(cache_key)
     if cached and (time.time() - cached["timestamp"]) < _DISCOVERY_CACHE_TTL_SECONDS:
@@ -1039,6 +1029,5 @@ def get_bedrock_context_length(model_id: str, region: str = "", probe: bool = Tr
     pinned to 200K via "opus-4"). ``probe=False`` / empty region skips the network call."""
     if probe and region and (probed := probe_bedrock_context_length(model_id, region)):
         return probed
-    model_lower = model_id.lower()
-    matches = [key for key in BEDROCK_CONTEXT_LENGTHS if key in model_lower]
+    matches = [key for key in BEDROCK_CONTEXT_LENGTHS if key in model_id.lower()]
     return BEDROCK_CONTEXT_LENGTHS[max(matches, key=len)] if matches else BEDROCK_DEFAULT_CONTEXT_LENGTH
