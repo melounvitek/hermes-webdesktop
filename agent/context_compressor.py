@@ -1980,19 +1980,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             )
         previous = telemetry.get("aux_call_duration_ms") or 0
         telemetry["aux_call_duration_ms"] = previous + max(0, int(duration_ms))
-        for key in (
-            "queue_wait_ms",
-            "prompt_build_ms",
-            "time_to_first_progress_ms",
-            "summary_generation_ms",
-            "commit_ms",
-        ):
-            if isinstance(phase_timings, dict) and key in phase_timings:
-                value = _safe_int(phase_timings[key])
-                if key in {"queue_wait_ms", "summary_generation_ms"} and value is not None:
-                    telemetry[key] = (telemetry.get(key) or 0) + value
-                else:
-                    telemetry[key] = value
+        if not isinstance(phase_timings, dict):
+            return
+        for key in ("queue_wait_ms", "prompt_build_ms", "time_to_first_progress_ms", "summary_generation_ms", "commit_ms"):
+            if key not in phase_timings:
+                continue
+            value = _safe_int(phase_timings[key])
+            # Wait and generation phases accumulate across retries; the rest are point readings.
+            if key in {"queue_wait_ms", "summary_generation_ms"} and value is not None:
+                telemetry[key] = (telemetry.get(key) or 0) + value
+            else:
+                telemetry[key] = value
 
     def _emit_init_summary_once(self) -> None:
         """Emit the init log line once, on first context-length resolution (keeps __init__ non-blocking)."""
@@ -2362,12 +2360,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._last_cooldown_refresh_was_authoritative = None
         now_mono = time.monotonic()
         local_state = None
-        if self._summary_failure_cooldown_until > now_mono:
+        local_remaining = self._summary_failure_cooldown_until - now_mono
+        if local_remaining > 0:
             local_state = {
-                "cooldown_until": time.time() + (
-                    self._summary_failure_cooldown_until - now_mono
-                ),
-                "remaining_seconds": self._summary_failure_cooldown_until - now_mono,
+                "cooldown_until": time.time() + local_remaining,
+                "remaining_seconds": local_remaining,
                 "error": self._last_summary_error,
             }
             if not refresh:
@@ -2375,11 +2372,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
         session_db = getattr(self, "_session_db", None)
         session_id = getattr(self, "_session_id", "")
-        if not session_db or not session_id:
-            return local_state
-
-        getter = getattr(session_db, "get_compression_failure_cooldown", None)
-        if getter is None:
+        getter = getattr(session_db, "get_compression_failure_cooldown", None) if session_db else None
+        if not session_id or getter is None:
             return local_state
         try:
             state = getter(session_id)
@@ -2482,12 +2476,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         max_tokens: int | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
-        runtime_changed = any((
-            model != self.model,
-            provider != self.provider,
-            base_url != self.base_url,
-            api_mode != self.api_mode,
-        ))
+        runtime_changed = (model, provider, base_url, api_mode) != (
+            self.model, self.provider, self.base_url, self.api_mode
+        )
         self.model = model
         self.base_url = base_url
         self.api_key = api_key
@@ -2595,6 +2586,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if effective_window > 0 and floored >= effective_window:
             return max(1, min(trigger_cap, effective_window - 1))
         return floored
+
     def __init__(
         self,
         model: str,
@@ -2630,9 +2622,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.model_thresholds = model_thresholds or {}
         # Raw config value, before override/floor; fallback when switching to a model with no override.
         self._config_threshold_percent = threshold_percent
-        self._base_threshold_percent = resolve_model_threshold(
-            model, self.model_thresholds, threshold_percent,
-        )
+        self._base_threshold_percent = resolve_model_threshold(model, self.model_thresholds, threshold_percent)
         self.threshold_percent = self._base_threshold_percent
         # Effective trigger = min(ratio threshold, cap); re-applied in update_model().
         self.threshold_tokens_cap = self._coerce_threshold_tokens_cap(threshold_tokens_cap)
@@ -2642,9 +2632,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.proactive_prune_tokens = int(proactive_prune_tokens or 0)
         # Floor at 200 chars: below that a summary can exceed what it replaces and pass 2 re-summarizes
         # its own output every turn. Configured 0 keeps the 8000 default via `or`.
-        self.proactive_prune_min_result_chars = max(
-            _PRUNE_MIN_CHARS, int(proactive_prune_min_result_chars or 8000)
-        )
+        self.proactive_prune_min_result_chars = max(_PRUNE_MIN_CHARS, int(proactive_prune_min_result_chars or 8000))
         # Every commit breaks the prompt-cache prefix; require a meaningful reclaim batch so fires are episodic.
         self.proactive_prune_min_reclaim_tokens = max(0, int(proactive_prune_min_reclaim_tokens or 0))
         # A committed prune is a cache boundary: rearm only after the prompt regrows the reclaimed tokens.
@@ -3135,11 +3123,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         ``proactive_prune_min_reclaim_tokens`` and a full regrowth runway; otherwise returns the
         INPUT object as ``(messages, 0)``.
         """
-        if self.proactive_prune_tokens <= 0:
-            return messages, 0
-        if current_tokens is not None and current_tokens < self.proactive_prune_tokens:
-            return messages, 0
-        if len(messages) <= self.protect_last_n + self._protect_head_size(messages) + 1:
+        if (
+            self.proactive_prune_tokens <= 0
+            or (current_tokens is not None and current_tokens < self.proactive_prune_tokens)
+            or len(messages) <= self.protect_last_n + self._protect_head_size(messages) + 1
+        ):
             return messages, 0
         before = sum(_estimate_msg_budget_tokens(m) for m in messages)
         if before < self._proactive_prune_rearm_tokens:
@@ -3167,11 +3155,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if session_db and session_id:
             try:
                 session_db.archive_and_compact(
-                    session_id,
-                    pruned_msgs,
-                    model_config_patch={
-                        PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: next_rearm_tokens,
-                    },
+                    session_id, pruned_msgs,
+                    model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: next_rearm_tokens},
                 )
             except Exception as exc:
                 logger.warning(
@@ -4420,16 +4405,21 @@ This compaction should PRIORITISE preserving all information related to the focu
         return idx
 
 
-    def _find_last_user_message_idx(self, messages: List[Dict[str, Any]], head_end: int) -> int:
-        """Return the latest actionable user turn at or after *head_end*, or -1.
+    @classmethod
+    def _real_user_indices_desc(cls, messages: List[Dict[str, Any]], head_end: int) -> list[int]:
+        """Indices (newest first) of actionable, non-synthetic user turns at or after *head_end*.
 
-        Compaction handoffs and blank platform echoes never displace the real request.
+        Compaction handoffs and blank platform echoes never count as the real request.
         """
-        for i in range(len(messages) - 1, head_end - 1, -1):
-            msg = messages[i]
-            if self._is_actionable_user_turn(msg) and not self._is_synthetic_compression_user_turn(msg):
-                return i
-        return -1
+        return [
+            i for i in range(len(messages) - 1, head_end - 1, -1)
+            if cls._is_actionable_user_turn(messages[i])
+            and not cls._is_synthetic_compression_user_turn(messages[i])
+        ]
+
+    def _find_last_user_message_idx(self, messages: List[Dict[str, Any]], head_end: int) -> int:
+        """Return the latest actionable user turn at or after *head_end*, or -1."""
+        return next(iter(self._real_user_indices_desc(messages, head_end)), -1)
 
     def _find_last_assistant_message_idx(self, messages: List[Dict[str, Any]], head_end: int) -> int:
         """Return the last text-bearing, non-summary assistant reply at or after *head_end*, or -1.
@@ -4446,13 +4436,12 @@ This compaction should PRIORITISE preserving all information related to the focu
             content = msg.get("content")
             if isinstance(content, str) and content.strip():
                 return i
-            if isinstance(content, list):
-                # Multimodal content: any non-empty text block counts.
-                for part in content:
-                    if isinstance(part, dict):
-                        text = part.get("text") or part.get("content")
-                        if isinstance(text, str) and text.strip():
-                            return i
+            # Multimodal content: any non-empty text block counts.
+            if isinstance(content, list) and any(
+                isinstance(p, dict) and isinstance(t := (p.get("text") or p.get("content")), str) and t.strip()
+                for p in content
+            ):
+                return i
         return last_any
 
     def _ensure_last_assistant_message_in_tail(
@@ -4466,9 +4455,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         Re-aligns backward so a preceding tool group is not split.
         """
         last_asst_idx = self._find_last_assistant_message_idx(messages, head_end)
-        if last_asst_idx < 0:
-            return cut_idx
-        if last_asst_idx >= cut_idx:
+        if last_asst_idx < 0 or last_asst_idx >= cut_idx:
             return cut_idx
         # Pull back to the assistant, then re-align so a preceding tool group is not split.
         new_cut = self._align_boundary_backward(messages, last_asst_idx)
@@ -4495,12 +4482,8 @@ This compaction should PRIORITISE preserving all information related to the focu
         cut is pushed forward past the whole turn-pair instead so it is summarised as completed.
         """
         last_user_idx = self._find_last_user_message_idx(messages, head_end)
-        if last_user_idx < 0:
+        if last_user_idx < 0 or last_user_idx >= cut_idx:
             return cut_idx
-
-        if last_user_idx >= cut_idx:
-            return cut_idx
-
         # A user message is already a clean boundary; _align_boundary_backward would
         # needlessly pull the cut into the preceding tool group.
         if not self.quiet_mode:
@@ -4539,25 +4522,15 @@ This compaction should PRIORITISE preserving all information related to the focu
         if n <= 1:
             return self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
-        # Same real-user filters as _find_last_user_message_idx. A user message is already a clean
-        # boundary: deliberately NO _align_boundary_backward here, it would pull the cut into the
-        # preceding tool group and split it.
-        user_indices = []
-        for i in range(len(messages) - 1, head_end - 1, -1):
-            msg = messages[i]
-            if self._is_actionable_user_turn(msg) and not self._is_synthetic_compression_user_turn(msg):
-                user_indices.append(i)
-
-        if len(user_indices) == 0:
+        # A user message is already a clean boundary: deliberately NO _align_boundary_backward
+        # here, it would pull the cut into the preceding tool group and split it.
+        user_indices = self._real_user_indices_desc(messages, head_end)
+        if not user_indices:
             return cut_idx
-
-        target_idx = user_indices[-1] if len(user_indices) < n else user_indices[n - 1]
-
+        target_idx = user_indices[min(n, len(user_indices)) - 1]
         if target_idx >= cut_idx:
             return cut_idx
-
-        cut_idx = target_idx
-        return max(cut_idx, head_end + 1)
+        return max(target_idx, head_end + 1)
 
     def _find_turn_pair_end(self, messages: List[Dict[str, Any]], user_idx: int) -> int:
         """Return the index after the turn-pair (user -> assistant -> tools) at *user_idx*.
