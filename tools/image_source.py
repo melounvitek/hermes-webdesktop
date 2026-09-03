@@ -1,13 +1,10 @@
-"""Single resolver for every media source -> bytes + mime.
+"""Single resolver for every media source (data:/http(s)/file/local/container) -> bytes + mime.
 
-All source handling (data:/http(s)/file/local/container) funnels through
-:func:`resolve_image_source` so size and magic-byte checks are enforced exactly once.
-Images are the default; callers whose argument takes video opt in via ``permitted=("video",)``.
-
-Security (terminal-backend confinement, GHSA-gpxw-6wxv-w3qq): under a non-local backend
-vision is confined like the file tools: local -> read any host path; non-local -> host-read
-only inside a media cache (bind-mounted into the sandbox), anything else is exec-read
-*inside the sandbox*, so an injected ``vision_analyze('/etc/passwd')`` never reads the host.
+Everything funnels through :func:`resolve_image_source` so size and magic-byte checks run
+exactly once. Images are the default; video callers opt in via ``permitted=("video",)``.
+Security (GHSA-gpxw-6wxv-w3qq): under a non-local backend vision is confined like the file
+tools — host-read only inside a media cache (bind-mounted into the sandbox), anything else is
+exec-read *inside the sandbox*, so ``vision_analyze('/etc/passwd')`` never reads the host.
 """
 from __future__ import annotations
 

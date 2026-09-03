@@ -29,11 +29,8 @@ def _load_fal_client() -> Any:
 
 
 from tools.debug_helpers import DebugSession
-from tools.fal_common import (
-    _ManagedFalSyncClient,
-    _extract_http_status,
-    _normalize_fal_queue_url_format,  # noqa: F401 — re-exported for tests
-)
+from tools.fal_common import (  # noqa: F401 — _normalize_fal_queue_url_format re-exported for tests
+    _ManagedFalSyncClient, _extract_http_status, _normalize_fal_queue_url_format)
 from tools.image_generation_catalog import (  # noqa: F401 — re-exported (plugins/tests/tools_config)
     DEFAULT_ASPECT_RATIO, DEFAULT_MODEL, FAL_MODELS, UPSCALER_CREATIVITY, UPSCALER_DEFAULT_PROMPT,
     UPSCALER_FACTOR, UPSCALER_GUIDANCE_SCALE, UPSCALER_MODEL, UPSCALER_NEGATIVE_PROMPT,
@@ -626,10 +623,11 @@ def _dispatch_to_plugin_provider(
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=_read_configured_image_model())
         result = provider.generate(**kwargs)
-    except TypeError as exc:
-        # generate() predating image_url support (third-party plugin not yet updated):
-        # text-to-image keeps working; surface a clear note when an edit was requested.
-        if "image_url" in kwargs or "reference_image_urls" in kwargs:
+    except Exception as exc:
+        # A TypeError from generate() predating image_url support (third-party plugin not yet
+        # updated): text-to-image keeps working; surface a clear note when an edit was requested.
+        is_type_error = isinstance(exc, TypeError)
+        if is_type_error and ("image_url" in kwargs or "reference_image_urls" in kwargs):
             logger.warning("image_gen provider '%s' rejected image-to-image kwargs "
                            "(signature too narrow): %s", pname, exc)
             return _provider_error(
@@ -637,10 +635,7 @@ def _dispatch_to_plugin_provider(
                 f"signature is out of date with the image_generate schema). Omit image_url for "
                 f"text-to-image, or pick a backend that supports editing via `hermes tools` → "
                 f"Image Generation.", "modality_unsupported")
-        logger.warning("Image gen provider '%s' raised TypeError: %s", pname, exc)
-        return _provider_error(f"Provider '{pname}' error: {exc}", "provider_exception")
-    except Exception as exc:
-        logger.warning("Image gen provider '%s' raised: %s", pname, exc)
+        logger.warning("Image gen provider '%s' raised%s: %s", pname, " TypeError" if is_type_error else "", exc)
         return _provider_error(f"Provider '{pname}' error: {exc}", "provider_exception")
     return _provider_result(result, "Provider returned a non-dict result")
 
@@ -674,13 +669,9 @@ def _maybe_route_managed_krea(
         from plugins.image_gen.krea import _resolve_managed_krea_gateway
         if _resolve_managed_krea_gateway() is None:
             return None
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Managed Krea routing probe failed: %s", exc)
-        return None
-    try:
         provider = _get_plugin_provider("krea")
     except Exception as exc:  # noqa: BLE001
-        logger.debug("Managed Krea routing: provider unavailable: %s", exc)
+        logger.debug("Managed Krea routing unavailable: %s", exc)
         return None
     if provider is None:
         return None
