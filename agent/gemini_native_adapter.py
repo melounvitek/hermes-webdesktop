@@ -407,10 +407,6 @@ def build_gemini_request(
 
 # ── Gemini → OpenAI response translation ─────────────────────────────────────
 
-def _map_gemini_finish_reason(reason: str) -> str:
-    return _FINISH_REASON_MAP.get(str(reason or "").upper(), "stop")
-
-
 def _tool_call_extra_from_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     sig = part.get("thoughtSignature")
     return {"google": {"thought_signature": sig}} if isinstance(sig, str) and sig else None
@@ -481,11 +477,10 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
             pieces[is_thought].append(text)
         elif fc := _part_function_call(part):
             tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
-
     if cand is None:
         finish_reason, usage = "stop", _usage_from_metadata({})
     else:
-        finish_reason = "tool_calls" if tool_calls else _map_gemini_finish_reason(str(cand.get("finishReason") or ""))
+        finish_reason = "tool_calls" if tool_calls else _FINISH_REASON_MAP.get(str(cand.get("finishReason") or "").upper(), "stop")
         usage = _usage_from_metadata(resp.get("usageMetadata") or {})
     reasoning = "".join(pieces[True]) or None
     message = SimpleNamespace(
@@ -567,7 +562,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
             }))
 
     if finish_reason_raw := str(cand.get("finishReason") or ""):
-        finish_reason = "tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
+        finish_reason = "tool_calls" if tool_call_indices else _FINISH_REASON_MAP.get(finish_reason_raw.upper(), "stop")
         finish_chunk = _make_stream_chunk(model=model, finish_reason=finish_reason)
         if usage_meta := event.get("usageMetadata") or {}:  # rides on the finish chunk so the stream loop records tokens
             finish_chunk.usage = _usage_from_metadata(usage_meta)
