@@ -81,16 +81,10 @@ _UNSAFE_ROOT_PREFIXES = ("mkfs",)
 # Substrings in a role='tool' result that mean the command did NOT execute with user consent
 # (blocked, denied, timed out, or still pending). Kept in sync with tools/approval.py templates.
 _BLOCK_MARKERS = (
-    "BLOCKED (hardline)",
-    "BLOCKED: User denied",
-    "BLOCKED: Action ",
-    "BLOCKED: Command flagged as dangerous",
-    "BLOCKED: approval required",
-    "BLOCKED: Failed to send approval request",
-    "The user has NOT consented",
-    "Asking the user for approval",
-    "approval_required",
-    "BLOCKED by user deny rule",
+    "BLOCKED (hardline)", "BLOCKED: User denied", "BLOCKED: Action ",
+    "BLOCKED: Command flagged as dangerous", "BLOCKED: approval required",
+    "BLOCKED: Failed to send approval request", "The user has NOT consented",
+    "Asking the user for approval", "approval_required", "BLOCKED by user deny rule",
 )
 
 

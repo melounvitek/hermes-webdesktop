@@ -211,6 +211,19 @@ def _is_xai_origin_host(host: str) -> bool:
     return host == "x.ai" or host.endswith(".x.ai")
 
 
+def _xai_url_problem(url: str) -> tuple[Optional[str], str]:
+    """``(problem, host)`` — problem is ``"scheme"``, ``"host"``, ``"origin"`` or None when *url* is HTTPS on x.ai."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https":
+        return "scheme", host
+    if not host:
+        return "host", host
+    if not _is_xai_origin_host(host):
+        return "origin", host
+    return None, host
+
+
 def _xai_validate_oauth_endpoint(url: str, *, field: str) -> str:
     """Refuse any OIDC discovery endpoint that isn't HTTPS on the xAI origin.
 
@@ -218,21 +231,20 @@ def _xai_validate_oauth_endpoint(url: str, *, field: str) -> str:
     ``token_endpoint`` that receives the refresh_token forever. Pinning scheme + host (RFC 8414 §2)
     removes that persistence.
     """
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise _xai_err(f"xAI OIDC discovery returned a non-HTTPS {field}: {url!r}.", "xai_discovery_invalid")
-    host = (parsed.hostname or "").lower()
-    if not host:
-        raise _xai_err(f"xAI OIDC discovery {field} is missing a hostname: {url!r}.", "xai_discovery_invalid")
-    if not _is_xai_origin_host(host):
-        raise _xai_err(
+    problem, host = _xai_url_problem(url)
+    if problem is None:
+        return url
+    message = {
+        "scheme": f"xAI OIDC discovery returned a non-HTTPS {field}: {url!r}.",
+        "host": f"xAI OIDC discovery {field} is missing a hostname: {url!r}.",
+        "origin": (
             f"xAI OIDC discovery {field} host {host!r} is not on the xAI origin "
             f"(expected x.ai or a *.x.ai subdomain). Refusing to use a cached "
             f"endpoint that may have been substituted by a MITM during initial "
-            f"discovery; re-authenticate with `hermes model` to re-fetch.",
-            "xai_discovery_invalid",
-        )
-    return url
+            f"discovery; re-authenticate with `hermes model` to re-fetch."
+        ),
+    }[problem]
+    raise _xai_err(message, "xai_discovery_invalid")
 
 
 def _xai_validate_inference_base_url(value: str, *, fallback: str) -> str:
@@ -246,22 +258,21 @@ def _xai_validate_inference_base_url(value: str, *, fallback: str) -> str:
     if not candidate:
         return fallback
     try:
-        parsed = urlparse(candidate)
+        problem, host = _xai_url_problem(candidate)
     except Exception:
         logger.warning("Ignoring malformed xAI base_url override %r; using %s instead.", candidate, fallback)
         return fallback
-    if parsed.scheme != "https":
+    if problem is None:
+        return candidate
+    if problem == "scheme":
         logger.warning(
             "Refusing non-HTTPS xAI base_url override %r (xai-oauth bearer would "
             "be sent in cleartext); falling back to %s.",
             candidate, fallback,
         )
-        return fallback
-    host = (parsed.hostname or "").lower()
-    if not host:
+    elif problem == "host":
         logger.warning("Ignoring xAI base_url override %r with no hostname; using %s instead.", candidate, fallback)
-        return fallback
-    if not _is_xai_origin_host(host):
+    else:
         logger.warning(
             "Refusing xAI base_url override %r — host %r is not on the xAI origin "
             "(expected x.ai or a *.x.ai subdomain). The xai-oauth bearer is only "
@@ -269,8 +280,7 @@ def _xai_validate_inference_base_url(value: str, *, fallback: str) -> str:
             "the credential. Falling back to %s.",
             candidate, host, fallback,
         )
-        return fallback
-    return candidate
+    return fallback
 
 
 def _xai_oauth_discovery(timeout_seconds: float = 15.0) -> Dict[str, str]:

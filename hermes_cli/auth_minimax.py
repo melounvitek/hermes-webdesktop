@@ -27,7 +27,6 @@ if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
-
 _MINIMAX_OAUTH_ERROR_BODY_LIMIT = 16 * 1024
 
 

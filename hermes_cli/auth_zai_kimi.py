@@ -16,7 +16,6 @@ from hermes_cli.auth_constants import httpx
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
-
 # Kimi Code (kimi.com/code) issues "sk-kimi-" keys that only work on api.kimi.com/coding; legacy
 # platform.moonshot.ai keys work on api.moonshot.ai/v1 (the old default). Intentionally NO /v1
 # suffix: the /coding endpoint speaks Anthropic Messages and the SDK appends "/v1/messages"
