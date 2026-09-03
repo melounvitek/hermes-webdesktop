@@ -62,8 +62,7 @@ class CustomProfile(ProviderProfile):
 
 
 custom = CustomProfile(
-    name="custom",
-    aliases=("ollama", "local", "vllm", "llamacpp", "llama.cpp", "llama-cpp"),
+    name="custom", aliases=("ollama", "local", "vllm", "llamacpp", "llama.cpp", "llama-cpp"),
     env_vars=(),  # No fixed key — custom endpoint
     base_url="",  # User-configured
     # Floor only (user model.max_tokens overrides); without it Ollama falls

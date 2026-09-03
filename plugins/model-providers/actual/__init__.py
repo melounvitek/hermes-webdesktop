@@ -25,18 +25,11 @@ class ActualProfile(ProviderProfile):
 
 
 actual = ActualProfile(
-    name="actual",
-    aliases=("actual-computer", "actualcomputer", "aci"),
-    display_name="Actual Computer",
-    description=(
-        "Actual Computer - hosted inference via api.actual.inc, or local "
-        "offline inference via ACTUAL_BASE_URL"
-    ),
-    signup_url="https://actual.inc",
-    env_vars=("ACTUAL_API_KEY", "ACTUAL_BASE_URL"),
-    base_url=DEFAULT_ACTUAL_BASE_URL,
-    auth_type="api_key",
-    api_mode="codex_responses",
+    name="actual", aliases=("actual-computer", "actualcomputer", "aci"), display_name="Actual Computer",
+    description="Actual Computer - hosted inference via api.actual.inc, or local "
+        "offline inference via ACTUAL_BASE_URL",
+    signup_url="https://actual.inc", env_vars=("ACTUAL_API_KEY", "ACTUAL_BASE_URL"),
+    base_url=DEFAULT_ACTUAL_BASE_URL, auth_type="api_key", api_mode="codex_responses",
 )
 
 register_provider(actual)

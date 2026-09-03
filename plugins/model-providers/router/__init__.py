@@ -253,19 +253,15 @@ class RouterProfile(ProviderProfile):
 
 
 router = RouterProfile(
-    name="router",
-    aliases=("ramp-router", "ramp", "router.com"),
-    api_mode="codex_responses",
+    name="router", aliases=("ramp-router", "ramp", "router.com"), api_mode="codex_responses",
     display_name="Ramp Router",
     description="Ramp Router (router.com) — routes each request to the cheapest model that clears your quality bar",
     signup_url="https://app.router.com/keys",
-    env_vars=("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY", "RAMP_ROUTER_BASE_URL"),
-    base_url=_base_url(),
+    env_vars=("RAMP_ROUTER_API_KEY", "ROUTER_API_KEY", "RAMP_ROUTER_BASE_URL"), base_url=_base_url(),
     auth_type="api_key",
     # Router attributes coding-agent clients by UA prefix; its WAF rejects default UAs.
     default_headers={"User-Agent": f"Hermes-Agent/{_HERMES_VERSION}"},
-    supports_vision=True,
-    default_aux_model="gpt-5.4-mini",
+    supports_vision=True, default_aux_model="gpt-5.4-mini",
     fallback_models=(),  # account-scoped IDs; the picker uses fetch_models()
 )
 

@@ -42,10 +42,8 @@ class CopilotProfile(ProviderProfile):
 
 
 copilot = CopilotProfile(
-    name="copilot",
-    aliases=("github-copilot", "github-models", "github-model", "github"),
-    env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"),
-    base_url="https://api.githubcopilot.com",
+    name="copilot", aliases=("github-copilot", "github-models", "github-model", "github"),
+    env_vars=("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"), base_url="https://api.githubcopilot.com",
     auth_type="copilot",
 )
 

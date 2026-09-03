@@ -36,11 +36,9 @@ class OpenCodeFreeProfile(ProviderProfile):
 
 
 opencode_free = OpenCodeFreeProfile(
-    name="opencode-free",
-    aliases=("free", "opencode_free"),
+    name="opencode-free", aliases=("free", "opencode_free"),
     env_vars=(),  # keyless — nothing to configure
-    base_url="https://opencode.ai/zen/v1",
-    display_name="OpenCode Free",
+    base_url="https://opencode.ai/zen/v1", display_name="OpenCode Free",
     description="OpenCode free models — keyless, no account needed",
     # Attribution headers (same values as opencode-zen/go) plus the empty Authorization
     # override that keeps the SDK's "Bearer <placeholder>" off the wire (free tier 401s it).

@@ -36,20 +36,16 @@ class MetaAIProfile(ProviderProfile):
 
 
 meta_ai = MetaAIProfile(
-    name="meta-ai",
-    aliases=("meta", "muse", "muse-spark", "model-api", "msl"),
-    display_name="Meta Model API",
+    name="meta-ai", aliases=("meta", "muse", "muse-spark", "model-api", "msl"), display_name="Meta Model API",
     description="Meta Muse Spark family (Meta Superintelligence Labs)",
     signup_url="https://developer.meta.com/ai/",
     # MODEL_API_KEY is Meta's documented env var; the aliases are conveniences.
     env_vars=("MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY", "META_BASE_URL"),
-    base_url=os.getenv("META_BASE_URL", "").strip() or "https://api.meta.ai/v1",
-    auth_type="api_key",
+    base_url=os.getenv("META_BASE_URL", "").strip() or "https://api.meta.ai/v1", auth_type="api_key",
     # Responses API engages Muse prompt caching (0 cached tokens on chat/completions vs
     # 93-99% hits on /v1/responses); the hook above still covers custom non-api.meta.ai base URLs.
     api_mode="codex_responses",
-    supports_vision=True,
-    default_aux_model="muse-spark-1.2-contributor",
+    supports_vision=True, default_aux_model="muse-spark-1.2-contributor",
     # Muse spends completion budget on hidden reasoning first; low caps can finish with empty content.
     default_max_tokens=16384,
     fallback_models=("muse-spark-1.2", "muse-spark-1.2-contributor"),
