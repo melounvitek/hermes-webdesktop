@@ -1131,6 +1131,11 @@ def _error_response(
     return web.json_response(_openai_error(message, err_type, param, code), status=status, headers=headers)
 
 
+def _invalid_request(message: str) -> "web.Response":
+    """400 with the bare ``{message, type}`` envelope the OpenAI-compatible validators use."""
+    return web.json_response({"error": {"message": message, "type": "invalid_request_error"}}, status=400)
+
+
 _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextVar(
     "api_agent_request_reservation", default=None)
 
