@@ -219,67 +219,63 @@ async def _telegram_send_one_media(
     the file because the first attempt consumed it."""
     ext = os.path.splitext(media_path)[1].lower()
     voice_note = ext in _VOICE_EXTS and is_voice
-    with open(media_path, "rb") as f:
-        media_kwargs = dict(thread_kwargs)
-        # ``caption`` is only set for a single captionable file, so this never
-        # double-captions a multi-file send or a voice note.
-        if caption is not None and not voice_note:
-            media_kwargs["caption"] = caption
-            media_kwargs["parse_mode"] = parse_mode
-        if voice_note or ext in _TELEGRAM_SEND_AUDIO_EXTS:
-            try:
-                from plugins.platforms.telegram.adapter import _probe_voice_duration_seconds
-                duration = await asyncio.to_thread(_probe_voice_duration_seconds, media_path)
-                if duration is not None:
-                    media_kwargs["duration"] = duration
-            except Exception:
-                pass
-
-        async def _send(**kw):
-            return await _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **kw)
-
+    media_kwargs = dict(thread_kwargs)
+    # ``caption`` is only set for a single captionable file, so this never
+    # double-captions a multi-file send or a voice note.
+    if caption is not None and not voice_note:
+        media_kwargs.update(caption=caption, parse_mode=parse_mode)
+    if voice_note or ext in _TELEGRAM_SEND_AUDIO_EXTS:
         try:
-            return await _send(**media_kwargs)
+            from plugins.platforms.telegram.adapter import _probe_voice_duration_seconds
+            duration = await asyncio.to_thread(_probe_voice_duration_seconds, media_path)
+            if duration is not None:
+                media_kwargs["duration"] = duration
+        except Exception:
+            pass
+
+    with open(media_path, "rb") as f:
+        try:
+            return await _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **media_kwargs)
         except Exception as media_err:
+            err_text = str(media_err).lower()
             if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
                 logger.warning(
                     "Thread %s not found for media send, retrying without message_thread_id",
-                    media_kwargs["message_thread_id"])
-                f.seek(0)
-                media_kwargs.pop("message_thread_id", None)
-                return await _send(**media_kwargs)
-            err_text = str(media_err).lower()
-            if media_kwargs.get("parse_mode") and ("parse" in err_text or "caption" in err_text):
+                    media_kwargs.pop("message_thread_id"))
+            elif media_kwargs.get("parse_mode") and ("parse" in err_text or "caption" in err_text):
                 logger.warning(
                     "Caption parse failed for media send, retrying plain: %s",
                     _sanitize_error_text(media_err))
-                f.seek(0)
                 media_kwargs.pop("parse_mode", None)
                 if not has_html and media_kwargs.get("caption"):
                     media_kwargs["caption"] = _strip_mdv2_safe(media_kwargs["caption"])
-                return await _send(**media_kwargs)
-            raise
+            else:
+                raise
+            f.seek(0)
+            return await _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **media_kwargs)
+
+
+def _telegram_format(message):
+    """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
+    HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
+    from telegram.constants import ParseMode
+
+    has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
+    if has_html:
+        return message, ParseMode.HTML, True
+    try:
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        formatted = TelegramAdapter.__new__(TelegramAdapter).format_message(message)
+    except Exception:
+        formatted = message  # formatting unavailable: send as-is
+    return formatted, ParseMode.MARKDOWN_V2, False
 
 
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
-    """One-shot Telegram Bot API send. Markdown -> MarkdownV2 via the adapter's
-    ``format_message``; text already containing HTML tags is sent as HTML instead.
-    Parse failures fall back to plain text so the message still delivers."""
+    """One-shot Telegram Bot API send; parse failures fall back to plain text so the
+    message still delivers."""
     try:
-        from telegram.constants import ParseMode
-
-        _has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
-        if _has_html:
-            formatted = message
-            send_parse_mode = ParseMode.HTML
-        else:
-            try:
-                from plugins.platforms.telegram.adapter import TelegramAdapter
-                formatted = TelegramAdapter.__new__(TelegramAdapter).format_message(message)
-            except Exception:
-                formatted = message  # formatting unavailable: send as-is
-            send_parse_mode = ParseMode.MARKDOWN_V2
-
+        formatted, send_parse_mode, _has_html = _telegram_format(message)
         bot = _telegram_bot(token)
         from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
 
@@ -291,9 +287,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         text_kwargs = dict(thread_kwargs)
         if disable_link_previews:
             text_kwargs["disable_web_page_preview"] = True
-
-        last_msg = None
-        warnings = []
+        last_msg, warnings = None, []
 
         # MEDIA caption: a single captionable file + short text rides on the bubble as
         # its *formatted* caption. Formatting can inflate a raw <1024 string past
@@ -421,18 +415,14 @@ async def _resolve_slack_user_target(token, chat_id):
             query = name.strip().lstrip("@").lower()
             matches, cursor = [], None
             for _page in range(20):
-                payload = {"limit": 200}
-                if cursor:
-                    payload["cursor"] = cursor
+                payload = {"limit": 200, **({"cursor": cursor} if cursor else {})}
                 data = await post_api(session, "users.list", payload)
                 if not data.get("ok"):
                     return None, f"Slack users.list error: {data.get('error', 'unknown')}"
-                for member in data.get("members", []):
-                    if member.get("deleted") or member.get("is_bot"):
-                        continue
-                    # Stable handle only: display/real names are mutable and non-unique.
-                    if str(member.get("name", "")).strip().lower() == query:
-                        matches.append(member)
+                # Stable handle only: display/real names are mutable and non-unique.
+                matches += [m for m in data.get("members", [])
+                            if not (m.get("deleted") or m.get("is_bot"))
+                            and str(m.get("name", "")).strip().lower() == query]
                 cursor = (data.get("response_metadata") or {}).get("next_cursor")
                 if not cursor:
                     break
@@ -476,15 +466,12 @@ async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, bat
             if "error" not in data:
                 await scheduler.report_rpc_duration(_rpc_duration, n)
                 return None
-
             err = data["error"]
             if not rl._is_signal_rate_limit_error(err):
                 return _error(f"Signal RPC error on batch {idx + 1}/{n_batches}: {err}")
-
             server_retry_after = rl._extract_retry_after_seconds(err)
             scheduler.feedback(server_retry_after, n)
             retry_after_label = f"{server_retry_after:.0f}s" if server_retry_after else "unknown"
-
             if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
                 logger.error(
                     "Signal: rate-limit retries exhausted on batch %d/%d "

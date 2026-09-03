@@ -8,9 +8,8 @@ logger = logging.getLogger("tools.send_message_tool")
 _TELEGRAM_TOPIC_TARGET_RE = re.compile(r"^\s*(-?\d+)(?::(\d+))?\s*$")
 _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?\s*$")
 # Slack conversation IDs: C (public), G (private/group), D (DM); uppercase alnum, 9+ chars.
-# User IDs (U...) become ``user:U...`` and are opened as D... conversations before
-# chat.postMessage (posting straight to a U/W id fails); ``@handle`` -> ``user_name:...``
-# is resolved through users.list first.
+# User IDs (U...) become ``user:U...`` and are opened as D... conversations first (posting
+# straight to a U/W id fails); ``@handle`` -> ``user_name:...`` resolves via users.list.
 _SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
 _SLACK_USER_ID_RE = re.compile(r"^\s*(U[A-Z0-9]{8,})\s*$")
 _SLACK_USER_NAME_RE = re.compile(r"^\s*@([A-Za-z0-9._-]{1,80})\s*$")
@@ -21,15 +20,14 @@ _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Z
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
-# Platforms addressing recipients by E.164 phone number ("+1555..."): without this the
-# '+' fails the isdigit() rule and falls through to channel-name resolution, which cannot
-# resolve a raw number. The '+' is kept because the adapters expect the E.164 form.
+# Platforms addressing recipients by E.164 phone number ("+1555..."): the '+' fails the
+# isdigit() rule and channel-name resolution cannot resolve a raw number; keep the '+'.
 _PHONE_PLATFORMS = frozenset({"photon", "signal", "sms", "whatsapp"})
 _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
 # Photon DM chat GUID (mirrors _DM_CHAT_GUID_RE in the photon adapter).
 _PHOTON_DM_GUID_RE = re.compile(r"^any;-;\+\d{6,}$")
-# WhatsApp JIDs (groups <digits>@g.us, users <phone>@s.whatsapp.net, linked ids @lid,
-# broadcast/newsletter): native targets the bridge accepts verbatim — never home-channel.
+# WhatsApp JIDs (@g.us groups, @s.whatsapp.net users, @lid, broadcast/newsletter): native
+# targets the bridge accepts verbatim — never home-channel.
 _WHATSAPP_JID_RE = re.compile(
     r"^\s*[\w-]+@(?:g\.us|s\.whatsapp\.net|lid|broadcast|newsletter)\s*$", re.IGNORECASE)
 # Buzz channels/DMs are native UUIDs: explicit targets, never the home channel.
@@ -37,16 +35,14 @@ _BUZZ_UUID_RE = re.compile(
     r"^\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\s*$", re.IGNORECASE)
 # A valid address is an explicit email target, not a channel name to resolve.
 _EMAIL_TARGET_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*$")
-# Home-channel env var exceptions to "<PLATFORM>_HOME_CHANNEL" (email reads
-# EMAIL_HOME_ADDRESS, see gateway/config.py) so the error guidance is actionable.
+# Exceptions to "<PLATFORM>_HOME_CHANNEL" (email reads EMAIL_HOME_ADDRESS) for error hints.
 _HOME_CHANNEL_ENV_OVERRIDES = {"email": "EMAIL_HOME_ADDRESS"}
 
 _UNRESOLVED = object()  # sentinel: stop parsing, target is NOT explicit (skip generic rules)
 
 
 # Per-platform explicit-target parsers: target_ref -> (chat_id, thread_id), None to fall
-# through to the generic rules in _parse_target_ref, or _UNRESOLVED. Order inside each
-# parser matters (e.g. Slack thread form before bare conversation id).
+# through to the generic rules in _parse_target_ref, or _UNRESOLVED.
 def _parse_regex_groups(regex, *, thread_group=True):
     """Explicit when ``regex`` fully matches: chat_id = group 1, thread = group 2 (or None)."""
     def parse(ref):
@@ -94,7 +90,7 @@ def _parse_slack(ref):
 
 def _parse_matrix(ref):
     # "<room>:$<event_id>" addresses a thread (rfind: room ids contain ':'). Bare "!room" /
-    # "@user" are explicit too, but via the generic rule so the numeric check keeps precedence.
+    # "@user" go via the generic rule so the numeric check keeps precedence.
     trimmed = ref.strip()
     split_idx = trimmed.rfind(":$")
     if split_idx > 0:
@@ -103,8 +99,7 @@ def _parse_matrix(ref):
 
 
 def _parse_yuanbao(ref):
-    # "group:<code>" / "direct:<id>"; a bare number is a group code, never a generic
-    # numeric chat id (yuanbao never falls through to the generic rules).
+    # "group:<code>" / "direct:<id>"; a bare number is a group code (never generic rules).
     match = _YUANBAO_TARGET_RE.fullmatch(ref)
     if match:
         return match.group(1), None
@@ -114,8 +109,7 @@ def _parse_yuanbao(ref):
 
 
 def _parse_nonempty(ref):
-    # ntfy topics and WeCom ids (wr/wc groups, wo/bare users — the adapter picks the
-    # send command) are explicit whenever non-empty.
+    # ntfy topics and WeCom ids (the adapter picks the send command) are explicit when non-empty.
     stripped = ref.strip()
     return (stripped, None) if stripped else None
 
@@ -149,12 +143,9 @@ _PLATFORM_PARSERS = {
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):
-    """Parse a tool target into (chat_id, thread_id, explicit).
-
-    Platform parser first, then the shared rules in this order: E.164 phone numbers
-    (keeping the '+' the signal/sms/whatsapp adapters expect), bare numeric ids, Matrix
-    ``!room``/``@user``, XMPP JIDs. Anything else goes to channel-directory resolution.
-    """
+    """(chat_id, thread_id, explicit): platform parser first, then in order E.164 phone
+    numbers (keeping the '+'), bare numeric ids, Matrix ``!room``/``@user``, XMPP JIDs.
+    Anything else goes to channel-directory resolution."""
     parser = _PLATFORM_PARSERS.get(platform_name)
     if parser is not None:
         parsed = parser(target_ref)
@@ -178,18 +169,13 @@ def resolve_send_target(
 ) -> tuple[str | None, str | None, str | None]:
     """Resolve one send target the same way for every caller (model tool, CLI, cron).
 
-    Channel-directory IDs are trusted. Plugin platforms must explicitly parse native
-    target syntax; for the model-facing send tool (the default) an unresolvable target
-    is an error the model can read and pick a listed target instead.
-
-    ``pass_unresolved_references=True`` is for callers with no model in the loop (cron
-    delivering a stored job's output, react/unreact on platform-native message ids): an
-    unresolvable target on a built-in platform, or on a plugin platform that declares no
-    parser, is handed to the adapter exactly as written and the adapter decides. A plugin
-    platform that DOES declare a parser stays strict for every caller.
-
-    The optional validator has the final say over parser-normalized, directory-resolved,
-    and passed-through IDs alike.
+    Channel-directory IDs are trusted; plugin parsers are the authority on native syntax.
+    By default an unresolvable target is an error the model can read and pick a listed
+    target instead. ``pass_unresolved_references=True`` (no model in the loop: cron,
+    react/unreact on native message ids) hands an unresolvable target on a built-in
+    platform, or a plugin platform declaring no parser, to the adapter exactly as written;
+    a plugin platform WITH a parser stays strict for every caller. The optional validator
+    has the final say over parser-normalized, directory-resolved and passed-through IDs.
     """
     from gateway.config import Platform
     from gateway.platform_registry import platform_registry

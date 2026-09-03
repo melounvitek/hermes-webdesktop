@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Let the agent react to a message with an emoji in the Hermes desktop app.
-
-The conversational counterpart to the user's tapback: same reaction store, same
-one-per-author semantics, written with ``author="agent"``. Lives in the ``desktop_ui``
-toolset so it costs nothing on other surfaces (platform adapters expose reactions via
-``send_message(action="react")``). Defaults to the message that triggered this turn so
-the model needn't thread row ids through tool calls, and emits ``message.reaction`` so
-the renderer paints it without a resume.
-"""
+"""Agent emoji reaction in the Hermes desktop app: the counterpart to the user's tapback
+(same store, one-per-author, ``author="agent"``). Lives in the ``desktop_ui`` toolset so it
+costs nothing elsewhere (adapters expose reactions via ``send_message(action="react")``);
+defaults to the triggering message and emits ``message.reaction`` for live painting."""
 
 import json
 
@@ -30,9 +25,8 @@ def _react(emoji: str, message_row_id, messages_back, *, db, session_key: str) -
     row_id = message_row_id
     target_role = "user"
     if row_id is None:
-        # Default target: the latest user message. `messages_back` steps to earlier user
-        # turns (1 = the one before) — ids aren't visible to the model and quoting text is
-        # ambiguous, but "two messages ago" is how a person thinks.
+        # Default: the latest user message; `messages_back` steps to earlier user turns
+        # (ids aren't visible to the model; "two messages ago" is how a person thinks).
         back = max(0, int(messages_back or 0))
         row_id = db.latest_message_row_id(session_key, role="user", offset=back)
         if row_id is None:
@@ -48,9 +42,8 @@ def _react(emoji: str, message_row_id, messages_back, *, db, session_key: str) -
     if reactions is None:
         return tool_error(f"Message {row_id} is not part of this conversation.")
 
-    # Paint it live. A missing bridge (non-desktop surface) is not an error — the reaction
-    # is persisted and shows on next load. `role` lets the renderer match a live message
-    # that doesn't know its durable row id yet (learned on resume).
+    # Paint it live; a missing bridge (non-desktop) is not an error — the reaction is
+    # persisted. `role` lets the renderer match a live message without a durable row id.
     try:
         desktop_ui.emit(
             "message.reaction", {"row_id": int(row_id), "reactions": reactions, "role": target_role})
