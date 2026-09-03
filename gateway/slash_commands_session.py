@@ -140,15 +140,13 @@ class GatewaySessionCommandsMixin:
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "Agent resource cleanup for session %s exceeded %ss during "
-                "/new reset; proceeding with reset (the worker thread is left "
-                "to finish on its own). (#35994)",
+                "Agent resource cleanup for session %s exceeded %ss during /new reset; proceeding with "
+                "reset (the worker thread is left to finish on its own). (#35994)",
                 session_key, _RESET_CLEANUP_TIMEOUT_S,
             )
         except Exception as cleanup_exc:
             logger.warning(
-                "Agent resource cleanup for session %s failed during /new "
-                "reset: %s (#35994)",
+                "Agent resource cleanup for session %s failed during /new reset: %s (#35994)",
                 session_key, cleanup_exc,
             )
 
@@ -483,7 +481,7 @@ class GatewaySessionCommandsMixin:
         if raw_args:
             try:
                 n = max(1, int(raw_args.split()[0]))
-            except (ValueError, IndexError):
+            except ValueError:
                 return t("gateway.undo.invalid_count", arg=raw_args.split()[0])
         session_entry = await self.async_session_store.get_or_create_session(source)
         result = await self.async_session_store.rewind_session(session_entry.session_id, n)
@@ -496,10 +494,7 @@ class GatewaySessionCommandsMixin:
             logger.debug("undo: cached-agent eviction skipped: %s", e)
         target_text = result["target_text"]
         preview = target_text[:200] + "..." if len(target_text) > 200 else target_text
-        return t(
-            "gateway.undo.removed", turns=result["turns_undone"], count=result["rewound_count"],
-            preview=preview,
-        )
+        return t("gateway.undo.removed", turns=result["turns_undone"], count=result["rewound_count"], preview=preview)
 
     # --------------------------------------------------------------------- /compress
 
@@ -522,10 +517,9 @@ class GatewaySessionCommandsMixin:
         agent = self._cached_agent_for(session_key)
         if agent is None or agent is _AGENT_PENDING_SENTINEL or getattr(agent, "_codex_session", None) is None:
             return (
-                "🗜️ Nothing to compact: this session runs on the Codex "
-                "app-server runtime, whose context lives in a Codex-owned "
-                "thread that only exists while the agent is active. Send a "
-                "message first, then /compress — or /reset to start fresh."
+                "🗜️ Nothing to compact: this session runs on the Codex app-server runtime, whose "
+                "context lives in a Codex-owned thread that only exists while the agent is active. "
+                "Send a message first, then /compress — or /reset to start fresh."
             )
         compressor = getattr(agent, "context_compressor", None)
         count_before = getattr(compressor, "compression_count", 0)
@@ -535,14 +529,12 @@ class GatewaySessionCommandsMixin:
             return t("gateway.compress.failed", error=exc)
         if getattr(compressor, "compression_count", 0) > count_before:
             return (
-                "🗜️ Codex app-server thread compacted (thread/compact). "
-                "The transcript mirror is unchanged by design — the "
-                "app-server now carries the compacted context."
+                "🗜️ Codex app-server thread compacted (thread/compact). The transcript mirror is "
+                "unchanged by design — the app-server now carries the compacted context."
             )
         return (
-            "⚠️ Codex app-server compaction did not complete — the thread "
-            "is unchanged. Check the app-server logs, retry /compress, or "
-            "/reset for a clean session."
+            "⚠️ Codex app-server compaction did not complete — the thread is unchanged. Check the "
+            "app-server logs, retry /compress, or /reset for a clean session."
         )
 
     async def _handle_compress_command_inner(self, event: MessageEvent) -> str:
@@ -669,12 +661,9 @@ class GatewaySessionCommandsMixin:
                 session_row = await get_session(session_id)
             except Exception as exc:
                 logger.warning(
-                    "Manual compression could not restore the system prompt "
-                    "for session %s: %s. Preserving an empty prompt so the "
-                    "live turn rebuilds it with its configured providers.",
-                    session_id,
-                    exc,
-                    exc_info=True,
+                    "Manual compression could not restore the system prompt for session %s: %s. "
+                    "Preserving an empty prompt so the live turn rebuilds it with its configured "
+                    "providers.", session_id, exc, exc_info=True,
                 )
 
         # compression.checkpoint_required needs the memory provider loaded so _compress_context()
@@ -718,10 +707,8 @@ class GatewaySessionCommandsMixin:
             )
         elif not getattr(tmp_agent, "_last_compaction_in_place", False):
             logger.warning(
-                "Manual /compress: session rotation did not occur "
-                "(session_id unchanged) and in-place mode is off — "
-                "preserving original transcript instead of overwriting "
-                "it (#44794)."
+                "Manual /compress: session rotation did not occur (session_id unchanged) and in-place "
+                "mode is off — preserving original transcript instead of overwriting it (#44794)."
             )
         await self.async_session_store.update_session(session_entry.session_key, last_prompt_tokens=0)
 
@@ -1069,10 +1056,7 @@ class GatewaySessionCommandsMixin:
         cross_origin = include_all and self._resume_caller_is_admin(source)
         scope_notice = None
         if include_all and not cross_origin:
-            scope_notice = (
-                "_Note: `all` (cross-chat listing) requires a configured admin; "
-                "showing this chat's sessions only._"
-            )
+            scope_notice = "_Note: `all` (cross-chat listing) requires a configured admin; showing this chat's sessions only._"
         current_entry = await self.async_session_store.get_or_create_session(source)
         rows = await asyncio.to_thread(
             query_session_listing,
@@ -1095,9 +1079,7 @@ class GatewaySessionCommandsMixin:
             title = f"Sessions matching “{search_query}”"
         else:
             title = "Sessions" if include_unnamed else "Named Sessions"
-        return format_gateway_session_listing(
-            rows, include_source=cross_origin, title=title, notice=scope_notice,
-        )
+        return format_gateway_session_listing(rows, include_source=cross_origin, title=title, notice=scope_notice)
 
     # ----------------------------------------------------------------------- /branch
 

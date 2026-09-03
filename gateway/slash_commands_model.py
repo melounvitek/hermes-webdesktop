@@ -259,20 +259,16 @@ class GatewayModelCommandsMixin:
             f"Adjust your self-identification accordingly.]"
         )
         self._session_model_overrides[ctx.session_key] = {
-            "model": result.new_model,
-            "provider": result.target_provider,
-            "api_key": result.api_key,
-            "base_url": result.base_url,
-            "api_mode": result.api_mode,
+            "model": result.new_model, "provider": result.target_provider, "api_key": result.api_key,
+            "base_url": result.base_url, "api_mode": result.api_mode,
             "request_overrides": dict(result.request_overrides or {}),
             "capabilities": dict(result.runtime_capabilities or {}),
         }
         if one_turn:
             if not hasattr(self, "_pending_one_turn_model_restores"):
                 self._pending_one_turn_model_restores = {}
-            self._pending_one_turn_model_restores[ctx.session_key] = (
-                ctx.restore_snapshot or {"had_override": False, "override": None}
-            )
+            snapshot = ctx.restore_snapshot or {"had_override": False, "override": None}
+            self._pending_one_turn_model_restores[ctx.session_key] = snapshot
         elif not picker and hasattr(self, "_pending_one_turn_model_restores"):
             self._pending_one_turn_model_restores.pop(ctx.session_key, None)
         # Non-secret write-through so the override survives a restart (api_key/api_mode are
@@ -323,14 +319,14 @@ class GatewayModelCommandsMixin:
         )
         if ctx_len:
             lines.append(t("gateway.model.context_label", tokens=f"{ctx_len:,}"))
+        if mi and mi.max_output:
+            lines.append(t("gateway.model.max_output_label", tokens=f"{mi.max_output:,}"))
         if mi:
-            if mi.max_output:
-                lines.append(t("gateway.model.max_output_label", tokens=f"{mi.max_output:,}"))
             lines.append(t("gateway.model.capabilities_label", capabilities=mi.format_capabilities()))
-        if not picker and (
-            (base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower())
-            or result.api_mode == "anthropic_messages"
-        ):
+        openrouter_claude = (
+            base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower()
+        )
+        if not picker and (openrouter_claude or result.api_mode == "anthropic_messages"):
             lines.append(t("gateway.model.prompt_caching_enabled"))
         if result.warning_message:
             lines.append(t("gateway.model.warning_prefix", warning=result.warning_message))
@@ -440,24 +436,17 @@ class GatewayModelCommandsMixin:
 
         async def _on_cost_confirm(choice: str) -> str:
             if choice == "cancel":
-                return (
-                    f"🟡 Model switch cancelled. Current model unchanged "
-                    f"({ctx.current_model or 'unknown'})."
-                )
+                return f"🟡 Model switch cancelled. Current model unchanged ({ctx.current_model or 'unknown'})."
             # "once" and "always" both proceed — selection guards have no persistent opt-out.
             return await self._commit_model_switch(result, ctx, source=ctx.source)
 
         _p = self._typed_command_prefix_for(event.source.platform)
+        message = (
+            f"⚠️ **{warning.title}**\n\n{warning.message}\n\n"
+            f"_Text fallback: reply `{_p}approve` to switch or `{_p}cancel` to keep the current model._"
+        )
         return True, await self._request_slash_confirm(
-            event=event,
-            command="model",
-            title=warning.title,
-            message=(
-                f"⚠️ **{warning.title}**\n\n{warning.message}\n\n"
-                f"_Text fallback: reply `{_p}approve` to switch or `{_p}cancel` to keep "
-                "the current model._"
-            ),
-            handler=_on_cost_confirm,
+            event=event, command="model", title=warning.title, message=message, handler=_on_cost_confirm,
         )
 
     async def _handle_model_command(self, event: MessageEvent) -> Optional[str]:
