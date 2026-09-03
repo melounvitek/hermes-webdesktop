@@ -1830,47 +1830,19 @@ def _reload_runtime_env_preserving_config_authority() -> None:
 
 
 def _bridge_max_turns_from_config(home: "Path") -> None:
-    """Bridge config.yaml agent.max_turns into HERMES_MAX_ITERATIONS (a global)."""
+    """Re-bridge config.yaml agent.max_turns (+ sessions.*) into env on the per-turn reload.
+
+    Managed overlay applies here too, else a managed max_turns would revert after one turn.
+    """
     config_path = home / 'config.yaml'
     if not config_path.exists():
         return
     try:
-        from hermes_cli.config import _expand_env_vars, read_user_config_raw
-        # Presence-sensitive env bridge: raw read is deliberate (only keys the
-        # user actually wrote get bridged); overlay + expansion applied below.
-        cfg = read_user_config_raw(config_path)
-        cfg = _expand_env_vars(cfg)
-        if not isinstance(cfg, dict):
-            cfg = {}
-        # Managed scope: the per-turn reload re-bridges config→env, so without the overlay a managed
-        # agent.max_turns/timezone/redact_secrets would revert to the user's value after one turn.
-        try:
-            from hermes_cli import managed_scope
-            cfg = managed_scope.apply_managed_overlay(cfg)
-        except Exception:
-            pass
+        cfg = _load_bridge_config(config_path)
     except Exception:
         return
-
-    agent_cfg = cfg.get("agent", {})
-    if isinstance(agent_cfg, dict) and "max_turns" in agent_cfg:
-        raw = agent_cfg["max_turns"]
-        # Preserve the raw spelling ("none", "unlimited", "120") so resolve_turn_limit() in
-        # _current_max_iterations can interpret it. Skip Python None (`null` / bare `key:`):
-        # str(None) -> "None" would map to the unlimited sentinel instead of "absent = default".
-        if raw is not None:
-            os.environ["HERMES_MAX_ITERATIONS"] = str(raw)
-        elif "HERMES_MAX_ITERATIONS" in os.environ:
-            # Clear stale bridge so downstream resolver applies its default.
-            del os.environ["HERMES_MAX_ITERATIONS"]
-    # config-authoritative knobs for the session-search index (config.yaml
-    # sessions.* wins over stale env; env stays the cross-process carrier).
-    sessions_cfg = cfg.get("sessions", {})
-    if isinstance(sessions_cfg, dict):
-        if "cjk_fts" in sessions_cfg:
-            os.environ["HERMES_CJK_FTS"] = str(sessions_cfg["cjk_fts"])
-        if "search_slow_ms" in sessions_cfg:
-            os.environ["HERMES_SEARCH_SLOW_MS"] = str(sessions_cfg["search_slow_ms"])
+    _bridge_max_turns_to_env(cfg.get("agent", {}))
+    _bridge_section_to_env(cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
 
 
 def _current_max_iterations() -> int:
@@ -2166,226 +2138,213 @@ os.environ["HERMES_TURN_LEASE_TIMEOUT"] = str(
 )
 
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
-# config.yaml is authoritative for terminal settings — overrides .env.
+# config.yaml is authoritative and unconditionally wins over .env for these keys; a `not in
+# os.environ` guard would let stale .env entries (an old HERMES_MAX_ITERATIONS) shadow config.
+_AGENT_ENV_BRIDGE = {
+    "gateway_timeout": "HERMES_AGENT_TIMEOUT",
+    "gateway_turn_lease_timeout": "HERMES_TURN_LEASE_TIMEOUT",
+    "gateway_timeout_warning": "HERMES_AGENT_TIMEOUT_WARNING",
+    "gateway_notify_interval": "HERMES_AGENT_NOTIFY_INTERVAL",
+    "session_stall_timeout": "HERMES_SESSION_STALL_TIMEOUT",
+    # Internal bridge only — config.yaml (agent.reconnect_attention_after) is the documented setting.
+    "reconnect_attention_after": "HERMES_RECONNECT_ATTENTION_AFTER_SECONDS",
+    "restart_drain_timeout": "HERMES_RESTART_DRAIN_TIMEOUT",
+    "cron_drain_timeout": "HERMES_CRON_DRAIN_TIMEOUT",
+    "gateway_auto_continue_freshness": "HERMES_AUTO_CONTINUE_FRESHNESS",
+    "gateway_startup_restore_drain_timeout": "HERMES_STARTUP_RESTORE_DRAIN_TIMEOUT",
+    "gateway_startup_warmup_timeout": "HERMES_STARTUP_WARMUP_TIMEOUT",
+}
+# config-authoritative knobs for the session-search index (env stays the cross-process carrier).
+_SESSIONS_ENV_BRIDGE = {"cjk_fts": "HERMES_CJK_FTS", "search_slow_ms": "HERMES_SEARCH_SLOW_MS"}
+_DISPLAY_ENV_BRIDGE = {
+    "busy_input_mode": "HERMES_GATEWAY_BUSY_INPUT_MODE",
+    "busy_text_mode": "HERMES_GATEWAY_BUSY_TEXT_MODE",
+    "busy_ack_enabled": "HERMES_GATEWAY_BUSY_ACK_ENABLED",
+}
+
+
+def _bridge_section_to_env(section: Any, mapping: Dict[str, str]) -> None:
+    """Export every present ``mapping`` key of a config section as ``str(value)``."""
+    if isinstance(section, dict):
+        for cfg_key, env_var in mapping.items():
+            if cfg_key in section:
+                os.environ[env_var] = str(section[cfg_key])
+
+
+def _bridge_max_turns_to_env(agent_cfg: Any) -> None:
+    """Bridge ``agent.max_turns`` preserving its raw spelling ("none", "unlimited", "120").
+
+    ``resolve_turn_limit`` (via ``_current_max_iterations``) interprets it. Python None (`null` /
+    bare `key:`) clears a stale bridge instead: str(None) -> "None" would map to the unlimited
+    sentinel rather than "absent = default".
+    """
+    if not isinstance(agent_cfg, dict) or "max_turns" not in agent_cfg:
+        return
+    raw = agent_cfg["max_turns"]
+    if raw is not None:
+        os.environ["HERMES_MAX_ITERATIONS"] = str(raw)
+    elif "HERMES_MAX_ITERATIONS" in os.environ:
+        del os.environ["HERMES_MAX_ITERATIONS"]
+
+
+def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
+    """Bridge nested ``terminal.*`` config to TERMINAL_* env vars (config.yaml overrides .env here)."""
+    _terminal_backend = str(
+        _terminal_cfg.get("backend") or os.environ.get("TERMINAL_ENV") or ""
+    ).strip().lower()
+    _terminal_env_map = {
+        "backend": "TERMINAL_ENV",
+        "degraded_mode": "TERMINAL_DEGRADED_MODE",
+        "cwd": "TERMINAL_CWD",
+        "timeout": "TERMINAL_TIMEOUT",
+        "home_mode": "TERMINAL_HOME_MODE",
+        "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
+        "docker_image": "TERMINAL_DOCKER_IMAGE",
+        "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
+        "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
+        "modal_image": "TERMINAL_MODAL_IMAGE",
+        "daytona_image": "TERMINAL_DAYTONA_IMAGE",
+        "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
+        "ssh_host": "TERMINAL_SSH_HOST",
+        "ssh_user": "TERMINAL_SSH_USER",
+        "ssh_port": "TERMINAL_SSH_PORT",
+        "ssh_key": "TERMINAL_SSH_KEY",
+        "container_cpu": "TERMINAL_CONTAINER_CPU",
+        "container_memory": "TERMINAL_CONTAINER_MEMORY",
+        "container_disk": "TERMINAL_CONTAINER_DISK",
+        "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
+        "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+        "docker_env": "TERMINAL_DOCKER_ENV",
+        "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
+        "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
+        "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
+        "docker_network": "TERMINAL_DOCKER_NETWORK",
+        "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
+        "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
+        "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
+        "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
+        "sandbox_dir": "TERMINAL_SANDBOX_DIR",
+        "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
+    }
+    for _cfg_key, _env_var in _terminal_env_map.items():
+        if _cfg_key not in _terminal_cfg:
+            continue
+        _val = _terminal_cfg[_cfg_key]
+        if _cfg_key == "cwd":
+            # Placeholders (".", "auto", "cwd") resolve to Path.home() later; only explicit paths bridge.
+            if str(_val) in {".", "auto", "cwd"}:
+                continue
+            # Expand "~" for local/container cwd so Popen never gets a literal "~/" (the kernel rejects
+            # it); SSH cwd is interpreted by the remote shell, so keep "~" there. Predicate shared with
+            # terminal_tool so the sites can't drift.
+            if isinstance(_val, str) and not _is_ssh_remote_tilde_cwd(_terminal_backend, _val.strip()):
+                _val = os.path.expanduser(_val)
+        os.environ[_env_var] = json.dumps(_val) if isinstance(_val, (list, dict)) else str(_val)
+
+
+def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
+    """Bridge auxiliary model/endpoint overrides (vision, approval, plugin-registered tasks).
+
+    Compression config is read from config.yaml directly by run_agent.py/auxiliary_client.py.
+    """
+    _aux_bridged_keys = {"vision", "approval"}
+    try:
+        from hermes_cli.plugins import get_plugin_auxiliary_tasks
+        for _entry in get_plugin_auxiliary_tasks():
+            _aux_bridged_keys.add(_entry["key"])
+    except Exception:
+        pass  # plugin discovery failure must not break startup; built-in bridging stays intact
+    for _task_key in _aux_bridged_keys:
+        _task_cfg = _auxiliary_cfg.get(_task_key, {})
+        if not isinstance(_task_cfg, dict):
+            continue
+        _upper = _task_key.upper()
+        _prov = str(_task_cfg.get("provider", "")).strip()
+        if _prov and _prov != "auto":
+            os.environ[f"AUXILIARY_{_upper}_PROVIDER"] = _prov
+        for _field, _suffix in (("model", "MODEL"), ("base_url", "BASE_URL"), ("api_key", "API_KEY")):
+            _value = str(_task_cfg.get(_field, "")).strip()
+            if _value:
+                os.environ[f"AUXILIARY_{_upper}_{_suffix}"] = _value
+
+
+def _bridge_config_to_env(_cfg: dict) -> None:
+    """Export config.yaml settings to the env vars os.getenv() consumers read."""
+    # Top-level simple values (fallback only — don't override .env)
+    for _key, _val in _cfg.items():
+        if isinstance(_val, (str, int, float, bool)) and _key not in os.environ:
+            os.environ[_key] = str(_val)
+    _terminal_cfg = _cfg.get("terminal", {})
+    if _terminal_cfg and isinstance(_terminal_cfg, dict):
+        _bridge_terminal_config_to_env(_terminal_cfg)
+    _auxiliary_cfg = _cfg.get("auxiliary", {})
+    if _auxiliary_cfg and isinstance(_auxiliary_cfg, dict):
+        _bridge_auxiliary_config_to_env(_auxiliary_cfg)
+    _agent_cfg = _cfg.get("agent", {})
+    _bridge_max_turns_to_env(_agent_cfg)
+    _bridge_section_to_env(_agent_cfg, _AGENT_ENV_BRIDGE)
+    _bridge_section_to_env(_cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
+    _display_cfg = _cfg.get("display", {})
+    _bridge_section_to_env(_display_cfg, _DISPLAY_ENV_BRIDGE)
+    if (
+        isinstance(_display_cfg, dict)
+        # Documented as a service-manager override, so preserve it when already set; the other
+        # display bridges stay config-authoritative for backwards compatibility.
+        and "busy_steer_ack_enabled" in _display_cfg
+        and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ
+    ):
+        os.environ["HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED"] = str(_display_cfg["busy_steer_ack_enabled"])
+    _tz_cfg = _cfg.get("timezone", "")
+    if _tz_cfg and isinstance(_tz_cfg, str):
+        os.environ["HERMES_TIMEZONE"] = _tz_cfg.strip()
+    _security_cfg = _cfg.get("security", {})
+    if isinstance(_security_cfg, dict) and _security_cfg.get("redact_secrets") is not None:
+        os.environ["HERMES_REDACT_SECRETS"] = str(_security_cfg["redact_secrets"]).lower()
+    # Media settings (delivery allowlist, recency trust, strict mode) use the shared bridge so
+    # standalone entrypoints (`hermes cron run`, gateway-less ticks) apply the SAME policy.
+    _gateway_cfg = _cfg.get("gateway", {})
+    if isinstance(_gateway_cfg, dict):
+        from gateway.media_policy import apply_media_policy_env
+
+        apply_media_policy_env(_cfg)
+        _trust_recent_seconds = _gateway_cfg.get("trust_recent_files_seconds")
+        if _trust_recent_seconds is not None:
+            os.environ["HERMES_MEDIA_TRUST_RECENT_SECONDS"] = str(_trust_recent_seconds)
+        # platform_connect_timeout is an escape hatch, unlike the bridges above: env WINS if already set.
+        if (
+            "platform_connect_timeout" in _gateway_cfg
+            and not os.environ.get("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+        ):
+            os.environ["HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT"] = str(_gateway_cfg["platform_connect_timeout"])
+
+
+def _load_bridge_config(config_path: Path) -> dict:
+    """Raw config read for the presence-sensitive env bridge, with the managed overlay applied.
+
+    Raw (not defaults-merged) is deliberate: only keys the user actually wrote may be bridged, else
+    all of DEFAULT_CONFIG would be exported. Managed values overlay BEFORE bridging so a pinned
+    timezone/redact_secrets/max_turns/terminal setting wins at the env layer too (fail-open).
+    """
+    from hermes_cli.config import _expand_env_vars, read_user_config_raw
+    cfg = _expand_env_vars(read_user_config_raw(config_path))
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        from hermes_cli import managed_scope
+        cfg = managed_scope.apply_managed_overlay(cfg)
+    except Exception:
+        pass
+    return cfg
+
+
 _config_path = _hermes_home / 'config.yaml'
+_cfg: dict = {}
 if _config_path.exists():
     try:
-        # Presence-sensitive env bridge: raw read is deliberate — only keys the user actually wrote
-        # may be bridged (a defaults merge would export all DEFAULT_CONFIG); overlay applied below.
-        from hermes_cli.config import _expand_env_vars, read_user_config_raw
-        _cfg = read_user_config_raw(_config_path)
-        # Expand ${ENV_VAR} references before bridging to env vars.
-        _cfg = _expand_env_vars(_cfg)
-        if not isinstance(_cfg, dict):
-            _cfg = {}
-        # Managed scope: overlay administrator-pinned values BEFORE bridging so a managed timezone/
-        # redact_secrets/max_turns/terminal setting wins at the env layer too; fail-open via helper.
-        try:
-            from hermes_cli import managed_scope
-            _cfg = managed_scope.apply_managed_overlay(_cfg)
-        except Exception:
-            pass
-        # Top-level simple values (fallback only — don't override .env)
-        for _key, _val in _cfg.items():
-            if isinstance(_val, (str, int, float, bool)) and _key not in os.environ:
-                os.environ[_key] = str(_val)
-        # Terminal config is nested — bridge to TERMINAL_* env vars.
-        # config.yaml overrides .env for these since it's the documented config path.
-        _terminal_cfg = _cfg.get("terminal", {})
-        if _terminal_cfg and isinstance(_terminal_cfg, dict):
-            _terminal_backend = str(
-                _terminal_cfg.get("backend") or os.environ.get("TERMINAL_ENV") or ""
-            ).strip().lower()
-            _terminal_env_map = {
-                "backend": "TERMINAL_ENV",
-                "degraded_mode": "TERMINAL_DEGRADED_MODE",
-                "cwd": "TERMINAL_CWD",
-                "timeout": "TERMINAL_TIMEOUT",
-                "home_mode": "TERMINAL_HOME_MODE",
-                "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
-                "docker_image": "TERMINAL_DOCKER_IMAGE",
-                "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
-                "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
-                "modal_image": "TERMINAL_MODAL_IMAGE",
-                "daytona_image": "TERMINAL_DAYTONA_IMAGE",
-                "vercel_runtime": "TERMINAL_VERCEL_RUNTIME",
-                "ssh_host": "TERMINAL_SSH_HOST",
-                "ssh_user": "TERMINAL_SSH_USER",
-                "ssh_port": "TERMINAL_SSH_PORT",
-                "ssh_key": "TERMINAL_SSH_KEY",
-                "container_cpu": "TERMINAL_CONTAINER_CPU",
-                "container_memory": "TERMINAL_CONTAINER_MEMORY",
-                "container_disk": "TERMINAL_CONTAINER_DISK",
-                "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
-                "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
-                "docker_env": "TERMINAL_DOCKER_ENV",
-                "docker_extra_args": "TERMINAL_DOCKER_EXTRA_ARGS",
-                "docker_shm_size": "TERMINAL_DOCKER_SHM_SIZE",
-                "docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
-                "docker_network": "TERMINAL_DOCKER_NETWORK",
-                "docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
-                "docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
-                "docker_shared_container_key": "TERMINAL_DOCKER_SHARED_CONTAINER_KEY",
-                "docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
-                "sandbox_dir": "TERMINAL_SANDBOX_DIR",
-                "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
-            }
-            for _cfg_key, _env_var in _terminal_env_map.items():
-                if _cfg_key in _terminal_cfg:
-                    _val = _terminal_cfg[_cfg_key]
-                    # Skip cwd placeholders (".", "auto", "cwd") — the gateway resolves them to
-                    # Path.home() later; only bridge explicit absolute paths from config.yaml.
-                    if _cfg_key == "cwd" and str(_val) in {".", "auto", "cwd"}:
-                        continue
-                    # Expand "~" in local/container cwd so subprocess.Popen never gets a literal
-                    # "~/" (the kernel rejects it); SSH cwd is interpreted by the remote shell, so
-                    # keep "~" there. Predicate shared with terminal_tool so the sites can't drift.
-                    if _cfg_key == "cwd" and isinstance(_val, str):
-                        if not _is_ssh_remote_tilde_cwd(_terminal_backend, _val.strip()):
-                            _val = os.path.expanduser(_val)
-                    if isinstance(_val, (list, dict)):
-                        os.environ[_env_var] = json.dumps(_val)
-                    else:
-                        os.environ[_env_var] = str(_val)
-        # Compression config is read from config.yaml by run_agent.py/auxiliary_client.py (no env
-        # bridge). Auxiliary model/endpoint overrides: vision, approval, plugin-registered tasks.
-        _auxiliary_cfg = _cfg.get("auxiliary", {})
-        if _auxiliary_cfg and isinstance(_auxiliary_cfg, dict):
-            # Canonical built-in bridged set; plugin tasks are added below via the aux registry.
-            _aux_bridged_keys = {"vision", "approval"}
-            try:
-                from hermes_cli.plugins import get_plugin_auxiliary_tasks
-                for _entry in get_plugin_auxiliary_tasks():
-                    _aux_bridged_keys.add(_entry["key"])
-            except Exception:
-                # Plugin discovery failure must not break gateway startup;
-                # built-in bridging stays intact.
-                pass
-
-            for _task_key in _aux_bridged_keys:
-                _task_cfg = _auxiliary_cfg.get(_task_key, {})
-                if not isinstance(_task_cfg, dict):
-                    continue
-                _prov = str(_task_cfg.get("provider", "")).strip()
-                _model = str(_task_cfg.get("model", "")).strip()
-                _base_url = str(_task_cfg.get("base_url", "")).strip()
-                _api_key = str(_task_cfg.get("api_key", "")).strip()
-                _upper = _task_key.upper()
-                if _prov and _prov != "auto":
-                    os.environ[f"AUXILIARY_{_upper}_PROVIDER"] = _prov
-                if _model:
-                    os.environ[f"AUXILIARY_{_upper}_MODEL"] = _model
-                if _base_url:
-                    os.environ[f"AUXILIARY_{_upper}_BASE_URL"] = _base_url
-                if _api_key:
-                    os.environ[f"AUXILIARY_{_upper}_API_KEY"] = _api_key
-        # config.yaml is authoritative and unconditionally wins over .env; a `not in os.environ`
-        # guard would let stale .env entries (an old HERMES_MAX_ITERATIONS) shadow current config.
-        _agent_cfg = _cfg.get("agent", {})
-        if _agent_cfg and isinstance(_agent_cfg, dict):
-            if "max_turns" in _agent_cfg:
-                _raw_mt = _agent_cfg["max_turns"]
-                # Same None-guard as _bridge_max_turns_from_config: str(None)
-                # → "None" → resolve_turn_limit maps to unlimited, not default.
-                if _raw_mt is not None:
-                    os.environ["HERMES_MAX_ITERATIONS"] = str(_raw_mt)
-                elif "HERMES_MAX_ITERATIONS" in os.environ:
-                    del os.environ["HERMES_MAX_ITERATIONS"]
-            if "gateway_timeout" in _agent_cfg:
-                os.environ["HERMES_AGENT_TIMEOUT"] = str(_agent_cfg["gateway_timeout"])
-            if "gateway_turn_lease_timeout" in _agent_cfg:
-                os.environ["HERMES_TURN_LEASE_TIMEOUT"] = str(
-                    _agent_cfg["gateway_turn_lease_timeout"]
-                )
-            if "gateway_timeout_warning" in _agent_cfg:
-                os.environ["HERMES_AGENT_TIMEOUT_WARNING"] = str(_agent_cfg["gateway_timeout_warning"])
-            if "gateway_notify_interval" in _agent_cfg:
-                os.environ["HERMES_AGENT_NOTIFY_INTERVAL"] = str(_agent_cfg["gateway_notify_interval"])
-            if "session_stall_timeout" in _agent_cfg:
-                os.environ["HERMES_SESSION_STALL_TIMEOUT"] = str(
-                    _agent_cfg["session_stall_timeout"]
-                )
-            if "reconnect_attention_after" in _agent_cfg:
-                # Internal bridge only — config.yaml (agent.reconnect_attention_after)
-                # is the documented, user-facing setting.
-                os.environ["HERMES_RECONNECT_ATTENTION_AFTER_SECONDS"] = str(
-                    _agent_cfg["reconnect_attention_after"]
-                )
-            if "restart_drain_timeout" in _agent_cfg:
-                os.environ["HERMES_RESTART_DRAIN_TIMEOUT"] = str(_agent_cfg["restart_drain_timeout"])
-            if "cron_drain_timeout" in _agent_cfg:
-                os.environ["HERMES_CRON_DRAIN_TIMEOUT"] = str(_agent_cfg["cron_drain_timeout"])
-            if "gateway_auto_continue_freshness" in _agent_cfg:
-                os.environ["HERMES_AUTO_CONTINUE_FRESHNESS"] = str(
-                    _agent_cfg["gateway_auto_continue_freshness"]
-                )
-            if "gateway_startup_restore_drain_timeout" in _agent_cfg:
-                os.environ["HERMES_STARTUP_RESTORE_DRAIN_TIMEOUT"] = str(
-                    _agent_cfg["gateway_startup_restore_drain_timeout"]
-                )
-            if "gateway_startup_warmup_timeout" in _agent_cfg:
-                os.environ["HERMES_STARTUP_WARMUP_TIMEOUT"] = str(
-                    _agent_cfg["gateway_startup_warmup_timeout"]
-                )
-        # config-authoritative knobs for the session-search index; same
-        # bridge semantics as the agent settings above.
-        _sessions_cfg = _cfg.get("sessions", {})
-        if _sessions_cfg and isinstance(_sessions_cfg, dict):
-            if "cjk_fts" in _sessions_cfg:
-                os.environ["HERMES_CJK_FTS"] = str(_sessions_cfg["cjk_fts"])
-            if "search_slow_ms" in _sessions_cfg:
-                os.environ["HERMES_SEARCH_SLOW_MS"] = str(
-                    _sessions_cfg["search_slow_ms"]
-                )
-        _display_cfg = _cfg.get("display", {})
-        if _display_cfg and isinstance(_display_cfg, dict):
-            if "busy_input_mode" in _display_cfg:
-                os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
-            if "busy_text_mode" in _display_cfg:
-                os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
-            if "busy_ack_enabled" in _display_cfg:
-                os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
-            # Documented as a service-manager override, so preserve it when already set; other
-            # display bridges stay config-authoritative for backwards compatibility.
-            if (
-                "busy_steer_ack_enabled" in _display_cfg
-                and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ
-            ):
-                os.environ["HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED"] = str(
-                    _display_cfg["busy_steer_ack_enabled"]
-                )
-        # Timezone: bridge config.yaml → HERMES_TIMEZONE env var.
-        _tz_cfg = _cfg.get("timezone", "")
-        if _tz_cfg and isinstance(_tz_cfg, str):
-            os.environ["HERMES_TIMEZONE"] = _tz_cfg.strip()
-        # Security settings
-        _security_cfg = _cfg.get("security", {})
-        if isinstance(_security_cfg, dict):
-            _redact = _security_cfg.get("redact_secrets")
-            if _redact is not None:
-                os.environ["HERMES_REDACT_SECRETS"] = str(_redact).lower()
-        # Media settings (delivery allowlist, recency trust, strict mode) use the shared bridge so
-        # standalone entrypoints (`hermes cron run`, gateway-less ticks) apply the SAME policy.
-        _gateway_cfg = _cfg.get("gateway", {})
-        if isinstance(_gateway_cfg, dict):
-            from gateway.media_policy import apply_media_policy_env
-
-            apply_media_policy_env(_cfg)
-            _trust_recent_seconds = _gateway_cfg.get("trust_recent_files_seconds")
-            if _trust_recent_seconds is not None:
-                os.environ["HERMES_MEDIA_TRUST_RECENT_SECONDS"] = str(_trust_recent_seconds)
-            # Bridge gateway.platform_connect_timeout → the env var the connect path and Discord
-            # ready-wait read. Unlike the bridges above, it is an escape hatch: WINS if already set.
-            if (
-                "platform_connect_timeout" in _gateway_cfg
-                and not os.environ.get("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
-            ):
-                os.environ["HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT"] = str(
-                    _gateway_cfg["platform_connect_timeout"]
-                )
+        _cfg = _load_bridge_config(_config_path)
+        _bridge_config_to_env(_cfg)
     except Exception as _bridge_err:
-        # Surface the failure to stderr so operators see it even though `logger` is not yet
-        # initialized at module-import time (logger is defined further down this module).
+        # stderr, not logger: the module logger is not initialized yet at import time.
         print(
             f"  Warning: config.yaml → env bridge failed: "
             f"{type(_bridge_err).__name__}: {_bridge_err}",
@@ -2400,7 +2359,7 @@ if _config_path.exists():
 # Apply IPv4 preference if configured (before any HTTP clients are created).
 try:
     from hermes_constants import apply_ipv4_preference
-    _network_cfg = (_cfg if '_cfg' in dir() else {}).get("network", {})
+    _network_cfg = _cfg.get("network", {})
     if isinstance(_network_cfg, dict) and _network_cfg.get("force_ipv4"):
         apply_ipv4_preference(force=True)
 except Exception as _bootstrap_exc:
