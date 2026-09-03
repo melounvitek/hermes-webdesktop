@@ -393,16 +393,12 @@ def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int
     repairs = 0
     collapsed: List[Dict] = []
     for msg in messages:
+        prev = collapsed[-1] if collapsed and isinstance(collapsed[-1], dict) else None
         if (
-            collapsed
-            and isinstance(msg, dict)
-            and msg.get("role") == "assistant"
-            and isinstance(collapsed[-1], dict)
-            and collapsed[-1].get("role") == "assistant"
-            and not _is_codex_interim(msg)
-            and not _is_codex_interim(collapsed[-1])
+            prev is not None and prev.get("role") == "assistant"
+            and isinstance(msg, dict) and msg.get("role") == "assistant"
+            and not _is_codex_interim(msg) and not _is_codex_interim(prev)
         ):
-            prev = collapsed[-1]
             # A provisional verification candidate is superseded, not unioned.
             if prev.get("finish_reason") in {"verification_required", "verify_hook_continue"}:
                 collapsed[-1] = msg
@@ -419,28 +415,27 @@ def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
     alias group (call_id/id/response_item_id/composite) so a duplicate keyed on a sibling
     alias is not replayed to strict providers."""
     repairs = 0
-    known_tool_ids: Dict[str, int] = {}
+    known_tool_ids: Dict[str, int] = {}  # alias -> group id; reset by assistant/user turns
     matched_tool_groups: set = set()
     next_tool_group = 0
     filtered: List[Dict] = []
     for msg in messages:
         role = msg.get("role") if isinstance(msg, dict) else None
-        if role == "assistant":
+        if role in ("assistant", "user"):
+            # An assistant turn starts a new tool-result run; a user turn closes it (later tool
+            # messages are orphans).
             known_tool_ids = {}
             matched_tool_groups = set()
-            for tc in (msg.get("tool_calls") or []):
+            for tc in (msg.get("tool_calls") or []) if role == "assistant" else ():
                 variants = tool_call_id_variants(tc)
-                if not variants:
-                    continue
-                group_id = next_tool_group
-                next_tool_group += 1
-                for tc_id in variants:
-                    known_tool_ids.setdefault(tc_id, group_id)
+                if variants:
+                    for tc_id in variants:
+                        known_tool_ids.setdefault(tc_id, next_tool_group)
+                    next_tool_group += 1
         elif role == "tool":
             result_variants = tool_result_id_variants(msg.get("tool_call_id"))
             candidate_groups = {
-                known_tool_ids[tc_id]
-                for tc_id in result_variants
+                known_tool_ids[tc_id] for tc_id in result_variants
                 if tc_id in known_tool_ids and known_tool_ids[tc_id] not in matched_tool_groups
             }
             if result_variants and not candidate_groups:
@@ -448,10 +443,6 @@ def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
                 continue
             if candidate_groups:
                 matched_tool_groups.add(min(candidate_groups))
-        elif role == "user":
-            # A user turn closes the tool-result run; later tool messages are orphans.
-            known_tool_ids = {}
-            matched_tool_groups = set()
         filtered.append(msg)
     return filtered, repairs
 
@@ -462,32 +453,24 @@ def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]
     dropped; codex interims exempt."""
     repairs = 0
     pruned: List[Dict] = []
-    n = len(messages)
-    i = 0
-    while i < n:
-        msg = messages[i]
-        i += 1
+    for i, msg in enumerate(messages):
         if not (
-            isinstance(msg, dict)
-            and msg.get("role") == "assistant"
-            and msg.get("tool_calls")
+            isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls")
             and not _is_codex_interim(msg)
         ):
             pruned.append(msg)
             continue
         answered: set = set()
-        j = i
-        while j < n and isinstance(messages[j], dict) and messages[j].get("role") == "tool":
-            tid = (messages[j].get("tool_call_id") or "").strip()
+        for follower in messages[i + 1:]:
+            if not (isinstance(follower, dict) and follower.get("role") == "tool"):
+                break
+            tid = (follower.get("tool_call_id") or "").strip()
             if tid:
                 answered.update(tool_result_id_variants(tid))
-            j += 1
         kept_calls = [tc for tc in msg["tool_calls"] if tool_call_id_variants(tc) & answered]
         if len(kept_calls) != len(msg["tool_calls"]):
             repairs += 1
-            if not kept_calls and not _msg_has_payload(
-                {k: v for k, v in msg.items() if k != "tool_calls"}
-            ):
+            if not kept_calls and not _msg_has_payload({k: v for k, v in msg.items() if k != "tool_calls"}):
                 # Pruned calls were the only payload; drop the turn (empty assistant messages 400).
                 continue
             if kept_calls:
@@ -500,34 +483,29 @@ def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]
 
 def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
     """Pass 3: merge consecutive plain-text user messages (no user input lost)."""
+    from agent.context_compressor import split_user_originated_turn
+
     repairs = 0
     merged: List[Dict] = []
     for msg in messages:
+        prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
         if (
-            merged
-            and isinstance(msg, dict)
-            and msg.get("role") == "user"
-            and isinstance(merged[-1], dict)
-            and merged[-1].get("role") == "user"
-        ):
-            prev = merged[-1]
+            prev is not None and prev.get("role") == "user"
+            and isinstance(msg, dict) and msg.get("role") == "user"
             # A summary carrier followed by a new user row is a deliberate durable shape after
             # retry/rewind; never mutate the persisted carrier (sanitizers merge copies later).
-            from agent.context_compressor import split_user_originated_turn
-            handoff, _ = split_user_originated_turn(prev)
-            prev_content = prev.get("content", "")
-            new_content = msg.get("content", "")
+            and split_user_originated_turn(prev)[0] is None
             # Only merge plain-text content; leave multimodal (list) content alone.
-            if handoff is None and isinstance(prev_content, str) and isinstance(new_content, str):
-                prev["content"] = (
-                    (prev_content + "\n\n" + new_content)
-                    if prev_content and new_content
-                    else (prev_content or new_content)
-                )
-                # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
-                drop_stale_api_content(prev)
-                repairs += 1
-                continue
+            and isinstance(prev.get("content", ""), str) and isinstance(msg.get("content", ""), str)
+        ):
+            prev_content, new_content = prev.get("content", ""), msg.get("content", "")
+            prev["content"] = (
+                (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
+            )
+            # Merged content invalidates the api_content sidecar; drop it so replay cannot use stale bytes.
+            drop_stale_api_content(prev)
+            repairs += 1
+            continue
         merged.append(msg)
     return merged, repairs
 
@@ -581,17 +559,15 @@ def _flatten_content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict):
-                if str(part.get("type") or "").strip().lower() in {"thinking", "reasoning", "redacted_thinking"}:
-                    continue
-                text = part.get("text")
-                if isinstance(text, str) and text:
-                    parts.append(text)
-        return "".join(parts)
+        return "".join(
+            part if isinstance(part, str) else part.get("text")
+            for part in content
+            if isinstance(part, str) or (
+                isinstance(part, dict)
+                and str(part.get("type") or "").strip().lower() not in {"thinking", "reasoning", "redacted_thinking"}
+                and isinstance(part.get("text"), str) and part.get("text")
+            )
+        )
     if isinstance(content, dict):
         return str(content.get("text") or content.get("content") or "")
     return str(content)
@@ -614,12 +590,8 @@ def strip_think_blocks(agent, content: str) -> str:
     pairs, unterminated open tags at a block boundary (mirrors ``gateway/stream_consumer.py``),
     stray orphan tags (all case-insensitive variants), and standalone tool-call XML blocks some
     open models emit; ``<function>`` is boundary- and ``name=``-gated so prose mentions survive."""
-    if not content:
-        return ""
-    content = _flatten_content_text(content)
-    if not content:
-        return ""
-    for pattern in _THINK_STRIP_PATTERNS:
+    content = _flatten_content_text(content) if content else ""
+    for pattern in _THINK_STRIP_PATTERNS if content else ():
         content = pattern.sub('', content)
     return content
 
