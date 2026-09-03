@@ -110,9 +110,8 @@ def _validate_delete_target(skill_dir: Path) -> Optional[str]:
     """Last-line guard before rmtree: even a poisoned tree must never delete (1) a path outside
     every known skills root, (2) a skills root itself, (3) a symlink/junction (rmtree follows it)."""
     if _is_path_redirect(skill_dir):
-        return (
-            f"Refusing to delete '{skill_dir}': the skill directory is a "
-            f"symlink/junction. Remove the link target manually if intended.")
+        return (f"Refusing to delete '{skill_dir}': the skill directory is a "
+                f"symlink/junction. Remove the link target manually if intended.")
     try:
         skill_dir.resolve()
     except OSError as exc:
@@ -120,14 +119,11 @@ def _validate_delete_target(skill_dir: Path) -> Optional[str]:
     resolved, roots = _resolved_roots(skill_dir)
     for _root, root in roots:
         if resolved == root:
-            return (
-                f"Refusing to delete '{skill_dir}': resolves to the skills root "
-                f"itself, which would remove every installed skill.")
+            return (f"Refusing to delete '{skill_dir}': resolves to the skills root "
+                    f"itself, which would remove every installed skill.")
         if resolved.is_relative_to(root):
             return None
-    return (
-        f"Refusing to delete '{skill_dir}': path does not resolve inside any "
-        f"known skills root.")
+    return f"Refusing to delete '{skill_dir}': path does not resolve inside any known skills root."
 
 
 def _is_pinned(name: str, what: str) -> Optional[bool]:
