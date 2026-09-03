@@ -67,7 +67,6 @@ except ModuleNotFoundError:
 # visible console when this process is windowless (pythonw gateway + every
 # kanban worker).  No-op on POSIX; never raises.
 from hermes_cli._subprocess_compat import suppress_platform_ver_console
-from hermes_cli.cli_output import line_input
 
 suppress_platform_ver_console()
 
@@ -152,16 +151,19 @@ def _exit_after_oneshot(rc: object) -> None:
         logging.shutdown()
     except Exception:
         pass
-    if rc is None:
-        exit_code = 0
-    elif isinstance(rc, int):
-        exit_code = rc
-    else:
-        exit_code = 1
-    os._exit(exit_code)
+    os._exit(rc if isinstance(rc, int) else (0 if rc is None else 1))
 
 
 _oneshot_cleanup_done = False
+# (module, attr, kwargs, exceptions swallowed). MCP shutdown may raise
+# BaseException-derived errors from executor teardown; the rest are Exception.
+_ONESHOT_CLEANUPS = (
+    ("tools.terminal_tool", "cleanup_all_environments", {}, Exception),
+    ("tools.async_delegation", "interrupt_all", {"reason": "oneshot shutdown"}, Exception),
+    ("tools.browser_tool", "_emergency_cleanup_all_sessions", {}, Exception),
+    ("tools.mcp_tool", "shutdown_mcp_servers", {}, BaseException),
+    ("agent.auxiliary_client", "shutdown_cached_clients", {}, Exception),
+)
 
 
 def _cleanup_oneshot_runtime() -> None:
@@ -176,31 +178,13 @@ def _cleanup_oneshot_runtime() -> None:
     if _oneshot_cleanup_done:
         return
     _oneshot_cleanup_done = True
-    try:
-        from tools.terminal_tool import cleanup_all_environments
-        cleanup_all_environments()
-    except Exception:
-        pass
-    try:
-        from tools.async_delegation import interrupt_all
-        interrupt_all(reason="oneshot shutdown")
-    except Exception:
-        pass
-    try:
-        from tools.browser_tool import _emergency_cleanup_all_sessions
-        _emergency_cleanup_all_sessions()
-    except Exception:
-        pass
-    try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
-    except BaseException:
-        pass
-    try:
-        from agent.auxiliary_client import shutdown_cached_clients
-        shutdown_cached_clients()
-    except Exception:
-        pass
+    import importlib
+
+    for module, attr, kwargs, swallow in _ONESHOT_CLEANUPS:
+        try:
+            getattr(importlib.import_module(module), attr)(**kwargs)
+        except swallow:
+            pass
 
 
 def _run_and_exit_oneshot(
@@ -251,14 +235,6 @@ def _run_and_exit_oneshot(
         # during best-effort cleanup must not fall back into interpreter
         # finalization, where the reported native SIGABRT occurs.
         _exit_after_oneshot(rc)
-
-
-def _project_root_str_fast() -> str:
-    return _startup_fast.project_root_str()
-
-
-def _ensure_project_root_on_path_fast() -> None:
-    _startup_fast.ensure_project_root_on_path()
 
 
 def _set_process_title() -> None:
@@ -403,14 +379,10 @@ def _suppress_mouse_residue_early() -> None:
 _suppress_mouse_residue_early()
 
 
-def _try_ultrafast_version() -> bool:
-    """Handle ``hermes --version`` before config/logging imports."""
-    return _startup_fast.try_fast_version()
+_startup_fast.ensure_project_root_on_path()
 
-
-_ensure_project_root_on_path_fast()
-
-if _try_ultrafast_version():
+# ``hermes --version`` is answered before config/logging imports.
+if _startup_fast.try_fast_version():
     raise SystemExit(0)
 
 import argparse
@@ -500,9 +472,8 @@ def _require_tty(command_name: str) -> None:
         sys.exit(1)
 
 
-# Add project root to path
-PROJECT_ROOT = Path(_project_root_str_fast())
-_ensure_project_root_on_path_fast()
+PROJECT_ROOT = Path(_startup_fast.project_root_str())
+_startup_fast.ensure_project_root_on_path()
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +817,6 @@ from hermes_cli import __version__, __release_date__
 # (god-file decomposition Phase 2). Re-imported here so select_provider_and_model and
 # existing test monkeypatches (hermes_cli.main._model_flow_*) keep resolving unchanged.
 from hermes_cli.model_setup_flows import (
-    _prompt_auth_credentials_choice,
     _model_flow_openrouter,
     _model_flow_nous,
     _model_flow_openai_codex,
@@ -860,7 +830,6 @@ from hermes_cli.model_setup_flows import (
     _model_flow_copilot_acp,
     _model_flow_kimi,
     _model_flow_stepfun,
-    _model_flow_bedrock_api_key,
     _model_flow_bedrock,
     _model_flow_vertex,
     _model_flow_api_key_provider,
@@ -2495,20 +2464,6 @@ def select_provider_and_model(args=None):
         _clear_stale_openai_base_url()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Auxiliary model configuration
-#
-# Hermes uses lightweight "auxiliary" models for side tasks (vision analysis,
-# context compression, web extraction, session search, etc.). Each task has
-# its own provider+model pair in config.yaml under `auxiliary.<task>`.
-#
-# The UI lives behind "Configure auxiliary models..." at the bottom of the
-# `hermes model` provider picker. It does NOT re-run credential setup — it
-# only routes already-authenticated providers to specific aux tasks. Users
-# configure new providers through the normal `hermes model` flow first.
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 # Lazy re-exports (PEP 562 ``__getattr__`` below). Tests and downstream call
 # sites read ``hermes_cli.main.<name>`` for the model catalog and for the
 # sessions/update/dashboard command surface that was split out of this file.
@@ -2531,84 +2486,39 @@ _LAZY_COMMAND_EXPORTS = {
         "_scan_dashboard_processes",
     ),
     "hermes_cli.update_cmd": (
-        "_web_toolchain_roots",
-        "_web_build_toolchain_ready",
-        "_warn_incomplete_gateway_fleet_restart",
-        "_warn_gateway_restart_phase_aborted",
+        "_web_toolchain_roots", "_web_build_toolchain_ready",
+        "_warn_incomplete_gateway_fleet_restart", "_warn_gateway_restart_phase_aborted",
         "_surviving_gateway_pids_after_failed_restart",
-        "_service_unit_supports_graceful_sigusr1_restart",
-        "_restart_phase_failure_is_incomplete",
-        "_print_update_completion",
-        "_log_only_write",
-        "_for_each_systemd_gateway_unit",
-        "_print_curator_recent_run_notice",
-        "_ORPHAN_RESCUE_REFS_TO_KEEP",
-        "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS",
-        "_UPDATE_CRITICAL_FILES",
-        "_abort_dependency_sync_if_self_locked",
-        "_assess_parked_branch_switch",
-        "_atomic_replace_dir",
-        "_capture_active_lazy_features",
-        "_capture_active_tool_dependencies",
-        "_capture_head_sha",
-        "_classify_concurrent_instance",
-        "_cmd_update_check",
-        "_cmd_update_impl",
-        "_cold_start_windows_gateway_after_update",
-        "_defer_update_for_self_lock",
-        "_dependency_sync_would_rewrite",
-        "_detect_self_loaded_native_modules",
-        "_detect_venv_python_processes",
-        "_discard_lockfile_churn",
-        "_discard_stashed_changes",
-        "_ensure_acp_launcher",
-        "_ensure_uv_for_termux",
-        "_filter_non_gateway_concurrent_instances",
-        "_finish_dashboard_update_cleanup",
-        "_fleet_probe_expected_runtimes",
-        "_format_time_ago",
-        "_gateway_prompt",
-        "_get_origin_url",
-        "_handoff_reapable_backend_pids",
-        "_install_psutil_android_compat",
-        "_is_fork",
-        "_ledger_manual_serve_holders",
-        "_ledger_reapable_backend_pids",
-        "_leftover_pausable_gateway_pids",
-        "_npm_lockfile_changed",
-        "_npm_manifests_digest",
-        "_orphaned_desktop_backend_pids",
-        "_park_stashed_changes",
-        "_pause_windows_gateways_for_update",
-        "_print_parked_branch_kept_notice",
-        "_print_parked_branch_skip_warning",
-        "_prune_orphan_rescue_refs",
-        "_purge_stale_hermes_modules",
-        "_record_npm_lockfile_hash",
-        "_refresh_active_lazy_features",
-        "_refresh_active_memory_provider_dependencies",
-        "_refresh_bootstrap_cache_scripts",
-        "_refresh_windows_gateway_launchers",
-        "_relaunch_stopped_serves",
-        "_reload_updated_runtime_modules",
-        "_restore_active_tool_dependencies",
-        "_restore_stashed_changes",
-        "_resume_windows_gateways_after_update",
-        "_run_logged_subprocess",
-        "_run_pre_update_backup",
-        "_stash_local_changes_if_needed",
-        "_stop_process_trees",
-        "_sync_with_upstream_if_needed",
-        "_update_node_dependencies",
-        "_update_via_zip",
-        "_upgrade_pip_before_lazy_refresh",
-        "_validate_critical_files_syntax",
-        "_validate_critical_modules_import",
-        "_venv_launcher_ancestors",
-        "_wait_for_windows_update_gateway_exit",
-        "_warn_orphaned_update_autostashes",
-        "_warn_pending_fleet_restart_on_startup",
-        "_write_marker_file",
+        "_service_unit_supports_graceful_sigusr1_restart", "_restart_phase_failure_is_incomplete",
+        "_print_update_completion", "_log_only_write", "_for_each_systemd_gateway_unit",
+        "_print_curator_recent_run_notice", "_ORPHAN_RESCUE_REFS_TO_KEEP",
+        "_ORPHAN_RESCUE_REF_MAX_AGE_DAYS", "_UPDATE_CRITICAL_FILES",
+        "_abort_dependency_sync_if_self_locked", "_assess_parked_branch_switch",
+        "_atomic_replace_dir", "_capture_active_lazy_features", "_capture_active_tool_dependencies",
+        "_capture_head_sha", "_classify_concurrent_instance", "_cmd_update_check",
+        "_cmd_update_impl", "_cold_start_windows_gateway_after_update",
+        "_defer_update_for_self_lock", "_dependency_sync_would_rewrite",
+        "_detect_self_loaded_native_modules", "_detect_venv_python_processes",
+        "_discard_lockfile_churn", "_discard_stashed_changes", "_ensure_acp_launcher",
+        "_ensure_uv_for_termux", "_filter_non_gateway_concurrent_instances",
+        "_finish_dashboard_update_cleanup", "_fleet_probe_expected_runtimes", "_format_time_ago",
+        "_gateway_prompt", "_get_origin_url", "_handoff_reapable_backend_pids",
+        "_install_psutil_android_compat", "_is_fork", "_ledger_manual_serve_holders",
+        "_ledger_reapable_backend_pids", "_leftover_pausable_gateway_pids", "_npm_lockfile_changed",
+        "_npm_manifests_digest", "_orphaned_desktop_backend_pids", "_park_stashed_changes",
+        "_pause_windows_gateways_for_update", "_print_parked_branch_kept_notice",
+        "_print_parked_branch_skip_warning", "_prune_orphan_rescue_refs",
+        "_purge_stale_hermes_modules", "_record_npm_lockfile_hash", "_refresh_active_lazy_features",
+        "_refresh_active_memory_provider_dependencies", "_refresh_bootstrap_cache_scripts",
+        "_refresh_windows_gateway_launchers", "_relaunch_stopped_serves",
+        "_reload_updated_runtime_modules", "_restore_active_tool_dependencies",
+        "_restore_stashed_changes", "_resume_windows_gateways_after_update",
+        "_run_logged_subprocess", "_run_pre_update_backup", "_stash_local_changes_if_needed",
+        "_stop_process_trees", "_sync_with_upstream_if_needed", "_update_node_dependencies",
+        "_update_via_zip", "_upgrade_pip_before_lazy_refresh", "_validate_critical_files_syntax",
+        "_validate_critical_modules_import", "_venv_launcher_ancestors",
+        "_wait_for_windows_update_gateway_exit", "_warn_orphaned_update_autostashes",
+        "_warn_pending_fleet_restart_on_startup", "_write_marker_file",
         "_write_update_incomplete_marker",
     ),
 }
@@ -2782,79 +2692,6 @@ def _clear_bytecode_cache(root: Path) -> int:
                 pass
             dirnames.clear()  # nothing left to recurse into
     return removed
-
-
-# Update pipeline lives in hermes_cli/update_cmd.py (main.py decomposition,
-# mechanical move). Its names are re-exported lazily through the module-level
-# __getattr__ above (see _LAZY_COMMAND_EXPORTS) so argparse wiring and test
-# monkeypatches on hermes_cli.main.<name> keep resolving unchanged without
-# paying the update_cmd import cost on every CLI invocation.
-
-
-# ---------------------------------------------------------------------------
-# Desktop build stamp — content-hash based skip logic
-# ---------------------------------------------------------------------------
-# The desktop Electron build is expensive.
-# Unlike the web UI (which uses mtime comparison), the desktop uses a
-# SHA-256 content hash of the source tree so that:
-#   - ``git checkout`` / ``git pull`` that touch mtimes but not content
-#     don't trigger a rebuild
-#   - ``hermes update`` can unconditionally call ``hermes desktop --build-only``
-#     and it will skip if nothing actually changed
-#   - ``hermes desktop`` (interactive launch) skips the build when the
-#     stamp matches, making repeated launches fast
-#
-# Stamp file: $HERMES_HOME/desktop-build-stamp.json
-# Schema:
-#   {
-#     "contentHash": "<sha256 hex of source files>",
-#     "sourceMode": true | false,
-#     "builtAt": "<ISO 8601>"
-#   }
-
-
-# ─── Desktop stage-and-swap pack (#86443) ───────────────────────────────────
-#
-# electron-builder packs IN PLACE: before-pack.mjs wipes ``release/<platform>-
-# unpacked`` (or the mac ``Hermes.app``) and the Electron unpack + asar + rename
-# then rebuild it. Any failure after that wipe — corrupt cached zip, blocked
-# download, missing dep, disk full — leaves the user with NO app, and
-# ``hermes update`` used to report "partially complete" over an empty
-# release/. Fix the class, not the predicate: build into a STAGING output
-# dir next to release/, verify the staged result, and only then swap it over
-# the live tree with renames. On any failure the live app is untouched.
-
-
-# ─── Desktop exe integrity gate (#69179) ────────────────────────────────────
-#
-# The desktop self-update chain (Desktop → hermes-setup --update →
-# `hermes update` → `hermes desktop --build-only` → relaunch) rebuilds
-# Hermes.exe on the end user's machine and used to verify only that the file
-# EXISTS before declaring success. A corrupt cached Electron zip whose
-# extraction produced a truncated electron.exe, an interrupted rcedit resource
-# rewrite, a disk-full pack, or a wrong-arch unpacked tree therefore shipped a
-# broken binary that Windows refuses to load ("This app can't run on your
-# computer" / 此应用无法在你的电脑上运行). These helpers parse the PE header —
-# no signature infrastructure required — so a structurally broken or
-# wrong-architecture Hermes.exe is caught BEFORE the updater replaces the
-# working app, and the previous build can be restored from the .bak tree that
-# apps/desktop/scripts/before-pack.mjs now preserves.
-
-
-# Dashboard process-hygiene helpers live in hermes_cli/dashboard_procs.py
-# (main.py decomposition, mechanical move). Re-exported lazily through the
-# module-level __getattr__ above so callers and test monkeypatches on
-# hermes_cli.main.<name> keep resolving unchanged.
-
-
-# Back-compat alias: some tests and any external callers may import the old
-# warn-only name.  The new behaviour (kill stale processes) replaces it.
-# Resolved lazily via _LAZY_ATTR_SOURCES near the module __getattr__.
-
-
-# =========================================================================
-# Fork detection and upstream management for `hermes update`
-# =========================================================================
 
 
 def cmd_update(args):
