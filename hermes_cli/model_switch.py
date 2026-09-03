@@ -1338,8 +1338,7 @@ def _resolve_switch_credentials(st: _Switch) -> Optional[ModelSwitchResult]:
     mandated_mode = host_mandated_api_mode(st.base_url)
     if mandated_mode is not None:
         st.api_mode = mandated_mode
-    elif not st.api_mode:
-        st.api_mode = determine_api_mode(st.target_provider, st.base_url)
+    st.api_mode = st.api_mode or determine_api_mode(st.target_provider, st.base_url)
     return None
 
 
@@ -1365,15 +1364,12 @@ def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
                       "message": f"Could not validate `{st.new_model}`: {e}"}
 
     if not validation.get("accepted"):
-        if _config_declares_model(st.new_model, st.target_provider, st.base_url, st.user_providers, st.custom_providers):
-            validation = {"accepted": True, "persist": True, "recognized": False, "message": validation.get("message", "")}
-        else:
+        if not _config_declares_model(st.new_model, st.target_provider, st.base_url, st.user_providers, st.custom_providers):
             return st.fail(
                 validation.get("message", "Invalid model"),
-                new_model=st.new_model, target_provider=st.target_provider, provider_label=st.provider_label,
-            )
-    if validation.get("corrected_model"):
-        st.new_model = validation["corrected_model"]
+                new_model=st.new_model, target_provider=st.target_provider, provider_label=st.provider_label)
+        validation = {"accepted": True, "persist": True, "recognized": False, "message": validation.get("message", "")}
+    st.new_model = validation.get("corrected_model") or st.new_model
     st.validation = validation
     return None
 
