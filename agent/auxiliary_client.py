@@ -1293,106 +1293,93 @@ class _CodexCompletionsAdapter:
         self._client = real_client
         self._model = model
 
-    def _host_flags(self) -> Tuple[str, bool, bool, bool]:
-        """``(base_url, is_xai, is_github_copilot, is_github_any)`` for the wrapped client."""
+    def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
+        """chat.completions kwargs → Responses API kwargs, ``(resp_kwargs, model, timeout)``; mirrors codex.py::build_kwargs."""
         from utils import base_url_host_matches
-
+        from agent.codex_responses_adapter import _chat_messages_to_responses_input
+        model = kwargs.get("model", self._model)
         host = str(getattr(self._client, "base_url", "") or "")
         is_xai = base_url_host_matches(host, "x.ai") or base_url_host_matches(host, "api.x.ai")
         is_copilot = base_url_host_matches(host, "githubcopilot.com")
-        return host, is_xai, is_copilot, is_copilot or base_url_host_matches(host, "models.github.ai")
-
-    def _responses_input(self, messages: List[Dict[str, Any]], is_github: bool) -> Tuple[str, List[Any]]:
-        """Split system → ``instructions`` and convert the rest via the SINGLE shared chat→Responses converter.
-
-        A private loop here once let role="tool" leak into Responses input[] (API
-        rejects it); the shared converter encodes tool history as
-        function_call/function_call_output so all paths stay identical.
-        """
-        from agent.codex_responses_adapter import _chat_messages_to_responses_input
-
+        is_github = is_copilot or base_url_host_matches(host, "models.github.ai")
+        # System → ``instructions``; the rest goes through the SINGLE shared chat→Responses
+        # converter (a private loop here once let role="tool" leak into input[]; the shared one
+        # encodes tool history as function_call/function_call_output).
         instructions = "You are a helpful assistant."
         replay_messages: List[Dict[str, Any]] = []
-        for msg in messages:
+        for msg in kwargs.get("messages", []):
             content = msg.get("content") or ""
             if msg.get("role", "user") == "system":
                 instructions = content if isinstance(content, str) else str(content)
             else:
                 replay_messages.append(msg)
-        # Copilot binds replayed codex_message_items ids to a backend connection that
-        # doesn't survive credential rotation (401 on replay) — same guard as build_kwargs.
-        # Aux calls never send ``context_management`` (main-turn feature): no compaction checkpoint.
-        return instructions, _chat_messages_to_responses_input(
-            replay_messages, is_github_responses=is_github, native_compaction_eligible=False
+        # Copilot binds replayed codex_message_items ids to a backend connection that doesn't
+        # survive credential rotation (401 on replay) — same guard as build_kwargs. Aux calls
+        # never send ``context_management`` (main-turn feature): no compaction checkpoint.
+        input_items = _chat_messages_to_responses_input(
+            replay_messages, is_github_responses=is_copilot, native_compaction_eligible=False
         )
-
-    @staticmethod
-    def _apply_extra_body(resp_kwargs: Dict[str, Any], extra_body: Any, model: str, is_xai: bool) -> None:
-        """Translate extra_body service_tier/reasoning into top-level Responses fields (mirrors codex.py::build_kwargs)."""
-        if not isinstance(extra_body, dict):
-            return
-        # service_tier (fast mode) is a top-level Responses field; xAI's endpoint rejects it.
-        service_tier = extra_body.get("service_tier")
-        if isinstance(service_tier, str) and service_tier.strip() and not is_xai:
-            resp_kwargs["service_tier"] = service_tier.strip()
-        reasoning_cfg = extra_body.get("reasoning")
-        # ``enabled: False`` leaves reasoning/include unset (Codex still thinks by default).
-        if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("enabled") is not False:
-            # Truthy-only: Codex 400s on e.g. {"effort": null}, so falsy → default.
-            # Shared per-model clamp with the main transport ("max" is gpt-5.6-only;
-            # "minimal"/"ultra" always rejected).
-            from agent.reasoning_effort import clamp_effort, codex_supported_efforts
-
-            effort = clamp_effort(reasoning_cfg.get("effort") or "medium", codex_supported_efforts(model))
-            resp_kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
-            resp_kwargs["include"] = ["reasoning.encrypted_content"]
-
-    @staticmethod
-    def _responses_tools(tools: Any) -> List[Dict[str, Any]]:
-        """chat.completions function tools → Responses tool entries (sanitized copies)."""
-        # xAI Responses rejects ``pattern``/``format`` JSON Schema keywords (400);
-        # strip for chat_completion_helpers.py parity. Deep-copy first — sanitizers
-        # mutate inner dicts in place and would strip the caller's tool registry.
+        resp_kwargs: Dict[str, Any] = {
+            # Codex only knows the base slug; strip the Hermes ``-900k`` picker suffix.
+            "model": _strip_codex_ctx_variant(model), "instructions": instructions,
+            "input": input_items or [{"role": "user", "content": ""}], "store": False,
+        }
+        # Forward the chat.completions timeout; otherwise a Codex stream can sit behind a
+        # dead-looking CLI until the user force-interrupts.
+        timeout = kwargs.get("timeout")
+        if timeout is not None:
+            resp_kwargs["timeout"] = timeout
+        # The Codex endpoint rejects max_output_tokens/temperature (400) — omit.
+        extra_body = kwargs.get("extra_body") or {}
+        if isinstance(extra_body, dict):
+            # service_tier (fast mode) is a top-level Responses field; xAI's endpoint rejects it.
+            service_tier = extra_body.get("service_tier")
+            if isinstance(service_tier, str) and service_tier.strip() and not is_xai:
+                resp_kwargs["service_tier"] = service_tier.strip()
+            reasoning_cfg = extra_body.get("reasoning")
+            # ``enabled: False`` leaves reasoning/include unset (Codex still thinks by default).
+            if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("enabled") is not False:
+                # Truthy-only: Codex 400s on e.g. {"effort": null}, so falsy → default. Shared
+                # per-model clamp with the main transport ("max" is gpt-5.6-only; "minimal"/"ultra" rejected).
+                from agent.reasoning_effort import clamp_effort, codex_supported_efforts
+                effort = clamp_effort(reasoning_cfg.get("effort") or "medium", codex_supported_efforts(model))
+                resp_kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
+                resp_kwargs["include"] = ["reasoning.encrypted_content"]
+        tools = kwargs.get("tools")
+        if tools:
+            # xAI Responses rejects ``pattern``/``format`` JSON Schema keywords (400); strip for
+            # chat_completion_helpers.py parity. Deep-copy first — sanitizers mutate inner dicts
+            # in place and would strip the caller's tool registry.
+            try:
+                import copy as _copy
+                from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
+                tools = _copy.deepcopy(list(tools))
+                tools, _ = strip_pattern_and_format(tools)
+                tools, _ = strip_slash_enum(tools)
+            except Exception as exc:
+                logger.warning(
+                    "Auxiliary client: failed to sanitize tool schemas for "
+                    "Codex/xAI Responses path: %s", exc,
+                )
+            converted = []
+            for t in tools:
+                fn = t.get("function", {}) if isinstance(t, dict) else {}
+                name = fn.get("name")
+                if name:
+                    converted.append({
+                        "type": "function", "name": name, "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                    })
+            if converted:
+                resp_kwargs["tools"] = converted
+        # Stable prompt-cache routing: key is content-addressed from the static prefix
+        # (instructions + tool schemas) so it survives across turns, scoped by the owning
+        # conversation (rotation-stable logical scope, else the physical session id). Skip the
+        # key where the main transport does: xAI takes it in extra_body, GitHub opts out.
         try:
-            import copy as _copy
-            from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
-            tools = _copy.deepcopy(list(tools))
-            tools, _ = strip_pattern_and_format(tools)
-            tools, _ = strip_slash_enum(tools)
-        except Exception as exc:
-            logger.warning(
-                "Auxiliary client: failed to sanitize tool schemas for "
-                "Codex/xAI Responses path: %s", exc,
-            )
-        converted = []
-        for t in tools:
-            fn = t.get("function", {}) if isinstance(t, dict) else {}
-            name = fn.get("name")
-            if name:
-                converted.append({
-                    "type": "function",
-                    "name": name,
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                })
-        return converted
-
-    @staticmethod
-    def _apply_prompt_cache(resp_kwargs: Dict[str, Any], model: str, host: str, skip_key: bool) -> None:
-        """Stable prompt-cache routing, mirroring codex.py::build_kwargs (else aux calls stay cache-cold).
-
-        Key is content-addressed from the static prefix (instructions + tool
-        schemas) so it survives across turns, scoped by the owning conversation
-        (rotation-stable logical scope, else the physical session id). ``skip_key``
-        where the main transport does: xAI takes it in extra_body, GitHub opts out.
-        """
-        try:
-            from agent.transports.codex import (
-                _cache_scope_from_session_id, _content_cache_key,
-                _default_prompt_cache_retention_for_request,
-            )
-
-            if not skip_key and "prompt_cache_key" not in resp_kwargs:
+            from agent.transports.codex import _cache_scope_from_session_id, _content_cache_key
+            from agent.transports.codex import _default_prompt_cache_retention_for_request
+            if not (is_xai or is_github) and "prompt_cache_key" not in resp_kwargs:
                 scope = _cache_scope_from_session_id(
                     _runtime_main_value("cache_scope") or _runtime_main_value("session_id")
                 )
@@ -1404,76 +1391,38 @@ class _CodexCompletionsAdapter:
                 if cache_retention:
                     resp_kwargs["prompt_cache_retention"] = cache_retention
         except Exception:
-            logger.debug(
-                "Codex auxiliary: prompt_cache_key derivation skipped", exc_info=True
-            )
-
-    def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
-        """Translate chat.completions kwargs into Responses API kwargs; returns ``(resp_kwargs, model, timeout)``."""
-        model = kwargs.get("model", self._model)
-        host, is_xai, is_copilot, is_github = self._host_flags()
-        instructions, input_items = self._responses_input(kwargs.get("messages", []), is_copilot)
-        resp_kwargs: Dict[str, Any] = {
-            # Codex only knows the base slug; strip the Hermes ``-900k`` picker suffix.
-            "model": _strip_codex_ctx_variant(model),
-            "instructions": instructions,
-            "input": input_items or [{"role": "user", "content": ""}],
-            "store": False,
-        }
-        # Forward the chat.completions timeout; otherwise a Codex stream can sit
-        # behind a dead-looking CLI until the user force-interrupts.
-        timeout = kwargs.get("timeout")
-        if timeout is not None:
-            resp_kwargs["timeout"] = timeout
-        # The Codex endpoint rejects max_output_tokens/temperature (400) — omit.
-        self._apply_extra_body(resp_kwargs, kwargs.get("extra_body") or {}, model, is_xai)
-        tools = kwargs.get("tools")
-        if tools:
-            converted = self._responses_tools(tools)
-            if converted:
-                resp_kwargs["tools"] = converted
-        self._apply_prompt_cache(resp_kwargs, model, host, is_xai or is_github)
+            logger.debug("Codex auxiliary: prompt_cache_key derivation skipped", exc_info=True)
         return resp_kwargs, model, timeout
 
-    def _stream_final_response(self, resp_kwargs: Dict[str, Any], model: str, guard: _CodexStreamGuard) -> Any:
-        """Drive ``responses.create(stream=True)`` under ``guard``; returns the assembled final Responses object."""
-        # Low-level ``responses.create(stream=True)`` and assemble the final response
-        # ourselves from ``response.output_item.done``: the high-level ``responses.stream()``
-        # rebuilds from ``response.completed.response.output``, which the Codex backend
-        # returns as ``null`` (NoneType crash inside the SDK).
-        from agent.codex_runtime import (
-            _bypass_sdk_request_transform, _consume_codex_event_stream
-        )
-
-        stream_kwargs = dict(resp_kwargs)
-        stream_kwargs["stream"] = True
-        # Keep bulk wire payload out of the SDK's GIL-holding request transform.
-        stream_kwargs = _bypass_sdk_request_transform(stream_kwargs)
-        event_stream = self._client.responses.create(**stream_kwargs)
-        guard.adopt_stream(event_stream)
-        # The timer may fire while responses.create() is blocked; if the cancelled
-        # attempt had no stream to close then, close it now that it is attempt-owned
-        # — never touch the shared client.
-        if guard.timed_out.is_set() and guard.cancel_requested():
-            guard.close_attempt_stream("late cancelled attempt stream close failed")
-        try:
-            # Some Codex-compatible hosts accept ``stream=True`` but return a completed
-            # Responses object (not iterable) — don't hand it to the consumer.
-            if hasattr(event_stream, "output"):
-                return event_stream
-            return _consume_codex_event_stream(
-                event_stream, model=str(resp_kwargs.get("model") or model), on_event=guard.on_event
-            )
-        finally:
-            guard.release_stream(event_stream)
-
     def create(self, **kwargs) -> Any:
+        # Low-level ``responses.create(stream=True)`` and assemble the final response ourselves
+        # from ``response.output_item.done``: the high-level ``responses.stream()`` rebuilds from
+        # ``response.completed.response.output``, which Codex returns as ``null`` (SDK crash).
         resp_kwargs, model, timeout = self._build_responses_kwargs(kwargs)
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
         guard = _CodexStreamGuard(self._client, total_timeout)
         try:
             guard.start()
-            final = self._stream_final_response(resp_kwargs, model, guard)
+            from agent.codex_runtime import _bypass_sdk_request_transform, _consume_codex_event_stream
+            # Keep bulk wire payload out of the SDK's GIL-holding request transform.
+            stream_kwargs = _bypass_sdk_request_transform({**resp_kwargs, "stream": True})
+            event_stream = self._client.responses.create(**stream_kwargs)
+            guard.adopt_stream(event_stream)
+            # The timer may fire while responses.create() is blocked; if the cancelled attempt
+            # had no stream to close then, close it now that it is attempt-owned — never the shared client.
+            if guard.timed_out.is_set() and guard.cancel_requested():
+                guard.close_attempt_stream("late cancelled attempt stream close failed")
+            try:
+                # Some Codex-compatible hosts accept ``stream=True`` but return a completed
+                # Responses object (not iterable) — don't hand it to the consumer.
+                if hasattr(event_stream, "output"):
+                    final = event_stream
+                else:
+                    final = _consume_codex_event_stream(
+                        event_stream, model=str(resp_kwargs.get("model") or model), on_event=guard.on_event
+                    )
+            finally:
+                guard.release_stream(event_stream)
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
             text_parts, tool_calls_raw, usage = _parse_codex_final_response(final)
@@ -1484,7 +1433,6 @@ class _CodexCompletionsAdapter:
             raise
         finally:
             guard.finish()
-
         # Shape the result like chat.completions.
         message = SimpleNamespace(
             role="assistant", content="".join(text_parts).strip() or None,
@@ -1549,9 +1497,7 @@ class AsyncCodexAuxiliaryClient(_AsyncAuxiliaryClientBase):
     pass
 
 
-def _translate_anthropic_response_format(
-    anthropic_kwargs: Dict[str, Any], response_format: Any,
-) -> None:
+def _translate_anthropic_response_format(anthropic_kwargs: Dict[str, Any], response_format: Any) -> None:
     """Merge an OpenAI response format into Anthropic ``output_config``."""
     if not isinstance(response_format, dict):
         return
@@ -1576,72 +1522,26 @@ def _translate_anthropic_response_format(
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
-    def __init__(
-        self, real_client: Any, model: str, is_oauth: bool = False, base_url: str | None = None
-    ):
+    def __init__(self, real_client: Any, model: str, is_oauth: bool = False, base_url: str | None = None):
         self._client = real_client
         self._model = model
         self._is_oauth = is_oauth
-        # Prefer the caller-supplied URL; fall back to the SDK client's host only for
-        # Nous Portal — a blanket fallback would flip MiniMax/Zhipu aux adapters to
-        # third-party handling (stripping thinking signatures).
+        # Caller URL first; fall back to the SDK client's host only for Nous Portal — a blanket
+        # fallback would flip MiniMax/Zhipu aux adapters to third-party handling (strips thinking sigs).
         self._base_url = base_url or None
         if not self._base_url:
             candidate = str(getattr(real_client, "base_url", "") or "") or None
             if candidate:
                 try:
                     from agent.anthropic_adapter import _is_nous_portal_endpoint
-
                     if _is_nous_portal_endpoint(candidate):
                         self._base_url = candidate
                 except Exception:
                     pass
 
-    @staticmethod
-    def _normalize_tool_choice(tool_choice: Any) -> Optional[str]:
-        """OpenAI tool_choice (str or dict) → Anthropic-style name/mode string."""
-        if isinstance(tool_choice, str):
-            return tool_choice
-        if isinstance(tool_choice, dict):
-            choice_type = str(tool_choice.get("type", "")).lower()
-            if choice_type == "function":
-                return tool_choice.get("function", {}).get("name")
-            if choice_type in {"auto", "required", "none"}:
-                return choice_type
-        return None
-
-    @staticmethod
-    def _merge_caller_extra_body(anthropic_kwargs: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        """Translate response_format (top-level and extra_body form) and pass vendor extra_body fields through.
-
-        A top-level ``response_format`` gets the same translation as the extra_body
-        form; when both are present the extra_body form wins. Passthrough excludes
-        ``reasoning``/``response_format`` (already TRANSLATED to native fields —
-        forwarding raw would 400 on strict gateways) and ``_``-prefixed Hermes plumbing.
-        """
-        top_level_response_format = kwargs.get("response_format")
-        if top_level_response_format is not None:
-            _translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
-        caller_extra_body = kwargs.get("extra_body")
-        if caller_extra_body and isinstance(caller_extra_body, dict):
-            _translate_anthropic_response_format(
-                anthropic_kwargs, caller_extra_body.get("response_format"),
-            )
-            passthrough = {
-                k: v for k, v in caller_extra_body.items()
-                if k not in {"reasoning", "response_format"}
-                and not str(k).startswith("_")
-            }
-            if passthrough:
-                existing = anthropic_kwargs.get("extra_body") or {}
-                if not isinstance(existing, dict):
-                    existing = {}
-                anthropic_kwargs["extra_body"] = {**existing, **passthrough}
-
     def create(self, **kwargs) -> Any:
         from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
         from agent.transports import get_transport
-
         model = kwargs.get("model", self._model)
         # ZAI's Anthropic endpoint rejects max_tokens on vision models (code 1210);
         # callers signal this via _skip_zai_max_tokens.
@@ -1650,22 +1550,27 @@ class _AnthropicCompletionsAdapter:
         else:
             max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         temperature = kwargs.get("temperature")
-        # Reasoning priority: explicit per-call _reasoning_config (MoA per-slot) wins
-        # over extra_body.reasoning; build_anthropic_kwargs translates to ``thinking``.
+        # Reasoning priority: explicit per-call _reasoning_config (MoA per-slot) wins over
+        # extra_body.reasoning; build_anthropic_kwargs translates to ``thinking``.
         reasoning_cfg = kwargs.get("_reasoning_config")
         if reasoning_cfg is None:
             _eb = kwargs.get("extra_body")
             _rc = _eb.get("reasoning") if isinstance(_eb, dict) else None
             if isinstance(_rc, dict):
                 reasoning_cfg = _rc
-
+        # OpenAI tool_choice (str or dict) → Anthropic-style name/mode string.
+        tool_choice = kwargs.get("tool_choice")
+        if isinstance(tool_choice, dict):
+            choice_type = str(tool_choice.get("type", "")).lower()
+            if choice_type == "function":
+                tool_choice = tool_choice.get("function", {}).get("name")
+            else:
+                tool_choice = choice_type if choice_type in {"auto", "required", "none"} else None
+        elif not isinstance(tool_choice, str):
+            tool_choice = None
         anthropic_kwargs = build_anthropic_kwargs(
-            model=model,
-            messages=kwargs.get("messages", []),
-            tools=kwargs.get("tools"),
-            max_tokens=max_tokens,
-            reasoning_config=reasoning_cfg,
-            tool_choice=self._normalize_tool_choice(kwargs.get("tool_choice")),
+            model=model, messages=kwargs.get("messages", []), tools=kwargs.get("tools"),
+            max_tokens=max_tokens, reasoning_config=reasoning_cfg, tool_choice=tool_choice,
             is_oauth=self._is_oauth,
             # Portal routes on ``anthropic/<slug>`` ids and replays signed thinking
             # keyed off base_url; omitting it breaks Portal model resolution.
@@ -1677,21 +1582,33 @@ class _AnthropicCompletionsAdapter:
             from agent.anthropic_adapter import _forbids_sampling_params
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
-        self._merge_caller_extra_body(anthropic_kwargs, kwargs)
-
+        # response_format: top-level gets the same translation as the extra_body form; when both
+        # are present the extra_body form wins. Passthrough excludes ``reasoning``/``response_format``
+        # (already TRANSLATED to native fields — raw would 400 on strict gateways) and ``_`` Hermes plumbing.
+        top_level_response_format = kwargs.get("response_format")
+        if top_level_response_format is not None:
+            _translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
+        caller_extra_body = kwargs.get("extra_body")
+        if caller_extra_body and isinstance(caller_extra_body, dict):
+            _translate_anthropic_response_format(anthropic_kwargs, caller_extra_body.get("response_format"))
+            passthrough = {
+                k: v for k, v in caller_extra_body.items()
+                if k not in {"reasoning", "response_format"} and not str(k).startswith("_")
+            }
+            if passthrough:
+                existing = anthropic_kwargs.get("extra_body") or {}
+                if not isinstance(existing, dict):
+                    existing = {}
+                anthropic_kwargs["extra_body"] = {**existing, **passthrough}
         response = create_anthropic_message(
             self._client,
             anthropic_kwargs,
-            # Record provider-response timing every event, but tick forward progress
-            # only for substantive payloads so keepalives can't hold a stalled summary
-            # open. None keeps the fast get_final_message path.
-            on_stream_event=(
-                _anthropic_aux_stream_event_hook() if _aux_progress_active() else None
-            ),
+            # Record provider-response timing every event, but tick forward progress only for
+            # substantive payloads so keepalives can't hold a stalled summary open. None keeps
+            # the fast get_final_message path.
+            on_stream_event=(_anthropic_aux_stream_event_hook() if _aux_progress_active() else None),
         )
-        _nr = get_transport("anthropic_messages").normalize_response(
-            response, strip_tool_prefix=self._is_oauth
-        )
+        _nr = get_transport("anthropic_messages").normalize_response(response, strip_tool_prefix=self._is_oauth)
         usage = None
         if hasattr(response, "usage") and response.usage:
             prompt_tokens = getattr(response.usage, "input_tokens", 0) or 0
@@ -1703,9 +1620,7 @@ class _AnthropicCompletionsAdapter:
         # ToolCall already duck-types as OpenAI shape via properties.
         choice = SimpleNamespace(
             index=0,
-            message=SimpleNamespace(
-                content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning
-            ),
+            message=SimpleNamespace(content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning),
             finish_reason=_nr.finish_reason,
         )
         return SimpleNamespace(choices=[choice], model=model, usage=usage)
@@ -1716,9 +1631,7 @@ class AnthropicAuxiliaryClient:
 
     def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
         self._real_client = real_client
-        self.chat = _ChatShim(_AnthropicCompletionsAdapter(
-            real_client, model, is_oauth=is_oauth, base_url=base_url,
-        ))
+        self.chat = _ChatShim(_AnthropicCompletionsAdapter(real_client, model, is_oauth=is_oauth, base_url=base_url))
         self.api_key = api_key
         self.base_url = base_url
 
@@ -1741,7 +1654,6 @@ class _BedrockCompletionsAdapter:
 
     def create(self, **kwargs) -> Any:
         from agent.bedrock_adapter import call_converse
-
         model = kwargs.get("model", self._model)
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         # OpenAI accepts ``stop`` as str or list; Converse requires a list.
@@ -1758,23 +1670,15 @@ class _BedrockCompletionsAdapter:
             # Converse streaming isn't wired here; call_llm's streaming consumer
             # detects a final object and downgrades to non-live output.
             logger.debug(
-                "BedrockAuxiliaryClient: stream=True requested for %s — "
-                "returning a complete response (Converse shim does not "
-                "stream); caller downgrades to non-streaming.",
-                model,
+                "BedrockAuxiliaryClient: stream=True requested for %s — returning a complete response "
+                "(Converse shim does not stream); caller downgrades to non-streaming.", model,
             )
         response = call_converse(
-            region=self._region,
-            model=model,
-            messages=kwargs.get("messages", []),
-            tools=kwargs.get("tools"),
-            # Omitted/None cap → None so Bedrock uses the model max (no-cap-by-default
-            # like every other aux wire). Truthiness, not ``is None``, mirrors the
-            # Anthropic shim: an explicit 0 means "no cap" on both wires.
-            max_tokens=int(max_tokens) if max_tokens else None,
-            temperature=kwargs.get("temperature"),
-            top_p=kwargs.get("top_p"),
-            stop_sequences=stop,
+            region=self._region, model=model, messages=kwargs.get("messages", []), tools=kwargs.get("tools"),
+            # Omitted/None cap → None so Bedrock uses the model max (no-cap-by-default like
+            # every other aux wire). Truthiness mirrors the Anthropic shim: explicit 0 = "no cap".
+            max_tokens=int(max_tokens) if max_tokens else None, temperature=kwargs.get("temperature"),
+            top_p=kwargs.get("top_p"), stop_sequences=stop,
         )
         # Converse is complete-response here: mark provider progress only after
         # return so TTFP reflects real Bedrock latency, not dispatch/setup.
@@ -1801,37 +1705,18 @@ class AsyncBedrockAuxiliaryClient(_AsyncAuxiliaryClientBase):
 
 
 def _endpoint_speaks_anthropic_messages(base_url: str) -> bool:
-    """True if ``base_url`` speaks Anthropic Messages instead of OpenAI chat.completions.
+    """True if ``base_url`` speaks Anthropic Messages, not OpenAI chat.completions.
 
-    Mirrors ``hermes_cli.runtime_provider._detect_api_mode_for_url`` so aux and
-    main agent agree on transport. Covers any ``/anthropic`` URL (MiniMax, Zhipu,
-    LiteLLM gateways), ``api.kimi.com/coding`` (only speaks the Anthropic shape;
-    chat.completions 404s on its model aliases), and ``api.anthropic.com``.
+    Mirrors ``hermes_cli.runtime_provider._detect_api_mode_for_url`` so aux and main agree: any
+    ``/anthropic`` URL (MiniMax, Zhipu, LiteLLM), ``api.kimi.com/coding`` (chat 404s), ``api.anthropic.com``.
     """
     normalized = (base_url or "").strip().lower().rstrip("/")
     if not normalized:
         return False
-    path = urlparse(normalized).path.rstrip("/")
-    if path.endswith("/anthropic") or path.endswith("/anthropic/v1"):
+    if urlparse(normalized).path.rstrip("/").endswith(("/anthropic", "/anthropic/v1")):
         return True
     hostname = base_url_hostname(normalized)
-    if hostname == "api.anthropic.com":
-        return True
-    return bool(hostname == "api.kimi.com" and "/coding" in normalized)
-
-
-def _is_specialized_aux_client(client_obj: Any) -> bool:
-    """True for clients that must never be re-dispatched through a wire adapter.
-
-    Anthropic/Bedrock/Codex wrappers, plus any client declaring
-    ``HERMES_SKIP_TRANSPORT_WRAP`` (native/ACP shims, in-tree or from a provider
-    plugin) — a class-attribute declaration rather than isinstance, so this hot
-    path never imports those client modules just to type-test.
-    """
-    return (
-        _safe_isinstance(client_obj, (AnthropicAuxiliaryClient, BedrockAuxiliaryClient, CodexAuxiliaryClient))
-        or _client_declares(client_obj, "HERMES_SKIP_TRANSPORT_WRAP")
-    )
+    return hostname == "api.anthropic.com" or bool(hostname == "api.kimi.com" and "/coding" in normalized)
 
 
 def _maybe_wrap_anthropic(
@@ -1839,16 +1724,22 @@ def _maybe_wrap_anthropic(
 ) -> Any:
     """Rewrap a plain OpenAI client in ``AnthropicAuxiliaryClient`` when the endpoint speaks Anthropic Messages.
 
-    Single transport-correction chokepoint run at the end of every ``resolve_provider_client``
-    branch. Returns ``client_obj`` unchanged for probe stubs / specialized adapters, OpenAI-wire
-    endpoints, an explicitly non-Anthropic ``api_mode``, or a missing ``anthropic`` SDK.
+    Single transport-correction chokepoint at the end of every ``resolve_provider_client`` branch; returns
+    ``client_obj`` unchanged for probe stubs/specialized adapters, OpenAI-wire, explicit non-Anthropic
+    ``api_mode``, or missing ``anthropic`` SDK.
     """
-    if isinstance(client_obj, _AuxProbeClientStub) or _is_specialized_aux_client(client_obj):
+    # Anthropic/Bedrock/Codex wrappers, plus any client declaring HERMES_SKIP_TRANSPORT_WRAP
+    # (native/ACP shims, in-tree or plugin), must never be re-dispatched through a wire adapter —
+    # a class-attribute declaration rather than isinstance so this hot path never imports them.
+    if (
+        isinstance(client_obj, _AuxProbeClientStub)
+        or _safe_isinstance(client_obj, (AnthropicAuxiliaryClient, BedrockAuxiliaryClient, CodexAuxiliaryClient))
+        or _client_declares(client_obj, "HERMES_SKIP_TRANSPORT_WRAP")
+    ):
         return client_obj
     # Explicit non-anthropic api_mode wins over URL heuristics.
     if api_mode != "anthropic_messages" and (api_mode or not _endpoint_speaks_anthropic_messages(base_url)):
         return client_obj
-
     try:
         from agent.anthropic_adapter import build_anthropic_client
     except ImportError:
@@ -1858,7 +1749,6 @@ def _maybe_wrap_anthropic(
             base_url,
         )
         return client_obj
-
     try:
         real_client = build_anthropic_client(api_key, base_url)
     except Exception as exc:
@@ -1867,15 +1757,12 @@ def _maybe_wrap_anthropic(
             "OpenAI-wire client.", base_url, exc,
         )
         return client_obj
-
     logger.debug(
         "Auxiliary transport: wrapping client in AnthropicAuxiliaryClient "
         "(model=%s, base_url=%s, api_mode=%s)",
         model, base_url[:60] if base_url else "", api_mode or "auto-detected",
     )
-    return AnthropicAuxiliaryClient(
-        real_client, model, api_key, base_url, is_oauth=False,
-    )
+    return AnthropicAuxiliaryClient(real_client, model, api_key, base_url, is_oauth=False)
 
 
 def _read_nous_auth() -> Optional[dict]:
@@ -1895,7 +1782,6 @@ def _read_nous_auth() -> Optional[dict]:
             "token_type": getattr(entry, "token_type", "Bearer"),
             "source": "pool",
         }
-
     try:
         if not _AUTH_JSON_PATH.is_file():
             return None
@@ -1903,7 +1789,7 @@ def _read_nous_auth() -> Optional[dict]:
         if data.get("active_provider") != "nous":
             return None
         provider = data.get("providers", {}).get("nous", {})
-        # Must have at least an access_token or agent_key
+        # Must have at least an access_token or agent_key.
         if not provider.get("agent_key") and not provider.get("access_token"):
             return None
         return provider
@@ -1915,52 +1801,36 @@ def _read_nous_auth() -> Optional[dict]:
 def _nous_api_key(provider: dict) -> str:
     """Extract a usable Nous inference JWT from stored auth state."""
     from hermes_cli.auth import _nous_invoke_jwt_is_usable
-
-    for token_key, expiry_key in (
-        ("agent_key", "agent_key_expires_at"), ("access_token", "expires_at")
-    ):
+    for token_key, expiry_key in (("agent_key", "agent_key_expires_at"), ("access_token", "expires_at")):
         token = provider.get(token_key)
         if not isinstance(token, str) or not token.strip():
             continue
-        if _nous_invoke_jwt_is_usable(
-            token, scope=provider.get("scope"), expires_at=provider.get(expiry_key)
-        ):
+        if _nous_invoke_jwt_is_usable(token, scope=provider.get("scope"), expires_at=provider.get(expiry_key)):
             return token
     return ""
-
-
-def _nous_base_url() -> str:
-    """Resolve the Nous inference base URL from env or default."""
-    return os.getenv("NOUS_INFERENCE_BASE_URL", _NOUS_DEFAULT_BASE_URL)
 
 
 def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[tuple[str, str]]:
     """Resolve Nous auxiliary credentials from the selected pool entry."""
     try:
         from hermes_cli.auth import _agent_key_is_usable
-
         pool = load_pool("nous")
     except Exception as exc:
         logger.debug("Auxiliary Nous pool credential resolution failed: %s", exc)
         return None
-
     if not pool or not pool.has_credentials():
         return None
-
     try:
         entry = pool.select()
     except Exception as exc:
         logger.debug("Auxiliary Nous pool selection failed: %s", exc)
         return None
-
     if entry is None:
         return None
 
     def _entry_state(e: Any) -> Dict[str, Any]:
-        return {
-            k: getattr(e, k, None)
-            for k in ("agent_key", "agent_key_expires_at", "access_token", "expires_at", "scope")
-        }
+        return {k: getattr(e, k, None) for k in (
+            "agent_key", "agent_key_expires_at", "access_token", "expires_at", "scope")}
 
     if force_refresh or not _agent_key_is_usable(_entry_state(entry), _nous_min_key_ttl_seconds()):
         try:
@@ -1971,7 +1841,6 @@ def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[t
         if refreshed is None:
             return None
         entry = refreshed
-
     api_key = _nous_api_key(_entry_state(entry))
     base_url = _pool_runtime_base_url(entry, _NOUS_DEFAULT_BASE_URL)
     if not api_key or not base_url:
@@ -1980,25 +1849,18 @@ def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[t
 
 
 def _resolve_nous_runtime_api(*, force_refresh: bool = False) -> Optional[tuple[str, str]]:
-    """Return fresh Nous runtime credentials (pool first, then auth store + JWT refresh).
-
-    Mirrors the main agent's 401 recovery path rather than trusting raw auth.json tokens.
-    """
+    """Fresh Nous runtime credentials (pool first, then auth store + JWT refresh) — mirrors the main agent's 401 recovery."""
     pooled = _resolve_nous_pool_runtime_api(force_refresh=force_refresh)
     if pooled is not None:
         return pooled
-
     try:
         from hermes_cli.auth import resolve_nous_runtime_credentials
-
         creds = resolve_nous_runtime_credentials(
-            timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
-            force_refresh=force_refresh,
+            timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15), force_refresh=force_refresh,
         )
     except Exception as exc:
         logger.debug("Auxiliary Nous runtime credential resolution failed: %s", exc)
         return None
-
     return _creds_pair(creds)
 
 
@@ -2017,18 +1879,13 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     Pool first (some xAI OAuth logins exist only as pool entries), then the singleton auth-store resolver.
     """
     try:
-        from hermes_cli.auth import (
-            DEFAULT_XAI_OAUTH_BASE_URL, _xai_validate_inference_base_url
-        )
-
+        from hermes_cli.auth import DEFAULT_XAI_OAUTH_BASE_URL, _xai_validate_inference_base_url
         pool = load_pool("xai-oauth")
         if pool and pool.has_credentials():
             entry = pool.select()
             if entry is not None:
                 api_key = str(
-                    getattr(entry, "runtime_api_key", None)
-                    or getattr(entry, "access_token", "")
-                    or ""
+                    getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "") or ""
                 ).strip()
                 _url = lambda v: str(v or "").strip().rstrip("/")  # noqa: E731
                 base_url = _xai_validate_inference_base_url(
@@ -2042,10 +1899,8 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
                     return api_key, base_url
     except Exception as exc:
         logger.debug("Auxiliary xAI OAuth pool credential resolution failed: %s", exc)
-
     try:
         from hermes_cli.auth import resolve_xai_oauth_runtime_credentials
-
         creds = resolve_xai_oauth_runtime_credentials()
     except Exception as exc:
         logger.debug("Auxiliary xAI OAuth runtime credential resolution failed: %s", exc)
@@ -2060,28 +1915,22 @@ def _read_codex_access_token() -> Optional[str]:
         token = _pool_runtime_api_key(entry)
         if token:
             return token
-
     try:
         from hermes_cli.auth import _read_codex_tokens
-        data = _read_codex_tokens()
-        tokens = data.get("tokens", {})
-        access_token = tokens.get("access_token")
+        access_token = _read_codex_tokens().get("tokens", {}).get("access_token")
         if not isinstance(access_token, str) or not access_token.strip():
             return None
-
         # Expired JWTs would block the auto chain and prevent fallback to working providers.
         try:
             import base64
             payload = access_token.split(".")[1]
             payload += "=" * (-len(payload) % 4)
-            claims = json.loads(base64.urlsafe_b64decode(payload))
-            exp = claims.get("exp", 0)
+            exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0)
             if exp and time.time() > exp:
                 logger.debug("Codex access token expired (exp=%s), skipping", exp)
                 return None
         except Exception:
             pass  # Non-JWT token or decode error — use as-is
-
         return access_token.strip()
     except Exception as exc:
         logger.debug("Could not read Codex auth for auxiliary client: %s", exc)
@@ -2095,7 +1944,6 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
     except ImportError:
         logger.debug("Could not import PROVIDER_REGISTRY for API-key fallback")
         return None, None
-
     for provider_id, pconfig in PROVIDER_REGISTRY.items():
         if pconfig.auth_type != "api_key":
             continue
@@ -2111,13 +1959,11 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             except ImportError:
                 pass
             return _try_anthropic()
-
         pool_present, entry = _select_pool_entry(provider_id)
         if pool_present:
             api_key = _pool_runtime_api_key(entry)
             if not api_key:
                 continue
-
             raw_base_url = _pool_runtime_base_url(entry, pconfig.inference_base_url) or pconfig.inference_base_url
             via = " via pool"
         else:
@@ -2127,13 +1973,31 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 continue
             raw_base_url = str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
             via = ""
-
         model = _get_aux_model_for_provider(provider_id) or None
         if model is None:
             continue  # skip provider if we don't know a valid aux model
         logger.debug("Auxiliary text client: %s (%s)%s", pconfig.name, model, via)
-        return _build_api_key_chain_client(provider_id, api_key, raw_base_url, model)
-
+        # Native Gemini, else OpenAI-wire + Anthropic rewrap.
+        base_url = _to_openai_base_url(raw_base_url)
+        if provider_id == "gemini":
+            from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
+            if is_native_gemini_base_url(base_url):
+                return GeminiNativeClient(api_key=api_key, base_url=base_url), model
+        if base_url_host_matches(base_url, "api.kimi.com"):
+            headers = {"User-Agent": "claude-code/0.1.0"}
+        elif base_url_host_matches(base_url, "githubcopilot.com"):
+            from hermes_cli.models import copilot_default_headers
+            headers = copilot_default_headers()
+        elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
+            headers = build_nvidia_nim_headers(base_url)
+        else:
+            headers = _profile_default_headers(provider_id)
+        extra = {"default_headers": headers} if headers else {}
+        merged = _apply_user_default_headers(extra.get("default_headers"))
+        if merged:
+            extra["default_headers"] = merged
+        client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
+        return _maybe_wrap_anthropic(client, model, api_key, raw_base_url), model
     return None, None
 
 
@@ -2150,13 +2014,11 @@ def _endpoint_default_headers(
         headers: dict = {"User-Agent": "claude-code/0.1.0"}
     elif base_url_host_matches(base_url, "githubcopilot.com"):
         from hermes_cli.copilot_auth import copilot_request_headers
-
         headers = dict(copilot_request_headers(is_agent_turn=True, is_vision=is_vision))
     elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
         headers = dict(build_nvidia_nim_headers(base_url))
     elif xai and base_url_host_matches(base_url, "x.ai"):
         from tools.xai_http import hermes_xai_default_headers
-
         headers = dict(hermes_xai_default_headers())
     else:
         headers = _profile_default_headers(provider) or {}
@@ -2177,38 +2039,7 @@ def _profile_default_headers(provider: str) -> Optional[dict]:
     return None
 
 
-def _build_api_key_chain_client(
-    provider_id: str, api_key: str, raw_base_url: str, model: str,
-) -> Tuple[Any, str]:
-    """Build the auto-chain client for one API-key provider (native Gemini, else OpenAI-wire + Anthropic rewrap)."""
-    base_url = _to_openai_base_url(raw_base_url)
-    if provider_id == "gemini":
-        from agent.gemini_native_adapter import GeminiNativeClient, is_native_gemini_base_url
-
-        if is_native_gemini_base_url(base_url):
-            return GeminiNativeClient(api_key=api_key, base_url=base_url), model
-    if base_url_host_matches(base_url, "api.kimi.com"):
-        headers = {"User-Agent": "claude-code/0.1.0"}
-    elif base_url_host_matches(base_url, "githubcopilot.com"):
-        from hermes_cli.models import copilot_default_headers
-
-        headers = copilot_default_headers()
-    elif base_url_host_matches(base_url, "integrate.api.nvidia.com"):
-        headers = build_nvidia_nim_headers(base_url)
-    else:
-        headers = _profile_default_headers(provider_id)
-    extra = {}
-    if headers:
-        extra["default_headers"] = headers
-    merged = _apply_user_default_headers(extra.get("default_headers"))
-    if merged:
-        extra["default_headers"] = merged
-    client = _create_openai_client(api_key=api_key, base_url=base_url, **extra)
-    return _maybe_wrap_anthropic(client, model, api_key, raw_base_url), model
-
-
-# ── Provider resolution helpers ─────────────────────────────────────────────
-
+# Provider resolution helpers
 
 _paid_lane_warned: set = set()
 
@@ -2225,7 +2056,6 @@ def _aux_openrouter_settings() -> Tuple[bool, str]:
     """Read (free_only, openrouter_model) from config; (False, _OPENROUTER_MODEL) on failure."""
     try:
         from hermes_cli.config import cfg_get, load_config_readonly
-
         cfg = load_config_readonly()
         free_only = bool(cfg_get(cfg, "auxiliary", "free_only", default=False))
         val = cfg_get(cfg, "auxiliary", "openrouter_model")
@@ -2241,11 +2071,9 @@ def _warn_paid_lane_once(model: str) -> None:
         return
     _paid_lane_warned.add(model)
     logger.warning(
-        "Auxiliary client: PAID lane engaged for auxiliary task — OpenRouter "
-        "fallback model %r is not a :free SKU and may incur real spend. Set "
-        "auxiliary.free_only: true to restrict auxiliary fallbacks to free "
-        "models, or auxiliary.openrouter_model to a :free model.",
-        model,
+        "Auxiliary client: PAID lane engaged for auxiliary task — OpenRouter fallback model %r is not "
+        "a :free SKU and may incur real spend. Set auxiliary.free_only: true to restrict auxiliary "
+        "fallbacks to free models, or auxiliary.openrouter_model to a :free model.", model,
     )
 
 
@@ -2254,35 +2082,33 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
     or_model = model or cfg_model
     if free_only and not _is_free_model(or_model):
         logger.warning(
-            "Auxiliary client: auxiliary.free_only is enabled but the "
-            "OpenRouter fallback model %r is not a :free SKU — skipping the "
-            "OpenRouter fallback. Set auxiliary.openrouter_model to a :free "
-            "model (e.g. nvidia/nemotron-3-ultra-550b-a55b:free) or disable "
-            "auxiliary.free_only.",
+            "Auxiliary client: auxiliary.free_only is enabled but the OpenRouter fallback model %r is "
+            "not a :free SKU — skipping the OpenRouter fallback. Set auxiliary.openrouter_model to a "
+            ":free model (e.g. nvidia/nemotron-3-ultra-550b-a55b:free) or disable auxiliary.free_only.",
             or_model,
         )
         return None, None
     if not _is_free_model(or_model):
         _warn_paid_lane_once(or_model)
-
     pool_present, entry = _select_pool_entry("openrouter")
     if pool_present:
         or_key = explicit_api_key or _pool_runtime_api_key(entry)
         if or_key:
             base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
             logger.debug("Auxiliary client: OpenRouter via pool")
-            return _create_openai_client(api_key=or_key, base_url=base_url,
-                           default_headers=build_or_headers()), or_model
+            return _create_openai_client(
+                api_key=or_key, base_url=base_url, default_headers=build_or_headers()
+            ), or_model
         # Exhausted pool: fall through to OPENROUTER_API_KEY rather than fail.
         logger.debug("Auxiliary client: OpenRouter pool exhausted, trying OPENROUTER_API_KEY")
-
     or_key = explicit_api_key or _scoped_key_env("OPENROUTER_API_KEY")
     if not or_key:
         _mark_provider_unhealthy("openrouter", ttl=60)
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
-    return _create_openai_client(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=build_or_headers()), or_model
+    return _create_openai_client(
+        api_key=or_key, base_url=OPENROUTER_BASE_URL, default_headers=build_or_headers()
+    ), or_model
 
 
 def _describe_openrouter_unavailable(model: str = None) -> str:
@@ -2306,36 +2132,27 @@ def _describe_openrouter_unavailable(model: str = None) -> str:
 
 
 def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
-    # Cross-session rate guard: if another session recorded a 429, skip Nous
-    # rather than pile onto the tapped RPH bucket.
+    # Cross-session rate guard: another session's 429 means skip Nous rather than pile onto the tapped RPH bucket.
     try:
         from agent.nous_rate_guard import nous_rate_limit_remaining
         _remaining = nous_rate_limit_remaining()
         if _remaining is not None and _remaining > 0:
-            logger.debug(
-                "Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)", _remaining
-            )
+            logger.debug("Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)", _remaining)
             _mark_provider_unhealthy("nous", ttl=_remaining)
             return None, None
     except Exception:
         pass
-
     nous = _read_nous_auth()
     runtime = _resolve_nous_runtime_api(force_refresh=False)
     if runtime is None and not nous:
-        logger.warning(
-            "Auxiliary Nous client unavailable: no Nous authentication found " "(run: hermes auth)."
-        )
+        logger.warning("Auxiliary Nous client unavailable: no Nous authentication found (run: hermes auth).")
         _mark_provider_unhealthy("nous", ttl=60)
         return None, None
     if runtime is None and nous:
-        logger.debug(
-            "Auxiliary Nous: runtime JWT refresh failed; checking stored " "auth.json token."
-        )
+        logger.debug("Auxiliary Nous: runtime JWT refresh failed; checking stored auth.json token.")
     global auxiliary_is_nous
     auxiliary_is_nous = True
     logger.debug("Auxiliary client: Nous Portal")
-
     # Portal recommended-models is authoritative (tier-aware); _NOUS_MODEL when unreachable/null.
     # Probes skip the lookup: exact model is irrelevant and it hits the network.
     model = _NOUS_MODEL
@@ -2355,7 +2172,6 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
                 "falling back to %s",
                 lane, exc, model,
             )
-
     if runtime is not None:
         api_key, base_url = runtime
     else:
@@ -2367,15 +2183,13 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
             )
             _mark_provider_unhealthy("nous", ttl=60)
             return None, None
-        base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
-    return (
-        _create_openai_client( api_key=api_key, base_url=base_url ), model
-    )
+        base_url = str(
+            (nous or {}).get("inference_base_url") or os.getenv("NOUS_INFERENCE_BASE_URL", _NOUS_DEFAULT_BASE_URL)
+        ).rstrip("/")
+    return _create_openai_client(api_key=api_key, base_url=base_url), model
 
 
-def _refresh_nous_recommended_model(
-    *, vision: bool, stale_model: Optional[str]
-) -> Optional[str]:
+def _refresh_nous_recommended_model(*, vision: bool, stale_model: Optional[str]) -> Optional[str]:
     """Fresh Portal recommended model after a stale-model 404 (long-lived processes pin dropped models).
 
     Returns the fresh recommendation, else ``_NOUS_MODEL``, whichever differs from ``stale_model``; None if neither.
@@ -2384,26 +2198,19 @@ def _refresh_nous_recommended_model(
     fresh: Optional[str] = None
     try:
         from hermes_cli.models import get_nous_recommended_aux_model
-
         fresh = get_nous_recommended_aux_model(vision=vision, force_refresh=True)
     except Exception as exc:
-        logger.debug(
-            "Nous recommended-model refresh failed (%s); using default %s", exc, _NOUS_MODEL
-        )
+        logger.debug("Nous recommended-model refresh failed (%s); using default %s", exc, _NOUS_MODEL)
     if fresh and fresh.strip().lower() != stale:
         return fresh
-    # Fall back to the known-good default only if it actually differs.
-    if _NOUS_MODEL.strip().lower() != stale:
-        return _NOUS_MODEL
-    return None
+    return _NOUS_MODEL if _NOUS_MODEL.strip().lower() != stale else None
 
 
 def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
-    """Main ``model.<field>``: process-local runtime override (``set_runtime_main``) first, then config.yaml.
+    """Main ``model.<field>``: runtime override (``set_runtime_main``) first, then config.yaml.
 
-    The override wins so tools gating on "the active main model" see the live
-    CLI/gateway runtime, not the persisted default. ``readonly`` picks
-    ``load_config_readonly`` (model/provider) vs ``load_config`` (api_key/base_url).
+    The override wins so "active main model" gates see the live CLI/gateway runtime, not the persisted
+    default. ``readonly`` picks ``load_config_readonly`` (model/provider) vs ``load_config`` (api_key/base_url).
     """
     override = _runtime_main_value(field)
     if isinstance(override, str) and override.strip():
@@ -2411,7 +2218,6 @@ def _read_main_field(field: str, *, readonly: bool, lower: bool = False) -> str:
         return value.lower() if lower else value
     try:
         from hermes_cli import config as _cfg_mod
-
         cfg = (_cfg_mod.load_config_readonly if readonly else _cfg_mod.load_config)()
         model_cfg = cfg.get("model", {})
         if field == "model" and isinstance(model_cfg, str) and model_cfg.strip():
@@ -2435,15 +2241,13 @@ _read_main_base_url = functools.partial(_read_main_field, "base_url", readonly=F
 
 
 def _resolve_moa_aggregator(preset_name: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Resolve a MoA preset to its aggregator (provider, model); (None, None) if unresolvable.
+    """MoA preset → aggregator (provider, model); (None, None) if unresolvable. None/"" = default preset.
 
-    "moa" is virtual — aux tasks skip the fan-out and use the aggregator slot. Shared so preset
-    lookup can't drift between callers. ``preset_name`` None/"" resolves the default preset.
+    "moa" is virtual — aux tasks skip the fan-out and use the aggregator slot; shared so lookup can't drift.
     """
     try:
         from hermes_cli.config import load_config
         from hermes_cli.moa_config import resolve_moa_preset
-
         preset = resolve_moa_preset(load_config().get("moa") or {}, preset_name or None)
         agg = preset.get("aggregator") or {}
         agg_provider = str(agg.get("provider") or "").strip()
@@ -2451,17 +2255,12 @@ def _resolve_moa_aggregator(preset_name: Optional[str]) -> Tuple[Optional[str], 
         if agg_provider and agg_model and agg_provider.lower() != "moa":
             return agg_provider, agg_model
     except Exception:
-        logger.debug(
-            "MoA aggregator resolution failed for preset %r", preset_name, exc_info=True
-        )
+        logger.debug("MoA aggregator resolution failed for preset %r", preset_name, exc_info=True)
     return None, None
 
 
 def _read_main_model_for_aux() -> str:
-    """Main model with MoA presets unwrapped to the aggregator's model.
-
-    A preset name is never a valid wire model id; "" when unresolvable (nothing beats a name that 400s).
-    """
+    """Main model with MoA presets unwrapped to the aggregator's model; "" when unresolvable (a preset name would 400)."""
     model = _read_main_model()
     if (_read_main_provider() or "").strip().lower() == "moa":
         _, agg_model = _resolve_moa_aggregator(model)
@@ -2475,10 +2274,7 @@ def _read_main_api_key_if_same_host(aux_base_url: str) -> str:
     Unconditional inheritance would leak the credential to any misconfigured host; mismatch keeps ``no-key-required`` → 401.
     """
     aux_host = base_url_hostname(aux_base_url)
-    if not aux_host:
-        return ""
-    main_host = base_url_hostname(_read_main_base_url())
-    if not main_host or aux_host != main_host:
+    if not aux_host or aux_host != base_url_hostname(_read_main_base_url()):
         return ""
     return _read_main_api_key()
 
@@ -2500,9 +2296,11 @@ _RELAY_AUX_CALL_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
 )
 
 
-def _new_relay_aux_call_context(args: tuple, kwargs: dict) -> Dict[str, Any]:
+@contextlib.contextmanager
+def _relay_aux_call_scope(args: tuple, kwargs: dict):
+    """Bind a fresh relay call context for one auxiliary call; mark it failed on any exception."""
     task = args[0] if args else kwargs.get("task")
-    return {
+    token = _RELAY_AUX_CALL_CONTEXT.set({
         "task": str(task or "unknown"),
         "request_id": f"aux-{uuid.uuid4().hex}",
         "attempt_count": 0,
@@ -2510,13 +2308,7 @@ def _new_relay_aux_call_context(args: tuple, kwargs: dict) -> Dict[str, Any]:
         "model": "",
         "response_model": None,
         "api_mode": "chat_completions",
-    }
-
-
-@contextlib.contextmanager
-def _relay_aux_call_scope(args: tuple, kwargs: dict):
-    """Bind a fresh relay call context for one auxiliary call; mark it failed on any exception."""
-    token = _RELAY_AUX_CALL_CONTEXT.set(_new_relay_aux_call_context(args, kwargs))
+    })
     try:
         yield
     except BaseException:
@@ -2528,29 +2320,23 @@ def _relay_aux_call_scope(args: tuple, kwargs: dict):
 
 def _relay_auxiliary_call(callback):
     """Give every physical retry in one auxiliary call a shared Relay identity."""
-
     @functools.wraps(callback)
     def wrapped(*args, **kwargs):
         with _relay_aux_call_scope(args, kwargs):
             return callback(*args, **kwargs)
-
     return wrapped
 
 
 def _relay_auxiliary_call_async(callback):
     """Async counterpart to :func:`_relay_auxiliary_call`."""
-
     @functools.wraps(callback)
     async def wrapped(*args, **kwargs):
         with _relay_aux_call_scope(args, kwargs):
             return await callback(*args, **kwargs)
-
     return wrapped
 
 
-def _set_relay_auxiliary_route(
-    provider: str | None, model: str | None, api_mode: str | None
-) -> None:
+def _set_relay_auxiliary_route(provider: str | None, model: str | None, api_mode: str | None) -> None:
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is None:
         return
