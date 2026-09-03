@@ -2105,6 +2105,99 @@ class _CompressionLockLeaseRefresher:
                 break
 
 
+def _lower_threshold_to_aux_context(
+    agent: Any, *, aux_model: str, aux_context: int, aux_provider: str, aux_base_url: str
+) -> None:
+    """Lower the live threshold to the aux model's window and tell the user how to fix config.
+
+    The summariser sends one user prompt (no system/tools), so threshold == aux_context
+    is safe. tail_token_budget and threshold_percent are kept in lockstep (as
+    update_model does) or the 1.5x tail ceiling exceeds the trigger and re-fires.
+    """
+    compressor = agent.context_compressor
+    old_threshold = compressor.threshold_tokens
+    new_threshold = aux_context
+    compressor.threshold_tokens = new_threshold
+    summary_target_ratio = getattr(compressor, "summary_target_ratio", None)
+    if isinstance(summary_target_ratio, (int, float)):
+        compressor.tail_token_budget = int(new_threshold * summary_target_ratio)
+    main_ctx = compressor.context_length
+    if main_ctx:
+        compressor.threshold_percent = new_threshold / main_ctx
+    safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
+    # Mirror the compressor's threshold math (percent floor, output reservation,
+    # 64K floor): a suggestion it would override is silently ignored and this
+    # warning reappears every session. External engines own policy: keep it plain.
+    from agent.context_compressor import ContextCompressor as _CC
+
+    recomputed_threshold = None
+    if main_ctx and isinstance(compressor, _CC):
+        recomputed_threshold = _CC._compute_threshold_tokens(
+            main_ctx,
+            _CC._effective_threshold_percent(main_ctx, safe_pct / 100),
+            getattr(compressor, "max_tokens", None),
+        )
+    threshold_suggestion_viable = recomputed_threshold is None or recomputed_threshold <= aux_context
+    # "model (provider)" labels for both sides; empty/"auto" provider falls back to
+    # the client's base_url hostname.
+    _main_model = getattr(agent, "model", "") or "?"
+    _main_provider = getattr(agent, "provider", "") or ""
+    _aux_provider_label = aux_provider if aux_provider and aux_provider != "auto" else ""
+    if not _aux_provider_label:
+        try:
+            from urllib.parse import urlparse
+            _aux_provider_label = urlparse(aux_base_url).hostname or aux_base_url
+        except Exception:
+            _aux_provider_label = aux_base_url or "auto"
+    _main_label = f"{_main_model} ({_main_provider})" if _main_provider else _main_model
+    _aux_label = f"{aux_model} ({_aux_provider_label})"
+    msg = (
+        f"⚠ Compression model {_aux_label} context is "
+        f"{aux_context:,} tokens, but the main model "
+        f"{_main_label}'s compression threshold was "
+        f"{old_threshold:,} tokens. "
+        f"Auto-lowered this session's threshold to "
+        f"{new_threshold:,} tokens so compression can run.\n"
+    )
+    if threshold_suggestion_viable:
+        msg += (
+            f"  To make this permanent, edit config.yaml — either:\n"
+            f"  1. Use a larger compression model:\n"
+            f"       auxiliary:\n"
+            f"         compression:\n"
+            f"           model: <model-with-{old_threshold:,}+-context>\n"
+            f"  2. Lower the compression threshold:\n"
+            f"       compression:\n"
+            f"         threshold: 0.{safe_pct:02d}"
+        )
+    else:
+        msg += (
+            f"  To make this permanent, use a larger compression "
+            f"model in config.yaml:\n"
+            f"       auxiliary:\n"
+            f"         compression:\n"
+            f"           model: <model-with-{old_threshold:,}+-context>\n"
+            f"  (Lowering compression.threshold cannot help here — "
+            f"with {_main_label}'s {main_ctx:,}-token window, "
+            f"Hermes's small-context floor and output reservation "
+            f"would recompute the trigger to "
+            f"{recomputed_threshold:,} tokens, still above the "
+            f"compression model's {aux_context:,}.)"
+        )
+    agent._compression_warning = msg
+    agent._emit_status(msg)
+    logger.warning(
+        "Auxiliary compression model %s has %d token context, "
+        "below the main model's compression threshold of %d "
+        "tokens — auto-lowered session threshold to %d to "
+        "keep compression working.",
+        aux_model,
+        aux_context,
+        old_threshold,
+        new_threshold,
+    )
+
+
 def check_compression_model_feasibility(agent: Any) -> None:
     """Warn at session start if the aux compression context is below the threshold.
 
@@ -2197,112 +2290,10 @@ def check_compression_model_feasibility(agent: Any) -> None:
                 f"detected value if it is wrong."
             )
 
-        threshold = agent.context_compressor.threshold_tokens
-        if aux_context < threshold:
-            # Lower the live threshold so compression works this session. The summariser
-            # sends one user prompt (no system/tools), so threshold == aux_context is safe.
-            old_threshold = threshold
-            new_threshold = aux_context
-            agent.context_compressor.threshold_tokens = new_threshold
-            # tail_token_budget derives from the threshold; keep it in lockstep (as
-            # update_model does) or the 1.5x tail ceiling exceeds the trigger and re-fires.
-            summary_target_ratio = getattr(
-                agent.context_compressor, "summary_target_ratio", None
-            )
-            if isinstance(summary_target_ratio, (int, float)):
-                agent.context_compressor.tail_token_budget = int(
-                    new_threshold * summary_target_ratio
-                )
-            # Keep threshold_percent in sync so update_model re-derives from a sensible
-            # value rather than the original too-high one.
-            main_ctx = agent.context_compressor.context_length
-            if main_ctx:
-                agent.context_compressor.threshold_percent = (
-                    new_threshold / main_ctx
-                )
-            safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
-            # Mirror the compressor's threshold math (percent floor, output reservation,
-            # 64K floor): a suggestion it would override is silently ignored and this
-            # warning reappears every session. External engines own policy: keep it plain.
-            from agent.context_compressor import ContextCompressor as _CC
-
-            recomputed_threshold = None
-            if main_ctx and isinstance(agent.context_compressor, _CC):
-                recomputed_threshold = _CC._compute_threshold_tokens(
-                    main_ctx,
-                    _CC._effective_threshold_percent(main_ctx, safe_pct / 100),
-                    getattr(agent.context_compressor, "max_tokens", None),
-                )
-            threshold_suggestion_viable = (
-                recomputed_threshold is None or recomputed_threshold <= aux_context
-            )
-            # "model (provider)" labels for both sides; empty/"auto" provider falls back to
-            # the client's base_url hostname.
-            _main_model = getattr(agent, "model", "") or "?"
-            _main_provider = getattr(agent, "provider", "") or ""
-            _aux_provider_label = (
-                _aux_cfg_provider
-                if _aux_cfg_provider and _aux_cfg_provider != "auto"
-                else ""
-            )
-            if not _aux_provider_label:
-                try:
-                    from urllib.parse import urlparse
-                    _aux_provider_label = (
-                        urlparse(aux_base_url).hostname or aux_base_url
-                    )
-                except Exception:
-                    _aux_provider_label = aux_base_url or "auto"
-            _main_label = (
-                f"{_main_model} ({_main_provider})"
-                if _main_provider
-                else _main_model
-            )
-            _aux_label = f"{aux_model} ({_aux_provider_label})"
-            msg = (
-                f"⚠ Compression model {_aux_label} context is "
-                f"{aux_context:,} tokens, but the main model "
-                f"{_main_label}'s compression threshold was "
-                f"{old_threshold:,} tokens. "
-                f"Auto-lowered this session's threshold to "
-                f"{new_threshold:,} tokens so compression can run.\n"
-            )
-            if threshold_suggestion_viable:
-                msg += (
-                    f"  To make this permanent, edit config.yaml — either:\n"
-                    f"  1. Use a larger compression model:\n"
-                    f"       auxiliary:\n"
-                    f"         compression:\n"
-                    f"           model: <model-with-{old_threshold:,}+-context>\n"
-                    f"  2. Lower the compression threshold:\n"
-                    f"       compression:\n"
-                    f"         threshold: 0.{safe_pct:02d}"
-                )
-            else:
-                msg += (
-                    f"  To make this permanent, use a larger compression "
-                    f"model in config.yaml:\n"
-                    f"       auxiliary:\n"
-                    f"         compression:\n"
-                    f"           model: <model-with-{old_threshold:,}+-context>\n"
-                    f"  (Lowering compression.threshold cannot help here — "
-                    f"with {_main_label}'s {main_ctx:,}-token window, "
-                    f"Hermes's small-context floor and output reservation "
-                    f"would recompute the trigger to "
-                    f"{recomputed_threshold:,} tokens, still above the "
-                    f"compression model's {aux_context:,}.)"
-                )
-            agent._compression_warning = msg
-            agent._emit_status(msg)
-            logger.warning(
-                "Auxiliary compression model %s has %d token context, "
-                "below the main model's compression threshold of %d "
-                "tokens — auto-lowered session threshold to %d to "
-                "keep compression working.",
-                aux_model,
-                aux_context,
-                old_threshold,
-                new_threshold,
+        if aux_context < agent.context_compressor.threshold_tokens:
+            _lower_threshold_to_aux_context(
+                agent, aux_model=aux_model, aux_context=aux_context,
+                aux_provider=_aux_cfg_provider, aux_base_url=aux_base_url,
             )
     except ValueError:
         # Hard rejections (aux below minimum context) must propagate
