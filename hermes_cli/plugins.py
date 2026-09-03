@@ -1038,31 +1038,24 @@ del _row
 def _resolve_hook_callback_timeout() -> float:
     """Effective hook-callback timeout from ``plugins.hook_callback_timeout`` (default 30s; ``<= 0``
     disables the threaded path; clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``)."""
-    timeout = _HOOK_CALLBACK_TIMEOUT_SECS
+    default = _HOOK_CALLBACK_TIMEOUT_SECS
     try:
         from hermes_cli.config import load_config_readonly
         plugins_cfg = (load_config_readonly() or {}).get("plugins")
-        if isinstance(plugins_cfg, dict) and plugins_cfg.get("hook_callback_timeout") is not None:
-            timeout = float(plugins_cfg["hook_callback_timeout"])
+        if not isinstance(plugins_cfg, dict) or plugins_cfg.get("hook_callback_timeout") is None:
+            return default
+        timeout = float(plugins_cfg["hook_callback_timeout"])
     except (TypeError, ValueError):
-        logger.warning(
-            "plugins.hook_callback_timeout is not a number; using default %gs",
-            _HOOK_CALLBACK_TIMEOUT_SECS,
-        )
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        logger.warning("plugins.hook_callback_timeout is not a number; using default %gs", default)
+        return default
     except Exception:
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        return default
     if timeout < 0:
-        logger.warning(
-            "plugins.hook_callback_timeout=%g is negative; using default %gs", timeout,
-            _HOOK_CALLBACK_TIMEOUT_SECS,
-        )
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        logger.warning("plugins.hook_callback_timeout=%g is negative; using default %gs", timeout, default)
+        return default
     if timeout > _MAX_HOOK_CALLBACK_TIMEOUT_SECS:
-        logger.warning(
-            "plugins.hook_callback_timeout=%g exceeds max %gs; clamping", timeout,
-            _MAX_HOOK_CALLBACK_TIMEOUT_SECS,
-        )
+        logger.warning("plugins.hook_callback_timeout=%g exceeds max %gs; clamping", timeout,
+                       _MAX_HOOK_CALLBACK_TIMEOUT_SECS)
         return _MAX_HOOK_CALLBACK_TIMEOUT_SECS
     return timeout
 
@@ -1080,23 +1073,26 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._cli_ref = None  # Set by CLI after plugin discovery
         self._gateway_message_injector: tuple[object, Callable] | None = None
         self._context_engine = None  # Set by a plugin via register_context_engine()
-        # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``).
+        # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``):
+        # plugins, hooks, middleware, CLI + slash commands, prompt sections, skills (qualified name ->
+        # metadata), portable MCP servers, auxiliary tasks, approval transports, Slack action handlers
+        # (matcher, callback, plugin_name), platform handler factories (lowercase platform -> list).
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
-        self._plugin_commands: Dict[str, dict] = {}  # slash commands
+        self._plugin_commands: Dict[str, dict] = {}
         self._system_prompt_sections: Dict[str, PluginSystemPromptSection] = {}
-        self._plugin_skills: Dict[str, Dict[str, Any]] = {}  # qualified name -> metadata
+        self._plugin_skills: Dict[str, Dict[str, Any]] = {}
         self._portable_mcp_servers: Dict[str, Dict[str, Any]] = {}
         self._aux_tasks: Dict[str, Dict[str, Any]] = {}
         self._approval_transports: Dict[str, Any] = {}
-        self._slack_action_handlers: List[tuple] = []  # (matcher, callback, plugin_name)
-        self._platform_handler_factories: Dict[str, List[tuple]] = {}  # lowercase platform -> list
+        self._slack_action_handlers: List[tuple] = []
+        self._platform_handler_factories: Dict[str, List[tuple]] = {}
         # Event bus: owner-tagged subscriptions (unload removes zombies); one daemon worker keeps
-        # registration order while emitters never block.
+        # registration order while emitters never block; per-worker chain depth caps mutual emitters.
         self._subscriptions: Dict[str, List[_EventSubscription]] = {}
         self._event_lock = threading.RLock()
         self._event_idle = threading.Condition(self._event_lock)
@@ -1104,21 +1100,20 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._event_pending_by_generation: Dict[int, int] = {0: 0}
         self._event_queue: queue.Queue[Any] = queue.Queue(maxsize=_EVENT_PENDING_CAP)
         self._event_worker: Optional[threading.Thread] = None
-        self._emit_depth = threading.local()  # per-worker chain depth caps mutual emitters
+        self._emit_depth = threading.local()
         # In-flight / recently-timed-out hook callbacks keyed by (hook_name, id(cb)) so a stuck
         # policy hook cannot spawn a new abandoned thread on every fire.
         self._hook_running_callbacks: Dict[tuple, object] = {}
         self._hook_timeout_suppressed_until: Dict[tuple, float] = {}
         self._hook_timeout_lock = threading.Lock()
         self._hook_timeout_suppression_seconds = _HOOK_TIMEOUT_SUPPRESSION_SECONDS
-        # Ledger per plugin (ownership) plus global order (reverse teardown across plugins).
-        # Process-global registries are shared across profiles while several managers coexist, so
-        # the ledger is keyed per (hermes_home, plugin_id) and every inverse is identity-conditional
-        # — one profile's unload can never clear another's registrations.
+        # Ledger per plugin (ownership) plus global order (reverse teardown across plugins). Process-
+        # global registries are shared across profiles while several managers coexist, so the ledger
+        # is keyed per (hermes_home, plugin_id) and every inverse is identity-conditional — one
+        # profile's unload can never clear another's. Persistent registrations that survived an
+        # unload-all park in ``_persistent_carryover`` until force re-discovery evicts the stale ones.
         self._ownership_ledger: Dict[str, List[PluginRegistration]] = {}
         self._registration_order: List[PluginRegistration] = []
-        # Persistent registrations that survived an unload-all; force re-discovery drains this via
-        # _evict_stale_persistent_registrations().
         self._persistent_carryover: List[PluginRegistration] = []
         # Deferred platforms whose client tools registered at discovery (see
         # _register_deferred_platform_tools): imported package (don't re-execute on materialize)
@@ -1137,8 +1132,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
 
     def clear_gateway_message_injector(self, owner: object) -> None:
         """Clear the injector only when it still belongs to ``owner``."""
-        registered = self._gateway_message_injector
-        if registered is not None and registered[0] is owner:
+        if self._gateway_message_injector is not None and self._gateway_message_injector[0] is owner:
             self._gateway_message_injector = None
 
     def inject_gateway_message(self, **kwargs: Any) -> bool:
@@ -1203,24 +1197,22 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             secrets = (load_config() or {}).get("secrets") or {}
         except Exception:
             secrets = {}
-        enabled_names = []
-        for source in plugin_sources:
-            name = getattr(source, "name", "")
-            section = secrets.get(name)
+
+        def _enabled(source) -> bool:
+            section = secrets.get(getattr(source, "name", ""))
             try:
-                if source.is_enabled(section if isinstance(section, dict) else {}):
-                    enabled_names.append(name)
+                return bool(source.is_enabled(section if isinstance(section, dict) else {}))
             except Exception:
-                continue  # mirrors the orchestrator: a raising is_enabled() is skipped
+                return False  # mirrors the orchestrator: a raising is_enabled() is skipped
+
+        enabled_names = [getattr(s, "name", "") for s in plugin_sources if _enabled(s)]
         if not enabled_names:
             return
         try:
             reset_secret_source_cache()
             load_hermes_dotenv()
-            logger.debug(
-                "Re-applied secret sources after plugin discovery for: %s",
-                ", ".join(sorted(enabled_names)),
-            )
+            logger.debug("Re-applied secret sources after plugin discovery for: %s",
+                         ", ".join(sorted(enabled_names)))
         except Exception as exc:
             logger.debug("secret source re-apply after discovery failed: %s", exc)
 
@@ -1236,28 +1228,21 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         enabled = _get_enabled_plugins()  # None = opt-in default (nothing enabled)
         stale_relay_keys = legacy_relay_plugin_keys(enabled)
         if stale_relay_keys:
-            logger.warning(
-                "Removed Hermes plugin %s is still listed in plugins.enabled; "
-                "remove it and configure native Relay plugins with %s", ", ".join(stale_relay_keys),
-                RELAY_PLUGINS_CONFIG_ENV,
-            )
+            logger.warning("Removed Hermes plugin %s is still listed in plugins.enabled; "
+                           "remove it and configure native Relay plugins with %s",
+                           ", ".join(stale_relay_keys), RELAY_PLUGINS_CONFIG_ENV)
         # Later sources win on key collision (project > user > bundled); gate the winners, then
         # load survivors in requires_plugins order (see resolve_plugin_load_order).
         winners = {manifest_key(m): m for m in manifests}
-        to_load = {
-            key: manifest for key, manifest in winners.items()
-            if self._gate_manifest(manifest, disabled, enabled)
-        }
+        to_load = {k: m for k, m in winners.items() if self._gate_manifest(m, disabled, enabled)}
         for lookup_key in resolve_plugin_load_order(to_load):
             manifest = to_load[lookup_key]
             self._warn_python_dependencies(manifest)
             self._validate_plugin_config_schema(manifest)
             self._load_plugin(manifest)
         if manifests:
-            logger.info(
-                "Plugin discovery complete: %d found, %d enabled", len(self._plugins),
-                sum(1 for p in self._plugins.values() if p.enabled),
-            )
+            logger.info("Plugin discovery complete: %d found, %d enabled", len(self._plugins),
+                        sum(1 for p in self._plugins.values() if p.enabled))
 
     def _gate_manifest(
         self, manifest: PluginManifest, disabled: Set[str], enabled: Optional[Set[str]],
@@ -1274,8 +1259,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             self._register_deferred_platform(manifest)
         else:
             self._plugins[manifest_key(manifest)] = LoadedPlugin(
-                manifest=manifest, enabled=verdict.enabled, error=verdict.error,
-            )
+                manifest=manifest, enabled=verdict.enabled, error=verdict.error)
         if verdict.log:
             logger.log(*verdict.log)
         return False
@@ -1307,17 +1291,14 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         disabled = _names(plugins_config.get("disabled", []))
         if not enabled:
             return False
-        winners = {manifest_key(m): m for m in self._collect_directory_manifests()}
-        for lookup_key, manifest in winners.items():
+        for lookup_key, manifest in {manifest_key(m): m for m in self._collect_directory_manifests()}.items():
             names = {lookup_key, manifest.name}
             if not manifest.portable or names & disabled or not names & enabled:
                 continue
-            try:
+            try:  # lazy: this is a startup probe, keep agent_plugins unimported unless needed
                 from hermes_cli.agent_plugins import _discover_mcp
-                if _discover_mcp(
-                    Path(manifest.path), get_hermes_home() / "plugin-data"
-                    / (manifest.skill_namespace or lookup_key), [], create_data=False,
-                ):
+                if _discover_mcp(Path(manifest.path), get_hermes_home() / "plugin-data"
+                                 / (manifest.skill_namespace or lookup_key), [], create_data=False):
                     return True
             except (OSError, RuntimeError, ValueError):
                 continue  # fail closed on an unreadable package; full discovery reports it
@@ -1346,14 +1327,12 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Return a list of info dicts for all discovered plugins."""
         return [
             {
-                "name": loaded.manifest.name, "key": manifest_key(loaded.manifest),
-                "kind": loaded.manifest.kind, "version": loaded.manifest.version,
-                "description": loaded.manifest.description, "source": loaded.manifest.source,
-                "enabled": loaded.enabled, "tools": len(loaded.tools_registered),
-                "hooks": len(loaded.hooks_registered),
-                "middleware": len(loaded.middleware_registered),
-                "commands": len(loaded.commands_registered), "error": loaded.error,
-            } for _key, loaded in sorted(self._plugins.items())
+                "name": p.manifest.name, "key": manifest_key(p.manifest), "kind": p.manifest.kind,
+                "version": p.manifest.version, "description": p.manifest.description,
+                "source": p.manifest.source, "enabled": p.enabled, "tools": len(p.tools_registered),
+                "hooks": len(p.hooks_registered), "middleware": len(p.middleware_registered),
+                "commands": len(p.commands_registered), "error": p.error,
+            } for _key, p in sorted(self._plugins.items())
         ]
 
     def find_plugin_skill(self, qualified_name: str) -> Optional[Path]:
@@ -1364,9 +1343,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def list_plugin_skills(self, plugin_name: str) -> List[str]:
         """Return sorted bare names of all skills registered by *plugin_name*."""
         prefix = f"{plugin_name}:"
-        return sorted(
-            e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix)
-        )
+        return sorted(e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix))
 
     def list_plugin_skill_metadata(self) -> List[Dict[str, Any]]:
         """Return progressive-disclosure metadata for registered plugin skills."""
@@ -1414,7 +1391,7 @@ def _clear_plugin_submodules(manager: Optional[PluginManager]) -> None:
     """
     if manager is None:
         return
-    for loaded in getattr(manager, "_plugins", {}).values():
+    for loaded in getattr(manager, "_plugins", {}).values():  # tolerates test-double managers
         module_name = getattr(getattr(loaded, "module", None), "__name__", None)
         if not module_name or not module_name.startswith(f"{_NS_PARENT}."):
             continue
@@ -1432,9 +1409,7 @@ def get_plugin_manager() -> PluginManager:
     with _plugin_managers_lock:
         # Tests/embedders monkeypatch ``_plugin_manager`` directly: adopt a single-slot manager the
         # keyed cache doesn't know about at all.
-        if (
-            _plugin_manager is not None and _plugin_manager not in _plugin_managers_by_home.values()
-        ):
+        if _plugin_manager is not None and _plugin_manager not in _plugin_managers_by_home.values():
             _plugin_managers_by_home[current_home] = _plugin_manager
             return _plugin_manager
         manager = _plugin_managers_by_home.get(current_home)
@@ -1505,9 +1480,7 @@ def start_background_plugin_discovery() -> None:
             except Exception:
                 logger.warning("background plugin discovery failed", exc_info=True)
 
-        _background_discovery_thread = threading.Thread(
-            target=_run, name="plugin-discovery", daemon=True
-        )
+        _background_discovery_thread = threading.Thread(target=_run, name="plugin-discovery", daemon=True)
         _background_discovery_thread.start()
 
 
@@ -1563,9 +1536,7 @@ def get_plugin_toolset_keys_nowait() -> "set[str]":
     """Plugin toolset keys without blocking on in-flight discovery: live registry when done, last
     launch's persisted set while a background scan runs (callers only EXCLUDE these keys, so a stale
     set is harmless and self-heals), else block via discover_plugins()."""
-    return _nowait_plugin_set(
-        "toolset_keys", lambda _m: {ts_key for ts_key, _, _ in get_plugin_toolsets()}
-    )
+    return _nowait_plugin_set("toolset_keys", lambda _m: {ts_key for ts_key, _, _ in get_plugin_toolsets()})
 
 
 def get_portable_mcp_server_names_nowait() -> "set[str]":
@@ -1589,9 +1560,7 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return _delivery_manager().invoke_hook(hook_name, **kwargs)
 
 
-def render_system_prompt_sections(
-    session_info: Mapping[str, Any],
-) -> List[RenderedPluginSystemPromptSection]:
+def render_system_prompt_sections(session_info: Mapping[str, Any]) -> List[RenderedPluginSystemPromptSection]:
     """Render plugin prompt sections after idempotent plugin discovery."""
     return _ensure_plugins_discovered().render_system_prompt_sections(session_info)
 
@@ -1637,11 +1606,9 @@ def fire_pre_command_hook(
         )
         for result in results:
             if isinstance(result, dict) and ("action" in result or "decision" in result):
-                logger.debug(
-                    "pre_command is observer-only in v1: ignoring directive "
-                    "%r for /%s (surface=%s). Block/rewrite will arrive with "
-                    "the command middleware variant (#64204/#64231).", result, command, surface,
-                )
+                logger.debug("pre_command is observer-only in v1: ignoring directive %r for /%s (surface=%s). "
+                             "Block/rewrite will arrive with the command middleware variant (#64204/#64231).",
+                             result, command, surface)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("pre_command hook dispatch failed (non-fatal): %s", exc)
 
@@ -1699,9 +1666,8 @@ def _get_pre_tool_call_directive_details(
         if action == "modify":
             partial = result.get("args")
             if isinstance(partial, dict) and partial:
-                if modified_args is None:
-                    modified_args = dict(args) if isinstance(args, dict) else {}
-                modified_args.update(partial)
+                modified_args = {**(modified_args if modified_args is not None else
+                                    (args if isinstance(args, dict) else {})), **partial}
             continue
         if action not in ("block", "approve"):
             continue
@@ -1712,9 +1678,7 @@ def _get_pre_tool_call_directive_details(
             continue
         rule_key = result.get("rule_key") if action == "approve" else None
         rule_key = (rule_key.strip() or None) if isinstance(rule_key, str) else None
-        return _PreToolCallDirective(
-            action=action, message=message, rule_key=rule_key, modified_args=modified_args,
-        )
+        return _PreToolCallDirective(action=action, message=message, rule_key=rule_key, modified_args=modified_args)
     return _PreToolCallDirective(modified_args=modified_args)
 
 
@@ -1755,18 +1719,14 @@ def _resolve_block_from_details(
         return None
     try:
         from tools.approval import (
-            request_tool_approval, reset_current_observability_context,
-            set_current_observability_context,
+            request_tool_approval, reset_current_observability_context, set_current_observability_context,
         )
         approval_tokens = None
         with suppress(Exception):
             approval_tokens = set_current_observability_context(
-                turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id,
-            )
+                turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
         try:
-            result = request_tool_approval(
-                tool_name, details.message or "", rule_key=details.rule_key or tool_name,
-            )
+            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name)
         finally:
             if approval_tokens is not None:
                 with suppress(Exception):
@@ -1787,10 +1747,7 @@ def _dispatch_pre_tool_call_hooks(
     block/approve message (``None`` to proceed) and merged ``modify`` args (``None`` if none)."""
     details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
     block_msg = _resolve_block_from_details(
-        details, tool_name,
-        turn_id=hook_kwargs.get("turn_id", ""), tool_call_id=hook_kwargs.get("tool_call_id", ""),
-        session_id=hook_kwargs.get("session_id", ""),
-    )
+        details, tool_name, **{k: hook_kwargs.get(k, "") for k in ("turn_id", "tool_call_id", "session_id")})
     return (block_msg, details.modified_args)
 
 
@@ -1856,11 +1813,8 @@ def get_plugin_error_classification(
     if isinstance(result.get("error_context"), dict):
         winner["error_context"] = result["error_context"]
     if len(valid) > 1:
-        logger.warning(
-            "transform_api_error_classification: skipped %d valid "
-            "classification(s) after the first result in registration order "
-            "won (run-all-then-pick-first)", len(valid) - 1,
-        )
+        logger.warning("transform_api_error_classification: skipped %d valid classification(s) after the "
+                       "first result in registration order won (run-all-then-pick-first)", len(valid) - 1)
     return winner
 
 
@@ -1909,10 +1863,8 @@ def resolve_plugin_command_result(result: Any) -> Any:
 
     threading.Thread(target=_runner, name="hermes-plugin-command-await", daemon=True).start()
     if not done.wait(timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS):
-        raise TimeoutError(
-            "Plugin command async handler did not complete within "
-            f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s"
-        )
+        raise TimeoutError("Plugin command async handler did not complete within "
+                           f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s")
     if "exc" in failure:
         raise failure["exc"]
     return outcome.get("value")
@@ -1954,8 +1906,6 @@ def get_plugin_toolsets() -> List[tuple]:
     result = []
     for ts_key in sorted(toolset_tools):
         plugin = toolset_plugin.get(ts_key)
-        desc = (plugin.manifest.description if plugin else "") or ", ".join(
-            sorted(toolset_tools[ts_key])
-        )
+        desc = (plugin.manifest.description if plugin else "") or ", ".join(sorted(toolset_tools[ts_key]))
         result.append((ts_key, f"🔌 {ts_key.replace('_', ' ').title()}", desc))
     return result
