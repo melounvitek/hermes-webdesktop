@@ -92,6 +92,7 @@ MAX_SKILL_FILE_BYTES = 1_048_576    # 1 MiB per supporting file
 VALID_NAME_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')  # filesystem-safe, URL-friendly
 ALLOWED_SUBDIRS = {"references", "templates", "scripts", "assets"}  # for write_file/remove_file
 _FRONTMATTER_END_RE = re.compile(r'\n---\s*\n')
+_NAME_RULE = "Use lowercase letters, numbers, hyphens, dots, and underscores."
 
 
 def _display_create_dir() -> str:
@@ -115,8 +116,7 @@ def _validate_name(name: str) -> Optional[str]:
     if len(name) > MAX_NAME_LENGTH:
         return f"Skill name exceeds {MAX_NAME_LENGTH} characters."
     if not VALID_NAME_RE.match(name):
-        return (f"Invalid skill name '{name}'. Use lowercase letters, numbers, "
-                f"hyphens, dots, and underscores. Must start with a letter or digit.")
+        return f"Invalid skill name '{name}'. {_NAME_RULE} Must start with a letter or digit."
     return None
 
 
@@ -128,8 +128,8 @@ def _validate_category(category: Optional[str]) -> Optional[str]:
     category = category.strip()
     if not category:
         return None
-    invalid = (f"Invalid category '{category}'. Use lowercase letters, numbers, "
-               "hyphens, dots, and underscores. Categories must be a single directory name.")
+    invalid = (f"Invalid category '{category}'. {_NAME_RULE} "
+               "Categories must be a single directory name.")
     if "/" in category or "\\" in category:
         return invalid
     if len(category) > MAX_NAME_LENGTH:
@@ -627,7 +627,6 @@ def _remove_file(name: str, file_path: str) -> Dict[str, Any]:
     guard = _background_review_write_guard(name, skill_dir, "remove_file")
     if guard:
         return guard
-
     target, err = _resolve_supporting_file(skill_dir, file_path)
     if err:
         return err
@@ -720,7 +719,7 @@ def apply_skill_pending(payload: Dict[str, Any]) -> str:
 # Debounce state for the sync push hook: a burst of skill_manage writes
 # collapses into one push after a quiet window, on a daemon timer.
 _sync_push_timer = None
-_sync_push_lock = None
+_sync_push_lock = threading.Lock()
 _SYNC_PUSH_DEBOUNCE_S = 5.0
 
 
@@ -728,16 +727,13 @@ def _maybe_debounced_sync_push(skill_name: str) -> None:
     """Debounced best-effort sync push after a skill write; never blocks the caller.
     Skills not opted into sync do nothing (no auth, no network); the push itself
     (``skills_sync_client.maybe_push_skills``) enforces the access gate."""
-    global _sync_push_timer, _sync_push_lock
+    global _sync_push_timer
     try:
         from tools.skill_usage import is_sync_enabled
         if not is_sync_enabled(skill_name):
             return
     except Exception:
         return
-
-    if _sync_push_lock is None:
-        _sync_push_lock = threading.Lock()
 
     def _fire():
         with suppress(Exception):

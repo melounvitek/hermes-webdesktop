@@ -15,11 +15,6 @@ _BATCH_OP_ACTIONS = {"create", "patch", "write_file", "remove_file"}
 _BATCH_MAX_OPS = 20
 
 
-def _norm_target(op) -> str:
-    fp = (op.get("file_path") or "").strip()
-    return posixpath.normpath(fp.lstrip("/")) if fp else "SKILL.md"
-
-
 def _validate_batch_ops(operations, default_name, tool_error):
     """Shape checks with no side effects. Returns (names, None) or (None, error_json)."""
     from tools.skill_manager_guards import _background_review_preflight
@@ -55,7 +50,9 @@ def _validate_batch_ops(operations, default_name, tool_error):
         nm = names[i]
         # create and full-rewrite patch (content) always hit SKILL.md.
         full_rewrite = act == "patch" and bool(op.get("content"))
-        target = "SKILL.md" if (act == "create" or full_rewrite) else _norm_target(op)
+        fp = (op.get("file_path") or "").strip()
+        target = ("SKILL.md" if (act == "create" or full_rewrite or not fp)
+                  else posixpath.normpath(fp.lstrip("/")))
         key = (nm, target)
         destructive = act in ("create", "write_file", "remove_file") or full_rewrite
         if destructive and key in touched_files:
@@ -67,19 +64,6 @@ def _validate_batch_ops(operations, default_name, tool_error):
                 success=False)
         touched_files.add(key)
     return names, None
-
-
-def _stage_batch_if_gated(operations, names):
-    """Approval gate for the WHOLE batch as one pending write."""
-    from tools.skill_manager_tool import _run_write_gate
-
-    def _staging(wa):
-        acts = ", ".join(op["action"] for op in operations)
-        skills = ", ".join(sorted(set(names)))
-        gist = f"batch({len(operations)} ops: {acts}) on {skills}"
-        return {"action": "batch", "operations": operations}, gist
-
-    return _run_write_gate(_staging)
 
 
 def _snapshot_skills(names, snap_root, find_skill):
@@ -169,7 +153,13 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         return err
 
     if not _smt._skill_gate_bypass.get():
-        staged = _stage_batch_if_gated(operations, names)
+        # Approval gate for the WHOLE batch as one pending write.
+        def _staging(wa):
+            acts = ", ".join(op["action"] for op in operations)
+            gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
+            return {"action": "batch", "operations": operations}, gist
+
+        staged = _smt._run_write_gate(_staging)
         if staged is not None:
             return staged
 

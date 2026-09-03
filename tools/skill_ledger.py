@@ -109,8 +109,6 @@ def _is_within(root: Path, path: Path) -> bool:
         return False
 
 
-# --- Blob store (content-addressed, deduped) ---------------------------------
-
 def _store_blob(data: bytes) -> str:
     """Write *data* keyed by sha256 (existing blob left alone). Returns the hash."""
     digest = hashlib.sha256(data).hexdigest()
@@ -157,8 +155,6 @@ def snapshot_paths(root: Optional[Path], *, complete_package: bool = False) -> L
     return out
 
 
-# --- Package-completeness fill from the newest curator backup -----------------
-
 def _package_rel(root: Path) -> Optional[str]:
     """Relative POSIX path of a skill dir under ``skills/``; None when outside it
     or under backup/hub/archive metadata roots (never a package)."""
@@ -173,12 +169,9 @@ def _strip_archive_timestamp(name: str) -> str:
     return match.group(1) if match else name
 
 
-def _skill_md_parent(items: Optional[List[Dict[str, str]]]) -> Optional[Path]:
-    for item in items or []:
-        path = Path(str(item.get("path", "")))
-        if path.name == "SKILL.md":
-            return path.parent
-    return None
+def _skill_md_parents(items: Optional[List[Dict[str, str]]]) -> List[Path]:
+    paths = [Path(str(item.get("path", ""))) for item in items or []]
+    return [p.parent for p in paths if p.name == "SKILL.md"]
 
 
 def package_prefixes(
@@ -188,10 +181,7 @@ def package_prefixes(
     the package parent from the before-state SKILL.md path (rollback fills where
     *root* is gone), the bare skill name, and the name minus an archive suffix."""
     candidates = [_package_rel(Path(root)) if root is not None else None]
-    for item in before or []:
-        path = Path(str(item.get("path", "")))
-        if path.name == "SKILL.md":
-            candidates.append(_package_rel(path.parent))
+    candidates += [_package_rel(p) for p in _skill_md_parents(before)]
     candidates += [skill, _strip_archive_timestamp(skill) if skill else None]
     found: List[str] = []
     for prefix in candidates:
@@ -294,8 +284,6 @@ def fill_snapshot_from_curator_backup(
     return out
 
 
-# --- Append + read ------------------------------------------------------------
-
 def append_entry(
     action: str, skill: str, before: Optional[List[Dict[str, str]]] = None,
     after: Optional[List[Dict[str, str]]] = None, actor: Optional[str] = None,
@@ -395,8 +383,6 @@ def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
     return next((row for row in list_entries() if row.get("id") == entry_id), None)
 
 
-# --- Single-edit rollback -----------------------------------------------------
-
 def _validate_entry_paths(entry: Dict[str, Any]) -> Optional[str]:
     """Every entry path must be under HERMES_HOME — a hand-edited ledger must not
     become a write-anywhere primitive."""
@@ -430,7 +416,8 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     # only missing paths are added, and the filled set is re-validated.
     if entry.get("action") in _PACKAGE_RESTORE_ACTIONS:
         before = fill_snapshot_from_curator_backup(
-            _skill_md_parent(before), before, skill=str(entry.get("skill") or "") or None)
+            next(iter(_skill_md_parents(before)), None), before,
+            skill=str(entry.get("skill") or "") or None)
         path_err = _validate_entry_paths({**entry, "before": before, "after": after})
         if path_err:
             return False, f"refusing rollback: {path_err}"
@@ -461,15 +448,11 @@ def rollback_entry(entry_id: str) -> Tuple[bool, str]:
 
     # Restore: write every before-file, remove files the mutation created.
     before_paths = {str(i["path"]) for i in before}
-    restored = 0
-    removed = 0
     for item in before:
         fp = Path(str(item["path"]))
-        data = read_blob(str(item["sha256"]))
-        assert data is not None  # pre-checked above
         fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_bytes(data)
-        restored += 1
+        fp.write_bytes(read_blob(str(item["sha256"])))  # pre-checked above
+    restored, removed = len(before), 0
     for item in after:
         p = str(item.get("path", ""))
         if p and p not in before_paths:

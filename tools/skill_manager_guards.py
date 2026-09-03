@@ -34,8 +34,6 @@ def _resolved_str(path: Path) -> str:
         return str(path)
 
 
-# --- Background-review read marks --------------------------------------------
-
 class _BackgroundReviewReadMarks:
     """Read marks shared by copied tool contexts within one review run."""
 
@@ -78,8 +76,6 @@ def _reset_background_review_read_marks() -> None:
     """Start a fresh, isolated read set for the current review context."""
     _background_review_read_paths.set(_BackgroundReviewReadMarks())
 
-
-# --- Delete-target safety -----------------------------------------------------
 
 def _containing_skills_root(skill_path: Path) -> Path:
     """Skills root (local or external_dirs) containing ``skill_path``; local dir if none match."""
@@ -138,8 +134,6 @@ def _validate_delete_target(skill_dir: Path) -> Optional[str]:
         f"Refusing to delete '{skill_dir}': path does not resolve inside any "
         f"known skills root.")
 
-
-# --- Ownership / provenance guards --------------------------------------------
 
 def _pinned_guard(name: str) -> Optional[str]:
     """Refusal message if *name* is pinned or essential, else None.
@@ -268,8 +262,6 @@ def _curator_consolidation_delete_guard(
         "separately. Keeping '{name}' active.".format(name=name),
         _fail_closed=True)
 
-
-# --- Org-mirror handling ------------------------------------------------------
 
 def _maybe_auto_propose_org_edit(name: str, skill_path: Path) -> Optional[str]:
     """Submit an org-skill edit upstream when `sync.org_auto_propose` is on.
