@@ -1208,11 +1208,13 @@ class MoAChatCompletions:
         if fanout_mode == "user_turn" or every_n >= 2:
             # Last REAL user message: the synthetic _ADVISORY_INSTRUCTION marker must not
             # count or the prefix would grow (and re-sign) every iteration.
-            for i in range(len(ref_messages) - 1, -1, -1):
-                m = ref_messages[i]
-                if m.get("role") == "user" and m.get("content") != _ADVISORY_INSTRUCTION:
-                    turn_prefix = ref_messages[: i + 1]
-                    break
+            last_user = next(
+                (i for i in range(len(ref_messages) - 1, -1, -1)
+                 if ref_messages[i].get("role") == "user" and ref_messages[i].get("content") != _ADVISORY_INSTRUCTION),
+                None,
+            )
+            if last_user is not None:
+                turn_prefix = ref_messages[: last_user + 1]
             if fanout_mode == "user_turn":
                 sig_messages = turn_prefix
 
@@ -1260,14 +1262,11 @@ class MoAChatCompletions:
             reference_timeout=float(raw_reference_timeout) if raw_reference_timeout else None,
             agent=self._agent, late_accounting_sink=self._record_late_reference_accounting,
         )
-        if any(text == _INTERRUPTED_REFERENCE_NOTE for _lbl, text, _acct in reference_outputs):
-            # An interrupted fan-out is a partial snapshot: never cache it (a HIT
-            # would replay placeholder notes every iteration).
-            self._ref_cache_key = None
-            self._ref_cache_outputs = []
-        else:
-            self._ref_cache_key = cache_key
-            self._ref_cache_outputs = list(reference_outputs)
+        # An interrupted fan-out is a partial snapshot: never cache it (a HIT would
+        # replay placeholder notes every iteration).
+        interrupted = any(text == _INTERRUPTED_REFERENCE_NOTE for _lbl, text, _acct in reference_outputs)
+        self._ref_cache_key = None if interrupted else cache_key
+        self._ref_cache_outputs = [] if interrupted else list(reference_outputs)
         # Fold advisor spend into accounting exactly once per turn.
         self._fold_pending_accounting(*_sum_reference_accounting(reference_outputs))
         # Stash the fan-out for trace persistence (aggregator parts filled in later).
