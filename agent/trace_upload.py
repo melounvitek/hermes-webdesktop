@@ -1,16 +1,11 @@
 """Upload a Hermes session transcript to Hugging Face as an agent trace.
 
-The SQLite session (``hermes_state.SessionDB``) is re-emitted in the **Claude
-Code JSONL** shape, one of the formats the HF Agent Trace Viewer auto-detects
-(docs: https://huggingface.co/docs/hub/agent-traces).
-
-* **Zero LLM turn.** Deterministic export; ``hermes trace upload`` calls
-  :func:`upload_session_trace` directly.
-* **Private by default.** Traces can contain prompts, tool output, local paths and
-  secrets: the dataset is created private and every text body goes through the
-  secret redactor (``force=True``) unless the caller passes ``redact=False``.
-* **Never raises.** Returns a user-facing status string. Programmatic callers
-  wanting the URL use :func:`build_trace_jsonl` + :func:`_do_upload` directly.
+The SQLite session is re-emitted in the **Claude Code JSONL** shape the HF Agent Trace Viewer
+auto-detects (https://huggingface.co/docs/hub/agent-traces). Deterministic, zero LLM turns.
+Private by default: traces can contain prompts, tool output, local paths and secrets, so the
+dataset is created private and every text body goes through the secret redactor (``force=True``)
+unless the caller passes ``redact=False``. :func:`upload_session_trace` never raises — it returns a
+user-facing status string; programmatic callers use :func:`build_trace_jsonl` + :func:`_do_upload`.
 """
 
 from __future__ import annotations
@@ -46,17 +41,15 @@ class TraceRedactionError(RuntimeError):
     """Raised when a trace cannot be safely redacted before upload."""
 
 
-# ---------------------------------------------------------------------------
-# Conversion: Hermes OpenAI-format messages -> Claude Code JSONL
-# ---------------------------------------------------------------------------
+# --- Conversion: Hermes OpenAI-format messages -> Claude Code JSONL ---
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def _redact(text: Any, enabled: bool) -> Any:
-    """Redact secrets from a string body when enabled; non-strings pass through.
-    ``force=True``: an upload always scrubs even if log redaction is disabled."""
+    """Redact secrets from a string body when enabled (``force=True``: an upload always scrubs
+    even if log redaction is disabled); non-strings pass through."""
     if not enabled or not isinstance(text, str) or not text:
         return text
     try:
@@ -183,10 +176,10 @@ def build_trace_jsonl(
 ) -> str:
     """Render Hermes conversation messages as Claude Code JSONL text.
 
-    Each non-system message becomes one line: ``user``/``tool`` -> ``{"type":
-    "user"}``, ``assistant`` -> ``{"type": "assistant"}`` with text + ``tool_use``
-    blocks. Tool results ride on user turns as a ``tool_result`` block keyed by
-    ``tool_call_id``; turns link via ``uuid`` / ``parentUuid``.
+    Each non-system message becomes one line: ``user``/``tool`` -> ``{"type": "user"}``,
+    ``assistant`` -> ``{"type": "assistant"}`` with text + ``tool_use`` blocks. Tool results ride
+    on user turns as a ``tool_result`` block keyed by ``tool_call_id``; turns link via ``uuid`` /
+    ``parentUuid``.
     """
     lines: List[str] = []
     parent: Optional[str] = None
@@ -218,9 +211,7 @@ def build_trace_jsonl(
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-# ---------------------------------------------------------------------------
-# Upload
-# ---------------------------------------------------------------------------
+# --- Upload ---
 
 def _resolve_hf_token() -> Optional[str]:
     """Return the user's Hugging Face token from the usual env vars."""
@@ -245,8 +236,7 @@ def _do_upload(
         from tools import lazy_deps
         lazy_deps.ensure("tool.trace_upload", prompt=False)
     except Exception:
-        # Lazy-install unavailable/declined — the import below surfaces the hint.
-        pass
+        pass  # lazy-install unavailable/declined — the import below surfaces the hint
     try:
         from huggingface_hub import HfApi
     except ImportError:
@@ -288,8 +278,8 @@ def _do_upload(
 
 
 def load_session_messages(session_id: str, db_path=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Load ``(messages, meta)`` from the SQLite store. ``meta`` is ``{}`` when the
-    session row is missing (messages may still exist for a live, untitled session)."""
+    """Load ``(messages, meta)`` from the SQLite store; ``meta`` is ``{}`` when the session row is
+    missing (messages may still exist for a live, untitled session)."""
     from hermes_state import SessionDB
     db = SessionDB(db_path=db_path) if db_path else SessionDB()
     try:
@@ -314,8 +304,8 @@ def upload_session_trace(
     db_path=None,
     token: Optional[str] = None,
 ) -> str:
-    """CLI/gateway entry point: load, convert, upload to the user's private
-    ``{user}/hermes-traces`` dataset. Returns a status string, never raises."""
+    """CLI/gateway entry point: load, convert, upload to the user's private ``{user}/hermes-traces``
+    dataset. Returns a status string, never raises."""
     if not session_id:
         return "No active session to upload."
 

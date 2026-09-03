@@ -1,9 +1,8 @@
 """Shared session activity observation contract.
 
-Observation-only: timestamp + bounded description/provenance. Notification,
-timeout, kill and retry policy live in their own components. Provenance is a
-small closed enum of *noun* sources; the default agent clock stamps ``unknown``
-unless a writer passes an explicit ``provenance=``.
+Observation-only: timestamp + bounded description/provenance. Notification, timeout, kill and
+retry policy live in their own components. Provenance is a small closed enum of *noun* sources;
+the default agent clock stamps ``unknown`` unless a writer passes an explicit ``provenance=``.
 """
 
 from __future__ import annotations
@@ -14,11 +13,10 @@ from typing import Any, Mapping, Optional
 
 ACTIVITY_DESCRIPTION_MAX = 120
 
-# Durable SessionDB heartbeat cadence. Contract: MUST stay >= 30s — the
-# SessionDB write path is contended and the heartbeat is an observation-only
-# projection that never justifies extra write pressure. Deliberately a code
-# constant (no config can turn it into a high-frequency writer); matches the
-# kanban auto-heartbeat. force_persist (terminal stamps) is the only bypass.
+# Durable SessionDB heartbeat cadence. Contract: MUST stay >= 30s — the SessionDB write path is
+# contended and this observation-only projection never justifies extra write pressure. A code
+# constant on purpose (no config can turn it into a high-frequency writer); matches the kanban
+# auto-heartbeat. force_persist (terminal stamps) is the only bypass.
 SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 
 
@@ -36,9 +34,7 @@ class ActivityProvenance(str, Enum):
 def bound_activity_description(description: Optional[str]) -> str:
     """Clamp free-form activity text to the shared description budget."""
     text = (description or "").strip()
-    if len(text) <= ACTIVITY_DESCRIPTION_MAX:
-        return text
-    return text[: ACTIVITY_DESCRIPTION_MAX - 1] + "…"
+    return text if len(text) <= ACTIVITY_DESCRIPTION_MAX else text[: ACTIVITY_DESCRIPTION_MAX - 1] + "…"
 
 
 def normalize_activity_provenance(provenance: Optional[ActivityProvenance | str]) -> ActivityProvenance:
@@ -52,8 +48,8 @@ def normalize_activity_provenance(provenance: Optional[ActivityProvenance | str]
 
 
 def reset_session_activity_persist_window(agent: Any) -> None:
-    """Clear the durable persist rate-limit so the next stamp writes through
-    (terminal compression labels must not stay stuck on mid-compress text)."""
+    """Clear the durable persist rate-limit so the next stamp writes through (terminal compression
+    labels must not stay stuck on mid-compress text)."""
     try:
         agent._session_activity_last_persist_mono = 0.0
     except Exception:
