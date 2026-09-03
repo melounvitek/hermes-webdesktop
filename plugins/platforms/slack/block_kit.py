@@ -171,9 +171,7 @@ def _divider_block() -> Block:
 def _rich_text_block(kind: str, children: List[Dict[str, Any]]) -> Block:
     """One ``rich_text`` block wrapping a single ``kind`` element (section/quote/preformatted)."""
     return {
-        "type": "rich_text",
-        "elements": [{"type": kind, "elements": _nonempty_elements(children)}],
-    }
+        "type": "rich_text", "elements": [{"type": kind, "elements": _nonempty_elements(children)}]}
 
 
 def _preformatted_block(text: str) -> Block:
@@ -205,13 +203,11 @@ def _list_block(items: List[Tuple[int, bool, str]]) -> Block:
                 "type": "rich_text_list",
                 "style": "ordered" if ordered else "bullet",
                 "indent": indent,
-                "elements": [],
-            }
+                "elements": []}
             elements.append(cur)
             cur_key = key
         cur["elements"].append(
-            {"type": "rich_text_section", "elements": _nonempty_elements(_inline_elements(text))}
-        )
+            {"type": "rich_text_section", "elements": _nonempty_elements(_inline_elements(text))})
     return {"type": "rich_text", "elements": elements}
 
 
@@ -278,9 +274,7 @@ def _table_block(rows: List[str], sep_line: str) -> Optional[Block]:
     last_non_default = max((c for c, a in enumerate(padded) if a != "left"), default=-1)
     column_settings = [{"align": a} for a in padded[: last_non_default + 1]]
     block: Block = {
-        "type": "table",
-        "rows": [[_rich_text_cell(cell) for cell in row] for row in parsed],
-    }
+        "type": "table", "rows": [[_rich_text_cell(cell) for cell in row] for row in parsed]}
     if column_settings:
         block["column_settings"] = column_settings
     return block
@@ -585,8 +579,7 @@ def sanitize_blocks(blocks: Optional[List[Block]]) -> Optional[List[Block]]:
                     _clamp_text_obj(el, MAX_SECTION_TEXT)
                     if isinstance(el, dict) and el.get("type") in ("mrkdwn", "plain_text")
                     else el
-                    for el in elements
-                ]
+                    for el in elements]
                 if any(c is not e for c, e in zip(clamped_els, elements)):
                     block = dict(block)
                     block["elements"] = clamped_els
