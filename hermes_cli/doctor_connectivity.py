@@ -316,8 +316,7 @@ def run_probes(probes: list) -> list:
     try:
         # 8 workers is plenty — each probe is one HTTP call plus a TLS handshake.
         with concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="doctor-probe") as ex:
-            futures = [ex.submit(fn) for _, fn in probes]
-            return [f.result() for f in futures]
+            return [f.result() for f in [ex.submit(fn) for _, fn in probes]]
     finally:
         if _imds_prev is None:
             os.environ.pop("AWS_EC2_METADATA_DISABLED", None)

@@ -79,14 +79,10 @@ def _check_auth_providers(should_fix: bool) -> Finding:
         from hermes_cli.auth import get_nous_auth_status_local, get_codex_auth_status, get_minimax_oauth_auth_status
         # Read-only display: refresh-free snapshot — doctor must never trigger an OAuth refresh.
         _login_row("Nous Portal auth", get_nous_auth_status_local())
-        codex_status = get_codex_auth_status()
-        if not _login_row("OpenAI Codex auth", codex_status):
-            if codex_status.get("error"):
-                check_info(codex_status["error"])
-            # Native OAuth uses Hermes' own device-code flow — the Codex CLI only imports existing tokens from
-            # ~/.codex/auth.json. Hint sits under the Codex row so it doesn't read as another provider's remedy.
-            if not _safe_which("codex"):
-                check_info("codex CLI not installed (optional — only required to import tokens from an existing Codex CLI login)")
+        # Native OAuth uses Hermes' own device-code flow — the Codex CLI only imports existing tokens from
+        # ~/.codex/auth.json. Hint sits under the Codex row so it doesn't read as another provider's remedy.
+        if not _login_row("OpenAI Codex auth", get_codex_auth_status(), show_error=True) and not _safe_which("codex"):
+            check_info("codex CLI not installed (optional — only required to import tokens from an existing Codex CLI login)")
         minimax_status = get_minimax_oauth_auth_status()
         _login_row("MiniMax OAuth", minimax_status, f"(logged in, region={minimax_status.get('region', 'global')})")
     except Exception as e:
@@ -94,16 +90,18 @@ def _check_auth_providers(should_fix: bool) -> Finding:
     # xAI OAuth — separate try/except so an import failure cannot disrupt the already-printed rows above.
     try:
         from hermes_cli.auth import get_xai_oauth_auth_status
-        xai_oauth_status = get_xai_oauth_auth_status() or {}
-        if not _login_row("xAI OAuth", xai_oauth_status) and xai_oauth_status.get("error"):
-            check_info(xai_oauth_status["error"])
+        _login_row("xAI OAuth", get_xai_oauth_auth_status() or {}, show_error=True)
     except Exception:
         pass
     return f
 
 
-def _login_row(label: str, status: dict, ok_detail: str = "(logged in)") -> bool:
-    return check_bool(status.get("logged_in"), (label, ok_detail), (label, "(not logged in)"))
+def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_error: bool = False) -> bool:
+    """ok/warn row for an OAuth status dict; with show_error, its ``error`` hint prints under a not-logged-in row."""
+    logged_in = check_bool(status.get("logged_in"), (label, ok_detail), (label, "(not logged in)"))
+    if not logged_in and show_error and status.get("error"):
+        check_info(status["error"])
+    return logged_in
 
 
 def _check_api_connectivity(should_fix: bool) -> Finding:
@@ -124,29 +122,17 @@ def _check_api_connectivity(should_fix: bool) -> Finding:
 
 # Ordered (section title, check). None title = check prints its own header (or none); order is user-visible.
 DOCTOR_CHECKS = (
-    ('Security Advisories', _check_security_advisories),
-    ('MCP Server Security', _check_mcp_security),
-    ('Python Environment', _check_python_environment),
-    ('SSL / CA Certificates', _check_certificates),
-    ('Required Packages', _check_required_packages),
-    ('Configuration Files', _check_env_file),
-    (None, _check_config_file),
-    (None, _check_config_drift),
-    ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement),
-    ('Auth Providers', _check_auth_providers),
-    ('Directory Structure', _check_directory_structure),
-    (None, _check_state_db),
-    (None, _check_gateway_supervision),
-    (None, _check_command_installation),
-    ('External Tools', _check_git_and_rg),
-    (None, _check_terminal_backend),
-    (None, _check_node_and_browser),
-    (None, _check_npm_audit),
-    ('API Connectivity', _check_api_connectivity),
-    ('Tool Availability', _check_tool_availability),
-    ('Skills Hub', _check_skills_hub),
-    ('Memory Provider', _check_memory_provider),
-    (None, _check_profiles),
+    ('Security Advisories', _check_security_advisories), ('MCP Server Security', _check_mcp_security),
+    ('Python Environment', _check_python_environment), ('SSL / CA Certificates', _check_certificates),
+    ('Required Packages', _check_required_packages), ('Configuration Files', _check_env_file),
+    (None, _check_config_file), (None, _check_config_drift),
+    ('xAI Model Retirement (May 15, 2026)', _check_xai_retirement), ('Auth Providers', _check_auth_providers),
+    ('Directory Structure', _check_directory_structure), (None, _check_state_db),
+    (None, _check_gateway_supervision), (None, _check_command_installation),
+    ('External Tools', _check_git_and_rg), (None, _check_terminal_backend), (None, _check_node_and_browser),
+    (None, _check_npm_audit), ('API Connectivity', _check_api_connectivity),
+    ('Tool Availability', _check_tool_availability), ('Skills Hub', _check_skills_hub),
+    ('Memory Provider', _check_memory_provider), (None, _check_profiles),
 )
 
 

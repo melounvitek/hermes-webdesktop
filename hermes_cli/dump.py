@@ -28,10 +28,8 @@ def _dotenv_key_names() -> set[str]:
         if line.lower().startswith("export "):
             line = line[len("export "):].lstrip()
         name, _, value = line.partition("=")
-        name = name.strip()
-        # A bare `KEY=` (empty value) is effectively unset for the backend.
-        if name and value.strip().strip("'\""):
-            names.add(name)
+        if name.strip() and value.strip().strip("'\""):  # a bare `KEY=` is effectively unset for the backend
+            names.add(name.strip())
     return names
 
 
@@ -40,11 +38,9 @@ def _git_output(project_root: Path, *args: str) -> str:
     try:
         result = subprocess.run(["git", *args], capture_output=True, text=True, encoding='utf-8', errors='replace',
                                 timeout=5, cwd=str(project_root))
-        if result.returncode == 0:
-            return result.stdout.strip()
+        return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _get_git_commit(project_root: Path) -> str:
