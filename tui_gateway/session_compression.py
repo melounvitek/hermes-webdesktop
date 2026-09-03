@@ -13,7 +13,6 @@ def _tui_compression_config_signature(cfg: dict | None) -> tuple:
     """Stable snapshot of compression/context keys that must apply next turn: the messaging-gateway
     cache-busting extract plus ``idle_compact_after_seconds``/``tail_mode`` (live-TUI-only keys)."""
     from gateway.run import GatewayRunner
-
     keys = GatewayRunner._extract_cache_busting_config(cfg)
     picked = {k: v for k, v in keys.items() if k.startswith("compression.") or k == "model.context_length"}
     compression = cfg.get("compression") if isinstance(cfg, dict) and isinstance(cfg.get("compression"), dict) else {}
@@ -27,7 +26,6 @@ def _compressor_ctor_default(name: str, fallback: Any) -> Any:
     try:
         import inspect
         from agent.context_compressor import ContextCompressor
-
         default = inspect.signature(ContextCompressor.__init__).parameters[name].default
         return fallback if default is inspect.Parameter.empty else default
     except Exception:
@@ -45,7 +43,6 @@ def _derived_default_threshold_percent(agent: Any, compression: dict) -> float:
     try:
         from agent.agent_init import _resolve_compression_threshold
         from agent.auxiliary_client import _compression_threshold_for_model, _is_codex_gpt54_or_gpt55, _is_codex_spark
-
         model, provider = getattr(agent, "model", "") or "", getattr(agent, "provider", "") or ""
         autoraise_enabled = str(compression.get("codex_gpt55_autoraise", True)).lower() in {"true", "1", "yes"}
         pct, _notice = _resolve_compression_threshold(
@@ -76,7 +73,6 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cfg = cfg if isinstance(cfg, dict) else {}
     compression = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-
     enabled_raw = compression.get("enabled", True)
     agent.compression_enabled = enabled_raw if isinstance(enabled_raw, bool) else str(enabled_raw).lower() in {"true", "1", "yes"}
     agent.codex_responses_native_compaction = is_truthy_value(compression.get("codex_responses_native", False))
@@ -91,7 +87,6 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     # Absence restores the agent_init/config default (0 = disabled).
     with contextlib.suppress(TypeError, ValueError):
         agent.compression_idle_compact_after_seconds = max(0, int(compression.get("idle_compact_after_seconds", 0) or 0))
-
     cc = getattr(agent, "context_compressor", None)
     if cc is None:
         return
@@ -112,11 +107,9 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     cc.model_thresholds = {
         str(k): float(v) for k, v in raw_thresholds.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
     } if isinstance(raw_thresholds, dict) else {}
-
     # threshold: present value wins; absence derives via the agent_init resolution (default + autoraise).
     # resolve_model_threshold returns ``pct`` unchanged when model_thresholds is empty.
     from agent.context_compressor import resolve_model_threshold
-
     pct: float | None = None
     if "threshold" in compression:
         with contextlib.suppress(TypeError, ValueError):
@@ -129,7 +122,6 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
         cc.threshold_percent = cc._effective_threshold_percent(cc.context_length, base)
     except Exception:
         cc.threshold_percent = pct
-
     raw_ctx = model_cfg.get("context_length")
     if raw_ctx is not None:
         with contextlib.suppress(TypeError, ValueError):
@@ -141,7 +133,6 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
         # model.context_length removed: drop the override and force re-inference from model metadata on
         # next access (construction's deferred resolution); re-applies the small-context floor too.
         cc._config_context_length = cc._resolved_context_length = None
-
     cc.threshold_tokens_cap = cc._coerce_threshold_tokens_cap(compression.get("threshold_tokens"))
     # Invalidate the cached trigger so the next preflight re-derives from percent/window, then the cap.
     cc._threshold_tokens = cc._tail_token_budget = None
@@ -206,7 +197,6 @@ def _compress_session_history(
     from hermes_cli.partial_compress import (
         parse_partial_compress_args, rejoin_compressed_head_and_tail, split_history_for_partial_compress,
     )
-
     agent = session["agent"]
     # Snapshot under the lock so the LLM-bound compression call does NOT hold history_lock for the
     # request — otherwise prompt.submit etc. block on the dispatcher loop while compaction runs.
@@ -247,7 +237,6 @@ def _compress_session_history(
         # No boundary committed; discard the pending deferred notification (exactly-once, no-op safe).
         finalize_context_engine_compression_notification(agent, committed=False)
         raise CompressionLockHeld(_lock_skipped if isinstance(_lock_skipped, str) else None)
-
     if tail:
         compressed = rejoin_compressed_head_and_tail(compressed, tail)
     with session["history_lock"]:
@@ -273,18 +262,15 @@ def _sync_session_key_after_compress(
     old_key = session.get("session_key", "") or ""
     if not new_session_id or new_session_id == old_key:
         return
-
     if not _transfer_active_session_slot(sid, session, new_session_id=new_session_id):
         logger.warning(
             "Compression session lease did not re-anchor: sid=%s old_session_id=%s new_session_id=%s",
             sid, old_key, new_session_id,
         )
-
     # Even if the approval module fails to import, anchor session_key on the continuation id.
     session["session_key"] = new_session_id
     with contextlib.suppress(Exception):
         from tools import approval
-
         with contextlib.suppress(Exception):
             approval.unregister_gateway_notify(old_key)
         with contextlib.suppress(Exception):
@@ -296,7 +282,6 @@ def _sync_session_key_after_compress(
     # Invalidate any in-flight ``_drain_queued_prompt`` claim taken under the pre-rotation key: a raced
     # drain must not dispatch on the continuation (its envelope is restored to the queue).
     session["_queued_prompt_generation"] = int(session.get("_queued_prompt_generation", 0)) + 1
-
     if clear_pending_title:
         session["pending_title"] = None
     if restart_slash_worker:

@@ -44,7 +44,6 @@ def _prepare_slash_worker_runtime() -> None:
     """Start bounded MCP discovery before HermesCLI snapshots tools: each slash_worker child is its
     own process — the parent ``hermes serve`` discovery thread does not populate this registry."""
     from hermes_cli.mcp_startup import start_background_mcp_discovery, wait_for_mcp_discovery
-
     start_background_mcp_discovery(logger=logger, thread_name="slash-worker-mcp-discovery")
     wait_for_mcp_discovery()
 
@@ -57,7 +56,6 @@ def _start_parent_death_watchdog(original_ppid) -> None:
         while _in_flight.is_set() and time.monotonic() < deadline:
             time.sleep(0.05)  # let an in-flight command finish/flush
         os._exit(0)
-
     threading.Thread(target=_loop, daemon=True).start()
 
 
@@ -81,7 +79,6 @@ def _run(cli: HermesCLI, command: str) -> str:
     # Desktop chat bubbles render plain text, not ANSI. A command that emits Rich color (e.g. /journey
     # under the gateway's inherited COLORTERM) would leak raw escapes; strip at this single choke point.
     from tools.ansi_strip import strip_ansi
-
     return strip_ansi(buf.getvalue().rstrip())
 
 
@@ -134,7 +131,6 @@ def main():
             # nearby activity).
             try:
                 from hermes_cli.mem_trim import trim_memory
-
                 trim_memory(reason="slash worker command completion")
             except Exception as exc:
                 # debug, not warning — a persistent failure would repeat every command.

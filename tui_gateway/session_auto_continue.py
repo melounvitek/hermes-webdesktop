@@ -4,7 +4,6 @@ busy-submit handling. Bodies are rebound onto server.py's globals at install tim
 
 from __future__ import annotations
 
-
 import contextlib
 
 from .method_ctx import bind_module
@@ -125,7 +124,6 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
         except Exception as exc:
             _notif_log_failure("auto-continue dispatch failed", exc)
             _ac_release_turn(session)
-
     threading.Thread(target=kickoff, daemon=True).start()
     logger.info("auto-continue scheduled for session %s (attempt %d, interrupted %.0fs ago)", session_key, attempt, age)
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
@@ -222,7 +220,6 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
         finally:
             with session["history_lock"]:
                 session["_busy_interrupt_pending"] = False
-
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
 
 
@@ -375,7 +372,6 @@ def _emit_terminal_turn_error(
     if error_surface is None and isinstance(error, BaseException):
         with contextlib.suppress(Exception):
             from agent.error_surface import build_error_surface_from_exception
-
             error_surface = build_error_surface_from_exception(
                 error, provider=str(getattr(agent, "provider", "") or ""), model=str(getattr(agent, "model", "") or "")
             )

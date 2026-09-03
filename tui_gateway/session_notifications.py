@@ -4,7 +4,6 @@ desktop UI wiring, HUD surface note. Bodies are rebound onto server.py's globals
 
 from __future__ import annotations
 
-
 import contextlib
 
 from .method_ctx import bind_module
@@ -369,7 +368,6 @@ def _notif_poll_kanban(sid: str, session: dict) -> None:
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
-
     claim = claim_event_delivery(evt, "tui-poller")
     if claim is None:
         return
@@ -440,7 +438,6 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     this session (see _notif_handle_event for ownership routing) and polls ``kanban_notify_subs`` every
     ``_KANBAN_POLL_SECONDS`` — the delivery path for platform="tui" rows."""
     from tools.process_registry import process_registry, format_process_notification
-
     queue = process_registry.completion_queue
     emitted: set = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
     handle = lambda evt, deferred: _notif_handle_event(  # noqa: E731
@@ -511,7 +508,6 @@ def _wire_desktop_sinks() -> None:
             return ""
         with _sessions_lock:
             return next((sid for sid, s in _sessions.items() if str(s.get("session_key") or "") == session_key), "")
-
     if getattr(process_registry, "on_output", None) is None:
         process_registry.on_output = lambda session, chunk: _emit(
             "agent.terminal.output", _owner_sid_for_process(session), {"process_id": session.id, "chunk": chunk}
@@ -554,7 +550,6 @@ def _hud_surface_note(session: dict) -> str:
     if session.get("client_surface") != "hud":
         return ""
     from agent.prompt_builder import hud_surface_note
-
     return hud_surface_note(getattr(session.get("agent"), "valid_tool_names", None))
 
 

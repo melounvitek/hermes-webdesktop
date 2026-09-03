@@ -53,7 +53,6 @@ def fuzzy_rank_slash_items(
     items: list[dict], catalog: list[dict], query: str
 ) -> tuple[list[dict], Callable[[dict], float]]:
     """Merge description/substring matches into ``items`` and sort by score.
-
     ``items`` are the completer's own (prefix-filtered) rows and keep their identity; ``catalog`` is
     the full command/skill universe, from which any entry the prefix filter missed but the fuzzy
     scorer matches is appended. Returns the score-sorted rows (stable within a tier) plus a

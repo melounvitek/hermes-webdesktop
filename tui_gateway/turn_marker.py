@@ -89,7 +89,6 @@ def _update(home: Path | str, session_key: str, mutate, what: str) -> None:
 
 def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attempts: int = 0) -> None:
     """Persist the marker for a turn that is about to run.
-
     ``attempts`` counts how many auto-continues led to this run: 0 for a user-initiated turn, N for
     the Nth automatic re-run — the crash-loop breaker reads it back on the next resume.
     """
