@@ -605,12 +605,7 @@ def _reset_stale_streak(agent) -> None:
 _INTERRUPTED_WAIT_STALE_SECONDS = 30.0
 
 
-def _record_interrupted_provider_wait(
-    agent,
-    elapsed: float,
-    *,
-    response_started: bool,
-) -> bool:
+def _record_interrupted_provider_wait(agent, elapsed: float, *, response_started: bool) -> bool:
     """Count a user-aborted pre-response stall toward the stale breaker.
 
     Past the no-output interval that earns a wait notice, an interrupt is
@@ -623,20 +618,13 @@ def _record_interrupted_provider_wait(
     logger.warning(
         "Interrupted provider wait counted as stale after %.0fs with no output; "
         "consecutive stale attempts=%d.",
-        elapsed,
-        _stale_streak(agent),
+        elapsed, _stale_streak(agent),
     )
     return True
 
 
 def _report_stale_nonstream_kill(
-    agent,
-    api_kwargs: dict,
-    elapsed: float,
-    stale_timeout: float,
-    *,
-    inline: bool = False,
-    hint: Optional[str] = None,
+    agent, api_kwargs: dict, elapsed: float, stale_timeout: float, *, inline: bool = False, hint: Optional[str] = None,
 ) -> None:
     """Log + status message for a stale non-streaming kill.
 
@@ -648,10 +636,7 @@ def _report_stale_nonstream_kill(
     logger.warning(
         "%son-streaming API call stale for %.0fs (threshold %.0fs). "
         "model=%s context=~%s tokens. Killing connection.",
-        "Inline n" if inline else "N",
-        elapsed,
-        stale_timeout,
-        model,
+        "Inline n" if inline else "N", elapsed, stale_timeout, model,
         f"{estimate_request_context_tokens(api_kwargs):,}",
     )
     try:
@@ -665,9 +650,7 @@ def _report_stale_nonstream_kill(
 
 def _touch_stale_kill_activity(agent, elapsed: float) -> None:
     try:
-        agent._touch_activity(
-            f"stale non-streaming call killed after {int(elapsed)}s"
-        )
+        agent._touch_activity(f"stale non-streaming call killed after {int(elapsed)}s")
     except Exception:
         logger.debug("stale activity touch failed", exc_info=True)
 
@@ -737,10 +720,7 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
     if not model_id or not isinstance(model_id, str):
         return None
     name = model_id.strip().lower()
-    for prefix in (
-        "global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.",
-        "ca.", "sa.", "me.", "af.",
-    ):
+    for prefix in ("global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca.", "sa.", "me.", "af."):
         if name.startswith(prefix):
             name = name[len(prefix):]
             break
@@ -750,11 +730,7 @@ def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
         base_candidates.append(name.replace(".", "-", 1))  # deepseek-r1-v1:0
     candidates: list[str] = []
     for cand in base_candidates:
-        for form in (
-            cand,
-            re.sub(r"(?<=\d)-(?=\d)", ".", cand),
-            re.sub(r"(?<=\d)\.(?=\d)", "-", cand),
-        ):
+        for form in (cand, re.sub(r"(?<=\d)-(?=\d)", ".", cand), re.sub(r"(?<=\d)\.(?=\d)", "-", cand)):
             if form not in candidates:
                 candidates.append(form)
     for cand in candidates:
@@ -852,7 +828,6 @@ def should_use_direct_api_call(agent) -> bool:
     # with the agent's platform stamp as a fallback for callers that bypass it.
     try:
         from agent.delegation_context import is_delegated_child_context
-
         if is_delegated_child_context():
             return True
     except Exception:
@@ -877,11 +852,7 @@ def _managed_local_load_notice(agent, api_kwargs: dict) -> "Optional[str]":
         if not base:
             return None
         from urllib.parse import urlparse
-
-        from hermes_cli.local_runtime.load_progress import (
-            get_loading_progress,
-            get_prefill_progress,
-        )
+        from hermes_cli.local_runtime.load_progress import get_loading_progress, get_prefill_progress
         from hermes_cli.local_runtime.supervisor import state_path
 
         state = json.loads(state_path().read_text(encoding="utf-8"))
@@ -919,9 +890,7 @@ def _resolve_direct_stale_timeout(agent, api_kwargs: dict) -> float:
     would silently reinstate the unbounded hang this exists to fix.
     """
     resolver = getattr(agent, "_compute_non_stream_stale_timeout", None)
-    if not callable(resolver):
-        return float("inf")
-    value = resolver(api_kwargs)
+    value = resolver(api_kwargs) if callable(resolver) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return float("inf")
     return float(value)
@@ -941,13 +910,7 @@ def _inline_nonstream_hard_timeout(stale_timeout: float):
     conn_cap = min(stale_timeout, 60.0)
     try:
         import httpx as _httpx
-
-        return _httpx.Timeout(
-            connect=conn_cap,
-            read=stale_timeout,
-            write=conn_cap,
-            pool=conn_cap,
-        )
+        return _httpx.Timeout(connect=conn_cap, read=stale_timeout, write=conn_cap, pool=conn_cap)
     except Exception:
         return stale_timeout
 
@@ -1071,11 +1034,7 @@ def direct_api_call(agent, api_kwargs: dict):
             except Exception:
                 pass
 
-    activity_hb = threading.Thread(
-        target=_activity_heartbeat,
-        name="direct-api-activity-hb",
-        daemon=True,
-    )
+    activity_hb = threading.Thread(target=_activity_heartbeat, name="direct-api-activity-hb", daemon=True)
     # Resolve the budget BEFORE start(): the resolver may raise (fail-closed),
     # and a leaked heartbeat thread would mask real stalls forever.
     call_start = time.time()
@@ -1096,9 +1055,7 @@ def direct_api_call(agent, api_kwargs: dict):
         if not request.abort("stale_call_kill"):
             return
         elapsed = time.time() - call_start
-        _report_stale_nonstream_kill(
-            agent, api_kwargs, elapsed, stale_timeout, inline=True
-        )
+        _report_stale_nonstream_kill(agent, api_kwargs, elapsed, stale_timeout, inline=True)
         _touch_stale_kill_activity(agent, elapsed)
 
     stale_watchdog = None
@@ -1112,9 +1069,7 @@ def direct_api_call(agent, api_kwargs: dict):
     # close the client so the retry builds a fresh pool.
     succeeded = False
     try:
-        response = _dispatch_nonstreaming_api_request(
-            agent, api_kwargs, make_client=request.make_client
-        )
+        response = _dispatch_nonstreaming_api_request(agent, api_kwargs, make_client=request.make_client)
     except Exception:
         if getattr(agent, "_interrupt_requested", False):
             raise InterruptedError("Agent interrupted during API call") from None
@@ -1187,9 +1142,7 @@ class _RequestClientRegistry:
 
     def set_client(self, client, *, kind: str = "openai"):
         with self.lock:
-            self.client = client
-            self.kind = kind
-            self.owner_tid = threading.get_ident()
+            self.client, self.kind, self.owner_tid = client, kind, threading.get_ident()
         return client
 
     @staticmethod
@@ -1203,11 +1156,7 @@ class _RequestClientRegistry:
     def set_stream_handle(self, stream):
         if self._stream_close_callable(stream) is None:
             return stream
-        with self.lock:
-            self.client = stream
-            self.kind = "stream"
-            self.owner_tid = threading.get_ident()
-        return stream
+        return self.set_client(stream, kind="stream")
 
     def _close_stream_handle(self, stream, reason: str) -> None:
         close = self._stream_close_callable(stream)
@@ -1221,9 +1170,7 @@ class _RequestClientRegistry:
 
     def close_once(self, reason: str) -> None:
         with self.lock:
-            request_client = self.client
-            request_kind = self.kind
-            owner_tid = self.owner_tid
+            request_client, request_kind, owner_tid = self.client, self.kind, self.owner_tid
             stranger_thread = (
                 request_kind != "stream"
                 and request_client is not None
@@ -1232,9 +1179,7 @@ class _RequestClientRegistry:
             )
             if stranger_thread:
                 if request_kind == "anthropic_messages":
-                    self.agent._abort_request_anthropic_client(
-                        request_client, reason=reason
-                    )
+                    self.agent._abort_request_anthropic_client(request_client, reason=reason)
                 else:
                     self.agent._abort_request_openai_client(request_client, reason=reason)
                 return
@@ -1310,23 +1255,13 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
         # prefill before the first SSE event: scale the cutoff up to the idle
         # default unless HERMES_CODEX_TTFB_STRICT keeps the smaller one.
         disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
-        strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if (
-            not strict
-            and disable_above > 0
-            and est_tokens >= disable_above
-            and ttfb_timeout < idle_default
-        ):
+        strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
+        if not strict and disable_above > 0 and est_tokens >= disable_above and ttfb_timeout < idle_default:
             logger.info(
                 "Scaling openai-codex no-byte TTFB watchdog from %.0fs to %.0fs "
                 "for large request (context=~%s tokens >= %.0f). "
                 "Set HERMES_CODEX_TTFB_STRICT=1 to keep the smaller cutoff.",
-                ttfb_timeout,
-                idle_default,
-                f"{est_tokens:,}",
-                disable_above,
+                ttfb_timeout, idle_default, f"{est_tokens:,}", disable_above,
             )
             ttfb_timeout = idle_default
         ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
@@ -1334,21 +1269,15 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
             logger.info(
                 "Capping openai-codex no-byte TTFB timeout from %.0fs to %.0fs "
                 "(context=~%s tokens). Set HERMES_CODEX_TTFB_MAX_SECONDS to tune.",
-                ttfb_timeout,
-                ttfb_cap,
-                f"{est_tokens:,}",
+                ttfb_timeout, ttfb_cap, f"{est_tokens:,}",
             )
             ttfb_timeout = ttfb_cap
 
     idle_timeout = _env_float("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", idle_default)
     return _NonStreamWatchdogs(
-        stale_timeout=stale_timeout,
-        codex=codex,
-        est_tokens=est_tokens,
-        ttfb_enabled=ttfb_enabled,
-        ttfb_timeout=ttfb_timeout,
-        idle_enabled=codex and idle_timeout > 0,
-        idle_timeout=idle_timeout,
+        stale_timeout=stale_timeout, codex=codex, est_tokens=est_tokens,
+        ttfb_enabled=ttfb_enabled, ttfb_timeout=ttfb_timeout,
+        idle_enabled=codex and idle_timeout > 0, idle_timeout=idle_timeout,
     )
 
 
@@ -1410,17 +1339,14 @@ class _NonStreamRequest:
         if kind == "anthropic_messages":
             client = self.agent._create_request_anthropic_client(reason=reason)
         else:
-            client = self.agent._create_request_openai_client(
-                reason=reason, api_kwargs=self.api_kwargs
-            )
+            client = self.agent._create_request_openai_client(reason=reason, api_kwargs=self.api_kwargs)
         return self.clients.set_client(client, kind=kind)
 
     def _call(self):
         try:
             self._install_codex_request_token()
             self.result["response"] = _dispatch_nonstreaming_api_request(
-                self.agent, self.api_kwargs, make_client=self._make_client
-            )
+                self.agent, self.api_kwargs, make_client=self._make_client)
         except Exception as e:
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
@@ -1431,16 +1357,14 @@ class _NonStreamRequest:
                     "Codex worker caught %s after request retirement — "
                     "discarding the stale partial instead of surfacing it "
                     "as a completed response. %s",
-                    type(e).__name__,
-                    self.agent._client_log_context(),
+                    type(e).__name__, self.agent._client_log_context(),
                 )
                 return
             if self.cancelled:
                 logger.debug(
                     "Non-streaming worker caught %s after request "
                     "cancellation — exiting without surfacing a network "
-                    "error.",
-                    type(e).__name__,
+                    "error.", type(e).__name__,
                 )
                 return
             self.result["error"] = e
@@ -1451,10 +1375,7 @@ class _NonStreamRequest:
             # Reuse reason only on a clean response; error or cancel-swallow
             # really closes so the next attempt builds a fresh pool.
             self.clients.close_once(
-                "request_complete"
-                if self.result["response"] is not None
-                else "request_error_cleanup"
-            )
+                "request_complete" if self.result["response"] is not None else "request_error_cleanup")
 
     def _abort_request(self, reason: str) -> None:
         """Watchdog/interrupt kill: abort the request client (kind-aware, #67142)
@@ -1479,13 +1400,9 @@ class _NonStreamRequest:
         wd = self.wd
         try:
             recovery = _codex_wait_notice_recovery(
-                stale_timeout=wd.stale_timeout,
-                ttfb_enabled=wd.ttfb_enabled,
-                ttfb_timeout=wd.ttfb_timeout,
+                stale_timeout=wd.stale_timeout, ttfb_enabled=wd.ttfb_enabled, ttfb_timeout=wd.ttfb_timeout,
                 last_event_ts=getattr(self.agent, "_codex_stream_last_event_ts", None),
-                call_start=self.call_start,
-                idle_enabled=wd.idle_enabled,
-                idle_timeout=wd.idle_timeout,
+                call_start=self.call_start, idle_enabled=wd.idle_enabled, idle_timeout=wd.idle_timeout,
                 elapsed=elapsed,
             )
             self.agent._emit_wait_notice(
@@ -2743,36 +2660,26 @@ def cleanup_task_resources(agent, task_id: str) -> None:
     headed mode (window stays visible; the browser inactivity reaper still
     handles idle sessions).
     """
-    try:
-        if is_persistent_env(task_id):
-            if agent.verbose_logging:
-                logging.debug(
-                    f"Skipping per-turn cleanup_vm for persistent env {task_id}; "
-                    f"idle reaper will handle it."
-                )
-        else:
-            _ra().cleanup_vm(task_id)
-    except Exception as e:
-        if agent.verbose_logging:
-            logger.warning("Failed to cleanup VM for task %s: %s", task_id, e)
-    try:
-        headed = False
+    def _headed() -> bool:
         try:
             from tools.browser_tool import _is_headed_mode
-            headed = _is_headed_mode()
+            return _is_headed_mode()
         except Exception:
-            headed = bool(os.environ.get("AGENT_BROWSER_HEADED"))
-        if headed:
+            return bool(os.environ.get("AGENT_BROWSER_HEADED"))
+
+    for label, skip, skip_what, cleanup in (
+        ("VM", is_persistent_env, "cleanup_vm for persistent env", lambda: _ra().cleanup_vm(task_id)),
+        ("browser", lambda _tid: _headed(), "cleanup_browser for headed session", lambda: _ra().cleanup_browser(task_id)),
+    ):
+        try:
+            if skip(task_id):
+                if agent.verbose_logging:
+                    logging.debug(f"Skipping per-turn {skip_what} {task_id}; idle reaper will handle it.")
+            else:
+                cleanup()
+        except Exception as e:
             if agent.verbose_logging:
-                logging.debug(
-                    f"Skipping per-turn cleanup_browser for headed session {task_id}; "
-                    f"idle reaper will handle it."
-                )
-        else:
-            _ra().cleanup_browser(task_id)
-    except Exception as e:
-        if agent.verbose_logging:
-            logger.warning("Failed to cleanup browser for task %s: %s", task_id, e)
+                logger.warning("Failed to cleanup %s for task %s: %s", label, task_id, e)
 
 
 def _build_partial_stream_stub(
@@ -3193,12 +3100,7 @@ class _ToolCallAccumulator:
         if extra is None and hasattr(tc_delta, "model_extra"):
             extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
         if extra is not None:
-            if hasattr(extra, "model_dump"):
-                try:
-                    extra = extra.model_dump(warnings=False)
-                except TypeError:
-                    extra = extra.model_dump()
-            entry["extra_content"] = extra
+            entry["extra_content"] = _model_dump_safe(extra) if hasattr(extra, "model_dump") else extra
         name = entry["function"]["name"]
         if name and idx not in self._notified:
             self._notified.add(idx)
@@ -3251,8 +3153,7 @@ class _StreamingCall:
         return stream
 
     def _close_managed_stream(self) -> None:
-        stream = self.managed_stream_holder.pop("stream", None)
-        close = getattr(stream, "close", None) if stream is not None else None
+        close = getattr(self.managed_stream_holder.pop("stream", None), "close", None)
         if callable(close):
             try:
                 close()
@@ -3326,11 +3227,7 @@ class _StreamingCall:
         the delta callback for tag extraction (the CLI drops non-reasoning text
         once the stream box is closed)."""
         if self.agent.stream_delta_callback:
-            try:
-                self.agent.stream_delta_callback(text)
-                self.agent._record_streamed_assistant_text(text)
-            except Exception:
-                pass
+            self._quiet(lambda: (self.agent.stream_delta_callback(text), self.agent._record_streamed_assistant_text(text)))
 
     def _new_diag(self) -> dict:
         diag = self.agent._stream_diag_init()
@@ -4101,11 +3998,7 @@ class _StreamingCall:
                 self.agent.base_url, self._stream_stale_timeout,
             )
             return
-        _est_tokens = estimate_request_context_tokens(self.api_kwargs)
-        if _est_tokens > 100_000:
-            base = max(base, 300.0)
-        elif _est_tokens > 50_000:
-            base = max(base, 240.0)
+        base = _scale_stale_timeout_for_context(base, estimate_request_context_tokens(self.api_kwargs))
         from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
         _reasoning_floor = get_reasoning_stale_timeout_floor(self.api_kwargs.get("model"))
         self._stream_stale_timeout = base if _reasoning_floor is None else max(base, _reasoning_floor)
@@ -4152,13 +4045,9 @@ class _StreamingCall:
             _content_filter_terminated = _cls.reason == FailoverReason.content_policy_blocked
         except Exception:
             _content_filter_terminated = False
-        _stub_msg = SimpleNamespace(role="assistant", content=_partial_text, tool_calls=None, reasoning_content=None)
-        _stub = SimpleNamespace(
-            id=PARTIAL_STREAM_STUB_ID,
-            model=getattr(self.agent, "model", "unknown"),
-            choices=[SimpleNamespace(index=0, message=_stub_msg, finish_reason=FINISH_REASON_LENGTH)],
-            usage=None,
-            _dropped_tool_names=_partial_names or None,
+        _stub = _build_partial_stream_stub(
+            "assistant", _partial_text, None, getattr(self.agent, "model", "unknown"), None,
+            dropped_tool_names=_partial_names,
         )
         if _content_filter_terminated:
             _stub._content_filter_terminated = True
