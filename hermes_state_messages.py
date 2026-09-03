@@ -275,13 +275,8 @@ class SessionMessagesMixin:
         *tool_calls* is the already-parsed value (see ``_parse_tool_calls``).
         *keep_reasoning* False stores NULL for every reasoning/codex column."""
         from hermes_state import _scrub_surrogates
-
-        def _str_or_none(value):
-            return _scrub_surrogates(value) if isinstance(value, str) else None
-
-        def _reasoning(key):
-            return msg.get(key) if keep_reasoning else None
-
+        _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None  # noqa: E731
+        _reasoning = lambda key: msg.get(key) if keep_reasoning else None  # noqa: E731
         return (
             session_id,
             role,
@@ -514,9 +509,7 @@ class SessionMessagesMixin:
                     changed = True
                     content = self._decode_content(row["content"])
                     pending.append({
-                        "row_id": row["id"],
-                        "role": row["role"],
-                        "emoji": reaction.get("emoji") or "",
+                        "row_id": row["id"], "role": row["role"], "emoji": reaction.get("emoji") or "",
                         "text": content if isinstance(content, str) else "",
                     })
                 if changed:
@@ -634,9 +627,7 @@ class SessionMessagesMixin:
         0 for an empty/unknown session."""
         if not session_id:
             return 0
-        row = self._read_one(
-            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ? AND active = 1", (session_id,),
-        )
+        row = self._read_one("SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ? AND active = 1", (session_id,))
         return int(row[0]) if row else 0
 
     def _tail_rows_after_watermark(self, conn, sql: str, params) -> Tuple[List[int], int]:
@@ -649,21 +640,15 @@ class SessionMessagesMixin:
         """Pure-SQL column clone of *tail_ids* as fresh live rows (new id, active=1,
         compacted=0, everything else byte-exact; FTS triggers index the clones). With
         *session_id* the clones land in that session instead of the originals'."""
-        skip = ("id", "active", "compacted") + (("session_id",) if session_id is not None else ())
+        retarget = session_id is not None
+        skip = ("id", "active", "compacted") + (("session_id",) if retarget else ())
         col_list = ", ".join(c for c in self._message_column_names(conn) if c not in skip)
-        placeholders = _placeholders(tail_ids)
-        if session_id is None:
-            conn.execute(
-                f"INSERT INTO messages ({col_list}, active, compacted) "
-                f"SELECT {col_list}, 1, 0 FROM messages "
-                f"WHERE id IN ({placeholders}) ORDER BY id", tail_ids,
-            )
-        else:
-            conn.execute(
-                f"INSERT INTO messages ({col_list}, session_id, active, compacted) "
-                f"SELECT {col_list}, ?, 1, 0 FROM messages "
-                f"WHERE id IN ({placeholders}) ORDER BY id", [session_id, *tail_ids],
-            )
+        conn.execute(
+            f"INSERT INTO messages ({col_list}, {'session_id, ' if retarget else ''}active, compacted) "
+            f"SELECT {col_list}, {'?, ' if retarget else ''}1, 0 FROM messages "
+            f"WHERE id IN ({_placeholders(tail_ids)}) ORDER BY id",
+            [session_id, *tail_ids] if retarget else tail_ids,
+        )
 
     def archive_and_compact(
         self, session_id: str, compacted_messages: List[Dict[str, Any]],
@@ -689,11 +674,7 @@ class SessionMessagesMixin:
         def _do(conn):
             if lock_holder is not None:
                 lock_row = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
-                if (
-                    lock_row is None
-                    or lock_row["holder"] != lock_holder
-                    or float(lock_row["expires_at"]) <= time.time()
-                ):
+                if lock_row is None or lock_row["holder"] != lock_holder or float(lock_row["expires_at"]) <= time.time():
                     raise SessionCompressionInProgressError(
                         f"Compression lease for {session_id!r} lost before "
                         "commit; refusing to publish a stale compaction"
@@ -1127,9 +1108,7 @@ class SessionMessagesMixin:
         """Session ids a full (display) resume materializes: the compression lineage,
         or the session alone for an explicit ``/branch`` copy. Shared by the resume
         readers and the resume guard so the guard counts exactly what a resume loads."""
-        if self._is_explicit_branch_session(session_id):
-            return [session_id]
-        return self._session_lineage_root_to_tip(session_id)
+        return [session_id] if self._is_explicit_branch_session(session_id) else self._session_lineage_root_to_tip(session_id)
 
     def _resume_count_scope(self, session_id: str, tip_only: bool) -> Tuple[List[str], str]:
         """``tip_only``: the tip's ACTIVE rows (model restore); else the full-lineage
