@@ -1,23 +1,18 @@
 """Production WebSocket RelayTransport — the gateway's live link to the connector.
 
 The gateway dials OUT to the connector's relay endpoint and speaks the
-newline-delimited JSON frame protocol mirrored in ``docs/relay-connector-contract.md``:
-
-  gateway -> connector : hello, outbound, interrupt, going_idle, inbound_ack
-  connector -> gateway : descriptor, inbound, outbound_result, interrupt_inbound,
-                         going_idle_ack, passthrough_forward
-
-Outbound calls block on a per-request future keyed by ``requestId`` until the
-matching ``outbound_result`` arrives; a background reader task pumps inbound
-frames to the registered handler and resolves pending futures.
-
-EXPERIMENTAL: the frame schema may change without a deprecation cycle until at
-least two Class-1 platforms validate it.
+newline-delimited JSON frame protocol of ``docs/relay-connector-contract.md``:
+gateway -> connector: hello, outbound, interrupt, going_idle, inbound_ack;
+connector -> gateway: descriptor, inbound, outbound_result, interrupt_inbound,
+going_idle_ack, passthrough_forward. Outbound calls block on a per-request future
+keyed by ``requestId`` until the matching ``outbound_result``; a background reader
+pumps inbound frames to the registered handler. EXPERIMENTAL schema.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -29,7 +24,6 @@ from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 from gateway.relay.descriptor import CapabilityDescriptor
 from gateway.relay.transport import InboundHandler
-import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +42,9 @@ _OUTBOUND_TIMEOUT_S = 30.0
 _TEARDOWN_AWAIT_TIMEOUT_S = 1.0
 # Max drain for in-flight outbound frames at disconnect: long enough for a
 # platform edit round-trip through the connector, short enough that shutdown
-# stays snappy when the connector is gone. Clamped at disconnect
-# time so drain + teardown stay inside the runner's adapter-disconnect budget:
-# blowing it cancels teardown mid-drain and leaves callers blocked on
-# _OUTBOUND_TIMEOUT_S.
+# stays snappy when the connector is gone. Clamped at disconnect time so drain +
+# teardown stay inside the runner's adapter-disconnect budget: blowing it cancels
+# teardown mid-drain and leaves callers blocked on _OUTBOUND_TIMEOUT_S.
 _DISCONNECT_DRAIN_GRACE_S = 5.0
 # Private-use close code the connector sends when it rejects/revokes a gateway's
 # WS upgrade auth. Received AFTER a successful handshake it means the per-gateway
@@ -60,12 +53,9 @@ _RELAY_UNAUTHORIZED_CLOSE_CODE = 4401
 
 
 def _disconnect_drain_grace_s(budget_s: Optional[float] = None) -> float:
-    """Effective drain grace: clamped to the caller's REMAINING disconnect budget.
-
-    When ``budget_s`` is None, mirrors the runner's env-driven default rather than
-    importing gateway/run.py (the transport must import without the runner).
-    Reserves the three sequential teardown awaits plus a small margin.
-    """
+    """Effective drain grace: clamped to the caller's REMAINING disconnect budget
+    (None mirrors the runner's env default so the transport imports without the
+    runner), reserving the three sequential teardown awaits plus a small margin."""
     budget = _env_disconnect_budget_s() if budget_s is None else max(0.0, budget_s)
     reserved = 3 * _TEARDOWN_AWAIT_TIMEOUT_S + 0.5
     return max(0.0, min(_DISCONNECT_DRAIN_GRACE_S, budget - reserved))
@@ -73,8 +63,8 @@ def _disconnect_drain_grace_s(budget_s: Optional[float] = None) -> float:
 
 def _env_disconnect_budget_s() -> float:
     """The runner's adapter-disconnect budget (same env var + default as
-    gateway/run.py:_adapter_disconnect_timeout_secs). Callers above the transport
-    use it to apportion the budget across go_idle / monitor teardown / drain."""
+    gateway/run.py:_adapter_disconnect_timeout_secs), apportioned by callers
+    across go_idle / monitor teardown / drain."""
     budget = 5.0
     raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
     if raw:
@@ -105,9 +95,9 @@ def _render_relay_context(context: Any) -> Optional[str]:
     """Flatten the connector's read-only ``context`` list (oldest→newest) into the
     ``MessageEvent.channel_context`` string history-backfill already uses.
 
-    Reference context only — never triggers the agent. Returns None when there is
-    no usable context so ``channel_context`` stays unset. Never raises: a malformed
-    payload must not break delivery of the already-admitted turn.
+    Reference only — never triggers the agent. None when there is no usable context
+    so ``channel_context`` stays unset. Never raises: a malformed payload must not
+    break delivery of the already-admitted turn.
     """
     if not context or not isinstance(context, list):
         return None
@@ -119,19 +109,14 @@ def _render_relay_context(context: Any) -> Optional[str]:
         if not text:
             continue
         src = item.get("source") or {}
-        author = ""
-        if isinstance(src, dict):
-            author = src.get("user_name") or src.get("user_id") or ""
+        author = (src.get("user_name") or src.get("user_id") or "") if isinstance(src, dict) else ""
         lines.append(f"{author}: {text}" if author else str(text))
     if not lines:
         return None
     return "[Recent channel messages]\n" + "\n".join(lines)
 
 
-def _normalize_slack_parent_command(
-    text: str,
-    message_type: MessageType,
-) -> tuple[str, MessageType]:
+def _normalize_slack_parent_command(text: str, message_type: MessageType) -> tuple[str, MessageType]:
     """Mirror native Slack ``/hermes`` routing for authenticated relay text."""
     parent_parts = text.strip().split(maxsplit=1)
     if not parent_parts or parent_parts[0] != "/hermes":
@@ -158,11 +143,10 @@ def _media_types_from_wire(raw: Dict[str, Any]) -> list[str]:
     """Per-attachment MIME types, parallel to ``media_urls``.
 
     INVARIANT: always the same length as ``media_urls`` (padded with ``""``), or
-    empty when there are no urls — consumers index and concatenate the two lists
-    pairwise, so a short list would shift later entries onto the wrong url.
-    Resolved BY URL LOOKUP into ``media[]``, never by position: the two wire fields
-    are independent and may disagree in order. A url with no match keeps ``""`` and
-    falls back to message-level classification.
+    empty when there are no urls — consumers index the two lists pairwise, so a
+    short list would shift later entries onto the wrong url. Resolved BY URL LOOKUP
+    into ``media[]``, never by position: the two wire fields are independent and may
+    disagree in order. A url with no match keeps ``""`` (message-level classification).
     """
     urls = raw.get("media_urls")
     if not isinstance(urls, list) or not urls:
@@ -177,18 +161,14 @@ def _media_types_from_wire(raw: Dict[str, Any]) -> list[str]:
     missing = sum(1 for t in types if not t)
     if missing and mime_by_url:
         logger.debug(
-            "relay inbound: %d/%d media_urls had no matching media[] mime",
-            missing,
-            len(types),
+            "relay inbound: %d/%d media_urls had no matching media[] mime", missing, len(types)
         )
     return types
 
 
 def _event_from_wire(raw: Dict[str, Any]) -> MessageEvent:
     """Rebuild a MessageEvent from the connector's normalized inbound payload (§3).
-
-    Unknown platforms fall back to RELAY, unknown message types to TEXT.
-    """
+    Unknown platforms fall back to RELAY, unknown message types to TEXT."""
     src = raw.get("source", {}) or {}
     from gateway.config import Platform
 
@@ -203,15 +183,9 @@ def _event_from_wire(raw: Dict[str, Any]) -> MessageEvent:
         chat_type=src.get("chat_type", "dm"),
         chat_name=src.get("chat_name"),
         user_id=src.get("user_id"),
-        # The connector sends the raw username as user_name plus optional
-        # user_display_name / user_handle enrichments; native adapters surface the
-        # DISPLAY name. Prefer the display name for parity with them. Session keys
-        # derive from user_id, never user_name, so this is presentation-only.
-        user_name=(
-            src.get("user_display_name")
-            or src.get("user_name")
-            or src.get("user_handle")
-        ),
+        # Native adapters surface the DISPLAY name, so prefer it over the raw
+        # username. Session keys derive from user_id, so this is presentation-only.
+        user_name=(src.get("user_display_name") or src.get("user_name") or src.get("user_handle")),
         thread_id=src.get("thread_id"),
         chat_topic=src.get("chat_topic"),
         user_id_alt=src.get("user_id_alt"),
@@ -222,7 +196,7 @@ def _event_from_wire(raw: Dict[str, Any]) -> MessageEvent:
         # Multiplex mode: the connector stamps the target Hermes profile; None on
         # a single-profile gateway keeps the legacy ``agent:main`` namespace.
         profile=src.get("profile"),
-        # Connector-stamped auto-thread markers; light the same semantic-rename
+        # Connector-stamped auto-thread markers light the same semantic-rename
         # lane native Discord uses.
         auto_thread_created=bool(src.get("auto_thread_created", False)),
         auto_thread_initial_name=src.get("auto_thread_initial_name"),
@@ -259,8 +233,7 @@ def _event_from_wire(raw: Dict[str, Any]) -> MessageEvent:
         reply_to_is_own_message=bool(reply_to.get("is_own", False)),
         media_urls=raw.get("media_urls") or [],
         # Parallel to media_urls; run.py's per-attachment classifiers consult
-        # media_types[i] FIRST (this is what routes a relayed image/document/voice
-        # attachment like its native equivalent, e.g. makes kind:"voice" STT-eligible).
+        # media_types[i] FIRST (routes a relayed image/document/voice like native).
         media_types=_media_types_from_wire(raw),
         channel_context=_render_relay_context(raw.get("context")),
         # Structured interactive-prompt reply, verbatim off the wire; the adapter
@@ -271,12 +244,9 @@ def _event_from_wire(raw: Dict[str, Any]) -> MessageEvent:
 
 @dataclass
 class PassthroughForward:
-    """A connector-forwarded passthrough-plane request (§5.1).
-
-    The connector answered the provider's latency-critical ACK at its edge, then
-    forwarded the sanitized request here. ``body`` is the exact decoded bytes
-    (base64 on the wire); ``headers`` preserve arrival order.
-    """
+    """A connector-forwarded passthrough-plane request (§5.1): the connector answered
+    the provider's latency-critical ACK at its edge, then forwarded the sanitized
+    request. ``body`` is the exact decoded bytes; ``headers`` preserve arrival order."""
 
     platform: str
     bot_id: str
@@ -284,17 +254,16 @@ class PassthroughForward:
     path: str
     headers: list[tuple[str, str]]
     body: bytes
-    # Multiplex-mode target profile, mirroring the ``profile`` on the inbound
-    # frame's SessionSource; None keeps the legacy ``agent:main`` namespace.
-    # Without it a relayed Discord slash-command/button/modal always fell back to
-    # agent:main even when the equivalent plain message routed to the right profile.
+    # Multiplex-mode target profile, mirroring the inbound frame's SessionSource;
+    # None keeps the legacy ``agent:main`` namespace. Without it a relayed Discord
+    # slash-command/button/modal fell back to agent:main even when the equivalent
+    # plain message routed to the right profile.
     profile: Optional[str] = None
 
 
 def _passthrough_from_wire(raw: Dict[str, Any]) -> PassthroughForward:
-    """Rebuild a PassthroughForward from the wire frame (body base64-decoded to
-    the exact bytes the connector forwarded). No verification here: the connector
-    is the trust boundary and already verified at the edge."""
+    """Rebuild a PassthroughForward from the wire frame (body base64-decoded). No
+    verification here: the connector is the trust boundary and verified at the edge."""
     import base64
 
     try:
@@ -372,10 +341,9 @@ class WebSocketRelayTransport:
         # an unexpected close (fast re-dial): the socket closes WITHOUT _closing,
         # so the reader still arms the supervisor, but it polls on the dormant
         # cadence so it does not fight the platform's suspend window. Cleared on
-        # a successful re-dial.
+        # a successful re-dial. A suspended machine's event loop is frozen, so the
+        # timer only advances once awake; it just needs to re-dial promptly then.
         self._dormant = False
-        # A suspended machine's event loop is frozen, so this timer only advances
-        # once awake; it just needs to re-dial promptly after wake.
         self._dormant_redial_s = 1.0
 
         self._ws: Any = None
@@ -445,15 +413,12 @@ class WebSocketRelayTransport:
             return {}
         from gateway.relay.auth import make_upgrade_token
 
-        token = make_upgrade_token(self._gateway_id, self._upgrade_secret)
-        return {"Authorization": f"Bearer {token}"}
+        return {"Authorization": f"Bearer {make_upgrade_token(self._gateway_id, self._upgrade_secret)}"}
 
     async def disconnect(self, *, budget_s: Optional[float] = None) -> None:
         """Tear down the socket, draining in-flight outbound frames first.
-
         ``budget_s`` is the REMAINING wall-clock budget the caller can spend here;
-        None applies the env-mirrored runner default.
-        """
+        None applies the env-mirrored runner default."""
         self._closing = True
         try:
             # A trailing outbound frame (typically the turn's finalize edit) may
@@ -465,10 +430,8 @@ class WebSocketRelayTransport:
             if pending:
                 grace = _disconnect_drain_grace_s(budget_s)
                 if grace > 0:
-                    try:
+                    with contextlib.suppress(Exception):  # grace is best-effort
                         await asyncio.wait(pending, timeout=grace)
-                    except Exception:  # noqa: BLE001 - grace is best-effort
-                        pass
             for attr in ("_supervisor", "_reader"):
                 task = getattr(self, attr)
                 if task is not None:
@@ -504,8 +467,7 @@ class WebSocketRelayTransport:
         return await asyncio.wait_for(self._descriptor_ready, timeout=self._connect_timeout_s)
 
     def descriptor_for_platform(self, platform: str) -> Optional[CapabilityDescriptor]:
-        """The negotiated descriptor for one fronted platform (per-chat caps, e.g.
-        Discord's 2000 vs Telegram's 4096 max_message_length), or None."""
+        """The negotiated descriptor for one fronted platform (per-chat caps), or None."""
         return self._descriptors_by_platform.get(platform)
 
     @property
@@ -552,9 +514,7 @@ class WebSocketRelayTransport:
         return next((b for p, b in self._identities if p == platform), None)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        result = await self._request_response(
-            {"op": "get_chat_info", "chat_id": chat_id}, frame_type="outbound"
-        )
+        result = await self._request_response({"op": "get_chat_info", "chat_id": chat_id})
         # The connector answers chat-info inside the outbound_result envelope.
         info = result.get("chat_info") or result
         return {"name": info.get("name", chat_id), "type": info.get("type", "dm")}
@@ -566,10 +526,9 @@ class WebSocketRelayTransport:
     async def go_idle(self, timeout_s: float = 10.0) -> bool:
         """Ask the connector to flip this instance to buffered-only.
 
-        Awaits the connector-AUTHORITATIVE ``going_idle_ack``. Returns False on
-        timeout / not-connected (the caller closes anyway). The read loop keeps
-        serving until the ack, so an event landing in the flip window is delivered
-        live, not lost.
+        Awaits the connector-AUTHORITATIVE ``going_idle_ack``. False on timeout /
+        not-connected (the caller closes anyway). The read loop keeps serving until
+        the ack, so an event landing in the flip window is delivered live, not lost.
         """
         if self._ws is None:
             return False
@@ -588,11 +547,11 @@ class WebSocketRelayTransport:
         WITHOUT setting ``_closing``.
 
         disconnect() cancels the supervisor (never re-dials on wake, stranding the
-        backlog); an unexpected close re-dials immediately (the platform proxy
-        never sees load drop, never suspends). Here the reader's fall-through still
-        arms the supervisor, which polls on the dormant cadence; on resume the
-        re-dial makes the connector drain the buffered backlog. Returns the go_idle
-        ack result; the close happens regardless. No-op (False) when never connected.
+        backlog); an unexpected close re-dials immediately (the platform proxy never
+        sees load drop, never suspends). Here the reader's fall-through still arms
+        the supervisor on the dormant cadence; on resume the re-dial makes the
+        connector drain the buffered backlog. Returns the go_idle ack result; the
+        close happens regardless. No-op (False) when never connected.
         """
         if self._ws is None:
             return False
@@ -614,11 +573,7 @@ class WebSocketRelayTransport:
             logger.debug("relay: inbound_ack send failed for %s", buffer_id)
 
     async def _request_response(
-        self,
-        action: Dict[str, Any],
-        frame_type: str = "outbound",
-        *,
-        platform: Optional[str] = None,
+        self, action: Dict[str, Any], *, platform: Optional[str] = None
     ) -> Dict[str, Any]:
         # Fail fast during teardown: the disconnect() fail-pending loop may already
         # have run, so a future registered now would never be settled.
@@ -629,7 +584,7 @@ class WebSocketRelayTransport:
         request_id = uuid.uuid4().hex
         fut: asyncio.Future[Dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = fut
-        frame: Dict[str, Any] = {"type": frame_type, "requestId": request_id, "action": action}
+        frame: Dict[str, Any] = {"type": "outbound", "requestId": request_id, "action": action}
         # Tag the egress platform with its MATCHING advertised botId only when a
         # concrete platform was resolved, so a single-platform gateway emits the
         # exact frame shape as before (connector falls back to session default).
@@ -649,13 +604,12 @@ class WebSocketRelayTransport:
             # above never sent anything (definite non-delivery) and stay unmarked.
             return {"success": False, "error": "relay outbound timed out", "ambiguous": True}
         except Exception as exc:  # noqa: BLE001 - a dead socket is a failed send, not a raise
-            # The socket can die between the liveness guard and the write, so
-            # _send may raise into callers whose contract is a result dict.
-            # A raise from the WRITE = frame never sent (no flag); a failure
-            # surfaced by the FUTURE (disconnect failing pending mid-flight) =
-            # frame sent, outcome unknown -> ambiguous. CancelledError still
-            # propagates (BaseException).
-            logger.debug("relay %s send failed", frame_type, exc_info=True)
+            # The socket can die between the liveness guard and the write, so _send
+            # may raise into callers whose contract is a result dict. A raise from
+            # the WRITE = frame never sent (no flag); a failure surfaced by the
+            # FUTURE (disconnect failing pending mid-flight) = frame sent, outcome
+            # unknown -> ambiguous. CancelledError still propagates (BaseException).
+            logger.debug("relay outbound send failed", exc_info=True)
             result: Dict[str, Any] = {"success": False, "error": f"relay send failed: {exc}"}
             if frame_sent:
                 result["ambiguous"] = True
@@ -707,9 +661,7 @@ class WebSocketRelayTransport:
                 and not self._auth_revoked
                 and (self._supervisor is None or self._supervisor.done())
             ):
-                self._supervisor = asyncio.create_task(
-                    self._reconnect_loop(), name="relay-ws-reconnect"
-                )
+                self._supervisor = asyncio.create_task(self._reconnect_loop(), name="relay-ws-reconnect")
         finally:
             # Drop the dead handle (identity-guarded) so every `_ws is None`
             # liveness check reports "not connected" for the whole outage — on
@@ -722,9 +674,7 @@ class WebSocketRelayTransport:
             # exits every waiter would block the full outbound timeout. Fail them
             # NOW with the dict shape callers expect (never an exception).
             self._fail_pending(
-                lambda fut: fut.set_result(
-                    {"success": False, "error": "relay transport connection lost"}
-                )
+                lambda fut: fut.set_result({"success": False, "error": "relay transport connection lost"})
             )
 
     @staticmethod
@@ -740,12 +690,10 @@ class WebSocketRelayTransport:
         return code if isinstance(code, int) else None
 
     async def _reconnect_loop(self) -> None:
-        """Re-dial with capped exponential backoff until a dial succeeds (its
-        reader takes over) or disconnect(). Never raises out.
-
-        After go_dormant() start from the dormant cadence; a successful dial
-        clears _dormant so any LATER unexpected drop uses the fast backoff.
-        """
+        """Re-dial with capped exponential backoff until a dial succeeds (its reader
+        takes over) or disconnect(). Never raises out. After go_dormant() start from
+        the dormant cadence; a successful dial clears _dormant so any LATER
+        unexpected drop uses the fast backoff."""
         backoff = self._dormant_redial_s if self._dormant else self._reconnect_backoff_s
         while not self._closing:
             await asyncio.sleep(backoff)
@@ -806,9 +754,7 @@ class WebSocketRelayTransport:
 
     async def _on_interrupt_inbound(self, frame: Dict[str, Any]) -> None:
         if self._interrupt_inbound_handler is not None:
-            await self._interrupt_inbound_handler(
-                frame.get("session_key", ""), frame.get("chat_id", "")
-            )
+            await self._interrupt_inbound_handler(frame.get("session_key", ""), frame.get("chat_id", ""))
 
     async def _on_passthrough_forward(self, frame: Dict[str, Any]) -> None:
         # Edge-ACKed passthrough request riding the same WS (no public inbound
