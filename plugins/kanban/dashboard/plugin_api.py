@@ -40,10 +40,9 @@ _BOARD_Q = Query(None, description="Kanban board slug (omit for current)")
 # --- Connection / board helpers ---------------------------------------------
 
 def _ws_upgrade_authorized(ws: "WebSocket") -> bool:
-    """Authorize a WebSocket upgrade via the dashboard's canonical WS gate
-    (``web_server._ws_auth_ok``: loopback ``?token=``, OAuth ``?ticket=``, internal ``?internal=``)
-    so this endpoint can never drift from core auth. Accepts when ``web_server`` isn't
-    importable (bare-FastAPI test harness)."""
+    """Authorize a WS upgrade via the dashboard's canonical gate (``web_server._ws_auth_ok``:
+    ``?token=`` / ``?ticket=`` / ``?internal=``) so this endpoint can never drift from core
+    auth; accepts when ``web_server`` isn't importable (bare-FastAPI test harness)."""
     try:
         from hermes_cli import web_server as _ws
     except Exception:
@@ -78,9 +77,8 @@ def _existing_board_slug(slug: str) -> str:
 
 
 def _conn(board: Optional[str] = None):
-    """Open a kanban_db connection for the already-normalised ``board`` (``None`` = active).
-    ``init_db`` is idempotent; running it here lets a fresh install self-heal (no "no such
-    table" if POST /tasks arrives before GET /board)."""
+    """Connect to the already-normalised ``board`` (``None`` = active). ``init_db`` is
+    idempotent; running it here lets a fresh install self-heal if POST /tasks arrives first."""
     try:
         kanban_db.init_db(board=board)
     except Exception as exc:
@@ -97,9 +95,8 @@ def _board_conn(board: Optional[str]) -> Iterator[tuple[Optional[str], sqlite3.C
 
 
 def _with_board_pinned(board: Optional[str], fn: Callable[[], Any]) -> Any:
-    """Run ``fn`` with the board pinned context-locally rather than via the process-global
-    ``HERMES_KANBAN_BOARD`` env var: concurrent threadpool requests for different boards
-    would otherwise race on the shared env var and cross-write."""
+    """Run ``fn`` with the board pinned context-locally, not via the process-global
+    ``HERMES_KANBAN_BOARD`` env var (concurrent requests for different boards would cross-write)."""
     with kanban_db.scoped_current_board(_resolve_board(board) or kanban_db.DEFAULT_BOARD):
         return fn()
 
@@ -145,9 +142,8 @@ def _errors_to_500(prefix: str) -> Iterator[None]:
 
 # --- Serialization helpers --------------------------------------------------
 
-# Dashboard columns, left-to-right; "archived" is a filter toggle, not a column.
-# Keep in sync with kanban_db.VALID_STATUSES — a status missing here gets
-# mis-bucketed into ``todo`` by the board fallback.
+# Dashboard columns, left-to-right ("archived" is a filter toggle, not a column). Keep in
+# sync with kanban_db.VALID_STATUSES — a status missing here gets mis-bucketed into ``todo``.
 BOARD_COLUMNS: list[str] = ["triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done"]
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
@@ -177,10 +173,8 @@ def _placeholders(ids: list) -> str:
 
 
 def _compute_task_diagnostics(conn: sqlite3.Connection, task_ids: Optional[list[str]] = None) -> dict[str, list[dict]]:
-    """Run the diagnostic rule engine and return ``{task_id: [diagnostic_dict, ...]}``
-    (tasks with no diagnostics omitted). Three aggregate queries (tasks, events, runs)
-    instead of N per-task lookups; slurps every event/run for the board — fine for the
-    dashboard's typical working set, paginate if profiling shows a hotspot."""
+    """``{task_id: [diagnostic_dict, ...]}`` (tasks with none omitted) via three aggregate
+    queries (tasks, events, runs) — slurps the board; paginate if profiling shows a hotspot."""
     from hermes_cli.config import load_config
 
     if task_ids is not None and not task_ids:
@@ -255,8 +249,8 @@ def get_board(
     board: Optional[str] = _BOARD_Q,
     workflow_template_id: Optional[str] = Query(None, description="Restrict to tasks using this workflow template id"),
     current_step_key: Optional[str] = Query(None, description="Restrict to tasks at this workflow step key")):
-    """Full board grouped by status column. Omitting ``board`` falls through to the
-    active board (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
+    """Full board grouped by status column; omitting ``board`` uses the active board
+    (``HERMES_KANBAN_BOARD`` env → on-disk ``current`` pointer → ``default``)."""
     with _board_conn(board) as (board, conn):
         tasks = kanban_db.list_tasks(
             conn, tenant=tenant, include_archived=include_archived,
@@ -406,9 +400,8 @@ async def upload_task_attachment(
     file: UploadFile = File(...),
     board: Optional[str] = Query(None),
     uploaded_by: Optional[str] = Form(None)):
-    """Store an upload under ``attachments_root(board)/<task_id>/`` with a sanitised,
-    collision-resolved name and record its metadata. ``_safe_attachment_name`` raises
-    ``ValueError`` → 400."""
+    """Store an upload under ``attachments_root(board)/<task_id>/`` (sanitised,
+    collision-resolved name; ``_safe_attachment_name`` ValueError → 400) and record it."""
     with _board_conn(board) as (board, conn), _value_error_400():
         _require_task(conn, task_id)
         safe_name = _safe_attachment_name(file.filename or "")
@@ -514,10 +507,9 @@ _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatch
 
 
 def _drag_to(conn, task_id: str, s: str) -> bool:
-    """Drag-drop move into ready/todo/triage. blocked/scheduled -> ready re-opens via
-    ``unblock_task``; any task leaving ``review`` goes through ``reopen_review_task``
-    (stale-run recovery, parent re-gate, ``review_reopened`` event) instead of a raw
-    status write. ``triage`` has no such transitions, so it skips the current-state query."""
+    """Drag-drop into ready/todo/triage: blocked/scheduled -> ready re-opens via ``unblock_task``;
+    leaving ``review`` goes through ``reopen_review_task`` (stale-run recovery, parent re-gate,
+    ``review_reopened`` event) instead of a raw write; ``triage`` needs no current-state query."""
     current = kanban_db.get_task(conn, task_id) if s != "triage" else None
     if s == "ready" and current and current.status in ("blocked", "scheduled"):
         return kanban_db.unblock_task(conn, task_id)
@@ -526,10 +518,9 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
     return _set_status_direct(conn, task_id, s)
 
 
-# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk. Each handler is
-# (conn, task_id, payload) -> ok. ``review`` routes through request_review (never a block,
-# so it can't trip unblock-loop detection); ``force=True`` because a dashboard action is
-# an explicit human override of a live worker claim.
+# Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
+# payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
+# detection) with ``force=True``: a dashboard action is a human override of a live worker claim.
 _STATUS_HANDLERS: dict[str, Any] = {
     "done": lambda conn, tid, p: kanban_db.complete_task(conn, tid, result=p.result, summary=p.summary, metadata=p.metadata),
     "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
@@ -558,8 +549,7 @@ def _set_priority(conn, task_id: str, priority: int, board: Optional[str]) -> No
         conn.execute(
             "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, 'reprioritized', ?, ?)",
             (task_id, json.dumps({"priority": int(priority)}), int(time.time())))
-    # Mutation-boundary observer: this direct-SQL write bypasses every kanban_db mutator,
-    # so report it here — after the txn commits.
+    # Mutation-boundary observer (post-commit): this direct-SQL write bypasses every kanban_db mutator.
     kanban_db.notify_task_updated(conn, task_id, ("priority",), board=board)
 
 
@@ -675,11 +665,9 @@ def _parents_blocking_ready(conn: sqlite3.Connection, task_id: str) -> list:
 
 
 def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) -> bool:
-    """Direct status write for drag-drop moves not covered by the structured
-    complete/block/unblock/archive verbs (todo<->ready, running<->ready); appends a
-    ``status`` event. Leaving ``running`` closes the active run with outcome='reclaimed'
-    so attempt history isn't orphaned, and the worker is terminated only AFTER the txn
-    commits (events must be durable before the kill)."""
+    """Direct status write for drag-drop moves without a structured verb (todo<->ready,
+    running<->ready) + a ``status`` event. Leaving ``running`` closes the run as 'reclaimed'
+    so attempt history isn't orphaned; the worker is killed only AFTER the txn commits."""
     terminations: list[tuple[Optional[int], Optional[str]]] = []
     effective_status = new_status
     with kanban_db.write_txn(conn):
@@ -773,9 +761,8 @@ def delete_link(parent_id: str = Query(...), child_id: str = Query(...), board: 
 
 
 def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str], entry: dict) -> None:
-    """Apply the bulk patch to one task, recording refusals in ``entry``. Unlike PATCH,
-    refusals don't abort the remaining ops — except a rejected status verb, which
-    short-circuits the whole entry (``_StatusRejected``)."""
+    """Apply the bulk patch to one task, recording refusals in ``entry`` without aborting the
+    remaining ops — except a rejected status verb (``_StatusRejected`` propagates)."""
     if payload.archive and not kanban_db.archive_task(conn, tid):
         entry.update(ok=False, error="archive refused")
     if payload.status is not None and not payload.archive:
@@ -831,9 +818,8 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
 def list_diagnostics(
     board: Optional[str] = _BOARD_Q,
     severity: Optional[str] = Query(None, description="Filter by severity: warning|error|critical")):
-    """Return ``[{task_id, task_title, task_status, task_assignee, diagnostics}]`` for every
-    task with an active diagnostic, highest severity first then most recent. Also consumed
-    by ``hermes kanban diagnostics`` when the dashboard runs."""
+    """Tasks with an active diagnostic, highest severity first then most recent; also
+    consumed by ``hermes kanban diagnostics`` when the dashboard runs."""
     with _board_conn(board) as (board, conn):
         diags_by_task = _compute_task_diagnostics(conn, task_ids=None)
         if severity and diags_by_task:
@@ -893,9 +879,8 @@ def get_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
 
 @router.get("/runs/{run_id}/inspect")
 def inspect_run_endpoint(run_id: int, board: Optional[str] = _BOARD_Q):
-    """Live psutil stats for a run's worker process. ``{alive: false, reason}`` when the run
-    ended, has no pid, the process is gone, or psutil is missing; ``access_denied`` style
-    errors are reported inline rather than as a 500."""
+    """Live psutil stats for a run's worker; ``{alive: false, reason}`` when unavailable and
+    access-denied reported inline rather than as a 500."""
     with _board_conn(board) as (board, conn):
         r = _require_run(conn, run_id)
 
@@ -936,9 +921,8 @@ class TerminateRunBody(BaseModel):
 
 @router.post("/runs/{run_id}/terminate")
 def terminate_run_endpoint(run_id: int, payload: TerminateRunBody, board: Optional[str] = _BOARD_Q):
-    """Terminate the worker behind an in-flight run via ``reclaim_task`` so the
-    SIGTERM->SIGKILL flow, run bookkeeping, and event log match ``POST /tasks/{id}/reclaim``.
-    404 unknown run; 409 already ended / not reclaimable."""
+    """Terminate an in-flight run via ``reclaim_task`` (same SIGTERM->SIGKILL flow, bookkeeping
+    and events as ``POST /tasks/{id}/reclaim``); 409 if already ended / not reclaimable."""
     with _board_conn(board) as (board, conn):
         r = _require_run(conn, run_id)
         if r.ended_at is not None:
@@ -973,10 +957,8 @@ class SpecifyBody(BaseModel):
 
 @router.post("/tasks/{task_id}/specify")
 def specify_task_endpoint(task_id: str, payload: SpecifyBody, board: Optional[str] = Query(None)):
-    """Flesh out a triage task via the auxiliary LLM and promote it to ``todo``
-    (``hermes kanban specify``). Returns ``{ok, task_id, reason, new_title}``; a non-OK
-    outcome is NOT an HTTP error — the UI renders the reason inline. Sync ``def`` so the
-    slow LLM call runs in FastAPI's threadpool."""
+    """Flesh out a triage task via the auxiliary LLM (``hermes kanban specify``). Non-OK is NOT
+    an HTTP error — the UI renders the reason inline. Sync ``def`` → runs in the threadpool."""
     def _run():
         from hermes_cli import kanban_specify  # lazy: missing aux client must not break plugin load
         return kanban_specify.specify_task(task_id, author=(payload.author or None))
@@ -1005,8 +987,7 @@ def reassign_task_endpoint(task_id: str, payload: ReassignBody, board: Optional[
         return {"ok": True, "task_id": task_id, "assignee": payload.profile or None}
 
 
-# Estimate: rough token/complexity read via the auxiliary model. NOT a dollar
-# cost — providers don't report cost reliably.
+# Estimate: rough token/complexity read via the auxiliary model. NOT a dollar cost.
 _ESTIMATE_SYSTEM_PROMPT = (
     "You estimate how much work an autonomous coding agent will spend on a "
     "kanban task. Given the task title and description, respond with STRICT "
@@ -1106,9 +1087,8 @@ def get_config():
 
 
 # --- Home-channel subscriptions (per-task, per-platform toggles) -------------
-# Each gateway platform has at most one "home" (chat_id, thread_id, name). A toggle-on
-# writes exactly the notify_subs row ``/kanban create`` would, so the existing gateway
-# notifier delivers completed/blocked/gave_up with no extra plumbing.
+# Each gateway platform has at most one "home" (chat_id, thread_id, name); a toggle-on writes
+# exactly the notify_subs row ``/kanban create`` would, so the gateway notifier needs no plumbing.
 
 def _configured_home_channels() -> list[dict]:
     """Every platform with a home_channel, from the live GatewayConfig (so env overlays
@@ -1228,9 +1208,8 @@ def dispatch(dry_run: bool = Query(False), max_n: int = Query(8, alias="max"), b
 
 @router.get("/model-options")
 def model_options():
-    """Authenticated providers + curated models for the model-override dropdown, via
-    ``inventory.build_models_payload`` (same substrate as the Models page / TUI picker) so
-    the dropdown can't offer a pair the rest of Hermes rejects. Skips pricing enrichment
+    """Providers + curated models for the override dropdown via ``inventory.build_models_payload``
+    (same substrate as the Models page) so it can't offer a pair Hermes rejects. Skips pricing
     and custom-provider probes: a slow/offline local endpoint must not hang the drawer."""
     try:
         from hermes_cli.inventory import build_models_payload, load_picker_context
@@ -1272,9 +1251,8 @@ class RenameBoardBody(BaseModel):
     project_id: Optional[str] = None
 
 
-# Board transfer exchanges filesystem PATHS, not bytes (same contract as profile
-# export/import): the desktop/dashboard clients run the native save/open dialog
-# on the machine hosting the backend, so a path is all either side needs.
+# Board transfer exchanges filesystem PATHS, not bytes (same contract as profile export/import):
+# clients run the native save/open dialog on the machine hosting the backend.
 
 class ExportBoardBody(BaseModel):
     output: str = ""  # empty → staging path under the kanban root
@@ -1536,9 +1514,8 @@ def update_profile_description(profile_name: str, payload: DescribeBody):
 
 @router.post("/profiles/{profile_name}/describe-auto")
 def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
-    """Generate a description via ``auxiliary.profile_describer`` and persist it with
-    ``description_auto: true`` (``hermes profile describe <name> --auto``). Non-OK
-    outcomes are NOT HTTP errors — the UI renders the reason inline."""
+    """``hermes profile describe <name> --auto``: persist with ``description_auto: true``.
+    Non-OK outcomes are NOT HTTP errors — the UI renders the reason inline."""
     with _errors_to_500("describer crashed"):
         from hermes_cli import profile_describer
         outcome = profile_describer.describe_profile(profile_name, overwrite=bool(payload.overwrite))
@@ -1553,10 +1530,8 @@ class DecomposeBody(BaseModel):
 
 @router.post("/tasks/{task_id}/decompose")
 def decompose_task_endpoint(task_id: str, payload: DecomposeBody, board: Optional[str] = Query(None)):
-    """Fan a triage task out into child tasks via the auxiliary LLM, routed to specialist
-    profiles by description (``hermes kanban decompose``). Returns ``{ok, task_id, reason,
-    fanout, child_ids, new_title}``; non-OK is NOT an HTTP error. Sync ``def`` so the slow
-    LLM call runs in the threadpool."""
+    """Fan a triage task out into child tasks via the auxiliary LLM (``hermes kanban decompose``).
+    Non-OK is NOT an HTTP error. Sync ``def`` → runs in the threadpool."""
     def _run():
         from hermes_cli import kanban_decompose
         return kanban_decompose.decompose_task(task_id, author=(payload.author or None))
@@ -1644,8 +1619,7 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
 
 # --- WebSocket: /events?since=<event_id>&board=<slug> ------------------------
 
-# Poll interval for the event tail loop. SQLite WAL + 300 ms polling is the
-# simplest robust approach: negligible CPU, no shared state across workers.
+# Event tail poll interval: WAL + 300 ms polling is the simplest robust approach (negligible CPU).
 _EVENT_POLL_SECONDS = 0.3
 
 
@@ -1670,9 +1644,8 @@ async def stream_events(ws: WebSocket):
         return
     await ws.accept()
 
-    # One SQLite connection per socket, used and closed only on a dedicated worker
-    # thread (sqlite connections are thread-affine); reusing it avoids churning
-    # WAL/SHM sidecars while an idle dashboard polls.
+    # One SQLite connection per socket, used/closed only on a dedicated worker thread
+    # (connections are thread-affine); reuse avoids churning WAL/SHM sidecars while idle.
     event_conn: Optional[sqlite3.Connection] = None
     event_executor: Optional[ThreadPoolExecutor] = None
 
@@ -1706,9 +1679,8 @@ async def stream_events(ws: WebSocket):
             return (rows[-1]["id"] if rows else cursor_val), out
 
         while True:
-            # Race receive() against the poll interval so a client disconnect is detected
-            # even when no events are flowing; otherwise an idle board leaks zombie poll
-            # tasks until the next send_json() fails. Other client messages (pong, text) are ignored.
+            # Race receive() against the poll interval so a disconnect is detected even when no
+            # events flow (else idle boards leak poll tasks). Other client messages are ignored.
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=_EVENT_POLL_SECONDS)
                 if msg["type"] == "websocket.disconnect":
@@ -1723,9 +1695,7 @@ async def stream_events(ws: WebSocket):
     except WebSocketDisconnect:
         return
     except asyncio.CancelledError:
-        # Normal shutdown (Ctrl-C cancels the task mid-poll). CancelledError is a BaseException,
-        # so the Exception handler below wouldn't quiet it and Uvicorn would print a traceback.
-        return
+        return  # normal shutdown; CancelledError is a BaseException the handler below wouldn't quiet
     except Exception as exc:  # never crash the dashboard worker
         log.warning("Kanban event stream error: %s", exc)
         try:

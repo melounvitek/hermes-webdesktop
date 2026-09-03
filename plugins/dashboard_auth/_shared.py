@@ -244,29 +244,15 @@ class NonInteractiveMixin:
 
 class JwtOAuthProvider(DashboardAuthProvider):
     """Authorization-code + PKCE provider whose session token is a JWT we verify ourselves
-    (nous: Portal access token; self-hosted: OIDC ID token). Subclasses implement
-    ``_jwks_uri``, ``_claims_for``, ``_grant``, ``_refresh_request`` and ``_session``."""
+    (nous: Portal access token; self-hosted: OIDC ID token). Subclasses set ``_client_id`` and
+    implement: ``_jwks_uri() -> str``; ``_claims_for(token) -> claims`` (raises
+    ``InvalidCodeError`` on expiry/foreign token, ``ProviderError`` otherwise);
+    ``_grant(data, *, bad_request_exc, headers=None, previous_refresh_token="") -> Session``;
+    ``_refresh_request(refresh_token) -> (form_data, extra_headers)``;
+    ``_session(token, refresh_token, claims) -> Session``."""
 
     _jwks_client: Any = None
-
-    def _jwks_uri(self) -> str:
-        raise NotImplementedError
-
-    def _claims_for(self, token: str) -> Dict[str, Any]:
-        raise NotImplementedError
-
-    def _grant(
-        self, data: Dict[str, str], *, bad_request_exc: type[Exception], headers: Optional[Dict[str, str]] = None,
-        previous_refresh_token: str = "",
-    ) -> Session:
-        raise NotImplementedError
-
-    def _refresh_request(self, refresh_token: str) -> tuple[Dict[str, str], Optional[Dict[str, str]]]:
-        """``(form_data, extra_headers)`` for the refresh grant."""
-        raise NotImplementedError
-
-    def _session(self, token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
-        raise NotImplementedError
+    _client_id: str = ""
 
     def _get_jwks_client(self) -> Any:
         if self._jwks_client is None:
