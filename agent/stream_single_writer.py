@@ -1,11 +1,10 @@
 """Best-effort accessors for the single-writer stream fence.
 
-The fence lives on ``AIAgent`` (``_claim_stream_writer`` / ``_stream_writer_is_current``)
-but is used from other streaming modules. Calling it directly would turn an *additive*
-safety net into a fatal AttributeError on a partially-updated checkout, hot-reloaded
-gateway, duck-typed agent, or test double (a cron job died this way). The fence may only
-drop a *provably* superseded stream, never the sole writer, so when it is unavailable or
-raises the correct degradation is "no fence": keep streaming.
+The fence lives on ``AIAgent`` (``_claim_stream_writer`` / ``_stream_writer_is_current``) but is
+used from other streaming modules. Calling it directly would turn an *additive* safety net into a
+fatal AttributeError on a partially-updated checkout, hot-reloaded gateway, duck-typed agent, or
+test double (a cron job died this way). The fence may only drop a *provably* superseded stream,
+never the sole writer, so when it is unavailable or raises the degradation is "no fence".
 """
 
 from __future__ import annotations

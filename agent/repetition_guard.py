@@ -1,17 +1,16 @@
 """Cheap content-sanity checks for the truncated-response continuation path.
 
-A model in a degenerate repetition loop can spend its ENTIRE output budget echoing one
-fragment; the ``finish_reason=length`` continuation path would then stitch that fragment
-into the final response with a "continue" nudge (one incident: a 60k-char turn delivered
-as 31 Discord messages). These helpers detect repetition-dominated fragments BEFORE the
-nudge so the turn aborts with a clear error. Deliberately conservative: only LONG verbatim
-repeats (60+ chars) covering a majority of the fragment trip the guard, so ordinary
-truncations (a sentence cut mid-word, a repeated heading, similar code lines) never do.
+A model in a degenerate repetition loop can spend its ENTIRE output budget echoing one fragment;
+the ``finish_reason=length`` continuation would then stitch it into the final response with a
+"continue" nudge (one incident: a 60k-char turn delivered as 31 Discord messages). This detects
+repetition-dominated fragments BEFORE the nudge so the turn aborts with a clear error. Deliberately
+conservative: only LONG verbatim repeats (60+ chars) covering a majority of the fragment trip it.
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 # Below this length the check doesn't run: short truncations trivially
 # contain repeated tokens and are legitimately continued.
@@ -54,12 +53,5 @@ def is_repetition_dominated(text: str) -> bool:
 
 def _line_repetition_dominated(text: str, n: int) -> bool:
     """True when a single normalized line covers half the fragment via repeats."""
-    counts: dict[str, int] = {}
-    for line in text.splitlines():
-        norm = line.strip()
-        if norm:
-            counts[norm] = counts.get(norm, 0) + 1
-    return any(
-        c >= _MIN_REPEAT_COUNT and c * len(line) >= n * _DOMINANCE_RATIO
-        for line, c in counts.items()
-    )
+    counts = Counter(norm for norm in (line.strip() for line in text.splitlines()) if norm)
+    return any(c >= _MIN_REPEAT_COUNT and c * len(line) >= n * _DOMINANCE_RATIO for line, c in counts.items())

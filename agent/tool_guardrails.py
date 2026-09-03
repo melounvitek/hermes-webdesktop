@@ -405,11 +405,10 @@ class ToolCallGuardrailController:
     ) -> IdenticalCallObservation:
         """Track consecutive identical calls; return notice + dedupe stub info.
 
-        ``notice`` fires from the threshold-th consecutive identical (tool, args, result) call;
-        observational, pollers exempt. ``stub`` replaces the CURRENT result from the 2nd
-        byte-identical repeat — the tool still executed, only the context representation is
-        deduplicated, so polling semantics survive (a changed result resets the streak). Pollers
-        are NOT exempt from stubbing: an unchanged poll is exactly when it saves most.
+        ``notice`` fires from the threshold-th consecutive identical (tool, args, result) call
+        (observational, pollers exempt). ``stub`` replaces the CURRENT result from the 2nd byte-identical
+        repeat — the tool still executed, only the context representation is deduplicated, so polling
+        semantics survive; pollers are NOT exempt here since an unchanged poll is where it saves most.
         """
         is_plain_str = isinstance(result, str)
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
@@ -477,11 +476,8 @@ class ToolCallGuardrailController:
     def _check_loop_cap(
         self, tool_name: str, args: Mapping[str, Any], signature: ToolCallSignature,
     ) -> ToolGuardrailDecision | None:
-        """Block once a per-turn cap is reached, else advance the counter and return None.
-
-        Blocking happens BEFORE the call when the count is already at the cap, so the (cap+1)-th
-        call is refused. delegate_task control actions spawn nothing and keep working after the cap.
-        """
+        """Block once a per-turn cap is reached (BEFORE the call, so the (cap+1)-th is refused), else advance
+        the counter and return None. delegate_task control actions spawn nothing and keep working after the cap."""
         spec = _LOOP_CAPS.get(tool_name)
         if spec is None:
             return None

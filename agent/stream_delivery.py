@@ -19,8 +19,6 @@ logger = logging.getLogger("run_agent")
 class StreamDeliveryMixin:
     """Stream ownership, delta/reasoning hook fan-out and interim-text dedup (see module docstring)."""
 
-    # ── stream text delivery ──
-
     @staticmethod
     def _call_quietly(cb, *args) -> bool:
         """Call ``cb(*args)`` if set, swallowing errors; True when it ran without raising."""
@@ -71,8 +69,6 @@ class StreamDeliveryMixin:
         """Accumulate visible assistant text emitted through stream callbacks (superseded writers excluded)."""
         if isinstance(text, str) and text and not self._stream_writer_superseded():
             self._current_streamed_assistant_text = getattr(self, "_current_streamed_assistant_text", "") + text
-
-    # ── interim assistant text ──
 
     @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
@@ -194,8 +190,6 @@ class StreamDeliveryMixin:
         self._enqueue_stream_hook("on_interim_message", text=visible, already_streamed=already_streamed)
         self._deliver_interim(visible, already_streamed=already_streamed, record=undelivered_parts or [visible])
 
-    # ── single-writer stream fence ──
-
     def _ensure_stream_writer_state(self) -> None:
         """Lazily create the single-writer guard fields (``AIAgent.__new__``-built instances skip ``agent_init``)."""
         if getattr(self, "_stream_writer_lock", None) is None:
@@ -243,8 +237,6 @@ class StreamDeliveryMixin:
                 "the turn after a retry superseded it.",
                 where, _n,
             )
-
-    # ── hook fan-out ──
 
     def _stream_hook_base_payload(self) -> Dict[str, Any]:
         return {

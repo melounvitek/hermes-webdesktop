@@ -168,23 +168,20 @@ class StatusOutputMixin:
 
     def _flush_status_buffer(self) -> None:
         """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
-        try:
-            # The buffered trace already carries the switch line; drop the one-shot notice.
-            self._pending_fallback_notice = None
-            buf = getattr(self, "_retry_status_buffer", None)
-            if not buf:
-                return
-            # Drain first so a callback exception doesn't double-emit.
-            messages = list(buf)
-            buf.clear()
-            replay = {"status": self._emit_status, "warn": self._emit_warning}
-            for kind, msg in messages:
-                try:
-                    if kind in replay:
-                        replay[kind](msg)
-                    else:
-                        self._vprint(f"{self.log_prefix}{msg}", force=True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # The buffered trace already carries the switch line; drop the one-shot notice.
+        self._pending_fallback_notice = None
+        buf = getattr(self, "_retry_status_buffer", None)
+        if not buf:
+            return
+        # Drain first so a callback exception doesn't double-emit.
+        messages = list(buf)
+        buf.clear()
+        replay = {"status": self._emit_status, "warn": self._emit_warning}
+        for kind, msg in messages:
+            try:
+                if kind in replay:
+                    replay[kind](msg)
+                else:
+                    self._vprint(f"{self.log_prefix}{msg}", force=True)
+            except Exception:
+                pass

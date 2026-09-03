@@ -1,11 +1,10 @@
 """Stateful scrubber for reasoning/thinking blocks in streamed assistant text.
 
-The regex ``_strip_think_blocks`` is correct for a complete string but, run per-delta,
-erases an opening ``<think>`` that arrives alone, so downstream state machines leak
-reasoning. This class holds partial tags at delta boundaries until resolved; ``flush()``
-releases held-back prose that was not a tag. Call ``reset()`` at the top of each turn.
-Boundary rule: an open tag only starts a block at a block boundary (stream start, after a
-newline, or with only whitespace on the current line), so prose that *mentions*
+The regex ``_strip_think_blocks`` is correct for a complete string but, run per-delta, erases an
+opening ``<think>`` that arrives alone, so downstream state machines leak reasoning. This class
+holds partial tags at delta boundaries until resolved; ``flush()`` releases held-back prose that
+was not a tag; ``reset()`` at the top of each turn. An open tag only starts a block at a block
+boundary (stream start / after a newline / whitespace-only line so far), so prose that *mentions*
 ``<think>`` is not suppressed; closed pairs are always suppressed (intentional).
 """
 
@@ -66,8 +65,7 @@ class StreamingThinkScrubber:
                 close_idx, close_len = self._find_first_tag(buf, self._CLOSE_TAGS)
                 if close_idx == -1:
                     # No close yet: hold back a possible partial close-tag prefix, drop the rest.
-                    held = self._max_partial_suffix(buf, self._CLOSE_TAGS)
-                    self._buf = buf[-held:] if held else ""
+                    self._hold_partial(buf, self._CLOSE_TAGS)
                     break
                 buf = buf[close_idx + close_len:]
                 self._in_block = False
@@ -90,12 +88,16 @@ class StreamingThinkScrubber:
 
             # No resolvable tag: hold back any partial-tag prefix at the tail
             # so a tag split across deltas isn't missed, then emit the rest.
-            held = self._max_partial_suffix(buf, self._ALL_TAGS)
-            self._emit(out, buf[:-held] if held else buf)
-            self._buf = buf[-held:] if held else ""
+            self._emit(out, self._hold_partial(buf, self._ALL_TAGS))
             break
 
         return "".join(out)
+
+    def _hold_partial(self, buf: str, tags: Tuple[str, ...]) -> str:
+        """Move a trailing partial-tag prefix of *buf* into ``_buf``; return the remainder."""
+        held = self._max_partial_suffix(buf, tags)
+        self._buf = buf[-held:] if held else ""
+        return buf[:-held] if held else buf
 
     def flush(self) -> str:
         """End-of-stream flush: inside an unterminated block the held-back content is discarded (leaking
@@ -146,16 +148,12 @@ class StreamingThinkScrubber:
         """True iff *idx* is a block boundary: position 0 after a newline-terminated (or no) prior emission,
         or any position whose preceding text on the current line is whitespace-only (when no newline
         precedes it in *buf*, the prior emission must also have ended with a newline)."""
-        prior_newline = (
-            already_emitted[-1].endswith("\n") if already_emitted else self._last_emitted_ended_newline
-        )
+        prior_newline = already_emitted[-1].endswith("\n") if already_emitted else self._last_emitted_ended_newline
         if idx == 0:
             return prior_newline
         preceding = buf[:idx]
         last_nl = preceding.rfind("\n")
-        if last_nl == -1:
-            return prior_newline and preceding.strip() == ""
-        return preceding[last_nl + 1:].strip() == ""
+        return (prior_newline if last_nl == -1 else True) and preceding[last_nl + 1:].strip() == ""
 
     @classmethod
     def _max_partial_suffix(cls, buf: str, tags: Tuple[str, ...]) -> int:
@@ -170,6 +168,4 @@ class StreamingThinkScrubber:
     @classmethod
     def _strip_orphan_close_tags(cls, text: str) -> str:
         """Remove close tags with no matching open (always noise) plus trailing whitespace."""
-        if "</" not in text:
-            return text
-        return cls._ORPHAN_CLOSE_RE.sub("", text)
+        return cls._ORPHAN_CLOSE_RE.sub("", text) if "</" in text else text
