@@ -1101,20 +1101,23 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
     """
     if existing_pid is None or not _pid_exists(existing_pid):
         return True
+    recorded_start = existing.get("start_time")
     current_start = _get_process_start_time(existing_pid)
-    if _start_times_conflict(existing.get("start_time"), current_start):
+    if _start_times_conflict(recorded_start, current_start):
         return True
-    if not _looks_like_gateway_process(existing_pid) and (
-        _read_process_cmdline(existing_pid) is not None
-        or (
-            (existing.get("start_time") is None or current_start is None)
-            and not _record_looks_like_gateway(existing)
-        )
-    ):
-        return True
-    # Stopped / tracing-stop state (T/t) in /proc/<pid>/status.
+    if not _looks_like_gateway_process(existing_pid):
+        if _read_process_cmdline(existing_pid) is not None:
+            return True
+        start_unknown = recorded_start is None or current_start is None
+        if start_unknown and not _record_looks_like_gateway(existing):
+            return True
+    return _process_is_stopped(existing_pid)
+
+
+def _process_is_stopped(pid: int) -> bool:
+    """True for a stopped / tracing-stop state (T/t) in ``/proc/<pid>/status``."""
     with contextlib.suppress(OSError):
-        for line in Path(f"/proc/{existing_pid}/status").read_text(encoding="utf-8").splitlines():
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
             if line.startswith("State:"):
                 return line.split()[1] in {"T", "t"}
     return False
@@ -1141,25 +1144,22 @@ def acquire_scoped_lock(
         record["profile"] = profile
     existing = _read_json_file(lock_path)
     if existing is None and lock_path.exists():
-        # Empty/invalid JSON: previous process died between O_EXCL create and
-        # json.dump(). Treat as stale.
+        # Empty/invalid JSON: previous process died between O_EXCL create and json.dump().
         _unlink_quietly(lock_path)
     if existing:
         existing_pid = _pid_from_record(existing)
-        # Our own PID: always self-reacquire. start_time guards reuse of OTHER
-        # PIDs; requiring equality here rejects reconnects when the on-disk
-        # record has start_time null (older writers / psutil failure).
+        # Our own PID: always self-reacquire. start_time guards reuse of OTHER PIDs; requiring
+        # equality here rejects reconnects when the on-disk record has start_time null.
         if existing_pid == os.getpid():
             _write_json_file(lock_path, record)
             return True, existing
         if not _scoped_lock_record_is_stale(existing, existing_pid):
             return False, existing
-        # Rename to a tombstone instead of unlink(): with unlink()+O_EXCL two
-        # racing starters could both win (the second unlink deleting the first
-        # racer's fresh lock). os.replace() lets exactly one claim it; a failed
-        # replace means another racer claimed it and O_EXCL below decides.
-        tombstone = lock_path.with_name(lock_path.name + ".stale")
+        # Rename to a tombstone instead of unlink(): with unlink()+O_EXCL two racing starters
+        # could both win. os.replace() lets exactly one claim it; a failed replace means another
+        # racer claimed it and O_EXCL below decides.
         with contextlib.suppress(OSError):
+            tombstone = lock_path.with_name(lock_path.name + ".stale")
             os.replace(lock_path, tombstone)
             _unlink_quietly(tombstone)
     try:
@@ -1175,8 +1175,7 @@ def release_scoped_lock(scope: str, identity: str) -> None:
     No start_time equality check: on-disk null vs a live fingerprint would wedge reconnects.
     """
     lock_path = _get_scope_lock_path(scope, identity)
-    existing = _read_json_file(lock_path)
-    if existing and existing.get("pid") == os.getpid():
+    if (_read_json_file(lock_path) or {}).get("pid") == os.getpid():
         _unlink_quietly(lock_path)
 
 
@@ -1194,8 +1193,8 @@ def release_all_scoped_locks(
     removed = 0
     for lock_file in lock_dir.glob("*.lock"):
         if owner_pid is not None:
-            record = _read_json_file(lock_file)
-            if record is None or _pid_from_record(record) != owner_pid:
+            record = _read_json_file(lock_file) or {}
+            if _pid_from_record(record) != owner_pid:
                 continue
             if owner_start_time is not None and record.get("start_time") != owner_start_time:
                 continue
@@ -1206,13 +1205,12 @@ def release_all_scoped_locks(
 
 
 # ── --replace takeover marker ─────────────────────────────────────────
-# SIGTERM exits the gateway with code 1 so Restart=on-failure revives it after
-# unexpected kills -- which would also revive a --replace target (flap loop against
-# the replacer). The replacer therefore writes a short-lived marker naming the target
-# PID + start_time BEFORE SIGTERM; the target's shutdown handler treats a matching
-# marker as a planned takeover and exits 0. Unlinked once consumed, so a stale one can
-# grief at most one future shutdown on the same PID, within _TAKEOVER_MARKER_TTL_S.
-
+# SIGTERM exits the gateway with code 1 so Restart=on-failure revives it after unexpected
+# kills -- which would also revive a --replace target (flap loop against the replacer). The
+# replacer therefore writes a short-lived marker naming the target PID + start_time BEFORE
+# SIGTERM; the target's shutdown handler treats a matching marker as a planned takeover and
+# exits 0. Unlinked once consumed, so a stale one can grief at most one future shutdown on
+# the same PID, within _TAKEOVER_MARKER_TTL_S.
 _TAKEOVER_MARKER_FILENAME = ".gateway-takeover.json"
 _TAKEOVER_MARKER_TTL_S = 60  # Marker older than this is treated as stale
 _PLANNED_STOP_MARKER_FILENAME = ".gateway-planned-stop.json"
@@ -1221,8 +1219,8 @@ _PLANNED_STOP_MARKER_TTL_S = 60
 
 def _get_takeover_marker_path(hermes_home: Optional[Path] = None) -> Path:
     """Takeover marker path; ``hermes_home`` is given only for a verified cross-home handoff."""
-    home = hermes_home or _get_process_hermes_home()
-    return _canonical_hermes_home(home) / _TAKEOVER_MARKER_FILENAME
+    home = _canonical_hermes_home(hermes_home or _get_process_hermes_home())
+    return home / _TAKEOVER_MARKER_FILENAME
 
 
 def _get_planned_stop_marker_path() -> Path:
@@ -1277,10 +1275,9 @@ def _consume_pid_marker_for_self(path: Path, *, ttl_s: int) -> bool:
     if parsed is None:
         return False
     record, target_pid, target_start_time = parsed
-    # Cross-profile guard: new markers name the verified TARGET home, which permits a
-    # deliberate cross-HERMES_HOME --replace while ignoring a marker accidentally
-    # written into another profile's directory. Legacy markers have no target field,
-    # so keep the original same-replacer-home rule.
+    # Cross-profile guard: new markers name the verified TARGET home, which permits a deliberate
+    # cross-HERMES_HOME --replace while ignoring a marker accidentally written into another
+    # profile's directory. Legacy markers have no target field: keep the same-replacer-home rule.
     our_home = _get_process_hermes_home()
     target_home = record.get("target_hermes_home")
     if target_home is not None:
