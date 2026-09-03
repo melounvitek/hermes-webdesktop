@@ -81,13 +81,10 @@ def _strip_yaml_frontmatter(content: str) -> str:
     return content
 
 
-# =========================================================================
 # Constants
-# =========================================================================
 DEFAULT_AGENT_IDENTITY = (
-    # A behavior spec (sizing rule, named prohibitions, earned-depth escape
-    # hatch), not a trait list — trait lists change nothing. Maintainer rule:
-    # models UNDER-explore by default; never re-add an exploration-thrift line.
+    # A behavior spec (sizing rule, named prohibitions, earned-depth escape hatch), not a trait list — trait
+    # lists change nothing. Maintainer rule: models UNDER-explore by default; never re-add an exploration-thrift line.
     "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask "
     "— a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's "
     "verified, and what's left, never a replay of the process. No filler (\"Great question,\" \"I'd be happy to\"), no "
@@ -97,9 +94,8 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
-    # Injected only when skill_view exists AND the hermes-agent skill is
-    # installed (system_prompt.py slot resolution). No "when the two differ"
-    # clause: docs-are-authoritative already carries the precedence.
+    # Injected only when skill_view exists AND the hermes-agent skill is installed (system_prompt.py slot
+    # resolution). No "when the two differ" clause: docs-are-authoritative already carries the precedence.
     "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
     "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
     "tools, or capabilities, the documentation at https://hermes-agent.nousresearch.com/docs is your "
@@ -108,8 +104,7 @@ HERMES_AGENT_HELP_GUIDANCE = (
     "before configuring, modifying, or troubleshooting Hermes so you don't guess or invent workarounds."
 )
 
-# Variant for sessions without the skills toolset (e.g. Blank Slate): naming
-# skill_view() there would be a dangling reference, so only the docs URL remains.
+# Variant for sessions without the skills toolset (e.g. Blank Slate): naming skill_view() there would dangle.
 HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
     "You run on Hermes Agent (by Nous Research). When the user needs help with Hermes itself — configuring, "
     "setting up, using, extending, or troubleshooting it — or when you need to understand your own features, "
@@ -153,13 +148,10 @@ SESSION_SEARCH_GUIDANCE = (
     "context exists, use session_search to recall it before asking them to repeat themselves."
 )
 
-# The opening sentence is worded deliberately: Anthropic's server-side filter
-# rejected the previous phrasing ("After completing a complex task (5+ tool
-# calls)... save the approach as a skill...") on subscription OAuth credentials,
-# surfacing as a billing-shaped HTTP 400. If you rewrite it, re-verify with a
-# subscription OAuth token — sk-ant-api keys do not hit the filter. Only the
-# compaction-pruning contract lives here; the safety-rule heading is referenced
-# by tests and compaction summaries.
+# The opening sentence is worded deliberately: Anthropic's server-side filter rejected the previous phrasing
+# ("After completing a complex task (5+ tool calls)... save the approach as a skill...") on subscription OAuth
+# credentials, surfacing as a billing-shaped HTTP 400. If you rewrite it, re-verify with a subscription OAuth
+# token — sk-ant-api keys do not hit the filter. The safety-rule heading is referenced by tests and compaction summaries.
 SKILLS_GUIDANCE = (
     "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n\n"
     "## Skill Safety Rule\n"
@@ -264,10 +256,9 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 # Model name substrings that trigger tool-use enforcement guidance.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
-# Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance
-# is "auto" (agentic-eval traces showed the same failure modes). Gemini/Gemma get
-# GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude does not exhibit these modes.
-# Any model can opt in via config.yaml (`true` or a substring list).
+# Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance is "auto" (agentic-eval
+# traces showed the same failure modes). Gemini/Gemma get GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude
+# does not exhibit these modes. Any model can opt in via config.yaml (`true` or a substring list).
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
     "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral",
@@ -287,9 +278,8 @@ TASK_COMPLETION_GUIDANCE = (
     "produce. Reporting a blocker honestly is always better than inventing a result."
 )
 
-# Universal parallel-tool-call guidance (ALL models): the runtime already executes
-# independent calls concurrently, the model just has to emit them together.
-# Supersedes the former Google-only bullet so no model receives the steer twice.
+# Universal parallel-tool-call guidance (ALL models): the runtime already executes independent calls
+# concurrently. Supersedes the former Google-only bullet so no model receives the steer twice.
 PARALLEL_TOOL_CALL_GUIDANCE = (
     "# Parallel tool calls\n"
     "When you need several pieces of information that don't depend on each other, request them together in a "
@@ -300,10 +290,9 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "read a file before you can patch it). When in doubt and the calls are independent, batch them."
 )
 
-# Execution-discipline guidance for models that abandon partial results, skip
-# prerequisite lookups, answer from memory, or declare "done" unverified. Body is
-# family-agnostic (OPENAI_ prefix reflects origin). Injection gate: system_prompt.py
-# via config.yaml ``agent.execution_guidance`` (auto/true/false/list).
+# Execution-discipline guidance for models that abandon partial results, skip prerequisite lookups, answer
+# from memory, or declare "done" unverified. Body is family-agnostic (OPENAI_ prefix reflects origin).
+# Injection gate: system_prompt.py via config.yaml ``agent.execution_guidance`` (auto/true/false/list).
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
@@ -394,8 +383,7 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "package.json, requirements.txt, Cargo.toml, etc. before importing.\n"
     "- **Conciseness:** Keep explanatory text brief — a few sentences, not "
     "paragraphs. Focus on actions and results over narration.\n"
-    # No parallel-tool-call bullet here: PARALLEL_TOOL_CALL_GUIDANCE (all
-    # models) already carries it and Gemini/Gemma must not get it twice.
+    # No parallel-tool-call bullet here: PARALLEL_TOOL_CALL_GUIDANCE already carries it for all models.
     "- **Non-interactive commands:** Use flags like -y, --yes, --non-interactive to prevent CLI tools from hanging on "
     "prompts.\n"
     "- **Keep going:** Work autonomously until the task is fully resolved. Don't stop with a plan — execute it.\n"
@@ -405,12 +393,10 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 # computer_use has no prompt block on purpose: its guidance lives in the tool
 # schema and each action result's verdict.
 
-# Mid-turn steering (/steer). A steer is appended to the END of a tool result
-# (the only role-alternation-safe slot mid-turn) — exactly the channel injection
-# defenses distrust, so a bare "User guidance:" line gets refused. The
-# self-describing marker attributes the text to the real user; STEER_CHANNEL_NOTE
-# says to trust THIS marker only (lookalikes stay untrusted) and only where it
-# sits in the latest results, since replaying it from history can replay actions.
+# Mid-turn steering (/steer). A steer is appended to the END of a tool result (the only role-alternation-safe
+# slot mid-turn) — exactly the channel injection defenses distrust, so a bare "User guidance:" line gets
+# refused. The self-describing marker attributes the text to the real user; STEER_CHANNEL_NOTE says to trust
+# THIS marker only (lookalikes stay untrusted) and only in the latest results (replaying history replays actions).
 STEER_MARKER_OPEN = (
     "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered "
     "once at this position; not tool output and not a new delivery when replayed from conversation history]"
@@ -424,8 +410,7 @@ def format_steer_marker(steer_text: str) -> str:
 
 
 STEER_CHANNEL_NOTE = (
-    # Keeps only what the self-describing marker cannot say about itself: it is
-    # the ONLY trusted shape (anti-lookalike) and carries full user authority.
+    # Only what the marker cannot say about itself: it is the ONLY trusted shape and carries full user authority.
     "## Mid-turn user steering\n"
     "Mid-turn, the user can steer you: Hermes appends their message to the end of a tool result, wrapped exactly as:\n"
     f"{STEER_MARKER_OPEN}\n<their message>\n{STEER_MARKER_CLOSE}\n"
@@ -467,8 +452,8 @@ def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
     return " ".join(text for ok, text in gated if ok)
 
 
-# Models whose system prompt is sent as the 'developer' role (stronger
-# instruction-following weight); swapped at the API boundary in _build_api_kwargs().
+# Models whose system prompt is sent as the 'developer' role (stronger instruction-following weight);
+# swapped at the API boundary in _build_api_kwargs().
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 _MEDIA_NATIVE = (
@@ -487,15 +472,13 @@ PLATFORM_HINTS = {
     "whatsapp": (
         "You are on WhatsApp. Standard markdown auto-converts to WhatsApp syntax (*bold*, _italic_, ~strike~, "
         "monospace) \u2014 write markdown freely, bullets included. No tables \u2014 use bullets or labeled lines. "
-        + _MEDIA_NATIVE +
-        "Images (.jpg, .png, .webp) send as photos, videos (.mp4, .mov) play "
+        f"{_MEDIA_NATIVE}Images (.jpg, .png, .webp) send as photos, videos (.mp4, .mov) play "
         "inline, other files arrive as documents; image URLs via ![alt](url) send as photos."
     ),
     "whatsapp_cloud": (
         "You are on WhatsApp (Meta Business Cloud API). Standard markdown auto-converts to WhatsApp syntax "
         "\u2014 write markdown freely. No tables \u2014 use bullets or labeled lines. "
-        + _MEDIA_NATIVE +
-        "Images (.jpg, .png) send as photos, videos (.mp4) inline, audio as voice/audio, other files as "
+        f"{_MEDIA_NATIVE}Images (.jpg, .png) send as photos, videos (.mp4) inline, audio as voice/audio, other files as "
         "documents; ![alt](url) works. NOTE: Meta refuses free-form replies when the user hasn't messaged in "
         "24h (error 131047) \u2014 relevant only for delayed/scheduled sends."
     ),
@@ -503,8 +486,7 @@ PLATFORM_HINTS = {
         "You are on Telegram. Standard Markdown auto-converts: **bold**, "
         "*italic*, ~~strikethrough~~, ||spoiler||, `code`, ```blocks```, "
         "[links](url), ## headers. Prefer bullets or labeled lines for structured data (no tables). "
-        + _MEDIA_NATIVE +
-        "Images (.png, .jpg, .webp) send as photos, videos (.mp4) play inline; image URLs via ![alt](url) send as "
+        f"{_MEDIA_NATIVE}Images (.png, .jpg, .webp) send as photos, videos (.mp4) play inline; image URLs via ![alt](url) send as "
         "photos. Audio: add [[audio_as_voice]] on its own line to send ANY audio file as a native voice bubble "
         "(non-Opus transcodes automatically); without it, .mp3/.m4a arrive as audio files, other formats as documents."
     ),
@@ -525,8 +507,7 @@ PLATFORM_HINTS = {
     "signal": (
         "You are on Signal. Standard markdown (**bold**, *italic*, ~~strike~~, # headers, `code`) auto-converts to "
         "Signal formatting; bullets render as \u2022. No tables \u2014 use bullets or labeled lines. "
-        + _MEDIA_NATIVE +
-        "Images (.png, .jpg, .webp) send as photos, other files as documents; ![alt](url) sends as photos."
+        f"{_MEDIA_NATIVE}Images (.png, .jpg, .webp) send as photos, other files as documents; ![alt](url) sends as photos."
     ),
     "email": (
         "You are communicating via email. Write clear, well-structured responses suitable for email. Use "
@@ -546,21 +527,19 @@ PLATFORM_HINTS = {
         "literal characters, so write plain text (indentation and blank lines are your only layout tools). Files: "
         "there is no attachment channel and MEDIA:/path tags are NOT intercepted here (they print as literal text) — "
         "deliver a file by stating its absolute path or URL in plain text; the user opens it themselves. "
-        + _LOCAL_CRON_DELIVERY_NOTE
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "tui": (
         # Same file-delivery reality as the CLI: no MEDIA: interception in tui/.
         "You are in the Hermes terminal UI (TUI). Files: there is no attachment channel and MEDIA:/path tags "
         "are NOT intercepted here (they print as literal text) — deliver a file by stating its absolute path "
         "or URL in plain text. "
-        + _LOCAL_CRON_DELIVERY_NOTE
+        f"{_LOCAL_CRON_DELIVERY_NOTE}"
     ),
     "desktop": (
-        # Every claim verified against the shipping renderer
-        # (inline-preview-directive.tsx). Widget text is recipe-first: HOW (an
-        # inline widget IS a ::preview'd HTML file) and WHY (the frame injects
-        # the theme prelude first; width adopts the first measured span).
-        # setup_mcp is taught by its own tool schema, not here.
+        # Every claim verified against the shipping renderer (inline-preview-directive.tsx). Widget text is
+        # recipe-first: HOW (an inline widget IS a ::preview'd HTML file) and WHY (the frame injects the theme
+        # prelude first; width adopts the first measured span). setup_mcp is taught by its own tool schema.
         "You are chatting inside the Hermes desktop app, a graphical chat surface. Markdown renders with full GitHub "
         "flavor (tables, syntax-highlighted code, math via $...$, task lists, callouts). Deliver files by writing "
         "MEDIA:/absolute/path/to/file — any file type: images/audio/video render inline, everything else becomes a "
@@ -598,8 +577,7 @@ PLATFORM_HINTS = {
         "blockquotes, and links render. Do NOT use tables (popular clients like Element X collapse them into run-on "
         "text \u2014 use '**Label:** value' lines or bullets), and avoid ||spoilers||, ~~strikethrough~~, and "
         "checkboxes (they appear as literal characters). Prefer [descriptive text](url) over bare URLs. "
-        + _MEDIA_NATIVE +
-        "Images send as inline photos, audio (.ogg, .mp3) as voice/audio "
+        f"{_MEDIA_NATIVE}Images send as inline photos, audio (.ogg, .mp3) as voice/audio "
         "messages, video (.mp4) inline, other files as attachments."
     ),
     "feishu": (
@@ -618,8 +596,7 @@ PLATFORM_HINTS = {
     ),
     "wecom": (
         "You are on WeCom (\u4f01\u4e1a\u5fae\u4fe1). Markdown is supported. "
-        + _MEDIA_NATIVE +
-        "Images (.jpg, .png, .webp) send as photos (\u226410 MB), other files as documents (\u226420 MB), videos "
+        f"{_MEDIA_NATIVE}Images (.jpg, .png, .webp) send as photos (\u226410 MB), other files as documents (\u226420 MB), videos "
         "(.mp4) play inline. Voice messages must be AMR \u2014 other audio formats send as file attachments. Image "
         "URLs via ![alt](url) are downloaded and sent as photos. Never claim you lack file-sending."
     ),
@@ -631,8 +608,7 @@ PLATFORM_HINTS = {
     "yuanbao": (
         "You are on Yuanbao (\u817e\u8baf\u5143\u5b9d), a Chinese AI assistant "
         "platform. Markdown renders (code blocks, tables, bold/italic). "
-        + _MEDIA_NATIVE +
-        "Images (.jpg, .png, .webp, .gif) send as photos, other files as downloadable documents (max 50 MB); "
+        f"{_MEDIA_NATIVE}Images (.jpg, .png, .webp, .gif) send as photos, other files as downloadable documents (max 50 MB); "
         "image URLs via ![alt](url) are downloaded and sent as photos. Never claim you lack file-sending. "
         "Stickers (\u8d34\u7eb8/\u8868\u60c5\u5305): when the user sends one (you see '[emoji: "
         "\u540d\u79f0]') or asks for one, use the sticker tools \u2014 yb_search_sticker with a Chinese "
@@ -648,9 +624,8 @@ PLATFORM_HINTS = {
         "intercepts nothing — a MEDIA: tag there renders as literal text exposing a raw host filesystem path. For "
         "those cases, state the plain file path in your response text instead of a MEDIA: tag."
     ),
-    # No "webui" hint on purpose: nothing constructs platform="webui" (the
-    # dashboard chat resolves to 'desktop' or 'tui'). If a real WebUI chat
-    # surface ships, write a hint from its actual renderer.
+    # No "webui" hint on purpose: nothing constructs platform="webui" (the dashboard chat resolves to
+    # 'desktop' or 'tui'). If a real WebUI chat surface ships, write a hint from its actual renderer.
 }
 
 # Telegram rich-messages extension — injected only with
@@ -666,10 +641,8 @@ TELEGRAM_RICH_MESSAGES_HINT = (
     "constructs like math and collapsible details may render as plain source text in that case. "
 )
 
-# ---------------------------------------------------------------------------
 # Environment hints — the machine/OS the agent's tools actually run on
 # (PLATFORM_HINTS describe the messaging channel instead).
-# ---------------------------------------------------------------------------
 WSL_ENVIRONMENT_HINT = (
     "You are running inside WSL (Windows Subsystem for Linux). The Windows host filesystem is mounted under /mnt/ — "
     "/mnt/c/ is the C: drive, /mnt/d/ is D:, etc. The user's Windows files are typically at "
@@ -678,13 +651,11 @@ WSL_ENVIRONMENT_HINT = (
 )
 
 
-# Backends that run commands (and every file tool) in a separate container /
-# remote host: host OS/$HOME/cwd would mislead, so the agent only sees the
-# machine it can touch.
+# Backends that run commands (and every file tool) in a separate container / remote host: host OS/$HOME/cwd
+# would mislead, so the agent only sees the machine it can touch.
 _REMOTE_TERMINAL_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "ssh", "vercel_sandbox", "managed_modal"})
 
-# Used when the live probe fails: only what the backend choice itself implies
-# (container type, likely OS family) — never an invented cwd/user/$HOME.
+# Used when the live probe fails: only what the backend choice implies — never an invented cwd/user/$HOME.
 _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "docker": "a Docker container (Linux)",
     "singularity": "a Singularity container (Linux)",
@@ -695,34 +666,25 @@ _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
     "ssh": "a remote host reached over SSH (likely Linux)",
 }
 
-# Per-process probe cache keyed by (env_type, cwd_hint) so a mid-process backend
-# switch rebuilds; in-memory only because the probed state may change across restarts.
+# Per-process probe cache keyed by (env_type, cwd_hint) so a mid-process backend switch rebuilds.
 _BACKEND_PROBE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _plugin_backend_attr(backend: str, attr: str, default=None):
+    """*attr* of a plugin-registered terminal backend, fail-soft (unknown backend / raising plugin -> *default*)."""
+    try:
+        from agent.terminal_env_registry import provider_flag
+
+        return provider_flag(backend, attr, default)
+    except Exception:
+        return default
 
 
 def _plugin_backend_is_remote(backend: str) -> bool:
     """Whether a plugin-registered terminal backend runs commands remotely (unknown names are local)."""
     if not backend or backend in _REMOTE_TERMINAL_BACKENDS or backend == "local":
         return False
-    try:
-        from agent.terminal_env_registry import provider_flag
-
-        return bool(provider_flag(backend, "is_remote", False))
-    except Exception:
-        return False
-
-
-def _plugin_backend_description(backend: str) -> str | None:
-    """Prompt fallback description declared by a plugin backend, if any."""
-    try:
-        from agent.terminal_env_registry import get_provider
-
-        provider = get_provider(backend)
-        if provider is not None:
-            return provider.env_description
-    except Exception:
-        pass
-    return None
+    return bool(_plugin_backend_attr(backend, "is_remote", False))
 
 
 def _windows_marketing_version() -> str:
@@ -808,22 +770,13 @@ def _run_backend_probe(env_type: str, terminal_tool) -> str:
 
 def _format_backend_probe(output: str) -> str:
     """Render the probe's key=value lines as an indented summary ("" if nothing usable)."""
-    parsed: dict[str, str] = {}
-    for line in output.splitlines():
-        if "=" in line:
-            k, _, v = line.partition("=")
-            parsed[k.strip()] = v.strip()
-    pieces = []
-    os_bits = " ".join(x for x in (parsed.get("os"), parsed.get("kernel")) if x and x != "unknown")
-    if os_bits:
-        pieces.append(f"OS: {os_bits}")
-    if parsed.get("user") and parsed["user"] != "unknown":
-        pieces.append(f"User: {parsed['user']}")
-    if parsed.get("home"):
-        pieces.append(f"Home: {parsed['home']}")
-    if parsed.get("cwd"):
-        pieces.append(f"Working directory: {parsed['cwd']}")
-    return "\n".join(f"  {p}" for p in pieces)
+    parsed = {k.strip(): v.strip() for k, _, v in (line.partition("=") for line in output.splitlines() if "=" in line)}
+    known = lambda key: parsed.get(key) if parsed.get(key) != "unknown" else None  # noqa: E731
+    fields = (
+        ("OS", " ".join(x for x in (known("os"), known("kernel")) if x)),
+        ("User", known("user")), ("Home", parsed.get("home")), ("Working directory", parsed.get("cwd")),
+    )
+    return "\n".join(f"  {label}: {value}" for label, value in fields if value)
 
 
 def _probe_remote_backend(env_type: str) -> str | None:
@@ -850,14 +803,12 @@ def _local_host_hints() -> list[str]:
     """Host OS / home / cwd block for a local terminal backend (tools run on this host)."""
     import platform
 
-    if is_wsl():
-        host = "WSL (Windows Subsystem for Linux)"
-    elif sys.platform == "win32":
-        host = f"Windows ({_windows_marketing_version()})"
-    elif sys.platform == "darwin":
-        host = f"macOS ({platform.mac_ver()[0] or platform.release()})"
-    else:
-        host = f"{platform.system()} ({platform.release()})"
+    host = (
+        "WSL (Windows Subsystem for Linux)" if is_wsl()
+        else f"Windows ({_windows_marketing_version()})" if sys.platform == "win32"
+        else f"macOS ({platform.mac_ver()[0] or platform.release()})" if sys.platform == "darwin"
+        else f"{platform.system()} ({platform.release()})"
+    )
     host_lines = [f"Host: {host}", f"User home directory: {os.path.expanduser('~')}"]
     try:
         host_lines.append(f"Current working directory: {resolve_agent_cwd()}")
@@ -890,7 +841,7 @@ def _remote_backend_hint(backend: str) -> str:
         )
     description = (
         _BACKEND_FALLBACK_DESCRIPTIONS.get(backend)
-        or _plugin_backend_description(backend)
+        or _plugin_backend_attr(backend, "env_description")
         or f"a {backend} environment (likely Linux)"
     )
     return lead + (
@@ -900,17 +851,23 @@ def _remote_backend_hint(backend: str) -> str:
     )
 
 
+def _config_readonly(what: str) -> dict:
+    """config.yaml as a dict, or {} when unreadable (logged at debug with *what* for context)."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        return load_config_readonly()
+    except Exception as e:
+        logger.debug("Could not read %s from config: %s", what, e)
+        return {}
+
+
 def _embedder_environment_hint() -> str:
     """Embedder-supplied environment description: HERMES_ENVIRONMENT_HINT (container ENV)
     wins over config.yaml ``agent.environment_hint``. Read once at prompt-build time."""
     extra = (os.getenv("HERMES_ENVIRONMENT_HINT") or "").strip()
     if not extra:
-        try:
-            from hermes_cli.config import load_config_readonly
-
-            extra = str((load_config_readonly().get("agent", {}) or {}).get("environment_hint", "")).strip()
-        except Exception as e:
-            logger.debug("Could not read agent.environment_hint from config: %s", e)
+        extra = str((_config_readonly("agent.environment_hint").get("agent", {}) or {}).get("environment_hint", "")).strip()
     return extra
 
 
@@ -933,8 +890,8 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
-# Dynamic cap (no explicit context_file_max_chars): ~4 chars/token, a small slice of
-# the window since context files share the cached prefix; small models stay at the floor.
+# Dynamic cap (no explicit context_file_max_chars): ~4 chars/token, a small slice of the window since
+# context files share the cached prefix; small models stay at the floor.
 _CONTEXT_FILE_CHARS_PER_TOKEN = 4
 _CONTEXT_FILE_WINDOW_FRACTION = 0.06
 _CONTEXT_FILE_DYNAMIC_CEILING = 500_000
@@ -950,19 +907,14 @@ def _dynamic_context_file_max_chars(context_length: Optional[int]) -> int:
 
 def _get_context_file_max_chars(context_length: Optional[int] = None) -> int:
     """Context-file truncation limit: explicit config.yaml ``context_file_max_chars`` wins, else the dynamic cap."""
-    try:
-        from hermes_cli.config import load_config_readonly
-
-        val = load_config_readonly().get("context_file_max_chars")
-        if isinstance(val, (int, float)) and val > 0:
-            return int(val)
-    except Exception as e:
-        logger.debug("Could not read context_file_max_chars from config: %s", e)
+    val = _config_readonly("context_file_max_chars").get("context_file_max_chars")
+    if isinstance(val, (int, float)) and val > 0:
+        return int(val)
     return _dynamic_context_file_max_chars(context_length)
 
 
-# Truncation warnings for the caller (run_agent) to surface. A ContextVar, not a
-# module list, so concurrent gateway-session prompt builds cannot drain each other's.
+# Truncation warnings for run_agent to surface. A ContextVar so concurrent gateway prompt builds cannot
+# drain each other's.
 _truncation_warnings: "contextvars.ContextVar[Optional[list]]" = contextvars.ContextVar(
     "context_file_truncation_warnings", default=None
 )
@@ -983,12 +935,9 @@ def drain_truncation_warnings() -> list:
     return drained
 
 
-# =========================================================================
 # Skills index (two-layer cache: in-process LRU, then disk snapshot)
-# =========================================================================
 
-# One entry per profile × platform (key carries skills_dir), so a multiplexing
-# gateway needs more than a handful; each miss is a full os.walk.
+# One entry per profile × platform (key carries skills_dir); a multiplexing gateway needs more than a handful.
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
@@ -1080,8 +1029,7 @@ def _write_skills_snapshot(skills_dir: Path, skill_entries: list[dict], category
 def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict, description: str) -> dict:
     """Serialisable metadata dict for one skill."""
     parts = skill_file.relative_to(skills_dir).parts
-    # Org mirror: category/name derive from the path WITHIN `_org/<org_id>/`;
-    # org_id is recorded for labeling + fail-loud collisions.
+    # Org mirror: category/name derive from the path WITHIN `_org/<org_id>/`; org_id drives labeling + collisions.
     org_id: str | None = None
     if len(parts) >= 3 and parts[0] == ORG_MIRROR_DIR_NAME:
         org_id, parts = parts[1], parts[2:]
@@ -1178,8 +1126,7 @@ def build_skills_system_prompt(
         skills_dir = get_skills_dir()
     try:
         external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
-        # Trusted project-local dirs — highest-precedence tier; cwd and trust are
-        # session-stable so the index stays byte-stable.
+        # Trusted project-local dirs — highest-precedence tier; cwd/trust are session-stable, so byte-stable.
         from agent.skill_utils import get_project_skills_dirs
         project_dirs = get_project_skills_dirs()
         if not skills_dir.exists() and not external_dirs and not project_dirs:
@@ -1258,9 +1205,8 @@ def _render_skills_index(
     """Render the ## Skills block; "" when there is nothing to list."""
     if not skills_by_category:
         return ""
-    # Demoted categories collapse to one names-only line. NEVER drop entries —
-    # agent-created skills are the model's project memory and it won't rediscover
-    # them via skills_list. Nested categories follow their parent.
+    # Demoted categories collapse to one names-only line. NEVER drop entries — agent-created skills are the
+    # model's project memory and it won't rediscover them via skills_list. Nested categories follow their parent.
     demoted = frozenset(cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
     hidden_note = (
         "\n(Categories marked [names only] are outside the current coding "
@@ -1313,8 +1259,7 @@ def _build_skills_system_prompt_inner(
     compact_categories: "frozenset[str] | None",
     project_dirs: "list[Path] | None" = None,
 ) -> str:
-    # The resolved platform is part of the key: per-platform disabled-skill lists
-    # must produce distinct cache entries (the gateway serves several platforms).
+    # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
     disabled = get_disabled_skill_names(_platform_hint or None)
     project_dirs = project_dirs or []
@@ -1343,8 +1288,7 @@ def _build_skills_system_prompt_inner(
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
 
-    # Disk snapshot (fast path) vs. full scan (cold path): both yield (entry,
-    # is_compatible) pairs so labeling + collision flagging run identically.
+    # Disk snapshot (fast path) vs. full scan: both yield (entry, is_compatible) pairs so labeling runs identically.
     snapshot = _load_skills_snapshot(skills_dir)
     if snapshot is not None:
         candidates = [
@@ -1362,8 +1306,7 @@ def _build_skills_system_prompt_inner(
         if is_compatible and not hides(_entry_name(entry), entry.get("skill_name") or "", entry.get("conditions") or {})
     ]
 
-    # Project-local skills (highest precedence): names claimed here shadow same-named
-    # profile-local skills; entries are tagged [project] for provenance.
+    # Project-local skills (highest precedence) shadow same-named profile-local skills; tagged [project].
     project_names: set[str] = set()
     if project_dirs:
         from agent.skill_utils import iter_project_skill_files
@@ -1375,8 +1318,7 @@ def _build_skills_system_prompt_inner(
                     desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s",
                 )
     if project_names:
-        # Drop shadowed profile-local entries BEFORE org labeling so collision
-        # flags don't fire on intentional project-over-local overrides.
+        # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
         visible_entries = [e for e in visible_entries if _entry_name(e) not in project_names]
 
     _label_visible_entries(visible_entries, skills_by_category)
@@ -1385,8 +1327,7 @@ def _build_skills_system_prompt_inner(
         category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
         _write_skills_snapshot(skills_dir, [entry for entry, _ in candidates], category_descriptions)
 
-    # External skill directories: scanned directly (read-only and small); local
-    # skills take precedence, so names already indexed are skipped.
+    # External skill directories: scanned directly (read-only, small); names already indexed are skipped.
     seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
     for ext_dir in external_dirs:
         if not ext_dir.exists():
@@ -1407,9 +1348,7 @@ def _build_skills_system_prompt_inner(
     return result
 
 
-# =========================================================================
 # Context files (SOUL.md, AGENTS.md, .cursorrules)
-# =========================================================================
 
 def _truncate_content(
     content: str,
@@ -1539,8 +1478,7 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
             break  # first name match wins per directory
     if len(sections) <= 1:
         return sections[0] if sections else ""
-    # Per-file budgets were applied above; also cap the merged chain so a deep
-    # monorepo cannot multiply the context-file budget unbounded.
+    # Per-file budgets applied above; also cap the merged chain so a deep monorepo can't multiply the budget.
     return _truncate_content(
         "\n\n".join(sections), "AGENTS.md (directory chain)",
         context_length=context_length, read_path=str(cwd_resolved / "AGENTS.md"),
@@ -1588,9 +1526,8 @@ def build_context_files_prompt(
     """
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     sections = []
-    # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt
-    # authority (the desktop default would load this repo's contributor AGENTS.md). An
-    # explicit cwd is honored verbatim; CLI surfaces pass allow_install_tree_fallback=True.
+    # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
+    # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.
     from agent.runtime_cwd import _is_install_tree
 
     if cwd is None and not allow_install_tree_fallback and _is_install_tree(cwd_path):
