@@ -17,23 +17,16 @@ class StatusOutputMixin:
     """Status/warning/notice emission and retry-chatter buffering (see module docstring)."""
 
     def _safe_print(self, *args, **kwargs):
-        """Print that swallows broken pipes / closed stdout (headless stdout can vanish mid-session).
-
-        Routes through ``self._print_fn`` so the CLI can inject an ANSI-aware renderer.
-        """
+        """Print that swallows broken pipes / closed stdout (headless stdout can vanish mid-session);
+        routes through ``self._print_fn`` so the CLI can inject an ANSI-aware renderer."""
         try:
-            fn = self._print_fn or print
-            fn(*args, **kwargs)
+            (self._print_fn or print)(*args, **kwargs)
         except (OSError, ValueError):
             pass
 
     def _vprint(self, *args, force: bool = False, **kwargs):
-        """Verbose print — suppressed while tokens are streaming.
-
-        ``force=True`` always shows (errors/warnings). Allowed during tool execution, muted
-        after the main response (``_mute_post_response``), and fully suppressed under
-        ``suppress_status_output`` (machine-readable ``hermes chat -q``).
-        """
+        """Verbose print — suppressed while tokens are streaming (allowed during tool execution) and after
+        the main response; ``force=True`` bypasses both. ``suppress_status_output`` (``hermes chat -q``) wins."""
         if getattr(self, "suppress_status_output", False):
             return
         if not force and (getattr(self, "_mute_post_response", False)
@@ -42,10 +35,8 @@ class StatusOutputMixin:
         self._safe_print(*args, **kwargs)
 
     def _should_start_quiet_spinner(self) -> bool:
-        """True when quiet-mode spinner output has a safe sink: ``_print_fn`` or a real TTY.
-
-        A raw spinner on a non-TTY stdout can corrupt protocol streams (ACP JSON-RPC).
-        """
+        """True when quiet-mode spinner output has a safe sink (``_print_fn`` or a real TTY); a raw spinner
+        on a non-TTY stdout can corrupt protocol streams (ACP JSON-RPC)."""
         if self._print_fn is not None:
             return True
         stream = getattr(sys, "stdout", None)
@@ -55,10 +46,8 @@ class StatusOutputMixin:
             return False
 
     def _should_emit_quiet_tool_messages(self) -> bool:
-        """True when quiet-mode tool summaries should print directly (CLI, no callback owns rendering).
-
-        ``suppress_status_output`` always wins so ``[tool]``/``[done]`` lines never land in captured stdout.
-        """
+        """True when quiet-mode tool summaries should print directly (CLI, no callback owns rendering);
+        ``suppress_status_output`` always wins so ``[tool]``/``[done]`` never land in captured stdout."""
         if getattr(self, "suppress_status_output", False):
             return False
         return self.quiet_mode and not self.tool_progress_callback and getattr(self, "platform", "") == "cli"
@@ -89,11 +78,8 @@ class StatusOutputMixin:
         self._emit_status_kind("warn", message, origin="_emit_warning")
 
     def _warn_context_overflow_blocked(self, reason: str, preflight_tokens: int, threshold_tokens: int) -> None:
-        """Warn (deduped) when context is over the compression threshold but compression is blocked.
-
-        Dedup is on the block *kind* (``cooldown`` / ``ineffective``), not the countdown
-        string; cleared by ``_clear_context_overflow_warn``.
-        """
+        """Warn (deduped on the block *kind* — ``cooldown`` / ``ineffective`` — not the countdown string;
+        cleared by ``_clear_context_overflow_warn``) when context is over the threshold but compression is blocked."""
         _warn_kind = (reason or "unknown").split(":", 1)[0]
         _warn_key = ("ctx_overflow_blocked", _warn_kind)
         if getattr(self, "_last_ctx_overflow_warn", None) == _warn_key:
@@ -141,24 +127,19 @@ class StatusOutputMixin:
         self._touch_activity(text)
         self._call_callback("thinking_callback", text, origin="_emit_wait_notice")
 
-    # ── Buffered retry/fallback status ──
-    # Retry chatter is buffered and shown only when every retry/fallback is exhausted; dropped on
-    # success. Backend logs are unaffected (every site still logs).
+    # ── Buffered retry/fallback status: shown only when every retry/fallback is exhausted, dropped on
+    # success. Backend logs are unaffected (every site still logs). ──
 
     def _buffer_retry_message(self, kind: str, message: str) -> None:
         """Buffer a retry/fallback line as ``(kind, text)`` until we know whether the turn recovered.
 
         ``kind`` is ``"status"`` (replays via ``_emit_status``), ``"vprint"`` (``_vprint(force=True)``) or
-        ``"warn"`` (``_emit_warning``). Never breaks the retry loop on a buffer hiccup.
+        ``"warn"`` (``_emit_warning``).
         """
-        try:
-            buf = getattr(self, "_retry_status_buffer", None)
-            if buf is None:
-                buf = []
-                self._retry_status_buffer = buf
-            buf.append((kind, message))
-        except Exception:
-            pass
+        buf = getattr(self, "_retry_status_buffer", None)
+        if buf is None:
+            buf = self._retry_status_buffer = []
+        buf.append((kind, message))
 
     def _buffer_status(self, message: str) -> None:
         self._buffer_retry_message("status", message)
@@ -168,34 +149,25 @@ class StatusOutputMixin:
 
     def _clear_status_buffer(self) -> None:
         """Drop buffered retry messages — call on successful recovery."""
-        try:
-            buf = getattr(self, "_retry_status_buffer", None)
-            if buf:
-                buf.clear()
-        except Exception:
-            pass
+        buf = getattr(self, "_retry_status_buffer", None)
+        if buf:
+            buf.clear()
 
     def _emit_pending_fallback_notice(self) -> None:
-        """Surface the one-shot fallback-switch notice on successful recovery.
-
-        A provider switch is durable state operators must see, unlike the transient retry
-        chatter ``_clear_status_buffer`` drops. Emitted exactly once, then cleared; on terminal
-        failure the buffered switch line is flushed instead (``_flush_status_buffer``).
-        """
-        try:
-            notice = getattr(self, "_pending_fallback_notice", None)
-            if not notice:
-                return
-            # Clear before emitting so a (swallowed) callback error can't leave a stale re-emit.
-            self._pending_fallback_notice = None
-            for item in notice if isinstance(notice, list) else [notice]:
-                try:
-                    self._emit_status(str(item))
-                except Exception:
-                    # One surface failure must not hide later switches from the same chain.
-                    continue
-        except Exception:
-            pass
+        """Surface the one-shot fallback-switch notice on successful recovery: a provider switch is durable
+        state operators must see, unlike the retry chatter ``_clear_status_buffer`` drops. Emitted once, then
+        cleared; on terminal failure the buffered switch line is flushed instead (``_flush_status_buffer``)."""
+        notice = getattr(self, "_pending_fallback_notice", None)
+        if not notice:
+            return
+        # Clear before emitting so a (swallowed) callback error can't leave a stale re-emit.
+        self._pending_fallback_notice = None
+        for item in notice if isinstance(notice, list) else [notice]:
+            try:
+                self._emit_status(str(item))
+            except Exception:
+                # One surface failure must not hide later switches from the same chain.
+                continue
 
     def _flush_status_buffer(self) -> None:
         """Emit buffered retry messages — call on terminal failure so the user sees what was tried."""
