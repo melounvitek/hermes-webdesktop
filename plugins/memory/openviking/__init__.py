@@ -165,10 +165,8 @@ def _sanitize_openviking_error_message(message: str, status_code: Optional[int] 
         title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
         if title_match:
             title = re.sub(r"\s+", " ", title_match.group(1)).strip()
-            if "|" in title:
-                title = title.split("|", 1)[1].strip()
-            if status_code and title.startswith(f"{status_code}:"):
-                title = title.split(":", 1)[1].strip()
+            title = title.split("|", 1)[1].strip() if "|" in title else title
+            title = title.split(":", 1)[1].strip() if status_code and title.startswith(f"{status_code}:") else title
             if title:
                 return f"{status}: {title}"
         return f"{status}: OpenViking endpoint returned an HTML error page."
@@ -630,7 +628,6 @@ def _normalize_openviking_url(url: str) -> str:
         candidate = f"http://[::1]:{trimmed.rsplit(':', 1)[1]}"
     else:
         candidate = trimmed if "://" in trimmed else f"http://{trimmed}"
-
     try:
         parsed = urlparse(candidate)
         if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
@@ -790,11 +787,6 @@ def _resolve_connection_settings(provider_config: Optional[dict] = None) -> dict
     }
 
 
-def _env_writes_from_connection_values(values: dict) -> dict:
-    writes = {env_key: _clean_config_value(values.get(value_key)) for env_key, value_key in zip(_OPENVIKING_ENV_KEYS, _CONNECTION_KEYS)}
-    return {key: value for key, value in writes.items() if value}
-
-
 def _secure_secret_file(path: Path, *, create: bool = False) -> None:
     """chmod 0600 a secret-bearing file; with ``create`` also pre-create it BEFORE writing
     (write-then-chmod leaves a window where the fresh file is world-readable under the umask)."""
@@ -833,14 +825,6 @@ def _write_env_vars(env_path: Path, env_writes: dict, remove_keys: tuple[str, ..
     _secure_secret_file(env_path, create=True)
     env_path.write_text("\n".join(new_lines) + ("\n" if new_lines else ""), encoding="utf-8", errors="surrogateescape")
     _secure_secret_file(env_path)
-
-
-def _remember_ovcli_path(provider_config: dict, ovcli_path: Path) -> None:
-    default_path = _default_ovcli_config_path().expanduser()
-    if os.environ.get(_OVCLI_CONFIG_ENV, "").strip() or ovcli_path.expanduser() != default_path:
-        provider_config["ovcli_config_path"] = str(ovcli_path)
-    else:
-        provider_config.pop("ovcli_config_path", None)
 
 
 def _ovcli_data_from_connection_values(values: dict) -> dict:
@@ -1164,15 +1148,17 @@ def _index_tool_calls(messages: List[Dict[str, Any]]) -> tuple[Dict[str, Dict[st
     return tool_calls_by_id, completed_tool_ids, skipped_tool_ids
 
 
+@dataclass
 class _TurnUpload:
     """One turn's OpenViking upload: structured batches first, falling back to plain text
     on a first-batch failure, and to individual messages after a failed retry."""
 
-    def __init__(self, provider: "OpenVikingMemoryProvider", sid: str, batch_messages: List[Dict[str, Any]],
-                 user_content: str, assistant_content: str):
-        self.provider, self.sid, self.batch_messages = provider, sid, batch_messages
-        self.user_content, self.assistant_content = user_content, assistant_content
-        self.next_index = 0
+    provider: "OpenVikingMemoryProvider"
+    sid: str
+    batch_messages: List[Dict[str, Any]]
+    user_content: str
+    assistant_content: str
+    next_index: int = 0
 
     def _trace(self, fmt: str, *args) -> None:
         if env_var_enabled(_SYNC_TRACE_ENV):
@@ -1489,7 +1475,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if self._shutting_down:
             self._client = None
             return None
-
         try:
             settings = _resolve_connection_settings(_load_hermes_openviking_config())
         except _OpenVikingEndpointError as exc:
@@ -2757,7 +2742,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
             "root_uri": result.get("root_uri", ""),
             "message": "Resource queued for processing. Use viking_search after a moment to find it.",
         }, ensure_ascii=False)
-
 
 
 def register(ctx) -> None:

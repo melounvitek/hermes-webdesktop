@@ -235,7 +235,11 @@ def _link_ovcli_profile(*, config: dict, provider_config: dict, env_path: Path, 
     for key in ("endpoint", "api_key", "root_api_key", "account", "user", "agent", "api_key_type"):
         provider_config.pop(key, None)
     provider_config["use_ovcli_config"] = True
-    ov._remember_ovcli_path(provider_config, ovcli_path)
+    # Record the path only when it is not the default location (or the env var points elsewhere).
+    if os.environ.get(ov._OVCLI_CONFIG_ENV, "").strip() or ovcli_path.expanduser() != ov._default_ovcli_config_path().expanduser():
+        provider_config["ovcli_config_path"] = str(ovcli_path)
+    else:
+        provider_config.pop("ovcli_config_path", None)
     config["memory"]["provider"] = "openviking"
     config["memory"]["openviking"] = provider_config
     ov._write_env_vars(env_path, {}, remove_keys=ov._OPENVIKING_ENV_KEYS)
@@ -253,7 +257,8 @@ def _save_hermes_only_config(*, config: dict, provider_config: dict, env_path: P
     config["memory"]["provider"] = "openviking"
     config["memory"]["openviking"] = provider_config
     # Publish the file writer's cleaned values to the current process as well.
-    writes = {key: ov._env_line_safe(value) for key, value in ov._env_writes_from_connection_values(values).items()}
+    writes = {env_key: ov._env_line_safe(value) for env_key, key in zip(ov._OPENVIKING_ENV_KEYS, ov._CONNECTION_KEYS)
+              if (value := ov._clean_config_value(values.get(key)))}
     ov._write_env_vars(env_path, writes, remove_keys=ov._OPENVIKING_ENV_KEYS)
     os.environ.update(writes)
     for key in set(ov._OPENVIKING_ENV_KEYS) - set(writes):
