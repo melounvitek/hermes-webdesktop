@@ -136,8 +136,7 @@ def build_vendor_gateway_url(vendor: str) -> str:
 
 
 def resolve_managed_tool_gateway(
-    vendor: str,
-    gateway_builder: Optional[Callable[[str], str]] = None,
+    vendor: str, gateway_builder: Optional[Callable[[str], str]] = None,
     token_reader: Optional[Callable[[], Optional[str]]] = None,
 ) -> Optional[ManagedToolGatewayConfig]:
     """Resolve shared managed-tool gateway config for a vendor."""
