@@ -16,13 +16,13 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 
-# ``agent.auxiliary_client`` costs ~50 ms cold (credential_pool → auth → rich);
-# only the handlers need it. Both names stay module attributes so tests can
-# patch ``tools.vision_tools.async_call_llm``; truthy-skip means injected mocks win.
+# ``agent.auxiliary_client`` costs ~50 ms cold; only the handlers need it. Both
+# names stay module attributes so tests can patch ``tools.vision_tools.async_call_llm``;
+# truthy-skip means injected mocks win.
 async_call_llm: Any = None
 extract_content_or_reasoning: Any = None
 
@@ -30,10 +30,7 @@ extract_content_or_reasoning: Any = None
 def _load_auxiliary_client() -> None:
     global async_call_llm, extract_content_or_reasoning
     if async_call_llm is None or extract_content_or_reasoning is None:
-        from agent.auxiliary_client import (
-            async_call_llm as _acl,
-            extract_content_or_reasoning as _ecr,
-        )
+        from agent.auxiliary_client import async_call_llm as _acl, extract_content_or_reasoning as _ecr
         if async_call_llm is None:
             async_call_llm = _acl
         if extract_content_or_reasoning is None:
@@ -62,8 +59,17 @@ logger = logging.getLogger(__name__)
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
 
+def _cfg_auxiliary(*keys: str, default=None):
+    """``auxiliary.<keys...>`` from config.yaml; ``default`` when config is unavailable."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return cfg_get(load_config(), "auxiliary", *keys, default=default)
+    except Exception:
+        return default
+
+
 def _read_vision_setting(env_var: str, key: str, cast, minimum=None):
-    """Env var → config.yaml ``auxiliary.vision.<key>`` → None.
+    """Env var → ``auxiliary.vision.<key>`` → None.
 
     Values that fail ``cast`` or fall below ``minimum`` are skipped in favor of
     the next source (a cap can never be disabled by a bad value).
@@ -80,44 +86,26 @@ def _read_vision_setting(env_var: str, key: str, cast, minimum=None):
         val = _accept(env_val)
         if val is not None:
             return val
-    try:
-        from hermes_cli.config import cfg_get, load_config
-        raw = cfg_get(load_config(), "auxiliary", "vision", key)
-        if raw is not None:
-            return _accept(raw)
-    except Exception:
-        pass
-    return None
+    raw = _cfg_auxiliary("vision", key)
+    return None if raw is None else _accept(raw)
 
 
-def _resolve_download_timeout() -> float:
-    """HTTP download timeout (separate from ``auxiliary.vision.timeout``, which governs the LLM call)."""
-    val = _read_vision_setting("HERMES_VISION_DOWNLOAD_TIMEOUT", "download_timeout", float)
-    return 30.0 if val is None else val
+# HTTP download timeout (separate from ``auxiliary.vision.timeout``, which governs the LLM call).
+_VISION_DOWNLOAD_TIMEOUT = _read_vision_setting("HERMES_VISION_DOWNLOAD_TIMEOUT", "download_timeout", float)
+if _VISION_DOWNLOAD_TIMEOUT is None:
+    _VISION_DOWNLOAD_TIMEOUT = 30.0
 
-
-_VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
-
-# Hard cap on downloaded media (50 MB): bounds memory/disk against
-# attacker-hosted multi-gigabyte files.
+# Hard cap on downloaded media (50 MB): bounds memory/disk against attacker-hosted files.
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 
-# ---------------------------------------------------------------------------
-# CPU-burst concurrency cap (vision encode/resize)
-# ---------------------------------------------------------------------------
-# A turn can fan out dozens of vision_analyze calls ("analyze every frame");
-# each does a CPU-heavy base64 encode + Pillow resize. Sessions share one
-# process, so unbounded encodes saturate every core and starve the shared event
-# loop (the dashboard liveness probe flapped UNHEALTHY in prod). We cap ONLY the
-# CPU burst — the LLM calls stay fully concurrent — on a dedicated executor sized
-# to the usable core count (the resource actually exhausted; no fixed ceiling).
-# It must be a threading primitive: each call runs via model_tools._run_async on
-# a PER-THREAD event loop, so an asyncio semaphore cannot coordinate across them.
-# The default executor is NOT used: it is shared with the gateway/web server.
-import threading  # noqa: F401  (kept for downstream importers / patch targets)
-
-
+# CPU-burst concurrency cap. A turn can fan out dozens of vision_analyze calls,
+# each a CPU-heavy base64 encode + Pillow resize; unbounded they saturate every
+# core and starve the shared event loop. Only the CPU burst is capped (LLM calls
+# stay fully concurrent) on a dedicated executor sized to the usable core count.
+# Must be a threading primitive: each call runs via model_tools._run_async on a
+# PER-THREAD loop, so an asyncio semaphore cannot coordinate across them. The
+# default executor is NOT used: it is shared with the gateway/web server.
 def _detect_host_cpus() -> int:
     """Usable CPU count (``sched_getaffinity`` honors cpuset pinning), at least 1."""
     try:
@@ -134,19 +122,14 @@ def _resolve_vision_cpu_workers() -> int:
 
 _VISION_CPU_WORKERS = _resolve_vision_cpu_workers()
 
-_vision_cpu_executor = ThreadPoolExecutor(
-    max_workers=_VISION_CPU_WORKERS,
-    thread_name_prefix="vision-encode",
-)
+_vision_cpu_executor = ThreadPoolExecutor(max_workers=_VISION_CPU_WORKERS, thread_name_prefix="vision-encode")
 
 
 async def _run_encode_on_cpu_executor(fn, *args, **kwargs):
     """Run a sync encode/resize callable on the bounded vision CPU executor (never the LLM call)."""
     import functools
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _vision_cpu_executor, functools.partial(fn, *args, **kwargs)
-    )
+    return await loop.run_in_executor(_vision_cpu_executor, functools.partial(fn, *args, **kwargs))
 
 
 def _image_url_shape_ok(url: str) -> bool:
@@ -167,9 +150,9 @@ async def _validate_image_url_async(url: str) -> bool:
 def _is_retryable_download_error(error: Exception) -> bool:
     """True only for transient download failures worth retrying.
 
-    Fail-fast: 4xx other than 429 (missing/forbidden), PermissionError (policy
-    or SSRF block), ValueError (too large / blocked redirect — deterministic).
-    Retryable: 429, 5xx, transport errors and anything unclassified.
+    Fail-fast: 4xx other than 429, PermissionError (policy/SSRF block), ValueError
+    (too large / blocked redirect — deterministic). Retryable: 429, 5xx, transport
+    errors and anything unclassified.
     """
     if isinstance(error, (PermissionError, ValueError)):
         return False
@@ -186,20 +169,13 @@ _DOWNLOAD_USER_AGENT = (
 
 
 async def _stream_download_to_file(
-    client,
-    url: str,
-    destination: Path,
-    max_bytes: int,
-    *,
-    headers: dict,
-    media_label: str = "Image",
+    client, url: str, destination: Path, max_bytes: int, *, headers: dict, media_label: str = "Image",
 ) -> Path:
     """Stream a GET to *destination* via a temp file with a running size cap.
 
-    The body is never fully buffered: chunks go to a temp file and the running
-    count is checked after each one (Content-Length gives an early reject but
-    servers can omit or lie, so the streaming cap is authoritative). The temp
-    file is atomically moved onto *destination* on success, deleted on failure.
+    The body is never fully buffered; Content-Length gives an early reject but
+    servers can omit or lie, so the streaming cap is authoritative. The temp file
+    is atomically moved onto *destination* on success, deleted on failure.
     """
     from utils import atomic_replace
 
@@ -213,17 +189,13 @@ async def _stream_download_to_file(
             except ValueError:
                 declared_size = None
             if declared_size is not None and declared_size > max_bytes:
-                raise ValueError(
-                    f"{media_label} too large ({declared_size} bytes, max {max_bytes})"
-                )
+                raise ValueError(f"{media_label} too large ({declared_size} bytes, max {max_bytes})")
 
         blocked = check_website_access(str(response.url))
         if blocked:
             raise PermissionError(blocked["message"])
 
-        tmp_destination = destination.with_name(
-            f".{destination.name}.{uuid.uuid4().hex}.tmp"
-        )
+        tmp_destination = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
         bytes_written = 0
         try:
             with tmp_destination.open("wb") as f:
@@ -232,52 +204,37 @@ async def _stream_download_to_file(
                         continue
                     bytes_written += len(chunk)
                     if bytes_written > max_bytes:
-                        raise ValueError(
-                            f"{media_label} too large ({bytes_written} bytes, max {max_bytes})"
-                        )
+                        raise ValueError(f"{media_label} too large ({bytes_written} bytes, max {max_bytes})")
                     f.write(chunk)
             atomic_replace(tmp_destination, destination)
         except Exception:
             try:
                 tmp_destination.unlink(missing_ok=True)
             except OSError:
-                logger.debug(
-                    "Could not delete partial download: %s", tmp_destination, exc_info=True
-                )
+                logger.debug("Could not delete partial download: %s", tmp_destination, exc_info=True)
             raise
 
     return destination
 
 
 async def _ssrf_redirect_guard(response):
-    """Re-validate each redirect target: a public URL that 302s to
-    http://169.254.169.254/ would otherwise bypass the pre-flight is_safe_url check.
-    Async because httpx.AsyncClient awaits event hooks."""
+    """Re-validate each redirect target (a public URL 302ing to 169.254.169.254 would
+    otherwise bypass the pre-flight check). Async because httpx.AsyncClient awaits hooks."""
     from tools.url_safety import async_is_safe_url, redirect_target_from_response
     redirect_url = redirect_target_from_response(response)
     if redirect_url and not await async_is_safe_url(redirect_url):
-        raise ValueError(
-            f"Blocked redirect to private/internal address: {redirect_url}"
-        )
+        raise ValueError(f"Blocked redirect to private/internal address: {redirect_url}")
 
 
 async def _download_media(
-    url: str,
-    destination: Path,
-    max_retries: int,
-    *,
-    media_label: str,
-    accept: str,
-    max_bytes: int,
-    timeout: float,
-    retry_all: bool,
+    url: str, destination: Path, max_retries: int, *,
+    media_label: str, accept: str, max_bytes: int, timeout: float, retry_all: bool,
 ) -> Path:
     """Shared SSRF-safe streaming download with exponential backoff (2s/4s/8s).
 
     ``retry_all=False`` (images) only retries transient errors per
-    :func:`_is_retryable_download_error` — a 404/403 never succeeds on retry, so
-    burning three backoff rounds just inflates latency. ``retry_all=True``
-    (video) keeps the legacy retry-everything behavior.
+    :func:`_is_retryable_download_error` — a 404/403 never succeeds on retry.
+    ``retry_all=True`` (video) keeps the legacy retry-everything behavior.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -293,9 +250,7 @@ async def _download_media(
             # follow_redirects for CDNs; the client validates DNS at connect
             # time and the hook re-validates each redirect target.
             async with create_ssrf_safe_async_client(
-                timeout=timeout,
-                follow_redirects=True,
-                event_hooks={"response": [_ssrf_redirect_guard]},
+                timeout=timeout, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]},
             ) as client:
                 await _stream_download_to_file(
                     client, url, destination, max_bytes,
@@ -307,10 +262,8 @@ async def _download_media(
             last_error = e
             final = attempt >= max_retries - 1
             if final or (not retry_all and not _is_retryable_download_error(e)):
-                logger.error(
-                    "%s download failed after %s attempt(s): %s",
-                    media_label, attempt + 1, str(e)[:100], exc_info=True,
-                )
+                logger.error("%s download failed after %s attempt(s): %s",
+                             media_label, attempt + 1, str(e)[:100], exc_info=True)
                 if not retry_all:
                     raise
                 break
@@ -334,8 +287,7 @@ async def _download_image(image_url: str, destination: Path, max_retries: int = 
     return await _download_media(
         image_url, destination, max_retries,
         media_label="Image", accept="image/*,*/*;q=0.8",
-        max_bytes=_VISION_MAX_DOWNLOAD_BYTES, timeout=_VISION_DOWNLOAD_TIMEOUT,
-        retry_all=False,
+        max_bytes=_VISION_MAX_DOWNLOAD_BYTES, timeout=_VISION_DOWNLOAD_TIMEOUT, retry_all=False,
     )
 
 
@@ -348,12 +300,10 @@ def _image_to_base64_data_url(image_path: Path, mime_type: Optional[str] = None)
 # Absolute hard ceiling for vision payloads (20 MB): no major provider accepts more.
 _MAX_BASE64_BYTES = 20 * 1024 * 1024
 
-# Proactive embed caps for conversation-history reuse. Native vision_analyze
-# bakes the data URL into the tool result, re-sent every later turn; a 4 MB /
-# 7900px embed cost ~100-260K billed tokens per image. 256 KB keeps a 1568px
-# screenshot cheap enough to ride the session; Anthropic's tokenizer downsamples
-# to a 1568px long edge anyway, so pixels past that cost wire bytes for no
-# fidelity. The 20 MB / provider 5 MB caps remain as one-shot safety nets.
+# Proactive embed caps for conversation-history reuse: the native path bakes the
+# data URL into the tool result, re-sent every later turn (a 4 MB embed cost
+# ~100-260K billed tokens). Anthropic downsamples to a 1568px long edge anyway,
+# so pixels past that cost wire bytes for no fidelity.
 _EMBED_TARGET_BYTES = 256 * 1024
 _EMBED_MAX_DIMENSION = 1568
 
@@ -372,12 +322,8 @@ def _is_image_size_error(error: Exception) -> bool:
     return any(hint in err_str for hint in _SIZE_ERROR_HINTS + ("image_url", "invalid_request"))
 
 
-def _build_scale_note(
-    scale_info: Optional[dict],
-    crop_offset: Optional[dict],
-) -> Optional[str]:
-    """Coordinate-mapping disclosure for downscale (``scale_info``) and/or region
-    crop (``crop_offset``); ``None`` when neither applied — no note, no noise."""
+def _build_scale_note(scale_info: Optional[dict], crop_offset: Optional[dict]) -> Optional[str]:
+    """Coordinate-mapping disclosure for downscale and/or region crop; ``None`` when neither applied."""
     parts = []
     if scale_info:
         ow, oh = scale_info["orig_width"], scale_info["orig_height"]
@@ -385,20 +331,13 @@ def _build_scale_note(
         fx = ow / nw if nw else 1.0
         fy = oh / nh if nh else 1.0
         if f"{fx:.2f}" == f"{fy:.2f}":
-            factor_clause = (
-                f"multiply any coordinates you report by {fx:.2f} "
-                f"to map back to the original image."
-            )
+            factor_clause = f"multiply any coordinates you report by {fx:.2f} to map back to the original image."
         else:
             factor_clause = (
                 f"multiply any x coordinates you report by {fx:.2f} and "
-                f"any y coordinates by {fy:.2f} to map back to the "
-                f"original image."
+                f"any y coordinates by {fy:.2f} to map back to the original image."
             )
-        parts.append(
-            f"Image downscaled from {ow}x{oh} to {nw}x{nh} for vision; "
-            f"{factor_clause}"
-        )
+        parts.append(f"Image downscaled from {ow}x{oh} to {nw}x{nh} for vision; {factor_clause}")
     if crop_offset:
         parts.append(
             f"Analysis was performed on a cropped region of the original "
@@ -410,11 +349,10 @@ def _build_scale_note(
 
 
 def _import_pillow_for_resize():
-    """Pillow is a lazy-installable soft dependency; return ``PIL.Image`` or None.
+    """Return ``PIL.Image`` or None (Pillow is a lazy-installable soft dependency).
 
     ``prompt=False``: a blocking input() deadlocks the interactive CLI where
-    prompt_toolkit owns stdin. The install is gated by
-    security.allow_lazy_installs, so reaching it is already opt-in.
+    prompt_toolkit owns stdin; the install is already gated by security.allow_lazy_installs.
     """
     try:
         from PIL import Image
@@ -451,9 +389,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # base64 ~4/3 + data URL header
     needs_resize_for_bytes = estimated_b64 > max_base64_bytes
-    needs_resize_for_dims = (
-        max_dimension is not None and _image_exceeds_dimension(image_path, max_dimension)
-    )
+    needs_resize_for_dims = max_dimension is not None and _image_exceeds_dimension(image_path, max_dimension)
 
     data_url = None
     if not needs_resize_for_bytes and not needs_resize_for_dims:
@@ -493,8 +429,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
 
     def _record_scale(w: int, h: int) -> None:
         if scale_out is not None and (w, h) != orig_dims:
-            scale_out.update(orig_width=orig_dims[0], orig_height=orig_dims[1],
-                             new_width=w, new_height=h)
+            scale_out.update(orig_width=orig_dims[0], orig_height=orig_dims[1], new_width=w, new_height=h)
 
     for attempt in range(5):
         if attempt > 0:
@@ -519,8 +454,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
             dims_ok = max_dimension is None or max(img.width, img.height) <= max_dimension
             if len(candidate) <= max_base64_bytes and dims_ok:
                 logger.info("Auto-resized image fits: %.1f MB (quality=%s, %dx%d)",
-                            len(candidate) / (1024 * 1024), q,
-                            img.width, img.height)
+                            len(candidate) / (1024 * 1024), q, img.width, img.height)
                 _record_scale(img.width, img.height)
                 return candidate
 
@@ -533,18 +467,14 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
-# Native fast path: when the active main model supports vision, skip the aux
-# LLM and return the image bytes as a multimodal tool-result envelope. The
-# agent loop unwraps it into an OpenAI-style content list on the `tool` role;
-# provider adapters translate that per backend, so the main model "sees" the
-# pixels directly on its next turn.
+# Native fast path: a vision-capable main model gets the image bytes as a
+# multimodal tool-result envelope (agent loop unwraps it into an OpenAI-style
+# content list on the `tool` role); no aux LLM, no information loss.
 # ---------------------------------------------------------------------------
 
-# Providers whose tool results accept image content (spec docs verified
-# Apr-2026): Anthropic Messages (+ aggregators proxying Claude — assume support,
-# falling back to text would regress their frontier models), OpenAI Chat
-# Completions / Responses. Gemini is gated on model: only 3.x supports
-# multimodal functionResponse.
+# Providers whose tool results accept image content: Anthropic Messages (and
+# aggregators proxying Claude — assume support), OpenAI Chat/Responses. Gemini
+# is gated on model: only 3.x supports multimodal functionResponse.
 _TOOL_RESULT_MEDIA_PROVIDERS = frozenset({
     "openrouter", "nous", "vertex", "bedrock", "anthropic-vertex", "google-vertex",
     "anthropic", "claude", "anthropic-direct",
@@ -574,11 +504,9 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     try:
         from providers import get_provider_profile
         profile = get_provider_profile(p)
-        if profile is not None and profile.supports_vision:
-            return True
+        return profile is not None and bool(profile.supports_vision)
     except Exception:
-        pass
-    return False
+        return False
 
 
 def _should_use_native_vision_fast_path() -> bool:
@@ -605,17 +533,12 @@ def _should_use_native_vision_fast_path() -> bool:
 
 
 def _build_native_vision_tool_result(
-    image_url: str,
-    question: str,
-    image_data_url: str,
-    image_size_bytes: int,
-    scale_note: Optional[str] = None,
+    image_url: str, question: str, image_data_url: str, image_size_bytes: int, scale_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Multimodal tool-result envelope (``_multimodal`` + ``content`` list).
 
     The text part is intentionally minimal — the model already has the question
-    in context; it acknowledges the image is visible. ``text_summary`` is the
-    fallback for providers without multimodal tool results.
+    in context. ``text_summary`` is the fallback for providers without multimodal tool results.
     """
     text_part = (
         "Image loaded into your context — you can see it natively now. "
@@ -650,8 +573,7 @@ def _build_native_vision_tool_result(
 def _unlink_quietly(path: Optional[Path]) -> None:
     if path is not None:
         try:
-            if path.exists():
-                path.unlink()
+            path.unlink(missing_ok=True)
         except Exception:
             pass
 
@@ -673,14 +595,11 @@ async def _prepare_image(
 ) -> _PreparedImage:
     """Resolve → materialize → normalize → (validate) → (crop). Raises ``_ImagePrepError``.
 
-    The single resolver unifies data:/http/file/local/container sources and
-    enforces terminal-backend confinement; bytes land in a temp file so the
-    path-based encode/resize pipeline is reused. Unsupported formats (SVG, BMP)
-    are converted to PNG BEFORE encoding — an unsupported media_type baked into
-    immutable history would 400 on every resume. The crop runs BEFORE any
-    downscale so the region keeps the full resolution budget. Blocking
-    rasterizer/Pillow work is offloaded. Intermediate temp files are deleted;
-    on error nothing is left behind.
+    Unsupported formats (SVG, BMP) are converted to PNG BEFORE encoding — an
+    unsupported media_type baked into immutable history would 400 on every
+    resume. The crop runs BEFORE any downscale so the region keeps the full
+    resolution budget. Blocking rasterizer/Pillow work is offloaded; on error
+    no temp file is left behind.
     """
     from tools.image_source import ImageResolutionError, ResolveContext, resolve_image_source
 
@@ -697,9 +616,7 @@ async def _prepare_image(
     size_bytes = len(resolved.data)
     crop_offset: dict = {}
     try:
-        normalized_path, mime, norm_err = await asyncio.to_thread(
-            _normalize_to_supported_image, path, mime,
-        )
+        normalized_path, mime, norm_err = await asyncio.to_thread(_normalize_to_supported_image, path, mime)
         if norm_err or normalized_path is None:
             raise _ImagePrepError(norm_err or "Image normalization failed.")
         if normalized_path != path:
@@ -742,11 +659,15 @@ def _too_large_message(image_data_url: str) -> str:
     )
 
 
+async def _resize_prepared(prepared: _PreparedImage, scale_info: dict, **kwargs) -> str:
+    """Run :func:`_resize_image_for_vision` on the CPU executor for a prepared image."""
+    return await _run_encode_on_cpu_executor(
+        _resize_image_for_vision, prepared.path, mime_type=prepared.mime, scale_out=scale_info, **kwargs,
+    )
+
+
 async def _vision_analyze_native(
-    image_url: str,
-    question: str,
-    task_id: Optional[str] = None,
-    region: Optional[list] = None,
+    image_url: str, question: str, task_id: Optional[str] = None, region: Optional[list] = None,
 ) -> Any:
     """Fast path for vision-capable main models.
 
@@ -775,17 +696,11 @@ async def _vision_analyze_native(
         # resize DOWN to the history-reuse target whenever the byte or long-edge
         # cap is exceeded, not just at the 20 MB hard ceiling.
         _scale_info: dict = {}
-        _over_dims = await _run_encode_on_cpu_executor(
-            _image_exceeds_dimension, prepared.path, _EMBED_MAX_DIMENSION,
-        )
+        _over_dims = await _run_encode_on_cpu_executor(_image_exceeds_dimension, prepared.path, _EMBED_MAX_DIMENSION)
         if len(image_data_url) > _EMBED_TARGET_BYTES or _over_dims:
-            image_data_url = await _run_encode_on_cpu_executor(
-                _resize_image_for_vision,
-                prepared.path, mime_type=prepared.mime,
-                max_base64_bytes=_EMBED_TARGET_BYTES,
-                max_dimension=_EMBED_MAX_DIMENSION,
-                scale_out=_scale_info,
-                force_jpeg=True,
+            image_data_url = await _resize_prepared(
+                prepared, _scale_info,
+                max_base64_bytes=_EMBED_TARGET_BYTES, max_dimension=_EMBED_MAX_DIMENSION, force_jpeg=True,
             )
             # Reject rather than embed a session-wedging payload.
             if len(image_data_url) > _MAX_BASE64_BYTES:
@@ -796,9 +711,7 @@ async def _vision_analyze_native(
             question=question,
             image_data_url=image_data_url,
             image_size_bytes=prepared.size_bytes,
-            scale_note=_build_scale_note(
-                _scale_info or None, prepared.crop_offset or None,
-            ),
+            scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None),
         )
 
     except Exception as exc:
@@ -810,16 +723,16 @@ async def _vision_analyze_native(
             _unlink_quietly(prepared.path)
 
 
-def _read_vision_call_settings(default_timeout: float, *, min_timeout: Optional[float] = None):
-    """``auxiliary.vision.timeout`` / ``.temperature`` from config.yaml (defaults 120s-ish / 0.1).
+def _aux_call_kwargs(messages: list, model: Optional[str], default_timeout: float, *,
+                     min_timeout: Optional[float] = None) -> dict:
+    """``async_call_llm`` kwargs with ``auxiliary.vision.timeout`` / ``.temperature`` from config.
 
     Local vision models (llama.cpp, ollama) can take well over 30s, hence the
-    generous defaults; ``min_timeout`` lets video enforce a floor.
+    generous defaults (temperature 0.1); ``min_timeout`` lets video enforce a floor.
     """
     timeout, temperature = default_timeout, 0.1
     try:
-        from hermes_cli.config import cfg_get, load_config
-        _vision_cfg = cfg_get(load_config(), "auxiliary", "vision", default={})
+        _vision_cfg = _cfg_auxiliary("vision", default={})
         _vt = _vision_cfg.get("timeout")
         if _vt is not None:
             timeout = float(_vt) if min_timeout is None else max(float(_vt), min_timeout)
@@ -828,7 +741,21 @@ def _read_vision_call_settings(default_timeout: float, *, min_timeout: Optional[
             temperature = float(_vtemp)
     except Exception:
         pass
-    return timeout, temperature
+    call_kwargs = {"task": "vision", "messages": messages, "temperature": temperature, "timeout": timeout}
+    if model:
+        call_kwargs["model"] = model
+    return call_kwargs
+
+
+def _media_messages(user_prompt: str, part_type: str, data_url: str) -> list:
+    """Single user message: text + one ``image_url``/``video_url`` data-URL part."""
+    return [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": user_prompt},
+            {"type": part_type, part_type: {"url": data_url}},
+        ],
+    }]
 
 
 # Error-message classification for the aux-LLM paths: first matching hint set
@@ -859,6 +786,11 @@ _VIDEO_ERROR_RULES = (
      "The video is too large for the API. Try compressing or trimming "
      "the video (max ~50 MB). Error: {e}"),
 )
+# kind -> (debug tool name, error rules)
+_ANALYSIS_KINDS = {
+    "image": ("vision_analyze_tool", _IMAGE_ERROR_RULES),
+    "video": ("video_analyze_tool", _VIDEO_ERROR_RULES),
+}
 
 
 def _classify_analysis_error(e: Exception, rules, fallback: str, **fmt) -> str:
@@ -896,21 +828,83 @@ def _cleanup_temp_media(path: Optional[Path], label: str) -> None:
             path.unlink()
             logger.debug("Cleaned up temporary %s file", label)
         except Exception as cleanup_error:
-            logger.warning(
-                "Could not delete temporary file: %s", cleanup_error, exc_info=True
-            )
+            logger.warning("Could not delete temporary file: %s", cleanup_error, exc_info=True)
 
 
-async def _call_vision_llm(call_kwargs: dict, empty_log: str):
-    """Call the aux vision LLM, retrying once on empty content (reasoning-only response)."""
+async def _call_vision_llm(call_kwargs: dict, empty_log: str, response=None):
+    """Aux vision LLM analysis text, retrying once on empty content (reasoning-only response).
+
+    ``response``: an already-made first call (image path retries it on size errors itself).
+    """
     _load_auxiliary_client()
-    response = await async_call_llm(**call_kwargs)
+    if response is None:
+        response = await async_call_llm(**call_kwargs)
     analysis = extract_content_or_reasoning(response)
     if not analysis:
         logger.warning(empty_log)
-        response = await async_call_llm(**call_kwargs)
-        analysis = extract_content_or_reasoning(response)
+        analysis = extract_content_or_reasoning(await async_call_llm(**call_kwargs))
     return analysis
+
+
+async def _run_analysis(
+    kind: str, source: str, user_prompt: str, model: Optional[str],
+    stage: Callable[[str, dict, list], Awaitable[tuple]],
+) -> str:
+    """Shared aux-LLM analysis skeleton for image/video: interrupt check → ``stage`` → JSON result.
+
+    ``stage(user_prompt, debug_call_data, temp_paths)`` prepares the media and
+    returns ``(analysis, scale_note)``; temp files it appends to ``temp_paths``
+    are deleted in ``finally`` (also on error). Returns JSON
+    ``{"success": bool, "analysis": str}`` (``analysis`` carries the error
+    explanation on failure).
+    """
+    tool_name, rules = _ANALYSIS_KINDS[kind]
+    if not isinstance(user_prompt, str):
+        user_prompt = str(user_prompt) if user_prompt is not None else ""
+    debug_call_data = _debug_call_data(kind, source, user_prompt, model)
+    temp_paths: list = []
+    try:
+        from tools.interrupt import is_interrupted
+        if is_interrupted():
+            return tool_error("Interrupted", success=False)
+
+        logger.info("Analyzing %s: %s", kind, source[:60])
+        logger.info("User prompt: %s", user_prompt[:100])
+
+        analysis, scale_note = await stage(user_prompt, debug_call_data, temp_paths)
+
+        analysis_length = len(analysis) if analysis else 0
+        logger.info("%s analysis completed (%s characters)", kind.capitalize(), analysis_length)
+
+        analysis = analysis or f"There was a problem with the request and the {kind} could not be analyzed."
+        result = {
+            "success": True,
+            "analysis": f"[{scale_note}] {analysis}" if scale_note else analysis,
+        }
+        if scale_note:
+            result["scale_note"] = scale_note
+        debug_call_data["success"] = True
+        debug_call_data["analysis_length"] = analysis_length
+        return _finish_analysis(tool_name, debug_call_data, result)
+
+    except Exception as e:
+        error_msg = f"Error analyzing {kind}: {str(e)}"
+        logger.error("%s", error_msg, exc_info=True)
+        analysis = _classify_analysis_error(
+            e, rules,
+            f"There was a problem with the request and the {kind} could not be analyzed. Error: {{e}}",
+            model=model,
+        )
+        debug_call_data["error"] = error_msg
+        return _finish_analysis(tool_name, debug_call_data, {
+            "success": False,
+            "error": error_msg,
+            "analysis": analysis,
+        })
+
+    finally:
+        for path in temp_paths:
+            _cleanup_temp_media(path, kind)
 
 
 async def vision_analyze_tool(
@@ -923,23 +917,11 @@ async def vision_analyze_tool(
     """Describe an image (URL, local path, data: URL) with the auxiliary vision LLM.
 
     ``user_prompt`` is pre-formatted by the caller. Returns JSON
-    ``{"success": bool, "analysis": str}`` (``analysis`` carries the error
-    explanation on failure). Temp images live under $HERMES_HOME/cache/vision/.
+    ``{"success": bool, "analysis": str}``. Temp images live under $HERMES_HOME/cache/vision/.
     """
-    if not isinstance(user_prompt, str):
-        user_prompt = str(user_prompt) if user_prompt is not None else ""
-    debug_call_data = _debug_call_data("image", image_url, user_prompt, model)
-
-    prepared: Optional[_PreparedImage] = None
-    try:
-        from tools.interrupt import is_interrupted
-        if is_interrupted():
-            return tool_error("Interrupted", success=False)
-
-        logger.info("Analyzing image: %s", image_url[:60])
-        logger.info("User prompt: %s", user_prompt[:100])
-
+    async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
         prepared = await _prepare_image(image_url, task_id, region, validate_decode=False)
+        temp_paths.append(prepared.path)
         logger.info("Image ready (%.1f KB)", prepared.size_bytes / 1024)
 
         # Send at full resolution first; on a size rejection, downscale and retry.
@@ -950,95 +932,33 @@ async def vision_analyze_tool(
 
         _scale_info: dict = {}
         if len(image_data_url) > _MAX_BASE64_BYTES:
-            image_data_url = await _run_encode_on_cpu_executor(
-                _resize_image_for_vision,
-                prepared.path, mime_type=prepared.mime,
-                scale_out=_scale_info)
+            image_data_url = await _resize_prepared(prepared, _scale_info)
             if len(image_data_url) > _MAX_BASE64_BYTES:
                 raise ValueError(_too_large_message(image_data_url))
 
         debug_call_data["image_size_bytes"] = prepared.size_bytes
-
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": image_data_url}},
-            ],
-        }]
+        messages = _media_messages(prompt, "image_url", image_data_url)
 
         logger.info("Processing image with vision model...")
-        vision_timeout, vision_temperature = _read_vision_call_settings(120.0)
-        call_kwargs = {
-            "task": "vision",
-            "messages": messages,
-            "temperature": vision_temperature,
-            "timeout": vision_timeout,
-        }
-        if model:
-            call_kwargs["model"] = model
+        call_kwargs = _aux_call_kwargs(messages, model, 120.0)
         _load_auxiliary_client()
         try:
             response = await async_call_llm(**call_kwargs)
         except Exception as _api_err:
-            if (_is_image_size_error(_api_err)
-                    and len(image_data_url) > _RESIZE_TARGET_BYTES):
-                logger.info(
-                    "API rejected image (%.1f MB, likely too large); "
-                    "auto-resizing to ~%.0f MB and retrying...",
-                    len(image_data_url) / (1024 * 1024),
-                    _RESIZE_TARGET_BYTES / (1024 * 1024),
-                )
-                image_data_url = await _run_encode_on_cpu_executor(
-                    _resize_image_for_vision,
-                    prepared.path, mime_type=prepared.mime,
-                    scale_out=_scale_info)
-                messages[0]["content"][1]["image_url"]["url"] = image_data_url
-                response = await async_call_llm(**call_kwargs)
-            else:
+            if not (_is_image_size_error(_api_err) and len(image_data_url) > _RESIZE_TARGET_BYTES):
                 raise
-
-        analysis = extract_content_or_reasoning(response)
-        if not analysis:
-            logger.warning("Vision LLM returned empty content, retrying once")
+            logger.info(
+                "API rejected image (%.1f MB, likely too large); auto-resizing to ~%.0f MB and retrying...",
+                len(image_data_url) / (1024 * 1024), _RESIZE_TARGET_BYTES / (1024 * 1024),
+            )
+            image_data_url = await _resize_prepared(prepared, _scale_info)
+            messages[0]["content"][1]["image_url"]["url"] = image_data_url
             response = await async_call_llm(**call_kwargs)
-            analysis = extract_content_or_reasoning(response)
 
-        analysis_length = len(analysis)
-        logger.info("Image analysis completed (%s characters)", analysis_length)
+        analysis = await _call_vision_llm(call_kwargs, "Vision LLM returned empty content, retrying once", response)
+        return analysis, _build_scale_note(_scale_info or None, prepared.crop_offset or None)
 
-        analysis = analysis or "There was a problem with the request and the image could not be analyzed."
-        scale_note = _build_scale_note(_scale_info or None, prepared.crop_offset or None)
-        result = {
-            "success": True,
-            "analysis": f"[{scale_note}] {analysis}" if scale_note else analysis,
-        }
-        if scale_note:
-            result["scale_note"] = scale_note
-
-        debug_call_data["success"] = True
-        debug_call_data["analysis_length"] = analysis_length
-        return _finish_analysis("vision_analyze_tool", debug_call_data, result)
-
-    except Exception as e:
-        error_msg = f"Error analyzing image: {str(e)}"
-        logger.error("%s", error_msg, exc_info=True)
-        analysis = _classify_analysis_error(
-            e, _IMAGE_ERROR_RULES,
-            "There was a problem with the request and the image could not "
-            "be analyzed. Error: {e}",
-            model=model,
-        )
-        debug_call_data["error"] = error_msg
-        return _finish_analysis("vision_analyze_tool", debug_call_data, {
-            "success": False,
-            "error": error_msg,
-            "analysis": analysis,
-        })
-
-    finally:
-        if prepared is not None:
-            _cleanup_temp_media(prepared.path, "image")
+    return await _run_analysis("image", image_url, user_prompt, model, stage)
 
 
 def check_vision_requirements() -> bool:
@@ -1047,8 +967,7 @@ def check_vision_requirements() -> bool:
     Mirrors its runtime fallback chain: explicit ``auxiliary.vision.provider``,
     then the auto chain (main provider → openrouter → nous) — without the auto
     step the tool would vanish whenever the explicit name was unresolvable.
-    Probe mode skips real SDK client construction (openai import + SSL setup)
-    on the tool-gating path; resolution policy is identical.
+    Probe mode skips real SDK client construction on the tool-gating path.
     """
     try:
         from agent.auxiliary_client import aux_probe_mode, resolve_vision_provider_client
@@ -1113,18 +1032,13 @@ VISION_ANALYZE_SCHEMA = {
 def _configured_aux_model(sections: tuple, env_vars: tuple) -> Optional[str]:
     """First non-empty ``auxiliary.<section>.model`` from config.yaml, else the
     first non-empty env var (legacy override), else None."""
-    try:
-        from hermes_cli.config import cfg_get, load_config
-        _cfg = load_config()
-        for section in sections:
-            _vmodel = cfg_get(_cfg, "auxiliary", section, "model")
-            if _vmodel:
-                model = str(_vmodel).strip() or None
-                if model:
-                    return model
-                break
-    except Exception:
-        pass
+    for section in sections:
+        _vmodel = _cfg_auxiliary(section, "model")
+        if _vmodel:
+            model = str(_vmodel).strip()
+            if model:
+                return model
+            break
     for env_var in env_vars:
         val = os.getenv(env_var, "").strip()
         if val:
@@ -1140,8 +1054,7 @@ async def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> str:
 
     # No concurrency gate around the whole analysis — the CPU burst is bounded
     # inside the encode/resize step, so multi-image fan-out keeps full request
-    # concurrency. Native fast path: main model sees the pixels directly, no
-    # aux call, no information loss.
+    # concurrency. Native fast path: main model sees the pixels directly.
     if _should_use_native_vision_fast_path():
         logger.info("vision_analyze: native fast path")
         return await _vision_analyze_native(image_url, question, task_id=task_id, region=region)
@@ -1191,10 +1104,7 @@ def _detect_video_mime_type(video_path: Path) -> Optional[str]:
 
 
 def _unsupported_video_format(suffix: str) -> str:
-    return (
-        f"Unsupported video format: '{suffix}'. "
-        f"Supported: {', '.join(sorted(_VIDEO_MIME_TYPES.keys()))}"
-    )
+    return f"Unsupported video format: '{suffix}'. Supported: {', '.join(sorted(_VIDEO_MIME_TYPES.keys()))}"
 
 
 def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None) -> str:
@@ -1212,23 +1122,18 @@ async def _materialize_video_from_terminal_backend(video_source: str, task_id: O
     """Read a path via the shared media resolver into a local temp video file.
 
     ``permitted=("video",)`` gives terminal-backend video reads the exact
-    pipeline vision_analyze uses: media-cache host reads (gateway downloads live
-    on the host, not in the sandbox), bounded in-sandbox exec-read, lazy env
-    bring-up, the credential-read guard, and the 50MB ingest cap.
+    pipeline vision_analyze uses: media-cache host reads, bounded in-sandbox
+    exec-read, lazy env bring-up, the credential-read guard, and the 50MB ingest cap.
     """
     from tools.image_source import ImageResolutionError, ResolveContext, resolve_image_source
 
-    source = video_source
-    if source.startswith("file://"):
-        source = source[len("file://"):]
+    source = video_source.removeprefix("file://")
     suffix = Path(source).suffix.lower()
     if suffix not in _VIDEO_MIME_TYPES:
         raise ValueError(_unsupported_video_format(suffix))
 
     try:
-        resolved = await resolve_image_source(
-            video_source, ResolveContext(task_id=task_id), permitted=("video",)
-        )
+        resolved = await resolve_image_source(video_source, ResolveContext(task_id=task_id), permitted=("video",))
     except ImageResolutionError as exc:
         raise ValueError(f"Could not read video from terminal backend: {exc}") from exc
 
@@ -1248,6 +1153,35 @@ async def _download_video(video_url: str, destination: Path, max_retries: int = 
     )
 
 
+async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths: list) -> Path:
+    """Local video path for a terminal-backend path, local file, or HTTP(S) URL.
+
+    Only files this function created are appended to ``temp_paths`` — never user-provided paths.
+    """
+    local_path = Path(os.path.expanduser(video_url.removeprefix("file://")))
+
+    from tools.image_source import _is_local_terminal_backend
+    if not _is_local_terminal_backend() and _is_path_like_video_source(video_url):
+        logger.info("Reading video source via terminal backend: %s", video_url)
+        path = await _materialize_video_from_terminal_backend(video_url, task_id)
+        temp_paths.append(path)
+        return path
+    if local_path.is_file():
+        from agent.file_safety import raise_if_read_blocked
+        raise_if_read_blocked(str(local_path))
+        logger.info("Using local video file: %s", video_url)
+        return local_path
+    if await _validate_image_url_async(video_url):
+        blocked = check_website_access(video_url)
+        if blocked:
+            raise PermissionError(blocked["message"])
+        path = get_hermes_dir("cache/video", "temp_video_files") / f"temp_video_{uuid.uuid4()}.mp4"
+        temp_paths.append(path)
+        await _download_video(video_url, path)
+        return path
+    raise ValueError("Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path.")
+
+
 async def video_analyze_tool(
     video_url: str,
     user_prompt: str,
@@ -1255,47 +1189,8 @@ async def video_analyze_tool(
     task_id: Optional[str] = None,
 ) -> str:
     """Analyze a video via multimodal LLM. Returns JSON {success, analysis}."""
-    if not isinstance(user_prompt, str):
-        user_prompt = str(user_prompt) if user_prompt is not None else ""
-    debug_call_data = _debug_call_data("video", video_url, user_prompt, model)
-
-    temp_video_path = None
-    should_cleanup = True
-
-    try:
-        from tools.interrupt import is_interrupted
-        if is_interrupted():
-            return tool_error("Interrupted", success=False)
-
-        logger.info("Analyzing video: %s", video_url[:60])
-        logger.info("User prompt: %s", user_prompt[:100])
-
-        resolved_url = video_url
-        if resolved_url.startswith("file://"):
-            resolved_url = resolved_url[len("file://"):]
-        local_path = Path(os.path.expanduser(resolved_url))
-
-        from tools.image_source import _is_local_terminal_backend
-        if not _is_local_terminal_backend() and _is_path_like_video_source(video_url):
-            logger.info("Reading video source via terminal backend: %s", video_url)
-            temp_video_path = await _materialize_video_from_terminal_backend(video_url, task_id)
-        elif local_path.is_file():
-            from agent.file_safety import raise_if_read_blocked
-            raise_if_read_blocked(str(local_path))
-            logger.info("Using local video file: %s", video_url)
-            temp_video_path = local_path
-            should_cleanup = False
-        elif await _validate_image_url_async(video_url):
-            blocked = check_website_access(video_url)
-            if blocked:
-                raise PermissionError(blocked["message"])
-            temp_dir = get_hermes_dir("cache/video", "temp_video_files")
-            temp_video_path = temp_dir / f"temp_video_{uuid.uuid4()}.mp4"
-            await _download_video(video_url, temp_video_path)
-        else:
-            raise ValueError(
-                "Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path."
-            )
+    async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
+        temp_video_path = await _materialize_video(video_url, task_id, temp_paths)
 
         video_size_bytes = temp_video_path.stat().st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
@@ -1317,56 +1212,12 @@ async def video_analyze_tool(
             )
 
         debug_call_data["video_size_bytes"] = video_size_bytes
-
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "video_url", "video_url": {"url": video_data_url}},
-            ],
-        }]
-
-        vision_timeout, vision_temperature = _read_vision_call_settings(180.0, min_timeout=180.0)
-        call_kwargs = {
-            "task": "vision",
-            "messages": messages,
-            "temperature": vision_temperature,
-            "timeout": vision_timeout,
-        }
-        if model:
-            call_kwargs["model"] = model
-
+        messages = _media_messages(prompt, "video_url", video_data_url)
+        call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
         analysis = await _call_vision_llm(call_kwargs, "Empty video response, retrying once")
+        return analysis, None
 
-        analysis_length = len(analysis) if analysis else 0
-        logger.info("Video analysis completed (%s characters)", analysis_length)
-
-        result = {
-            "success": True,
-            "analysis": analysis or "There was a problem with the request and the video could not be analyzed.",
-        }
-        debug_call_data["success"] = True
-        debug_call_data["analysis_length"] = analysis_length
-        return _finish_analysis("video_analyze_tool", debug_call_data, result)
-
-    except Exception as e:
-        error_msg = f"Error analyzing video: {str(e)}"
-        logger.error("%s", error_msg, exc_info=True)
-        analysis = _classify_analysis_error(
-            e, _VIDEO_ERROR_RULES,
-            "There was a problem with the request and the video could not "
-            "be analyzed. Error: {e}",
-        )
-        debug_call_data["error"] = error_msg
-        return _finish_analysis("video_analyze_tool", debug_call_data, {
-            "success": False,
-            "error": error_msg,
-            "analysis": analysis,
-        })
-
-    finally:
-        if should_cleanup:
-            _cleanup_temp_media(temp_video_path, "video")
+    return await _run_analysis("video", video_url, user_prompt, model, stage)
 
 
 VIDEO_ANALYZE_SCHEMA = {
@@ -1403,9 +1254,7 @@ def _handle_video_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
         "including visual content, motion, audio cues, text overlays, and scene "
         f"transitions. Then answer the following question:\n\n{question}"
     )
-    model = _configured_aux_model(
-        ("video", "vision"), ("AUXILIARY_VIDEO_MODEL", "AUXILIARY_VISION_MODEL"),
-    )
+    model = _configured_aux_model(("video", "vision"), ("AUXILIARY_VIDEO_MODEL", "AUXILIARY_VISION_MODEL"))
     return video_analyze_tool(video_url, full_prompt, model, task_id=kw.get("task_id"))
 
 
