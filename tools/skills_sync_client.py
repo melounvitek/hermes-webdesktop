@@ -1,18 +1,12 @@
 #!/usr/bin/env python3
-"""Skill Sync client -- the low-level sync layer.
-
-Builds content-addressed objects from local skills and talks the sync wire contract (push
-objects + CAS a ref, pull the owner's HEAD, three-way merge on a 409). Driven by the debounced
-push hook in ``skill_manage``, ``maybe_pull_skills`` at the curator tick sites, and ``hermes
-sync``. Lives under tools/ (NOT hermes_cli/) so it never imports the CLI at module load;
-``skills_sync_client_wire`` and ``skills_sync_client_org`` are re-exported here.
-ACCESS GATE (pre-launch): sync is INERT unless the signed-in user is a Nous admin, read off the
-``tool_gateway_admin`` JWT claim (NAS's misleading name for the global portal-admin permission;
-replace with a real entitlement before shipping). OPT-IN DEFAULT (provisional): nothing syncs
-unless the user marks a skill for sync -- local intent is the ``sync`` flag in ``.usage.json``,
-the DURABLE cross-device state is the committed ``sync-manifest`` blob in the plane. Only
-agent-created + user-authored skills under ``~/.hermes/skills/`` are eligible.
-"""
+"""Skill Sync client -- the low-level sync layer (push objects + CAS a ref, pull the owner's
+HEAD, three-way merge on a 409). Driven by the debounced ``skill_manage`` push hook, the curator
+tick ``maybe_pull_skills`` and ``hermes sync``. Lives under tools/ so it never imports the CLI at
+module load; ``skills_sync_client_wire`` / ``skills_sync_client_org`` are re-exported here.
+ACCESS GATE (pre-launch): INERT unless the user is a Nous admin per the ``tool_gateway_admin``
+JWT claim (NAS's misleading name for the global portal-admin permission; replace before shipping).
+OPT-IN DEFAULT (provisional): local intent is the ``sync`` flag in ``.usage.json``; the DURABLE
+cross-device state is the ``sync-manifest`` blob in the plane. Only ~/.hermes/skills/ skills qualify."""
 
 from __future__ import annotations
 
@@ -37,9 +31,8 @@ logger = logging.getLogger(__name__)
 _merge_skill = merge_skill
 _skill_trees_of_root = skill_trees_of_root
 
-# Identity & access gate. The bearer comes from resolve_nous_runtime_credentials() (file lock,
-# host allowlist, refresh); its payload is decoded unverified to read the gate claim, whose
-# wire name is NAS's and means "Nous admin" (Permissions.ADMIN_ACCESS).
+# Gate claim (NAS's wire name; means "Nous admin" / Permissions.ADMIN_ACCESS). The bearer comes
+# from resolve_nous_runtime_credentials(); its payload is decoded unverified to read this.
 NOUS_ADMIN_CLAIM = "tool_gateway_admin"
 
 
@@ -48,13 +41,11 @@ class SyncInertError(RuntimeError):
 
 
 def resolve_identity() -> Dict[str, Any]:
-    """``{api_key, base_url, owner, nous_admin, claims}``; SyncInertError if not logged in / no
-    bearer. ``owner`` is advisory for local ref naming only -- the server derives the real owner
-    from the bearer. The JWT is decoded WITHOUT signature verification: safe because the claims
-    never drive authz here (the server re-verifies), only whether to attempt sync at all."""
+    """``{api_key, base_url, owner, nous_admin, claims}``; SyncInertError if not logged in / no bearer.
+    ``owner`` is advisory (local ref naming; the server derives the real one). The JWT is decoded
+    WITHOUT verification: safe, the claims only decide whether to attempt sync, never authz."""
     try:
         from hermes_cli.auth import resolve_nous_runtime_credentials
-
         creds = resolve_nous_runtime_credentials() or {}
     except Exception as e:
         raise SyncInertError(f"no Nous credentials: {e}") from e
@@ -63,7 +54,6 @@ def resolve_identity() -> Dict[str, Any]:
         raise SyncInertError("no bearer token available")
     try:
         import jwt  # PyJWT, a core dependency
-
         claims = jwt.decode(api_key, options={"verify_signature": False, "verify_exp": False}) or {}
     except Exception as e:
         logger.debug("skills_sync_client: JWT payload decode failed: %s", e)
@@ -74,11 +64,9 @@ def resolve_identity() -> Dict[str, Any]:
         "nous_admin": claims.get(NOUS_ADMIN_CLAIM) is True, "claims": claims}
 
 
-# Configuration -- env-first so a Hermes Cloud instance can enable sync purely through the
-# environment. Every knob: HERMES_SYNC_<KEY> env -> config.yaml ``sync.<key>`` -> default
-# (keys: base_url = the sync plane, NOT the inference URL; enabled; default_opt_in; org_auto_propose).
-
-#: Production Skill Sync plane; a normal user configures nothing.
+# Configuration -- env-first so Hermes Cloud can enable sync via environment alone. Every knob:
+# HERMES_SYNC_<KEY> env -> config.yaml ``sync.<key>`` -> default (base_url = the sync plane, NOT
+# the inference URL; enabled; default_opt_in; org_auto_propose).
 DEFAULT_SYNC_BASE_URL = "https://gateway-gateway.nousresearch.com"
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -89,7 +77,6 @@ def _sync_config(key: str) -> Any:
     """``sync.<key>`` from config.yaml, or None. Lazy import: must not import the CLI at module load."""
     try:
         from hermes_cli.config import load_config
-
         return ((load_config() or {}).get("sync") or {}).get(key)
     except Exception as e:
         logger.debug("skills_sync_client: config sync.%s read failed: %s", key, e)
@@ -110,10 +97,8 @@ def resolve_sync_base_url() -> Optional[str]:
 
 def _parse_bool(value: Any) -> Optional[bool]:
     """Parse a config/env bool; None if unrecognized so callers fall through to the next layer."""
-    if isinstance(value, bool):
+    if isinstance(value, bool) or value is None:
         return value
-    if value is None:
-        return None
     s = str(value).strip().lower()
     return True if s in _TRUE else False if s in _FALSE else None
 
@@ -148,7 +133,6 @@ def sync_default_opt_in() -> bool:
 
 def _skills_dir() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "skills"
 
 
@@ -177,9 +161,8 @@ def _skill_rel_path(skill_name: str) -> Optional[PurePosixPath]:
 
 
 def is_sync_eligible(skill_name: str) -> bool:
-    """Candidate for sync (before the opt-in check): present locally, NOT bundled, NOT hub-installed,
-    NOT external, NOT under the ``_org/`` mirror (enterprise content must never ride a personal
-    push). Mirrors the curator's exclusions (tools/skill_usage.py)."""
+    """Sync candidate (before opt-in): local, NOT bundled/hub-installed/external, NOT under ``_org/``
+    (enterprise content never rides a personal push). Mirrors the curator's exclusions."""
     try:
         from tools.skill_usage import is_bundled, is_hub_installed, _find_skill_dir
         from agent.skill_utils import is_external_skill_path
@@ -195,9 +178,8 @@ def is_sync_eligible(skill_name: str) -> bool:
 
 
 def list_synced_skill_names() -> List[str]:
-    """Names of skills that should sync (sorted, deduped), per ``sync_default_opt_in()``: opt-in ->
-    eligible skills whose usage record has ``sync: true``; opt-out -> every eligible skill unless
-    its record has ``sync: false``."""
+    """Sorted skill names that should sync: opt-in -> eligible skills with ``sync: true``;
+    opt-out (``sync_default_opt_in()``) -> every eligible skill unless ``sync: false``."""
     try:
         from tools.skill_usage import load_usage
     except Exception:
@@ -212,8 +194,7 @@ def list_synced_skill_names() -> List[str]:
 
 
 def _all_local_skill_names() -> List[str]:
-    """Every locally-present skill name (a dir under ~/.hermes/skills/ with a ``SKILL.md``;
-    frontmatter ``name`` falling back to the dir name). Eligibility is applied by the caller."""
+    """Every local skill name (dir under ~/.hermes/skills/ with SKILL.md; frontmatter ``name`` or dir name)."""
     names: List[str] = []
     root = _skills_dir()
     try:
@@ -221,12 +202,9 @@ def _all_local_skill_names() -> List[str]:
             if skill_md.is_symlink():
                 continue
             name = skill_md.parent.name
-            try:
+            with suppress(Exception):
                 from tools.skill_usage import _read_skill_name
-
                 name = _read_skill_name(skill_md, name)
-            except Exception:
-                pass
             if name:
                 names.append(name)
     except OSError as e:
@@ -248,7 +226,6 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
         return adopted
     try:
         from tools.skill_usage import set_sync, is_curation_eligible, is_sync_enabled
-
         for sname, enabled in remote_manifest.items():
             if enabled and is_curation_eligible(sname) and not is_sync_enabled(sname):
                 set_sync(sname, True)
@@ -264,7 +241,6 @@ def _default_device_label() -> str:
     """Short hostname + random suffix (two machines can share a hostname); bare uuid if unusable."""
     import socket
     import uuid
-
     try:
         host = socket.gethostname() or ""
     except OSError:
@@ -274,17 +250,14 @@ def _default_device_label() -> str:
 
 
 def stable_device_id() -> str:
-    """Stable per-device label persisted at ~/.hermes/skills/.sync_device_id. An existing file
-    always wins; otherwise seeded from HERMES_SYNC_DEVICE_NAME (first use only; lets Hermes Cloud
-    name hosted instances) or a friendly default, then persisted so a later ``set_device_name()`` wins."""
+    """Per-device label at ~/.hermes/skills/.sync_device_id. An existing file always wins; else seeded
+    from HERMES_SYNC_DEVICE_NAME (first use only, for Hermes Cloud) or a friendly default, then persisted."""
     path = _skills_dir() / ".sync_device_id"
-    try:
+    with suppress(OSError):
         if path.exists():
             val = path.read_text(encoding="utf-8").strip()
             if val:
                 return val
-    except OSError:
-        pass
     val = (os.environ.get("HERMES_SYNC_DEVICE_NAME") or "").strip() or _default_device_label()
     try:
         _write_device_id(val)
@@ -308,9 +281,8 @@ def set_device_name(name: str) -> str:
     return cleaned
 
 
-# Local sync STATE: the last HEAD we pushed/pulled + the root tree at that point (FULL-digest
-# namespace). Distinct from the bundled manifest (skills_sync.py) and from the plane's
-# `sync-manifest` object. Lives at ~/.hermes/skills/.sync_state; legacy `.sync_manifest` migrates on read.
+# Local sync STATE: last HEAD pushed/pulled + its root tree (FULL-digest namespace). Distinct from
+# the bundled manifest (skills_sync.py) and the plane's `sync-manifest`. ~/.hermes/skills/.sync_state.
 
 _EMPTY_STATE: Dict[str, Any] = {"head": None, "skills": {}}
 
@@ -334,9 +306,8 @@ def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict
 
 
 def read_sync_state() -> Dict[str, Any]:
-    """``{"head": "sha256:...|null", "skills": {...}}``; a default on missing/corrupt. If
-    ``.sync_state`` is absent but the legacy ``.sync_manifest`` exists it is read, rewritten to
-    the new path and removed, so no head record is lost."""
+    """``{"head": "sha256:...|null", "skills": {...}}``; a default on missing/corrupt. A legacy
+    ``.sync_manifest`` is migrated to ``.sync_state`` on read so no head record is lost."""
     path = _sync_state_path()
     if path.exists():
         return _load_state_file(path) or dict(_EMPTY_STATE)
@@ -355,7 +326,6 @@ def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
     try:
         from tools.skill_usage import _atomic_write
-
         _atomic_write(
             _sync_state_path(), ".sync_state_",
             lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
@@ -369,17 +339,13 @@ def _record_head(state: Dict[str, Any], head: str, root: str) -> None:
     write_sync_state(state)
 
 
-# Profile snapshot -- the root tree mirrors each synced skill's relative path under
-# ~/.hermes/skills/ (category dirs become intermediate trees).
+# Profile snapshot -- the root tree mirrors each skill's relative path (categories = intermediate trees).
 
-def snapshot_profile(
-    skill_names: List[str], *, max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES
-) -> Tuple[ObjectSet, str, Dict[str, str]]:
-    """Build all objects for *skill_names* + the profile-root tree -> ``(objects, root_tree_hash,
-    {skill_name: tree_hash})``. Skills whose blobs exceed *max_object_bytes* are skipped (logged).
-    The root also carries the ``sync-manifest`` blob listing every included skill as enabled."""
+def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
+                     ) -> Tuple[ObjectSet, str, Dict[str, str]]:
+    """All objects for *skill_names* + profile root -> ``(objects, root_hash, {name: tree_hash})``.
+    Oversized skills are skipped (logged); the root carries a ``sync-manifest`` blob of included skills."""
     from tools.skill_usage import _find_skill_dir
-
     objects = ObjectSet()
     skill_tree_map: Dict[str, str] = {}
     root: Dict[str, Any] = {}
@@ -405,9 +371,8 @@ def user_head_ref(owner: str) -> str:
     return f"refs/user/{owner}/HEAD"
 
 
-def _personal_client(
-    identity: Optional[Dict[str, Any]], client: Optional[SyncClient]
-) -> Tuple[Dict[str, Any], Optional[SyncClient]]:
+def _personal_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient],
+                     ) -> Tuple[Dict[str, Any], Optional[SyncClient]]:
     """Identity + client for a personal sync op; ``client`` is None when no base URL is configured."""
     identity = identity if identity is not None else resolve_identity()
     if client is None:
@@ -419,15 +384,10 @@ def _personal_client(
 _NO_BASE_URL = {"ok": False, "reason": "no sync base url configured", "noop": True}
 
 
-def push_skills(
-    client: Optional[SyncClient] = None,
-    *,
-    skill_names: Optional[List[str]] = None,
-    identity: Optional[Dict[str, Any]] = None,
-    message: str = "hermes skill sync") -> Dict[str, Any]:
-    """Push opted-in skills to ``refs/user/<owner>/HEAD``: upload new objects, CAS HEAD. A 409 with
-    an actual head -> three-way merge + one retry; a 409 against a NON-EXISTENT ref (stale local
-    head, e.g. from another plane) -> redo the CAS as a create. Never raises for inert/no-op cases."""
+def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[List[str]] = None,
+                identity: Optional[Dict[str, Any]] = None, message: str = "hermes skill sync") -> Dict[str, Any]:
+    """Push opted-in skills to ``refs/user/<owner>/HEAD`` (upload objects, CAS HEAD). 409 with an actual
+    head -> three-way merge + one retry; 409 on a NON-EXISTENT ref (stale local head) -> CAS as a create."""
     identity, client = _personal_client(identity, client)
     if client is None:
         return dict(_NO_BASE_URL)
@@ -466,18 +426,11 @@ def push_skills(
     return result
 
 
-def _resolve_push_conflict(
-    client: SyncClient,
-    identity: Dict[str, Any],
-    actual_head: str,
-    our_root: str,
-    our_commit: str,
-    objects: ObjectSet,
-    message: str,
-    base_head: Optional[str]) -> Dict[str, Any]:
-    """Three-way merge per skill against the base we forked from (see merge_skill): each side
-    changing a DIFFERENT skill -> merge commit (2 parents) + CAS retry; both changing the SAME
-    skill -> TRUE OVERLAP -> written to refs/user/<owner>/conflict/<n> for out-of-band resolution."""
+def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_head: str, our_root: str,
+                           our_commit: str, objects: ObjectSet, message: str, base_head: Optional[str],
+                           ) -> Dict[str, Any]:
+    """Per-skill three-way merge against the forked base (merge_skill): different skills changed ->
+    merge commit + CAS retry; SAME skill -> OVERLAP -> refs/user/<owner>/conflict/<n> for out-of-band."""
     owner = identity["owner"]
     ours_trees = skill_trees_of_root(client, our_root)
     theirs_trees = skill_trees_of_root(client, root_tree_of_commit(client, actual_head))
@@ -535,12 +488,10 @@ def _next_conflict_index(client: SyncClient, owner: str) -> int:
     return (max(used) + 1) if used else 1
 
 
-def pull_skills(
-    client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """Pull the owner's HEAD and materialize opted-in skills under ~/.hermes/skills/ if it advanced
-    past our recorded head. Opt-in intent is first adopted FROM the plane manifest, then only
-    opted-in paths are written so a pull never resurrects a skill the user hasn't chosen."""
+def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None,
+                ) -> Dict[str, Any]:
+    """Pull the owner's HEAD (if it advanced) and materialize opted-in skills. Opt-ins are first
+    adopted FROM the plane manifest; only opted-in paths are written (never resurrects a skill)."""
     identity, client = _personal_client(identity, client)
     if client is None:
         return dict(_NO_BASE_URL)
@@ -565,12 +516,10 @@ def pull_skills(
     return {"ok": True, "head": head, "updated": sorted(updated), "opt_in_adopted": sorted(adopted)}
 
 
-# Gated public entrypoints (gate-and-swallow, like the curator's maybe_run_curator): best-effort,
-# never raise, return a result dict or None.
+# Gated public entrypoints (gate-and-swallow, like maybe_run_curator): never raise; dict or None.
 
 def _gate_and_swallow(op: str, run: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]):
-    """Run *run(identity)* only if every background-sync gate holds (Nous admin, feature on, base
-    URL); None when inert or on any error."""
+    """Run *run(identity)* only if all gates hold (Nous admin, feature on, base URL); None if inert/error."""
     try:
         identity = resolve_identity()
         if not identity.get("nous_admin") or not sync_feature_enabled() or not resolve_sync_base_url():
@@ -595,8 +544,7 @@ def maybe_pull_skills() -> Optional[Dict[str, Any]]:
 
 
 def sync_status() -> Dict[str, Any]:
-    """Status snapshot for ``hermes sync status``. Never raises. ``org_available`` False means the
-    account isn't in a shared organisation (org workflow does not apply), not that anything is broken."""
+    """Snapshot for ``hermes sync status``; never raises. ``org_available`` False = not in a shared org."""
     status: Dict[str, Any] = {
         "nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
         "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
@@ -627,8 +575,7 @@ def sync_status() -> Dict[str, Any]:
     return status
 
 
-# Org-shared skills live in skills_sync_client_org; imported last because that module reads
-# this module's state lazily.
+# Imported last: skills_sync_client_org reads this module's state lazily.
 from tools.skills_sync_client_org import (  # noqa: E402,F401  (re-exports)
     ORG_DIR_NAME, _ORG_CAS_MAX_ATTEMPTS, _clear_active_org_marker, _org_baseline_path,
     _read_org_baseline, _read_org_head, _skill_dir_fingerprint, _write_active_org_marker,

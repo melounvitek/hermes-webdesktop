@@ -51,9 +51,8 @@ def wire_address(data: bytes) -> str:
 
 
 def canonical_json_bytes(obj: Dict[str, Any]) -> bytes:
-    """Canonical JSON for tree/commit hashing: UTF-8, sorted keys, no whitespace, no trailing
-    newline. Arrays must already be in contract order (tree entries by name, commit parents by
-    significance). Client and server MUST agree byte-for-byte or a push fails ``422 hash_mismatch``."""
+    """Canonical JSON for hashing: UTF-8, sorted keys, no whitespace/trailing newline; arrays already in
+    contract order. Client and server MUST agree byte-for-byte or a push fails ``422 hash_mismatch``."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
@@ -66,9 +65,8 @@ def build_sync_manifest_bytes(skills: Dict[str, bool]) -> bytes:
 
 
 def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
-    """Parse ``sync-manifest`` bytes into ``{name: enabled}``, or None if malformed.
-    Strict (mirrors gateway-gateway ``parseSyncManifest``): unknown type, version != 1, non-list
-    skills or a malformed entry all reject -- a bad manifest must not read as "nothing opted in"."""
+    """``{name: enabled}`` from ``sync-manifest`` bytes, or None if malformed. Strict (mirrors gateway
+    ``parseSyncManifest``): a bad manifest must not read as "nothing opted in"."""
     try:
         value = json.loads(data.decode("utf-8"))
     except Exception:
@@ -80,9 +78,7 @@ def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
         return None
     out: Dict[str, bool] = {}
     for raw in value["skills"]:
-        if not isinstance(raw, dict):
-            return None
-        name, enabled = raw.get("name"), raw.get("enabled")
+        name, enabled = (raw.get("name"), raw.get("enabled")) if isinstance(raw, dict) else (None, None)
         if not isinstance(name, str) or not name or not isinstance(enabled, bool):
             return None
         out[name] = enabled
@@ -125,9 +121,8 @@ def _file_mode(path: Path) -> str:
 
 
 def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> str:
-    """Recursively build objects for *dir_path*; return the tree address. Files -> blobs, subdirs
-    -> nested trees; symlinks/special files are skipped (contract: no symlinks). A blob over
-    *max_object_bytes* raises ValueError so the caller can surface / skip the artifact (server -> 413)."""
+    """Build objects for *dir_path* recursively; return the tree address. Symlinks/special files are
+    skipped (contract). A blob over *max_object_bytes* raises ValueError (server would 413)."""
     entries: List[Dict[str, str]] = []
     for child in sorted(dir_path.iterdir(), key=lambda p: p.name):
         if child.is_symlink():
@@ -143,11 +138,9 @@ def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> 
     return _add_tree(entries, objects)
 
 
-def build_commit(
-    tree_hash: str, parents: List[str], *, owner: str, device: str, message: str,
-    objects: ObjectSet, ts: Optional[str] = None) -> str:
-    """Build a commit object and return its address. ``parents``: 0 for the first commit, 1 for
-    an edit, 2 for a merge (parents[0] = base fast-forwarded from, parents[1] = other head)."""
+def build_commit(tree_hash: str, parents: List[str], *, owner: str, device: str, message: str,
+                 objects: ObjectSet, ts: Optional[str] = None) -> str:
+    """Commit object address. ``parents``: 0 first commit, 1 edit, 2 merge (base first, other head second)."""
     return objects.add(KIND_COMMIT, canonical_json_bytes({
         "type": KIND_COMMIT, "tree": tree_hash, "parents": list(parents),
         "author": {"owner": owner, "device": device},
@@ -156,9 +149,8 @@ def build_commit(
 
 
 def build_root_tree(node: Dict[str, Any], objects: ObjectSet, *, manifest_hash: Optional[str] = None) -> str:
-    """Canonicalize a nested ``{name: {"__tree__": hash} | subdict}`` root into trees.
-    ``manifest_hash`` (top level only) adds the root ``sync-manifest`` BLOB entry; it cannot
-    collide with a skill dir because skill entries are trees."""
+    """Canonicalize a nested ``{name: {"__tree__": hash} | subdict}`` root into trees. ``manifest_hash``
+    adds the root ``sync-manifest`` BLOB entry (cannot collide with a skill dir: those are trees)."""
     entries: List[Dict[str, str]] = []
     for name, child in node.items():
         if isinstance(child, dict) and "__tree__" in child and len(child) == 1:
@@ -179,8 +171,8 @@ def nest_skill_tree(root: Dict[str, Any], rel_parts: Tuple[str, ...], tree_hash:
 
 
 def assemble_root_from_skill_trees(skill_trees: Dict[str, str], objects: ObjectSet) -> str:
-    """Profile-root tree from ``{posix_rel_path: tree_hash}``. The skill trees are assumed already
-    durable (either side of a merge / the org HEAD); only the new intermediate/root trees are added."""
+    """Profile-root tree from ``{posix_rel_path: tree_hash}``; skill trees are assumed durable, only
+    the new intermediate/root trees are added."""
     root: Dict[str, Any] = {}
     for path, tree_hash in skill_trees.items():
         nest_skill_tree(root, PurePosixPath(path).parts, tree_hash)
@@ -198,9 +190,8 @@ class SyncError(RuntimeError):
 
 
 class SyncConflict(RuntimeError):
-    """CAS lost (409). NOT a rejection -- pushed objects are already durable. ``actual`` is the
-    current head to merge against, or None when the ref does not exist server-side (the server
-    sends ""): "retry as a create"; it must never be fetched as an object -- normalized here."""
+    """CAS lost (409); NOT a rejection, pushed objects are durable. ``actual`` = head to merge against,
+    or None when the ref does not exist (server sends ""): retry as a create, never fetch it."""
 
     def __init__(self, actual: Optional[str]):
         self.actual: Optional[str] = actual or None
@@ -223,19 +214,15 @@ def _body(r) -> Dict[str, Any]:
 
 
 class SyncClient:
-    """Sync client bound to a base URL + Nous bearer.
-
-    Org refs/objects live behind SEPARATE ``org/`` routes, not a prefix filter: the personal
-    routes are hard-scoped to the token's owner and would silently answer an org query with
-    personal data. Callers reading org content MUST pass ``org_scope=True`` on every hop.
-    """
+    """Sync client bound to a base URL + Nous bearer. Org refs/objects live behind SEPARATE ``org/``
+    routes: the personal routes are hard-scoped to the token's owner and would silently answer an
+    org query with personal data, so org readers MUST pass ``org_scope=True`` on every hop."""
 
     def __init__(self, base_url: str, api_key: str, *, timeout: float = 30.0):
         self.base = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         import requests  # core dependency
-
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_key}"
 
@@ -243,8 +230,8 @@ class SyncClient:
         return f"{self.base}/v1/sync/{path.lstrip('/')}"
 
     def _request(self, method: str, path: str, op: str, *, ok=(200,), errors: Optional[Dict[int, Any]] = None, **kw):
-        """One wire call. Raises SyncError unless the status is in *ok*; *errors* maps specific
-        statuses to a message (str or ``fn(response)``), anything else gets ``"<op> failed: <code>"``."""
+        """One wire call; SyncError unless the status is in *ok*. *errors* maps a status to a message
+        (str or ``fn(response)``); anything else gets ``"<op> failed: <code>"``."""
         r = self._session.request(method, self._url(path), timeout=self.timeout, **kw)
         if r.status_code in ok:
             return r
@@ -285,11 +272,9 @@ class SyncClient:
         return self._get_json_of_kind(tree_hash, KIND_TREE, org_scope)
 
     def put_objects(self, objects: Dict[str, Tuple[str, bytes]], *, org_scope: bool = False) -> Dict[str, Any]:
-        """POST objects -- batch multipart upload: field name = the claimed ``sha256:<hex>``,
-        ``filename`` = object type, body = raw bytes (the contract forbids base64-in-JSON). The
-        server recomputes every hash and rejects the whole batch with 422 on mismatch; known
-        hashes are idempotent no-ops. ``org_scope`` adds ``?scope=org`` so objects land
-        org-readable (required before an org CAS/propose)."""
+        """POST objects as multipart (field = claimed ``sha256:<hex>``, filename = kind, body = raw
+        bytes; no base64-in-JSON). The server rehashes and 422s the whole batch on mismatch; known
+        hashes are no-ops. ``org_scope`` adds ``?scope=org`` (required before an org CAS/propose)."""
         files = [(h, (kind, data, "application/octet-stream")) for h, (kind, data) in objects.items()]
         r = self._request(
             "POST", "objects", "put_objects", ok=(200, 201), files=files,
@@ -298,9 +283,8 @@ class SyncClient:
         return _body(r)
 
     def cas_ref(self, name: str, from_hash: Optional[str], to_hash: str) -> Dict[str, Any]:
-        """POST refs/:name -- atomic compare-and-swap. Raises SyncConflict on 409. A non-admin
-        member's CAS on an org HEAD is converted server-side to a proposal (202) and surfaced as
-        ``{"proposal_pending": True, ...}``: SUCCESS-shaped but never to be presented as live/merged."""
+        """POST refs/:name -- atomic CAS; SyncConflict on 409. A member's CAS on an org HEAD becomes a
+        proposal (202) -> ``{"proposal_pending": True, ...}``: success-shaped, never present as live."""
         r = self._request(
             "POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409), json={"from": from_hash, "to": to_hash},
             errors={403: "forbidden (403) -- owner/permission"})
@@ -324,8 +308,7 @@ def root_tree_of_commit(client: SyncClient, commit_hash: str, *, org_scope: bool
 
 
 def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: bool = False) -> Dict[str, str]:
-    """Flatten a profile-root tree into ``{posix_rel_path: skill_tree_hash}``: a skill tree is any
-    subtree containing a ``SKILL.md`` blob, keyed by its path so category nesting is preserved."""
+    """``{posix_rel_path: skill_tree_hash}`` for every subtree containing a ``SKILL.md`` blob."""
     result: Dict[str, str] = {}
 
     def _walk(tree_hash: str, prefix: str) -> None:
@@ -342,8 +325,7 @@ def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: b
 
 
 def read_manifest_of_root(client: SyncClient, root_tree_hash: str) -> Optional[Dict[str, bool]]:
-    """``{name: enabled}`` from the root-level ``sync-manifest`` blob, or None if absent/malformed.
-    This is how a device learns another device's opt-ins."""
+    """``{name: enabled}`` from the root ``sync-manifest`` blob (how a device learns another's opt-ins)."""
     try:
         tree = client.get_tree_json(root_tree_hash)
     except Exception as e:
@@ -361,9 +343,8 @@ def read_manifest_of_root(client: SyncClient, root_tree_hash: str) -> Optional[D
 
 
 def materialize_tree(client: SyncClient, tree_hash: str, dest: Path, *, org_scope: bool = False) -> None:
-    """Write the tree at *tree_hash* into *dest* (created if needed): blobs -> files (+x restored
-    for ``exec``), trees -> subdirectories. Does NOT delete files absent from the tree (caller
-    decides). Refuses path traversal."""
+    """Write the tree into *dest*: blobs -> files (+x for ``exec``), trees -> subdirs. Does NOT delete
+    files absent from the tree (caller decides). Refuses path traversal."""
     dest.mkdir(parents=True, exist_ok=True)
     for entry in client.get_tree_json(tree_hash, org_scope=org_scope).get("entries", []):
         name = entry.get("name", "")
@@ -383,9 +364,8 @@ def materialize_tree(client: SyncClient, tree_hash: str, dest: Path, *, org_scop
 
 
 def merge_skill(base: Optional[str], ours: Optional[str], theirs: Optional[str]) -> str:
-    """Three-way decision for one skill's tree hash: ``ours`` / ``theirs`` / ``either`` / ``overlap``
-    / ``none``. A side "modified" the skill when its hash differs from the common base (same
-    semantics as skills_sync.py's origin/user/incoming block)."""
+    """Three-way decision: ``ours``/``theirs``/``either``/``overlap``/``none``. A side "modified" the
+    skill when its hash differs from the base (same semantics as skills_sync.py)."""
     if ours == theirs:
         return "either" if ours is not None else "none"
     if theirs == base:  # only we moved
