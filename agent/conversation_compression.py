@@ -287,12 +287,8 @@ def _rollback_durable_cooldown(
 
 
 def _restore_compressor_attempt_state(
-    compressor: Any,
-    snapshot: dict[str, Any],
-    *,
-    durable_cooldown_authoritative: Optional[bool] = None,
-    durable_cooldown_state: Optional[dict[str, Any]] = None,
-    attempt_generation: Optional[int] = None,
+    compressor: Any, snapshot: dict[str, Any], *, durable_cooldown_authoritative: Optional[bool] = None,
+    durable_cooldown_state: Optional[dict[str, Any]] = None, attempt_generation: Optional[int] = None,
 ) -> None:
     """Restore the per-attempt snapshot after a pre-commit hard cancel.
 
@@ -772,11 +768,7 @@ def _stall_source_fingerprint(agent: Any, messages: Any, approx_tokens: Optional
 
 
 def _record_stall_interrupted_backoff(
-    agent: Any,
-    *,
-    commit_fence: Optional[CompressionCommitFence],
-    started_at: float,
-    messages: Any,
+    agent: Any, *, commit_fence: Optional[CompressionCommitFence], started_at: float, messages: Any,
     approx_tokens: Optional[int],
 ) -> bool:
     """Persist a stall-interrupted cooldown after snapshot restore.
@@ -848,15 +840,10 @@ def resolve_compression_fallback_route() -> Optional[dict]:
 
 
 def _retry_compression_on_fallback_chain(
-    *,
-    worker: Callable[[CompressionCommitFence], Tuple[list, str]],
-    messages: list,
-    system_prompt_fallback: Any,
-    idle_timeout_seconds: float,
-    total_ceiling_seconds: float,
+    *, worker: Callable[[CompressionCommitFence], Tuple[list, str]], messages: list,
+    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
-    on_timeout_cause: Optional[Callable[[bool, bool], None]] = None,
-    telemetry_agent: Any = None,
+    on_timeout_cause: Optional[Callable[[bool, bool], None]] = None, telemetry_agent: Any = None,
     new_fence: Optional[Callable[[], CompressionCommitFence]] = None,
 ) -> Optional[Tuple[list, str]]:
     """Re-run an aborted compression once with the summary route pinned.
@@ -1030,18 +1017,12 @@ def _release_cancelled_worker(
 
 
 def run_compress_context_with_progress_timeout(
-    *,
-    worker: Callable[[CompressionCommitFence], Tuple[list, str]],
-    messages: list,
-    system_prompt_fallback: Any,
-    idle_timeout_seconds: float,
-    total_ceiling_seconds: float,
+    *, worker: Callable[[CompressionCommitFence], Tuple[list, str]], messages: list,
+    system_prompt_fallback: Any, idle_timeout_seconds: float, total_ceiling_seconds: float,
     on_timeout: Optional[Callable[[float, float, float], None]] = None,
     on_timeout_cause: Optional[Callable[[bool, bool], None]] = None,
     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
-    fence: Optional[CompressionCommitFence] = None,
-    telemetry_agent: Any = None,
-    stall_fallback: bool = True,
+    fence: Optional[CompressionCommitFence] = None, telemetry_agent: Any = None, stall_fallback: bool = True,
     new_fence: Optional[Callable[[], CompressionCommitFence]] = None,
 ) -> Tuple[list, str]:
     """Run ``worker(fence)`` under a sync progress-aware (idle + ceiling) timeout.
@@ -1225,12 +1206,7 @@ def _session_was_rotated_by_compression(session_db: Any, session_id: str) -> boo
 
 
 def _emit_compression_attempt_telemetry(
-    agent: Any,
-    *,
-    started_at: float,
-    commit_status: str,
-    split_status: str,
-    failure_class: str | None = None,
+    agent: Any, *, started_at: float, commit_status: str, split_status: str, failure_class: str | None = None,
     commit_started_at: float | None = None,
 ) -> None:
     """Emit one content-free JSON log line for a compression attempt."""
@@ -1545,13 +1521,8 @@ def _compression_lock_holder(agent: Any) -> str:
 
 
 def _supported_compression_kwargs(
-    compress_fn: Any,
-    *,
-    current_tokens: Optional[int],
-    focus_topic: Optional[str],
-    force: bool,
-    memory_context: str,
-    bypass_cooldown: bool = False,
+    compress_fn: Any, *, current_tokens: Optional[int], focus_topic: Optional[str], force: bool,
+    memory_context: str, bypass_cooldown: bool = False,
 ) -> dict:
     """Return only compression kwargs accepted by an engine callable.
 
@@ -1769,8 +1740,7 @@ def _lower_threshold_to_aux_context(
     _main_label = f"{_main_model} ({_main_provider})" if _main_provider else _main_model
     _aux_label = f"{aux_model} ({_aux_provider_label})"
     msg = (
-        f"⚠ Compression model {_aux_label} context is "
-        f"{aux_context:,} tokens, but the main model "
+        f"⚠ Compression model {_aux_label} context is {aux_context:,} tokens, but the main model "
         f"{_main_label}'s compression threshold was "
         f"{old_threshold:,} tokens. "
         f"Auto-lowered this session's threshold to "
@@ -1778,8 +1748,7 @@ def _lower_threshold_to_aux_context(
     )
     if threshold_suggestion_viable:
         msg += (
-            f"  To make this permanent, edit config.yaml — either:\n"
-            f"  1. Use a larger compression model:\n"
+            f"  To make this permanent, edit config.yaml — either:\n  1. Use a larger compression model:\n"
             f"       auxiliary:\n"
             f"         compression:\n"
             f"           model: <model-with-{old_threshold:,}+-context>\n"
@@ -1789,9 +1758,7 @@ def _lower_threshold_to_aux_context(
         )
     else:
         msg += (
-            f"  To make this permanent, use a larger compression "
-            f"model in config.yaml:\n"
-            f"       auxiliary:\n"
+            f"  To make this permanent, use a larger compression model in config.yaml:\n       auxiliary:\n"
             f"         compression:\n"
             f"           model: <model-with-{old_threshold:,}+-context>\n"
             f"  (Lowering compression.threshold cannot help here — "
@@ -1823,8 +1790,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
         return
     try:
         from agent.auxiliary_client import (
-            _resolve_task_provider_model,
-            _try_configured_fallback_for_unavailable_client,
+            _resolve_task_provider_model, _try_configured_fallback_for_unavailable_client,
             get_text_auxiliary_client,
         )
         from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
@@ -2337,15 +2303,8 @@ class _CompressionLease:
     """
 
     def __init__(
-        self,
-        agent: Any,
-        *,
-        db: Any,
-        sid: str,
-        ttl: float,
-        refresh_interval: Any,
-        commit_fence: Optional[CompressionCommitFence],
-        lifecycle: _CompactionLifecycle,
+        self, agent: Any, *, db: Any, sid: str, ttl: float, refresh_interval: Any,
+        commit_fence: Optional[CompressionCommitFence], lifecycle: _CompactionLifecycle,
     ) -> None:
         self._agent = agent
         self.db = db
@@ -2440,12 +2399,8 @@ def _resolve_lock_api(lock_db: Any) -> Tuple[Any, Optional[Exception]]:
 
 
 def _abort_lease(
-    agent: Any,
-    lifecycle: _CompactionLifecycle,
-    system_message: str,
-    attempt_started_at: float,
-    failure_class: str,
-    prompt: Optional[str] = None,
+    agent: Any, lifecycle: _CompactionLifecycle, system_message: str, attempt_started_at: float,
+    failure_class: str, prompt: Optional[str] = None,
 ) -> Tuple[None, str]:
     """Sit-out return for lease acquisition: prompt, aborted telemetry, terminal status edge."""
     if prompt is None:
@@ -2494,12 +2449,8 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
 
 
 def _sit_out_lock_contention(
-    agent: Any,
-    lease: _CompressionLease,
-    lifecycle: _CompactionLifecycle,
-    system_message: str,
-    approx_tokens: Optional[int],
-    attempt_started_at: float,
+    agent: Any, lease: _CompressionLease, lifecycle: _CompactionLifecycle, system_message: str,
+    approx_tokens: Optional[int], attempt_started_at: float,
 ) -> Tuple[None, str]:
     """Another path holds the lock: publish the lock-skip signal, warn once, sit out."""
     try:
@@ -2532,13 +2483,8 @@ def _sit_out_lock_contention(
 
 
 def _acquire_compression_lease(
-    agent: Any,
-    *,
-    commit_fence: Optional[CompressionCommitFence],
-    lifecycle: _CompactionLifecycle,
-    system_message: str,
-    approx_tokens: Optional[int],
-    attempt_started_at: float,
+    agent: Any, *, commit_fence: Optional[CompressionCommitFence], lifecycle: _CompactionLifecycle,
+    system_message: str, approx_tokens: Optional[int], attempt_started_at: float,
 ) -> Tuple[Optional[_CompressionLease], Optional[str]]:
     """Take the per-session compression lock; ``(None, prompt)`` means sit out.
 
@@ -2742,12 +2688,7 @@ def _pre_compress_memory_context(agent: Any, messages: list, checkpoint_required
 
 
 def _resolve_compress_call(
-    agent: Any,
-    *,
-    approx_tokens: Optional[int],
-    focus_topic: Optional[str],
-    force: bool,
-    memory_context: str,
+    agent: Any, *, approx_tokens: Optional[int], focus_topic: Optional[str], force: bool, memory_context: str,
     bypass_cooldown: bool,
 ) -> Tuple[Callable[..., Any], dict[str, Any]]:
     """Bind ``compress()`` and only the kwargs its signature accepts."""
@@ -2768,14 +2709,8 @@ def _resolve_compress_call(
 
 
 def _run_summary_dispatch(
-    agent: Any,
-    messages: list,
-    compress_fn: Callable[..., Any],
-    compress_kwargs: dict[str, Any],
-    *,
-    commit_fence: Optional[CompressionCommitFence],
-    attempt_generation: Any,
-    hard_cancel_event: Any,
+    agent: Any, messages: list, compress_fn: Callable[..., Any], compress_kwargs: dict[str, Any], *,
+    commit_fence: Optional[CompressionCommitFence], attempt_generation: Any, hard_cancel_event: Any,
 ) -> list:
     """Run the compressor under the fence's progress hook, deadline and interrupt guard."""
     # Publish progress to the commit fence so hosts extend deadlines while tokens
@@ -2810,8 +2745,7 @@ def _run_summary_dispatch(
             compressed = messages
         else:
             with (
-                aux_progress_hook(_progress_hook),
-                aux_stream_deadline(_host_stream_deadline),
+                aux_progress_hook(_progress_hook), aux_stream_deadline(_host_stream_deadline),
                 aux_interrupt_protection(cancel_check=_compression_cancel_requested),
             ):
                 compressed = compress_fn(messages, **compress_kwargs)
@@ -2927,12 +2861,7 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
 
 
 def _salvage_or_refuse_grown_transcript(
-    agent: Any,
-    messages: list,
-    compressed: list,
-    *,
-    system_message: str,
-    attempt_started_at: float,
+    agent: Any, messages: list, compressed: list, *, system_message: str, attempt_started_at: float,
     attempt_snapshot: dict,
 ) -> Tuple[Optional[list], Optional[str]]:
     """Anti-growth guard at the COMMIT SITE (in-place commits before the gateway can inspect).
@@ -3032,14 +2961,8 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
 
 
 def _publish_rotated_compaction(
-    agent: Any,
-    messages: list,
-    compressed: list,
-    *,
-    new_system_prompt: str,
-    lease: _CompressionLease,
-    old_session_id: str,
-    compressed_user_turn_outcome: str,
+    agent: Any, messages: list, compressed: list, *, new_system_prompt: str, lease: _CompressionLease,
+    old_session_id: str, compressed_user_turn_outcome: str,
 ) -> None:
     """Rotate the session: flush the parent, publish the child, re-point the agent.
 
@@ -3151,18 +3074,9 @@ def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
 
 
 def _finish_compaction_boundary(
-    agent: Any,
-    compressed: list,
-    *,
-    new_system_prompt: str,
-    old_session_id: Optional[str],
-    in_place: bool,
-    compacted_in_place: bool,
-    session_commit_succeeded: bool,
-    defer_context_engine_notification: bool,
-    compression_made_progress: bool,
-    compression_used_fallback: bool,
-    compression_feasibility_skip: bool,
+    agent: Any, compressed: list, *, new_system_prompt: str, old_session_id: Optional[str], in_place: bool,
+    compacted_in_place: bool, session_commit_succeeded: bool, defer_context_engine_notification: bool,
+    compression_made_progress: bool, compression_used_fallback: bool, compression_feasibility_skip: bool,
     task_id: str,
 ) -> int:
     """Post-commit bookkeeping: notify engines/providers/hooks, re-arm usage tracking.
@@ -3261,13 +3175,8 @@ def _finish_compaction_boundary(
 
 
 def _candidate_rejected(
-    agent: Any,
-    compressed: Any,
-    messages: list,
-    messages_before_compression: list,
-    *,
-    attempt_generation: Any,
-    attempt_started_at: float,
+    agent: Any, compressed: Any, messages: list, messages_before_compression: list, *,
+    attempt_generation: Any, attempt_started_at: float,
 ) -> bool:
     """Reject an unusable compression candidate before any session mutation.
 
@@ -3353,18 +3262,9 @@ class _CommitOutcome:
 
 
 def _commit_compaction(
-    agent: Any,
-    messages: list,
-    compressed: list,
-    *,
-    in_place: bool,
-    lease: _CompressionLease,
-    new_system_prompt: str,
-    system_message: str,
-    compressed_user_turn_outcome: str,
-    messages_before_compression: Optional[list],
-    made_progress: bool,
-    attempt: _Attempt,
+    agent: Any, messages: list, compressed: list, *, in_place: bool, lease: _CompressionLease,
+    new_system_prompt: str, system_message: str, compressed_user_turn_outcome: str,
+    messages_before_compression: Optional[list], made_progress: bool, attempt: _Attempt,
 ) -> _CommitOutcome:
     """Persist the compacted transcript: memory extraction, anti-growth guard, then the
     in-place archive or the parent->child rotation.
@@ -3488,19 +3388,9 @@ class _SummaryPhase:
 
 
 def _run_summary_phase(
-    agent: Any,
-    messages: list,
-    *,
-    lease: _CompressionLease,
-    in_place: bool,
-    checkpoint_required: bool,
-    approx_tokens: Optional[int],
-    focus_topic: Optional[str],
-    force: bool,
-    bypass_cooldown: bool,
-    commit_fence: Optional[CompressionCommitFence],
-    hard_cancel_event: Any,
-    system_message: str,
+    agent: Any, messages: list, *, lease: _CompressionLease, in_place: bool, checkpoint_required: bool,
+    approx_tokens: Optional[int], focus_topic: Optional[str], force: bool, bypass_cooldown: bool,
+    commit_fence: Optional[CompressionCommitFence], hard_cancel_event: Any, system_message: str,
     attempt: _Attempt,
 ) -> _SummaryPhase:
     """Adopt a grown durable parent, gather memory context and run the summarizer.
@@ -3635,15 +3525,8 @@ def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: b
 
 
 def _route_codex_compaction(
-    agent: Any,
-    messages: list,
-    system_message: str,
-    *,
-    commit_fence: Optional[CompressionCommitFence],
-    attempt: _Attempt,
-    approx_tokens: Optional[int],
-    task_id: str,
-    force: bool,
+    agent: Any, messages: list, system_message: str, *, commit_fence: Optional[CompressionCommitFence],
+    attempt: _Attempt, approx_tokens: Optional[int], task_id: str, force: bool,
 ) -> Tuple[list, str]:
     """Codex owns the real thread: run its own compact under the commit fence bracket."""
     if commit_fence is not None and not commit_fence.begin_commit(getattr(agent, "_hard_interrupt_requested", None)):
@@ -3678,16 +3561,9 @@ def _announce_compression_start(
 
 
 def compress_context(
-    agent: Any,
-    messages: list,
-    system_message: str,
-    *,
-    approx_tokens: Optional[int] = None,
-    task_id: str = "default",
-    focus_topic: Optional[str] = None,
-    force: bool = False,
-    bypass_cooldown: bool = False,
-    defer_context_engine_notification: bool = False,
+    agent: Any, messages: list, system_message: str, *, approx_tokens: Optional[int] = None,
+    task_id: str = "default", focus_topic: Optional[str] = None, force: bool = False,
+    bypass_cooldown: bool = False, defer_context_engine_notification: bool = False,
     commit_fence: Optional[CompressionCommitFence] = None,
 ) -> Tuple[list, str]:
     """Compress conversation context and split the session in SQLite.
@@ -3902,13 +3778,8 @@ def _record_codex_compaction_failure(agent: Any, error: str) -> None:
 
 
 def _compress_context_via_codex_app_server(
-    agent: Any,
-    messages: list,
-    system_message: Optional[str],
-    *,
-    approx_tokens: Optional[int] = None,
-    task_id: str = "default",
-    force: bool = False,
+    agent: Any, messages: list, system_message: Optional[str], *, approx_tokens: Optional[int] = None,
+    task_id: str = "default", force: bool = False,
 ) -> Tuple[list, str]:
     """Route compaction to Codex app-server for Codex-owned threads.
 

@@ -32,13 +32,7 @@ def _timeout_fallback_prompt(agent, system_message: str) -> str:
 
 
 def _report_compression_timeout(
-    agent,
-    *,
-    idle: float,
-    waited: float,
-    since_progress: float,
-    total_ceiling: float,
-    total_exhausted: bool,
+    agent, *, idle: float, waited: float, since_progress: float, total_ceiling: float, total_exhausted: bool,
     progress_observed: bool,
 ) -> None:
     """Host-side timeout bookkeeping: log, activity stamp, cooldown ladder, user warning."""
@@ -82,8 +76,7 @@ def _report_compression_timeout(
         )
     else:
         emit(
-            "⚠ Context compression timed out "
-            f"after {idle:.1f}s with no output from the summary "
+            f"⚠ Context compression timed out after {idle:.1f}s with no output from the summary "
             "model. No messages were dropped — continuing without compression. Run /compress to retry, /new "
             "for a clean session, or check auxiliary.compression."
         )
@@ -94,8 +87,7 @@ def _warn_commit_overrun(agent, waited: float, ceiling: float) -> None:
     emit = getattr(agent, "_emit_warning", None)
     if callable(emit):
         emit(
-            "⚠ Context compression commit is taking unusually "
-            f"long ({waited:.0f}s, ceiling {ceiling:.0f}s). "
+            f"⚠ Context compression commit is taking unusually long ({waited:.0f}s, ceiling {ceiling:.0f}s). "
             "Waiting for it to finish safely — if this persists, check SessionDB health (disk / lock contention)."
         )
 
@@ -194,17 +186,9 @@ class CompressionFacadeMixin:
     """``_compress_context`` (see module docstring)."""
 
     def _compress_context(
-        self,
-        messages: list,
-        system_message: str,
-        *,
-        approx_tokens: int = None,
-        task_id: str = "default",
-        focus_topic: str = None,
-        force: bool = False,
-        bypass_cooldown: bool = False,
-        defer_context_engine_notification: bool = False,
-        commit_fence=None,
+        self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default",
+        focus_topic: str = None, force: bool = False, bypass_cooldown: bool = False,
+        defer_context_engine_notification: bool = False, commit_fence=None,
     ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
@@ -214,19 +198,13 @@ class CompressionFacadeMixin:
         # Per-attempt timeout signal for turn-start preflight and in-loop consumers: a stalled
         # compression must not be mistaken for a structural no-op. Thread-local + per-agent lock.
         from agent.conversation_compression import (
-            CompressionCommitFence,
-            compress_context,
-            reset_context_compression_timeout_outcome,
+            CompressionCommitFence, compress_context, reset_context_compression_timeout_outcome,
             resolve_context_compression_timeouts,
         )
         reset_context_compression_timeout_outcome(self)
         from agent.portal_tags import (
-            get_affinity_scope,
-            get_conversation_context,
-            reset_affinity_scope,
-            reset_conversation_context,
-            set_affinity_scope,
-            set_conversation_context,
+            get_affinity_scope, get_conversation_context, reset_affinity_scope, reset_conversation_context,
+            set_affinity_scope, set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
         # Out-of-turn compaction (/compact, gateway /compress, partial head compression) runs outside
