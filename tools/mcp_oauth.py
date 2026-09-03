@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import webbrowser
+from functools import partialmethod
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -261,17 +262,10 @@ class HermesTokenStorage:
     def _path(self, suffix: str) -> Path:
         return _get_token_dir(self._hermes_home) / f"{self._server_name}{suffix}"
 
-    def _tokens_path(self) -> Path:
-        return self._path(".json")
-
-    def _client_info_path(self) -> Path:
-        return self._path(".client.json")
-
-    def _meta_path(self) -> Path:
-        return self._path(".meta.json")
-
-    def _cimd_rejected_path(self) -> Path:
-        return self._path(".cimd-off")
+    _tokens_path = partialmethod(_path, ".json")
+    _client_info_path = partialmethod(_path, ".client.json")
+    _meta_path = partialmethod(_path, ".meta.json")
+    _cimd_rejected_path = partialmethod(_path, ".cimd-off")
 
     def _state_paths(self) -> tuple[Path, Path, Path]:
         return self._tokens_path(), self._client_info_path(), self._meta_path()
@@ -669,8 +663,7 @@ def _get_hermes_oauth_provider_class() -> type | None:
 
         HermesOAuthClientProvider = type("HermesOAuthClientProvider", (HermesProviderMixin, base), {
             "__doc__": "SDK provider plus Hermes' token-endpoint fixes (see ``HermesProviderMixin``).",
-            "__module__": __name__,
-            "_hermes_logger": logger})
+            "__module__": __name__, "_hermes_logger": logger})
     return HermesOAuthClientProvider
 
 
@@ -960,9 +953,7 @@ def build_oauth_auth(server_name: str, server_url: str, oauth_config: dict | Non
     Legacy API — new code uses :func:`tools.mcp_oauth_manager.get_manager` so state is shared
     across config-time, runtime and reconnect paths."""
     if not _OAUTH_AVAILABLE or _sdk_class("OAuthClientProvider") is None:
-        logger.warning(
-            "MCP OAuth requested for '%s' but SDK auth types are not available. Install with: pip install 'mcp>=1.26.0'",
-            server_name)
+        logger.warning("MCP OAuth requested for '%s' but SDK auth types are not available. Install with: pip install 'mcp>=1.26.0'", server_name)
         return None
     from tools.mcp_oauth_provider import build_provider_kwargs, prepare_oauth_config
 

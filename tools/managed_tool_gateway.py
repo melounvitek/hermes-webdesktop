@@ -118,12 +118,10 @@ def read_nous_access_token() -> Optional[str]:
 
 def get_tool_gateway_scheme() -> str:
     """Return configured shared gateway URL scheme."""
-    scheme = os.getenv("TOOL_GATEWAY_SCHEME", "").strip().lower()
-    if not scheme:
-        return _DEFAULT_TOOL_GATEWAY_SCHEME
-    if scheme in {"http", "https"}:
-        return scheme
-    raise ValueError("TOOL_GATEWAY_SCHEME must be 'http' or 'https'")
+    scheme = os.getenv("TOOL_GATEWAY_SCHEME", "").strip().lower() or _DEFAULT_TOOL_GATEWAY_SCHEME
+    if scheme not in {"http", "https"}:
+        raise ValueError("TOOL_GATEWAY_SCHEME must be 'http' or 'https'")
+    return scheme
 
 
 def build_vendor_gateway_url(vendor: str) -> str:

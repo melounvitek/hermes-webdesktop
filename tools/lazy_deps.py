@@ -11,6 +11,7 @@ package can only add modules, never shadow core; PyPI-by-name specs only (``_spe
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -260,18 +261,13 @@ def _ensure_target_ready(target: Path) -> Optional[str]:
             except OSError:
                 have = ""
             if have and have != want:
-                logger.info(
-                    "Lazy install target %s was built for ABI %r but running ABI is %r; wiping stale packages.",
-                    target, have, want,
-                )
+                logger.info("Lazy install target %s was built for ABI %r but running ABI is %r; wiping stale packages.", target, have, want)
                 for child in target.iterdir():
                     if child.is_dir() and not child.is_symlink():
                         shutil.rmtree(child, ignore_errors=True)
                     else:
-                        try:
+                        with contextlib.suppress(OSError):
                             child.unlink()
-                        except OSError:
-                            pass
         target.mkdir(parents=True, exist_ok=True)
         stamp.write_text(want, encoding="utf-8")
     except OSError as e:
@@ -295,14 +291,12 @@ def _activate_target_on_syspath(target: Path) -> None:
 
 def _invalidate_import_caches() -> None:
     """Make just-installed dists visible to importers and importlib.metadata in this process."""
-    try:
+    with contextlib.suppress(Exception):
         import importlib
         importlib.invalidate_caches()
         import importlib.metadata as _md
         if hasattr(_md, "_cache_clear"):
             _md._cache_clear()  # type: ignore[attr-defined]
-    except Exception:
-        pass
 
 
 def activate_durable_lazy_target() -> None:
@@ -322,11 +316,10 @@ def _allow_lazy_installs() -> bool:
     """Whether lazy installs are permitted: (1) ``security.allow_lazy_installs: false`` blocks
     in BOTH modes; (2) the sealed venv (``HERMES_DISABLE_LAZY_INSTALLS=1``) blocks only without a
     durable target to redirect into. Unreadable config fails OPEN — blocking is an explicit opt-in."""
-    try:
+    cfg = None
+    with contextlib.suppress(Exception):
         from hermes_cli.config import load_config
         cfg = load_config()
-    except Exception:
-        cfg = None
     if cfg is not None and not bool((cfg.get("security") or {}).get("allow_lazy_installs", True)):
         return False
     if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1":
@@ -562,10 +555,8 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
             return _InstallResult(False, "", f"pip install failed: {e}")
     finally:
         if constraints is not None:
-            try:
+            with contextlib.suppress(OSError):
                 constraints.unlink()
-            except OSError:
-                pass
 
 
 # ---- Public API ---------------------------------------------------------------
@@ -635,10 +626,7 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     if prompt and not _prompt_toolkit_active() and sys.stdin.isatty() and sys.stdout.isatty():
         spec_list = ", ".join(missing)
         try:
-            answer = input(
-                f"\nFeature {feature!r} requires: {spec_list}\n"
-                f"Install into the active venv now? [Y/n] "
-            ).strip().lower()
+            answer = input(f"\nFeature {feature!r} requires: {spec_list}\nInstall into the active venv now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             answer = "n"
         if answer and answer not in {"y", "yes"}:
