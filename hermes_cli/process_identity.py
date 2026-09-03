@@ -89,9 +89,7 @@ def spawn_env(purpose: str, *, project_root: Optional[Path] = None) -> dict[str,
 
 def parse_spawn_tag(raw: object) -> Optional[SpawnTag]:
     """Parse a ``HERMES_SPAWN`` value; ``None`` for anything malformed."""
-    if not isinstance(raw, str):
-        return None
-    parts = raw.split(":")
+    parts = raw.split(":") if isinstance(raw, str) else []
     if len(parts) != 5 or parts[0] != _TAG_VERSION:
         return None
     _, install, purpose, pid_s, create_s = parts

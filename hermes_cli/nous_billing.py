@@ -18,8 +18,7 @@ from typing import Any, Optional
 
 DEFAULT_PORTAL_BASE_URL = "https://portal.nousresearch.com"
 
-# Tight so a hung portal doesn't freeze the TUI (charge/poll calls are quick).
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_TIMEOUT = 15.0  # tight so a hung portal doesn't freeze the TUI (charge/poll calls are quick)
 
 
 # --- Typed errors ---
@@ -101,8 +100,7 @@ class BillingUpgradeCapExceeded(BillingTransient):
 def resolve_portal_base_url(state: Optional[dict[str, Any]] = None) -> str:
     """Resolve the portal base URL with login-time precedence: env, stored state, default."""
     env = os.getenv("HERMES_PORTAL_BASE_URL") or os.getenv("NOUS_PORTAL_BASE_URL")
-    stored = state.get("portal_base_url") if state else None
-    for candidate in (env, stored):
+    for candidate in (env, state.get("portal_base_url") if state else None):
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip().rstrip("/")
     return DEFAULT_PORTAL_BASE_URL

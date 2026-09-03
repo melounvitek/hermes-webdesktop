@@ -32,7 +32,6 @@ Caps = dict[str, Optional[dict[str, Any]]]
 
 def _origin():
     from hermes_cli import models
-
     return models
 
 
@@ -56,14 +55,8 @@ def parse_openrouter_reasoning_capabilities(item: Any) -> Optional[dict[str, Any
     raw_efforts = reasoning.get("supported_efforts")
     efforts: Optional[list[str]] = None
     if isinstance(raw_efforts, list):
-        efforts = list(dict.fromkeys(
-            str(effort).strip().lower() for effort in raw_efforts if str(effort).strip()
-        ))
-    return {
-        "supports_reasoning": True,
-        "supported_efforts": efforts,
-        "mandatory": reasoning.get("mandatory") is True,
-    }
+        efforts = list(dict.fromkeys(str(e).strip().lower() for e in raw_efforts if str(e).strip()))
+    return {"supports_reasoning": True, "supported_efforts": efforts, "mandatory": reasoning.get("mandatory") is True}
 
 
 # ── Disk mirror ────────────────────────────────────────────────────────
@@ -83,7 +76,6 @@ def _reasoning_caps_disk_path() -> Path:
 
 def _read_reasoning_caps_disk() -> dict[str, Any]:
     from hermes_cli.models import _read_json_cache
-
     return _read_json_cache(_reasoning_caps_disk_path()) or {}
 
 
@@ -103,7 +95,6 @@ def _load_reasoning_caps_disk(url: str) -> tuple[Optional[Caps], float]:
 def _save_reasoning_caps_disk(url: str, caps: Caps) -> None:
     """Merge *url*'s catalog into the shared disk mirror, atomically."""
     from hermes_cli.models import _write_json_cache
-
     try:
         data = _origin()._read_reasoning_caps_disk()
         data[url] = {"ts": time.time(), "caps": caps}
@@ -154,9 +145,8 @@ def _fetch_reasoning_caps_catalog(url: str, timeout: float) -> Optional[Caps]:
     """Fetch one OpenRouter-shaped ``/v1/models`` catalog → per-model caps; None when unreachable or
     empty so callers remember the failure. Sends a User-Agent: the Portal 403s anonymous reads."""
     m = _origin()
-    headers = {"Accept": "application/json", "User-Agent": m._HERMES_USER_AGENT}
     try:
-        req = urllib.request.Request(url, headers=headers)
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": m._HERMES_USER_AGENT})
         with m._urlopen_model_catalog_request(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode())
     except Exception:

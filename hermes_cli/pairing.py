@@ -63,8 +63,7 @@ def _cmd_approve(store, platform: str, code: str):
     else:
         result = store.approve_code(platform, code.upper())
     if result:
-        uid = result["user_id"]
-        name = result.get("user_name") or ""
+        uid, name = result["user_id"], result.get("user_name") or ""
         display = f"{name} ({uid})" if name else uid
         print(f"\n  Approved! User {display} on {platform} can now use the bot~")
         print("  They'll be recognized automatically on their next message.\n")
