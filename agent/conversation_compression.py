@@ -330,6 +330,44 @@ def _clear_compression_cancelled_check_if_owner(
         return True
 
 
+def _rollback_durable_cooldown(
+    compressor: Any,
+    snapshot: dict[str, Any],
+    authoritative: Optional[bool],
+    durable_state: Optional[dict[str, Any]],
+) -> None:
+    """Recreate/clear the durable cooldown row from the attempt snapshot.
+
+    Authoritative captures use the exact raw-row restore API (verifies read-back,
+    propagates failure); the legacy path re-derives deadline/error best-effort.
+    """
+    session_db = vars(compressor).get("_session_db")
+    session_id = vars(compressor).get("_session_id")
+    if session_db is None or not session_id:
+        return
+    if authoritative is True:
+        restorer = getattr(type(session_db), "restore_compression_failure_cooldown_row", None)
+        if not callable(restorer) or durable_state is None:
+            raise RuntimeError("exact compression cooldown rollback API is unavailable")
+        restorer(session_db, session_id, copy.deepcopy(durable_state))
+        return
+    try:
+        deadline = float(snapshot["_summary_failure_cooldown_until"] or 0.0)
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining > 0:
+            recorder = getattr(type(session_db), "record_compression_failure_cooldown", None)
+            if callable(recorder):
+                recorder(session_db, session_id, time.time() + remaining, snapshot.get("_last_summary_error"))
+        else:
+            clearer = getattr(type(session_db), "clear_compression_failure_cooldown", None)
+            if callable(clearer):
+                clearer(session_db, session_id)
+    except Exception:
+        # Legacy/third-party compatibility path: its existing APIs
+        # do not provide a verifiable transaction contract.
+        logger.debug("compression cooldown persistence rollback failed", exc_info=True)
+
+
 def _restore_compressor_attempt_state(
     compressor: Any,
     snapshot: dict[str, Any],
@@ -365,62 +403,9 @@ def _restore_compressor_attempt_state(
             or not bool(snapshot.get("_cooldown_persist_failed", False))
         )
     ):
-        session_db = vars(compressor).get("_session_db")
-        session_id = vars(compressor).get("_session_id")
-        if session_db is not None and session_id:
-            if durable_cooldown_authoritative is True:
-                restorer = getattr(
-                    type(session_db),
-                    "restore_compression_failure_cooldown_row",
-                    None,
-                )
-                if not callable(restorer) or durable_cooldown_state is None:
-                    raise RuntimeError(
-                        "exact compression cooldown rollback API is unavailable"
-                    )
-                # This API restores raw columns (including expired and null
-                # combinations), verifies the read-back, and propagates failure.
-                restorer(
-                    session_db,
-                    session_id,
-                    copy.deepcopy(durable_cooldown_state),
-                )
-            else:
-                try:
-                    deadline = float(
-                        snapshot["_summary_failure_cooldown_until"] or 0.0
-                    )
-                    remaining = max(0.0, deadline - time.monotonic())
-                    durable_deadline = time.time() + remaining
-                    durable_error = snapshot.get("_last_summary_error")
-                    if remaining > 0:
-                        recorder = getattr(
-                            type(session_db),
-                            "record_compression_failure_cooldown",
-                            None,
-                        )
-                        if callable(recorder):
-                            recorder(
-                                session_db,
-                                session_id,
-                                durable_deadline,
-                                durable_error,
-                            )
-                    else:
-                        clearer = getattr(
-                            type(session_db),
-                            "clear_compression_failure_cooldown",
-                            None,
-                        )
-                        if callable(clearer):
-                            clearer(session_db, session_id)
-                except Exception:
-                    # Legacy/third-party compatibility path: its existing APIs
-                    # do not provide a verifiable transaction contract.
-                    logger.debug(
-                        "compression cooldown persistence rollback failed",
-                        exc_info=True,
-                    )
+        _rollback_durable_cooldown(
+            compressor, snapshot, durable_cooldown_authoritative, durable_cooldown_state
+        )
     restored = copy.deepcopy(snapshot)
     # Re-validate under the claim lock: the slow durable rollback above leaves a
     # window where a fallback may have claimed; stale writes must not interleave.
@@ -1606,32 +1591,30 @@ def _get_context_compression_timeout_state(
         return lock, state if isinstance(state, threading.local) else None
 
 
-def reset_context_compression_timeout_outcome(agent: Any) -> None:
-    """Clear the current thread's owned-compression timeout outcome.
+def _set_context_compression_timeout_outcome(agent: Any, timed_out: bool) -> None:
+    """Write this thread's owned-compression timeout outcome.
 
     The ``agent._last_compression_timed_out`` mirror stays authoritative for
     minimal agent doubles that do not support ``vars()``.
     """
     locked_state = _get_context_compression_timeout_state(agent, create=True)
     if locked_state is None or locked_state[1] is None:
-        agent._last_compression_timed_out = False
+        agent._last_compression_timed_out = timed_out
         return
     lock, state = locked_state
     with lock:
-        state.timed_out = False
-        agent._last_compression_timed_out = False
+        state.timed_out = timed_out
+        agent._last_compression_timed_out = timed_out
+
+
+def reset_context_compression_timeout_outcome(agent: Any) -> None:
+    """Clear the current thread's owned-compression timeout outcome."""
+    _set_context_compression_timeout_outcome(agent, False)
 
 
 def mark_context_compression_timed_out(agent: Any) -> None:
     """Mark the current owned compression as host-timed-out."""
-    locked_state = _get_context_compression_timeout_state(agent, create=True)
-    if locked_state is None or locked_state[1] is None:
-        agent._last_compression_timed_out = True
-        return
-    lock, state = locked_state
-    with lock:
-        state.timed_out = True
-        agent._last_compression_timed_out = True
+    _set_context_compression_timeout_outcome(agent, True)
 
 
 def context_compression_timed_out(agent: Any) -> bool:
@@ -2962,6 +2945,25 @@ class _CompressionLease:
                     self.finish_lock_setup()
 
 
+def _resolve_lock_api(lock_db: Any) -> Tuple[Any, Optional[Exception]]:
+    """Return ``(try_acquire_compression_lock, lookup_error)`` for ``lock_db``.
+
+    ``(None, None)`` = no db or legacy SessionDB without the lock API (fail open);
+    ``(None, exc)`` = lookup itself failed (caller fails closed).
+    """
+    if lock_db is None:
+        return None, None
+    try:
+        if _lock_api_is_absent_on_session_db(lock_db):
+            return None, None
+        try_acquire = lock_db.try_acquire_compression_lock
+        if not callable(try_acquire):
+            return None, TypeError("compression lock API is present but not callable")
+        return try_acquire, None
+    except Exception as exc:
+        return None, exc
+
+
 def _acquire_compression_lease(
     agent: Any,
     *,
@@ -2981,28 +2983,10 @@ def _acquire_compression_lease(
     """
     _lock_db = getattr(agent, "_session_db", None)
     _lock_sid = agent.session_id or ""
-    _try_acquire_lock = None
-    _lock_lookup_error: Optional[Exception] = None
-    _legacy_session_db_without_lock_api = False
     # Clear stale lock-skip so this call's outcome alone is visible; else a manual
     # /compress after an auto lock-skip falsely reports "already in progress".
     agent._compression_skipped_due_to_lock = None
-    if _lock_db is not None:
-        try:
-            _legacy_session_db_without_lock_api = _lock_api_is_absent_on_session_db(
-                _lock_db
-            )
-        except Exception as exc:
-            _lock_lookup_error = exc
-        if _lock_lookup_error is None and not _legacy_session_db_without_lock_api:
-            try:
-                _try_acquire_lock = _lock_db.try_acquire_compression_lock
-                if not callable(_try_acquire_lock):
-                    _lock_lookup_error = TypeError(
-                        "compression lock API is present but not callable"
-                    )
-            except Exception as exc:
-                _lock_lookup_error = exc
+    _try_acquire_lock, _lock_lookup_error = _resolve_lock_api(_lock_db)
     try:
         _lock_ttl = float(getattr(agent, "_compression_lock_ttl_seconds", 300.0) or 300.0)
     except (TypeError, ValueError):
@@ -3656,6 +3640,64 @@ def _salvage_or_refuse_grown_transcript(
     return compressed, None
 
 
+def _parent_deliberately_ended(session_db: Any, session_id: str) -> bool:
+    """True when the parent row was ended by a non-automatic reason. Fails OPEN: an
+    unreadable row must not turn a cheap guard into a new way to lose compression."""
+    reader = getattr(session_db, "get_session", None)
+    if not callable(reader):
+        return False
+    try:
+        from hermes_state_common import is_automatic_end_reason
+
+        row = reader(session_id) or {}
+        return row.get("ended_at") is not None and not is_automatic_end_reason(row.get("end_reason"))
+    except Exception:
+        return False
+
+
+def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: Any) -> None:
+    """Migrate /goal, /heartbeat, /loop state and the title from the parent to the child.
+
+    Each lookup is a flat per-session read with no parent walk, so state would silently
+    die at the boundary. The title is carried unchanged (renumbering per rotation made
+    one session look like many); its provenance is read BEFORE the transfer clears the
+    ancestor's row, then restored so an inherited auto-title stays upgradeable.
+    """
+    try:
+        from hermes_cli.goals import migrate_goal_to_session
+        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
+    except Exception as _goal_err:
+        logger.debug("Could not migrate goal on compression: %s", _goal_err)
+    try:
+        from hermes_cli.heartbeat import migrate_heartbeat_to_session
+        migrate_heartbeat_to_session(old_session_id, agent.session_id)
+    except Exception as _hb_err:
+        logger.debug("Could not migrate heartbeat on compression: %s", _hb_err)
+    try:
+        from hermes_cli.loops import migrate_loop_to_session
+        migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
+    except Exception as _loop_err:
+        logger.debug("Could not migrate loop on compression: %s", _loop_err)
+    if not old_title:
+        return
+    _src = None
+    try:
+        _src = agent._session_db.get_session_title_source(old_session_id)
+    except Exception as _src_err:
+        logger.debug("Could not read title provenance: %s", _src_err)
+    try:
+        agent._session_db.set_session_title(agent.session_id, old_title)
+    except (ValueError, Exception) as e:
+        logger.debug("Could not propagate title on compression: %s", e)
+        return
+    # set_session_title() records "user"; restore the original authority.
+    if _src is not None:
+        try:
+            agent._session_db.set_session_title_source(agent.session_id, _src)
+        except Exception as _src_err:
+            logger.debug("Could not propagate title provenance: %s", _src_err)
+
+
 def _publish_rotated_compaction(
     agent: Any,
     messages: list,
@@ -3682,27 +3724,8 @@ def _publish_rotated_compaction(
     # The flush is durable and NOT rolled back on abort: a deliberately-ended parent
     # fails publish forever, so check that before writing. Automatic end stamps are
     # healed by publish (don't abort); the lease is re-acquirable (don't check it).
-    _parent_row_reader = getattr(agent._session_db, "get_session", None)
-    _parent_already_ended = False
-    if callable(_parent_row_reader):
-        try:
-            from hermes_state_common import is_automatic_end_reason
-
-            _parent_row = _parent_row_reader(old_session_id) or {}
-            _parent_already_ended = (
-                _parent_row.get("ended_at") is not None
-                and not is_automatic_end_reason(
-                    _parent_row.get("end_reason")
-                )
-            )
-        except Exception:
-            # Fail OPEN: an unreadable row must not turn a cheap
-            # guard into a new way to lose compression.
-            _parent_already_ended = False
-    if _parent_already_ended:
-        raise RuntimeError(
-            f"Compression parent already ended: {old_session_id}"
-        )
+    if _parent_deliberately_ended(agent._session_db, old_session_id):
+        raise RuntimeError(f"Compression parent already ended: {old_session_id}")
     # Foreign-tail ceiling: the flush below writes OUR rows (already in handoff);
     # rows above the start watermark up to this MAX(id) are foreign appends.
     try:
@@ -3794,58 +3817,7 @@ def _publish_rotated_compaction(
     agent._db_flush_scan_prefix = None
     _rebind_session_context(agent.session_id)
     agent._session_db_created = True
-    # Carry /goal to the child: load_goal is a flat per-session lookup with no
-    # parent walk, so the goal would silently die at the boundary.
-    try:
-        from hermes_cli.goals import migrate_goal_to_session
-        migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
-    except Exception as _goal_err:
-        logger.debug("Could not migrate goal on compression: %s", _goal_err)
-    # Same boundary hazard for /heartbeat state — carry it too.
-    try:
-        from hermes_cli.heartbeat import migrate_heartbeat_to_session
-        migrate_heartbeat_to_session(old_session_id, agent.session_id)
-    except Exception as _hb_err:
-        logger.debug("Could not migrate heartbeat on compression: %s", _hb_err)
-    # Same hazard for a persistent /loop: carry it so recurring wakeups survive.
-    try:
-        from hermes_cli.loops import migrate_loop_to_session
-        migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
-    except Exception as _loop_err:
-        logger.debug("Could not migrate loop on compression: %s", _loop_err)
-    # Carry the title unchanged: renumbering per rotation made one session look
-    # like many. Uniqueness holds: _set_session_title transfers off the ancestor.
-    if old_title:
-        # Read provenance BEFORE the write: the transfer clears the ancestor's row, so
-        # a later read is None and the child would be frozen as "user".
-        _src = None
-        try:
-            _src = agent._session_db.get_session_title_source(
-                old_session_id
-            )
-        except Exception as _src_err:
-            logger.debug(
-                "Could not read title provenance: %s", _src_err
-            )
-        try:
-            agent._session_db.set_session_title(
-                agent.session_id, old_title
-            )
-        except (ValueError, Exception) as e:
-            logger.debug("Could not propagate title on compression: %s", e)
-        else:
-            # set_session_title() records "user"; restore the original authority so an
-            # inherited auto-title stays upgradeable and a manual one stays pinned.
-            if _src is not None:
-                try:
-                    agent._session_db.set_session_title_source(
-                        agent.session_id, _src
-                    )
-                except Exception as _src_err:
-                    logger.debug(
-                        "Could not propagate title provenance: %s",
-                        _src_err,
-                    )
+    _carry_session_state_to_child(agent, old_session_id, old_title)
 
 
 def _warn_summary_or_aux_fallback(agent: Any) -> None:
@@ -3873,6 +3845,26 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
                     f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
                     "check auxiliary.compression.model in config.yaml."
                 )
+
+
+def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
+    """Clear the file-read (and skill_view) repeat-read dedup caches after a boundary.
+
+    Original read content was summarized away, so a re-read must return full content,
+    not a "file unchanged" stub.
+    """
+    try:
+        from tools.file_tools import reset_file_dedup
+        reset_file_dedup(task_id)
+    except Exception:
+        pass
+    if not skills:
+        return
+    try:
+        from tools.skills_tool import reset_skill_view_dedup
+        reset_skill_view_dedup(task_id)
+    except Exception:
+        pass
 
 
 def _finish_compaction_boundary(
@@ -4013,20 +4005,7 @@ def _finish_compaction_boundary(
         else:
             agent.context_compressor._verify_compaction_cleared_threshold = True
 
-    # Clear file-read dedup cache: original read content was summarized away, so a
-    # re-read needs full content, not a "file unchanged" stub.
-    try:
-        from tools.file_tools import reset_file_dedup
-        reset_file_dedup(task_id)
-    except Exception:
-        pass
-    # Same for the skill_view repeat-view dedup: a post-compression
-    # re-view must return the full skill content again.
-    try:
-        from tools.skills_tool import reset_skill_view_dedup
-        reset_skill_view_dedup(task_id)
-    except Exception:
-        pass
+    _reset_read_dedup_caches(task_id)
     return _compressed_est
 
 
@@ -4944,12 +4923,7 @@ def _compress_context_via_codex_app_server(
     except Exception:
         logger.debug("codex compaction bookkeeping failed", exc_info=True)
 
-    try:
-        from tools.file_tools import reset_file_dedup
-
-        reset_file_dedup(task_id)
-    except Exception:
-        pass
+    _reset_read_dedup_caches(task_id, skills=False)
 
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s",
@@ -4964,6 +4938,127 @@ def _compress_context_via_codex_app_server(
     return messages, existing_prompt
 
 
+# 4 MB leaves headroom under Anthropic's 5 MB; shrinking loses quality but only
+# runs after a confirmed provider rejection, so the alternative is failure.
+_IMAGE_SHRINK_TARGET_BYTES = 4 * 1024 * 1024
+_IMAGE_SUFFIX_BY_MIME = {
+    "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+    "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/bmp": ".bmp",
+}
+
+
+def _data_url_mime(header: str, default: str = "image/jpeg") -> str:
+    """``image/*`` mime from a ``data:`` URL header, else ``default``."""
+    if header.startswith("data:"):
+        candidate = header[len("data:"):].split(";", 1)[0].strip()
+        if candidate.startswith("image/"):
+            return candidate
+    return default
+
+
+def _decode_pixels(data_url: str) -> Optional[tuple]:
+    """``(width, height)`` of a base64 data URL; None when Pillow is missing or the payload is corrupt."""
+    try:
+        import base64 as _b64_dim
+        import io as _io_dim
+        header_d, _, data_d = data_url.partition(",")
+        if not data_d or not data_url.startswith("data:"):
+            return None
+        from PIL import Image as _PILImage
+        with _PILImage.open(_io_dim.BytesIO(_b64_dim.b64decode(data_d))) as _img:
+            return _img.size
+    except Exception:
+        return None
+
+
+def _shrink_data_url(url: str, *, max_dimension: int, resize_fn: Any) -> tuple:
+    """Return ``(resized_url, unshrinkable)`` for a data URL.
+
+    ``resized_url`` is None when no rewrite applied. ``unshrinkable`` is True only
+    when the image violated a constraint and resizing failed to satisfy that same
+    constraint, so the caller knows a retry is pointless. The accept gate MUST use
+    the axis that triggered the shrink: a pixel downscale can re-encode to MORE
+    bytes (PNG non-monotonic); a byte-only reject wedges.
+    """
+    target_bytes = _IMAGE_SHRINK_TARGET_BYTES
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None, False
+    needs_shrink = len(url) > target_bytes  # over byte budget
+    triggered_by = "bytes" if needs_shrink else None
+    if not needs_shrink:
+        # Bytes fine; check pixels against the provider cap (tiny bytes, huge pixels).
+        dims = _decode_pixels(url)
+        if dims is None or max(dims) <= max_dimension:
+            return None, False
+        triggered_by = "dimension"
+
+    try:
+        header, _, data = url.partition(",")
+        mime = _data_url_mime(header)
+        import base64 as _b64
+        raw = _b64.b64decode(data)
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="hermes_shrink_", suffix=_IMAGE_SUFFIX_BY_MIME.get(mime, ".jpg"), delete=False,
+        )
+        try:
+            tmp.write(raw)
+            tmp.close()
+            resized = resize_fn(
+                Path(tmp.name),
+                mime_type=mime,
+                max_base64_bytes=target_bytes,
+                max_dimension=max_dimension,
+            )
+        finally:
+            try:
+                Path(tmp.name).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if not resized:
+            return None, True  # Pillow couldn't help
+        new_dims = _decode_pixels(resized)
+        if triggered_by == "bytes":
+            # Byte budget is binding — bytes must shrink; and the resizer may return an
+            # over-cap blob (long side freezes at the 64px short-side floor) → still 400.
+            if len(resized) >= len(url) or (new_dims is not None and max(new_dims) > max_dimension):
+                return None, True
+            return resized, False
+        # Dimension cap is binding: accept a byte-larger re-encode if now within cap.
+        if new_dims is not None:
+            return (resized, False) if max(new_dims) <= max_dimension else (None, True)
+        # Can't verify dimensions: fall back to the bytes-must-shrink gate so we never
+        # accept an unverifiable byte-larger blob.
+        if len(resized) >= len(url):
+            return None, True
+        return resized, False
+    except Exception as exc:
+        logger.warning("image-shrink recovery: re-encode failed — %s", exc)
+        return None, triggered_by is not None
+
+
+def _source_to_data_url(source: Any) -> Optional[str]:
+    """Anthropic ``{"type": "base64", ...}`` image source → data URL, else None."""
+    if not isinstance(source, dict) or source.get("type") != "base64":
+        return None
+    data = source.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    media_type = str(source.get("media_type") or "image/jpeg").strip()
+    if not media_type.startswith("image/"):
+        media_type = "image/jpeg"
+    return f"data:{media_type};base64,{data}"
+
+
+def _write_data_url_to_source(source: dict, data_url: str) -> dict:
+    """Return a NEW source dict carrying the re-encoded payload.
+
+    Copy-on-write: parts may be shared with the persistent history, so mutating
+    in place would store the degraded image; the caller replaces the part.
+    """
+    header, _, data = data_url.partition(",")
+    return {**source, "type": "base64", "media_type": _data_url_mime(header), "data": data}
+
+
 def try_shrink_image_parts_in_messages(
     api_messages: list,
     *,
@@ -4973,7 +5068,8 @@ def try_shrink_image_parts_in_messages(
 
     Mutates ``api_messages`` in place. Returns True if any part was replaced,
     False if nothing to shrink or Pillow could not help. Targets data-URL parts
-    over 4 MB or ``max_dimension``; http(s) image URLs are left untouched.
+    over 4 MB or ``max_dimension`` (Anthropic's per-side pixel cap, parsed from
+    the rejection by the caller); http(s) image URLs are left untouched.
     """
     if not api_messages:
         return False
@@ -4984,147 +5080,13 @@ def try_shrink_image_parts_in_messages(
         logger.warning("image-shrink recovery: vision_tools unavailable — %s", exc)
         return False
 
-    # 4 MB leaves headroom under Anthropic's 5 MB; shrinking loses quality but only
-    # runs after a confirmed provider rejection, so the alternative is failure.
-    target_bytes = 4 * 1024 * 1024
-    # Anthropic also caps per-side pixels (8000, or lower in many-image requests);
-    # the caller passes the parsed ceiling when the rejection includes it.
     changed_count = 0
     # Track over-target parts that could not be shrunk: if any remain, a retry
     # re-sends the same payload and wastes the single retry budget.
     unshrinkable_oversized = 0
 
-    def _decode_pixels(data_url: str) -> Optional[tuple]:
-        """Return ``(width, height)`` of a base64 data URL, or None on failure.
-
-        None when Pillow is missing or the payload is corrupt; caller falls back to a
-        bytes-only check.
-        """
-        try:
-            import base64 as _b64_dim
-            import io as _io_dim
-            header_d, _, data_d = data_url.partition(",")
-            if not data_d or not data_url.startswith("data:"):
-                return None
-            from PIL import Image as _PILImage
-            with _PILImage.open(_io_dim.BytesIO(_b64_dim.b64decode(data_d))) as _img:
-                return _img.size
-        except Exception:
-            return None
-
-    def _shrink_data_url(url: str) -> tuple:
-        """Return ``(resized_url, unshrinkable)`` for a data URL.
-
-        ``resized_url`` is None when no rewrite applied. ``unshrinkable`` is True only
-        when the image violated a constraint and resizing failed to satisfy that same
-        constraint, so the caller knows a retry is pointless.
-        """
-        if not isinstance(url, str) or not url.startswith("data:"):
-            return None, False
-
-        # The accept gate MUST use the axis that triggered the shrink: a pixel downscale
-        # can re-encode to MORE bytes (PNG non-monotonic); byte-only reject wedges.
-        needs_shrink = len(url) > target_bytes  # over byte budget
-        triggered_by = "bytes" if needs_shrink else None
-        if not needs_shrink:
-            # Bytes fine; check pixels against the provider cap (tiny bytes, huge pixels).
-            dims = _decode_pixels(url)
-            if dims is None:
-                # Pillow missing or corrupt data — fall back to byte-only.
-                return None, False
-            if max(dims) <= max_dimension:
-                return None, False  # both bytes and pixels are within limits
-            needs_shrink = True
-            triggered_by = "dimension"
-
-        try:
-            header, _, data = url.partition(",")
-            mime = "image/jpeg"
-            if header.startswith("data:"):
-                mime_part = header[len("data:"):].split(";", 1)[0].strip()
-                if mime_part.startswith("image/"):
-                    mime = mime_part
-            import base64 as _b64
-            raw = _b64.b64decode(data)
-            suffix = {
-                "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
-                "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/bmp": ".bmp",
-            }.get(mime, ".jpg")
-            tmp = tempfile.NamedTemporaryFile(
-                prefix="hermes_shrink_", suffix=suffix, delete=False,
-            )
-            try:
-                tmp.write(raw)
-                tmp.close()
-                resized = _resize_image_for_vision(
-                    Path(tmp.name),
-                    mime_type=mime,
-                    max_base64_bytes=target_bytes,
-                    max_dimension=max_dimension,
-                )
-            finally:
-                try:
-                    Path(tmp.name).unlink(missing_ok=True)
-                except Exception:
-                    pass
-            if not resized:
-                # Resize returned nothing — Pillow couldn't help.
-                return None, True
-            if triggered_by == "bytes":
-                # Byte budget is the binding constraint — bytes must shrink.
-                if len(resized) >= len(url):
-                    return None, True  # re-encode made it bigger
-                # The resizer may return an over-cap blob (long side freezes at the 64px short-
-                # side floor); still over cap → re-400, so unshrinkable. Undecodable dims: skip.
-                new_dims = _decode_pixels(resized)
-                if new_dims is not None and max(new_dims) > max_dimension:
-                    return None, True
-                return resized, False
-            # Dimension cap is binding: accept a byte-larger re-encode if now within cap.
-            new_dims = _decode_pixels(resized)
-            if new_dims is not None:
-                if max(new_dims) <= max_dimension:
-                    return resized, False
-                # Still over the per-side cap — the resize didn't satisfy it.
-                return None, True
-            # Can't verify dimensions: fall back to the bytes-must-shrink gate so we never
-            # accept an unverifiable byte-larger blob.
-            if len(resized) >= len(url):
-                return None, True
-            return resized, False
-        except Exception as exc:
-            logger.warning("image-shrink recovery: re-encode failed — %s", exc)
-            return None, triggered_by is not None
-
-    def _source_to_data_url(source: Any) -> Optional[str]:
-        if not isinstance(source, dict) or source.get("type") != "base64":
-            return None
-        data = source.get("data")
-        if not isinstance(data, str) or not data:
-            return None
-        media_type = str(source.get("media_type") or "image/jpeg").strip()
-        if not media_type.startswith("image/"):
-            media_type = "image/jpeg"
-        return f"data:{media_type};base64,{data}"
-
-    def _write_data_url_to_source(source: dict, data_url: str) -> dict:
-        """Return a NEW source dict carrying the re-encoded payload.
-
-        Copy-on-write: parts may be shared with the persistent history, so mutating
-        in place would store the degraded image; the caller replaces the part.
-        """
-        header, _, data = data_url.partition(",")
-        media_type = "image/jpeg"
-        if header.startswith("data:"):
-            candidate = header[len("data:"):].split(";", 1)[0].strip()
-            if candidate.startswith("image/"):
-                media_type = candidate
-        return {
-            **source,
-            "type": "base64",
-            "media_type": media_type,
-            "data": data,
-        }
+    def _shrink(url: Any) -> tuple:
+        return _shrink_data_url(url, max_dimension=max_dimension, resize_fn=_resize_image_for_vision)
 
     for msg in api_messages:
         if not isinstance(msg, dict):
@@ -5139,55 +5101,43 @@ def try_shrink_image_parts_in_messages(
             if not isinstance(part, dict):
                 continue
             ptype = part.get("type")
+            replacement = None
             if ptype == "image":
                 source = part.get("source")
-                url = _source_to_data_url(source)
-                resized, unshrinkable = _shrink_data_url(url or "")
+                resized, unshrinkable = _shrink(_source_to_data_url(source) or "")
                 if resized and isinstance(source, dict):
-                    if new_content is None:
-                        new_content = list(content)
-                    new_content[part_idx] = {
-                        **part,
-                        "source": _write_data_url_to_source(source, resized),
-                    }
-                    changed_count += 1
-                elif unshrinkable:
-                    unshrinkable_oversized += 1
+                    replacement = {**part, "source": _write_data_url_to_source(source, resized)}
+            elif ptype in {"image_url", "input_image"}:
+                image_value = part.get("image_url")
+                # OpenAI chat.completions: {"image_url": {"url": "data:..."}}
+                # OpenAI Responses: {"image_url": "data:..."}
+                if isinstance(image_value, dict):
+                    resized, unshrinkable = _shrink(image_value.get("url", ""))
+                    if resized:
+                        replacement = {**part, "image_url": {**image_value, "url": resized}}
+                elif isinstance(image_value, str):
+                    resized, unshrinkable = _shrink(image_value)
+                    if resized:
+                        replacement = {**part, "image_url": resized}
+                else:
+                    continue
+            else:
                 continue
-            if ptype not in {"image_url", "input_image"}:
-                continue
-            image_value = part.get("image_url")
-            # OpenAI chat.completions: {"image_url": {"url": "data:..."}}
-            # OpenAI Responses: {"image_url": "data:..."}
-            if isinstance(image_value, dict):
-                url = image_value.get("url", "")
-                resized, unshrinkable = _shrink_data_url(url)
-                if resized:
-                    if new_content is None:
-                        new_content = list(content)
-                    new_content[part_idx] = {
-                        **part,
-                        "image_url": {**image_value, "url": resized},
-                    }
-                    changed_count += 1
-                elif unshrinkable:
-                    unshrinkable_oversized += 1
-            elif isinstance(image_value, str):
-                resized, unshrinkable = _shrink_data_url(image_value)
-                if resized:
-                    if new_content is None:
-                        new_content = list(content)
-                    new_content[part_idx] = {**part, "image_url": resized}
-                    changed_count += 1
-                elif unshrinkable:
-                    unshrinkable_oversized += 1
+            if replacement is not None:
+                if new_content is None:
+                    new_content = list(content)
+                new_content[part_idx] = replacement
+                changed_count += 1
+            elif unshrinkable:
+                unshrinkable_oversized += 1
         if new_content is not None:
             msg["content"] = new_content
 
+    target_mb = _IMAGE_SHRINK_TARGET_BYTES / (1024 * 1024)
     if changed_count:
         logger.info(
             "image-shrink recovery: re-encoded %d image part(s) to fit under %.0f MB",
-            changed_count, target_bytes / (1024 * 1024),
+            changed_count, target_mb,
         )
     if unshrinkable_oversized:
         # An unshrinkable oversized image makes retry pointless; signal no progress even
@@ -5195,7 +5145,7 @@ def try_shrink_image_parts_in_messages(
         logger.warning(
             "image-shrink recovery: %d oversized image part(s) could not be "
             "shrunk under %.0f MB — not retrying (would re-send rejected payload)",
-            unshrinkable_oversized, target_bytes / (1024 * 1024),
+            unshrinkable_oversized, target_mb,
         )
         return False
     return changed_count > 0
