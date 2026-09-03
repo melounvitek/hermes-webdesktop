@@ -183,6 +183,7 @@ _LINK_COLUMNS = (
     "room_id", "member_id", "target_url", "target_profile", "grant", "catalog_json",
     "cancellation_scope_id", "trace_id", "transport_security", "status", "updated_at")
 _REMOTE_RUN_WHERE = " AND ".join(f"{column}=?" for column in _REMOTE_RUN_IDENTITY_COLUMNS)
+_SELECT_REMOTE_RUN = f"SELECT * FROM hosted_room_remote_runs WHERE {_REMOTE_RUN_WHERE}"
 _LIVE_RESERVATION_WHERE = ("WHERE room_id=? AND target_profile=? AND expires_at>? AND revoked_at IS NULL")
 _SELECT_LIVE_RESERVATION = (
     f"SELECT 1 FROM hosted_room_peer_reservations {_LIVE_RESERVATION_WHERE} LIMIT 1")
@@ -506,15 +507,16 @@ def _transaction(db_path: Path | str, *, immediate: bool = False):
 
 
 def _raise_room_not_found(conn: sqlite3.Connection, room_id: str) -> NoReturn:
+    # A retained disband tombstone still has replayable history; the caller simply
+    # did not opt into reading disbanded rooms.
     retained = conn.execute("SELECT 1 FROM hosted_rooms WHERE room_id=?", (room_id,)).fetchone()
-    if retained is not None:
-        # A retained disband tombstone still has replayable history. The
-        # caller simply did not opt into reading disbanded rooms.
-        raise RoomNotFoundError("hosted room not found")
-    retired = conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone()
-    if retired is not None:
+    if retained is None and _is_retired(conn, room_id):
         raise RoomHistoryExpiredError("Group Chat history expired; room_id remains permanently retired")
     raise RoomNotFoundError("hosted room not found")
+
+
+def _is_retired(conn: sqlite3.Connection, room_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone() is not None
 
 
 def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> sqlite3.Row:
@@ -762,9 +764,8 @@ def revoke_room_grant_scope(
 def _reservation_claims(claims: Mapping[str, Any]) -> tuple[str, str, str, str, int]:
     """Validate (room_id, member_id, target_profile, authority_gateway_id, authority_epoch)."""
     values = (
-        _room_id(claims.get("room_id")), _actor_id(claims.get("member_id"), "member_id"),
-        _actor_id(claims.get("target_profile"), "target_profile"),
-        _actor_id(claims.get("authority_gateway_id"), "authority_gateway_id"),
+        _room_id(claims.get("room_id")),
+        *(_actor_id(claims.get(key), key) for key in ("member_id", "target_profile", "authority_gateway_id")),
         int(claims.get("authority_epoch") or 0))
     if values[4] < 1:
         raise HostedRoomError("authority_epoch must be positive")
@@ -865,13 +866,11 @@ def upsert_remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any],
     """Durably bind one logical peer task attempt to its remote run handle."""
     timestamp = _now(now)
     identity = _remote_run_identity(record)
+    immutable = (*identity, record["run_id"], record["session_id"])
     with _transaction(db_path, immediate=True) as conn:
-        existing = conn.execute(
-            f"SELECT * FROM hosted_room_remote_runs WHERE {_REMOTE_RUN_WHERE}", identity).fetchone()
-        immutable = (*identity, record["run_id"], record["session_id"])
+        existing = conn.execute(_SELECT_REMOTE_RUN, identity).fetchone()
         if existing is not None:
-            stored = (*_remote_run_identity(existing), existing["run_id"], existing["session_id"])
-            if stored != immutable:
+            if (*_remote_run_identity(existing), existing["run_id"], existing["session_id"]) != immutable:
                 raise HostedRoomError("remote run receipt conflicts with its logical task")
             conn.execute(
                 f"UPDATE hosted_room_remote_runs SET updated_at=? WHERE {_REMOTE_RUN_WHERE}",
@@ -907,10 +906,7 @@ def list_remote_run_receipts(
 
 def remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return the exact durable remote run handle for one task attempt."""
-    row = _read_one(
-        db_path,
-        f"SELECT * FROM hosted_room_remote_runs WHERE {_REMOTE_RUN_WHERE}",
-        _remote_run_identity(record))
+    row = _read_one(db_path, _SELECT_REMOTE_RUN, _remote_run_identity(record))
     return dict(row) if row is not None else None
 
 
@@ -960,7 +956,7 @@ def create_room(
     now = _now(now)
 
     with _transaction(db_path, immediate=True) as conn:
-        if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
+        if _is_retired(conn, room_id):
             raise RoomConflictError("room_id belongs to a disbanded room")
         existing = conn.execute(_SELECT_ROOM_WITH_BYTES, (room_id,)).fetchone()
         if existing is not None:
@@ -1119,9 +1115,7 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
         try:
             table_row = conn.execute(
                 f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{table}' LIMIT 1").fetchone()
-            if table_row is None:
-                return False
-            return conn.execute(query, params).fetchone() is not None
+            return table_row is not None and conn.execute(query, params).fetchone() is not None
         finally:
             conn.close()
     except sqlite3.Error as exc:

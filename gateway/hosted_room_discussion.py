@@ -359,10 +359,10 @@ def _require_gateway_actor(actor: Mapping[str, Any], room: DiscussionRoom, messa
 
 def _member_by_id(room: DiscussionRoom, member_id: Any) -> DiscussionMember:
     normalized = _identifier(member_id, label="member_id")
-    for member in room.members:
-        if member.member_id == normalized:
-            return member
-    raise DiscussionValidationError(f"unknown Discussion member '{normalized}'")
+    member = next((m for m in room.members if m.member_id == normalized), None)
+    if member is None:
+        raise DiscussionValidationError(f"unknown Discussion member '{normalized}'")
+    return member
 
 
 def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom) -> None:
@@ -785,13 +785,9 @@ def reconstruct_task_plan(
     member = next(
         (
             candidate for candidate in room.members
-            if (
-                candidate.member_id == target_member_id
-                if target_member_id is not None
-                else candidate.profile == profile)),
+            if candidate.profile == profile
+            and (target_member_id is None or candidate.member_id == target_member_id)),
         None)
-    if member is not None and member.profile != profile:
-        member = None
     if member is None or _member_digest(member) != match.group("member"):
         raise DiscussionReconstructionError("task target member does not match turn_id")
     prompt = payload.get("prompt")
