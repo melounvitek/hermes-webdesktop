@@ -207,12 +207,9 @@ def clone_honcho_for_profile(profile_name: str) -> bool:
     cfg = _read_config()
     if not cfg:
         return False
-    hosts = cfg.get("hosts", {})
     default_block, has_key = _default_block_and_key(cfg)
-    if not default_block and not has_key:
-        return False
     new_host = profile_host_key(profile_name)
-    if new_host in hosts:
+    if (not default_block and not has_key) or new_host in cfg.get("hosts", {}):
         return False
 
     new_block: dict = {}
@@ -281,8 +278,7 @@ def cmd_enable(args) -> None:
     label = _label(host)
     block = cfg.setdefault("hosts", {}).setdefault(host, {})
     if block.get("enabled") is True:
-        print(f"  {label}Honcho is already enabled.\n")
-        return
+        return print(f"  {label}Honcho is already enabled.\n")
     block["enabled"] = True
 
     if not block.get("aiPeer"):  # fresh profile block: clone settings from default
@@ -303,8 +299,7 @@ def cmd_disable(args) -> None:
     host = _host_key()
     block = cfg_get(cfg, "hosts", host, default={})
     if not block or block.get("enabled") is False:
-        print(f"  {_label(host)}Honcho is already disabled.\n")
-        return
+        return print(f"  {_label(host)}Honcho is already disabled.\n")
     block["enabled"] = False
     print(f"  {_label(host)}Honcho disabled.")
     _save(cfg)
@@ -313,10 +308,10 @@ def cmd_disable(args) -> None:
 # ── identity mapping (setup wizard) ────────────────────────────────────────
 
 def _resolve_effective_identity_mapping(cfg: dict, hermes_host: dict) -> tuple[bool, dict, str, bool, bool]:
-    """``(pin, aliases, prefix, aliases_from_root, prefix_from_root)`` for the active
-    host, mirroring ``HonchoClientConfig.from_global_config`` precedence (root-level
-    overrides; ``pinUserPeer`` beats ``pinPeerName``) so setup classifies the shape
-    the gateway actually runs with. ``*_from_root`` lets writes skip inherited values."""
+    """``(pin, aliases, prefix, aliases_from_root, prefix_from_root)`` for the active host,
+    mirroring ``from_global_config`` precedence (host over root; ``pinUserPeer`` beats
+    ``pinPeerName``) so setup classifies the shape the gateway actually runs with.
+    ``*_from_root`` lets writes skip inherited values."""
     pin_sources = (hermes_host.get("pinUserPeer"), hermes_host.get("pinPeerName"),
                    cfg.get("pinUserPeer"), cfg.get("pinPeerName"))
     pin = bool(next((v for v in pin_sources if v is not None), False))
@@ -344,15 +339,13 @@ def _migrate_pin_key(block: dict) -> bool:
     resolver prefers the canonical key). Returns True if the block changed."""
     if "pinPeerName" not in block:
         return False
-    legacy = block.pop("pinPeerName")
-    if "pinUserPeer" not in block:
-        block["pinUserPeer"] = legacy
+    block.setdefault("pinUserPeer", block.pop("pinPeerName"))
     return True
 
 
 def _gateway_platforms() -> list[str] | None:
-    """Connected gateway platforms, or None if undetectable. Lazy + guarded:
-    the memory plugin must not hard-depend on the gateway package."""
+    """Connected gateway platforms, or None if undetectable (lazy + guarded: the memory
+    plugin must not hard-depend on the gateway package)."""
     try:
         from gateway.config import load_gateway_config
         return [p.value for p in load_gateway_config().get_connected_platforms()]
@@ -365,12 +358,8 @@ def _collect_operator_aliases(existing: dict, peer_target: str) -> dict:
     aliases = dict(existing)
     print(f"\n  Add runtime IDs that should alias to peer '{peer_target}'.\n"
           "  Leave blank to skip a platform.  Existing aliases are preserved.")
-    for platform_label, alias_hint in (
-        ("Telegram UID", "e.g. 7654321"),
-        ("Discord snowflake", "e.g. 491827364"),
-        ("Slack user ID", "e.g. U04ABCDEF"),
-        ("Matrix MXID", "e.g. @you:matrix.org"),
-    ):
+    for platform_label, alias_hint in (("Telegram UID", "e.g. 7654321"), ("Discord snowflake", "e.g. 491827364"),
+                                       ("Slack user ID", "e.g. U04ABCDEF"), ("Matrix MXID", "e.g. @you:matrix.org")):
         entered = _prompt(f"  {platform_label} ({alias_hint})", default="").strip()
         if entered:
             aliases[entered] = peer_target
@@ -386,11 +375,9 @@ def _apply_runtime_prefix(hermes_host: dict, current_prefix: str, prefix_from_ro
 
 
 def _echo_identity_mapping(hermes_host: dict) -> None:
-    aliases = hermes_host.get("userPeerAliases")
-    prefix = hermes_host.get("runtimePeerPrefix")
     print(f"  resolved →\n    pinUserPeer       = {bool(hermes_host.get('pinUserPeer'))}\n"
-          f"    userPeerAliases   = {aliases if aliases else '{}'}\n"
-          f"    runtimePeerPrefix = {prefix if prefix else '(none)'}")
+          f"    userPeerAliases   = {hermes_host.get('userPeerAliases') or '{}'}\n"
+          f"    runtimePeerPrefix = {hermes_host.get('runtimePeerPrefix') or '(none)'}")
 
 
 def _configure_raw_identity_mapping(hermes_host, current_pin, current_aliases, current_prefix,
@@ -406,14 +393,10 @@ def _configure_raw_identity_mapping(hermes_host, current_pin, current_aliases, c
         return
     aliases = dict(current_aliases) if isinstance(current_aliases, dict) and not aliases_from_root else {}
     print("  userPeerAliases — 'runtime_id=peer' pairs (blank line to finish):")
-    while True:
-        entry = _prompt("    alias", default="").strip()
-        if not entry:
-            break
-        if "=" in entry:
-            rid, peer = (p.strip() for p in entry.split("=", 1))
-            if rid and peer:
-                aliases[rid] = peer
+    while entry := _prompt("    alias", default="").strip():
+        rid, _, peer = (p.strip() for p in entry.partition("="))
+        if rid and peer:
+            aliases[rid] = peer
     if aliases:
         hermes_host["userPeerAliases"] = aliases
     _apply_runtime_prefix(hermes_host, current_prefix, prefix_from_root,
@@ -421,12 +404,10 @@ def _configure_raw_identity_mapping(hermes_host, current_pin, current_aliases, c
 
 
 def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> None:
-    """Gateway identity mapping step. Only the gateway supplies a runtime user
-    ID (CLI/TUI/desktop fall through to peerName), so the step is gated on
-    gateway detection."""
+    """Gateway identity mapping step. Only the gateway supplies a runtime user ID (CLI/TUI/
+    desktop fall through to peerName), so the step is gated on gateway detection."""
     current_pin, current_aliases, current_prefix, aliases_from_root, prefix_from_root = (
-        _resolve_effective_identity_mapping(cfg, hermes_host)
-    )
+        _resolve_effective_identity_mapping(cfg, hermes_host))
     current_shape = "single" if current_pin else "hybrid" if current_aliases else "multi"
 
     gw_platforms = _gateway_platforms()
@@ -444,7 +425,7 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
         return
 
     peer_target = hermes_host.get("peerName") or current_peer or "user"
-    default_choice = {"single": "1", "hybrid": "2", "multi": "3"}.get(current_shape, "3")
+    default_choice = {"single": "1", "hybrid": "2"}.get(current_shape, "3")
     print("\n  How should gateway users map to memory peers?\n"
           "    [1] just me — every non-agent user collapses to your peer\n"
           "    [2] me + other people — keep mine pooled, others separate\n"
@@ -468,15 +449,13 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
             shape = "hybrid"
 
     if shape == "skip":
-        print("  Identity mapping left untouched.")
-        return
+        return print("  Identity mapping left untouched.")
     if shape == "raw":
         _configure_raw_identity_mapping(hermes_host, current_pin, current_aliases, current_prefix,
                                         aliases_from_root, prefix_from_root)
     else:
-        # Preserve operator-curated host-level aliases across multi → multi
-        # re-runs. Root-sourced aliases cascade naturally and are NOT copied
-        # down — an empty host map would mask a root baseline.
+        # Preserve operator-curated host-level aliases across multi → multi re-runs. Root-sourced
+        # aliases cascade naturally and are NOT copied down — an empty host map would mask a root baseline.
         prior_aliases = dict(current_aliases) if isinstance(current_aliases, dict) else {}
         if shape == "multi" and aliases_from_root:
             prior_aliases = {}
@@ -556,11 +535,10 @@ def _open_in_browser(url: str) -> None:
 
 
 def _setup_local_auth(cfg: dict, hermes_host: dict) -> None:
-    """Self-hosted Honcho may run with AUTH_USE_AUTH=true; clients then send a
-    JWT signed with the server's AUTH_JWT_SECRET as the bearer token. It is
-    stored under the host block (not top-level apiKey) so ``get_honcho_client``
-    treats it as an explicit local auth opt-in and cloud/hybrid switching is
-    unaffected."""
+    """Self-hosted Honcho may run with AUTH_USE_AUTH=true; clients then send a JWT signed with
+    the server's AUTH_JWT_SECRET as the bearer token. It is stored under the host block (not
+    top-level apiKey) so ``get_honcho_client`` treats it as an explicit local auth opt-in and
+    cloud/hybrid switching is unaffected."""
     new_url = _prompt("Base URL", default=cfg.get("baseUrl") or "http://localhost:8000")
     if new_url:
         cfg["baseUrl"] = new_url
@@ -582,15 +560,12 @@ def _setup_local_auth(cfg: dict, hermes_host: dict) -> None:
 def _setup_device_login(hermes_host: dict, write_path: Path, *, open_browser: bool) -> bool:
     """RFC 8628 device-code sign-in. Returns False if setup must abort."""
     from plugins.memory.honcho.oauth_flow import (
-        AccessDenied, AuthorizationTimeout, DeviceCode, DeviceCodeExpired, DeviceFlowError,
-        authorize_via_device_code,
+        AccessDenied, AuthorizationTimeout, DeviceCode, DeviceCodeExpired, DeviceFlowError, authorize_via_device_code,
     )
 
     def _show(device: DeviceCode) -> None:
-        print("\n  To connect, on any device with a browser:")
-        print(f"\n    1. Open   {device.verification_uri}")
-        print(f"    2. Enter  {device.user_code}")
-        print(f"\n  Or open directly:\n\n    {device.verification_uri_complete}\n")
+        print(f"\n  To connect, on any device with a browser:\n\n    1. Open   {device.verification_uri}\n"
+              f"    2. Enter  {device.user_code}\n\n  Or open directly:\n\n    {device.verification_uri_complete}\n")
         mins = max(1, device.expires_in // 60)
         print(f"  Waiting for approval (expires in {mins} min, Ctrl-C to cancel) ", end="", flush=True)
 
@@ -598,8 +573,7 @@ def _setup_device_login(hermes_host: dict, write_path: Path, *, open_browser: bo
     try:
         cred = authorize_via_device_code(
             config_path=write_path, source="hermes-cli", apply_config=False, display=_show,
-            open_url=_open_in_browser if open_browser else None,
-            on_poll=lambda: print(".", end="", flush=True),
+            open_url=_open_in_browser if open_browser else None, on_poll=lambda: print(".", end="", flush=True),
         )
     except KeyboardInterrupt:
         print("\n  Cancelled. Re-run 'hermes honcho setup' to try again.\n")
@@ -621,9 +595,8 @@ def _setup_device_login(hermes_host: dict, write_path: Path, *, open_browser: bo
 
 
 def _setup_browser_login(hermes_host: dict, write_path: Path) -> bool:
-    """Loopback OAuth sign-in, up front — the browser link is the whole point.
-    Tokens merge into the in-memory cfg so the wizard's final save keeps them;
-    settings stay wizard-owned (apply_config=False). Returns False on abort."""
+    """Loopback OAuth sign-in. Tokens merge into the in-memory cfg so the wizard's final save
+    keeps them; settings stay wizard-owned (apply_config=False). Returns False on abort."""
     from plugins.memory.honcho.oauth_flow import authorize_via_loopback
 
     def _open(url: str) -> None:
@@ -683,9 +656,7 @@ def _setup_cloud_auth(cfg: dict, hermes_host: dict, write_path: Path) -> bool:
 
 
 def _menu(header: str, *lines: str) -> None:
-    print(f"\n  {header}:")
-    for line in lines:
-        print(f"    {line}")
+    print(f"\n  {header}:\n" + "\n".join(f"    {line}" for line in lines))
 
 
 def _choice_step(hermes_host, key, current, label, valid, fallback=None) -> None:
@@ -724,16 +695,16 @@ def _setup_tuning(cfg: dict, hermes_host: dict) -> None:
     _menu("Context injection per turn (hybrid/context recall modes only)",
           "uncapped -- no limit (default)",
           "N        -- token limit per turn (e.g. 1200)")
-    new_ctx_tokens = _prompt("Context tokens", default=str(current_ctx_tokens) if current_ctx_tokens else "uncapped")
-    if new_ctx_tokens.strip().lower() in {"none", "uncapped", "no limit"}:
+    new_ctx_tokens = _prompt("Context tokens", default=str(current_ctx_tokens) if current_ctx_tokens else "uncapped").strip()
+    if new_ctx_tokens.lower() in {"none", "uncapped", "no limit"}:
         hermes_host.pop("contextTokens", None)
-    elif new_ctx_tokens.strip():
+    elif new_ctx_tokens:
         try:
             val = int(new_ctx_tokens)
-            if val >= 0:
-                hermes_host["contextTokens"] = val
         except (ValueError, TypeError):
-            pass  # keep current
+            val = -1  # non-numeric keeps current
+        if val >= 0:
+            hermes_host["contextTokens"] = val
 
     _menu("Dialectic cadence",
           "How often Honcho rebuilds its user model (LLM call on Honcho backend).",
@@ -765,8 +736,7 @@ def _setup_tuning(cfg: dict, hermes_host: dict) -> None:
 def cmd_setup(args) -> None:
     """Interactive Honcho setup wizard."""
     cfg = _read_config()
-    write_path = _local_config_path()
-    read_path = _config_path()
+    write_path, read_path = _local_config_path(), _config_path()
     print(f"\nHoncho memory setup\n{RULE}\n  Honcho gives Hermes persistent cross-session memory.\n  Config: {write_path}")
     if read_path != write_path and read_path.exists():
         print(f"  (seeding from existing config at {read_path})")
@@ -822,8 +792,7 @@ def cmd_setup(args) -> None:
         hcfg, _client = _connect(_host_key(), reset=True)
         print("OK")
     except Exception as e:
-        print(f"FAILED\n  Error: {e}")
-        return
+        return print(f"FAILED\n  Error: {e}")
 
     print(f"""
   Honcho is ready.
@@ -873,13 +842,11 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
     except Exception:
         return [(_active_profile_name(), _host_key(), {})]
     cfg = _read_config()
-    results = [("default", HOST, cfg.get("hosts", {}).get(HOST, {}))]
-    for p in profiles:
-        if p.name != "default":
-            h = profile_host_key(p.name)
-            # _host_block (not hosts.get) keeps legacy dot-form keys ("hermes.work") readable.
-            results.append((p.name, h, _host_block(cfg, h)))
-    return results
+    # _host_block (not hosts.get) keeps legacy dot-form keys ("hermes.work") readable.
+    return [("default", HOST, cfg.get("hosts", {}).get(HOST, {}))] + [
+        (p.name, profile_host_key(p.name), _host_block(cfg, profile_host_key(p.name)))
+        for p in profiles if p.name != "default"
+    ]
 
 
 def cmd_status(args) -> None:
@@ -904,13 +871,11 @@ def cmd_status(args) -> None:
         except Exception:
             cfg = False
         if not cfg:
-            print(f"  No Honcho config found at {active_path}\n  Run 'hermes honcho setup' to configure.\n")
-            return
+            return print(f"  No Honcho config found at {active_path}\n  Run 'hermes honcho setup' to configure.\n")
     try:
         hcfg = HonchoClientConfig.from_global_config(host=_host_key())
     except Exception as e:
-        print(f"  Config error: {e}\n")
-        return
+        return print(f"  Config error: {e}\n")
 
     # The OAuth access token is also stored under apiKey, so the auth line
     # distinguishes a refreshable grant from a static key explicitly.
@@ -926,9 +891,8 @@ def cmd_status(args) -> None:
         auth = f"OAuth ({cred.client_id}, token {token_state})"
     else:
         auth = f"API key ({_mask(hcfg.api_key or '')})"
-    print(f"\nHoncho status{f' [{hcfg.host}]' if profile != 'default' else ''}\n" + RULE)
-    if profile != "default":
-        print(f"  Profile:        {profile}")
+    print(f"\nHoncho status{f' [{hcfg.host}]' if profile != 'default' else ''}\n" + RULE
+          + (f"\n  Profile:        {profile}" if profile != "default" else ""))
     print(f"  Host:           {hcfg.host}\n  Enabled:        {hcfg.enabled}\n  Auth:           {auth}\n"
           f"  Workspace:      {hcfg.workspace_id}\n  Config:         {active_path}")
     global_path = Path.home() / ".honcho" / "config.json"
@@ -1019,12 +983,10 @@ def cmd_peers(args) -> None:
 
 def cmd_sessions(args) -> None:
     """List known directory → session name mappings."""
-    cfg = _read_config()
-    sessions = cfg.get("sessions", {})
+    sessions = _read_config().get("sessions", {})
     if not sessions:
-        print(f"  No session mappings configured.\n\n  Add one with: hermes honcho map <session-name>\n"
-              f"  Or edit {_config_path()} directly.\n")
-        return
+        return print(f"  No session mappings configured.\n\n  Add one with: hermes honcho map <session-name>\n"
+                     f"  Or edit {_config_path()} directly.\n")
     cwd = os.getcwd()
     print(f"\nHoncho session mappings ({len(sessions)})\n" + RULE)
     for path, name in sorted(sessions.items()):
@@ -1038,8 +1000,7 @@ def cmd_map(args) -> None:
         return cmd_sessions(args)
     session_name = args.session_name.strip()
     if not session_name:
-        print("  Session name cannot be empty.\n")
-        return
+        return print("  Session name cannot be empty.\n")
     import re
     sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', session_name).strip('-')
     if sanitized != session_name:
@@ -1098,8 +1059,7 @@ def _show_or_set_choice(args, *, attr: str, key: str, noun: str, title: str, cho
         print(f"\n  Set with: hermes honcho {attr} [{'|'.join(choices)}]\n")
         return
     if value not in choices:
-        print(f"  Invalid {noun} '{value}'. Options: {', '.join(choices)}\n")
-        return
+        return print(f"  Invalid {noun} '{value}'. Options: {', '.join(choices)}\n")
     host = _host_key()
     cfg.setdefault("hosts", {}).setdefault(host, {})[key] = value
     _write_config(cfg)
@@ -1155,15 +1115,13 @@ def cmd_identity(args) -> None:
     """Seed AI peer identity or show both peer representations."""
     cfg = _read_config()
     if not _resolve_api_key(cfg):
-        print("  No API key configured. Run 'hermes honcho setup' first.\n")
-        return
+        return print("  No API key configured. Run 'hermes honcho setup' first.\n")
     file_path = getattr(args, "file", None)
     try:
         hcfg, client = _connect(_host_key())
         mgr, session_key = _session_manager(hcfg, client)
     except Exception as e:
-        print(f"  Honcho connection failed: {e}\n")
-        return
+        return print(f"  Honcho connection failed: {e}\n")
 
     if getattr(args, "show", False):
         from plugins.memory.honcho.session import HonchoAuthError
@@ -1171,8 +1129,7 @@ def cmd_identity(args) -> None:
             user_card = mgr.get_peer_card(session_key)
             ai_rep = mgr.get_ai_representation(session_key)
         except HonchoAuthError as e:
-            print(f"  Honcho authentication failed: {e}\n")
-            return
+            return print(f"  Honcho authentication failed: {e}\n")
         print(f"\nUser peer ({hcfg.peer_name or 'not set'})\n" + RULE)
         print("\n".join(f"  {fact}" for fact in user_card) if user_card
               else "  No user peer card yet. Send a few messages to build one.")
@@ -1209,17 +1166,13 @@ Honcho identity management
 
 def _find_memory_files(names: list[str]) -> list[Path]:
     """Existing files named ``names`` in cwd then ~/.openclaw, deduplicated."""
-    found: list[Path] = []
-    for name in names:
-        for d in (Path(os.getcwd()), Path.home() / ".openclaw"):
-            p = d / name
-            if p.exists() and p not in found:
-                found.append(p)
-    return found
+    candidates = (d / name for name in names for d in (Path(os.getcwd()), Path.home() / ".openclaw"))
+    return list(dict.fromkeys(p for p in candidates if p.exists()))
 
 
 def _migrate_upload(mgr, session_key: str, user_files: list[Path]) -> None:
     dirs_with_files = set(str(f.parent) for f in user_files)
+    # List (not generator) so every directory is attempted even after one succeeds.
     if any([mgr.migrate_memory_files(session_key, d) for d in dirs_with_files]):
         print(f"  Uploaded user memory files from: {', '.join(dirs_with_files)}")
     else:
@@ -1305,8 +1258,7 @@ Step 3  Migrate user memory files → Honcho user peer
   (Hermes calls migrate_memory_files() on first session init.)
 
   If you want to migrate them now without starting a session:""")
-        for _f in user_files:
-            print("    hermes honcho migrate  — this step handles it interactively")
+        print("    hermes honcho migrate  — this step handles it interactively\n" * len(user_files), end="")
         if has_key:
             _offer("  Upload user memory files to Honcho now?", _migrate_upload, user_files)
         else:
@@ -1434,22 +1386,18 @@ def honcho_command(args) -> None:
     if sub == "setup":  # honcho setup goes through the unified memory-provider path
         print("\n  Honcho is configured via the memory provider system.\n  Running 'hermes memory setup'...\n")
         from hermes_cli.memory_setup import cmd_setup_provider
-        cmd_setup_provider("honcho")
-        return
+        return cmd_setup_provider("honcho")
     handler = cmd_status if sub is None else _HANDLERS.get(sub)
     if handler is None:
-        print(f"  Unknown honcho command: {sub}\n"
-              "  Available: status, sessions, map, peer, mode, strategy, tokens, identity, migrate, enable, disable, sync\n")
-        return
+        return print(f"  Unknown honcho command: {sub}\n"
+                     "  Available: status, sessions, map, peer, mode, strategy, tokens, identity, migrate, enable, disable, sync\n")
     handler(args)
 
 
 def register_cli(subparser) -> None:
     """Build the ``hermes honcho`` argparse subcommand tree on the ``hermes honcho`` parser."""
-    subparser.add_argument(
-        "--target-profile", metavar="NAME", dest="target_profile",
-        help="Target a specific profile's Honcho config without switching",
-    )
+    subparser.add_argument("--target-profile", metavar="NAME", dest="target_profile",
+                           help="Target a specific profile's Honcho config without switching")
     subs = subparser.add_subparsers(dest="honcho_command")
     for name, help_text, _handler, arguments in _SUBCOMMANDS:
         parser = subs.add_parser(name, help=help_text)
