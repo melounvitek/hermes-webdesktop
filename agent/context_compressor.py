@@ -636,6 +636,70 @@ class _HandoffScan:
     previous_summary_before: Optional[str]
     has_user_turn_before: Optional[bool]
 
+def _short_error_text(e: Exception, limit: int = 220) -> str:
+    """Error text (or class name) capped for durable cooldown rows and telemetry."""
+    text = str(e).strip() or e.__class__.__name__
+    if len(text) > limit:
+        text = text[: limit - 3].rstrip() + "..."
+    return text
+
+
+@dataclass
+class _SummaryFailureKind:
+    """Transient-failure classes of a summary call (several may hold at once)."""
+
+    model_not_found: bool
+    timeout: bool
+    json_decode: bool
+    streaming_closed: bool
+    empty_content: bool
+    truncated: bool
+
+    def fallback_reason(self) -> str:
+        """Reason string for the one-shot main-model retry log line, most specific first."""
+        for flagged, reason in (
+            (self.json_decode, "returned invalid JSON"),
+            (self.truncated, "returned a truncated summary (output token cap)"),
+            (self.empty_content, "returned empty content"),
+            (self.model_not_found, "unavailable"),
+            (self.streaming_closed, "closed stream prematurely"),
+            (self.timeout, "timed out"),
+        ):
+            if flagged:
+                return reason
+        return "failed"
+
+
+def _classify_summary_failure(e: Exception) -> _SummaryFailureKind:
+    """Classify a summary-call exception by status code / message shape."""
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    err = str(e).lower()
+    return _SummaryFailureKind(
+        # Permanent-looking error on a distinct summary model: fall back to main instead of cooldown.
+        model_not_found=(
+            status in {404, 503}
+            or "model_not_found" in err
+            or "does not exist" in err
+            or "no available channel" in err
+        ),
+        timeout=status in {408, 429, 502, 504} or "timeout" in err or "timed out" in err,
+        # Malformed/non-JSON bodies (HTML 502 as application/json) surface as JSONDecodeError or
+        # APIResponseValidationError "expecting value"; treat as transient.
+        json_decode=isinstance(e, json.JSONDecodeError) or "expecting value" in err,
+        # httpx premature-close errors are transient; treat like a timeout, not a 60s cooldown.
+        streaming_closed=_is_connection_error(e),
+        # HTTP 200 with empty body from a degraded provider, plus the sibling "no usable response"
+        # shapes from _validate_llm_response.
+        empty_content=isinstance(e, RuntimeError) and (
+            "empty content" in err
+            or "llm returned none response" in err
+            or "llm returned invalid response" in err
+        ),
+        # Truncated summary: one main-model retry, then ABORT preserving the session.
+        truncated=isinstance(e, RuntimeError) and _TRUNCATED_SUMMARY_MARKER in err,
+    )
+
+
 # Summary failures that abort compress() regardless of abort_on_summary_failure, in precedence
 # order: (flag attribute, telemetry failure_class, user-facing warning with %d preserved messages).
 _TERMINAL_SUMMARY_FAILURES = (
@@ -3559,10 +3623,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             "Falling back to main model '%s' for compression.",
             self.summary_model, reason, e, self.model,
         )
-        _err_text = str(e).strip() or e.__class__.__name__
-        if len(_err_text) > 220:
-            _err_text = _err_text[:217].rstrip() + "..."
-        self._last_aux_model_failure_error = _err_text
+        self._last_aux_model_failure_error = _short_error_text(e)
         self._last_aux_model_failure_model = self.summary_model
         telemetry = getattr(self, "_active_compression_telemetry", None)
         if isinstance(telemetry, dict):
@@ -3570,6 +3631,74 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             telemetry["failure_class"] = telemetry.get("failure_class") or "aux_model_fallback"
         self.summary_model = ""  # empty = use main model
         self._clear_compression_failure_cooldown()  # no cooldown — retry immediately
+
+    def _call_summary_llm(self, prompt: str, prompt_started_at: float) -> str:
+        """Issue the single aux summary call; return validated content text.
+
+        Raises RuntimeError for empty content or a length-truncated (PARTIAL) summary so the
+        failure routes through main-model fallback + cooldown instead of wiping the compacted turns.
+        """
+        call_kwargs: Dict[str, Any] = {
+            "task": "compression",
+            "main_runtime": {
+                "model": self.model,
+                "provider": self.provider,
+                "base_url": self.base_url,
+                "api_key": self.api_key,
+                "api_mode": self.api_mode,
+            },
+            "messages": [{"role": "user", "content": prompt}],
+            # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
+            # (thinking models burn it on reasoning). Timeout comes from call_llm config.
+        }
+        if self.summary_model:
+            call_kwargs["model"] = self.summary_model
+        # call_llm writes the route it actually selected; never pre-resolve a second, stale pair.
+        _aux_route: Dict[str, str] = {}
+        call_kwargs["route_info"] = _aux_route
+        # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
+        call_kwargs.update(_pinned_summary_call_kwargs())
+        _aux_call_start = time.monotonic()
+        _latency_info: Dict[str, int] = {
+            "prompt_build_ms": max(0, int((_aux_call_start - prompt_started_at) * 1000))
+        }
+        call_kwargs["latency_info"] = _latency_info
+        try:
+            # Compression is atomic: shield the summary call from gateway interrupts. Re-entrant.
+            with aux_interrupt_protection():
+                response = call_llm(**call_kwargs)
+        finally:
+            route_known = bool(_aux_route.get("provider") and _aux_route.get("model"))
+            _aux_model = _aux_route.get("model") or self.summary_model or self.model or ""
+            self._record_aux_compression_call(
+                prompt_messages=call_kwargs["messages"],
+                # max_tokens is intentionally absent; .get() keeps the telemetry hook from breaking the call.
+                max_tokens=call_kwargs.get("max_tokens"),
+                duration_ms=int((time.monotonic() - _aux_call_start) * 1000),
+                aux_provider=_aux_route.get("provider") or self.provider or "",
+                aux_model=_aux_model,
+                effective_aux_context=self.context_length if route_known and _aux_model == self.model else None,
+                phase_timings=_latency_info,
+            )
+        if self._compression_cancelled():
+            raise AuxiliaryExplicitCancellation()
+        # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
+        content = extract_content_or_reasoning(response, max_reasoning_chars=8000)
+        if not content.strip():
+            raise RuntimeError(
+                "Context compression LLM returned empty content "
+                f"(provider={self.provider or 'auto'} "
+                f"model={self.summary_model or self.model})"
+            )
+        if _response_finish_reason(response) == "length":
+            raise RuntimeError(
+                "Context compression summary was truncated "
+                f"({_TRUNCATED_SUMMARY_MARKER}): generation hit the output "
+                "token cap and the summary is incomplete "
+                f"(provider={self.provider or 'auto'} "
+                f"model={self.summary_model or self.model})"
+            )
+        return content
 
     def _generate_summary(
         self,
@@ -3585,12 +3714,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         prompt_started_at = time.monotonic()
         if self._compression_cancelled():
             raise AuxiliaryExplicitCancellation()
-        now = prompt_started_at
         # bypass_cooldown: provider-proven overflow gets ONE real attempt while armed.
-        if now < self._summary_failure_cooldown_until and not bypass_cooldown:
+        if prompt_started_at < self._summary_failure_cooldown_until and not bypass_cooldown:
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
-                self._summary_failure_cooldown_until - now,
+                self._summary_failure_cooldown_until - prompt_started_at,
             )
             return None
 
@@ -3610,10 +3738,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 _pruned_skill_names.append(_name)
         del _pruned_skill_names[_MAX_PRUNED_SKILL_MARKERS:]
         # Lean mode even-samples oversized input (one bounded request, never a second).
-        if getattr(self, "tail_mode", "lean") == "lean":
-            content_to_summarize = self._sample_summary_input(content_to_summarize)
-        else:
-            content_to_summarize = self._bound_summary_input(content_to_summarize)
+        bound = self._sample_summary_input if getattr(self, "tail_mode", "lean") == "lean" else self._bound_summary_input
+        content_to_summarize = bound(content_to_summarize)
         has_user_turn = getattr(self, "_summary_has_user_turn", None)
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
@@ -3626,84 +3752,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         )
 
         try:
-            call_kwargs = {
-                "task": "compression",
-                "main_runtime": {
-                    "model": self.model,
-                    "provider": self.provider,
-                    "base_url": self.base_url,
-                    "api_key": self.api_key,
-                    "api_mode": self.api_mode,
-                },
-                "messages": [{"role": "user", "content": prompt}],
-                # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
-                # (thinking models burn it on reasoning). Timeout comes from call_llm config.
-            }
-            if self.summary_model:
-                call_kwargs["model"] = self.summary_model
-            # call_llm writes the route it actually selected; never pre-resolve a second, stale pair.
-            _aux_route: Dict[str, str] = {}
-            call_kwargs["route_info"] = _aux_route
-            # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
-            _pinned_route = _pinned_summary_call_kwargs()
-            if _pinned_route:
-                call_kwargs.update(_pinned_route)
-            # Compression is atomic: shield the summary call from gateway interrupts. Re-entrant.
-            _aux_call_start = time.monotonic()
-            _latency_info: Dict[str, int] = {
-                "prompt_build_ms": max(0, int((_aux_call_start - prompt_started_at) * 1000))
-            }
-            call_kwargs["latency_info"] = _latency_info
-            try:
-                with aux_interrupt_protection():
-                    response = call_llm(**call_kwargs)
-            finally:
-                route_known = bool(_aux_route.get("provider") and _aux_route.get("model"))
-                _aux_provider = _aux_route.get("provider") or self.provider or ""
-                _aux_model = _aux_route.get("model") or self.summary_model or self.model or ""
-                _aux_context = (
-                    self.context_length
-                    if route_known and _aux_model == self.model
-                    else None
-                )
-                self._record_aux_compression_call(
-                    prompt_messages=call_kwargs["messages"],
-                    # max_tokens is intentionally absent; .get() keeps the telemetry hook from breaking the call.
-                    max_tokens=call_kwargs.get("max_tokens"),
-                    duration_ms=int((time.monotonic() - _aux_call_start) * 1000),
-                    aux_provider=_aux_provider,
-                    aux_model=_aux_model,
-                    effective_aux_context=_aux_context,
-                    phase_timings=_latency_info,
-                )
-            if self._compression_cancelled():
-                raise AuxiliaryExplicitCancellation()
-            # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
-            content = extract_content_or_reasoning(
-                response, max_reasoning_chars=8000
-            )
-            # Some proxies return HTTP 200 with empty content; treat as failure so it routes
-            # through main-model fallback + cooldown instead of wiping the compacted turns.
-            if not content.strip():
-                raise RuntimeError(
-                    "Context compression LLM returned empty content "
-                    f"(provider={self.provider or 'auto'} "
-                    f"model={self.summary_model or self.model})"
-                )
-            # finish_reason "length" means PARTIAL text; never persist it as a checkpoint.
-            if _response_finish_reason(response) == "length":
-                raise RuntimeError(
-                    "Context compression summary was truncated "
-                    f"({_TRUNCATED_SUMMARY_MARKER}): generation hit the output "
-                    "token cap and the summary is incomplete "
-                    f"(provider={self.provider or 'auto'} "
-                    f"model={self.summary_model or self.model})"
-                )
+            content = self._call_summary_llm(prompt, prompt_started_at)
             # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
             from agent.agent_runtime_helpers import strip_think_blocks
-            stripped = strip_think_blocks(None, content).strip()
-            if stripped:
-                content = stripped
+            content = strip_think_blocks(None, content).strip() or content
             # The summarizer may echo secrets verbatim; redact the output too.
             summary = _redact_compaction_text(content.strip())
             # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
@@ -3715,10 +3767,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             self._clear_compression_failure_cooldown()
             self._summary_model_fallen_back = False
             self._last_summary_error = None
-            self._last_summary_auth_failure = False
-            self._last_summary_network_failure = False
-            self._last_summary_empty_content_failure = False
-            self._last_summary_truncated_failure = False
+            for flag, _class, _msg in _TERMINAL_SUMMARY_FAILURES:
+                setattr(self, flag, False)
             return self._with_summary_prefix(summary)
         except Exception as e:
             return self._on_summary_failure(e, turns_to_summarize, focus_topic, memory_context)
@@ -4002,44 +4052,16 @@ This compaction should PRIORITISE preserving all information related to the focu
                             "for %d seconds.",
                             _SUMMARY_FAILURE_COOLDOWN_SECONDS)
             return None
-        # Permanent-looking error on a distinct summary model: fall back to main instead of cooldown.
-        _status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
-        _err_str = str(e).lower()
-        _is_model_not_found = (
-            _status in {404, 503}
-            or "model_not_found" in _err_str
-            or "does not exist" in _err_str
-            or "no available channel" in _err_str
-        )
-        _is_timeout = (
-            _status in {408, 429, 502, 504}
-            or "timeout" in _err_str
-            or "timed out" in _err_str
-        )
-        # Malformed/non-JSON bodies (HTML 502 as application/json) surface as JSONDecodeError or
-        # APIResponseValidationError "expecting value"; treat as transient.
-        _is_json_decode = (
-            isinstance(e, json.JSONDecodeError)
-            or "expecting value" in _err_str
-        )
-        # httpx premature-close errors are transient; treat like a timeout, not a 60s cooldown.
-        _is_streaming_closed = _is_connection_error(e)
-        # HTTP 200 with empty body from a degraded provider.
-        _is_empty_content = isinstance(e, RuntimeError) and (
-            "empty content" in _err_str
-            # Sibling "no usable response" shapes from _validate_llm_response — same class.
-            or "llm returned none response" in _err_str
-            or "llm returned invalid response" in _err_str
-        )
-        # Truncated summary: one main-model retry, then ABORT preserving the session.
-        _is_truncated_summary = (
-            isinstance(e, RuntimeError)
-            and _TRUNCATED_SUMMARY_MARKER in _err_str
-        )
+        kind = _classify_summary_failure(e)
+        _is_model_not_found = kind.model_not_found
+        _is_timeout = kind.timeout
+        _is_json_decode = kind.json_decode
+        _is_streaming_closed = kind.streaming_closed
+        _is_empty_content = kind.empty_content
+        _is_truncated_summary = kind.truncated
         # Auth/permission/quota failures are not retryable: flag so compress() preserves the
         # session. A distinct summary_model still gets the one-shot main-model fallback.
-        _is_access_or_quota_error = _is_summary_access_or_quota_error(e)
-        if _is_access_or_quota_error:
+        if _is_summary_access_or_quota_error(e):
             # Field name kept for caller compatibility; now covers the whole access/quota class.
             self._last_summary_auth_failure = True
         if _is_json_decode and not _is_model_not_found and not _is_timeout:
@@ -4061,22 +4083,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             and self.summary_model != self.model
             and not getattr(self, "_summary_model_fallen_back", False)
         ):
-            _reason = next(
-                (
-                    reason
-                    for flagged, reason in (
-                        (_is_json_decode, "returned invalid JSON"),
-                        (_is_truncated_summary, "returned a truncated summary (output token cap)"),
-                        (_is_empty_content, "returned empty content"),
-                        (_is_model_not_found, "unavailable"),
-                        (_is_streaming_closed, "closed stream prematurely"),
-                        (_is_timeout, "timed out"),
-                    )
-                    if flagged
-                ),
-                "failed",
-            )
-            self._fallback_to_main_for_compression(e, _reason)
+            self._fallback_to_main_for_compression(e, kind.fallback_reason())
             return self._generate_summary(
                 turns_to_summarize,
                 focus_topic=focus_topic,
@@ -4091,9 +4098,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             _transient_cooldown = 30
         else:
             _transient_cooldown = 60
-        err_text = str(e).strip() or e.__class__.__name__
-        if len(err_text) > 220:
-            err_text = err_text[:217].rstrip() + "..."
+        err_text = _short_error_text(e)
         self._record_compression_failure_cooldown(_transient_cooldown, err_text)
         self._last_summary_error = err_text
         # Terminal network/empty-content failure after any fallback: flag so compress() ABORTS
