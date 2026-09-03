@@ -75,7 +75,7 @@ class TerminalEnvironmentProvider(ProviderBase):
         return self.is_available()
 
     def probe(self) -> Tuple[str, str]:
-        """Dashboard picker health ``(status, detail)``, status in ``ready``/``needs_setup``/``unavailable``. Never raise; <~2s."""
+        """Dashboard picker health ``(status, detail)``; status ``ready``/``needs_setup``/``unavailable``. Never raise; <~2s."""
         return ("ready", "") if self.is_available() else ("needs_setup", f"{self.display_name} is not configured.")
 
     def setup_instructions(self) -> List[str]:
