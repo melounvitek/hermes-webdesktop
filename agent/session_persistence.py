@@ -301,13 +301,12 @@ def _db_flush_failed(agent, e: Exception, batch_rows: List[Dict[str, Any]], adop
 
 def _session_log_entry(agent, msg: Dict[str, Any]) -> Dict[str, Any]:
     """Copy of ``msg`` with scratchpad tags normalised and credentials redacted (respects HERMES_REDACT_SECRETS)."""
-    if msg.get("role") == "assistant" and msg.get("content"):
-        msg = dict(msg)
-        msg["content"] = agent._clean_session_content(msg["content"])
-    if "content" in msg:
-        msg = dict(msg)
-        msg["content"] = agent._redact_message_content(msg.get("content"))
-    return msg
+    if "content" not in msg:
+        return msg
+    content = msg["content"]
+    if msg.get("role") == "assistant" and content:
+        content = agent._clean_session_content(content)
+    return {**msg, "content": agent._redact_message_content(content)}
 
 
 class SessionPersistenceMixin:
@@ -353,19 +352,22 @@ class SessionPersistenceMixin:
         """Remove empty-response retry scaffolding from the tail, then (only if any was present) rewind
         the tool-result / assistant(tool_calls) pair the failed iteration left hanging — otherwise the
         next user turn lands as ``...tool, user`` and providers return empty content forever."""
-        def _tail(*keys: str) -> bool:
+        def tail(*keys: str) -> bool:
             return bool(messages) and isinstance(messages[-1], dict) and any(messages[-1].get(k) for k in keys)
 
+        def tail_role(role: str) -> bool:
+            return bool(messages) and isinstance(messages[-1], dict) and messages[-1].get("role") == role
+
         dropped_scaffolding = False
-        while _tail("_empty_recovery_synthetic", "_empty_terminal_sentinel"):
+        while tail("_empty_recovery_synthetic", "_empty_terminal_sentinel"):
             messages.pop()
             dropped_scaffolding = True
         if not dropped_scaffolding:
             return
-        while messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "tool":
+        while tail_role("tool"):
             messages.pop()
         # Providers reject a dangling assistant(tool_calls) whose results were just popped.
-        if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "assistant" and messages[-1].get("tool_calls"):
+        if tail_role("assistant") and tail("tool_calls"):
             messages.pop()
 
     _repair_message_sequence = _forward("agent.agent_runtime_helpers", "repair_message_sequence")
@@ -449,15 +451,11 @@ class SessionPersistenceMixin:
             return redact_sensitive_text(content)
         if not isinstance(content, list):
             return content
-        redacted = []
-        for part in content:
-            if isinstance(part, dict):
-                part = dict(part)
-                for key in ("text", "content"):
-                    if isinstance(part.get(key), str):
-                        part[key] = redact_sensitive_text(part[key])
-            redacted.append(part)
-        return redacted
+        return [
+            {**p, **{k: redact_sensitive_text(p[k]) for k in ("text", "content") if isinstance(p.get(k), str)}}
+            if isinstance(p, dict) else p
+            for p in content
+        ]
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
         """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False) for
