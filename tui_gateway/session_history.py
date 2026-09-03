@@ -1,8 +1,5 @@
-"""Session history/message shaping: image-ref messages, content coercion, history->wire messages,
-in-flight turn tracking and turn-failure detail.
-
-Bodies are rebound onto server.py's globals (method_ctx.bind_module) and reference them bare.
-"""
+"""Session history/message shaping: image-ref messages, content coercion, history->wire messages, in-flight
+turn tracking and turn-failure detail. Bodies are rebound onto server.py's globals (method_ctx.bind_module)."""
 
 from __future__ import annotations
 
@@ -12,14 +9,12 @@ from .method_ctx import bind_module
 def _active_image_routing_identity(agent: Any) -> tuple[str, str]:
     """Return the live provider/model, falling back before agent startup."""
     from agent.auxiliary_client import _read_main_model, _read_main_provider
-
     return (getattr(agent, "provider", "") or _read_main_provider(), getattr(agent, "model", "") or _read_main_model())
 
 
 def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
-    """Reference attached images by path so the agent analyzes them in-loop with ``vision_analyze``.
-    Pre-analyzing with the auxiliary vision model blocked submit 60-90s per photo and poisoned
-    auto-titles with the description."""
+    """Reference attached images by path so the agent analyzes them in-loop with ``vision_analyze``: pre-
+    analyzing with the auxiliary vision model blocked submit 60-90s/photo and poisoned auto-titles."""
     prefix = "\n\n".join(
         f"[The user attached an image: {p.name}]\n[Examine it with the vision_analyze tool using image_url: {p}]"
         for p in map(Path, image_paths) if p.exists()
@@ -31,12 +26,10 @@ def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
 
 
 def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str]) -> str:
-    """Persisted form of the user's message: ``@image:<path>`` directives (the desktop renders them
-    as images); ``_build_image_ref_message``'s ``image_url:`` hint is model-only, never persisted.
-    Caption first, directives last: session previews are the first 60 chars of the first user
-    message, so a leading directive would label the session with a truncated path."""
+    """Persisted form of the user's message: ``@image:<path>`` directives (the desktop renders them as
+    images); ``_build_image_ref_message``'s ``image_url:`` hint is model-only, never persisted. Caption
+    first, directives last: session previews are the first 60 chars of the first user message."""
     from agent.context_references import format_reference_value
-
     text = user_text or ""
     refs = "\n".join(f"@image:{format_reference_value(p)}" for p in image_paths if Path(p).exists())
     if not refs:
@@ -45,9 +38,9 @@ def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str
 
 
 def _build_persist_user_message(user_text: str, image_paths: list[str], run_message: Any) -> Any:
-    """Shape the persisted user turn like the model payload: ``_flush_messages_to_session_db`` ignores
-    a plain-string override for a list (native-vision) payload, so swap only the text part for the
-    ``@image:`` form, keep image parts, and drop API-only text parts (barge-in note)."""
+    """Shape the persisted user turn like the model payload: ``_flush_messages_to_session_db`` ignores a
+    plain-string override for a list (native-vision) payload, so swap only the text part for the
+    ``@image:`` form, keep image parts, drop API-only text parts (barge-in note)."""
     persist_text = _build_persist_message_with_image_refs(user_text, image_paths)
     if not isinstance(run_message, list):
         return persist_text
@@ -86,41 +79,24 @@ def _history_dict_text(content: dict, *, image_urls: bool) -> str:
 
 def _content_display_text(content: Any) -> str:
     if isinstance(content, list):
-        parts = (_content_display_text(part).strip() for part in content)
-        return "\n".join(text for text in parts if text)
+        return "\n".join(t for t in (_content_display_text(part).strip() for part in content) if t)
     if isinstance(content, dict):
         return _history_dict_text(content, image_urls=False)
     return "" if content is None else str(content)
 
 
 def _coerce_message_text(content: Any) -> str:
-    """Render ``message['content']`` (str, parts list, or one structured dict) as a plain string.
-    Image parts keep their URL inline so the desktop's ``extractEmbeddedImages`` and the resume payload
-    agree with the cached message (else the inline image flashed, then vanished); other structured
-    shapes become a bracketed placeholder so resume doesn't drop the message."""
+    """Render ``message['content']`` (str, parts list, or one structured dict) as a plain string. Image parts
+    keep their URL inline so the desktop's ``extractEmbeddedImages`` and the resume payload agree with the
+    cached message (else the inline image flashed, then vanished); other shapes become a placeholder."""
     if isinstance(content, list):
         chunks: list[str] = []
         for part in content:
-            if isinstance(part, str):
-                chunks.append(part)
-                continue
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text")
-            if isinstance(text, str):
-                chunks.append(text)
-                continue
-            kind = part.get("type")
-            if kind in _HISTORY_TEXT_KINDS:
-                t = part.get("text") or part.get("content") or ""
-                if t:
-                    chunks.append(str(t))
-            elif kind in _HISTORY_IMAGE_KINDS:
-                chunks.append(f"\n{_history_part_image_url(part) or '[image]'}")
-            elif kind in _HISTORY_AUDIO_KINDS:
-                chunks.append("\n[audio]")
-            elif kind:
-                chunks.append(f"\n[{kind}]")
+            if isinstance(part, str) or (isinstance(part, dict) and isinstance(part.get("text"), str)):
+                chunks.append(part if isinstance(part, str) else part["text"])
+            elif isinstance(part, dict) and part.get("type"):
+                rendered = _history_dict_text(part, image_urls=True)
+                chunks.append(rendered if part["type"] in _HISTORY_TEXT_KINDS else f"\n{rendered}")
         return "".join(chunks)
     if isinstance(content, dict):
         return _history_dict_text(content, image_urls=True)
@@ -134,44 +110,36 @@ def _history_text_only_part(part: dict) -> bool:
 
 def _is_text_only_busy_payload(content: Any) -> bool:
     """True when a busy submit carries only plain text, not attachments/media."""
-    if isinstance(content, (str, int, float)):
-        return True
     if isinstance(content, list):
         return bool(content) and all(
             isinstance(part, str) or (isinstance(part, dict) and _history_text_only_part(part)) for part in content
         )
-    return isinstance(content, dict) and _history_text_only_part(content)
+    return isinstance(content, (str, int, float)) or (isinstance(content, dict) and _history_text_only_part(content))
 
 
 def _is_display_hidden_marker(role: str | None, text: str) -> bool:
-    """Gateway notices (model-switch, personality) persist as role=user ``[System: …]`` rows so strict
-    providers accept them mid-history; they must never render as a user bubble. Filtering in this one
-    projection hides them everywhere (raw marker stays in ``session["history"]``) and keeps them from
-    shifting the user-message ordinals the desktop reconciles against."""
+    """Gateway notices (model-switch, personality) persist as role=user ``[System: …]`` rows so strict providers
+    accept them mid-history; they must never render as a user bubble. Filtering in this one projection hides
+    them everywhere (raw marker stays in ``session["history"]``) and keeps the desktop's user ordinals stable."""
     return role == "user" and text.lstrip().startswith("[System:")
 
 
 def _skill_scaffold_projection(content_text: str) -> str:
-    """The invocation a slash-skill-expanded turn came from, else "" — every UI renders
-    ``/work fix the leak`` instead of the embedded skill body."""
+    """The invocation a slash-skill-expanded turn came from, else "" — UIs render ``/work fix the leak``."""
     return describe_skill_invocation(content_text, separator=" ") or ""
 
 
 def _expand_skill_invocation_for_replay(text: str, task_id: str) -> str:
-    """Inverse of :func:`_skill_scaffold_projection`: rewind/regenerate hands back the projected
-    invocation, and re-running it verbatim would drop the skill. Unchanged when not resolvable."""
+    """Inverse of :func:`_skill_scaffold_projection`: rewind/regenerate hands back the projected invocation,
+    and re-running it verbatim would drop the skill. Unchanged when not resolvable."""
     head, _, arg = (text or "").strip().partition(" ")
     if not head.startswith("/"):
         return text
     try:
         from agent.skill_commands import build_skill_invocation_message, resolve_skill_command_key
-
         cmd_key = resolve_skill_command_key(head.lstrip("/"))
-        if cmd_key is None:
-            return text
-        return build_skill_invocation_message(cmd_key, arg.strip(), task_id=task_id) or text
-    except Exception:
-        # A skill that no longer resolves must not break the rewind.
+        return text if cmd_key is None else (build_skill_invocation_message(cmd_key, arg.strip(), task_id=task_id) or text)
+    except Exception:  # a skill that no longer resolves must not break the rewind
         logger.debug("skill re-expansion failed for replay", exc_info=True)
         return text
 
@@ -182,12 +150,9 @@ _AUTO_CONTINUE_NOTE_PREFIX = "[System note: Your previous turn was interrupted m
 
 
 def _legacy_display_kind(role: str, text: str) -> str | None:
-    """Infer the display type of a synthetic row persisted without one. New rows are typed at turn
-    start (``persist_user_display_kind``); this prefix sniff migrates untyped rows already on disk (a
-    turn killed mid-run never reached the stamp), which would otherwise paint as a user bubble."""
-    if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX):
-        return "auto_continue"
-    return None
+    """Display type of a synthetic row persisted untyped: new rows are typed at turn start (``persist_user_display_kind``);
+    this prefix sniff migrates rows already on disk (a turn killed mid-run never reached the stamp)."""
+    return "auto_continue" if role == "user" and text.lstrip().startswith(_AUTO_CONTINUE_NOTE_PREFIX) else None
 
 
 _HISTORY_REASONING_KEYS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items")
@@ -212,8 +177,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             continue
         if role == "assistant" and m.get("tool_calls"):
             for tc in m["tool_calls"]:
-                fn = tc.get("function", {})
-                tc_id = tc.get("id", "")
+                fn, tc_id = tc.get("function", {}), tc.get("id", "")
                 if tc_id and fn.get("name"):
                     try:
                         args = json.loads(fn.get("arguments", "{}"))
@@ -223,15 +187,11 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             if not content_text.strip():
                 continue
         if role == "tool":
-            tc_id = m.get("tool_call_id", "")
-            tc_info = tool_call_args.get(tc_id) if tc_id else None
-            name = (tc_info[0] if tc_info else None) or m.get("tool_name") or "tool"
-            args = (tc_info[1] if tc_info else None) or {}
-            tool_msg = {"role": "tool", "name": name, "context": _tool_ctx(name, args)}
+            tc_name, tc_args = tool_call_args.get(m.get("tool_call_id") or "", (None, None))
+            name = tc_name or m.get("tool_name") or "tool"
+            args = tc_args or {}
             # `context` is an 80-char preview; ship args so a full-call renderer isn't truncated.
-            if args:
-                tool_msg["args"] = args
-            messages.append(tool_msg)
+            messages.append({"role": "tool", "name": name, "context": _tool_ctx(name, args), **({"args": args} if args else {})})
             continue
         # A reasoning-only assistant turn is kept so "Thinking…" still shows after resume/reload.
         has_reasoning = role == "assistant" and any(m.get(key) for key in _HISTORY_REASONING_KEYS)
@@ -245,16 +205,12 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         # Durable row identity (_rows_to_conversation); reactions etc. address persisted messages by it.
         if m.get("_row_id") is not None:
             msg["row_id"] = m["_row_id"]
-        if role == "user":
-            invocation = _skill_scaffold_projection(content_text)
-            if invocation:
-                # The invocation, never the expanded body (rewind re-sends by ordinal).
-                msg["text"] = invocation
-                msg["display_kind"] = "skill_invocation"
+        # A user turn shows its skill invocation, never the expanded body (rewind re-sends by ordinal).
+        invocation = _skill_scaffold_projection(content_text) if role == "user" else ""
+        if invocation:
+            msg.update(text=invocation, display_kind="skill_invocation")
         if role == "assistant":
-            for key in _HISTORY_REASONING_KEYS:
-                if m.get(key) is not None:
-                    msg[key] = m[key]
+            msg.update((key, m[key]) for key in _HISTORY_REASONING_KEYS if m.get(key) is not None)
         # Display-only timeline metadata (model switches, delegation events).
         display_kind = m.get("display_kind") or _legacy_display_kind(role, content_text)
         if display_kind:
@@ -266,15 +222,11 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
 
 
 def _coerce_seed_history(value: Any) -> list[dict]:
-    if not isinstance(value, list):
-        return []
     history = []
-    for item in value:
+    for item in value if isinstance(value, list) else ():
         if not isinstance(item, dict) or item.get("role") not in ("user", "assistant", "system"):
             continue
-        content = item.get("content")
-        if content is None:
-            content = item.get("text")
+        content = item.get("text") if item.get("content") is None else item.get("content")
         if isinstance(content, str) and content.strip():
             history.append({"role": item["role"], "content": content})
     return history
@@ -286,9 +238,7 @@ def _inflight_text(value: Any) -> str:
 
 def _start_inflight_turn(session: dict, text: Any) -> None:
     now = time.time()
-    session["inflight_turn"] = {
-        "assistant": "", "started_at": now, "streaming": True, "updated_at": now, "user": _inflight_text(text),
-    }
+    session["inflight_turn"] = {"assistant": "", "started_at": now, "streaming": True, "updated_at": now, "user": _inflight_text(text)}
 
 
 def _append_inflight_delta(session: dict, delta: Any) -> None:
@@ -298,9 +248,7 @@ def _append_inflight_delta(session: dict, delta: Any) -> None:
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
         turn = {"assistant": "", "streaming": True, "user": ""}
-    turn["assistant"] = f"{turn.get('assistant') or ''}{text}"
-    turn["streaming"] = True
-    turn["updated_at"] = time.time()
+    turn.update(assistant=f"{turn.get('assistant') or ''}{text}", streaming=True, updated_at=time.time())
     session["inflight_turn"] = turn
 
 
@@ -311,10 +259,10 @@ def _record_inflight_correction(session: dict, text: Any) -> None:
     turn = session.get("inflight_turn")
     if not correction or not isinstance(turn, dict):
         return
+    # correction_offsets: arrival-order boundary (assistant chars already streamed) so resuming clients
+    # place the bubble between the output seen and the output redirected.
     turn = dict(turn)
     turn["corrections"] = [*(turn.get("corrections") or []), correction]
-    # Arrival-order boundary (assistant chars already streamed) so resuming clients place the bubble
-    # between the output seen and the output redirected.
     turn["correction_offsets"] = [*(turn.get("correction_offsets") or []), len(str(turn.get("assistant") or ""))]
     turn["updated_at"] = time.time()
     session["inflight_turn"] = turn
@@ -325,27 +273,23 @@ def _clear_inflight_turn(session: dict) -> None:
 
 
 def _fail_inflight_turn(session: dict, error: Any, error_surface: Optional[dict] = None) -> None:
-    """Mark the in-flight turn terminal-error but keep it replayable: a failure's terminal frame can be
-    lost on WS disconnect and the turn may never have been committed, so the snapshot lets
-    ``session.resume`` replay prompt, partial text and error instead of stranding the client on a
-    spinner. Lives until the next turn starts or the session closes. Caller holds history_lock."""
+    """Mark the in-flight turn terminal-error but keep it replayable: a failure's terminal frame can be lost on
+    WS disconnect and the turn may never have been committed, so the snapshot lets ``session.resume`` replay
+    prompt, partial text and error. Lives until the next turn starts or the session closes. Caller holds history_lock."""
     message = str(error) if not isinstance(error, BaseException) else (str(error) or type(error).__name__)
     now = time.time()
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
         turn = {"assistant": "", "user": "", "started_at": now}
-    turn["assistant"] = str(turn.get("assistant") or "")
-    turn["user"] = str(turn.get("user") or "")
-    turn["error"] = message or "turn failed"
-    turn["status"] = "error"
-    turn["recoverable"] = True
-    if error_surface:
-        # {layer, code, retryable} so a reconnect renders the same layered error card.
+    turn.update(
+        assistant=str(turn.get("assistant") or ""), user=str(turn.get("user") or ""),
+        error=message or "turn failed", status="error", recoverable=True,
+    )
+    if error_surface:  # {layer, code, retryable} so a reconnect renders the same layered error card
         turn["error_surface"] = dict(error_surface)
     else:
         turn.pop("error_surface", None)
-    turn["streaming"] = False
-    turn["updated_at"] = now
+    turn.update(streaming=False, updated_at=now)
     session["inflight_turn"] = turn
 
 
@@ -357,10 +301,9 @@ _TURN_PROMPT_ECHO_MAX_PROMPT = 65536
 
 
 def _strip_prompt_echo(message: str, prompt: Any) -> str:
-    """Blank runs of the submitted prompt that ``message`` quotes back: secret redaction is pattern-based
-    and a provider 4xx echoing the request carries private prose matching no pattern. Any run of
-    ``_TURN_PROMPT_ECHO_WINDOW``+ chars shared with the prompt (or its JSON-escaped form) becomes
-    ``<prompt>``. Shingle-set matching keeps it linear. Only verbatim echo is stopped — a floor."""
+    """Blank runs of the submitted prompt that ``message`` quotes back: secret redaction is pattern-based and a
+    provider 4xx echoing the request carries private prose matching no pattern. Any ``_TURN_PROMPT_ECHO_WINDOW``+
+    char run shared with the prompt (or its JSON-escaped form) becomes ``<prompt>``; shingles keep it linear."""
     if not message or not prompt:
         return message
     needle = " ".join(str(prompt).split())[:_TURN_PROMPT_ECHO_MAX_PROMPT]
@@ -368,15 +311,11 @@ def _strip_prompt_echo(message: str, prompt: Any) -> str:
     if len(needle) < window or len(message) < window:
         return message
     shingles = {needle[i:i + window] for i in range(len(needle) - window + 1)}
-    try:
-        escaped = json.dumps(needle)[1:-1]
-    except Exception:
-        escaped = ""
-    if escaped and escaped != needle:
+    escaped = json.dumps(needle)[1:-1]
+    if escaped != needle:
         shingles.update(escaped[i:i + window] for i in range(len(escaped) - window + 1))
     out: list[str] = []
-    i = 0
-    n = len(message)
+    i, n = 0, len(message)
     while i <= n - window:
         if message[i:i + window] in shingles:
             j = i + window
@@ -392,11 +331,9 @@ def _strip_prompt_echo(message: str, prompt: Any) -> str:
 
 
 def _turn_failure_detail(error: Any, reason: Any = None, prompt: Any = None) -> str:
-    """Why a turn failed, for the ``tui turn finished`` bookend: ``""`` when nothing to say, else a
-    fragment with its own leading space (distinguishes a provider 4xx from a budget wall or crashed
-    finalizer). Two content contracts: ``redact_sensitive_text`` removes credentials;
-    ``_strip_prompt_echo`` removes a 4xx body quoting ``prompt`` back. Invariant: this record may gain
-    failure classification and provider detail, never the user's own content."""
+    """Why a turn failed, for the ``tui turn finished`` bookend: ``""`` when nothing to say, else a fragment with
+    its own leading space. ``redact_sensitive_text`` removes credentials; ``_strip_prompt_echo`` removes a 4xx
+    body quoting ``prompt`` back. This record may gain failure detail, never the user's own content."""
     reason_text = str(reason or "").strip()
     message = str(error or "").strip()
     if isinstance(error, BaseException):
@@ -405,7 +342,6 @@ def _turn_failure_detail(error: Any, reason: Any = None, prompt: Any = None) -> 
         return ""
     try:
         from agent.redact import redact_sensitive_text
-
         message = redact_sensitive_text(message, force=True)
     except Exception:
         message = "<unredactable>"  # never fail open
@@ -414,12 +350,8 @@ def _turn_failure_detail(error: Any, reason: Any = None, prompt: Any = None) -> 
     message = _strip_prompt_echo(message, prompt)
     if len(message) > _TURN_FAILURE_DETAIL_LIMIT:
         message = message[:_TURN_FAILURE_DETAIL_LIMIT] + "\u2026"
-    out = ""
-    if reason_text:
-        out += " failure_reason=%s" % " ".join(reason_text.split())
-    if message:
-        out += " cause=%r" % message
-    return out
+    out = " failure_reason=%s" % " ".join(reason_text.split()) if reason_text else ""
+    return out + (" cause=%r" % message if message else "")
 
 
 def register(server) -> None:
