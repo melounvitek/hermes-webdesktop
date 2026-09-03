@@ -506,10 +506,9 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
             return
         exported_items.append((data, exported_path))
     message_count = sum(len(data.get("messages") or []) for data, _path in exported_items)
-    suffix = "" if message_count == 1 else "s"
     n = len(exported_items)
-    where = exported_items[0][1] if n == 1 else output_dir
-    print(f"Exported {n} session{'' if n == 1 else 's'} ({message_count} message{suffix}) to {where}")
+    print(f"Exported {n} session{'' if n == 1 else 's'} ({message_count} message{'' if message_count == 1 else 's'}) "
+          f"to {exported_items[0][1] if n == 1 else output_dir}")
     if not args.delete_after_verified:
         return
     for data, exported_path in exported_items:
