@@ -11,9 +11,7 @@ from typing import Any, Dict
 DEFAULT_MAX_BYTES = 50_000       # terminal_tool.MAX_OUTPUT_CHARS
 DEFAULT_MAX_LINES = 2000         # file_operations.MAX_LINES
 DEFAULT_MAX_LINE_LENGTH = 2000   # file_operations.MAX_LINE_LENGTH
-
-# Process-lifetime cache: avoids re-reading config.yaml on every tool call.
-_cached_limits: dict | None = None
+_cached_limits: dict | None = None  # process-lifetime: no config.yaml re-read per tool call
 
 
 def _coerce_int(value: Any, default: int, minimum: int) -> int:
@@ -31,8 +29,8 @@ def _coerce_positive_int(value: Any, default: int) -> int:
 
 
 def get_tool_output_limits() -> Dict[str, int]:
-    """Resolved ``{max_bytes, max_lines, max_line_length}``; never raises. Cached
-    for the process — ``_reset_tool_output_limits_cache()`` forces a fresh read."""
+    """Resolved ``{max_bytes, max_lines, max_line_length}``; never raises. Cached for the
+    process — ``_reset_tool_output_limits_cache()`` forces a fresh read."""
     global _cached_limits
     if _cached_limits is not None:
         return _cached_limits
@@ -40,9 +38,9 @@ def get_tool_output_limits() -> Dict[str, int]:
         from hermes_cli.config import load_config
         cfg = load_config() or {}
         section = cfg.get("tool_output") if isinstance(cfg, dict) else None
-        if not isinstance(section, dict):
-            section = {}
     except Exception:
+        section = None
+    if not isinstance(section, dict):
         section = {}
     _cached_limits = {
         "max_bytes": _coerce_positive_int(section.get("max_bytes"), DEFAULT_MAX_BYTES),

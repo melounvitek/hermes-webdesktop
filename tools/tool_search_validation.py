@@ -16,8 +16,8 @@ _SCHEMA_LITERAL_KEYS = frozenset({"const", "default", "enum", "example", "exampl
 
 
 def _schema_for_local_validation(node: Any) -> Any:
-    """JSON-Schema-compatible copy honoring OpenAPI ``nullable: true`` — the
-    normal coercion path accepts that shape, so local validation must too."""
+    """JSON-Schema-compatible copy honoring OpenAPI ``nullable: true`` (the normal coercion
+    path accepts that shape, so local validation must too)."""
     if isinstance(node, list):
         return [_schema_for_local_validation(item) for item in node]
     if not isinstance(node, dict):
@@ -38,14 +38,14 @@ def _schema_for_local_validation(node: Any) -> Any:
         if "null" not in schema_type:
             normalized["type"] = [*schema_type, "null"]
         return normalized
-    # No ``type`` to extend ($ref/combinator): wrap so local refs still resolve
-    # from the root while null stays an explicit alternative.
+    # No ``type`` to extend ($ref/combinator): wrap so local refs still resolve from the
+    # root while null stays an explicit alternative.
     return {"anyOf": [normalized, {"type": "null"}]}
 
 
 def _schema_has_external_ref(node: Any) -> bool:
-    """True when *node* contains a non-local ``$ref`` — local validation must
-    never turn a tool call into an implicit network/file fetch (fail open)."""
+    """True when *node* contains a non-local ``$ref`` — local validation must never turn a
+    tool call into an implicit network/file fetch (fail open)."""
     if isinstance(node, list):
         return any(_schema_has_external_ref(item) for item in node)
     if not isinstance(node, dict):
@@ -53,10 +53,8 @@ def _schema_has_external_ref(node: Any) -> bool:
     ref = node.get("$ref")
     if isinstance(ref, str) and not ref.startswith("#"):
         return True
-    return any(
-        _schema_has_external_ref(value)
-        for key, value in node.items()
-        if key not in _SCHEMA_LITERAL_KEYS)
+    return any(_schema_has_external_ref(value) for key, value in node.items()
+               if key not in _SCHEMA_LITERAL_KEYS)
 
 
 def _validation_path(error: Any) -> str:
@@ -79,15 +77,12 @@ def _validation_error(message: str, *, path: str, constraint: str, parameters: A
 
 
 def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str]:
-    """Validate ``tool_call`` arguments against the deferred tool's schema.
-
-    Models invoke deferred tools "blind" (schema unseen) and omit required
-    args; without this, the opaque downstream failure makes cheap models loop.
-    Required-field probe first, then the same schema-guided coercion normal
-    dispatch applies, then jsonschema on the repaired copy. Missing/malformed
-    schemas, no validator, and external refs all fail OPEN. Returns a JSON
-    error string when invalid, ``None`` when the call should dispatch.
-    """
+    """Validate ``tool_call`` arguments against the deferred tool's schema. Models invoke
+    deferred tools "blind" (schema unseen) and omit required args; without this, the opaque
+    downstream failure makes cheap models loop. Required-field probe first, then the same
+    schema-guided coercion normal dispatch applies, then jsonschema on the repaired copy.
+    Missing/malformed schemas, no validator, and external refs all fail OPEN. Returns a JSON
+    error string when invalid, ``None`` when the call should dispatch."""
     try:
         from tools.registry import registry as _registry
         schema = _registry.get_schema(name)
@@ -98,35 +93,31 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
         if not isinstance(params, dict):
             return None
         required = params.get("required")
-        if isinstance(required, list):
-            missing = [r for r in required if isinstance(r, str) and r not in args]
-            if missing:
-                return _validation_error(
-                    f"tool_call to '{name}' is missing required argument(s): "
-                    f"{', '.join(missing)}. The tool was NOT invoked.",
-                    path="arguments", constraint="required", parameters=params)
-
+        missing = ([r for r in required if isinstance(r, str) and r not in args]
+                   if isinstance(required, list) else [])
+        if missing:
+            return _validation_error(
+                f"tool_call to '{name}' is missing required argument(s): "
+                f"{', '.join(missing)}. The tool was NOT invoked.",
+                path="arguments", constraint="required", parameters=params)
         validation_schema = _schema_for_local_validation(params)
         if _schema_has_external_ref(validation_schema):
             logger.debug("Skipping local deferred-argument validation for %s: external $ref", name)
             return None
-
-        # Validate the repaired shape dispatch will see; copy because
-        # coerce_tool_args may normalize in place (dispatch re-coerces canonically).
+        # Validate the repaired shape dispatch will see; copy because coerce_tool_args may
+        # normalize in place (dispatch re-coerces canonically).
         try:
             from model_tools import coerce_tool_args
             candidate_args = coerce_tool_args(name, dict(args))
         except Exception:
             logger.debug("Deferred-argument coercion failed for %s", name, exc_info=True)
             candidate_args = dict(args)
-
         try:
             from jsonschema.exceptions import best_match
             from jsonschema.validators import validator_for
         except ImportError:
             logger.debug("jsonschema unavailable; keeping required-only validation for %s", name)
             return None
-
         validator_cls = validator_for(validation_schema)
         validator_cls.check_schema(validation_schema)
         validation_error = best_match(validator_cls(validation_schema).iter_errors(candidate_args))
