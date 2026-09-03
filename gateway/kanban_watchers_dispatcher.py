@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from gateway.kanban_watchers_common import _list_boards, logger
+from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
 
 _CORRUPT_DB_MARKERS = ("file is not a database", "database disk image is malformed")
 
@@ -33,23 +33,6 @@ class _DispatcherSettings:
     max_in_progress_per_profile: Optional[int]
 
 
-def _positive_int_setting(kanban_cfg: dict, key: str) -> Optional[int]:
-    """Parse an optional ``kanban.<key>`` int cap; None when unset or invalid (< 1 is invalid)."""
-    raw = kanban_cfg.get(key)
-    if raw is None:
-        return None
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        logger.warning("kanban dispatcher: invalid kanban.%s=%r; ignoring", key, raw)
-        return None
-    if value < 1:
-        logger.warning("kanban dispatcher: kanban.%s=%r is below 1; ignoring", key, raw)
-        return None
-    logger.info("kanban dispatcher: %s=%d", key, value)
-    return value
-
-
 def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettings:
     """Parse and log the dispatcher settings in their established order."""
     try:
@@ -66,10 +49,9 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     if max_spawn is not None:
         logger.info("kanban dispatcher: max_spawn=%s", max_spawn)
 
-    # Cap simultaneously running tasks so slow workers don't pile up and
-    # time out. Explicit config wins; otherwise a memory-derived default
-    # (unbounded fan-out swap-thrashes small hosts), or None where total
-    # memory can't be read.
+    # Cap simultaneously running tasks so slow workers don't pile up and time
+    # out. Explicit config wins; otherwise a memory-derived default (unbounded
+    # fan-out swap-thrashes small hosts), or None where total memory can't be read.
     max_in_progress = _positive_int_setting(kanban_cfg, "max_in_progress")
     effective_max_in_progress = kb.resolve_max_in_progress(max_in_progress)
     if max_in_progress is None and effective_max_in_progress is not None:
@@ -86,15 +68,13 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     except (TypeError, ValueError):
         logger.warning(
             "kanban dispatcher: invalid kanban.failure_limit=%r; using default %d",
-            raw_failure_limit,
-            kb.DEFAULT_FAILURE_LIMIT,
+            raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT,
         )
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
     if failure_limit < 1:
         logger.warning(
             "kanban dispatcher: kanban.failure_limit=%r is below 1; using default %d",
-            raw_failure_limit,
-            kb.DEFAULT_FAILURE_LIMIT,
+            raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT,
         )
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
 
@@ -150,12 +130,10 @@ class _KanbanDispatcher:
     def __init__(self, kb: Any, settings: _DispatcherSettings) -> None:
         self.kb = kb
         self.settings = settings
-        self.disabled_corrupt_boards: dict[
-            str, tuple[tuple[str, int | None, int | None], float]
-        ] = {}
+        self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
 
     def _board_slugs(self) -> list:
-        return [b.get("slug") or self.kb.DEFAULT_BOARD for b in _list_boards(self.kb)]
+        return _board_slugs(self.kb)
 
     def board_db_fingerprint(self, slug: str) -> tuple[str, int | None, int | None]:
         path = self.kb.kanban_db_path(slug)
@@ -191,14 +169,10 @@ class _KanbanDispatcher:
             logger.info(
                 "kanban dispatcher: board %s database fingerprint unchanged "
                 "after %.0fs quarantine; retrying dispatch",
-                slug,
-                age,
+                slug, age,
             )
         else:
-            logger.info(
-                "kanban dispatcher: board %s database changed; retrying dispatch",
-                slug,
-            )
+            logger.info("kanban dispatcher: board %s database changed; retrying dispatch", slug)
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
@@ -218,12 +192,8 @@ class _KanbanDispatcher:
             # process (see the matching note in the notifier collector).
             conn = self.kb.connect(board=slug)
             return self.kb.dispatch_once(
-                conn,
-                board=slug,
-                max_spawn=s.max_spawn,
-                max_in_progress=s.max_in_progress,
-                failure_limit=s.failure_limit,
-                stale_timeout_seconds=s.stale_timeout_seconds,
+                conn, board=slug, max_spawn=s.max_spawn, max_in_progress=s.max_in_progress,
+                failure_limit=s.failure_limit, stale_timeout_seconds=s.stale_timeout_seconds,
                 default_assignee=s.default_assignee,
                 max_in_progress_per_profile=s.max_in_progress_per_profile,
                 reconcile_orphans=s.reconcile_orphans,
@@ -237,8 +207,7 @@ class _KanbanDispatcher:
                     "the file changes, the gateway restarts, or the "
                     "quarantine timer expires. Move or restore the file, "
                     "then run `hermes kanban init` if you need a fresh board.",
-                    slug,
-                    fingerprint[0],
+                    slug, fingerprint[0],
                 )
                 return None
             logger.exception("kanban dispatcher: tick failed on board %s", slug)
@@ -253,14 +222,13 @@ class _KanbanDispatcher:
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
 
     def ready_nonempty(self) -> bool:
-        """Is there a ready+assigned+unclaimed task on ANY board that the
-        dispatcher would actually spawn for?
+        """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?
 
-        Control-plane lanes (e.g. ``orion-cc``) are pulled by terminals
-        via ``claim_task`` and never spawnable — a queue full of those is
-        "correctly idle", not "stuck". The review column is probed only
-        when review dispatch is on (same gate as the dispatcher): a task
-        waiting for a human reviewer is idle, not stuck.
+        Control-plane lanes (e.g. ``orion-cc``) are pulled by terminals via
+        ``claim_task`` and never spawnable — a queue full of those is
+        "correctly idle", not "stuck". The review column is probed only when
+        review dispatch is on (same gate as the dispatcher): a task waiting
+        for a human reviewer is idle, not stuck.
         """
         kb = self.kb
         _review_probe = kb.review_dispatch_enabled()
@@ -268,9 +236,7 @@ class _KanbanDispatcher:
             conn = None
             try:
                 conn = kb.connect(board=slug)
-                if kb.has_spawnable_ready(conn):
-                    return True
-                if _review_probe and kb.has_spawnable_review(conn):
+                if kb.has_spawnable_ready(conn) or (_review_probe and kb.has_spawnable_review(conn)):
                     return True
             except Exception:
                 continue
@@ -281,17 +247,15 @@ class _KanbanDispatcher:
         return False
 
     def auto_decompose_tick(self, auto_decompose_per_tick: int) -> int:
-        """Auto-decompose up to N triage tasks across all boards into
-        ready workgraphs before dispatch fans out; the per-tick cap keeps
-        a bulk triage load from burst-spending the aux LLM. Returns the
-        number decomposed/specified.
+        """Auto-decompose up to N triage tasks across all boards into ready workgraphs.
+
+        Runs before dispatch fans out; the per-tick cap keeps a bulk triage
+        load from burst-spending the aux LLM. Returns the number decomposed.
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
         except Exception as exc:  # pragma: no cover
-            logger.warning(
-                "kanban auto-decompose: import failed (%s); skipping", exc,
-            )
+            logger.warning("kanban auto-decompose: import failed (%s); skipping", exc)
             return 0
         attempted = 0
         successes = 0
@@ -306,10 +270,7 @@ class _KanbanDispatcher:
                 try:
                     triage_ids = _decomp.list_triage_ids()
                 except Exception as exc:
-                    logger.debug(
-                        "kanban auto-decompose: list_triage_ids failed on board %s (%s)",
-                        slug, exc,
-                    )
+                    logger.debug("kanban auto-decompose: list_triage_ids failed on board %s (%s)", slug, exc)
                     triage_ids = []
                 for tid in triage_ids:
                     if attempted >= auto_decompose_per_tick:
@@ -329,28 +290,16 @@ class _KanbanDispatcher:
         try:
             outcome = _decomp.decompose_task(tid, author="auto-decomposer")
         except Exception:
-            logger.exception(
-                "kanban auto-decompose: decompose_task crashed on %s",
-                tid,
-            )
+            logger.exception("kanban auto-decompose: decompose_task crashed on %s", tid)
             return 0
         if not outcome.ok:
             # Common no-op reasons (no aux client) must not spam logs every tick.
-            logger.debug(
-                "kanban auto-decompose [%s]: %s skipped: %s",
-                slug, tid, outcome.reason,
-            )
+            logger.debug("kanban auto-decompose [%s]: %s skipped: %s", slug, tid, outcome.reason)
             return 0
         if outcome.fanout and outcome.child_ids:
-            logger.info(
-                "kanban auto-decompose [%s]: %s → %d children",
-                slug, tid, len(outcome.child_ids),
-            )
+            logger.info("kanban auto-decompose [%s]: %s → %d children", slug, tid, len(outcome.child_ids))
         else:
-            logger.info(
-                "kanban auto-decompose [%s]: %s → single task (no fanout)",
-                slug, tid,
-            )
+            logger.info("kanban auto-decompose [%s]: %s → single task (no fanout)", slug, tid)
         return 1
 
 
@@ -364,9 +313,7 @@ def _log_spawn_results(results: Optional[list]) -> bool:
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
                 "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
-                slug,
-                len(res.spawned),
-                res.reclaimed,
+                slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
