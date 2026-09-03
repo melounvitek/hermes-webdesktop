@@ -117,9 +117,8 @@ _OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the per-profile projects DB.
 
-    WAL with DELETE fallback for network filesystems (shared helper from ``hermes_state``). Schema
-    init is idempotent (``CREATE TABLE IF NOT EXISTS`` + additive migrations) and cached per-path
-    per-process.
+    WAL with DELETE fallback for network filesystems (``hermes_state`` helper). Schema init is
+    idempotent (``CREATE TABLE IF NOT EXISTS`` + additive migrations) and cached per-path per-process.
     """
     path = db_path if db_path is not None else projects_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,12 +145,8 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 @contextlib.contextmanager
 def connect_closing(db_path: Optional[Path] = None):
-    """Open a projects DB connection and guarantee it is closed on exit.
-
-    sqlite3's connection context manager only commits/rollbacks, it does NOT close the fd; long-lived
-    processes (gateway, dashboard) would otherwise leak fds to ``projects.db``. Mirrors
-    ``kanban_db.connect_closing``.
-    """
+    """Open a projects DB connection and close it on exit (sqlite3's own context manager only
+    commits/rollbacks, so long-lived gateway/dashboard processes would leak fds otherwise)."""
     conn = connect(db_path=db_path)
     try:
         yield conn
@@ -235,11 +230,8 @@ def _primary_path_key(path: str) -> str:
 
 
 def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
-    """The first (oldest) project whose primary path matches ``path``, else None.
-
-    Comparison is separator/case normalized so equivalent Windows spellings of the same folder do
-    not slip past the dedup check.
-    """
+    """The first (oldest) project whose primary path matches ``path`` (separator/case normalized so
+    equivalent Windows spellings don't slip past the dedup check), else None."""
     key = _primary_path_key(path)
     if not key:
         return None
@@ -265,12 +257,8 @@ def create_project(
     board_slug: Optional[str] = None,
     allow_duplicate_path: bool = False,
 ) -> str:
-    """Create a project and return its id.
-
-    ``folders`` are normalized to absolute paths. If ``primary_path`` is given it is added to the
-    folder set (if not already present) and marked primary; otherwise the first folder becomes
-    primary.
-    """
+    """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
+    is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
     name = str(name or "").strip()
     if not name:
         raise ValueError("project name must not be empty")
@@ -337,11 +325,8 @@ def update_project(
     color: Optional[str] = None,
     board_slug: Optional[str] = None,
 ) -> bool:
-    """Patch top-level project fields. Only provided fields change.
-
-    ``icon``, ``color``, and ``board_slug`` accept an empty string to clear (store NULL) — passing
-    ``None`` leaves the field untouched, so callers that want to clear must send ``""``.
-    """
+    """Patch top-level project fields; only provided (non-None) fields change. ``icon``, ``color`` and
+    ``board_slug`` take ``""`` to clear (store NULL) — ``None`` leaves the field untouched."""
     if name is not None:
         name = str(name).strip()
         if not name:
@@ -480,11 +465,8 @@ def get_discovery_policy_key(conn: sqlite3.Connection) -> Optional[str]:
 
 
 def reconcile_discovered_repos_policy(conn: sqlite3.Connection, policy_key: str, *, preserve_unversioned: bool = False) -> bool:
-    """Clear cached scan rows when their discovery policy changes.
-
-    Existing pre-policy rows are retained only for the backward-compatible default policy. Returns
-    whether rows were cleared.
-    """
+    """Clear cached scan rows when their discovery policy changes; pre-policy rows are retained only
+    for the backward-compatible default policy. Returns whether rows were cleared."""
     current = get_discovery_policy_key(conn)
     if current == policy_key:
         return False
@@ -514,12 +496,9 @@ def record_discovered_repos(
     replace: bool = False,
     policy_key: Optional[str] = None,
 ) -> int:
-    """Persist scanned git repo roots into the cache.
-
-    ``repos`` is an iterable of ``(root, label)``. Roots are normalized; the label falls back to the
-    basename. Returns the number of rows written. ``replace`` marks the authoritative result of a
-    fresh scan: stale rows are deleted first so old eval/worktree noise doesn't live forever.
-    """
+    """Persist scanned ``(root, label)`` repo roots (normalized; label falls back to basename) and
+    return the row count. ``replace`` = authoritative fresh scan: stale rows are deleted first so old
+    eval/worktree noise doesn't live forever."""
     now = _now()
     rows = []
     for root, label in repos:
@@ -551,11 +530,8 @@ def list_discovered_repos(conn: sqlite3.Connection) -> List[dict]:
 
 
 def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
-    """Return the project owning ``path`` (longest-prefix folder match).
-
-    A folder owns ``path`` when ``path`` equals the folder or is nested under it. The most specific
-    (longest) folder wins, so nested projects resolve to the innermost one.
-    """
+    """Return the project owning ``path``: a folder owns it when equal or an ancestor, and the longest
+    folder wins so nested projects resolve to the innermost one."""
     if not str(path or "").strip():
         return None
     target = _normalize_path(path)
@@ -579,11 +555,8 @@ _BRANCH_SAFE_RE = re.compile(r"[^a-z0-9._-]+")
 
 
 def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:
-    """Deterministic branch name for a project-linked kanban task.
-
-    Shape: ``<project-slug>/<task-id>`` (optionally ``-<title-slug>``); stable and human-meaningful,
-    replacing the random ``wt/<task-id>`` fallback.
-    """
+    """Deterministic ``<project-slug>/<task-id>[-<title-slug>]`` branch name for a project-linked kanban
+    task (stable and human-meaningful, replacing the random ``wt/<task-id>`` fallback)."""
     base = f"{project.slug or _slugify(project.name)}/{task_id}"
     if title:
         tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")[:40].strip("-")

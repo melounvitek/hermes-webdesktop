@@ -51,13 +51,13 @@ def query_session_listing(
     limit: int = 10,
     exclude_sources: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return session rows for interactive listing surfaces.
+    """Return session rows for interactive listing surfaces (shared CLI/gateway policy).
 
-    Shared CLI/gateway policy: source-scoped unless global is requested, unnamed hidden unless a
-    full listing is asked for, current session hidden unless requested (then marked
-    ``is_current_session``); ``session_key`` restricts gateway callers to one lane before the DB
-    limit applies. With ``search_query`` rows are filtered by title/id in SQL, ordered by recent
-    activity, and unnamed sessions stay visible since an id match may be the only handle.
+    Source-scoped unless global is requested; unnamed hidden unless a full listing is asked for;
+    current session hidden unless requested (then marked ``is_current_session``); ``session_key``
+    restricts gateway callers to one lane before the DB limit applies. With ``search_query`` rows
+    are filtered by title/id in SQL, ordered by recent activity, and unnamed sessions stay visible
+    since an id match may be the only handle.
     """
     search = (search_query or "").strip()
     rows = session_db.list_sessions_rich(
