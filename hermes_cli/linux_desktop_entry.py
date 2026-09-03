@@ -75,18 +75,13 @@ def _can_import_hermes_cli(interpreter: Path) -> bool:
     cached = _probe_cache.get(key)
     if cached is not None:
         return cached
-    try:
-        result = subprocess.run(
-            [key, "-I", "-c", "import hermes_cli.main"],
-            cwd=os.path.abspath(os.sep),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
+    ok = _run_quiet(
+        [key, "-I", "-c", "import hermes_cli.main"],
+        cwd=os.path.abspath(os.sep), timeout=15, on_error=None,
+    )
+    if ok is None:
         return True
-    _probe_cache[key] = ok = result.returncode == 0
+    _probe_cache[key] = ok
     return ok
 
 
@@ -228,6 +223,18 @@ def _shebang_tokens(shebang: str) -> "list[str]":
     return shebang[2:].strip().split()
 
 
+def _is_native_binary(head: bytes) -> bool:
+    return head[:4] == b"\x7fELF" or head.startswith(b"MZ")
+
+
+def _read_head(path: Path, size: int = 4096) -> Optional[bytes]:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(size)
+    except OSError:
+        return None
+
+
 def _wrapper_shebang_safe(wrapper: Path) -> bool:
     """Whether an executable wrapper can actually run in the DE context.
 
@@ -235,12 +242,10 @@ def _wrapper_shebang_safe(wrapper: Path) -> bool:
     interpreter itself). A python-shebang wrapper is safe only when its interpreter stays inside
     the RUNNING venv; anything unknown fails safe toward the module fallback.
     """
-    try:
-        with open(wrapper, "rb") as fh:
-            head = fh.read(4096)
-    except OSError:
+    head = _read_head(wrapper)
+    if head is None:
         return False
-    if head[:4] == b"\x7fELF" or head.startswith(b"MZ"):
+    if _is_native_binary(head):
         return True
     if not head.startswith(b"#!"):
         return False
@@ -273,11 +278,10 @@ def _wrapper_targets_checkout(wrapper: Path, checkout_root: Path) -> bool:
     tried: the installer writes $INSTALL_DIR lexically, so with a symlinked home the shim text
     carries the lexical path while the caller may pass a resolved one.
     """
-    try:
-        head = wrapper.read_bytes()[:4096]
-    except OSError:
+    head = _read_head(wrapper)
+    if head is None:
         return False
-    if b"\x7fELF" in head[:4] or head.startswith(b"MZ"):
+    if _is_native_binary(head):
         # Native binary: cannot verify, cannot be another checkout's bash shim either — accept.
         return True
     text = head.decode("utf-8", errors="replace")
@@ -322,14 +326,10 @@ def _needs_interpreter(bin_path: Path) -> bool:
     Native binaries (uv shim, PyInstaller, distro package) and shell wrappers (the installer's
     bash launcher execs the venv python itself) never need one.
     """
-    try:
-        with open(bin_path, "rb") as fh:
-            head = fh.readline(256)
-    except OSError:
+    head = _read_head(bin_path, 256)
+    if head is None or not head.startswith(b"#!"):
         return False
-    if not head.startswith(b"#!"):
-        return False
-    shebang = head.decode("utf-8", errors="replace").strip()
+    shebang = head.decode("utf-8", errors="replace").splitlines()[0].strip()
     if "python" not in shebang.lower():
         return False
     return _shebang_escapes_running_env(shebang)
@@ -400,17 +400,19 @@ def refresh_desktop_databases(applications_dir: Path) -> "list[str]":
     return ran
 
 
-def _run_quiet(cmd: "list[str]") -> bool:
+def _run_quiet(cmd: "list[str]", *, timeout: int = 60, on_error: Optional[bool] = False, **kwargs) -> Optional[bool]:
+    """Exit-status success of a silenced subprocess; ``on_error`` when it could not be run at all."""
     try:
         result = subprocess.run(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-            timeout=60,
+            timeout=timeout,
+            **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return on_error
     return result.returncode == 0
 
 

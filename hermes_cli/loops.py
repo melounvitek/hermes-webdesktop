@@ -231,9 +231,9 @@ class LoopState:
             "last_stop_reason": data.get("last_stop_reason"),
             "route": route if isinstance(route, dict) else {},
         }
+        # Remaining numeric/str fields: missing key -> dataclass default; present-but-falsy -> zero.
         for f in fields(cls):
             if f.name not in kwargs:
-                # Missing key -> dataclass default; present-but-falsy -> the type's zero.
                 cast = {"str": str, "int": int, "float": float}[f.type]
                 kwargs[f.name] = cast(data.get(f.name, f.default) or cast())
         return cls(**kwargs)
@@ -472,35 +472,34 @@ class LoopManager:
             route=dict(route or {}),
         )
         self._state = state
-        save_loop(self.session_id, state)
-        return state
+        return self._save()
+
+    def _save(self) -> LoopState:
+        save_loop(self.session_id, self._state)
+        return self._state
 
     def pause(self, reason: str = "user-paused") -> Optional[LoopState]:
-        if not self._state or self._state.status not in {"active", "paused"}:
+        s = self._state
+        if not s or s.status not in {"active", "paused"}:
             return None
-        self._state.status = "paused"
-        self._state.paused_reason = reason
-        self._state.awaiting_response = False
-        save_loop(self.session_id, self._state)
-        return self._state
+        s.status, s.paused_reason, s.awaiting_response = "paused", reason, False
+        return self._save()
 
     def resume(self) -> Optional[LoopState]:
-        if not self._state or self._state.status == "cleared":
+        s = self._state
+        if not s or s.status == "cleared":
             return None
-        self._state.status = "active"
-        self._state.paused_reason = None
-        self._state.awaiting_response = False
+        s.status, s.paused_reason, s.awaiting_response = "active", None, False
         # Re-arm relative to now so a long pause doesn't fire instantly N times.
-        delay = self._state.current_delay or self._state.interval_seconds or self_paced_floor_seconds()
-        self._state.next_due_at = time.time() + min(delay, 5.0)
-        save_loop(self.session_id, self._state)
-        return self._state
+        delay = s.current_delay or s.interval_seconds or self_paced_floor_seconds()
+        s.next_due_at = time.time() + min(delay, 5.0)
+        return self._save()
 
     def clear(self) -> bool:
         if self._state is None or self._state.status == "cleared":
             return False
         self._state.status = "cleared"
-        save_loop(self.session_id, self._state)
+        self._save()
         self._state = None
         return True
 
@@ -526,9 +525,8 @@ class LoopManager:
         s.awaiting_response = True
         # Provisional schedule from NOW: complete_tick reschedules from turn end, but if the
         # process dies mid-turn this keeps the persisted loop from being 'due' in a tight loop.
-        delay = s.current_delay or s.interval_seconds or self_paced_floor_seconds()
-        s.next_due_at = s.last_fired_at + delay
-        save_loop(self.session_id, s)
+        s.next_due_at = s.last_fired_at + (s.current_delay or s.interval_seconds or self_paced_floor_seconds())
+        self._save()
 
         if s.prompt.lstrip().startswith("/"):
             return s.prompt.strip()
@@ -543,7 +541,7 @@ class LoopManager:
             return
         s.awaiting_response = False
         s.ticks_fired = max(0, s.ticks_fired - 1)
-        save_loop(self.session_id, s)
+        self._save()
 
     def _stop(self, status: str, reason: str, message: str) -> Dict[str, Any]:
         """Persist a terminal (``done``) or recoverable (``paused``) stop and build the result."""
@@ -553,7 +551,7 @@ class LoopManager:
             s.last_stop_reason = reason
         else:
             s.paused_reason = reason
-        save_loop(self.session_id, s)
+        self._save()
         return {"status": status, "stopped": True, "reason": reason, "message": message}
 
     def complete_tick(self, last_response: str) -> Dict[str, Any]:
@@ -616,7 +614,7 @@ class LoopManager:
         else:
             s.current_delay = s.interval_seconds
         s.next_due_at = now + s.current_delay
-        save_loop(self.session_id, s)
+        self._save()
         return {"status": "active", "stopped": False, "reason": "loop continues", "message": ""}
 
 
