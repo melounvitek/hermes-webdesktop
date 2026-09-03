@@ -17,6 +17,12 @@ from agent.turn_stop_gates import apply_stop_gates
 
 logger = logging.getLogger("agent.conversation_loop")
 
+# Ephemeral retry scaffolding rows popped before the final answer becomes durable.
+_EPHEMERAL_SCAFFOLDING_FLAGS = (
+    "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
+    "_dropped_toolcall_nudge",
+)
+
 
 @dataclass
 class FinalResponseVerdict:
@@ -66,15 +72,12 @@ def finish_text_response(
             result=result,
         )
 
-    # No tool calls — final response. (Dropped tool-call recovery lives at
-    # the finalization chokepoint below so it catches every path.)
     final_response = assistant_message.content or ""
-
-    # Unmute: _mute_post_response from a housekeeping tool turn must not
-    # silence empty-response warnings on the final response path.
+    # Unmute: _mute_post_response from a housekeeping tool turn must not silence
+    # empty-response warnings on the final response path.
     agent._mute_post_response = False
 
-    # Check if response only has think block with no actual content after it
+    # Think-block-only / empty content: recovery path.
     if not agent._has_content_after_think_block(final_response):
         _ev = recover_empty_response(
             agent, assistant_message, response, finish_reason, final_response=final_response,
@@ -93,11 +96,10 @@ def finish_text_response(
             return _verdict("break")
         return _verdict("continue")
 
-    # Reset retry counter/signature on successful content
     agent._empty_content_retries = 0
     agent._thinking_prefill_retries = 0
-    # Surface the one-shot fallback switch notice before dropping the retry
-    # buffer so a provider/model switch stays visible on success.
+    # Surface the one-shot fallback switch notice before dropping the retry buffer so a
+    # provider/model switch stays visible on success.
     agent._emit_pending_fallback_notice()
     agent._clear_status_buffer()
 
@@ -106,16 +108,13 @@ def finish_text_response(
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
-    # Said-continue-but-stopped guard: no tool calls but the short reply
-    # TAILS with an announced next action. Fires mid-task too; reuses the
-    # SAME bounded continuation path and counter (max 2 per turn).
+    # Said-continue-but-stopped guard: no tool calls but the short reply TAILS with an
+    # announced next action. Reuses the SAME bounded continuation counter (max 2 per turn).
     _stall_continue_intent = (
         bool(getattr(agent, "_stall_guards", True))
         and agent.valid_tool_names
         and codex_ack_continuations < 2
-        and trailing_continue_intent(
-            agent._strip_think_blocks(final_response or "")
-        )
+        and trailing_continue_intent(agent._strip_think_blocks(final_response or ""))
     )
     if _stall_continue_intent or (
         _ack_mode != "off"
@@ -136,14 +135,10 @@ def finish_text_response(
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         append_message(messages, interim_msg)
         agent._emit_interim_assistant_message(interim_msg)
-
-        continue_msg = {
-            "role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE
-        }
-        append_message(messages, continue_msg)
+        append_message(messages, {"role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE})
         agent._session_messages = messages
-        # An acknowledgment is non-final: its text must not suppress
-        # iteration-limit summarization if the continuation exhausts budget.
+        # An acknowledgment is non-final: its text must not suppress iteration-limit
+        # summarization if the continuation exhausts budget.
         final_response = None
         return _verdict("continue")
 
@@ -163,9 +158,8 @@ def finish_text_response(
 
     final_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
-    # ── Dropped tool-call recovery (copilot/Claude) ────────
-    # finish_reason="tool_calls" with empty tool_calls would end the turn
-    # unstarted; re-prompt (max 3 CONSECUTIVE stalls, reset per tool round).
+    # Dropped tool-call recovery (copilot/Claude): finish_reason="tool_calls" with empty
+    # tool_calls would end the turn unstarted; re-prompt (max 3 CONSECUTIVE stalls).
     if (
         finish_reason == "tool_calls"
         and not assistant_message.tool_calls
@@ -182,9 +176,8 @@ def finish_text_response(
             "↻ Model signaled a tool call but sent none — "
             f"re-prompting ({agent._dropped_toolcall_retries}/3)"
         )
-        # Both halves of the re-prompt pair are ephemeral scaffolding; flag
-        # them so the flush never persists them and the finalization pop
-        # can strip an unanswered tail pair.
+        # Both halves of the re-prompt pair are ephemeral scaffolding: never persisted,
+        # and the finalization pop strips an unanswered tail pair.
         final_msg["_dropped_toolcall_nudge"] = True
         append_message(messages, final_msg)
         append_message(messages, {
@@ -204,12 +197,7 @@ def finish_text_response(
     while (
         messages
         and isinstance(messages[-1], dict)
-        and (
-            messages[-1].get("_thinking_prefill")
-            or messages[-1].get("_empty_recovery_synthetic")
-            or messages[-1].get("_empty_terminal_sentinel")
-            or messages[-1].get("_dropped_toolcall_nudge")
-        )
+        and any(messages[-1].get(flag) for flag in _EPHEMERAL_SCAFFOLDING_FLAGS)
     ):
         messages.pop()
 
@@ -226,9 +214,8 @@ def finish_text_response(
         return _verdict("continue")
 
     append_message(messages, final_msg)
-    # Make the answer durable before leaving the loop; _DB_PERSISTED_MARKER
-    # keeps _persist_session idempotent. Failure must NOT abort the turn:
-    # _persist_session retries the write. (#81641)
+    # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps
+    # _persist_session idempotent). Failure must NOT abort the turn: finalize retries.
     try:
         agent._flush_messages_to_session_db(messages, conversation_history)
     except Exception:
@@ -243,4 +230,3 @@ def finish_text_response(
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
     return _verdict("break")
-    return _verdict("fallthrough")

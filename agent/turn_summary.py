@@ -1,18 +1,15 @@
 """Per-turn accounting for the interactive CLI (display-only, pure).
 
-:class:`TurnSummaryCollector` rides the existing ``tool_progress_callback`` feed
-(``tool.completed`` events carry the tool name and raw result) and tallies what a
-turn did — no agent-loop state is threaded through. :func:`format_turn_summary`
-renders a tally plus wall-clock duration into one dim line, e.g.::
-
-    ⋯ 12.4s · edited 2 files +18 -3 · read 4 files · ran 3 commands
-
-(ported from Claude Code's post-turn accounting line). :func:`format_token_flow`
-is the spinner-side cumulative token readout (``↓ 1.2k tok``).
+:class:`TurnSummaryCollector` rides the ``tool_progress_callback`` feed (``tool.completed``
+events carry the tool name and raw result) and tallies what a turn did — no agent-loop state
+is threaded through. :func:`format_turn_summary` renders a tally plus wall-clock duration
+into one dim line: ``⋯ 12.4s · edited 2 files +18 -3 · read 4 files · ran 3 commands``.
+:func:`format_token_flow` is the spinner-side cumulative token readout (``↓ 1.2k tok``).
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,18 +22,14 @@ __all__ = [
 ]
 
 
-# Leading glyph: terminal chrome, deliberately not an emoji.
-SUMMARY_PREFIX = "⋯"
-
+SUMMARY_PREFIX = "⋯"  # terminal chrome, deliberately not an emoji
 # A tool-less turn faster than this is a plain chat reply: formatter returns "".
 _MIN_TOOLLESS_SECONDS = 2.0
-
 # Max "verb + count" segments before collapsing the rest into "+N more".
 _MAX_SEGMENTS = 4
 
-
-# Tool name -> (verb, singular noun, plural noun). Past tense: printed after the
-# turn. Unlisted tools (plugin/MCP) fall into a generic "called N tools" bucket.
+# Tool name -> (verb, singular noun, plural noun), past tense. Unlisted tools (plugin/MCP)
+# fall into a generic "called N tools" bucket.
 _VERB_GROUPS: dict[str, tuple[str, str, str]] = {
     "write_file": ("edited", "file", "files"),
     "patch": ("edited", "file", "files"),
@@ -56,12 +49,9 @@ _VERB_GROUPS: dict[str, tuple[str, str, str]] = {
     "memory": ("updated", "memory", "memories"),
 }
 
-# Verb group that carries file-edit line deltas (+X -Y) when known.
-_EDIT_VERB = "edited"
-
+_EDIT_VERB = "edited"  # verb group that carries file-edit line deltas (+X -Y) when known
 # Render order: edits first, then reads, then commands; others in first-seen order.
 _VERB_PRIORITY: tuple[str, ...] = ("edited", "read", "ran")
-
 # Tools whose results may report a unified diff we can count lines from.
 _DIFF_RESULT_TOOLS = frozenset({"patch"})
 
@@ -94,8 +84,6 @@ def _extract_line_deltas(tool_name: str, result: Any) -> tuple[int, int] | None:
         if not text.startswith("{"):
             return None
         try:
-            import json
-
             # strict=False tolerates raw control chars inside an embedded diff.
             payload = json.loads(text, strict=False)
         except Exception:
@@ -169,12 +157,9 @@ def _pluralize(count: int, plural_noun: str) -> str:
     """``"1 file"`` / ``"3 files"`` from a plural noun form."""
     if count != 1:
         return f"{count} {plural_noun}"
-    if plural_noun.endswith("ies"):
-        return f"1 {plural_noun[:-3]}y"
-    if plural_noun.endswith("ses"):
-        return f"1 {plural_noun[:-2]}"
-    if plural_noun.endswith("s"):
-        return f"1 {plural_noun[:-1]}"
+    for suffix, singular_tail in (("ies", "y"), ("ses", "s"), ("s", "")):
+        if plural_noun.endswith(suffix):
+            return f"1 {plural_noun[:-len(suffix)]}{singular_tail}"
     return f"1 {plural_noun}"
 
 

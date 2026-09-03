@@ -1,20 +1,11 @@
 """Turn liveness watchdog: force-abort turns that stall silently.
 
-A turn can wedge mid-flight with no error and its durable lease still
-renewing, so nothing ever frees the session. This module owns the policy:
-config resolution (``agent.turn_liveness`` in config.yaml, validated — a typo,
-NaN or Inf warns and falls back rather than disabling the timeout or freezing
-the poll), the sampling state machine, and the watcher thread.
-``AIAgent.run_conversation`` supplies the commit/deactivate callbacks that own
-turn-lease state.
-
-Race safety: the watchdog binds its abort decision to the observed
-``(generation, timestamp)`` pair; the commit callback revalidates that pair
-under the same lock ``_touch_activity`` stamps with, so a turn that resumed
-while the stall was being surfaced is never hard-cancelled. The revalidated
-generation flows into ``AIAgent.interrupt`` (``require_generation``) as a
-claim consumed at the final mutation edge, in ONE activity-lock critical
-section with the first interrupt-state publish.
+A turn can wedge mid-flight with no error and its durable lease still renewing, so nothing
+ever frees the session. This module owns config resolution (``agent.turn_liveness``,
+validated — a typo, NaN or Inf warns and falls back), the sampling state machine, and the
+watcher thread. Race safety: the abort decision is bound to the observed
+``(generation, timestamp)``; the commit callback revalidates it under the same lock
+``_touch_activity`` stamps with, so a turn that resumed is never hard-cancelled.
 """
 
 from __future__ import annotations
@@ -118,8 +109,8 @@ class TurnLivenessWatchdog:
         self._deactivate_turn = deactivate_turn
 
     def make_thread(self) -> threading.Thread:
-        """Build the (not yet started) watcher thread; run_agent starts it at
-        turn entry, after the turn-active flag and activity clock are stamped."""
+        """Build the (not yet started) watcher thread; started at turn entry, after the
+        turn-active flag and activity clock are stamped."""
         return threading.Thread(target=self._watch, name="turn-liveness-watchdog", daemon=True)
 
     def _watch(self) -> None:
@@ -129,15 +120,13 @@ class TurnLivenessWatchdog:
                 return  # turn no longer active
             if snapshot.idle_seconds < self._timeout_s:
                 continue
-            # Observational only: the commit below can still veto the abort
-            # if progress resumed; the definitive settlement is published
-            # by _surface_committed_abort after commit + deactivate.
+            # Observational only: the commit below can still veto the abort if progress
+            # resumed; the definitive settlement is _surface_committed_abort.
             self._surface_stall(snapshot)
             message = f"Turn made no progress for {int(snapshot.idle_seconds)}s; aborting to release the session."
             if not self._commit_abort(snapshot, message):
                 continue
-            # Stop renewing the lease so a wedge the interrupt cannot unwind
-            # expires via TTL instead of masking forever.
+            # Stop renewing the lease so a wedge the interrupt cannot unwind expires via TTL.
             self._deactivate_turn()
             self._surface_committed_abort(snapshot)
             return
@@ -161,11 +150,8 @@ class TurnLivenessWatchdog:
             logger.debug(debug_msg, exc_info=True)
 
     def _surface_stall(self, snapshot: ActivitySnapshot) -> None:
-        """Log + UI-warn that recovery is beginning (not that it committed).
-
-        Rate-limited per activity generation so repeatedly declined aborts
-        do not re-log every poll; a new generation re-arms the surface.
-        """
+        """Log + UI-warn that recovery is beginning (not that it committed). Rate-limited per
+        activity generation so repeatedly declined aborts do not re-log every poll."""
         generation = snapshot.generation
         if getattr(self, "_last_surfaced_generation", None) == generation:
             return
