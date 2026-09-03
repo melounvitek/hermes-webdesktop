@@ -169,8 +169,7 @@ def _cmd_recover(args):
             )
             progress.finish()
     except (SessionRecoveryError, OSError, sqlite3.DatabaseError) as exc:
-        print(f"Error: session recovery failed: {exc}")
-        print("The supplied source database was not replaced or deleted.")
+        print(f"Error: session recovery failed: {exc}\nThe supplied source database was not replaced or deleted.")
         return 1
     if report_path is not None:
         try:
@@ -261,11 +260,10 @@ def _cmd_list(db, args):
     _ws_filter = (getattr(args, "workspace", None) or "").strip()
     if _ws_filter:
         _needle = _ws_filter.lower()
-
-        def _in_workspace(s):
-            key = (_ws_key(s) or "").lower()
-            return bool(key) and (_needle in key or _needle == os.path.basename(key.rstrip("/\\")))
-        sessions = [s for s in sessions if _in_workspace(s)]
+        keyed = ((s, (_ws_key(s) or "").lower()) for s in sessions)
+        sessions = [
+            s for s, key in keyed if key and (_needle in key or _needle == os.path.basename(key.rstrip("/\\")))
+        ]
     if not sessions:
         print("No sessions found.")
         return
