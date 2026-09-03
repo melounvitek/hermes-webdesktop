@@ -1148,6 +1148,33 @@ _RATE_LIMIT_REASONS = frozenset({
 _TRANSPORT_FAILURE_REASONS = frozenset({FailoverReason.timeout, FailoverReason.overloaded})
 
 
+_LONG_CONTEXT_TIER_CAP = 200000
+
+
+def _cap_long_context_tier(agent: Any) -> int:
+    """Cap the compressor's context window at the long-context tier limit; returns the
+    previous ``context_length``."""
+    compressor = agent.context_compressor
+    old_ctx = compressor.context_length
+    if old_ctx > _LONG_CONTEXT_TIER_CAP:
+        compressor.update_model(
+            model=agent.model, context_length=_LONG_CONTEXT_TIER_CAP, base_url=agent.base_url,
+            api_key=getattr(agent, "api_key", ""), provider=agent.provider, api_mode=agent.api_mode,
+        )
+        # Context probing flags exist only on the built-in compressor (plugin engines
+        # manage their own). Don't persist — a tier limit, not a model capability;
+        # 1M should return if extra usage is enabled.
+        if hasattr(compressor, "_context_probed"):
+            compressor._context_probed = True
+            compressor._context_probe_persistable = False
+        agent._buffer_vprint(
+            f"⚠️  Anthropic long-context tier "
+            f"requires extra usage — reducing context: "
+            f"{old_ctx:,} → {_LONG_CONTEXT_TIER_CAP:,} tokens"
+        )
+    return old_ctx
+
+
 def _eager_fallback_status(classified: Any, is_upstream: bool, is_transport_failure: bool) -> str:
     """Status line announcing an eager fallback switch."""
     if is_upstream:
@@ -1271,27 +1298,7 @@ def route_classified_error(
     # Anthropic 429 "Extra usage is required for long context requests" is a
     # subscription-tier limit, not transient: cap at 200k and compress.
     if classified.reason == FailoverReason.long_context_tier:
-        _reduced_ctx = 200000
-        compressor = agent.context_compressor
-        old_ctx = compressor.context_length
-        if old_ctx > _reduced_ctx:
-            compressor.update_model(
-                model=agent.model, context_length=_reduced_ctx, base_url=agent.base_url,
-                api_key=getattr(agent, "api_key", ""), provider=agent.provider,
-                api_mode=agent.api_mode,
-            )
-            # Context probing flags exist only on the built-in compressor (plugin engines
-            # manage their own). Don't persist — a tier limit, not a model capability;
-            # 1M should return if extra usage is enabled.
-            if hasattr(compressor, "_context_probed"):
-                compressor._context_probed = True
-                compressor._context_probe_persistable = False
-            agent._buffer_vprint(
-                f"⚠️  Anthropic long-context tier "
-                f"requires extra usage — reducing context: "
-                f"{old_ctx:,} → {_reduced_ctx:,} tokens"
-            )
-
+        old_ctx = _cap_long_context_tier(agent)
         compression_attempts += 1
         if compression_attempts <= max_compression_attempts:
             original_len = len(messages)
@@ -1303,9 +1310,11 @@ def route_classified_error(
                 task_id=effective_task_id,
             )
             conversation_history = conversation_history_after_compression(agent, messages, conversation_history)
-            if len(messages) < original_len or old_ctx > _reduced_ctx:
+            if len(messages) < original_len or old_ctx > _LONG_CONTEXT_TIER_CAP:
                 agent._buffer_status(
-                    COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE.format(new_ctx=_reduced_ctx, old_ctx=old_ctx)
+                    COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE.format(
+                        new_ctx=_LONG_CONTEXT_TIER_CAP, old_ctx=old_ctx
+                    )
                 )
                 time.sleep(2)
                 # Provider proved the request doesn't fit the reduced window; row count
