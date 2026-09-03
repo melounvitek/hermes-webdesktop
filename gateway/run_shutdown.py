@@ -702,17 +702,13 @@ class GatewayShutdownMixin:
                 dedup_key = (job_id, *_notice_target_key(platform.value, chat_id, thread_id))
                 if dedup_key in notified:
                     continue
-                try:
+                with _log_suppressed(logging.DEBUG, "Cron interrupt notice to %s:%s raised: %s", platform.value, chat_id):
                     metadata = self._thread_metadata_for_target(platform, chat_id, thread_id, adapter=adapter)
-                    result = await adapter.send(chat_id, msg, metadata=metadata)
-                    if _send_failed(result):
-                        logger.debug(
-                            "Cron interrupt notice to %s:%s failed: %s", platform.value, chat_id, _send_error(result),
-                        )
-                        continue
-                    notified.add(dedup_key)
-                except Exception as e:
-                    logger.debug("Cron interrupt notice to %s:%s raised: %s", platform.value, chat_id, e)
+                    if await self._send_notice_logged(
+                        adapter, chat_id, msg, platform.value, "Cron interrupt notice to %s:%s failed: %s",
+                        "Cron interrupt notice to %s:%s raised: %s", metadata=metadata,
+                    ):
+                        notified.add(dedup_key)
         if notified:
             logger.info("Shutdown: delivered %d interrupted-cron-job notice(s)", len(notified))
         return len(notified)
@@ -742,19 +738,27 @@ class GatewayShutdownMixin:
     ) -> bool:
         """Send one shutdown notice; True when delivered. Failures are debug-logged, never raised."""
         where = "home channel " if kind == "home channel" else ""
-        try:
-            result = await adapter.send(chat_id, msg, **send_kwargs)
-            if _send_failed(result):
-                logger.debug(
-                    "Failed to send shutdown notification to %s%s:%s: %s", where, platform_str, chat_id,
-                    _send_error(result),
-                )
-                return False
-            logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
-            return True
-        except Exception as e:
-            logger.debug("Failed to send shutdown notification to %s%s:%s: %s", where, platform_str, chat_id, e)
+        fail_fmt = f"Failed to send shutdown notification to {where}%s:%s: %s"
+        if not await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs):
             return False
+        logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
+        return True
+
+    @staticmethod
+    async def _send_notice_logged(
+        adapter, chat_id: str, msg: str, platform_str: str, fail_fmt: str, raise_fmt: Optional[str] = None, **kw
+    ) -> bool:
+        """``adapter.send`` whose failure is debug-logged as ``fmt % (platform, chat, error)`` — ``fail_fmt``
+        for success=False, ``raise_fmt`` (default ``fail_fmt``) for a raise; True only on a delivered send."""
+        try:
+            result = await adapter.send(chat_id, msg, **kw)
+        except Exception as e:
+            logger.debug(raise_fmt or fail_fmt, platform_str, chat_id, e)
+            return False
+        if _send_failed(result):
+            logger.debug(fail_fmt, platform_str, chat_id, _send_error(result))
+            return False
+        return True
 
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
