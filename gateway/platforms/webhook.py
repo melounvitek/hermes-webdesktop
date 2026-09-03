@@ -226,8 +226,7 @@ class WebhookAdapter(BasePlatformAdapter):
             self._runner = None
             logger.error(
                 "[webhook] Could not bind %s:%d: %s. "
-                "Set a different host or port in config.yaml under "
-                "platforms.webhook.extra.",
+                "Set a different host or port in config.yaml under platforms.webhook.extra.",
                 self._host or "all IPv4+IPv6 interfaces", self._port, exc)
             return False
         self._mark_connected()
@@ -725,8 +724,7 @@ class WebhookAdapter(BasePlatformAdapter):
             if not v2_timestamp:
                 logger.warning(
                     "[webhook] Route '%s' sent X-Webhook-Signature-V2 with "
-                    "no X-Webhook-Timestamp — rejecting rather than "
-                    "falling back to legacy V1",
+                    "no X-Webhook-Timestamp — rejecting rather than falling back to legacy V1",
                     route_name)
                 return False
             age = _timestamp_age(v2_timestamp)
@@ -745,8 +743,7 @@ class WebhookAdapter(BasePlatformAdapter):
                     "[webhook] Route '%s' uses legacy body-only HMAC (no "
                     "timestamp), which is vulnerable to replay attacks. Add "
                     "an 'X-Webhook-Timestamp' header and switch to "
-                    "'X-Webhook-Signature-V2' (HMAC-SHA256 of "
-                    "'<timestamp>.<body>').",
+                    "'X-Webhook-Signature-V2' (HMAC-SHA256 of '<timestamp>.<body>').",
                     route_name)
             return _hmac_str_equal(generic_sig, _hex_hmac(secret, body))
         logger.debug("[webhook] Secret configured but no signature header found")

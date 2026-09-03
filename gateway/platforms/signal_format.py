@@ -16,8 +16,7 @@ _INLINE_PATTERNS = [
     (re.compile(r"~~(.+?)~~", re.DOTALL), "STRIKETHROUGH"),
     (re.compile(r"`(.+?)`"), "MONOSPACE"),
     (re.compile(r"(?<!\*)\*(?!\*| )(.+?)(?<!\*)\*(?!\*)"), "ITALIC"),
-    (re.compile(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)"), "ITALIC"),
-]
+    (re.compile(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)"), "ITALIC")]
 
 
 def _utf16_len(s: str) -> int:
@@ -103,8 +102,7 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
     adjusted_prior = [
         (_adjust(start), _adjust(start + length) - _adjust(start), style)
         for start, length, style in styles
-        if _adjust(start + length) > _adjust(start)
-    ]
+        if _adjust(start + length) > _adjust(start)]
     text = result + text[last_end:]
     style_strings: list[str] = []
     for cp_start, cp_len, style_type in sorted(adjusted_prior + inline_styles):

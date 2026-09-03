@@ -62,8 +62,7 @@ def _extract_retry_after_seconds(err: Any) -> Optional[float]:
         results = ((err.get("data") or {}).get("response") or {}).get("results") or []
         candidates = [
             parse_retry_after_seconds(r.get("retryAfterSeconds")) for r in results
-            if isinstance(r, dict) and r.get("retryAfterSeconds")
-        ]
+            if isinstance(r, dict) and r.get("retryAfterSeconds")]
         candidates = [c for c in candidates if c is not None]
         if candidates:
             return max(candidates)
@@ -84,8 +83,7 @@ def _is_signal_rate_limit_error(err: Any) -> bool:
         "[429]" in message
         or "ratelimit" in msg_lower
         or "retrylaterexception" in msg_lower
-        or "retry after" in msg_lower
-    )
+        or "retry after" in msg_lower)
 
 
 def _format_wait(seconds: float) -> str:
@@ -113,8 +111,7 @@ class SignalAttachmentScheduler:
     def __init__(
         self,
         capacity: float = float(SIGNAL_RATE_LIMIT_BUCKET_CAPACITY),
-        default_retry_after: float = float(SIGNAL_RATE_LIMIT_DEFAULT_RETRY_AFTER),
-    ) -> None:
+        default_retry_after: float = float(SIGNAL_RATE_LIMIT_DEFAULT_RETRY_AFTER)) -> None:
         self.capacity = float(capacity)
         self.tokens = float(capacity)
         self.refill_rate = 1.0 / float(default_retry_after)
@@ -154,8 +151,7 @@ class SignalAttachmentScheduler:
             return 0.0
         if n > self.capacity:
             raise SignalSchedulerError(
-                f"Signal scheduler was called requesting {n} tokens (max is {self.capacity})",
-            )
+                f"Signal scheduler was called requesting {n} tokens (max is {self.capacity})")
         total_slept = 0.0
         first_pass = True
         while True:
@@ -172,8 +168,7 @@ class SignalAttachmentScheduler:
                 logger.info(
                     "Signal scheduler: pausing %.1fs for %d tokens "
                     "(available=%.1f, deficit=%.1f, refill=%.4f/s ≈ %.1fs/token)",
-                    wait, n, self.tokens, deficit, self.refill_rate, 1.0 / self.refill_rate,
-                )
+                    wait, n, self.tokens, deficit, self.refill_rate, 1.0 / self.refill_rate)
                 first_pass = False
             await asyncio.sleep(wait)
             total_slept += wait
@@ -196,8 +191,7 @@ class SignalAttachmentScheduler:
             logging.INFO if rpc_duration > 10 and n_attachments > 5 else logging.DEBUG,
             "Signal scheduler: RPC for %d att took %.1fs — "
             "tokens %.1f → %.1f (deducted=%d, no upload refill credited, refill=%.4fs⁻¹)",
-            n_attachments, rpc_duration, token_before, self.tokens, n_attachments, self.refill_rate,
-        )
+            n_attachments, rpc_duration, token_before, self.tokens, n_attachments, self.refill_rate)
 
     def feedback(self, retry_after: Optional[float], n_attempted: int) -> None:
         """Apply server feedback after a 429: empty the bucket and, when ``retry_after``

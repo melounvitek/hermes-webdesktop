@@ -22,8 +22,7 @@ except ImportError:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter, MessageEvent, MessageType, SendResult, is_network_accessible,
-)
+    BasePlatformAdapter, MessageEvent, MessageType, SendResult, is_network_accessible)
 
 logger = logging.getLogger(__name__)
 
@@ -144,8 +143,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 "extra.allowed_source_cidrs. Configure the Microsoft Graph "
                 "source CIDRs or bind to loopback (127.0.0.1/::1) behind a "
                 "tunnel or reverse proxy.",
-                self._host,
-            )
+                self._host)
             return False
         app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get(self._health_path, self._handle_health)
@@ -169,8 +167,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
 
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
+        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         logger.info("[msgraph_webhook] Response for %s: %s", chat_id, content[:200])
         return SendResult(success=True)
 
@@ -185,8 +182,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             "platform": self.platform.value,
             "webhook_path": self._webhook_path,
             "accepted": self._accepted_count,
-            "duplicates": self._duplicate_count,
-        })
+            "duplicates": self._duplicate_count})
 
     async def _handle_validation(self, request: "web.Request") -> "web.Response":
         """Graph subscription validation handshake: echo ``validationToken`` verbatim
@@ -315,12 +311,10 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=f"msgraph:{notification.get('subscriptionId', 'unknown')}",
             chat_name="msgraph/webhook", chat_type="webhook",
-            user_id="msgraph", user_name="Microsoft Graph",
-        )
+            user_id="msgraph", user_name="Microsoft Graph")
         return MessageEvent(
             text=self._render_prompt(notification), message_type=MessageType.TEXT, source=source,
-            raw_message=notification, message_id=message_id, internal=True,
-        )
+            raw_message=notification, message_id=message_id, internal=True)
 
     def _render_prompt(self, notification: Dict[str, Any]) -> str:
         template = self.config.extra.get("prompt", "")
@@ -329,8 +323,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 "notification": notification,
                 "resource": notification.get("resource", ""),
                 "change_type": notification.get("changeType", ""),
-                "subscription_id": notification.get("subscriptionId", ""),
-            })
+                "subscription_id": notification.get("subscriptionId", "")})
         rendered = json.dumps(notification, indent=2, sort_keys=True)[:4000]
         return f"Microsoft Graph change notification:\n\n```json\n{rendered}\n```"
 
