@@ -183,14 +183,11 @@ def _setup_backend_modal(config: dict) -> None:
     modal_mode = normalize_modal_mode(_setup.cfg_get(config, "terminal", "modal_mode"))
     use_managed_modal = False
     if managed_modal_available:
-        if modal_mode in ("managed", "direct"):
-            default_modal_idx = 0 if modal_mode == "managed" else 1
-        else:
-            default_modal_idx = 1 if _setup.get_env_value("MODAL_TOKEN_ID") else 0
+        # Default to the configured mode; when unset, to "direct" only if Modal creds exist.
+        default_idx = {"managed": 0, "direct": 1}.get(modal_mode, 1 if _setup.get_env_value("MODAL_TOKEN_ID") else 0)
         use_managed_modal = _setup.prompt_choice(
             "Select how Modal execution should be billed:",
-            ["Use my Nous subscription", "Use my own Modal account"], default_modal_idx,
-        ) == 0
+            ["Use my Nous subscription", "Use my own Modal account"], default_idx) == 0
 
     if use_managed_modal:
         config["terminal"]["modal_mode"] = "managed"
@@ -248,7 +245,7 @@ def _setup_backend_ssh(config: dict) -> None:
         ("  SSH private key path", "TERMINAL_SSH_KEY", str(Path.home() / ".ssh" / "id_rsa")))
     values = []
     for label, env_var, default in fields:
-        value = _setup.prompt(label, (_setup.get_env_value(env_var) or "") or default)
+        value = _setup.prompt(label, _setup.get_env_value(env_var) or default)
         values.append(value)
         if value and (env_var != "TERMINAL_SSH_PORT" or value != "22"):
             _setup.save_env_value(env_var, value)

@@ -282,9 +282,7 @@ def _render_sessions(ctx):
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            lister = getattr(db, "list_gateway_sessions", None)
-            if callable(lister):
-                gateway_rows = lister(active_only=True) or []
+            gateway_rows = db.list_gateway_sessions(active_only=True) or []
         finally:
             db.close()
     except Exception:
