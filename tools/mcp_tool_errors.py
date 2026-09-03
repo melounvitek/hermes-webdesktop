@@ -99,8 +99,7 @@ def _classify_mcp_failure(exc: BaseException) -> str:
         or isinstance(root, (NonMcpEndpointError, InvalidMcpUrlError, FileNotFoundError))
         or (isinstance(root, OSError) and getattr(root, "errno", None) == errno.ENOENT)
         # 401/403 HTTPStatusError that _is_auth_error's type-gate missed (auth types not importable here).
-        or getattr(getattr(root, "response", None), "status_code", None) in (401, 403)
-    )
+        or getattr(getattr(root, "response", None), "status_code", None) in (401, 403))
     return "permanent" if permanent else "transient"
 
 
@@ -334,8 +333,7 @@ def _is_auth_error(exc: BaseException) -> bool:
 _SESSION_EXPIRED_MARKERS: tuple = (
     "invalid or expired session", "expired session", "session expired", "session not found",
     "unknown session", "session terminated", "closedresourceerror", "closed resource",
-    "transport is closed", "connection closed", "broken pipe", "end of file",
-)
+    "transport is closed", "connection closed", "broken pipe", "end of file")
 
 # Node budget for ``_is_session_expired_error``. The visited set breaks cycles; the budget
 # bounds pathological acyclic graphs. Kept well above ``sys.getrecursionlimit()`` so deep
