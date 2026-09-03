@@ -15,20 +15,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    resolve_aspect_ratio,
-    save_b64_image,
-    save_url_image,
-    success_response,
+    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response
 )
 from plugins.image_gen._common import (
-    StaticImageGenProvider,
-    error_factory,
-    import_openai,
-    openai_importable,
-    prompt_required_error,
-    resolve_static_model,
-    size_for,
+    StaticImageGenProvider, error_factory, import_openai, openai_importable, prompt_required_error,
+    resolve_static_model, size_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,12 +81,8 @@ class MetaImageGenProvider(StaticImageGenProvider):
         return {"modalities": ["text"], "max_reference_images": 0}
 
     def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
+        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()

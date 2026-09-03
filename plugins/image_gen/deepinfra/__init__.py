@@ -19,19 +19,11 @@ from typing import Any, Dict, List, Optional
 
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    resolve_aspect_ratio,
-    save_b64_image,
-    save_url_image,
-    success_response,
+    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response
 )
 from plugins.image_gen._common import (
-    StaticImageGenProvider,
-    error_factory,
-    import_openai,
-    load_image_gen_config,
-    prompt_required_error,
-    size_for,
+    StaticImageGenProvider, error_factory, import_openai, load_image_gen_config,
+    prompt_required_error, size_for,
 )
 
 logger = logging.getLogger(__name__)

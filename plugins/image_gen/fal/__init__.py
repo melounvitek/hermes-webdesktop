@@ -68,12 +68,8 @@ class FalImageGenProvider(StaticImageGenProvider):
         return {"modalities": ["text"], "max_reference_images": 0, "supports_upscale": True}
 
     def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
+        self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, *,
+        image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Forward to :func:`tools.image_generation_tool.image_generate_tool` and

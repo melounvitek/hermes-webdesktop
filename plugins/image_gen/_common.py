@@ -13,11 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from agent.image_gen_provider import (
-    ImageGenProvider,
-    error_response,
-    normalize_reference_images,
-    save_b64_image,
-    save_url_image,
+    ImageGenProvider, error_response, normalize_reference_images, save_b64_image, save_url_image
 )
 
 logger = logging.getLogger(__name__)
@@ -79,13 +75,8 @@ def load_image_gen_config(sub: Optional[str] = None) -> Dict[str, Any]:
 
 
 def resolve_static_model(
-    models: Dict[str, Dict[str, Any]],
-    default: str,
-    *,
-    env_var: str,
-    config_key: str,
-    explicit: Optional[str] = None,
-    include_top_level: bool = True,
+    models: Dict[str, Dict[str, Any]], default: str, *, env_var: str, config_key: str,
+    explicit: Optional[str] = None, include_top_level: bool = True,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Pick ``(model_id, meta)`` from a fixed catalog.
@@ -123,8 +114,7 @@ def collect_source_images(
 
 def catalog_rows(
     models: Dict[str, Dict[str, Any]],
-    fields: Iterable[str] = ("display", "speed", "strengths", "price"),
-    *,
+    fields: Iterable[str] = ("display", "speed", "strengths", "price"), *,
     price: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Picker rows: ``id`` plus ``fields`` from each meta (missing ``display`` →
@@ -213,16 +203,8 @@ def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, A
 
 
 def materialize_image(
-    b64: Optional[str],
-    url: Optional[str],
-    *,
-    prefix: str,
-    label: str,
-    provider: str,
-    model: str,
-    prompt: str,
-    aspect: str,
-    log: logging.Logger = logger,
+    b64: Optional[str], url: Optional[str], *, prefix: str, label: str, provider: str, model: str,
+    prompt: str, aspect: str, log: logging.Logger = logger,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """``(image_ref, None)`` or ``(None, error_dict)`` for a ``(b64_json, url)`` pair.
 
@@ -274,12 +256,7 @@ class HttpFailure:
 
 
 def post_json(
-    url: str,
-    *,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    timeout: Any,
-    label: str,
+    url: str, *, headers: Dict[str, str], payload: Dict[str, Any], timeout: Any, label: str,
     error_message: Callable[[Any, Exception], str] = requests_error_message,
     catch_request_exception: bool = False,
 ) -> Tuple[Optional[Any], Optional[HttpFailure]]:
