@@ -153,10 +153,8 @@ def release_tts_lease(lease: str) -> Dict[str, Any]:
     with _tts_lease_lock:
         _tts_leases.discard(lease)
         holders = len(_tts_leases)
-        result: Dict[str, Any] = {"leases": holders, "released": 0}
-        if holders == 0:
-            result["released"] = release_tts_provider()["released"]
-    return result
+        released = release_tts_provider()["released"] if holders == 0 else 0
+    return {"leases": holders, "released": released}
 
 
 def tts_lease_holders() -> List[str]:

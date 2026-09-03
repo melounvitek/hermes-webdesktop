@@ -59,14 +59,10 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
 
 # ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
 ELEVENLABS_MODEL_MAX_TEXT_LENGTH: Dict[str, int] = {
-    "eleven_v3": 5000,
-    "eleven_ttv_v3": 5000,
-    "eleven_multilingual_v2": 10000,
-    "eleven_multilingual_v1": 10000,
-    "eleven_english_sts_v2": 10000,
-    "eleven_english_sts_v1": 10000,
-    "eleven_flash_v2": 30000,
-    "eleven_flash_v2_5": 40000}
+    "eleven_v3": 5000, "eleven_ttv_v3": 5000,
+    "eleven_multilingual_v2": 10000, "eleven_multilingual_v1": 10000,
+    "eleven_english_sts_v2": 10000, "eleven_english_sts_v1": 10000,
+    "eleven_flash_v2": 30000, "eleven_flash_v2_5": 40000}
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -103,9 +99,7 @@ def _resolve_max_text_length(provider: Optional[str], tts_config: Optional[Dict[
 
 
 # PCM output specs for Gemini TTS (fixed by the API): 24kHz mono 16-bit (L16).
-GEMINI_TTS_SAMPLE_RATE = 24000
-GEMINI_TTS_CHANNELS = 1
-GEMINI_TTS_SAMPLE_WIDTH = 2
+GEMINI_TTS_SAMPLE_RATE, GEMINI_TTS_CHANNELS, GEMINI_TTS_SAMPLE_WIDTH = 24000, 1, 2
 
 # ffmpeg args producing the Ogg/Opus voice-bubble encoding Telegram & co expect.
 _OPUS_VOICE_ARGS = [

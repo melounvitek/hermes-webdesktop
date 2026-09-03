@@ -225,8 +225,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
         model_id=el_config.get("model_id", DEFAULT_ELEVENLABS_MODEL_ID),
         output_format="opus_48000_64" if output_path.endswith(".ogg") else "mp3_44100_128")
     with open(output_path, "wb") as f:
-        for chunk in audio_generator:
-            f.write(chunk)
+        f.writelines(audio_generator)
     return output_path
 
 
@@ -238,7 +237,7 @@ _XAI_WRAPPING_SPEECH_TAGS = (
     "soft", "whisper", "loud", "build-intensity", "decrease-intensity", "higher-pitch",
     "lower-pitch", "slow", "fast", "sing-song", "singing", "laugh-speak", "emphasis")
 _XAI_SPEECH_TAG_RE = re.compile(
-    r"(\[(?:" + "|".join(_XAI_INLINE_SPEECH_TAGS) + r")\]|</?(?:" + "|".join(_XAI_WRAPPING_SPEECH_TAGS) + r")>)",
+    rf"(\[(?:{'|'.join(_XAI_INLINE_SPEECH_TAGS)})\]|</?(?:{'|'.join(_XAI_WRAPPING_SPEECH_TAGS)})>)",
     flags=re.IGNORECASE)
 _XAI_FIRST_SENTENCE_RE = re.compile(r"^(.{12,120}?[.!?…])\s+(?=\S)", flags=re.DOTALL)
 
