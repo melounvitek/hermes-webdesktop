@@ -154,22 +154,18 @@ def _messages(session: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _message_text(content: Any) -> str:
-    if content is None:
-        return ""
     if isinstance(content, list):
         return "\n".join(part for part in map(_content_part_text, content) if part)
-    return _content_part_text(content)
+    return "" if content is None else _content_part_text(content)
 
 
 def _content_part_text(part: Any) -> str:
-    if isinstance(part, str):
-        return part
-    if isinstance(part, dict):
-        for key in ("text", "content"):
-            if isinstance(value := part.get(key), str):
-                return value
-        return json.dumps(part, ensure_ascii=False, sort_keys=True)
-    return str(part)
+    if not isinstance(part, dict):
+        return part if isinstance(part, str) else str(part)
+    for key in ("text", "content"):
+        if isinstance(value := part.get(key), str):
+            return value
+    return json.dumps(part, ensure_ascii=False, sort_keys=True)
 
 
 def _format_timestamp(value: Any) -> Optional[str]:

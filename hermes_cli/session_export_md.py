@@ -31,14 +31,10 @@ def _iso_timestamp(value: Any) -> str:
 
 
 def _frontmatter_line(key: str, value: Any) -> str:
-    if value is None:
-        shown = "null"
-    elif isinstance(value, bool):
-        shown = "true" if value else "false"
-    elif isinstance(value, (int, float, list)):
-        shown = json.dumps(value, ensure_ascii=False)
+    if value is None or isinstance(value, bool):
+        shown = {None: "null", True: "true", False: "false"}[value]
     else:
-        shown = json.dumps(str(value), ensure_ascii=False)
+        shown = json.dumps(value if isinstance(value, (int, float, list)) else str(value), ensure_ascii=False)
     return f"{key}: {shown}"
 
 
@@ -60,9 +56,7 @@ def _session_id(session: dict[str, Any]) -> str:
 
 def _segments(session: dict[str, Any]) -> list[dict[str, Any]]:
     segments = session.get("segments")
-    if isinstance(segments, list) and segments:
-        return [s for s in segments if isinstance(s, dict)]
-    return [session]
+    return [s for s in segments if isinstance(s, dict)] if isinstance(segments, list) and segments else [session]
 
 
 def _message_count(session: dict[str, Any]) -> int:
@@ -165,10 +159,9 @@ def file_sha256(path: Path | str) -> str:
 
 
 def verify_export_file(path: Path | str, session: dict[str, Any]) -> tuple[bool, str]:
-    p = Path(path)
-    if not p.exists():
+    if not Path(path).exists():
         return False, "file missing"
-    text = p.read_text(encoding="utf-8")
+    text = Path(path).read_text(encoding="utf-8")
     match = _SHA_LINE_RE.search(text)
     if not match:
         return False, "sha256 marker missing"
