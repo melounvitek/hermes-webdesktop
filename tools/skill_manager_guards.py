@@ -65,8 +65,7 @@ def mark_background_review_skill_read(path: Path) -> None:
         return
     marks = _background_review_read_paths.get()
     if marks is None:
-        marks = _BackgroundReviewReadMarks()
-        _background_review_read_paths.set(marks)
+        _background_review_read_paths.set(marks := _BackgroundReviewReadMarks())
     marks.add(_resolved_str(path))
 
 
@@ -93,9 +92,9 @@ def _containing_skills_root(skill_path: Path) -> Path:
         resolved = skill_path
     for root in get_all_skills_dirs():
         try:
-            resolved.relative_to(root.resolve())
-            return root
-        except (ValueError, OSError):
+            if resolved.is_relative_to(root.resolve()):
+                return root
+        except OSError:
             continue
     return _smt._skills_dir()
 
@@ -133,15 +132,11 @@ def _validate_delete_target(skill_dir: Path) -> Optional[str]:
             return (
                 f"Refusing to delete '{skill_dir}': resolves to the skills root "
                 f"itself, which would remove every installed skill.")
-        try:
-            rel = resolved.relative_to(root)
-        except ValueError:
-            continue
-        if rel.parts:
+        if resolved.is_relative_to(root):
             return None
     return (
-        f"Refusing to delete '{skill_dir}': path does not resolve inside any " f"known skills root."
-    )
+        f"Refusing to delete '{skill_dir}': path does not resolve inside any "
+        f"known skills root.")
 
 
 # --- Ownership / provenance guards --------------------------------------------
@@ -165,19 +160,16 @@ def _pinned_guard(name: str) -> Optional[str]:
         from tools import skill_usage
         if skill_usage.get_record(name).get("pinned"):
             return (
-                f"Skill '{name}' is pinned and cannot be deleted by "
-                f"skill_manage. Ask the user to run "
-                f"`hermes curator unpin {name}` if they want to delete it. "
-                f"Patches and edits are allowed on pinned skills; only "
-                f"deletion is blocked.")
+                f"Skill '{name}' is pinned and cannot be deleted by skill_manage. Ask the user to "
+                f"run `hermes curator unpin {name}` if they want to delete it. Patches and edits "
+                f"are allowed on pinned skills; only deletion is blocked.")
     except Exception:
         logger.debug("pinned-guard lookup failed for %s", name, exc_info=True)
     return None
 
 
 def _background_review_write_guard(
-    name: str, skill_dir: Path, action: str,
-) -> Optional[Dict[str, Any]]:
+    name: str, skill_dir: Path, action: str) -> Optional[Dict[str, Any]]:
     """Refuse autonomous curator writes to anything but curator-owned sediment.
 
     The background review fork has no user in the loop, so unlike foreground
@@ -189,10 +181,9 @@ def _background_review_write_guard(
         from tools import skill_usage
         if skill_usage.get_record(name).get("pinned"):
             return _refusal(
-                f"Refusing background curator {action} for pinned skill "
-                f"'{name}': pinned skills are off-limits to autonomous "
-                "maintenance. Ask the user to run "
-                f"`hermes curator unpin {name}` if they want it changed.")
+                f"Refusing background curator {action} for pinned skill '{name}': pinned skills "
+                f"are off-limits to autonomous maintenance. Ask the user to run `hermes curator "
+                f"unpin {name}` if they want it changed.")
     except Exception:
         logger.debug("pinned skill guard lookup failed for %s", name, exc_info=True)
 
@@ -214,7 +205,7 @@ def _background_review_write_guard(
             (skill_usage.is_bundled, "bundled")):
             if predicate(name):
                 return _refusal(
-                    f"Refusing background curator {action} for {label} " f"skill '{name}'.")
+                    f"Refusing background curator {action} for {label} skill '{name}'.")
         # Not curator-managed (no `created_by: "agent"`) => user-owned. A MISSING
         # record and an explicit `created_by: null` must resolve IDENTICALLY (keying
         # on presence made the policy depend on the guard's own side effect: the
@@ -224,16 +215,14 @@ def _background_review_write_guard(
             _detail = (f"created_by={usage_rec.get('created_by')!r}" if isinstance(usage_rec, dict)
                        else "no usage record")
             return _refusal(
-                f"Refusing background curator {action} for skill "
-                f"'{name}': the skill is not curator-managed ({_detail}). "
-                "User-owned skills are off-limits to autonomous curation. "
-                f"Run `hermes curator adopt {name}` to opt it in.")
+                f"Refusing background curator {action} for skill '{name}': the skill is not "
+                f"curator-managed ({_detail}). User-owned skills are off-limits to autonomous "
+                f"curation. Run `hermes curator adopt {name}` to opt it in.")
     except Exception:
         logger.warning("owned skill guard lookup failed for %s", name, exc_info=True)
         return _refusal(
-            f"Refusing background curator {action} for skill '{name}': "
-            "agent ownership could not be verified because the provenance "
-            "record is unavailable or unreadable.")
+            f"Refusing background curator {action} for skill '{name}': agent ownership could not "
+            f"be verified because the provenance record is unavailable or unreadable.")
     return None
 
 
@@ -243,11 +232,10 @@ def _background_review_read_before_write_guard(
     if not _is_background_review() or _background_review_has_read(target):
         return None
     return _refusal(
-        f"Refusing background curator {action} for skill '{name}': "
-        f"the current {file_label} content has not been loaded in this "
-        "review turn. Call skill_view(name) for SKILL.md, or "
-        "skill_view(name, file_path=...) for a supporting file, then "
-        "retry the write using the content just returned.",
+        f"Refusing background curator {action} for skill '{name}': the current {file_label} "
+        f"content has not been loaded in this review turn. Call skill_view(name) for SKILL.md, or "
+        f"skill_view(name, file_path=...) for a supporting file, then retry the write using the "
+        f"content just returned.",
         _read_before_write_required=True)
 
 
@@ -260,8 +248,7 @@ def _background_review_preflight(action: str, name: str) -> Optional[Dict[str, A
 
 
 def _curator_consolidation_delete_guard(
-    name: str, absorbed_into: Optional[str],
-) -> Optional[Dict[str, Any]]:
+    name: str, absorbed_into: Optional[str]) -> Optional[Dict[str, Any]]:
     """Fail closed on unverified deletes during the curator consolidation pass.
 
     The review fork's only legitimate delete is a verified consolidation declared
@@ -273,12 +260,11 @@ def _curator_consolidation_delete_guard(
     if isinstance(absorbed_into, str) and absorbed_into.strip():
         return None
     return _refusal(
-        f"Refusing background curator delete of skill '{name}': the "
-        "consolidation pass may only archive a skill it has absorbed into "
-        "an umbrella. Pass absorbed_into=<umbrella> (the umbrella must "
-        "already exist) to record a verified consolidation. Pruning a "
-        "skill with no forwarding target is not permitted here — the "
-        "deterministic inactivity prune handles staleness archival "
+        f"Refusing background curator delete of skill '{name}': the consolidation pass may only "
+        f"archive a skill it has absorbed into an umbrella. Pass absorbed_into=<umbrella> (the "
+        f"umbrella must already exist) to record a verified consolidation. Pruning a skill with no "
+        f"forwarding target is not permitted here — the deterministic inactivity prune handles "
+        f"staleness archival "
         "separately. Keeping '{name}' active.".format(name=name),
         _fail_closed=True)
 
@@ -331,12 +317,10 @@ def _org_mirror_write_guard(name: str, skill_path: Path, action: str) -> Optiona
 
         if is_org_mirror_path(skill_path, _smt._skills_dir()):
             return _refusal(
-                f"Cannot {action} '{name}' locally: it is shared by your "
-                "organisation, so a local delete would just come back on "
-                "the next sync. Ask an org admin to remove it for "
-                "everyone. (Editing it IS allowed — your changes are kept "
-                "and can be proposed back with `hermes sync propose "
-                f"{name}`.)")
+                f"Cannot {action} '{name}' locally: it is shared by your organisation, so a local "
+                f"delete would just come back on the next sync. Ask an org admin to remove it for "
+                f"everyone. (Editing it IS allowed — your changes are kept and can be proposed "
+                f"back with `hermes sync propose {name}`.)")
     except Exception:
         logger.debug("org mirror guard lookup failed for %s", name, exc_info=True)
     return None

@@ -34,8 +34,7 @@ from tools.skill_manager_guards import (  # noqa: F401 — re-exported for calle
     _background_review_write_guard, _containing_skills_root, _curator_consolidation_delete_guard,
     _is_path_redirect, _maybe_auto_propose_org_edit, _org_mirror_write_guard, _pinned_guard,
     _reset_background_review_read_marks, _validate_delete_target, _is_background_review,
-    mark_background_review_skill_read,
-)
+    mark_background_review_skill_read)
 from tools.skill_manager_batch import (  # noqa: F401
     _BATCH_MAX_OPS, _BATCH_OP_ACTIONS, _skill_manage_batch)
 from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
@@ -243,11 +242,9 @@ def _find_skill(name: str) -> Optional[Dict[str, Any]]:
             if skill_dir.name == name:
                 return {"path": skill_dir}
             if local_root is not None:
-                try:
-                    rel = skill_dir.resolve().relative_to(local_root)
-                except ValueError:
-                    continue
-                if rel.as_posix() == name:  # POSIX form so it works on Windows too
+                resolved = skill_dir.resolve()
+                if (resolved.is_relative_to(local_root)
+                        and resolved.relative_to(local_root).as_posix() == name):  # POSIX form
                     return {"path": skill_dir}
     return None
 
@@ -301,9 +298,8 @@ def _skill_not_found_error(name: str, suffix: str = "") -> str:
     elif others:
         names = ", ".join(f"'{p}'" for p, _ in others)
         base += (
-            f" Skills by that name exist in other profiles: {names}. Switch profiles "
-            f"(`hermes -p <name>`) to edit there, or edit the files directly "
-            f"(file tools / terminal).")
+            f" Skills by that name exist in other profiles: {names}. Switch profiles (`hermes -p "
+            f"<name>`) to edit there, or edit the files directly (file tools / terminal).")
     else:
         base += " Use skills_list() to see available skills."
     return base + suffix
@@ -433,12 +429,11 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         shutil.rmtree(skill_dir, ignore_errors=True)
         return _err(scan_error)
 
-    try:
-        _display_path = str(skill_dir.relative_to(_skills_dir()))
-    except ValueError:
-        _display_path = str(skill_dir)  # created under skills.create_dir
+    root = _skills_dir()
+    # Relative when under the profile dir; absolute when created under skills.create_dir.
+    display = skill_dir.relative_to(root) if skill_dir.is_relative_to(root) else skill_dir
     result = {
-        "success": True, "message": f"Skill '{name}' created.", "path": _display_path,
+        "success": True, "message": f"Skill '{name}' created.", "path": str(display),
         "skill_md": str(skill_md), "_change": {"description": _description_preview(content)},
     }
     if category:
@@ -466,8 +461,7 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
         return guard
     result = {
         "success": True, "message": f"Skill '{name}' updated (full rewrite).",
-        "path": str(skill_dir), "_change": {"description": _description_preview(content)},
-    }
+        "path": str(skill_dir), "_change": {"description": _description_preview(content)}}
     _attach_org_note(result, name, skill_dir)
     _add_description_prompt_preview(result, content)
     return result
@@ -481,11 +475,10 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         # A bare "required" error is a dead end: the model retries blindly and
         # often escapes to action='write_file', clobbering the whole file.
         return _err(
-            "old_string is required for 'patch' and must be the EXACT text currently in the "
-            "file. Read the target file first (read_file on the skill's SKILL.md, or the file "
-            "named by file_path) and copy the snippet verbatim, then retry 'patch'. Do NOT fall "
-            "back to action='write_file' — that rewrites the entire file and destroys unrelated "
-            "content.")
+            "old_string is required for 'patch' and must be the EXACT text currently in the file. "
+            "Read the target file first (read_file on the skill's SKILL.md, or the file named by "
+            "file_path) and copy the snippet verbatim, then retry 'patch'. Do NOT fall back to "
+            "action='write_file' — that rewrites the entire file and destroys unrelated content.")
     if new_string is None:
         return _err("new_string is required for 'patch'. Use an empty string to delete matched text.")
     # No old_string == new_string guard here: fuzzy_find_and_replace rejects
@@ -535,8 +528,7 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         "success": True,
         "message": f"Patched {target_label} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
         "_change": {"old": old_string[:200] + ("…" if len(old_string) > 200 else ""),
-                    "new": new_string[:200] + ("…" if len(new_string) > 200 else "")},
-    }
+                    "new": new_string[:200] + ("…" if len(new_string) > 200 else "")}}
     _attach_org_note(result, name, skill_dir)
     return result
 
@@ -556,8 +548,7 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
         return _err(pinned_err)
 
     absorbed_target = absorbed_into.strip() if isinstance(absorbed_into, str) else ""
-    is_consolidation = bool(absorbed_target)
-    if is_consolidation:
+    if absorbed_target:
         if absorbed_target == name:
             return _err(f"absorbed_into='{absorbed_target}' cannot equal the skill being deleted.")
         if not _find_skill(absorbed_target):
@@ -571,7 +562,7 @@ def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, A
 
     # Curator consolidations must be RECOVERABLE (`hermes curator restore`): archive
     # instead of rmtree. Foreground deletes keep hard-delete semantics.
-    absorbed_note = f" Content absorbed into '{absorbed_target}'." if is_consolidation else ""
+    absorbed_note = f" Content absorbed into '{absorbed_target}'." if absorbed_target else ""
     if _is_background_review():
         try:
             from tools.skill_usage import archive_skill
@@ -783,8 +774,7 @@ _ACTION_HANDLERS = {
     "patch": _act_patch,
     "delete": lambda a: _delete_skill(a["name"], absorbed_into=a["absorbed_into"]),
     "write_file": lambda a: _write_file(a["name"], a["file_path"], a["file_content"]),
-    "remove_file": lambda a: _remove_file(a["name"], a["file_path"]),
-}
+    "remove_file": lambda a: _remove_file(a["name"], a["file_path"])}
 # action -> (arg, is_missing, error) argument-shape checks run before the handler.
 _REQUIRED_ARGS = {
     "create": [("content", lambda v: not v,
@@ -794,8 +784,7 @@ _REQUIRED_ARGS = {
     "write_file": [("file_path", lambda v: not v,
                     "file_path is required for 'write_file'. Example: 'references/api-guide.md'"),
                    ("file_content", lambda v: v is None, "file_content is required for 'write_file'.")],
-    "remove_file": [("file_path", lambda v: not v, "file_path is required for 'remove_file'.")],
-}
+    "remove_file": [("file_path", lambda v: not v, "file_path is required for 'remove_file'.")]}
 
 
 def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
@@ -910,7 +899,8 @@ SKILL_MANAGE_SCHEMA = {
         "op only). Existing skills are modified wherever they live. Keep "
         "the description's first 57 chars a self-contained trigger: 'Use "
         "when <trigger>. <one-line behavior>.' — skill_view() shows "
-        "format conventions."),
+        "format conventions."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -925,19 +915,25 @@ SKILL_MANAGE_SCHEMA = {
                             "description": (
                                 "Skill name (lowercase, hyphens/underscores, "
                                 "max 64 chars); an existing skill's name "
-                                "unless creating.")},
+                                "unless creating."
+                            )
+                        },
                         "action": {
                             "type": "string",
-                            "enum": ["create", "patch", "delete", "write_file", "remove_file"]},
+                            "enum": ["create", "patch", "delete", "write_file", "remove_file"]
+                        },
                         "content": {
                             "type": "string",
                             "description": (
                                 "Full SKILL.md text (YAML frontmatter + "
                                 "markdown body) for create, or a full "
-                                "rewrite on patch.")},
+                                "rewrite on patch."
+                            )
+                        },
                         "category": {
                             "type": "string",
-                            "description": "Optional category subdir for create (e.g. 'devops')."},
+                            "description": "Optional category subdir for create (e.g. 'devops')."
+                        },
                         # patch args: same fuzzy-matching semantics as the
                         # `patch` tool — teach only skill-specific facts here.
                         "old_string": {
@@ -946,10 +942,12 @@ SKILL_MANAGE_SCHEMA = {
                         },
                         "new_string": {
                             "type": "string",
-                            "description": "Replacement (patch); empty string deletes the match."},
+                            "description": "Replacement (patch); empty string deletes the match."
+                        },
                         "replace_all": {
                             "type": "boolean",
-                            "description": "patch: replace all occurrences (default false)."},
+                            "description": "patch: replace all occurrences (default false)."
+                        },
                         "file_path": {
                             "type": "string",
                             "description": (
@@ -958,15 +956,24 @@ SKILL_MANAGE_SCHEMA = {
                                 "never absolute. write_file/remove_file: "
                                 "required; first segment references/, "
                                 "templates/, scripts/, or assets/. patch: "
-                                "optional (default SKILL.md).")},
+                                "optional (default SKILL.md)."
+                            )
+                        },
                         "file_content": {
-                            "type": "string", "description": "Content for write_file."}},
-                    "required": ["name", "action"]}},
+                            "type": "string",
+                            "description": "Content for write_file."
+                        }
+                    },
+                    "required": ["name", "action"]
+                }
+            },
             # Also accepted, never advertised: the legacy flat single-op fields, and
             # `absorbed_into` on delete ops (curator-only vocabulary; the curator's
             # prompt documents it and the delete guard's error re-teaches it).
         },
-        "required": ["operations"]}}
+        "required": ["operations"],
+    },
+}
 
 
 # --- Registry ---
@@ -976,5 +983,4 @@ registry.register(
     name="skill_manage", toolset="skills", schema=SKILL_MANAGE_SCHEMA, emoji="📝",
     handler=lambda args, **kw: _skill_manage_from(
         args, absorbed_into=args.get("absorbed_into"), operations=args.get("operations"),
-        task_id=kw.get("task_id"), session_id=kw.get("session_id")),
-)
+        task_id=kw.get("task_id"), session_id=kw.get("session_id")))

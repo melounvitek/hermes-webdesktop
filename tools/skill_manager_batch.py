@@ -31,9 +31,8 @@ def _validate_batch_ops(operations, default_name, tool_error):
         act = op["action"]
         if act not in _BATCH_OP_ACTIONS:
             return None, tool_error(
-                f"operations[{i}]: unknown action '{act}'. "
-                f"Batchable: {', '.join(sorted(_BATCH_OP_ACTIONS))}; "
-                "delete must be sole.",
+                f"operations[{i}]: unknown action '{act}'. Batchable: "
+                f"{', '.join(sorted(_BATCH_OP_ACTIONS))}; delete must be sole.",
                 success=False)
         nm = op.get("name") or default_name
         if not nm:
@@ -61,11 +60,10 @@ def _validate_batch_ops(operations, default_name, tool_error):
         destructive = act in ("create", "write_file", "remove_file") or full_rewrite
         if destructive and key in touched_files:
             return None, tool_error(
-                f"operations[{i}]: {act} on '{target}' of skill '{nm}' — an "
-                "earlier op in this batch already touched that file, and this "
-                "op would silently discard its work. One destructive op "
-                "(write_file/remove_file/full rewrite) per file per batch; "
-                "put it first, or fold the change in. Patch chains are fine.",
+                f"operations[{i}]: {act} on '{target}' of skill '{nm}' — an earlier op in this "
+                f"batch already touched that file, and this op would silently discard its work. "
+                f"One destructive op (write_file/remove_file/full rewrite) per file per batch; put "
+                f"it first, or fold the change in. Patch chains are fine.",
                 success=False)
         touched_files.add(key)
     return names, None
