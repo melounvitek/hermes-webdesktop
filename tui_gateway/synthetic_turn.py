@@ -1,22 +1,15 @@
 """Synthetic GIL-heavy turn driver for the AC-4 isolation certify harness.
 
-The regime under test is interpreter-wide GIL starvation: concurrent heavy agent
-turns run compute in threads of the SERVING process and starve the event loop
-that flushes WebSocket frames (loop thread parked in ``take_gil`` — NOT blocked
-on I/O).  To certify the isolation fix without spending real tokens, the turn
-driver must reproduce THAT: sustained pure-Python CPU holding the GIL for the
-turn's duration.  A network/sleep stub is WRONG — it releases the GIL during I/O
-and never reproduces ``take_gil`` contention, so a green off it is fake.
+The regime under test is interpreter-wide GIL starvation: concurrent heavy agent turns run compute in
+threads of the SERVING process and starve the event loop that flushes WebSocket frames (loop thread
+parked in ``take_gil`` — NOT blocked on I/O). To certify the isolation fix without spending real
+tokens the turn driver must reproduce THAT: sustained pure-Python CPU holding the GIL. A network/
+sleep stub is WRONG — it releases the GIL during I/O, so a green off it is fake.
 
-This module is a **test seam**: dead unless ``HERMES_ISO_CERTIFY_SYNTH_TURN=1``.
-When armed, ``tui_gateway.server._make_agent`` returns a
-:class:`SyntheticHeavyAgent` instead of a real ``AIAgent``.  Both the in-process
-``_pool`` path (isolation OFF) and the compute-host child path (isolation ON)
-build through ``_make_agent``, so the isolation boundary is the only variable.
-
-Per-turn intensity (wall duration, CPU chunk size, delta cadence, token
-accounting) rides in the prompt text as a JSON object; any other prompt falls
-back to env / built-in defaults.
+Test seam: dead unless ``HERMES_ISO_CERTIFY_SYNTH_TURN=1``. When armed, ``server._make_agent`` returns
+a :class:`SyntheticHeavyAgent` on both the in-process ``_pool`` path (isolation OFF) and the compute-
+host child path (isolation ON), so the isolation boundary is the only variable. Per-turn intensity
+rides in the prompt text as a JSON object; any other prompt falls back to env / built-in defaults.
 """
 
 from __future__ import annotations
@@ -38,10 +31,10 @@ def synth_turn_armed() -> bool:
 class SyntheticHeavyAgent:
     """An AIAgent-shaped object whose turn is a GIL-holding CPU burn.
 
-    Presents only the surface ``tui_gateway.server``'s turn path and status
-    helpers read (``run_conversation``/``interrupt``/``clear_interrupt`` plus the
-    ``model``/``provider``/``session_*`` attributes consumed by ``_get_usage`` and
-    ``_session_info``).  Never opens a socket or spawns a subprocess.
+    Presents only the surface ``tui_gateway.server``'s turn path and status helpers read
+    (``run_conversation``/``interrupt``/``clear_interrupt`` plus the ``model``/``provider``/
+    ``session_*`` attributes consumed by ``_get_usage`` and ``_session_info``). Never opens a socket
+    or spawns a subprocess.
     """
 
     def __init__(self, session_id: str, *, model: str = "synthetic-heavy") -> None:
@@ -49,9 +42,7 @@ class SyntheticHeavyAgent:
         self.model = model
         self.provider = "synthetic"
         self.api_mode = "chat_completions"
-        self.base_url = ""
-        self.api_key = ""
-        self.platform = ""
+        self.base_url = self.api_key = self.platform = ""
         self.tools: list[Any] = []
         self.reasoning_config: dict | None = None
         self.service_tier: str | None = None
@@ -59,17 +50,13 @@ class SyntheticHeavyAgent:
         self._config_context_length = 200_000
         self._cached_system_prompt = ""
         # Cumulative session counters (read by _get_usage → status bar).
-        self.session_input_tokens = 0
-        self.session_output_tokens = 0
-        self.session_prompt_tokens = 0
-        self.session_completion_tokens = 0
-        self.session_reasoning_tokens = 0
-        self.session_total_tokens = 0
+        self.session_input_tokens = self.session_output_tokens = self.session_prompt_tokens = 0
+        self.session_completion_tokens = self.session_reasoning_tokens = self.session_total_tokens = 0
         self.session_api_calls = 0
         self.history: list[dict[str, str]] = []
         self._interrupt = threading.Event()
 
-    # ── interrupt contract (mirrors AIAgent) ───────────────────────────
+    # interrupt contract (mirrors AIAgent)
     def clear_interrupt(self) -> None:
         self._interrupt.clear()
 
@@ -96,15 +83,15 @@ class SyntheticHeavyAgent:
         return {
             # Wall-clock seconds of GIL-holding compute.
             "duration_s": float(spec.get("duration_s", _env_float("HERMES_ISO_CERTIFY_DURATION_S", 8.0))),
-            # Pure-Python ops per interrupt-check chunk: small enough that an
-            # interrupt lands within ms, large enough to stay hot on the GIL.
+            # Pure-Python ops per interrupt-check chunk: small enough that an interrupt lands within
+            # ms, large enough to stay hot on the GIL.
             "chunk": int(spec.get("chunk", _env_int("HERMES_ISO_CERTIFY_CHUNK", 20_000))),
             # Streamed-delta cadence: each delta is a loop wakeup marshalling a frame.
             "delta_interval_s": float(spec.get("delta_interval_s", _env_float("HERMES_ISO_CERTIFY_DELTA_S", 0.05))),
             # Notional output tokens per delta (drives the 100K+-token heavy-turn proxy).
             "tokens_per_delta": int(spec.get("tokens_per_delta", _env_int("HERMES_ISO_CERTIFY_TPD", 512))),
-            # Optional per-chunk sleep for a mixed regime (0 = pure burn).  --dry-run
-            # uses a short duration, NOT a sleep, so it still exercises the real seam.
+            # Optional per-chunk sleep for a mixed regime (0 = pure burn). --dry-run uses a short
+            # duration, NOT a sleep, so it still exercises the real seam.
             "sleep_s": float(spec.get("sleep_s", 0.0)),
         }
 
@@ -136,8 +123,8 @@ class SyntheticHeavyAgent:
             now = time.monotonic()
             if now - start >= duration:
                 break
-            # A tight integer loop never releases the GIL — the exact contention
-            # that starves the serving loop.
+            # A tight integer loop never releases the GIL — the exact contention that starves the
+            # serving loop.
             for _ in range(chunk):
                 acc = (acc * 1_000_003 + 12_345) & 0xFFFFFFFFFFFFFFFF
             if sleep_s:
@@ -152,34 +139,20 @@ class SyntheticHeavyAgent:
                 last_delta = now
 
         self.session_api_calls += 1
-        # Fold the checksum into the reply so the loop can't be eliminated and
-        # the turn is deterministic and inspectable.
+        # Fold the checksum into the reply so the loop can't be eliminated and the turn is
+        # deterministic and inspectable.
         final = (
             f"[synthetic heavy turn] deltas={deltas} "
             f"out_tokens={self.session_output_tokens} "
             f"interrupted={interrupted} checksum={acc & 0xFFFF:04x}"
         )
-        messages = [
-            *base_history,
-            {"role": "user", "content": str(message)[:200]},
-            {"role": "assistant", "content": final},
-        ]
-        self.history = messages
-        return {
-            "final_response": final,
-            "messages": messages,
-            "interrupted": interrupted,
-            "error": None,
-            "last_reasoning": None,
-        }
+        self.history = [*base_history, {"role": "user", "content": str(message)[:200]}, {"role": "assistant", "content": final}]
+        return {"final_response": final, "messages": self.history, "interrupted": interrupted, "error": None, "last_reasoning": None}
 
 
 def maybe_build_synthetic_agent(session_id: str, model_override: Any = None) -> SyntheticHeavyAgent | None:
-    """Return a :class:`SyntheticHeavyAgent` when the seam is armed, else ``None``.
-
-    ``model_override`` (dict or str) only influences the reported ``model`` label;
-    it never changes the compute.
-    """
+    """Return a :class:`SyntheticHeavyAgent` when the seam is armed, else ``None``. ``model_override``
+    (dict or str) only influences the reported ``model`` label; it never changes the compute."""
     if not synth_turn_armed():
         return None
     model = "synthetic-heavy"
@@ -190,8 +163,4 @@ def maybe_build_synthetic_agent(session_id: str, model_override: Any = None) -> 
     return SyntheticHeavyAgent(session_id, model=model)
 
 
-__all__ = [
-    "SyntheticHeavyAgent",
-    "maybe_build_synthetic_agent",
-    "synth_turn_armed",
-]
+__all__ = ["SyntheticHeavyAgent", "maybe_build_synthetic_agent", "synth_turn_armed"]
