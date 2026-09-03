@@ -221,16 +221,15 @@ def _resolve_worktree_base(repo_root: str, fetch_timeout: float = 5,
 def _ensure_worktrees_gitignored(repo_root: str) -> None:
     """Append ``.worktrees/`` to the repo's .gitignore when missing (fail-soft)."""
     gitignore = Path(repo_root) / ".gitignore"
-    _ignore_entry = ".worktrees/"
     try:
         # utf-8-sig: a Notepad BOM would glue to the first line and defeat the
         # membership check (duplicating the entry); the append writes UTF-8.
         existing = gitignore.read_text(encoding="utf-8-sig", errors="replace") if gitignore.exists() else ""
-        if _ignore_entry not in existing.splitlines():
+        if ".worktrees/" not in existing.splitlines():
             with open(gitignore, "a", encoding="utf-8") as f:
                 if existing and not existing.endswith("\n"):
                     f.write("\n")
-                f.write(f"{_ignore_entry}\n")
+                f.write(".worktrees/\n")
     except Exception as e:
         logger.debug("Could not update .gitignore: %s", e)
 
@@ -344,9 +343,8 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
         print("  cd into your project repo first, then run hermes -w")
         return None
 
-    wt_name = f"hermes-{uuid.uuid4().hex[:8]}"
-    if name:
-        wt_name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")[:40] or wt_name
+    wt_name = ((name and re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")[:40])
+               or f"hermes-{uuid.uuid4().hex[:8]}")
     branch_name = f"hermes/{wt_name}"
 
     worktrees_dir = Path(repo_root) / ".worktrees"
@@ -395,10 +393,8 @@ def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> boo
     try:
         remote_refs = _git_out(["for-each-ref", "--format=%(refname)", "refs/remotes"], worktree_path,
                                timeout=timeout)
-        if remote_refs is None:
-            return True
         if not remote_refs:
-            return False
+            return remote_refs is None  # no remote-tracking refs: nothing to be unpushed against
         unpushed = _git_out(["log", "--oneline", "HEAD", "--not", "--remotes"], worktree_path,
                             timeout=timeout)
         return unpushed is None or bool(unpushed)
@@ -651,15 +647,15 @@ def _worktree_lock_is_live(repo_root: str, worktree_path: str, timeout: int = 10
     worktrees would accumulate indefinitely. Fails SAFE toward ``"live"``.
     """
     try:
-        result = _git(["worktree", "list", "--porcelain"], repo_root, timeout=timeout)
-        if result.returncode != 0:
-            return "live"
+        listing = _git_out(["worktree", "list", "--porcelain"], repo_root, timeout=timeout)
     except Exception:
+        listing = None
+    if listing is None:
         return "live"
 
     target = Path(worktree_path).resolve()
     current: Optional[Path] = None
-    for line in result.stdout.splitlines():
+    for line in listing.splitlines():
         if line.startswith("worktree "):
             try:
                 current = Path(line[len("worktree "):].strip()).resolve()
