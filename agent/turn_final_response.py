@@ -17,6 +17,12 @@ from agent.turn_stop_gates import apply_stop_gates
 
 logger = logging.getLogger("agent.conversation_loop")
 
+# Ephemeral retry scaffolding rows popped before the final answer becomes durable.
+_EPHEMERAL_SCAFFOLDING_FLAGS = (
+    "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
+    "_dropped_toolcall_nudge",
+)
+
 
 @dataclass
 class FinalResponseVerdict:
@@ -136,11 +142,7 @@ def finish_text_response(
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         append_message(messages, interim_msg)
         agent._emit_interim_assistant_message(interim_msg)
-
-        continue_msg = {
-            "role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE
-        }
-        append_message(messages, continue_msg)
+        append_message(messages, {"role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE})
         agent._session_messages = messages
         # An acknowledgment is non-final: its text must not suppress
         # iteration-limit summarization if the continuation exhausts budget.
@@ -204,12 +206,7 @@ def finish_text_response(
     while (
         messages
         and isinstance(messages[-1], dict)
-        and (
-            messages[-1].get("_thinking_prefill")
-            or messages[-1].get("_empty_recovery_synthetic")
-            or messages[-1].get("_empty_terminal_sentinel")
-            or messages[-1].get("_dropped_toolcall_nudge")
-        )
+        and any(messages[-1].get(flag) for flag in _EPHEMERAL_SCAFFOLDING_FLAGS)
     ):
         messages.pop()
 
@@ -243,4 +240,3 @@ def finish_text_response(
     if not agent.quiet_mode:
         agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
     return _verdict("break")
-    return _verdict("fallthrough")

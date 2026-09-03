@@ -1,15 +1,16 @@
 """One tool-calling round of the conversation turn loop: validate/cap/dedupe the model's
 tool calls, persist the tool-call turn BEFORE any side effect, execute the tools, honour
-guardrail halts / persistence failures, then compress after tool results. Extracted from
-``run_conversation``'s ``if assistant_message.tool_calls:`` branch; nothing here imports
-``agent.conversation_loop`` at module level (cycle) — loop-internal helpers resolve lazily.
+guardrail halts / persistence failures, then compress after tool results. Nothing here
+imports ``agent.conversation_loop`` at module level (cycle) — loop-internal helpers resolve
+lazily.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from agent.message_metadata import append_message
 from agent.message_sanitization import coalesce_tool_call_id
@@ -17,6 +18,9 @@ from agent.turn_preflight import compress_after_tool_results
 from agent.turn_tool_validation import validate_tool_calls
 
 logger = logging.getLogger("agent.conversation_loop")
+
+# Post-response housekeeping tools: a round made only of these mutes tool progress.
+_HOUSEKEEPING_TOOLS = frozenset({"memory", "todo_list", "skill_manage", "session_search"})
 
 
 @dataclass
@@ -49,9 +53,7 @@ def run_tool_round(
     durability invariant: resume must see the executed block if a destructive tool restarts
     Hermes; a failed canonical append ends the turn rather than running tools from
     process-only state."""
-    from agent.conversation_loop import (
-        _invalid_tool_name_error_content,
-    )
+    from agent.conversation_loop import _invalid_tool_name_error_content
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ToolRoundVerdict:
         return ToolRoundVerdict(
@@ -75,39 +77,28 @@ def run_tool_round(
         conversation_history=conversation_history, api_call_count=api_call_count,
         effective_task_id=effective_task_id,
     )
-    _mixed_invalid_batch = _tvv.mixed_invalid_batch
     if _tvv.action == "return":
         return _verdict("return", _tvv.result)
     if _tvv.action == "continue":
         return _verdict("continue")
 
     # ── Post-call guardrails ──────────────────────────
-    assistant_message.tool_calls = agent._cap_delegate_task_calls(
-        assistant_message.tool_calls
-    )
     assistant_message.tool_calls = agent._deduplicate_tool_calls(
-        assistant_message.tool_calls
+        agent._cap_delegate_task_calls(assistant_message.tool_calls)
     )
 
-    # Collect invalid calls so the assistant message keeps EVERY emitted
-    # call (each tool_call needs a matching result) while only valid ones
-    # dispatch.
-    _invalid_batch_calls = []
-    if _mixed_invalid_batch:
-        _invalid_batch_calls = [
-            tc for tc in assistant_message.tool_calls
-            if tc.function.name not in agent.valid_tool_names
-        ]
+    # Mixed batch: the assistant message keeps EVERY emitted call (each tool_call needs a
+    # matching result) while only valid ones dispatch.
+    _invalid_batch_calls = [
+        tc for tc in assistant_message.tool_calls if tc.function.name not in agent.valid_tool_names
+    ] if _tvv.mixed_invalid_batch else []
 
-    _st = stage_tool_call_message(
+    assistant_msg, duplicate_previous_interim = stage_tool_call_message(
         agent, assistant_message=assistant_message, finish_reason=finish_reason, messages=messages
     )
-    assistant_msg = _st.assistant_msg
-    duplicate_previous_interim = _st.duplicate_previous_interim
     append_message(messages, assistant_msg)
 
     # Mixed batch: error-result invalid calls and drop them from execution.
-    # The assistant message keeps all calls so tool_call/result pairs hold.
     if _invalid_batch_calls:
         for tc in _invalid_batch_calls:
             append_message(messages, {
@@ -122,7 +113,6 @@ def run_tool_round(
             tc for tc in assistant_message.tool_calls if tc.function.name in agent.valid_tool_names
         ]
 
-    _tool_turn_persisted = None
     try:
         # Persist the tool-call turn before any tool side effects so resume
         # sees the executed block if a destructive tool restarts Hermes.
@@ -132,9 +122,7 @@ def run_tool_round(
     except Exception as exc:
         _tool_turn_persisted = False
         from hermes_state import classify_persistence_error
-        agent._last_persistence_error_cause = (
-            classify_persistence_error(exc)
-        )
+        agent._last_persistence_error_cause = classify_persistence_error(exc)
         logger.warning(
             "Incremental tool-call persistence failed before execution "
             "(session=%s): %s",
@@ -162,10 +150,8 @@ def run_tool_round(
     # tool feed lines. Display callback only — TTS (_stream_callback) must
     # NOT receive None (its end-of-stream marker).
     if agent.stream_delta_callback:
-        try:
+        with suppress(Exception):
             agent.stream_delta_callback(None)
-        except Exception:
-            pass
 
     agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
@@ -190,11 +176,9 @@ def run_tool_round(
         if final_response:
             agent._safe_print(f"\n{final_response}\n")
             if agent.stream_delta_callback:
-                try:
+                with suppress(Exception):
                     agent.stream_delta_callback(final_response)
                     agent.stream_delta_callback(None)
-                except Exception:
-                    pass
         return _verdict("break")
 
     # Reset per-turn retry counters so one truncation can't poison the turn.
@@ -206,8 +190,7 @@ def run_tool_round(
 
     # Refund the iteration when the ONLY tool was execute_code (programmatic
     # tool calling) — cheap RPC-style calls shouldn't eat the budget.
-    _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
-    if _tc_names == {"execute_code"}:
+    if {tc.function.name for tc in assistant_message.tool_calls} == {"execute_code"}:
         agent.iteration_budget.refund()
 
     _ptc = compress_after_tool_results(
@@ -232,40 +215,21 @@ def run_tool_round(
     # Touch activity so slow post-tool work plus a slow follow-up API call
     # can't exceed the gateway inactivity timeout (HERMES_AGENT_TIMEOUT).
     agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
-    # Continue loop for next response
     return _verdict("continue")
-    return _verdict("fallthrough")
-
-
-@dataclass
-class StagedToolCallMessage:
-    """Always ``action == "fallthrough"``. ``assistant_msg`` is the transcript row to append;
-    ``duplicate_previous_interim`` suppresses re-emitting interim commentary the previous
-    ``incomplete`` row already showed."""
-
-    action: str
-    assistant_msg: Any
-    duplicate_previous_interim: Any
 
 
 def stage_tool_call_message(
     agent: Any, *, assistant_message: Any, finish_reason: Any, messages: Any
-) -> StagedToolCallMessage:
-    """Build the assistant tool-call row and update the per-turn fallback/mute state: drop a bare
-    bracketed marker beside a call (#78148), classify housekeeping-only rounds, keep visible
-    content as the empty-follow-up fallback, pop thinking-only prefills (resetting their
-    counters), re-arm the post-tool nudge and the dropped-tool-call stall budget."""
-    from agent.conversation_loop import (
-        _STALE_MARKER_RE,
-    )
+) -> Tuple[Dict[str, Any], bool]:
+    """Build the assistant tool-call row and update the per-turn fallback/mute state.
 
-    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> StagedToolCallMessage:
-        return StagedToolCallMessage(
-            action=action,
-            assistant_msg=assistant_msg,
-            duplicate_previous_interim=duplicate_previous_interim,
-
-        )
+    Drops a bare bracketed marker beside a call (#78148), classifies housekeeping-only
+    rounds, keeps visible content as the empty-follow-up fallback, pops thinking-only
+    prefills (resetting their counters), re-arms the post-tool nudge and the
+    dropped-tool-call stall budget. Returns ``(assistant_msg, duplicate_previous_interim)``;
+    the flag suppresses re-emitting interim commentary the previous ``incomplete`` row
+    already showed."""
+    from agent.conversation_loop import _STALE_MARKER_RE
 
     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
 
@@ -285,9 +249,6 @@ def stage_tool_call_message(
 
     # Classify tools regardless of visible content: a substantive tool-only
     # turn must invalidate any older housekeeping fallback.
-    _HOUSEKEEPING_TOOLS = frozenset({
-        "memory", "todo_list", "skill_manage", "session_search",
-    })
     _all_housekeeping = all(
         tc.function.name in _HOUSEKEEPING_TOOLS for tc in assistant_message.tool_calls
     )
@@ -316,17 +277,15 @@ def stage_tool_call_message(
             if clean:
                 agent._vprint(f"  ┊ 💬 {clean}")
 
-    # Pop thinking-only prefill message(s) before appending
-    # (tool-call path — same rationale as the final-response path).
+    # Pop thinking-only prefill message(s) before appending (same rationale as the
+    # final-response path). Tool calls after a prefill recovery reset the prefill
+    # counter, so each tool-call success is a fresh start, not a cumulative burn.
     _had_prefill = False
     while (
         messages and isinstance(messages[-1], dict) and messages[-1].get("_thinking_prefill")
     ):
         messages.pop()
         _had_prefill = True
-
-    # Tool calls after a prefill recovery reset the prefill counter, so
-    # each tool-call success is a fresh start, not a cumulative burn.
     if _had_prefill:
         agent._thinking_prefill_retries = 0
         agent._empty_content_retries = 0
@@ -338,16 +297,11 @@ def stage_tool_call_message(
 
     previous_msg = messages[-1] if messages else None
     current_interim_visible = agent._interim_assistant_visible_text(assistant_msg)
-    previous_interim_visible = (
-        agent._interim_assistant_visible_text(previous_msg)
-        if isinstance(previous_msg, dict)
-        else ""
-    )
     duplicate_previous_interim = (
         bool(current_interim_visible)
         and isinstance(previous_msg, dict)
         and previous_msg.get("role") == "assistant"
         and previous_msg.get("finish_reason") == "incomplete"
-        and previous_interim_visible == current_interim_visible
+        and agent._interim_assistant_visible_text(previous_msg) == current_interim_visible
     )
-    return _verdict("fallthrough")
+    return assistant_msg, duplicate_previous_interim
