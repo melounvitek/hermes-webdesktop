@@ -269,11 +269,8 @@ class _SafeWriter:
 
 def _get_proxy_from_env() -> Optional[str]:
     """First configured proxy URL from HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (any case), or None."""
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return normalize_proxy_url(value)
-    return None
+    keys = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+    return next((normalize_proxy_url(v) for k in keys if (v := os.environ.get(k, "").strip())), None)
 
 
 def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:

@@ -59,11 +59,9 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     current = cwd.resolve()
     # No git root: cwd only — walking parents could pick up a file planted in /tmp, /home, etc.
     for directory in [current, *current.parents] if stop_at else [current]:
-        for name in (".hermes.md", "HERMES.md"):
-            if (directory / name).is_file():
-                return directory / name
-        if directory == stop_at:
-            break
+        found = next((directory / n for n in (".hermes.md", "HERMES.md") if (directory / n).is_file()), None)
+        if found or directory == stop_at:
+            return found
     return None
 
 
@@ -247,7 +245,6 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "user. Responses that only describe intentions without acting are not acceptable."
 )
 
-# Model name substrings that trigger tool-use enforcement guidance.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
 # Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance is "auto" (agentic-eval
@@ -739,9 +736,8 @@ def _run_backend_probe(env_type: str, terminal_tool) -> str:
     """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
     config = terminal_tool._get_env_config()
     # Mirrors tools/terminal_tool.py's live-command assembly (`_create_environment` is the factory).
-    image_key = _BACKEND_IMAGE_KEYS.get(env_type)
     env = terminal_tool._create_environment(
-        env_type=env_type, image=config.get(image_key, "") if image_key else "", cwd=config.get("cwd", ""),
+        env_type=env_type, image=config.get(_BACKEND_IMAGE_KEYS[env_type], "") if env_type in _BACKEND_IMAGE_KEYS else "", cwd=config.get("cwd", ""),
         timeout=config.get("timeout", 180),
         ssh_config=terminal_tool._ssh_config_from_config(config) if env_type == "ssh" else None,
         container_config=({k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
@@ -812,10 +808,8 @@ def _local_host_hints() -> list[str]:
 
 def _remote_backend_hint(backend: str) -> str:
     """Backend-only block for remote/sandbox backends (host info deliberately suppressed)."""
-    lead = (
-        f"Terminal backend: {backend}. Your `terminal`, `read_file`, `write_file`, `patch`, and "
-        f"`search_files` tools all operate inside "
-    )
+    lead = (f"Terminal backend: {backend}. Your `terminal`, `read_file`, `write_file`, `patch`, and "
+            f"`search_files` tools all operate inside ")
     probe = _probe_remote_backend(backend)
     if probe:
         return lead + (
@@ -959,12 +953,9 @@ def _build_skills_manifest(skills_dir: Path) -> dict[str, list[int]]:
 
 def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     """The disk snapshot if it exists, is current-version, and its manifest still matches."""
-    snapshot_path = _skills_prompt_snapshot_path()
-    if not snapshot_path.exists():
-        return None
     try:
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    except Exception:
+        snapshot = json.loads(_skills_prompt_snapshot_path().read_text(encoding="utf-8"))
+    except Exception:  # missing, unreadable or corrupt -> rebuild
         return None
     if (isinstance(snapshot, dict) and snapshot.get("version") == _SKILLS_SNAPSHOT_VERSION
             and snapshot.get("manifest") == _build_skills_manifest(skills_dir)):
@@ -979,10 +970,8 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     org_id: str | None = None
     if len(parts) >= 3 and parts[0] == ORG_MIRROR_DIR_NAME:
         org_id, parts = parts[1], parts[2:]
-    if len(parts) >= 2:
-        skill_name, category = parts[-2], ("/".join(parts[:-2]) if len(parts) > 2 else parts[0])
-    else:
-        skill_name, category = skill_file.parent.name, "general"
+    skill_name = skill_file.parent.name  # == parts[-2] whenever a parent component exists
+    category = "general" if len(parts) < 2 else "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
     entry = {
@@ -1261,9 +1250,6 @@ def _build_skills_system_prompt_inner(
         while len(_SKILLS_PROMPT_CACHE) > _SKILLS_PROMPT_CACHE_MAX:
             _SKILLS_PROMPT_CACHE.popitem(last=False)
     return result
-
-
-# Context files (SOUL.md, AGENTS.md, .cursorrules)
 
 
 def _truncate_content(

@@ -109,16 +109,12 @@ _OVERRIDE_FLAGS = ("allow_provider_override", "allow_model_override", "allow_age
                    "allow_profile_override", "allow_task_override")
 
 
-def _normalize_ref(raw: str) -> str:
-    return (raw or "").strip().lower()
-
-
 def _coerce_allowlist(raw: Any) -> tuple[Optional[frozenset], bool]:
     """YAML list → ``(frozenset_or_None, allow_any)``. A ``"*"`` entry sets
     ``allow_any``; missing / non-list → ``(None, False)`` = no allowlist."""
     if not isinstance(raw, list):
         return None, False
-    normalized = [_normalize_ref(item) for item in raw if isinstance(item, str)]
+    normalized = [item.strip().lower() for item in raw if isinstance(item, str)]
     return frozenset(item for item in normalized if item and item != "*"), "*" in normalized
 
 
@@ -159,7 +155,7 @@ def _gate_ref_override(policy: _TrustPolicy, kind: str, requested: str) -> str:
     if not getattr(policy, f"allow_{kind}_override"):
         raise _denied(policy.plugin_id, f"override the {kind}", f"allow_{kind}_override")
     allowed = getattr(policy, f"allowed_{kind}s")
-    if not getattr(policy, f"allow_any_{kind}") and allowed is not None and _normalize_ref(requested) not in allowed:
+    if not getattr(policy, f"allow_any_{kind}") and allowed is not None and requested.strip().lower() not in allowed:
         raise PluginLlmTrustError(f"Plugin {policy.plugin_id!r} {kind} override {requested!r} is not in "
                                   f"plugins.entries.{policy.plugin_id}.llm.allowed_{kind}s.")
     return requested.strip()
