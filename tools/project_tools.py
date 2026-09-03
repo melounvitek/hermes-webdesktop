@@ -64,7 +64,9 @@ def _resolve(conn, token: str):
 def _activated(proj, task_id: Optional[str]) -> str:
     primary = _primary_path(proj)
     _apply_workspace(task_id, primary, proj.name)
-    return json.dumps({"success": True, "id": proj.id, "slug": proj.slug, "name": proj.name, "primary_path": primary})
+    return json.dumps({
+        "success": True, "id": proj.id, "slug": proj.slug, "name": proj.name, "primary_path": primary,
+    })
 
 
 def project_list(task_id: Optional[str] = None) -> str:
@@ -77,7 +79,10 @@ def project_list(task_id: Optional[str] = None) -> str:
     return json.dumps({
         "active_id": active,
         "projects": [
-            {"id": p.id, "slug": p.slug, "name": p.name, "primary_path": _primary_path(p), "active": p.id == active}
+            {
+                "id": p.id, "slug": p.slug, "name": p.name,
+                "primary_path": _primary_path(p), "active": p.id == active,
+            }
             for p in projects
         ],
     })
@@ -127,7 +132,9 @@ def project_switch(project: str, task_id: Optional[str] = None) -> str:
 
 _ACTIONS = {
     "list": lambda args, tid: project_list(task_id=tid),
-    "create": lambda args, tid: project_create(name=args.get("name", ""), path=args.get("path"), task_id=tid),
+    "create": lambda args, tid: project_create(
+        name=args.get("name", ""), path=args.get("path"), task_id=tid,
+    ),
     "switch": lambda args, tid: project_switch(project=args.get("name", ""), task_id=tid),
 }
 

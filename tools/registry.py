@@ -35,7 +35,8 @@ def _bound_error_text(text: str) -> str:
     if len(text) <= _MAX_TOOL_ERROR_CHARS:
         return text
     logger.debug(
-        "tool error body truncated for context (%d chars): %s", len(text), text[:_MAX_LOGGED_ERROR_CHARS],
+        "tool error body truncated for context (%d chars): %s",
+        len(text), text[:_MAX_LOGGED_ERROR_CHARS],
     )
     return text[:_MAX_TOOL_ERROR_CHARS] + _TOOL_ERROR_TRUNCATION_MARKER
 
@@ -52,9 +53,7 @@ def _bound_json_error_result(result: str) -> str:
         payload = json.loads(result)
     except ValueError:
         return result
-    if not isinstance(payload, dict):
-        return result
-    error = payload.get("error")
+    error = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(error, str) or len(error) <= _MAX_TOOL_ERROR_CHARS:
         return result
     payload["error"] = _bound_error_text(error)
@@ -68,8 +67,7 @@ def _is_registry_register_call(node: ast.AST) -> bool:
     func = node.value.func
     return (
         isinstance(func, ast.Attribute) and func.attr == "register"
-        and isinstance(func.value, ast.Name) and func.value.id == "registry"
-    )
+        and isinstance(func.value, ast.Name) and func.value.id == "registry")
 
 
 def _module_registers_tools(module_path: Path) -> bool:
@@ -92,8 +90,7 @@ def _module_registers_tools(module_path: Path) -> bool:
     return any(
         _is_registry_register_call(stmt)
         or (isinstance(stmt, ast.For) and any(_is_registry_register_call(s) for s in stmt.body))
-        for stmt in tree.body
-    )
+        for stmt in tree.body)
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
@@ -120,7 +117,7 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         except OSError:
             continue
         cached = cache.get(abs_path)
-        if isinstance(cached, (list, tuple)) and len(cached) == 3 and (cached[0], cached[1]) == stat_key:
+        if isinstance(cached, (list, tuple)) and len(cached) == 3 and tuple(cached[:2]) == stat_key:
             registers = bool(cached[2])
         else:
             registers = _module_registers_tools(path)
@@ -183,7 +180,7 @@ def _save_discovery_cache(cache: Dict[str, list]) -> None:
 
 @dataclass(eq=False, slots=True)
 class ToolEntry:
-    """Metadata for one registered tool (identity semantics: restore/CAS paths compare with ``is``)."""
+    """Metadata for one registered tool (identity semantics: restore/CAS paths compare ``is``)."""
 
     name: str
     toolset: str
@@ -212,8 +209,7 @@ class _PluginOverridePolicy:
 
 _OVERRIDE_DENIED_MSG = (
     "Plugin module {owner!r} cannot override built-in tool {name!r} "
-    "without operator opt-in (allow_tool_override)."
-)
+    "without operator opt-in (allow_tool_override).")
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +238,11 @@ _check_fn_last_good: Dict[tuple[Callable, Optional[str]], float] = {}
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
 _NO_CACHE_CHECK_FNS: Set[Callable] = set()
+_BROWSER_IDENTITY_KEYS = (
+    "HERMES_SESSION_ID",
+    "HERMES_BROWSER_CONTROL_PRINCIPAL",
+    "HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY",
+)
 
 
 def no_cache_check_fn(fn: Callable) -> Callable:
@@ -281,11 +282,7 @@ def check_fn_cache_scope() -> Optional[str]:
     try:
         from gateway.session_context import get_session_env
 
-        browser_identity = (
-            get_session_env("HERMES_SESSION_ID", ""),
-            get_session_env("HERMES_BROWSER_CONTROL_PRINCIPAL", ""),
-            get_session_env("HERMES_BROWSER_CONTROL_TRANSPORT_FAMILY", ""),
-        )
+        browser_identity = tuple(get_session_env(key, "") for key in _BROWSER_IDENTITY_KEYS)
         if all(str(value or "").strip() for value in browser_identity):
             return CHECK_FN_CACHE_BYPASS
     except Exception:
@@ -299,9 +296,7 @@ def check_fn_cache_scope() -> Optional[str]:
         from hermes_constants import get_hermes_home_override
 
         override = get_hermes_home_override()
-        if not override:
-            return CHECK_FN_CACHE_BYPASS
-        return str(Path(override).expanduser().resolve())
+        return str(Path(override).expanduser().resolve()) if override else CHECK_FN_CACHE_BYPASS
     except Exception:
         # Fail closed: bypass both cache layers rather than aliasing requests
         # whose multiplex profile identity could not be resolved.
@@ -323,24 +318,19 @@ def _run_check_fn_uncached(fn: Callable, *, unresolved_scope: bool = False) -> b
                 "check_fn %s hit the multiplex fail-closed path with no "
                 "profile secret scope active; dependent tools re-probe on "
                 "the first scoped turn",
-                _fn_label(fn),
-            )
-            return False
-        # The scope resolved but the read still failed closed: a genuinely lost scope.
-        logger.warning(
-            "check_fn %s raised UnscopedSecretError while the profile cache "
-            "scope was resolved; dependent tools will be unavailable this turn",
-            _fn_label(fn),
-            exc_info=True,
-        )
-        return False
+                _fn_label(fn))
+        else:
+            # The scope resolved but the read still failed closed: a genuinely lost scope.
+            logger.warning(
+                "check_fn %s raised UnscopedSecretError while the profile cache "
+                "scope was resolved; dependent tools will be unavailable this turn",
+                _fn_label(fn), exc_info=True)
     except Exception:
         detail = " while profile cache scope was unresolved" if unresolved_scope else ""
         logger.warning(
             "check_fn %s raised%s; dependent tools will be unavailable this turn",
-            _fn_label(fn), detail, exc_info=True,
-        )
-        return False
+            _fn_label(fn), detail, exc_info=True)
+    return False
 
 
 def _check_fn_cached(fn: Callable) -> bool:
@@ -379,15 +369,13 @@ def _check_fn_cached(fn: Callable) -> bool:
             logger.warning(
                 "check_fn %s failed (%s) within %.0fs of last success; "
                 "treating as transient and keeping tool(s) available",
-                _fn_label(fn), outcome, _CHECK_FN_FAILURE_GRACE_SECONDS,
-            )
+                _fn_label(fn), outcome, _CHECK_FN_FAILURE_GRACE_SECONDS)
             return True
 
         # No recent success (or grace expired) — honor the failure. Logged so silent
         # tool loss in quiet mode (subagents) is diagnosable.
         logger.warning(
-            "check_fn %s %s; dependent tools will be unavailable this turn", _fn_label(fn), outcome,
-        )
+            "check_fn %s %s; dependent tools will be unavailable this turn", _fn_label(fn), outcome)
         _check_fn_cache[cache_key] = (now, False)
         return False
 
@@ -400,7 +388,7 @@ def _memo_check(fn: Callable, memo: Dict[Callable, bool]) -> bool:
 
 
 def invalidate_check_fn_cache() -> None:
-    """Drop all cached ``check_fn`` results (after config changes such as ``hermes tools enable``)."""
+    """Drop all cached ``check_fn`` results (after config changes like ``hermes tools enable``)."""
     with _check_fn_cache_lock:
         _check_fn_cache.clear()
         _check_fn_last_good.clear()
@@ -462,16 +450,18 @@ class ToolRegistry:
 
     def _drop_toolset_aliases(self, toolset: str) -> None:
         self._toolset_aliases = {
-            alias: target for alias, target in self._toolset_aliases.items() if target != toolset
-        }
+            alias: target for alias, target in self._toolset_aliases.items() if target != toolset}
 
     def _merged_tools(self, scope: Optional[str] = None) -> Dict[str, ToolEntry]:
         """Return global tools overlaid with one profile's plugin tools."""
-        merged = dict(self._tools)
-        merged.update(self._scoped_tools.get(scope or self.current_scope_key(), {}))
-        return merged
+        return {**self._tools, **self._scoped_tools.get(scope or self.current_scope_key(), {})}
 
-    def _snapshot_state(self, scope: Optional[str] = None) -> tuple[List[ToolEntry], Dict[str, Callable]]:
+    def _toolset_entries(self, toolset: str, scope: Optional[str]) -> List[ToolEntry]:
+        return [entry for entry in self._merged_tools(scope).values() if entry.toolset == toolset]
+
+    def _snapshot_state(
+        self, scope: Optional[str] = None,
+    ) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
         with self._lock:
             entries = list(self._merged_tools(scope).values())
@@ -493,19 +483,18 @@ class ToolRegistry:
         plus desktop-only ``read_terminal``) must not be gated by the first ``check_fn``.
         """
         check_results: Dict[Callable, bool] = {}
-        for entry in entries:
-            if entry.toolset != toolset:
-                continue
-            if not entry.check_fn or _memo_check(entry.check_fn, check_results):
-                return True
-        return False
+        return any(
+            not entry.check_fn or _memo_check(entry.check_fn, check_results)
+            for entry in entries if entry.toolset == toolset)
 
     def get_entry(self, name: str, *, scope: Optional[str] = None) -> Optional[ToolEntry]:
         """Return the active profile's entry by name, falling back to global."""
         with self._lock:
             return self._merged_tools(scope).get(name)
 
-    def snapshot_registration(self, name: str, *, scope: Optional[str] = None) -> Optional[ToolEntry]:
+    def snapshot_registration(
+        self, name: str, *, scope: Optional[str] = None,
+    ) -> Optional[ToolEntry]:
         """Return the local slot state without following global fallback."""
         with self._lock:
             return self._slot(scope).get(name)
@@ -528,7 +517,8 @@ class ToolRegistry:
             existing = self._toolset_aliases.get(alias)
             if existing and existing != toolset:
                 logger.warning(
-                    "Toolset alias collision: '%s' (%s) overwritten by %s", alias, existing, toolset,
+                    "Toolset alias collision: '%s' (%s) overwritten by %s",
+                    alias, existing, toolset,
                 )
             self._toolset_aliases[alias] = toolset
             self._generation += 1
@@ -574,8 +564,7 @@ class ToolRegistry:
         current: _PluginOverridePolicy,
         previous: Optional[_PluginOverridePolicy],
         *,
-        scope: Optional[str] = None,
-    ) -> bool:
+        scope: Optional[str] = None) -> bool:
         """CAS-restore policy state while retaining durable scope attribution."""
         with self._lock:
             key = (scope, module_namespace)
@@ -618,15 +607,12 @@ class ToolRegistry:
                 current = func
                 continue
             globals_dict = getattr(current, "__globals__", None)
-            if isinstance(globals_dict, dict):
-                module_name = globals_dict.get("__name__", "")
-                if module_name:
-                    return str(module_name)
+            if isinstance(globals_dict, dict) and globals_dict.get("__name__", ""):
+                return str(globals_dict["__name__"])
             wrapped = getattr(current, "__wrapped__", None)
-            if wrapped is not None:
-                current = wrapped
-                continue
-            break
+            if wrapped is None:
+                break
+            current = wrapped
         module_name = getattr(current, "__module__", "")
         if module_name:
             return str(module_name)
@@ -637,8 +623,7 @@ class ToolRegistry:
         with self._lock:
             matches = [
                 namespace for namespace in self._plugin_module_scopes
-                if module_namespace == namespace or module_namespace.startswith(f"{namespace}.")
-            ]
+                if module_namespace == namespace or module_namespace.startswith(f"{namespace}.")]
             if matches:
                 return max(matches, key=len)
         # Also gate plugin modules currently loading but not yet policy-recorded
@@ -660,8 +645,7 @@ class ToolRegistry:
                 return next(iter(scopes))
             raise PermissionError(
                 f"Plugin module {module_namespace!r} is active in multiple "
-                "profiles and cannot register outside one of those scopes."
-            )
+                "profiles and cannot register outside one of those scopes.")
 
     def plugin_scope_for_module(self, module_namespace: str) -> Optional[str]:
         """Public host lookup for a loaded plugin module's immutable scope."""
@@ -700,8 +684,7 @@ class ToolRegistry:
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
         override: bool = False,
-        scope: Optional[str] = None,
-    ):
+        scope: Optional[str] = None):
         """Register a tool. Called at module-import time by each tool file.
 
         ``override=True`` is an explicit opt-in for plugins that intend to replace an
@@ -716,18 +699,20 @@ class ToolRegistry:
             scope = self._plugin_scope_of(owner)
         with self._lock:
             target = self._slot(scope, create=True)
-            existing = self._tools.get(name) if scope is None else self._merged_tools(scope).get(name)
-            plugin_override_denied = owner is not None and not self._plugin_override_allowed(scope, owner)
+            existing = (self._tools if scope is None else self._merged_tools(scope)).get(name)
+            plugin_override_denied = (
+                owner is not None and not self._plugin_override_allowed(scope, owner)
+            )
             shadows_global = (
-                owner is not None and scope is not None and name not in target and name in self._tools
+                owner is not None and scope is not None
+                and name not in target and name in self._tools
             )
             if shadows_global:
                 if not override:
                     logger.error(
                         "Tool registration REJECTED: plugin %r attempted to "
                         "shadow global tool %r without override=True",
-                        owner, name,
-                    )
+                        owner, name)
                     return
                 if plugin_override_denied:
                     raise PermissionError(_OVERRIDE_DENIED_MSG.format(owner=owner, name=name))
@@ -740,16 +725,14 @@ class ToolRegistry:
                             "operator opt-in. Set "
                             "plugins.entries.<plugin_id>.allow_tool_override: true "
                             "in config.yaml to allow it.",
-                            owner, name, existing.toolset,
-                        )
+                            owner, name, existing.toolset)
                         raise PermissionError(_OVERRIDE_DENIED_MSG.format(owner=owner, name=name))
                     # Explicit opt-in (or non-plugin caller): replace the tool; INFO so
                     # the override is auditable in agent.log.
                     logger.info(
                         "Tool '%s': toolset '%s' overriding existing toolset '%s' "
                         "(override=True opt-in)",
-                        name, toolset, existing.toolset,
-                    )
+                        name, toolset, existing.toolset)
                 else:
                     # Reject every cross-toolset shadow, including MCP-to-MCP collisions.
                     # MCP reconnect/refresh re-registers within the same toolset: allowed.
@@ -758,8 +741,7 @@ class ToolRegistry:
                         "shadow existing tool from toolset '%s'. Pass "
                         "override=True to register() if the replacement is "
                         "intentional, or deregister the existing tool first.",
-                        name, toolset, existing.toolset,
-                    )
+                        name, toolset, existing.toolset)
                     return
             target[name] = ToolEntry(
                 name=name,
@@ -772,8 +754,7 @@ class ToolRegistry:
                 description=description or schema.get("description", ""),
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
-                dynamic_schema_overrides=dynamic_schema_overrides,
-            )
+                dynamic_schema_overrides=dynamic_schema_overrides)
             # Availability is derived per-tool (_toolset_has_exposable_tools), so this
             # map no longer gates a toolset. It still feeds get_toolset_requirements ->
             # TOOLSET_REQUIREMENTS["check_fn"], which banner.py reads (presence only,
@@ -801,8 +782,7 @@ class ToolRegistry:
             if caller_owner is not None and scope is not None and scope != caller_scope:
                 raise PermissionError(
                     f"Plugin module {caller_mod!r} cannot deregister tools "
-                    "outside its own profile scope."
-                )
+                    "outside its own profile scope.")
             if scope is None:
                 scope = caller_scope
             target = self._slot(scope)
@@ -812,8 +792,7 @@ class ToolRegistry:
                     raise PermissionError(
                         f"Scoped plugin module {caller_mod!r} cannot deregister "
                         f"process-global tool {name!r}; register a scoped "
-                        "override instead."
-                    )
+                        "override instead.")
                 return
             if not entry.toolset.startswith("mcp-"):
                 owner = self._plugin_owner_of(entry.handler)
@@ -824,32 +803,34 @@ class ToolRegistry:
                 if (
                     caller_owner is not None
                     and not same_plugin
-                    and not self._plugin_override_allowed(caller_scope, caller_owner)
-                ):
+                    and not self._plugin_override_allowed(caller_scope, caller_owner)):
                     logger.error(
                         "Tool deregistration REJECTED: plugin %r attempted to "
                         "remove tool %r (toolset %r) it does not own, without "
                         "operator opt-in. Set "
                         "plugins.entries.%s.allow_tool_override: true in "
                         "config.yaml to allow it.",
-                        caller_mod, name, entry.toolset, caller_mod,
-                    )
+                        caller_mod, name, entry.toolset, caller_mod)
                     raise PermissionError(
                         f"Plugin module {caller_mod!r} cannot deregister tool "
                         f"{name!r} (toolset {entry.toolset!r}) without operator "
-                        f"opt-in (allow_tool_override)."
-                    )
+                        f"opt-in (allow_tool_override).")
             del target[name]
             if scope is not None and not target:
                 self._scoped_tools.pop(scope, None)
-            if not any(e.toolset == entry.toolset for e in self._merged_tools(scope).values()):
+            if not self._toolset_entries(entry.toolset, scope):
                 self._toolset_checks.pop(entry.toolset, None)
                 self._drop_toolset_aliases(entry.toolset)
             self._generation += 1
         logger.debug("Deregistered tool: %s", name)
 
     def restore_registration(
-        self, name: str, current: ToolEntry, previous: Optional[ToolEntry], *, scope: Optional[str] = None,
+        self,
+        name: str,
+        current: ToolEntry,
+        previous: Optional[ToolEntry],
+        *,
+        scope: Optional[str] = None,
     ) -> bool:
         """Restore a host-owned registration if it is still current (plugin ownership ledger).
 
@@ -876,7 +857,7 @@ class ToolRegistry:
             if previous is not None:
                 affected_toolsets.add(previous.toolset)
             for toolset in affected_toolsets:
-                surviving = [entry for entry in self._merged_tools(scope).values() if entry.toolset == toolset]
+                surviving = self._toolset_entries(toolset, scope)
                 check_fn = next((entry.check_fn for entry in surviving if entry.check_fn), None)
                 if scope is None:
                     if check_fn is None:
@@ -886,8 +867,7 @@ class ToolRegistry:
                 if not surviving and not any(
                     entry.toolset == toolset
                     for entries in self._scoped_tools.values()
-                    for entry in entries.values()
-                ):
+                    for entry in entries.values()):
                     self._drop_toolset_aliases(toolset)
             self._generation += 1
         logger.debug("Restored tool registration: %s", name)
@@ -924,7 +904,8 @@ class ToolRegistry:
                         schema_with_name.update(overrides)
                 except Exception as exc:
                     logger.warning(
-                        "dynamic_schema_overrides for tool %s raised %s; using static schema", name, exc,
+                        "dynamic_schema_overrides for tool %s raised %s; using static schema",
+                        name, exc,
                     )
             result.append({"type": "function", "function": schema_with_name})
         return result
@@ -943,8 +924,7 @@ class ToolRegistry:
         if (
             isinstance(result, dict)
             and result.get("_multimodal") is True
-            and isinstance(result.get("content"), list)
-        ):
+            and isinstance(result.get("content"), list)):
             return result
 
         result_type = type(result).__name__
@@ -953,10 +933,11 @@ class ToolRegistry:
             f"Tool handler returned unsupported result type: {result_type}",
             error_type="tool_result_contract",
             tool=name,
-            result_type=result_type,
-        )
+            result_type=result_type)
 
-    def dispatch(self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
+    def dispatch(
+        self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs,
+    ) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
         results normalized, every exception returned as ``{"error": ...}``."""
         entry = self.get_entry(name, scope=scope)
@@ -1001,7 +982,7 @@ class ToolRegistry:
         return sorted(entry.name for entry in self._snapshot_entries())
 
     def get_schema(self, name: str) -> Optional[dict]:
-        """A tool's raw schema dict, bypassing check_fn filtering (token estimation, introspection)."""
+        """A tool's raw schema dict, bypassing check_fn filtering (token estimates, introspection)."""
         entry = self.get_entry(name)
         return entry.schema if entry else None
 
@@ -1028,8 +1009,7 @@ class ToolRegistry:
         entries = self._snapshot_entries()
         return {
             toolset: self._toolset_has_exposable_tools(toolset, entries)
-            for toolset in sorted({entry.toolset for entry in entries})
-        }
+            for toolset in sorted({entry.toolset for entry in entries})}
 
     def get_available_toolsets(self) -> Dict[str, dict]:
         """Return toolset metadata for UI display."""
@@ -1042,8 +1022,7 @@ class ToolRegistry:
                     "available": self._toolset_has_exposable_tools(entry.toolset, entries),
                     "tools": [],
                     "description": "",
-                    "requirements": [],
-                }
+                    "requirements": []}
             info["tools"].append(entry.name)
             _extend_unique(info["requirements"], entry.requires_env or [])
         return toolsets
@@ -1058,8 +1037,7 @@ class ToolRegistry:
                 "env_vars": [],
                 "check_fn": toolset_checks.get(entry.toolset),
                 "setup_url": None,
-                "tools": [],
-            })
+                "tools": []})
             _extend_unique(info["tools"], [entry.name])
             _extend_unique(info["env_vars"], entry.requires_env)
         return result
@@ -1077,8 +1055,7 @@ class ToolRegistry:
                 unavailable.append({
                     "name": ts,
                     "env_vars": ts_entries[0].requires_env if ts_entries else [],
-                    "tools": [entry.name for entry in ts_entries],
-                })
+                    "tools": [entry.name for entry in ts_entries]})
         return available, unavailable
 
 

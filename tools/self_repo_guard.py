@@ -14,15 +14,13 @@ from tools.approval import (
     _bash_exec_payload,
     _deobfuscate_shell_word_for_detection,
     _iter_shell_command_starts,
-    _read_shell_word,
-)
+    _read_shell_word)
 
 # bisect is included: it drives repeated checkouts of the running root — the
 # exact module-version-skew hazard this guard exists for.
 _WORKTREE_MUTATIONS = frozenset({
     "checkout", "switch", "rebase", "merge", "pull", "restore", "clean",
-    "cherry-pick", "revert", "bisect",
-})
+    "cherry-pick", "revert", "bisect"})
 _WORKTREE_TARGET_ACTIONS = frozenset({"move", "remove"})
 _STASH_SAFE_ACTIONS = frozenset({"list", "show", "create", "store", "drop", "clear"})
 _RESET_WORKTREE_MODES = frozenset({"--hard", "--merge", "--keep"})
@@ -37,8 +35,7 @@ _KNOWN_GIT_BUILTINS = frozenset({
     "maintenance", "merge-base", "mv", "notes", "push", "range-diff", "reflog",
     "remote", "repack", "replace", "reset", "restore", "rev-list", "rev-parse",
     "rm", "shortlog", "show", "show-ref", "stash", "status", "submodule", "tag",
-    "worktree",
-})
+    "worktree"})
 _SHELL_EXECUTABLES = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=(.*)", re.DOTALL)
 _RESET_HARD_RE = re.compile(r"--h(?:a(?:r(?:d)?)?)?\Z")
@@ -47,19 +44,19 @@ _NO_OPTIONS: frozenset[str] = frozenset()
 _WRAPPER_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
     "sudo": frozenset({
         "-C", "--chdir", "-c", "--close-from", "-g", "--group", "-h", "--host",
-        "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user",
-    }),
+        "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user"}),
     "env": frozenset({"-a", "--argv0", "-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
     "command": _NO_OPTIONS,
     "builtin": _NO_OPTIONS,
     "exec": frozenset({"-a"}),
     "nohup": _NO_OPTIONS,
     "setsid": _NO_OPTIONS,
-    "time": frozenset({"-f", "--format", "-o", "--output"}),
-}
+    "time": frozenset({"-f", "--format", "-o", "--output"})}
 _MAX_RECURSION = 4
 # git global options that consume the next argument (-C/--work-tree/-c are acted on).
-_GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({"-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path"})
+_GIT_GLOBAL_OPTIONS_WITH_ARG = frozenset({
+    "-C", "-c", "--work-tree", "--git-dir", "--namespace", "--exec-path",
+})
 
 
 @dataclass
@@ -119,7 +116,9 @@ def _shell_words_at(command: str, start: int) -> list[str]:
     return words
 
 
-def _consume_options(words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS) -> int:
+def _consume_options(
+    words: list[str], start: int, options_with_arg: frozenset[str] = _NO_OPTIONS,
+) -> int:
     """Index of the first positional at/after ``start`` (``--`` ends options)."""
     index = start
     while index < len(words):
@@ -311,8 +310,7 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
             executable
             and _executable_name(executable) in _SHELL_EXECUTABLES
             and _shell_script_arg(args) is None
-            and not any(arg and not arg.startswith("-") for arg in args)
-        )
+            and not any(arg and not arg.startswith("-") for arg in args))
         specs.append(_Heredoc(delimiter, strip_tabs, execute_as_shell))
 
     return specs
@@ -410,7 +408,8 @@ def _stash_mutates(args: list[str]) -> bool:
 
 def _clean_mutates(args: list[str]) -> bool:
     return not any(
-        arg == "--dry-run" or (not arg.startswith("--") and _has_short_flag(arg, "n")) for arg in args
+        arg == "--dry-run" or (not arg.startswith("--") and _has_short_flag(arg, "n"))
+        for arg in args
     )
 
 
@@ -425,8 +424,7 @@ _CONDITIONAL_MUTATIONS: dict[str, Callable[[list[str]], bool]] = {
     "reset": _reset_mutates,
     "stash": _stash_mutates,
     "clean": _clean_mutates,
-    "restore": _restore_mutates,
-}
+    "restore": _restore_mutates}
 
 
 def _mutates_worktree(subcommand: str, args: list[str]) -> bool:
@@ -452,8 +450,7 @@ def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
     try:
         result = subprocess.run(
             [executable, "-C", str(target), "config", "--get", f"alias.{alias}"],
-            capture_output=True, text=True, timeout=1, check=False,
-        )
+            capture_output=True, text=True, timeout=1, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     value = result.stdout.strip()
@@ -461,9 +458,16 @@ def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
 
 
 def _inspect_git(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int,
+    executable: str,
+    args: list[str],
+    current_dir: Path,
+    env: dict[str, str],
+    root: Path,
+    depth: int,
 ) -> str | None:
-    target, subcommand, sub_args, inline_aliases = _git_target_and_subcommand(args, current_dir, env)
+    target, subcommand, sub_args, inline_aliases = _git_target_and_subcommand(
+        args, current_dir, env,
+    )
     if subcommand is None:
         return None
     # `worktree` names its victim as an argument, so the cwd check does not apply.
@@ -491,7 +495,12 @@ def _inspect_git(
 
 
 def _inspect_github_cli(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int,
+    executable: str,
+    args: list[str],
+    current_dir: Path,
+    env: dict[str, str],
+    root: Path,
+    depth: int,
 ) -> str | None:
     if not _is_within(current_dir, root):
         return None
@@ -502,7 +511,12 @@ def _inspect_github_cli(
 
 
 def _inspect_shell(
-    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path, depth: int,
+    executable: str,
+    args: list[str],
+    current_dir: Path,
+    env: dict[str, str],
+    root: Path,
+    depth: int,
 ) -> str | None:
     script = _shell_script_arg(args)
     return _find_mutation(script, current_dir, root, depth + 1) if script else None
@@ -513,8 +527,7 @@ _INSPECTORS: dict[str, Callable[..., str | None]] = {
     "git": _inspect_git,
     "gh": _inspect_github_cli,
     "hub": _inspect_github_cli,
-    **{shell: _inspect_shell for shell in _SHELL_EXECUTABLES},
-}
+    **{shell: _inspect_shell for shell in _SHELL_EXECUTABLES}}
 
 
 def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str | None:
@@ -576,8 +589,7 @@ def guard_active() -> bool:
 
 
 def detect_self_repo_git_mutation(
-    command: str, cwd: str | None, source_root: Path | None = None,
-) -> tuple[bool, str | None]:
+    command: str, cwd: str | None, source_root: Path | None = None) -> tuple[bool, str | None]:
     """Return whether a command would rewrite the live source checkout."""
     root = source_root if source_root is not None else get_running_source_root()
     if root is None or not command:
@@ -594,7 +606,8 @@ def detect_self_repo_git_mutation(
 def _block_message(operation: str, root: Path) -> str:
     # Suggest a disk-backed scratch dir: /tmp is usually tmpfs (see message).
     hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    scratch = (Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes") / "scratch"
+    home = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
+    scratch = home / "scratch"
     return (
         f"Blocked: `{operation}` would rewrite Hermes's live source checkout "
         f"({root}) and can mix module versions in this running process. "
@@ -604,5 +617,4 @@ def _block_message(operation: str, root: Path) -> str:
         "tmpfs and a few dependency installs can fill it and ENOSPC other "
         "work. Delete the clone when the branch is pushed. To change this "
         "checkout, stop Hermes, run the command externally, then restart "
-        "Hermes."
-    )
+        "Hermes.")

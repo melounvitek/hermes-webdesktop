@@ -59,8 +59,7 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
         renames[key] = candidate
         logger.debug(
             "schema_sanitizer[%s]: renamed property key %r -> %r "
-            "(provider key-pattern compat)", path, key, candidate,
-        )
+            "(provider key-pattern compat)", path, key, candidate)
     return renames
 
 
@@ -86,14 +85,13 @@ def unrename_tool_args(params_schema: Any, args: Any) -> Any:
             elif isinstance(value, list) and isinstance(subschema.get("items"), dict):
                 value = [
                     unrename_tool_args(subschema["items"], item) if isinstance(item, dict) else item
-                    for item in value
-                ]
+                    for item in value]
         out[orig] = value
     return out
 
 
 def sanitize_tool_schemas(tools: list[dict]) -> list[dict]:
-    """Deep-copied ``tools`` (OpenAI format) with each parameter schema sanitized; callers may mutate."""
+    """Deep-copied ``tools`` (OpenAI format) with sanitized parameter schemas; callers may mutate."""
     if not tools:
         return tools
     return [_sanitize_single_tool(tool) for tool in tools]
@@ -134,7 +132,7 @@ _REF_FORBIDDEN_SIBLINGS = frozenset({"default"})
 
 
 def _strip_ref_siblings(node: Any) -> Any:
-    """Recursively drop forbidden siblings from ``$ref`` nodes (Fireworks rejects ``default`` there)."""
+    """Recursively drop forbidden siblings of ``$ref`` (Fireworks rejects ``default`` there)."""
     if isinstance(node, list):
         return [_strip_ref_siblings(item) for item in node]
     if not isinstance(node, dict):
@@ -163,8 +161,7 @@ def _strip_top_level_combinators(params: dict, *, path: str = "<tool>") -> dict:
             logger.debug(
                 "schema_sanitizer[%s]: stripped top-level %r combinator "
                 "from tool parameters (strict-backend compat)",
-                path, key,
-            )
+                path, key)
             out.pop(key, None)
     return out
 
@@ -193,11 +190,16 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
     ``keep_nullable_hint`` sets ``nullable: true`` for runtime ``"null"`` → ``None`` coercion.
     """
     if isinstance(schema, list):
-        return [strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema]
+        return [
+            strip_nullable_unions(item, keep_nullable_hint=keep_nullable_hint) for item in schema
+        ]
     if not isinstance(schema, dict):
         return schema
 
-    stripped = {k: strip_nullable_unions(v, keep_nullable_hint=keep_nullable_hint) for k, v in schema.items()}
+    stripped = {
+        k: strip_nullable_unions(v, keep_nullable_hint=keep_nullable_hint)
+        for k, v in schema.items()
+    }
     for key in _UNION_KEYS:
         variants = stripped.get(key)
         if not isinstance(variants, list):
@@ -212,7 +214,9 @@ def strip_nullable_unions(schema: Any, *, keep_nullable_hint: bool = True) -> An
     return stripped
 
 
-_CONST_PRIMITIVE_TYPES: dict[type, str] = {bool: "boolean", int: "integer", float: "number", str: "string"}
+_CONST_PRIMITIVE_TYPES: dict[type, str] = {
+    bool: "boolean", int: "integer", float: "number", str: "string",
+}
 
 
 def _const_branch_type(branch: Any) -> str | None:
@@ -264,7 +268,10 @@ def collapse_const_unions(schema: Any) -> Any:
         branch_types = {_const_branch_type(item) for item in const_branches}
         if len(branch_types) != 1 or None in branch_types:
             continue
-        replacement: dict = {"type": branch_types.pop(), "enum": [item["const"] for item in const_branches]}
+        replacement: dict = {
+            "type": branch_types.pop(),
+            "enum": [item["const"] for item in const_branches],
+        }
         if null_branches:
             replacement["nullable"] = True
         _carry_union_meta(out, replacement, skip_default_on_ref=False)
@@ -312,13 +319,11 @@ def _sanitize_node(node: Any, path: str) -> Any:
             logger.debug(
                 "schema_sanitizer[%s]: replacing bare-string schema %r "
                 "with {'type': %r}",
-                path, node, node,
-            )
+                path, node, node)
             return _empty_object() if node == "object" else {"type": node}
         logger.debug(
             "schema_sanitizer[%s]: replacing non-schema string %r "
-            "with empty object schema", path, node,
-        )
+            "with empty object schema", path, node)
         return _empty_object()
 
     if isinstance(node, list):
@@ -341,8 +346,7 @@ def _sanitize_node(node: Any, path: str) -> Any:
             renames = prop_renames if key == "properties" else {}
             out[key] = {
                 renames.get(sub_k, sub_k): _sanitize_node(sub_v, f"{path}.{key}.{renames.get(sub_k, sub_k)}")
-                for sub_k, sub_v in value.items()
-            }
+                for sub_k, sub_v in value.items()}
         elif key in {"items", "additionalProperties"}:
             # Bool ``additionalProperties`` is valid and widely accepted;
             # ``items: true/false`` is non-standard but preserved rather than dropped.
@@ -377,8 +381,10 @@ def _sanitize_node(node: Any, path: str) -> Any:
 _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 
 
-def _reactive_strip(tools: list[dict], strip_node: Callable[[dict], int], log_msg: str) -> tuple[list[dict], int]:
-    """Apply *strip_node* (returns keywords removed) to every dict node of every tool's parameters, in place.
+def _reactive_strip(
+    tools: list[dict], strip_node: Callable[[dict], int], log_msg: str,
+) -> tuple[list[dict], int]:
+    """Apply *strip_node* (returns keywords removed) to every dict node of each tool's parameters.
 
     Handles OpenAI format (``{"function": {"parameters": ...}}``) and Responses format
     (``{"name": ..., "parameters": ...}``). Returns ``(tools, stripped_count)`` — same list.
@@ -431,8 +437,7 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
     return _reactive_strip(
         tools, _strip,
         "schema_sanitizer: stripped %d pattern/format keyword(s) from "
-        "tool schemas (llama.cpp grammar-parse recovery)",
-    )
+        "tool schemas (llama.cpp grammar-parse recovery)")
 
 
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
@@ -452,5 +457,4 @@ def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
     return _reactive_strip(
         tools, _strip,
         "schema_sanitizer: stripped %d enum keyword(s) containing '/' "
-        "from tool schemas (xAI Responses grammar-compile recovery)",
-    )
+        "from tool schemas (xAI Responses grammar-compile recovery)")

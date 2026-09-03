@@ -185,8 +185,10 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     return result
 
 
-def should_allow_plugin_install(result: ScanResult, force: bool = False) -> Tuple[Optional[bool], str]:
-    """Map a verdict to ``(allowed, reason)``: True installs, None needs confirmation, False is blocked."""
+def should_allow_plugin_install(
+    result: ScanResult, force: bool = False,
+) -> Tuple[Optional[bool], str]:
+    """Map a verdict to ``(allowed, reason)``: True installs, None asks to confirm, False blocks."""
     n = len(result.findings)
     if result.verdict == "safe":
         return True, "Allowed (clean scan)"

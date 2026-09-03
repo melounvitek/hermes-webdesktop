@@ -5,7 +5,7 @@ from typing import Optional
 
 
 def validate_within_dir(path: Path, root: Path) -> Optional[str]:
-    """Error message if *path* does not resolve inside *root* (symlinks/``..`` normalised), else None."""
+    """Error message if *path* does not resolve inside *root* (symlinks and ``..`` followed)."""
     try:
         path.resolve().relative_to(root.resolve())
     except (ValueError, OSError) as exc:
