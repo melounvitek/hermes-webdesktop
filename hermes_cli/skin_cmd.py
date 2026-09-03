@@ -49,35 +49,27 @@ def _skin_set(key: str, value: str, skin: str | None) -> int:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         target = name
     else:
-        # Built-in (or missing): fork into an editable copy that keeps its full
-        # palette, under a fresh name so the built-in stays intact for revert.
+        # Built-in (or missing): fork into an editable copy that keeps its full palette, under a
+        # fresh name so the built-in stays intact for revert.
         from hermes_cli.skin_engine import load_skin
 
         resolved = load_skin(name)
         target = f"{name}-custom"
         path = _skins_dir() / f"{target}.yaml"
-        data = {
-            "name": target,
-            "description": f"{name} + custom {key}",
-            "colors": dict(resolved.colors),
-            "branding": dict(resolved.branding),
-            "tool_prefix": resolved.tool_prefix,
-        }
-
+        data = {"name": target, "description": f"{name} + custom {key}",
+                "colors": dict(resolved.colors), "branding": dict(resolved.branding),
+                "tool_prefix": resolved.tool_prefix}
     if not isinstance(data.get("colors"), dict):
         data["colors"] = {}
     data["colors"][key] = value
     data.setdefault("name", target)
-
-    # Atomic write: write_text truncates with no fsync; safe_load("") → None
-    # → {} would permanently lose the palette on the next set (#51356, #16743).
+    # Atomic write: write_text truncates with no fsync; safe_load("") → None → {} would
+    # permanently lose the palette on the next set.
     from utils import atomic_yaml_write
 
     atomic_yaml_write(path, data, sort_keys=False)
-
     if target != name:
         _use(target)
-
     print(f"✓ {key} = {value} in {display_hermes_home()}/skins/{target}.yaml (live within ~1s)")
     return 0
 
@@ -95,7 +87,6 @@ def _skin_list() -> int:
 def skin_command(args) -> None:
     """Dispatch ``hermes skin <verb>``."""
     verb = getattr(args, "skin_command", None)
-
     if verb == "set":
         sys.exit(_skin_set(args.key, args.value, getattr(args, "skin", None)))
     elif verb == "use":
