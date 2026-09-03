@@ -241,5 +241,6 @@ class TestCLIDefaultsHaveAuxiliaryKeys:
         # test runs on Windows where the default locale is cp1252.
         source = Path(_cli_mod.__file__).read_text(encoding="utf-8")
         assert "auxiliary_config = defaults.get(\"auxiliary\"" in source
+        assert "_AUXILIARY_TASK_ENV" in source
         assert "AUXILIARY_VISION_PROVIDER" in source
         assert "AUXILIARY_VISION_MODEL" in source
