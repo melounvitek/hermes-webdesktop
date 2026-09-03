@@ -12,7 +12,6 @@ import json
 import logging
 import re
 import tempfile
-from concurrent.futures import TimeoutError as FutureTimeout
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from itertools import count
@@ -213,7 +212,7 @@ def make_acp_edit_approval_requester(
 
     def _requester(proposal: EditProposal) -> bool:
         from acp.schema import PermissionOption
-        from agent.async_utils import safe_schedule_threadsafe
+        from acp_adapter.permissions import await_permission
 
         if auto_approve_getter is not None:
             try:
@@ -224,22 +223,13 @@ def make_acp_edit_approval_requester(
             except Exception:
                 logger.debug("ACP edit auto-approval policy check failed", exc_info=True)
 
-        coro = request_permission_fn(
-            session_id=session_id,
-            tool_call=build_acp_edit_tool_call(proposal),
+        response, _timed_out = await_permission(
+            request_permission_fn, loop, session_id, tool_call=build_acp_edit_tool_call(proposal),
             options=[PermissionOption(option_id="allow_once", kind="allow_once", name="Allow edit"),
                      PermissionOption(option_id="deny", kind="reject_once", name="Deny")],
+            timeout=timeout, what="Edit approval request",
         )
-        future = safe_schedule_threadsafe(
-            coro, loop, logger=logger, log_message="Edit approval request: failed to schedule on loop",
-        )
-        if future is None:
-            return False
-        try:
-            response = future.result(timeout=timeout)
-        except (FutureTimeout, Exception) as exc:
-            future.cancel()
-            logger.warning("Edit approval request timed out or failed: %s", exc)
+        if response is None:
             return False
         outcome = getattr(response, "outcome", None)
         return getattr(outcome, "outcome", None) == "selected" and getattr(outcome, "option_id", None) == "allow_once"
