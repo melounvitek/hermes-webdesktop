@@ -98,34 +98,31 @@ class MCPServerTransportMixin:
         reverse of the SDK's discover-first mode: zero extra round-trips for the handshake-era
         servers that dominate today. ``stateless`` probes discover first (one legacy retry on any
         error); ``legacy`` is handshake only. A handshake TIMEOUT never falls back — it propagates."""
-        def initialize():
-            return asyncio.wait_for(session.initialize(), timeout=connect_timeout)
-
-        def discover():
-            return asyncio.wait_for(session.discover(), timeout=connect_timeout)
+        def call(method: str):
+            return asyncio.wait_for(getattr(session, method)(), timeout=connect_timeout)
 
         async def attempt(primary, fallback, should_fallback, log_fmt, *log_extra):
             try:
-                return await primary()
+                return await call(primary)
             except Exception as exc:
                 if isinstance(exc, asyncio.TimeoutError) or not should_fallback(exc):
                     raise
                 logger.info(log_fmt, self.name, exc, *log_extra)
-                return await fallback()
+                return await call(fallback)
 
         mode = str((self._config or {}).get("protocol", "auto")).lower().strip()
         if mode in ("stateless", "modern", "2026-07-28"):
-            return await attempt(discover, initialize, lambda exc: True,
+            return await attempt("discover", "initialize", lambda exc: True,
                                  "MCP server '%s': server/discover rejected (%s) despite "
                                  "protocol=%s — falling back to the legacy handshake", mode)
         if mode in ("legacy", "handshake"):
-            return await initialize()
+            return await call("initialize")
         if mode != "auto":
             logger.warning("MCP server '%s': unknown protocol=%r — treating as 'auto' "
                            "(valid: auto, stateless, legacy)", self.name, mode)
         # mcp 1.x has no server/discover client — nothing to fall back to.
         return await attempt(
-            initialize, discover, lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
+            "initialize", "discover", lambda exc: _handshake_rejected_as_modern(exc) and hasattr(session, "discover"),
             "MCP server '%s': legacy handshake rejected (%s) — "
             "retrying via server/discover (2026-07-28 stateless server)")
 
@@ -173,8 +170,7 @@ class MCPServerTransportMixin:
         """Ledger the freshly spawned stdio children (pids, pgids, machine spawn ledger)."""
         new_pgids = _capture_pgids(new_pids)
         with _core._lock:
-            for _pid in new_pids:
-                _stdio_pids[_pid] = self.name
+            _stdio_pids.update(dict.fromkeys(new_pids, self.name))
             _stdio_pgids.update(new_pgids)
         # Machine spawn ledger (startup sweeps reap orphans after an unclean exit); best-effort.
         for _pid in new_pids:
@@ -349,10 +345,10 @@ class MCPServerTransportMixin:
             _httpx_mod = _core.sdk_httpx()
 
             def _mcp_http_client_factory(headers=None, timeout=None, auth=None):
-                kwargs: dict = {"follow_redirects": True, "verify": ssl_verify,
-                                "timeout": timeout if timeout is not None else _httpx_mod.Timeout(30.0, read=300.0)}
-                kwargs.update({k: v for k, v in (("headers", headers), ("auth", auth), ("cert", client_cert)) if v is not None})
-                return _httpx_mod.AsyncClient(**kwargs)
+                return _httpx_mod.AsyncClient(
+                    follow_redirects=True, verify=ssl_verify,
+                    timeout=timeout if timeout is not None else _httpx_mod.Timeout(30.0, read=300.0),
+                    **{k: v for k, v in (("headers", headers), ("auth", auth), ("cert", client_cert)) if v is not None})
 
             sse_kwargs["httpx_client_factory"] = _mcp_http_client_factory
         return _core.sse_client(**sse_kwargs)
@@ -360,9 +356,16 @@ class MCPServerTransportMixin:
     def _streamable_http_transport(self, url: str, headers: dict, connect_timeout: float,
                                    ssl_verify, client_cert, oauth_auth,
                                    strict_cfg_headers: bool, configured_header_names: set):
-        """Streamable HTTP context manager (mcp >= 1.24.0: caller-owned httpx client)."""
+        """Streamable HTTP context manager: mcp >= 1.24.0 gets a caller-owned httpx client; on the
+        deprecated API (mcp < 1.24.0) the SDK owns the client."""
         if not _core._MCP_NEW_HTTP:
-            return self._legacy_http_transport(url, headers, connect_timeout, ssl_verify, oauth_auth, strict_cfg_headers)
+            if strict_cfg_headers:
+                # Fail closed: without an owned client redirects can't be hooked.
+                raise ImportError(f"MCP server '{self.name}' requires mcp >= 1.24.0 to "
+                                  "enforce the portable redirect-header boundary "
+                                  "(strict_redirect_headers). Upgrade the mcp package.")
+            return _core.streamablehttp_client(url, headers=headers, timeout=float(connect_timeout), verify=ssl_verify,
+                                               **({"auth": oauth_auth} if oauth_auth is not None else {}))
         # Explicit AsyncClient matching the SDK's create_mcp_http_client defaults; MUST come from
         # the SDK's httpx module (httpx2 on mcp >= 2.0) since the SDK sends its own Requests through it.
         httpx = _core.sdk_httpx()
@@ -381,17 +384,6 @@ class MCPServerTransportMixin:
                     yield streams
 
         return _owned_client_streams()
-
-    def _legacy_http_transport(self, url: str, headers: dict, connect_timeout: float,
-                               ssl_verify, oauth_auth, strict_cfg_headers: bool):
-        """Deprecated API (mcp < 1.24.0): the SDK owns the httpx client."""
-        if strict_cfg_headers:
-            # Fail closed: without an owned client redirects can't be hooked.
-            raise ImportError(f"MCP server '{self.name}' requires mcp >= 1.24.0 to "
-                              "enforce the portable redirect-header boundary "
-                              "(strict_redirect_headers). Upgrade the mcp package.")
-        return _core.streamablehttp_client(url, headers=headers, timeout=float(connect_timeout), verify=ssl_verify,
-                                           **({"auth": oauth_auth} if oauth_auth is not None else {}))
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP (or SSE) transport."""
@@ -417,12 +409,11 @@ class MCPServerTransportMixin:
         ssl_verify = config.get("ssl_verify", True)
         client_cert = _resolve_client_cert(self.name, config)
         oauth_auth = self._build_oauth_auth(url, config)
+        common = (url, headers, connect_timeout, ssl_verify, client_cert, oauth_auth, strict_cfg_headers)
         if config.get("transport") == "sse":
-            transport = self._sse_transport(url, headers, connect_timeout, ssl_verify, client_cert, oauth_auth, strict_cfg_headers)
-            label = "SSE"
+            transport, label = self._sse_transport(*common), "SSE"
         else:
-            transport = self._streamable_http_transport(url, headers, connect_timeout, ssl_verify, client_cert,
-                                                        oauth_auth, strict_cfg_headers, configured_header_names)
+            transport = self._streamable_http_transport(*common, configured_header_names)
             label = "HTTP" if _core._MCP_NEW_HTTP else "legacy HTTP"
         return await self._serve_transport(transport, label, float(connect_timeout))
 

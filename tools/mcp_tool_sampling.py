@@ -56,7 +56,6 @@ def _convert_sampling_message(msg) -> List[dict]:
     tool_results = [b for b in blocks if _tool_use_id(b) is not _MISSING]
     tool_uses = [b for b in blocks if _is_tool_use(b) and _tool_use_id(b) is _MISSING]
     content_blocks = [b for b in blocks if _tool_use_id(b) is _MISSING and not _is_tool_use(b)]
-
     out = [{"role": "tool", "tool_call_id": _tool_use_id(tr), "content": _tool_result_text(tr)} for tr in tool_results]
     if tool_uses:
         msg_dict: dict = {"role": msg.role, "tool_calls": [_tool_call_dict(tu, i) for i, tu in enumerate(tool_uses)]}
@@ -64,13 +63,12 @@ def _convert_sampling_message(msg) -> List[dict]:
         if text_parts:
             msg_dict["content"] = "\n".join(text_parts)
         out.append(msg_dict)
+    elif len(content_blocks) == 1 and hasattr(content_blocks[0], "text"):
+        out.append({"role": msg.role, "content": content_blocks[0].text})
     elif content_blocks:
-        if len(content_blocks) == 1 and hasattr(content_blocks[0], "text"):
-            out.append({"role": msg.role, "content": content_blocks[0].text})
-        else:
-            parts = [p for p in map(_content_part, content_blocks) if p is not None]
-            if parts:
-                out.append({"role": msg.role, "content": parts})
+        parts = [p for p in map(_content_part, content_blocks) if p is not None]
+        if parts:
+            out.append({"role": msg.role, "content": parts})
     return out
 
 
@@ -159,10 +157,9 @@ class SamplingHandler:
             self._tool_loop_count = 0
             return self._error(
                 f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)")
-        content_blocks = [
-            _core.ToolUseContent(type="tool_use", id=tc.id, name=tc.function.name,
-                                 input=_parse_tool_call_arguments(self.server_name, tc.function.arguments))
-            for tc in choice.message.tool_calls]
+        content_blocks = [_core.ToolUseContent(type="tool_use", id=tc.id, name=tc.function.name,
+                                               input=_parse_tool_call_arguments(self.server_name, tc.function.arguments))
+                          for tc in choice.message.tool_calls]
         self._log_response(response, ", tool_calls=%d", len(content_blocks))
         return _core.CreateMessageResultWithTools(
             role="assistant", content=content_blocks, model=response.model, stopReason="toolUse")
@@ -234,8 +231,7 @@ class SamplingHandler:
         choice = response.choices[0]
         self.metrics["requests"] += 1
         total_tokens = _response_total_tokens(response, 0)
-        if isinstance(total_tokens, int):
-            self.metrics["tokens_used"] += total_tokens
+        self.metrics["tokens_used"] += total_tokens if isinstance(total_tokens, int) else 0
         if choice.finish_reason == "tool_calls" and getattr(choice.message, "tool_calls", None):
             return self._build_tool_use_result(choice, response)
         return self._build_text_result(choice, response)
@@ -249,10 +245,8 @@ def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
     lines = [f"Fields requested by MCP server '{server_name}':"]
     for field_name, field_spec in props.items():
         spec = field_spec if isinstance(field_spec, dict) else {}
-        field_type = str(spec.get("type", "") or "")
-        field_desc = str(spec.get("description", "") or "")
-        suffix = f" ({field_type})" if field_type else ""
-        lines.append(f"  - {field_name}{suffix}: {field_desc}" if field_desc else f"  - {field_name}{suffix}")
+        field_type, field_desc = str(spec.get("type", "") or ""), str(spec.get("description", "") or "")
+        lines.append(f"  - {field_name}" + (f" ({field_type})" if field_type else "") + (f": {field_desc}" if field_desc else ""))
     return "\n".join(lines)
 
 

@@ -101,7 +101,7 @@ def _wrap_with_home_override(coro: "Coroutine") -> "Coroutine":
         from hermes_constants import get_hermes_home_override, reset_hermes_home_override, set_hermes_home_override
         home_override = get_hermes_home_override()
     except Exception:
-        return coro
+        home_override = None
     if not home_override:
         return coro
 
@@ -121,7 +121,7 @@ def _wrap_with_dashboard_oauth_flow(coro):
         from tools.mcp_dashboard_oauth import dashboard_oauth_flow, get_dashboard_oauth_flow
         flow = get_dashboard_oauth_flow()
     except Exception:
-        return coro
+        flow = None
     if flow is None:
         return coro
 
@@ -163,16 +163,13 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         if is_interrupted():
             future.cancel()
             raise InterruptedError("User sent a new message")
-        wait_timeout = 0.1
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                future.cancel()
-                raise TimeoutError(f"MCP call timed out after {time.monotonic() - start_time:.1f}s "
-                                   f"(configured timeout: {float(timeout):.1f}s)")
-            wait_timeout = min(wait_timeout, remaining)
+        remaining = 0.1 if deadline is None else deadline - time.monotonic()
+        if remaining <= 0:
+            future.cancel()
+            raise TimeoutError(f"MCP call timed out after {time.monotonic() - start_time:.1f}s "
+                               f"(configured timeout: {float(timeout):.1f}s)")
         try:
-            return future.result(timeout=wait_timeout)
+            return future.result(timeout=min(0.1, remaining))
         except concurrent.futures.TimeoutError:
             # Aliases builtin TimeoutError, so it also fires for the coroutine's own timeout: a done
             # future must yield its outcome.
@@ -270,7 +267,7 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
     if loop is not None:
         # Drain before stopping: tasks still suspended when the loop closes get resumed by the GC
         # against a closed loop. shutdown_mcp_servers only reaps _servers; everything else ends here.
-        stop_owned_by_loop = False
+        future = None
         if loop.is_running():
             from agent.async_utils import safe_schedule_threadsafe
 
@@ -278,7 +275,6 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
                 _core._drain_and_stop_mcp_loop(), loop, logger=logger,
                 log_message="MCP loop drain: failed to schedule", log_level=logging.WARNING)
             if future is not None:
-                stop_owned_by_loop = True
                 try:
                     future.result(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT + 1)
                 except TimeoutError:
@@ -291,7 +287,7 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
                 loop.run_until_complete(_core._drain_mcp_loop_tasks(timeout=_core._MCP_LOOP_DRAIN_TIMEOUT))
             except BaseException as exc:
                 logger.warning("Error draining stopped MCP loop tasks: %s", exc)
-        if not stop_owned_by_loop and loop.is_running():
+        if future is None and loop.is_running():  # drain-and-stop wasn't scheduled: stop it ourselves
             loop.call_soon_threadsafe(loop.stop)
         if thread is not None:
             thread.join(timeout=5)

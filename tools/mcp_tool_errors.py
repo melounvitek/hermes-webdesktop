@@ -136,22 +136,20 @@ def _resolve_client_cert(server_name: str, config: dict):
             raise FileNotFoundError(f"{prefix}{label} not found at {expanded!r}")
         return expanded
 
-    if isinstance(raw_cert, (list, tuple)):
-        if raw_key is not None:
-            raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR "
-                             f"client_cert + client_key, not both")
-        if len(raw_cert) not in (2, 3):
-            raise ValueError(f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})")
-        pair = (_expand(raw_cert[0], "client_cert[0]"), _expand(raw_cert[1], "client_cert[1]"))
-        if len(raw_cert) == 2:
-            return pair
-        if not isinstance(raw_cert[2], str):
-            raise ValueError(f"{prefix}client_cert[2] (key passphrase) must be a string")
-        return (*pair, raw_cert[2])
-    cert_path = _expand(raw_cert, "client_cert")
+    if not isinstance(raw_cert, (list, tuple)):
+        cert_path = _expand(raw_cert, "client_cert")
+        return (cert_path, _expand(raw_key, "client_key")) if raw_key is not None else cert_path  # combined PEM
     if raw_key is not None:
-        return (cert_path, _expand(raw_key, "client_key"))
-    return cert_path  # single combined PEM (cert + key)
+        raise ValueError(f"{prefix}specify either client_cert as a list [cert, key] OR "
+                         f"client_cert + client_key, not both")
+    if len(raw_cert) not in (2, 3):
+        raise ValueError(f"{prefix}client_cert list form must have 2 or 3 elements (got {len(raw_cert)})")
+    pair = (_expand(raw_cert[0], "client_cert[0]"), _expand(raw_cert[1], "client_cert[1]"))
+    if len(raw_cert) == 2:
+        return pair
+    if not isinstance(raw_cert[2], str):
+        raise ValueError(f"{prefix}client_cert[2] (key passphrase) must be a string")
+    return (*pair, raw_cert[2])
 
 
 def _resolve_identity_header(server_name: str, config: dict):
@@ -193,8 +191,8 @@ def _apply_identity_header(server_name: str, config: dict, headers: dict) -> dic
     if any(key.lower() == name.lower() for key in headers):
         logger.debug("MCP server '%s': identity_header '%s' already set via explicit "
                      "headers config — keeping the explicit value", server_name, name)
-        return headers
-    headers[name] = value
+    else:
+        headers[name] = value
     return headers
 
 
@@ -206,10 +204,8 @@ def _make_redirect_header_stripper(original_url, *, strict: bool = False,
     origin = (original_url.scheme, original_url.host, original_url.port)
 
     async def _strip_on_cross_origin_redirect(response):
-        if not (response.is_redirect and response.next_request):
-            return
-        target = response.next_request.url
-        if (target.scheme, target.host, target.port) == origin:
+        target = response.next_request.url if response.is_redirect and response.next_request else None
+        if target is None or (target.scheme, target.host, target.port) == origin:
             return
         headers = response.next_request.headers
         headers.pop("authorization", None)
@@ -225,9 +221,7 @@ def _make_redirect_header_stripper(original_url, *, strict: bool = False,
 def _exc_children(exc: BaseException) -> List[BaseException]:
     """Sub-exceptions of a group, else ``__cause__``/``__context__`` when they are exceptions."""
     nested = getattr(exc, "exceptions", None)
-    if nested:
-        return list(nested)
-    return [c for c in (exc.__cause__, exc.__context__) if isinstance(c, BaseException)]
+    return list(nested) if nested else [c for c in (exc.__cause__, exc.__context__) if isinstance(c, BaseException)]
 
 
 def _format_connect_error(exc: BaseException) -> str:
@@ -244,21 +238,18 @@ def _format_connect_error(exc: BaseException) -> str:
     def _flatten_messages(current: BaseException) -> List[str]:
         # A group's own str() is opaque — only its children speak.
         text = "" if getattr(current, "exceptions", None) else str(current).strip()
-        messages = [text] if text else []
-        for child in _exc_children(current):
-            messages.extend(_flatten_messages(child))
+        messages = ([text] if text else []) + [m for child in _exc_children(current) for m in _flatten_messages(child)]
         return messages or [current.__class__.__name__]
 
     missing = _find_missing(exc)
-    if missing:
-        message = f"missing executable '{missing}'"
-        if os.path.basename(missing) in {"npx", "npm", "node"}:
-            message += (" (ensure Node.js is installed and PATH includes its bin directory, "
-                        "or set mcp_servers.<name>.command to an absolute path and include "
-                        "that directory in mcp_servers.<name>.env.PATH)")
-        return _sanitize_error(message)
-    deduped = list(dict.fromkeys(_flatten_messages(exc)))
-    return _sanitize_error("; ".join(deduped[:3]))
+    if not missing:
+        return _sanitize_error("; ".join(list(dict.fromkeys(_flatten_messages(exc)))[:3]))
+    message = f"missing executable '{missing}'"
+    if os.path.basename(missing) in {"npx", "npm", "node"}:
+        message += (" (ensure Node.js is installed and PATH includes its bin directory, "
+                    "or set mcp_servers.<name>.command to an absolute path and include "
+                    "that directory in mcp_servers.<name>.env.PATH)")
+    return _sanitize_error(message)
 
 
 # Lazily-built caches so this module imports without the SDK OAuth module.
@@ -292,11 +283,10 @@ def _get_auth_error_types() -> tuple:
     (which still need the 401 check in :func:`_is_auth_error`)."""
     global _AUTH_ERROR_TYPES
     if not _AUTH_ERROR_TYPES:
-        _AUTH_ERROR_TYPES = tuple(
-            _optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError")
-            + _optional_types("mcp.client.auth", "UnauthorizedError")  # older SDKs
-            + _optional_types("tools.mcp_oauth", "OAuthNonInteractiveError")
-            + list(_http_status_error_types()))
+        _AUTH_ERROR_TYPES = (*_optional_types("mcp.client.auth", "OAuthFlowError", "OAuthTokenError"),
+                             *_optional_types("mcp.client.auth", "UnauthorizedError"),  # older SDKs
+                             *_optional_types("tools.mcp_oauth", "OAuthNonInteractiveError"),
+                             *_http_status_error_types())
     return _AUTH_ERROR_TYPES
 
 
@@ -304,9 +294,7 @@ def _is_auth_error(exc: BaseException) -> bool:
     """True if ``exc`` indicates an MCP OAuth failure; ``HTTPStatusError`` counts only with status 401."""
     if not isinstance(exc, _get_auth_error_types()):
         return False
-    if isinstance(exc, _http_status_error_types()):
-        return getattr(exc.response, "status_code", None) == 401
-    return True
+    return getattr(exc.response, "status_code", None) == 401 if isinstance(exc, _http_status_error_types()) else True
 
 
 # Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).
