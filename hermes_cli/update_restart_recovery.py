@@ -70,24 +70,12 @@ _UNIT_SETTLE_ATTEMPTS = 10
 _UNIT_SETTLE_DELAY = 1.0
 
 
-def _run_quiet(
-    run: Callable[..., Any],
-    argv: list[str],
-    *,
-    timeout: int,
-    **extra: Any,
-) -> Any | None:
+def _run_quiet(run: Callable[..., Any], argv: list[str], *, timeout: int, **extra: Any) -> Any | None:
     """Run ``argv`` capturing text output; ``None`` when it errors or times out."""
     try:
         return run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=timeout,
-            **extra,
+            argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            check=False, timeout=timeout, **extra,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -110,18 +98,11 @@ def _child_environment() -> dict[str, str]:
     return env
 
 
-def _run_profile_restart(
-    profile: str,
-    *,
-    run: Callable[..., Any],
-) -> bool:
+def _run_profile_restart(profile: str, *, run: Callable[..., Any]) -> bool:
     """Run one profile restart without inheriting the updater's process state."""
     kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL, "env": _child_environment()}
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-        )
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     else:
         kwargs["start_new_session"] = True
     argv = [sys.executable, "-m", "hermes_cli.main", "-p", profile, "gateway", "restart"]
@@ -136,60 +117,43 @@ def _systemd_unit_candidates(profile: str) -> tuple[str, ...]:
 
 
 def _systemd_verified_active(profile: str, *, run: Callable[..., Any]) -> bool:
-    """Return True only when systemd itself reports the profile's unit active.
-
-    This is the observation that separates ``verified`` from ``relaunch_attempted``. Any failure
-    here (no ``systemctl``, probe error, unit not ``active``) means we could NOT verify — never that
-    the restart failed.
-    """
+    """True only when systemd itself reports the profile's unit active — the observation separating
+    ``verified`` from ``relaunch_attempted``. Any failure (no ``systemctl``, probe error, unit not
+    ``active``) means we could NOT verify, never that the restart failed."""
     systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return False
-    return any(
+    return bool(systemctl) and any(
         _unit_is_active([systemctl, "--user"], unit, run=run, require_rc0=True)
         for unit in _systemd_unit_candidates(profile)
     )
 
 
 def restart_profiles(
-    profiles: Iterable[str],
-    *,
-    supervisors: Mapping[str, str] | None = None,
-    run: Callable[..., Any] = subprocess.run,
+    profiles: Iterable[str], *, supervisors: Mapping[str, str] | None = None, run: Callable[..., Any] = subprocess.run
 ) -> dict[str, list[str]]:
-    """Restart the supplied profiles and return per-profile terminal results.
-
-    The caller supplies only profiles whose inventory identified a service supervisor.
+    """Restart the supplied profiles (only ones whose inventory identified a service supervisor).
 
     A profile only lands in ``verified`` when its supervisor is systemd and ``systemctl --user is-
     active`` independently confirms the unit after the relaunch command succeeded.
     """
     supervisors = supervisors or {}
-    normalized = sorted({profile for profile in profiles if isinstance(profile, str) and profile})
-    verified: list[str] = []
-    relaunch_attempted: list[str] = []
-    failed: list[str] = []
-    for profile in normalized:
+    result: dict[str, list[str]] = {"verified": [], "relaunch_attempted": [], "failed": []}
+    for profile in sorted({p for p in profiles if isinstance(p, str) and p}):
         if not _run_profile_restart(profile, run=run):
-            failed.append(profile)
-            continue
-        if supervisors.get(profile) == "systemd" and _systemd_verified_active(profile, run=run):
-            verified.append(profile)
+            bucket = "failed"
+        elif supervisors.get(profile) == "systemd" and _systemd_verified_active(profile, run=run):
+            bucket = "verified"
         else:
-            relaunch_attempted.append(profile)
-    return {"verified": verified, "relaunch_attempted": relaunch_attempted, "failed": failed}
+            bucket = "relaunch_attempted"
+        result[bucket].append(profile)
+    return result
 
 
 def _systemctl_scopes() -> list[tuple[str, list[str]]]:
-    """``systemctl`` invocations for the user and system scopes, or nothing.
+    """``(label, systemctl argv)`` for the user and system scopes (the pair the in-process phase walks), or nothing.
 
-    Mirrors the scope pair the in-process restart phase walks. ``systemctl`` is resolved through
-    ``shutil.which`` so this module never has to import any Hermes platform helper — importing the
-    freshly pulled tree is exactly what aborted the phase that called us.
-
-    Each scope is returned with its label because ``hermes-serve.service`` in the user manager and
-    ``hermes-serve.service`` in the system manager are two different processes. Every identity this
-    module produces or consumes stays qualified by that label; the bare unit name is never the key.
+    ``systemctl`` comes from ``shutil.which`` so this module never imports a Hermes platform helper —
+    importing the freshly pulled tree is exactly what aborted the phase that called us. Scopes carry
+    their label because the same unit name in both managers is two different processes.
     """
     systemctl = shutil.which("systemctl")
     if not systemctl or sys.platform != "linux":
@@ -206,10 +170,8 @@ def _listed_serve_units(scope: list[str], *, run: Callable[..., Any]) -> list[st
     )
     if result is None:
         return []
-    # The glob is a systemd pattern, not a name gate: `hermes-serve*` also
-    # matches the unrelated `hermes-server.service`. Require the exact
-    # base unit or the hyphenated profile family, same shape as the
-    # in-process phase's own name gate.
+    # The glob is a systemd pattern, not a name gate (`hermes-serve*` also matches
+    # `hermes-server.service`): require the exact base unit or the profile family.
     units: list[str] = []
     for line in (getattr(result, "stdout", "") or "").splitlines():
         parts = line.split()
@@ -220,18 +182,14 @@ def _listed_serve_units(scope: list[str], *, run: Callable[..., Any]) -> list[st
 
 def _unit_main_pid(scope: list[str], unit: str, *, run: Callable[..., Any]) -> int:
     """The unit's ``MainPID`` via ``systemctl show``; ``0`` when absent or unreadable."""
-    result = _run_quiet(
-        run, scope + ["show", unit, "--property=MainPID", "--value"], timeout=_VERIFY_TIMEOUT
-    )
+    result = _run_quiet(run, scope + ["show", unit, "--property=MainPID", "--value"], timeout=_VERIFY_TIMEOUT)
     try:
         return int(_stdout(result) or 0) if _succeeded(result) else 0
     except ValueError:
         return 0
 
 
-def _unit_is_active(
-    scope: list[str], unit: str, *, run: Callable[..., Any], require_rc0: bool = False
-) -> bool:
+def _unit_is_active(scope: list[str], unit: str, *, run: Callable[..., Any], require_rc0: bool = False) -> bool:
     result = _run_quiet(run, scope + ["is-active", unit], timeout=_VERIFY_TIMEOUT)
     if result is None or (require_rc0 and not _succeeded(result)):
         return False
@@ -239,12 +197,7 @@ def _unit_is_active(
 
 
 def _serve_unit_replaced(
-    scope: list[str],
-    unit: str,
-    previous_pid: int,
-    *,
-    run: Callable[..., Any],
-    sleep: Callable[[float], Any],
+    scope: list[str], unit: str, previous_pid: int, *, run: Callable[..., Any], sleep: Callable[[float], Any]
 ) -> bool:
     """Did the unit come back on a NEW main process?
 
@@ -255,11 +208,10 @@ def _serve_unit_replaced(
     for attempt in range(_UNIT_SETTLE_ATTEMPTS):
         if attempt:
             sleep(_UNIT_SETTLE_DELAY)
-        if not _unit_is_active(scope, unit, run=run):
-            continue
-        current = _unit_main_pid(scope, unit, run=run)
-        if current > 0 and current != previous_pid:
-            return True
+        if _unit_is_active(scope, unit, run=run):
+            current = _unit_main_pid(scope, unit, run=run)
+            if current > 0 and current != previous_pid:
+                return True
     return False
 
 
@@ -275,43 +227,29 @@ def _split_skip_entry(entry: Any) -> tuple[str, str]:
     return scope_label, unit.removesuffix(".service")
 
 
-def _normalized_skips(
-    skip_units: Iterable[Any],
-) -> tuple[set[tuple[str, str]], set[str]]:
-    """Split already-settled units into scope-qualified and legacy entries.
-
-    A bare ``"hermes-serve"`` carries no scope and therefore cannot say WHICH of two same-named
-    processes was settled.
-    """
+def _normalized_skips(skip_units: Iterable[Any]) -> tuple[set[tuple[str, str]], set[str]]:
+    """Split already-settled units into scope-qualified and legacy entries (a bare ``"hermes-serve"``
+    carries no scope and cannot say WHICH of two same-named processes was settled)."""
     qualified: set[tuple[str, str]] = set()
     legacy: set[str] = set()
     for entry in skip_units or ():
         scope_label, base = _split_skip_entry(entry)
-        if not base:
-            continue
-        if scope_label in _SCOPE_LABELS:
-            qualified.add((scope_label, base))
-        else:
-            legacy.add(base)
+        if base:
+            (qualified.add((scope_label, base)) if scope_label in _SCOPE_LABELS else legacy.add(base))
     return qualified, legacy
 
 
 def restart_serve_units(
-    *,
-    skip_units: Iterable[Any] = (),
-    run: Callable[..., Any] = subprocess.run,
-    sleep: Callable[[float], Any] = time.sleep,
+    *, skip_units: Iterable[Any] = (), run: Callable[..., Any] = subprocess.run, sleep: Callable[[float], Any] = time.sleep
 ) -> dict[str, list[str]]:
     """Restart every active ``hermes-serve*`` systemd unit from this process.
 
-    Units are enumerated from systemd, never from the update inventory. That keeps the relaunch
-    authority requirement structural: a manually launched or Desktop-owned ``hermes serve`` owns no
-    unit and therefore cannot be touched here.
+    Units are enumerated from systemd, never from the update inventory, so a manually launched or
+    Desktop-owned ``hermes serve`` (no unit) structurally cannot be touched here.
     """
     skipped_qualified, skipped_legacy = _normalized_skips(skip_units)
-    # (scope, base unit) -> replaced?  A unit name can exist in BOTH the user
-    # and the system scope; each is a separate process and each is proven,
-    # reported and accounted for on its own.
+    # (scope, base unit) -> replaced?  The same unit name in the user and the system
+    # scope is two processes; each is proven, reported and accounted for on its own.
     outcomes: dict[tuple[str, str], bool] = {}
     seen: set[tuple[str, str]] = set()
     for scope_label, scope in _systemctl_scopes():
@@ -322,26 +260,15 @@ def restart_serve_units(
                 continue
             seen.add(target)
             if not _unit_is_active(scope, unit, run=run):
-                # Not running: nothing is serving a stale generation from it.
-                continue
+                continue  # not running: nothing serves a stale generation from it
             previous_pid = _unit_main_pid(scope, unit, run=run)
-            if previous_pid <= 0:
-                # Active with no readable main process: a replacement cannot
-                # be observed, so it cannot be claimed. Restarting blind and
-                # reporting success is the failure mode this module exists to
-                # remove.
-                outcomes[target] = False
-                continue
-            result = _run_quiet(
-                run, scope + ["--no-ask-password", "restart", unit], timeout=_UNIT_RESTART_TIMEOUT
-            )
-            if not _succeeded(result):
-                # Includes the unprivileged system-scope case. We do not probe
-                # for sudo here: an unverifiable unit must read as failed so
-                # the update stays explicitly incomplete.
-                outcomes[target] = False
-                continue
-            outcomes[target] = _serve_unit_replaced(scope, unit, previous_pid, run=run, sleep=sleep)
+            # No readable main PID: a replacement can't be observed, so it can't be claimed
+            # (restarting blind and reporting success is the failure mode this module removes).
+            # A failed restart includes the unprivileged system-scope case; no sudo probe —
+            # an unverifiable unit must read as failed so the update stays explicitly incomplete.
+            outcomes[target] = previous_pid > 0 and _succeeded(
+                _run_quiet(run, scope + ["--no-ask-password", "restart", unit], timeout=_UNIT_RESTART_TIMEOUT)
+            ) and _serve_unit_replaced(scope, unit, previous_pid, run=run, sleep=sleep)
     # ``<scope>/<unit>`` is the only identity this module reports for a serve unit.
     return {
         "verified": sorted(f"{scope}/{base}" for (scope, base), ok in outcomes.items() if ok),
@@ -356,10 +283,7 @@ def _parse_payload(stream) -> tuple[list[str], dict[str, str], bool, list[str]]:
     profiles = payload.get("profiles")
     if not isinstance(profiles, list):
         raise ValueError("recovery payload must contain a profiles list")
-    if any(
-        not isinstance(profile, str) or not _PROFILE_ID_RE.fullmatch(profile)
-        for profile in profiles
-    ):
+    if any(not isinstance(profile, str) or not _PROFILE_ID_RE.fullmatch(profile) for profile in profiles):
         raise ValueError("recovery profiles contain an invalid profile id")
     raw_supervisors = payload.get("supervisors")
     supervisors: dict[str, str] = {}
@@ -384,27 +308,20 @@ def _parse_payload(stream) -> tuple[list[str], dict[str, str], bool, list[str]]:
         if not isinstance(raw_skip, list) or any(not isinstance(entry, (str, dict)) for entry in raw_skip):
             raise ValueError("recovery serve_units skip list is invalid")
         for entry in raw_skip:
-            # A skip entry names one already-settled process. The qualified
-            # shape carries the systemd scope, because `hermes-serve.service`
-            # can exist in BOTH managers and settling one says nothing about
-            # the other. A bare string is the legacy shape a pre-update
-            # interpreter can still send; it is kept, and read as
-            # scope-agnostic by `restart_serve_units`.
+            # A skip entry names one already-settled process. The qualified shape carries the systemd
+            # scope (`hermes-serve.service` can exist in BOTH managers; settling one says nothing about
+            # the other). A bare string is the legacy shape a pre-update interpreter can still send,
+            # read as scope-agnostic by `restart_serve_units`.
             if isinstance(entry, dict):
                 if not isinstance(entry.get("unit"), str):
                     raise ValueError("recovery serve_units skip list is invalid")
                 if not isinstance(entry.get("scope"), str):
                     entry = {"unit": entry["unit"]}
             scope_label, base = _split_skip_entry(entry)
-            # Only the shapes systemd can actually produce for this family; a
-            # skip entry is a name filter, never a command argument. An
-            # unrecognized scope drops the entry rather than raising: dropping
-            # a skip can only ever cause one more restart-and-verify, while
-            # honouring an unreadable one could suppress recovery of a stale
-            # process.
-            if scope_label and scope_label not in _SCOPE_LABELS:
-                continue
-            if not _UNIT_RE.fullmatch(f"{base}.service"):
+            # Only shapes systemd can produce for this family (a skip is a name filter, never a command
+            # argument). An unrecognized scope DROPS the entry rather than raising: a dropped skip costs at
+            # most one extra restart-and-verify; honouring an unreadable one could suppress recovery.
+            if (scope_label and scope_label not in _SCOPE_LABELS) or not _UNIT_RE.fullmatch(f"{base}.service"):
                 continue
             skip_units.append(f"{scope_label}/{base}" if scope_label else base)
     return profiles, supervisors, recover_serve, skip_units
@@ -425,10 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({
-            "error": str(exc),
-            "verified": [],
-            "relaunch_attempted": [],
-            "failed": [],
+            "error": str(exc), "verified": [], "relaunch_attempted": [], "failed": [],
             "serve_units": {"verified": [], "failed": []},
         }))
         return 2
