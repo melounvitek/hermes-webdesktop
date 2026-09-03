@@ -924,21 +924,14 @@ class _CheckoutPlan:
     upstream_checked: bool
 
 
-def _prepare_checkout_for_update(
-    git_cmd,
-    branch,
-    current_branch,
-    *,
-    is_fork,
-    assume_yes,
-    gateway_mode,
-    gw_input_fn,
-    switch_branch,
-    _windows_gateway_resume,
-):
-    """Parked-branch guard, land on the target, stash, count new commits. Exits when the
-    checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
-    date, -1 when tips differ but the shallow count is unrecoverable."""
+def _apply_parked_branch_guard(
+    git_cmd, branch, current_branch, *, switch_branch, _windows_gateway_resume
+) -> tuple[bool, bool, "str | None"]:
+    """Decide how a checkout parked on another branch is brought to *branch*.
+
+    Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``; ``sys.exit(1)``
+    when the branch is dirty/unverifiable (code update SKIPPED) or the target is missing.
+    """
     switch_block_reason = None  # only meaningful when parked_branch_switched
     # Parked-branch guard (stash-switch-pull-switch-back used to "update" main while the
     # running code stayed behind). By branch contents + updates.parked_branch_strategy:
@@ -1003,6 +996,28 @@ def _prepare_checkout_for_update(
                 f"  ⚠ Checkout was parked on '{current_branch}' "
                 f"(fully merged) — switching back to {branch}..."
             )
+    return parked_branch_switched, in_place_update, switch_block_reason
+
+
+def _prepare_checkout_for_update(
+    git_cmd,
+    branch,
+    current_branch,
+    *,
+    is_fork,
+    assume_yes,
+    gateway_mode,
+    gw_input_fn,
+    switch_branch,
+    _windows_gateway_resume,
+):
+    """Parked-branch guard, land on the target, stash, count new commits. Exits when the
+    checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
+    date, -1 when tips differ but the shallow count is unrecoverable."""
+    parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(
+        git_cmd, branch, current_branch, switch_branch=switch_branch,
+        _windows_gateway_resume=_windows_gateway_resume,
+    )
 
     if not in_place_update and current_branch != branch:
         if current_branch == "HEAD":
