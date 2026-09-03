@@ -36,10 +36,7 @@ def managed_nous_tools_enabled(*, force_fresh: bool = False) -> bool:
 
 
 def nous_tool_gateway_unavailable_message(
-    capability: str = "the Nous Tool Gateway",
-    *,
-    force_fresh: bool = False,
-) -> str:
+    capability: str = "the Nous Tool Gateway", *, force_fresh: bool = False) -> str:
     """Return account-aware guidance for an unavailable Nous Tool Gateway path."""
     try:
         from hermes_cli.nous_account import (
@@ -55,8 +52,7 @@ def nous_tool_gateway_unavailable_message(
         pass
     return (
         f"{capability} is unavailable. Run `hermes model` to refresh your "
-        "Nous Portal login and billing status."
-    )
+        "Nous Portal login and billing status.")
 
 
 def normalize_browser_cloud_provider(value: object | None) -> str:
@@ -81,9 +77,7 @@ def has_direct_modal_credentials() -> bool:
     except (PermissionError, OSError):
         modal_file_exists = False
     return bool(
-        (os.getenv("MODAL_TOKEN_ID") and os.getenv("MODAL_TOKEN_SECRET"))
-        or modal_file_exists
-    )
+        (os.getenv("MODAL_TOKEN_ID") and os.getenv("MODAL_TOKEN_SECRET")) or modal_file_exists)
 
 
 def resolve_modal_backend_state(
@@ -91,8 +85,7 @@ def resolve_modal_backend_state(
     *,
     has_direct: bool,
     managed_ready: bool,
-    managed_enabled: bool | None = None,
-) -> Dict[str, Any]:
+    managed_enabled: bool | None = None) -> Dict[str, Any]:
     """Resolve direct vs managed Modal backend: ``direct``/``managed`` are
     exclusive; ``auto`` prefers managed when available, else direct."""
     requested_mode = coerce_modal_mode(modal_mode)
@@ -111,8 +104,7 @@ def resolve_modal_backend_state(
         "has_direct": has_direct,
         "managed_ready": managed_ready,
         "managed_mode_blocked": requested_mode == "managed" and not managed_enabled,
-        "selected_backend": selected_backend,
-    }
+        "selected_backend": selected_backend}
 
 
 def _scoped_credential(name: str) -> str:
@@ -138,11 +130,7 @@ def _dotenv_value(env_var: str) -> str:
 
 
 def resolve_provider_secret(
-    env_var: str,
-    provider_id: str,
-    config_value: str = "",
-    env_getter=None,
-) -> str:
+    env_var: str, provider_id: str, config_value: str = "", env_getter=None) -> str:
     """Resolve a voice-provider API key (single owner for STT/TTS lookup).
 
     Order: explicit ``config_value`` -> profile secret scope / env -> ``.env``
@@ -194,8 +182,7 @@ def resolve_openai_audio_api_key() -> str:
     a raw ``os.environ`` read could bill another profile's account under multiplex."""
     return (
         resolve_provider_secret("VOICE_TOOLS_OPENAI_KEY", "")
-        or resolve_provider_secret("OPENAI_API_KEY", "openai-api")
-    )
+        or resolve_provider_secret("OPENAI_API_KEY", "openai-api"))
 
 
 def prefers_gateway(config_section: str) -> bool:
@@ -215,16 +202,11 @@ def prefers_gateway(config_section: str) -> bool:
 NOUS_MANAGED_PROVIDER = "nous"
 
 # Per-capability keys that also count as "this category has been configured".
-_EXTRA_SELECTION_KEYS = {
-    "web": ("search_backend", "extract_backend"),
-}
+_EXTRA_SELECTION_KEYS = {"web": ("search_backend", "extract_backend")}
 
 # Key(s) carrying the category's provider selection. ``browser.backend`` is the
 # DRIVER choice (browser-use CLI vs built-in), not the cloud provider — excluded.
-_SELECTION_NAME_KEYS = {
-    "browser": ("cloud_provider",),
-    "web": ("backend",),
-}
+_SELECTION_NAME_KEYS = {"browser": ("cloud_provider",), "web": ("backend",)}
 _DEFAULT_NAME_KEYS = ("provider", "backend", "cloud_provider")
 
 
@@ -298,8 +280,7 @@ def selection_error(section: str, selection_name: str, failure: str) -> str:
     failure = removed_backend_note(section, selection_name) or failure
     return (
         f"{section} is configured to use {selection_name} (set via hermes "
-        f"tools), but {failure}. Run 'hermes tools' to change it."
-    )
+        f"tools), but {failure}. Run 'hermes tools' to change it.")
 
 
 def fal_key_is_configured() -> bool:

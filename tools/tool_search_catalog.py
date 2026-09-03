@@ -122,8 +122,7 @@ def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
             schema=td,
             source=source,
             source_name=source_name,
-            _tokens=_tokenize(_entry_search_text(td, source_label)),
-        ))
+            _tokens=_tokenize(_entry_search_text(td, source_label))))
     return catalog
 
 
@@ -167,8 +166,7 @@ def search_catalog(
     query: str,
     limit: int = 5,
     *,
-    corpus_stats: Optional[_CorpusStats] = None,
-) -> List[CatalogEntry]:
+    corpus_stats: Optional[_CorpusStats] = None) -> List[CatalogEntry]:
     """Top-``limit`` catalog entries for ``query`` by BM25 (exact name match
     ranks first). Falls back to a name-substring match only when NO query
     token appears in any document (e.g. "hub" vs ``github_*``); the IDF
@@ -226,10 +224,7 @@ def _listing_group_label(source_name: str) -> str:
 
 
 def build_catalog_listing_with_form(
-    deferrable: List[Dict[str, Any]],
-    *,
-    max_tokens: int = 4000,
-) -> Tuple[Optional[str], str]:
+    deferrable: List[Dict[str, Any]], *, max_tokens: int = 4000) -> Tuple[Optional[str], str]:
     """Render the skills-style deferred-catalog manifest: ``- name: short desc``
     lines grouped under a heading per source (MCP server / plugin toolset).
 

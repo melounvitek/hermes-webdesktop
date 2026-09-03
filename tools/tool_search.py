@@ -22,25 +22,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.registry import tool_error
 from tools.tool_search_names import (  # noqa: F401 — re-exported public names
-    BRIDGE_TOOL_NAMES,
-    TOOL_CALL_NAME,
-    TOOL_DESCRIBE_NAME,
-    TOOL_SEARCH_NAME,
+    BRIDGE_TOOL_NAMES, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
 )
 from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/test names
-    CHARS_PER_TOKEN,
-    CatalogEntry,
-    _corpus_stats,
-    _entry_search_text,
-    _fn,
-    _listing_group_label,
-    _registry_entry,
-    _short_desc,
-    _stem,
-    _tokenize,
-    build_catalog,
-    build_catalog_listing_with_form,
-    search_catalog,
+    CHARS_PER_TOKEN, CatalogEntry, _corpus_stats, _entry_search_text, _fn,
+    _listing_group_label, _registry_entry, _short_desc, _stem, _tokenize,
+    build_catalog, build_catalog_listing_with_form, search_catalog,
 )
 from tools.tool_search_validation import validate_deferred_call_args  # noqa: F401
 
@@ -94,9 +81,7 @@ class ToolSearchConfig:
             # A list replaces the curated default wholesale; anything else = curated.
             defer_tools=(
                 frozenset(str(n).strip() for n in defer_raw if str(n).strip())
-                if isinstance(defer_raw, (list, tuple, set)) else None
-            ),
-        )
+                if isinstance(defer_raw, (list, tuple, set)) else None))
 
 
 _TRI_STATE_ALIASES = {"true": "on", "1": "on", "yes": "on", "false": "off", "0": "off", "no": "off"}
@@ -202,8 +187,7 @@ def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
 
 def classify_tools(
     tool_defs: List[Dict[str, Any]],
-    defer_tools: Optional[frozenset] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    defer_tools: Optional[frozenset] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable). Bridge tools are
     dropped (they are re-added after classification)."""
     visible: List[Dict[str, Any]] = []
@@ -236,8 +220,7 @@ def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
 def should_activate(
     config: ToolSearchConfig,
     deferrable_tokens: int,
-    context_length: Optional[int],
-) -> bool:
+    context_length: Optional[int]) -> bool:
     """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any
     deferrable tool exists. ``"auto"`` is an alias of ``"on"`` reserved for a
     future budget-gated mode — do not distinguish them without that design.
@@ -280,8 +263,7 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
         "tool's description. Follow with "
         f"`{TOOL_DESCRIBE_NAME}` to load full parameter schemas, "
         f"then `{TOOL_CALL_NAME}` to invoke. Tools listed at the top of this "
-        "system prompt are already available and do not need to be searched."
-    )
+        "system prompt are already available and do not need to be searched.")
     if not listing:
         return desc
     if listing_form == "groups":
@@ -290,28 +272,24 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
             "through this bridge. For any request in these domains, search "
             "here FIRST — do not claim the capability is unavailable and do "
             "not substitute a generic tool (terminal/browser) without "
-            "searching.\n\n" + listing
-        )
+            "searching.\n\n" + listing)
     desc += (
         "\n\nEvery deferred capability is listed below. If a tool name "
         "appears here, do NOT claim it is unavailable — load it with "
         f"`{TOOL_DESCRIBE_NAME}` (skip `{TOOL_SEARCH_NAME}` when you "
-        "already see the exact name)."
-    )
+        "already see the exact name).")
     if listing_form == "mixed":
         desc += (
             " For servers marked 'names not listed', the tools exist "
             f"too — find them with `{TOOL_SEARCH_NAME}` before "
-            "concluding anything is missing."
-        )
+            "concluding anything is missing.")
     return desc + "\n\n" + listing
 
 
 def bridge_tool_schemas(
     deferred_count: int,
     listing: Optional[str] = None,
-    listing_form: str = "",
-) -> List[Dict[str, Any]]:
+    listing_form: str = "") -> List[Dict[str, Any]]:
     """Bridge tool schemas injected in place of deferred tools. Kept short —
     every byte is paid on every turn. ``listing`` is embedded in the tool_search
     description; ``listing_form`` picks the framing (per-tool forms say "skip
@@ -384,8 +362,7 @@ def assemble_tool_defs(
     tool_defs: List[Dict[str, Any]],
     *,
     context_length: Optional[int] = None,
-    config: Optional[ToolSearchConfig] = None,
-) -> AssemblyResult:
+    config: Optional[ToolSearchConfig] = None) -> AssemblyResult:
     """Return the tool-defs list the model should actually see: passthrough
     when inactive, otherwise deferrable tools replaced by the three bridge
     tools. Idempotent — bridge tools already present are stripped first."""
@@ -403,8 +380,7 @@ def assemble_tool_defs(
             tool_defs=incoming, activated=False, deferred_count=len(deferrable),
             deferred_tokens=deferrable_tokens,
             threshold_tokens=int((context_length or 0) * (config.threshold_pct / 100.0)),
-            tier=0,
-        )
+            tier=0)
 
     listing, listing_form = None, "none"
     listing_budget = listing_token_budget(config, context_length)
@@ -416,13 +392,11 @@ def assemble_tool_defs(
     logger.info(
         "tool_search activated (tier %d): %d core/visible tools kept, %d deferred "
         "(~%d tokens), listing %s (budget ~%d tokens)",
-        tier, len(visible), len(deferrable), deferrable_tokens, listing_form, listing_budget,
-    )
+        tier, len(visible), len(deferrable), deferrable_tokens, listing_form, listing_budget)
     return AssemblyResult(
         tool_defs=visible + bridge, activated=True, deferred_count=len(deferrable),
         deferred_tokens=deferrable_tokens, threshold_tokens=listing_budget,
-        tier=tier, listing_form=listing_form,
-    )
+        tier=tier, listing_form=listing_form)
 
 
 def is_bridge_tool(name: str) -> bool:
@@ -443,8 +417,7 @@ def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
         "source": entry.source,
         "source_name": entry.source_name,
         "description": (entry.description or "")[:400],  # cap chatty MCP descriptions
-        "required": [r[:64] for r in required if isinstance(r, str)][:32],
-    }
+        "required": [r[:64] for r in required if isinstance(r, str)][:32]}
 
 
 def _available_source_summary(catalog: List[CatalogEntry]) -> List[Dict[str, Any]]:
@@ -519,8 +492,7 @@ def dispatch_tool_search(args: Dict[str, Any],
                 "This query returned no lexical matches, but the sources above "
                 "are connected and their tools remain available. Retry "
                 "tool_search with the service name plus a concrete action or "
-                "object before concluding the capability is unavailable."
-            )
+                "object before concluding the capability is unavailable.")
         results.append(group)
     return json.dumps({
         "queries": queries,
@@ -560,16 +532,13 @@ def dispatch_tool_describe(args: Dict[str, Any],
         if fn is not None:
             tools[name] = {
                 "description": fn.get("description", ""),
-                "parameters": fn.get("parameters", {}),
-            }
+                "parameters": fn.get("parameters", {})}
         elif _registry_entry(name) is not None and not is_deferrable_tool_name(
-            name, load_config_readonly().effective_defer_tools
-        ):
+            name, load_config_readonly().effective_defer_tools):
             # Registered but bridge/core/GUI-surface: a real name, wrong door.
             errors[name] = (
                 f"'{name}' is not a deferrable tool. If you see it in the tools list "
-                "already, call it directly; otherwise check the spelling against tool_search."
-            )
+                "already, call it directly; otherwise check the spelling against tool_search.")
         else:
             not_found.append(name)
 
@@ -590,8 +559,7 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     defer_tools = load_config_readonly().effective_defer_tools
     return frozenset(
         name for name in _tool_def_names(tool_defs)
-        if name and is_deferrable_tool_name(name, defer_tools)
-    )
+        if name and is_deferrable_tool_name(name, defer_tools))
 
 
 def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
@@ -616,34 +584,16 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     if not is_deferrable_tool_name(name, load_config_readonly().effective_defer_tools):
         return None, {}, (
             f"'{name}' is not a deferrable tool. If it appears in the model-facing tools "
-            "list already, call it directly instead of via tool_call."
-        )
+            "list already, call it directly instead of via tool_call.")
     return name, raw_args, None
 
 
 __all__ = [
-    "TOOL_SEARCH_NAME",
-    "TOOL_DESCRIBE_NAME",
-    "TOOL_CALL_NAME",
-    "BRIDGE_TOOL_NAMES",
-    "ToolSearchConfig",
-    "CatalogEntry",
-    "AssemblyResult",
-    "load_config",
-    "is_deferrable_tool_name",
-    "classify_tools",
-    "estimate_tokens_from_schemas",
-    "should_activate",
-    "build_catalog",
-    "build_catalog_listing_with_form",
-    "listing_token_budget",
-    "search_catalog",
-    "bridge_tool_schemas",
-    "assemble_tool_defs",
-    "is_bridge_tool",
-    "dispatch_tool_search",
-    "dispatch_tool_describe",
-    "resolve_underlying_call",
-    "scoped_deferrable_names",
-    "validate_deferred_call_args",
+    "TOOL_SEARCH_NAME", "TOOL_DESCRIBE_NAME", "TOOL_CALL_NAME", "BRIDGE_TOOL_NAMES",
+    "ToolSearchConfig", "CatalogEntry", "AssemblyResult", "load_config",
+    "is_deferrable_tool_name", "classify_tools", "estimate_tokens_from_schemas",
+    "should_activate", "build_catalog", "build_catalog_listing_with_form", "listing_token_budget",
+    "search_catalog", "bridge_tool_schemas", "assemble_tool_defs", "is_bridge_tool",
+    "dispatch_tool_search", "dispatch_tool_describe", "resolve_underlying_call",
+    "scoped_deferrable_names", "validate_deferred_call_args",
 ]

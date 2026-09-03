@@ -20,11 +20,7 @@ import stat
 from pathlib import Path
 from typing import IO
 
-__all__ = [
-    "ensure_spill_dir",
-    "open_exclusive",
-    "write_text_exclusive",
-]
+__all__ = ["ensure_spill_dir", "open_exclusive", "write_text_exclusive"]
 
 # O_NOFOLLOW is POSIX-only; on Windows O_EXCL alone already refuses every
 # pre-existing path.
@@ -51,8 +47,7 @@ def open_exclusive(
     private: bool = True,
     overwrite: bool = False,
     encoding: str = "utf-8",
-    errors: str = "strict",
-) -> IO[str]:
+    errors: str = "strict") -> IO[str]:
     """Open ``path`` for writing via exclusive create; never follows a link.
     ``overwrite=True`` first unlinks an existing path (``lstat``-checked, so only
     the link itself is removed and directories are refused), then creates
@@ -83,8 +78,7 @@ def write_text_exclusive(
     private: bool = True,
     overwrite: bool = False,
     encoding: str = "utf-8",
-    errors: str = "strict",
-) -> None:
+    errors: str = "strict") -> None:
     """``Path.write_text`` equivalent that refuses to follow symlinks."""
     with open_exclusive(
         path, private=private, overwrite=overwrite, encoding=encoding, errors=errors
