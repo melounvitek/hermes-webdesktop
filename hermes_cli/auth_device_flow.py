@@ -1,8 +1,7 @@
 """Shared device-code / browser / TLS helpers for interactive OAuth logins.
 
-Split out of ``hermes_cli/auth.py``; every name is re-exported there so ``hermes_cli.auth.<name>``
-keeps resolving (and monkeypatching). Origin-internal helpers are imported lazily inside each
-function (no import cycle; patches on ``hermes_cli.auth.<helper>`` still intercept).
+Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
+inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations
@@ -107,22 +106,16 @@ def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) 
     if host not in {"127.0.0.1", "::1", "localhost"} or not port:
         return
     divider = "-" * 60
-    print()
-    print(divider)
-    print("Remote session detected — SSH tunnel required")
-    print(divider)
-    print(f"Hermes is waiting for the OAuth callback on {redirect_uri}")
-    print("but your browser is on a different machine. Run this command")
-    print("in a NEW terminal on your local machine BEFORE opening the URL:")
-    print()
-    print(f"  ssh -N -L {port}:127.0.0.1:{port} {_ssh_user_at_host()}")
-    print()
-    print("Then open the authorize URL above in your local browser.")
+    print(
+        f"\n{divider}\nRemote session detected — SSH tunnel required\n{divider}\n"
+        f"Hermes is waiting for the OAuth callback on {redirect_uri}\n"
+        "but your browser is on a different machine. Run this command\n"
+        "in a NEW terminal on your local machine BEFORE opening the URL:\n\n"
+        f"  ssh -N -L {port}:127.0.0.1:{port} {_ssh_user_at_host()}\n\n"
+        "Then open the authorize URL above in your local browser.")
     if docs_url:
         print(f"Provider docs:      {docs_url}")
-    print(f"SSH/jump-box guide: {OAUTH_OVER_SSH_DOCS_URL}")
-    print(divider)
-    print()
+    print(f"SSH/jump-box guide: {OAUTH_OVER_SSH_DOCS_URL}\n{divider}\n")
 
 
 def _default_verify() -> bool | ssl.SSLContext:

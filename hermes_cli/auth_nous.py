@@ -1,8 +1,7 @@
 """Nous Portal OAuth: device-code login, refresh, shared-store mirroring, JWT selection, status.
 
-Split out of ``hermes_cli/auth.py``; every name is re-exported there so ``hermes_cli.auth.<name>``
-keeps resolving (and monkeypatching). Origin-internal helpers are imported lazily inside each
-function (no import cycle; patches on ``hermes_cli.auth.<helper>`` still intercept).
+Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
+inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations
@@ -468,9 +467,8 @@ def _quarantine_forensics(state: Dict[str, Any], error: AuthError, reason: str) 
         forensic["auth_json_path"] = str(auth_path)
         try:
             st = os.stat(auth_path)
-            forensic["auth_json_size"] = st.st_size
-            forensic["auth_json_mtime"] = st.st_mtime
-            forensic["auth_json_exists"] = True
+            forensic.update(
+                auth_json_size=st.st_size, auth_json_mtime=st.st_mtime, auth_json_exists=True)
         except FileNotFoundError:
             forensic["auth_json_exists"] = False
     except Exception as exc:  # pragma: no cover - never let logging break quarantine
@@ -505,7 +503,6 @@ def _quarantine_nous_oauth_state(state: Dict[str, Any], error: AuthError, *, rea
     logger.warning(
         "Nous OAuth state quarantined (terminal auth death): %s",
         json.dumps(_quarantine_forensics(state, error, reason), sort_keys=True, ensure_ascii=False))
-
     for key in (*_FLAT_OAUTH_TOKEN_KEYS, *_NOUS_EMPTY_AGENT_KEY_FIELDS):
         state.pop(key, None)
     state["last_auth_error"] = _last_auth_error_marker("nous", error, reason=reason)
@@ -578,12 +575,10 @@ def _refresh_access_token(
         if "access_token" not in payload:
             raise _nous_err("Refresh response missing access_token", "invalid_token", relogin=True)
         return payload
-
     try:
         error_payload = response.json()
     except Exception as exc:
         raise _nous_err("Refresh token exchange failed", relogin=True) from exc
-
     code = str(error_payload.get("error", "invalid_grant"))
     description = str(error_payload.get("error_description") or "Refresh token exchange failed")
     relogin = code in {"invalid_grant", "invalid_token", "refresh_token_reused"}
@@ -602,7 +597,6 @@ def _refresh_access_token(
             "instead.\n"
             "Re-authenticate with: hermes auth add nous")
         relogin = True
-
     raise _nous_err(description, code, relogin=relogin)
 
 
@@ -695,7 +689,6 @@ def fetch_nous_models(
         except Exception as e:
             logger.debug("Could not parse error response JSON: %s", e)
         raise _nous_err(description, "models_fetch_failed")
-
     data = response.json().get("data")
     if not isinstance(data, list):
         return []
@@ -732,17 +725,37 @@ def refresh_nous_oauth_pure(
     ``on_state_update`` fires after a successful access-token refresh so callers owning persistent
     state can save the rotated refresh token before later validation can fail.
     """
+    return refresh_nous_oauth_from_state(
+        {
+            "access_token": access_token, "refresh_token": refresh_token, "client_id": client_id,
+            "portal_base_url": portal_base_url, "inference_base_url": inference_base_url,
+            "token_type": token_type, "scope": scope, "obtained_at": obtained_at,
+            "expires_at": expires_at, "agent_key": agent_key,
+            "agent_key_expires_at": agent_key_expires_at,
+            "tls": {"insecure": insecure, "ca_bundle": ca_bundle}},
+        timeout_seconds=timeout_seconds, force_refresh=force_refresh,
+        on_state_update=on_state_update)
+
+
+def refresh_nous_oauth_from_state(
+    src: Dict[str, Any], *, timeout_seconds: float = 15.0, force_refresh: bool = False,
+    on_state_update: Optional[Callable[[Dict[str, Any], str], None]] = None) -> Dict[str, Any]:
+    """Refresh Nous OAuth from a state dict (defaults filled in) without mutating auth.json."""
     from hermes_cli.auth import (
         _assert_nous_inference_jwt_usable, _refresh_access_token, _resolve_verify,
         _select_nous_invoke_jwt)
+    tls = src.get("tls") or {}
+    insecure, ca_bundle = tls.get("insecure"), tls.get("ca_bundle")
     state: Dict[str, Any] = {
-        "access_token": access_token, "refresh_token": refresh_token,
-        "client_id": client_id or DEFAULT_NOUS_CLIENT_ID,
-        "portal_base_url": (portal_base_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/"),
-        "inference_base_url": (inference_base_url or DEFAULT_NOUS_INFERENCE_URL).rstrip("/"),
-        "token_type": token_type or "Bearer", "scope": scope or DEFAULT_NOUS_SCOPE,
-        "obtained_at": obtained_at, "expires_at": expires_at, "agent_key": agent_key,
-        "agent_key_expires_at": agent_key_expires_at,
+        "access_token": src.get("access_token", ""), "refresh_token": src.get("refresh_token", ""),
+        "client_id": src.get("client_id") or DEFAULT_NOUS_CLIENT_ID,
+        "portal_base_url": (src.get("portal_base_url") or DEFAULT_NOUS_PORTAL_URL).rstrip("/"),
+        "inference_base_url": (
+            src.get("inference_base_url") or DEFAULT_NOUS_INFERENCE_URL).rstrip("/"),
+        "token_type": src.get("token_type") or "Bearer",
+        "scope": src.get("scope") or DEFAULT_NOUS_SCOPE,
+        "obtained_at": src.get("obtained_at"), "expires_at": src.get("expires_at"),
+        "agent_key": src.get("agent_key"), "agent_key_expires_at": src.get("agent_key_expires_at"),
         "tls": {"insecure": bool(insecure), "ca_bundle": ca_bundle}}
     verify = _resolve_verify(insecure=insecure, ca_bundle=ca_bundle, auth_state=state)
     with _nous_http_client(timeout_seconds or 15.0, verify) as client:
@@ -765,23 +778,6 @@ def refresh_nous_oauth_pure(
         _assert_nous_inference_jwt_usable(state)
         _select_nous_invoke_jwt(state)
     return state
-
-
-def refresh_nous_oauth_from_state(
-    state: Dict[str, Any], *, timeout_seconds: float = 15.0, force_refresh: bool = False,
-    on_state_update: Optional[Callable[[Dict[str, Any], str], None]] = None) -> Dict[str, Any]:
-    """Refresh Nous OAuth from a state dict. Thin wrapper around refresh_nous_oauth_pure."""
-    tls = state.get("tls") or {}
-    return refresh_nous_oauth_pure(
-        state.get("access_token", ""), state.get("refresh_token", ""),
-        state.get("client_id", "hermes-cli"), state.get("portal_base_url", DEFAULT_NOUS_PORTAL_URL),
-        state.get("inference_base_url", DEFAULT_NOUS_INFERENCE_URL),
-        token_type=state.get("token_type", "Bearer"), scope=state.get("scope", DEFAULT_NOUS_SCOPE),
-        obtained_at=state.get("obtained_at"), expires_at=state.get("expires_at"),
-        agent_key=state.get("agent_key"), agent_key_expires_at=state.get("agent_key_expires_at"),
-        timeout_seconds=timeout_seconds, insecure=tls.get("insecure"),
-        ca_bundle=tls.get("ca_bundle"),
-        force_refresh=force_refresh, on_state_update=on_state_update)
 
 
 def persist_nous_credentials(creds: Dict[str, Any], *, label: Optional[str] = None):
@@ -845,7 +841,6 @@ def _nous_effective_routing(state: Dict[str, Any]) -> tuple[str, str, str, str]:
                 "(host %r or scheme not allowed), using default",
                 portal_url, portal_host)
             portal_url = DEFAULT_NOUS_PORTAL_URL
-
     stored_inference_url = (
         _validate_nous_inference_url_from_network(
             _optional_base_url(state.get("inference_base_url")))
@@ -981,7 +976,6 @@ class _NousRuntimeResolve:
                     self.persist("runtime_shared_merge_missing_access_token")
         if not self.has_access_token():
             raise _nous_err("No access token found for Nous Portal login.", relogin=True)
-
         invoke_jwt_status = self.invoke_jwt_status()
         self.skip_refresh_if_peer_rotated()
         if not (self.force_refresh or invoke_jwt_status is not None):
@@ -1034,10 +1028,8 @@ def resolve_nous_runtime_credentials(
             state["client_id"] = run.client_id
             state["tls"] = _tls_state_from_verify(verify)
         run.persist("resolve_nous_runtime_credentials_final")
-
     if run.persisted_any:
         _sync_nous_pool_from_auth_store()
-
     api_key = state.get("agent_key")
     if not isinstance(api_key, str) or not api_key:
         raise _nous_err("Failed to resolve a Nous inference API key", "server_error")
@@ -1082,24 +1074,23 @@ def _snapshot_nous_pool_status() -> Dict[str, Any]:
             return (agent_exp, access_exp, -int(getattr(entry, "priority", 0) or 0))
 
         entry = max(entries, key=_entry_sort_key)
-        if not getattr(entry, "runtime_api_key", None):
+        attr = lambda name, default=None: getattr(entry, name, default)  # noqa: E731
+        if not attr("runtime_api_key"):
             return _empty_nous_auth_status()
-        access_token = getattr(entry, "access_token", None)
-        auth_type = str(getattr(entry, "auth_type", "") or "").strip().lower()
-        refresh_token = getattr(entry, "refresh_token", None)
+        access_token, refresh_token = attr("access_token"), attr("refresh_token")
+        auth_type = str(attr("auth_type", "") or "").strip().lower()
         is_portal_oauth = bool(access_token) and (
             auth_type.startswith("oauth") or bool(refresh_token))
-        label = getattr(entry, "label", "unknown")
-        portal_status_url = (
-            (getattr(entry, "portal_base_url", None) or DEFAULT_NOUS_PORTAL_URL) if is_portal_oauth
-            else None)
+        label = attr("label", "unknown")
         return {
-            "logged_in": is_portal_oauth, "portal_base_url": portal_status_url,
-            "inference_base_url": getattr(entry, "inference_base_url", None)
-            or getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None),
+            "logged_in": is_portal_oauth,
+            "portal_base_url": (
+                (attr("portal_base_url") or DEFAULT_NOUS_PORTAL_URL) if is_portal_oauth else None),
+            "inference_base_url": (
+                attr("inference_base_url") or attr("runtime_base_url") or attr("base_url")),
             "access_token": access_token if is_portal_oauth else None,
-            "access_expires_at": getattr(entry, "expires_at", None),
-            "agent_key_expires_at": getattr(entry, "agent_key_expires_at", None),
+            "access_expires_at": attr("expires_at"),
+            "agent_key_expires_at": attr("agent_key_expires_at"),
             "has_refresh_token": bool(refresh_token), "inference_credential_present": True,
             "credential_source": f"pool:{label}", "source": f"pool:{label}"}
     except Exception:
@@ -1292,14 +1283,12 @@ def _nous_device_code_login(
     verify: bool | str = False if insecure else (ca_bundle if ca_bundle else True)
     if _is_remote_session():
         open_browser = False
-
     print(f"Starting Hermes login via {pconfig.name}...")
     print(f"Portal: {portal_base_url}")
     if insecure:
         print("TLS verification: disabled (--insecure)")
     elif ca_bundle:
         print(f"TLS verification: custom CA bundle ({ca_bundle})")
-
     with _nous_http_client(timeout_seconds, verify) as client:
         device_data = _request_device_code(
             client=client, portal_base_url=portal_base_url, client_id=client_id, scope=scope)
@@ -1309,9 +1298,8 @@ def _nous_device_code_login(
         interval = int(device_data["interval"])
         _print_device_code_instructions(
             verification_url, user_code, open_browser=open_browser, failure_dash="—")
-        # Surface the URL/code to an out-of-band consumer (e.g. the TUI gateway, whose stdout is
-        # a JSON-RPC pipe where print() is dropped). Fired AFTER the print/browser block and
-        # BEFORE polling blocks so the consumer can render the link while we wait. Best-effort.
+        # Out-of-band consumer (e.g. the TUI gateway, whose stdout is a JSON-RPC pipe): fired AFTER
+        # the print/browser block and BEFORE polling so it can render the link while we wait.
         if on_verification is not None:
             try:
                 on_verification(verification_url, user_code)
@@ -1323,7 +1311,6 @@ def _nous_device_code_login(
             client=client, portal_base_url=portal_base_url, client_id=client_id,
             device_code=str(device_data["device_code"]), expires_in=expires_in,
             poll_interval=interval)
-
     now = datetime.now(timezone.utc)
     token_expires_in = _coerce_ttl_seconds(token_data.get("expires_in", 0))
     resolved_inference_url = (
@@ -1392,7 +1379,6 @@ def step_up_nous_billing_scope(
             requested.append(tok)
     if NOUS_BILLING_MANAGE_SCOPE not in requested:
         requested.append(NOUS_BILLING_MANAGE_SCOPE)
-
     auth_state = _nous_device_code_login(
         portal_base_url=prior.get("portal_base_url") or None,
         inference_base_url=prior.get("inference_base_url") or None,
@@ -1415,16 +1401,12 @@ def _pick_nous_model_after_login(
     runtime_key = auth_state.get("agent_key") or auth_state.get("access_token")
     if not isinstance(runtime_key, str) or not runtime_key:
         raise _nous_err("No runtime API key available to fetch models", "invalid_token")
-
     from hermes_cli.models import (
-        get_curated_nous_model_ids, get_pricing_for_provider,
-        check_nous_free_tier, partition_nous_models_by_tier,
-        nous_policy_allowed_ids, restrict_to_nous_policy,
-        union_with_portal_free_recommendations,
-        union_with_portal_paid_recommendations)
+        get_curated_nous_model_ids, get_pricing_for_provider, check_nous_free_tier,
+        partition_nous_models_by_tier, nous_policy_allowed_ids, restrict_to_nous_policy,
+        union_with_portal_free_recommendations, union_with_portal_paid_recommendations)
     model_ids = get_curated_nous_model_ids()
     _portal = auth_state.get("portal_base_url", "")
-
     print()
     unavailable_models: list = []
     unavailable_message = ""
@@ -1441,8 +1423,7 @@ def _pick_nous_model_after_login(
             except Exception:
                 unavailable_message = ""
         # The Portal's free/paidRecommendedModels endpoint is the source of truth for what's
-        # available *right now*: augment the curated list so users on older Hermes builds still
-        # see newly-launched models without a CLI release.
+        # available *right now*: newly-launched models show without a CLI release.
         union = (
             union_with_portal_free_recommendations if free_tier
             else union_with_portal_paid_recommendations)
@@ -1489,10 +1470,9 @@ def _offer_shared_nous_import(timeout_seconds: float) -> Optional[Dict[str, Any]
     except RuntimeError:
         shared_path = None
     print()
-    if shared_path:
-        print(f"Found existing Nous OAuth credentials at {shared_path}")
-    else:
-        print("Found existing shared Nous OAuth credentials")
+    print(
+        f"Found existing Nous OAuth credentials at {shared_path}" if shared_path
+        else "Found existing shared Nous OAuth credentials")
     if not _prompt_yes_no("Import these credentials? [Y/n]: ", default="y"):
         return None
     print("Rehydrating Nous session from shared credentials...")
@@ -1537,21 +1517,19 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
                 ca_bundle=ca_bundle)
         inference_base_url = auth_state["inference_base_url"]
 
-        # Snapshot the prior active_provider BEFORE _save_provider_state overwrites it to "nous",
-        # so "Skip (keep current)" in the model picker can restore the user's previous provider.
+        # Snapshot BEFORE _save_provider_state overwrites active_provider to "nous", so a
+        # model-picker "Skip (keep current)" can restore the user's previous provider.
         with _auth_store_lock():
             prior_active_provider = _load_auth_store().get("active_provider")
         saved_to = _save_active_provider_state("nous", auth_state)
         # Mirror to the shared store so other profiles can one-tap import (best-effort inside).
         _write_shared_nous_state(auth_state)
         _sync_nous_pool_from_auth_store()
-
         print()
         print("Login successful!")
         print(f"  Auth state: {saved_to}")
 
-        # Resolve the model BEFORE writing the provider to config.yaml so config is never
-        # half-updated (provider=nous but model still the previous provider's).
+        # Pick the model BEFORE writing the provider to config.yaml so config is never half-updated.
         selected_model = None
         try:
             selected_model = _pick_nous_model_after_login(auth_state, inference_base_url)
@@ -1560,16 +1538,14 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
             print()
             print(f"Login succeeded, but could not fetch available models. Reason: {message}")
 
-        # No model selected (Skip, fetch failed, or nothing curated): preserve the previous
-        # provider rather than silently switching to Nous with a mismatched model. config.yaml
-        # model.provider is left untouched; the Nous OAuth tokens stay saved for future use.
+        # No model (Skip, fetch failed, nothing curated): keep the previous provider rather than
+        # switch to Nous with a mismatched model; the Nous tokens stay saved for future use.
         if not selected_model:
             _restore_active_provider(prior_active_provider)
             print()
             print("No provider change. Nous credentials saved for future use.")
             print("  Run `hermes model` again to switch to Nous Portal.")
             return
-
         config_path = _update_config_for_provider(
             "nous", inference_base_url, default_model=selected_model)
         if selected_model:
