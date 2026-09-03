@@ -1,8 +1,8 @@
-"""``hermes profile`` command — one handler per action, dispatched by table.
+"""``hermes profile`` command — one handler per action, dispatched by ``PROFILE_ACTIONS``.
 
-Moved out of ``hermes_cli/main.py:cmd_profile`` (was a 600-line if/elif chain).
-``hermes_cli.main`` re-exports ``cmd_profile`` so existing callers and
-monkeypatches on ``hermes_cli.main.cmd_profile`` keep working.
+``hermes_cli.main`` re-exports ``cmd_profile`` so existing callers and monkeypatches on
+``hermes_cli.main.cmd_profile`` keep working. Imports from ``hermes_cli.profiles`` stay
+lazy (inside each handler) so tests can monkeypatch the module attributes.
 """
 
 from __future__ import annotations
@@ -10,6 +10,40 @@ from __future__ import annotations
 from pathlib import Path
 import os
 import sys
+
+
+def _die(msg: str, code: int = 1, *, err: bool = False) -> None:
+    print(msg, file=sys.stderr if err else sys.stdout)
+    sys.exit(code)
+
+
+def _confirm(prompt: str) -> bool:
+    """y/N prompt; EOF / Ctrl-C count as "no"."""
+    try:
+        answer = input(prompt).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    return answer in {"y", "yes"}
+
+
+def _is_active(p, active: str) -> bool:
+    return p.name == active or (active == "default" and p.is_default)
+
+
+def _env_file_has_key(env_path: Path, key: str) -> bool:
+    """True when *key* is assigned in *env_path*. Read as utf-8-sig: a Notepad-edited .env can
+    carry a BOM that would hide the first key behind U+FEFF. A mis-encoded file (UnicodeDecodeError
+    is a ValueError, not OSError) must not abort the install preview — skip the pre-check."""
+    if not env_path.is_file():
+        return False
+    try:
+        for raw in env_path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw.strip()
+            if line and not line.startswith("#") and line.split("=", 1)[0].strip() == key:
+                return True
+    except (OSError, UnicodeDecodeError):
+        pass
+    return False
 
 
 def _render_distribution_plan(plan) -> None:
@@ -26,13 +60,10 @@ def _render_distribution_plan(plan) -> None:
     print(f"  Source:   {plan.provenance}")
     print(f"  Target:   {plan.target_dir}")
     if plan.existing:
-        # Distinguish "updating an existing distribution" (well-understood
-        # semantics — dist-owned overwritten, config preserved, user data
-        # untouched) from "overwriting a hand-built plain profile" (same
-        # mechanics but the user didn't sign up for this when they created
-        # the profile manually).
-        existing_is_distribution = (plan.target_dir / MANIFEST_FILENAME).is_file()
-        if existing_is_distribution:
+        # Updating an existing distribution (dist-owned overwritten, config preserved, user
+        # data untouched) vs overwriting a hand-built plain profile (same mechanics, but the
+        # user didn't sign up for it).
+        if (plan.target_dir / MANIFEST_FILENAME).is_file():
             print("  (profile exists — will overwrite distribution-owned files only)")
         else:
             print(
@@ -45,30 +76,10 @@ def _render_distribution_plan(plan) -> None:
         print("\n  Env vars:")
         for er in mf.env_requires:
             tag = "required" if er.required else "optional"
-            # Check both the current shell environment and the target profile's
-            # .env file so we don't nag about keys the user already has set up.
-            already = os.environ.get(er.name) is not None
-            if not already and plan.target_dir.is_dir():
-                env_path = plan.target_dir / ".env"
-                if env_path.is_file():
-                    try:
-                        # .env is written as UTF-8 everywhere in the codebase,
-                        # but a Notepad-edited file can carry a BOM — read as
-                        # utf-8-sig so the first key isn't hidden behind
-                        # U+FEFF (#62617).
-                        for raw in env_path.read_text(encoding="utf-8-sig").splitlines():
-                            line = raw.strip()
-                            if not line or line.startswith("#"):
-                                continue
-                            key = line.split("=", 1)[0].strip()
-                            if key == er.name:
-                                already = True
-                                break
-                    except (OSError, UnicodeDecodeError):
-                        # UnicodeDecodeError is a ValueError, not an OSError, so
-                        # the old guard let a mis-encoded .env abort the whole
-                        # install preview. Skip the pre-check instead.
-                        pass
+            # Shell environment OR the target profile's .env — don't nag about set keys.
+            already = os.environ.get(er.name) is not None or (
+                plan.target_dir.is_dir() and _env_file_has_key(plan.target_dir / ".env", er.name)
+            )
             status = "✓ set" if already else ("needs setting" if er.required else "—")
             line = f"    • {er.name} ({tag}, {status})"
             if er.description:
@@ -84,57 +95,29 @@ def _render_distribution_plan(plan) -> None:
 def _profile_status(args):
     """Bare ``hermes profile`` — show current profile status."""
     from hermes_constants import display_hermes_home
-    from hermes_cli.profiles import (
-        get_active_profile_name,
-        list_profiles,
-    )
-
-    from hermes_cli.profiles import format_profile_label
+    from hermes_cli.profiles import format_profile_label, get_active_profile_name, list_profiles
 
     profile_name = get_active_profile_name()
     dhh = display_hermes_home()
 
-    profiles = list_profiles()
-    current = next(
-        (
-            p
-            for p in profiles
-            if p.name == profile_name
-            or (profile_name == "default" and p.is_default)
-        ),
-        None,
-    )
-    label = format_profile_label(
-        profile_name, current.display_name if current else ""
-    )
+    current = next((p for p in list_profiles() if _is_active(p, profile_name)), None)
+    label = format_profile_label(profile_name, current.display_name if current else "")
     print(f"\nActive profile: {label}")
     print(f"Path:           {dhh}")
 
     if current is not None:
         p = current
         if p.model:
-            print(
-                f"Model:          {p.model}"
-                + (f" ({p.provider})" if p.provider else "")
-            )
-        print(
-            f"Gateway:        {'running' if p.gateway_running else 'stopped'}"
-        )
+            print(f"Model:          {p.model}" + (f" ({p.provider})" if p.provider else ""))
+        print(f"Gateway:        {'running' if p.gateway_running else 'stopped'}")
         print(f"Skills:         {p.skill_count} installed")
         if p.alias_path:
-            alias_display = p.alias_name or p.name
-            print(f"Alias:          {alias_display} → hermes -p {p.name}")
+            print(f"Alias:          {p.alias_name or p.name} → hermes -p {p.name}")
     print()
-    return
 
 
 def _profile_list(args):
-    from hermes_cli.profiles import (
-        get_active_profile_name,
-        list_profiles,
-    )
-
-    from hermes_cli.profiles import format_profile_label
+    from hermes_cli.profiles import format_profile_label, get_active_profile_name, list_profiles
 
     profiles = list_profiles()
     active = get_active_profile_name()
@@ -143,7 +126,6 @@ def _profile_list(args):
         print("No profiles found.")
         return
 
-    # Header
     print(
         f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} "
         f"{'Alias':<12} {'Distribution'}"
@@ -154,22 +136,12 @@ def _profile_list(args):
     )
 
     for p in profiles:
-        marker = (
-            " ◆"
-            if (p.name == active or (active == "default" and p.is_default))
-            else "  "
-        )
+        marker = " ◆" if _is_active(p, active) else "  "
         name = format_profile_label(p.name, p.display_name)
         model = (p.model or "—")[:26]
         gw = "running" if p.gateway_running else "stopped"
-        alias = (p.alias_name or p.name) if p.alias_path else "—"
-        if p.is_default:
-            alias = "—"
-        if p.distribution_name:
-            dist = f"{p.distribution_name}@{p.distribution_version or '?'}"
-            dist = dist[:30]
-        else:
-            dist = "—"
+        alias = (p.alias_name or p.name) if p.alias_path and not p.is_default else "—"
+        dist = f"{p.distribution_name}@{p.distribution_version or '?'}"[:30] if p.distribution_name else "—"
         print(f"{marker}{name:<15} {model:<28} {gw:<12} {alias:<12} {dist}")
     print()
 
@@ -180,13 +152,9 @@ def _profile_use(args):
     name = args.profile_name
     try:
         set_active_profile(name)
-        if name == "default":
-            print("Switched to: default (~/.hermes)")
-        else:
-            print(f"Switched to: {name}")
+        print("Switched to: default (~/.hermes)" if name == "default" else f"Switched to: {name}")
     except (ValueError, FileNotFoundError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
 
 
 def _profile_create(args):
@@ -205,11 +173,11 @@ def _profile_create(args):
     clone_all = getattr(args, "clone_all", False)
     no_alias = getattr(args, "no_alias", False)
     no_skills = getattr(args, "no_skills", False)
+    clone_from = getattr(args, "clone_from", None)
+    clone_config = clone or clone_from is not None
+    cloned = clone_config or clone_all
 
     try:
-        clone_from = getattr(args, "clone_from", None)
-        clone_config = clone or clone_from is not None
-
         profile_dir = create_profile(
             name=name,
             clone_from=clone_from,
@@ -219,109 +187,89 @@ def _profile_create(args):
             no_skills=no_skills,
             description=getattr(args, "description", None),
         )
-        print(f"\nProfile '{name}' created at {profile_dir}")
-
-        if clone_config or clone_all:
-            source_label = (
-                getattr(args, "clone_from", None) or get_active_profile_name()
-            )
-            if clone_all:
-                print(
-                    f"Full copy from {source_label} "
-                    "(excluding session history, backups, and snapshots)."
-                )
-            else:
-                print(
-                    f"Cloned config, .env, SOUL.md, and skills from {source_label}."
-                )
-
-        # Auto-clone Honcho config for the new profile (only with clone operations)
-        if clone_config or clone_all:
-            try:
-                from plugins.memory.honcho.cli import clone_honcho_for_profile
-
-                if clone_honcho_for_profile(name):
-                    print(f"Honcho config cloned (peer: {name})")
-            except Exception:
-                pass  # Honcho plugin not installed or not configured
-
-        # Seed bundled skills for fresh profiles only. Clone operations
-        # already copied the source profile's skills, including any
-        # user-installed or intentionally removed skills.
-        if not (clone_config or clone_all):
-            result = seed_profile_skills(profile_dir)
-            if result and result.get("skipped_opt_out"):
-                print(
-                    "No bundled skills seeded (--no-skills). "
-                    "Delete .no-bundled-skills in the profile to opt back in."
-                )
-            elif result:
-                copied = len(result.get("copied", []))
-                print(f"{copied} bundled skills synced.")
-            else:
-                print(
-                    "⚠ Skills could not be seeded. Run `{} update` to retry.".format(
-                        name
-                    )
-                )
-
-        # Create wrapper alias
-        if not no_alias:
-            collision = check_alias_collision(name)
-            if collision:
-                print(f"\n⚠ Cannot create alias '{name}' — {collision}")
-                print(
-                    f"  Choose a custom alias:  hermes profile alias {name} --name <custom>"
-                )
-                print(f"  Or access via flag:     hermes -p {name} chat")
-            else:
-                wrapper_path = create_wrapper_script(name)
-                if wrapper_path:
-                    print(f"Wrapper created: {wrapper_path}")
-                    if not _is_wrapper_dir_in_path():
-                        print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
-                        print(
-                            "  Add to your shell config (~/.bashrc or ~/.zshrc):"
-                        )
-                        print('    export PATH="$HOME/.local/bin:$PATH"')
-
-        # Profile dir for display
-        try:
-            profile_dir_display = "~/" + profile_dir.relative_to(Path.home()).as_posix()
-        except ValueError:
-            profile_dir_display = str(profile_dir)
-
-        # Next steps
-        print("\nNext steps:")
-        print(f"  {name} setup              Configure API keys and model")
-        print(f"  {name} chat               Start chatting")
-        print(f"  {name} gateway start      Start the messaging gateway")
-        if clone or clone_all:
-            print(f"\n  Edit {profile_dir_display}/.env for different API keys")
-            print(f"  Edit {profile_dir_display}/SOUL.md for different personality")
-        else:
-            print(
-                f"\n  ⚠ This profile has no API keys yet. Run '{name} setup' first,"
-            )
-            print("    or it will inherit keys from your shell environment.")
-            print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
-        print()
-
     except (ValueError, FileExistsError, FileNotFoundError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
+    print(f"\nProfile '{name}' created at {profile_dir}")
+
+    if cloned:
+        source_label = clone_from or get_active_profile_name()
+        if clone_all:
+            print(f"Full copy from {source_label} (excluding session history, backups, and snapshots).")
+        else:
+            print(f"Cloned config, .env, SOUL.md, and skills from {source_label}.")
+        # Auto-clone Honcho config for the new profile (only with clone operations)
+        try:
+            from plugins.memory.honcho.cli import clone_honcho_for_profile
+
+            if clone_honcho_for_profile(name):
+                print(f"Honcho config cloned (peer: {name})")
+        except Exception:
+            pass  # Honcho plugin not installed or not configured
+    else:
+        # Fresh profiles only: clones already carry the source's (user-curated) skills.
+        result = seed_profile_skills(profile_dir)
+        if result and result.get("skipped_opt_out"):
+            print(
+                "No bundled skills seeded (--no-skills). "
+                "Delete .no-bundled-skills in the profile to opt back in."
+            )
+        elif result:
+            print(f"{len(result.get('copied', []))} bundled skills synced.")
+        else:
+            print(f"⚠ Skills could not be seeded. Run `{name} update` to retry.")
+
+    if not no_alias:
+        collision = check_alias_collision(name)
+        if collision:
+            print(f"\n⚠ Cannot create alias '{name}' — {collision}")
+            print(f"  Choose a custom alias:  hermes profile alias {name} --name <custom>")
+            print(f"  Or access via flag:     hermes -p {name} chat")
+        else:
+            wrapper_path = create_wrapper_script(name)
+            if wrapper_path:
+                print(f"Wrapper created: {wrapper_path}")
+                if not _is_wrapper_dir_in_path():
+                    print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
+                    print("  Add to your shell config (~/.bashrc or ~/.zshrc):")
+                    print('    export PATH="$HOME/.local/bin:$PATH"')
+
+    try:
+        profile_dir_display = "~/" + profile_dir.relative_to(Path.home()).as_posix()
+    except ValueError:
+        profile_dir_display = str(profile_dir)
+
+    print("\nNext steps:")
+    print(f"  {name} setup              Configure API keys and model")
+    print(f"  {name} chat               Start chatting")
+    print(f"  {name} gateway start      Start the messaging gateway")
+    if clone or clone_all:
+        print(f"\n  Edit {profile_dir_display}/.env for different API keys")
+        print(f"  Edit {profile_dir_display}/SOUL.md for different personality")
+    else:
+        print(f"\n  ⚠ This profile has no API keys yet. Run '{name} setup' first,")
+        print("    or it will inherit keys from your shell environment.")
+        print(f"  Edit {profile_dir_display}/SOUL.md to customize personality")
+    print()
 
 
 def _profile_delete(args):
     from hermes_cli.profiles import delete_profile
 
-    name = args.profile_name
-    yes = getattr(args, "yes", False)
     try:
-        delete_profile(name, yes=yes)
+        delete_profile(args.profile_name, yes=getattr(args, "yes", False))
     except (ValueError, FileNotFoundError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
+
+
+def _describe_target_dir(name: str) -> Path:
+    """Profile dir for ``describe``: ``default`` maps to the CURRENT home (get_hermes_home),
+    everything else to its named directory."""
+    from hermes_cli import profiles as _profiles_mod
+
+    if _profiles_mod.normalize_profile_name(name) == "default":
+        from hermes_constants import get_hermes_home as _hh
+        return Path(_hh())
+    return _profiles_mod.get_profile_dir(name)
 
 
 def _profile_describe(args):
@@ -334,38 +282,22 @@ def _profile_describe(args):
     name = getattr(args, "profile_name", None)
 
     if all_flag and not auto_flag:
-        print("profile describe: --all requires --auto", file=sys.stderr)
-        sys.exit(2)
+        _die("profile describe: --all requires --auto", 2, err=True)
     if all_flag and (text_value or name):
-        print(
-            "profile describe: --all is mutually exclusive with a profile name / --text",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        _die("profile describe: --all is mutually exclusive with a profile name / --text", 2, err=True)
     if not all_flag and not name:
-        print("profile describe: profile name is required (or --all --auto)", file=sys.stderr)
-        sys.exit(2)
+        _die("profile describe: profile name is required (or --all --auto)", 2, err=True)
     if text_value and auto_flag:
-        print(
-            "profile describe: --text is mutually exclusive with --auto",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        _die("profile describe: --text is mutually exclusive with --auto", 2, err=True)
 
     # Show current description if no operation requested.
     if name and not text_value and not auto_flag:
         try:
-            if _profiles_mod.normalize_profile_name(name) == "default":
-                from hermes_constants import get_hermes_home as _hh
-                profile_dir = Path(_hh())
-            else:
-                profile_dir = _profiles_mod.get_profile_dir(name)
+            profile_dir = _describe_target_dir(name)
         except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+            _die(f"Error: {exc}", err=True)
         if not profile_dir.is_dir():
-            print(f"Error: profile '{name}' not found", file=sys.stderr)
-            sys.exit(1)
+            _die(f"Error: profile '{name}' not found", err=True)
         meta = _profiles_mod.read_profile_meta(profile_dir)
         desc = meta.get("description") or ""
         if not desc:
@@ -378,20 +310,14 @@ def _profile_describe(args):
     # --text path: just write the user-authored description.
     if text_value:
         try:
-            if _profiles_mod.normalize_profile_name(name) == "default":
-                from hermes_constants import get_hermes_home as _hh
-                profile_dir = Path(_hh())
-            else:
-                profile_dir = _profiles_mod.get_profile_dir(name)
             _profiles_mod.write_profile_meta(
-                profile_dir,
+                _describe_target_dir(name),
                 description=text_value,
                 description_auto=False,
             )
             print(f"Description updated for '{name}'.")
         except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
+            _die(f"Error: {exc}", err=True)
         sys.exit(0)
 
     # --auto path: invoke the LLM describer.
@@ -400,27 +326,19 @@ def _profile_describe(args):
     if all_flag:
         targets = _pd.list_describable_profiles(missing_only=True)
         if not targets:
-            print("All profiles already have descriptions.")
-            sys.exit(0)
+            _die("All profiles already have descriptions.", 0)
     else:
         targets = [name]
 
     ok_count = 0
-    fail_count = 0
     for tgt in targets:
         outcome = _pd.describe_profile(tgt, overwrite=overwrite_flag)
         if outcome.ok:
             ok_count += 1
             print(f"Described '{outcome.profile_name}': {outcome.description}")
         else:
-            fail_count += 1
-            print(
-                f"profile describe {outcome.profile_name}: {outcome.reason}",
-                file=sys.stderr,
-            )
-    if not all_flag:
-        sys.exit(0 if ok_count == 1 else 1)
-    sys.exit(0 if ok_count > 0 else 1)
+            print(f"profile describe {outcome.profile_name}: {outcome.reason}", file=sys.stderr)
+    sys.exit(0 if (ok_count > 0 if all_flag else ok_count == 1) else 1)
 
 
 def _profile_show(args):
@@ -433,19 +351,17 @@ def _profile_show(args):
         _served_by_running_multiplexer,
         _count_skills,
         _read_distribution_meta,
-        _get_wrapper_dir,
+        _wrapper_path,
         find_alias_for_profile,
         format_profile_label,
         read_profile_meta,
     )
 
     if not profile_exists(name):
-        print(f"Error: Profile '{name}' does not exist.")
-        sys.exit(1)
+        _die(f"Error: Profile '{name}' does not exist.")
     profile_dir = get_profile_dir(name)
     model, provider = _read_config_model(profile_dir)
     gw = _check_gateway_running(profile_dir) or _served_by_running_multiplexer(name)
-    skills = _count_skills(profile_dir)
     dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
     alias_name = find_alias_for_profile(name)
     display = read_profile_meta(profile_dir).get("display_name", "")
@@ -455,22 +371,16 @@ def _profile_show(args):
     if model:
         print(f"Model:   {model}" + (f" ({provider})" if provider else ""))
     print(f"Gateway: {'running' if gw else 'stopped'}")
-    print(f"Skills:  {skills}")
-    print(
-        f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}"
-    )
-    print(
-        f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}"
-    )
+    print(f"Skills:  {_count_skills(profile_dir)}")
+    print(f".env:    {'exists' if (profile_dir / '.env').exists() else 'not configured'}")
+    print(f"SOUL.md: {'exists' if (profile_dir / 'SOUL.md').exists() else 'not configured'}")
     if dist_name:
         print(f"Distribution: {dist_name}@{dist_version or '?'}")
         if dist_source:
             print(f"Installed from: {dist_source}")
         print(f"  (run `hermes profile info {name}` for full manifest)")
     if alias_name:
-        is_windows = sys.platform == "win32"
-        wrapper = _get_wrapper_dir() / (f"{alias_name}.bat" if is_windows else alias_name)
-        print(f"Alias:   {alias_name} → hermes -p {name}  ({wrapper})")
+        print(f"Alias:   {alias_name} → hermes -p {name}  ({_wrapper_path(alias_name)})")
     print()
 
 
@@ -480,44 +390,39 @@ def _profile_alias(args):
         _is_wrapper_dir_in_path,
         check_alias_collision,
         create_wrapper_script,
+        profile_exists,
         remove_wrapper_script,
+        validate_alias_name,
     )
 
     name = args.profile_name
     remove = getattr(args, "remove", False)
     custom_name = getattr(args, "alias_name", None)
 
-    from hermes_cli.profiles import profile_exists, validate_alias_name
-
     if not profile_exists(name):
-        print(f"Error: Profile '{name}' does not exist.")
-        sys.exit(1)
+        _die(f"Error: Profile '{name}' does not exist.")
 
     alias_name = custom_name or name
 
     try:
         validate_alias_name(alias_name)
     except ValueError as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
+        _die(f"Error: {exc}")
 
     if remove:
         if remove_wrapper_script(alias_name):
             print(f"✓ Removed alias '{alias_name}'")
         else:
             print(f"No alias '{alias_name}' found to remove.")
-    else:
-        collision = check_alias_collision(alias_name)
-        if collision:
-            print(f"Error: {collision}")
-            sys.exit(1)
-        wrapper_path = create_wrapper_script(
-            alias_name, target=name if custom_name else None
-        )
-        if wrapper_path:
-            print(f"✓ Alias created: {wrapper_path}")
-            if not _is_wrapper_dir_in_path():
-                print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")
+        return
+    collision = check_alias_collision(alias_name)
+    if collision:
+        _die(f"Error: {collision}")
+    wrapper_path = create_wrapper_script(alias_name, target=name if custom_name else None)
+    if wrapper_path:
+        print(f"✓ Alias created: {wrapper_path}")
+        if not _is_wrapper_dir_in_path():
+            print(f"⚠ {_get_wrapper_dir()} is not in your PATH.")
 
 
 def _profile_rename(args):
@@ -529,8 +434,7 @@ def _profile_rename(args):
             print(f"\nProfile renamed: {args.old_name} → {args.new_name}")
             print(f"Path: {new_dir}\n")
     except (ValueError, FileExistsError, FileNotFoundError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
 
 
 def _profile_export(args):
@@ -542,65 +446,40 @@ def _profile_export(args):
         result_path = export_profile(name, output)
         print(f"✓ Exported '{name}' to {result_path}")
     except (ValueError, FileNotFoundError, OSError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
 
 
 def _profile_import(args):
-    from hermes_cli.profiles import (
-        check_alias_collision,
-        create_wrapper_script,
-    )
-
-    from hermes_cli.profiles import import_profile
+    from hermes_cli.profiles import check_alias_collision, create_wrapper_script, import_profile
 
     try:
-        profile_dir = import_profile(
-            args.archive, name=getattr(args, "import_name", None)
-        )
+        profile_dir = import_profile(args.archive, name=getattr(args, "import_name", None))
         name = profile_dir.name
         print(f"✓ Imported profile '{name}' at {profile_dir}")
 
-        # Offer to create alias
-        collision = check_alias_collision(name)
-        if not collision:
+        if not check_alias_collision(name):
             wrapper_path = create_wrapper_script(name)
             if wrapper_path:
                 print(f"  Wrapper created: {wrapper_path}")
         print()
     except (ValueError, FileExistsError, FileNotFoundError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
 
 
 def _profile_install(args):
     import tempfile
-    from hermes_cli.profile_distribution import (
-        plan_install,
-        install_distribution,
-        DistributionError,
-    )
+    from hermes_cli.profile_distribution import DistributionError, install_distribution, plan_install
 
     try:
-        # Preview: stage the distribution into a scratch dir, show the
-        # manifest, then do the real install.  The double-stage avoids
-        # any side-effects if the user declines.
+        # Preview: stage into a scratch dir, show the manifest, then do the real install.
+        # The double-stage avoids any side-effects if the user declines.
         with tempfile.TemporaryDirectory(prefix="hermes_dist_preview_") as tmp:
-            plan = plan_install(
-                args.source,
-                Path(tmp),
-                override_name=getattr(args, "install_name", None),
-            )
+            plan = plan_install(args.source, Path(tmp), override_name=getattr(args, "install_name", None))
             _render_distribution_plan(plan)
 
-            if not getattr(args, "yes", False):
-                try:
-                    answer = input("\nProceed with install? [y/N] ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    answer = ""
-                if answer not in {"y", "yes"}:
-                    print("Install cancelled.")
-                    return
+            if not getattr(args, "yes", False) and not _confirm("\nProceed with install? [y/N] "):
+                print("Install cancelled.")
+                return
 
         plan = install_distribution(
             args.source,
@@ -622,28 +501,21 @@ def _profile_install(args):
             )
         print(f"\n  Use with:      hermes -p {plan.manifest.name} chat")
     except (DistributionError, ValueError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
 
 
 def _profile_update(args):
-    from hermes_cli.profile_distribution import (
-        update_distribution,
-        read_manifest,
-        DistributionError,
-    )
+    from hermes_cli.profile_distribution import DistributionError, read_manifest, update_distribution
     from hermes_cli.profiles import get_profile_dir, normalize_profile_name
 
-    name = args.profile_name
     try:
-        canon = normalize_profile_name(name)
+        canon = normalize_profile_name(args.profile_name)
         current = read_manifest(get_profile_dir(canon))
         if current is None:
-            print(
+            _die(
                 f"Error: Profile '{canon}' is not a distribution (no distribution.yaml). "
                 "Only profiles installed via `hermes profile install` can be updated."
             )
-            sys.exit(1)
 
         force_config = getattr(args, "force_config", False)
         if not getattr(args, "yes", False):
@@ -654,24 +526,26 @@ def _profile_update(args):
             else:
                 print("  config.yaml will be preserved (pass --force-config to overwrite).")
             print("  User data (memories, sessions, auth, .env) will NOT be touched.")
-            try:
-                answer = input("\nProceed? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                answer = ""
-            if answer not in {"y", "yes"}:
+            if not _confirm("\nProceed? [y/N] "):
                 print("Update cancelled.")
                 return
 
         plan = update_distribution(canon, force_config=force_config)
         print(f"\n✓ Updated '{plan.manifest.name}' → v{plan.manifest.version}")
         if plan.has_cron:
-            print(
-                "  Cron files were refreshed.  Review with:  "
-                f"hermes -p {plan.manifest.name} cron list"
-            )
+            print(f"  Cron files were refreshed.  Review with:  hermes -p {plan.manifest.name} cron list")
     except (DistributionError, ValueError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
+
+
+_INFO_FIELDS = (
+    ("description", "Description:  "),
+    ("author", "Author:       "),
+    ("license", "License:      "),
+    ("hermes_requires", "Requires:     Hermes "),
+    ("source", "Source:       "),
+    ("installed_at", "Installed:    "),
+)
 
 
 def _profile_info(args):
@@ -680,28 +554,15 @@ def _profile_info(args):
     try:
         data = describe_distribution(args.profile_name)
     except (DistributionError, ValueError) as e:
-        print(f"Error: {e}")
-        sys.exit(1)
+        _die(f"Error: {e}")
     if not data:
-        print(
-            f"Profile '{args.profile_name}' is not a distribution "
-            "(no distribution.yaml)."
-        )
+        print(f"Profile '{args.profile_name}' is not a distribution (no distribution.yaml).")
         return
     print(f"\nDistribution: {data.get('name')}")
     print(f"Version:      {data.get('version', '?')}")
-    if data.get("description"):
-        print(f"Description:  {data['description']}")
-    if data.get("author"):
-        print(f"Author:       {data['author']}")
-    if data.get("license"):
-        print(f"License:      {data['license']}")
-    if data.get("hermes_requires"):
-        print(f"Requires:     Hermes {data['hermes_requires']}")
-    if data.get("source"):
-        print(f"Source:       {data['source']}")
-    if data.get("installed_at"):
-        print(f"Installed:    {data['installed_at']}")
+    for key, label in _INFO_FIELDS:
+        if data.get(key):
+            print(f"{label}{data[key]}")
     env_reqs = data.get("env_requires") or []
     if env_reqs:
         print("\nEnvironment variables:")
