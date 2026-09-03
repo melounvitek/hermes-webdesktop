@@ -36,23 +36,19 @@ def _sanitize_field(value: Any, *, limit: int) -> str:
         return ""
     raw = str(value).replace("\r", " ").replace("\n", " ")
     raw = "".join(ch for ch in raw if ch == " " or ch.isprintable())
-    raw = raw.strip()[:limit]
-    return html.escape(raw, quote=False)
+    return html.escape(raw.strip()[:limit], quote=False)
 
 
 def format_diagnostic(d: Dict[str, Any]) -> str:
     """One-line representation of a single diagnostic (fields sanitized)."""
     sev = SEVERITY_NAMES.get(d.get("severity") or 1, "ERROR")
-    rng = d.get("range") or {}
-    start = rng.get("start") or {}
+    start = (d.get("range") or {}).get("start") or {}
     line = int(start.get("line", 0)) + 1
     col = int(start.get("character", 0)) + 1
     msg = _sanitize_field(d.get("message"), limit=MAX_MESSAGE_CHARS)
     code = _sanitize_field(d.get("code"), limit=MAX_CODE_CHARS)
-    code_part = f" [{code}]" if code else ""
     source = _sanitize_field(d.get("source"), limit=MAX_SOURCE_CHARS)
-    source_part = f" ({source})" if source else ""
-    return f"{sev} [{line}:{col}] {msg}{code_part}{source_part}"
+    return f"{sev} [{line}:{col}] {msg}{f' [{code}]' if code else ''}{f' ({source})' if source else ''}"
 
 
 def report_for_file(
@@ -63,14 +59,11 @@ def report_for_file(
     max_per_file: int = MAX_PER_FILE,
 ) -> str:
     """Build a ``<diagnostics file=...>`` block; ``""`` when nothing passes the severity filter."""
-    if not diagnostics:
-        return ""
-    filtered = [d for d in diagnostics if (d.get("severity") or 1) in severities]
+    filtered = [d for d in diagnostics or [] if (d.get("severity") or 1) in severities]
     if not filtered:
         return ""
-    limited = filtered[:max_per_file]
-    extra = len(filtered) - len(limited)
-    body = "\n".join(format_diagnostic(d) for d in limited)
+    body = "\n".join(format_diagnostic(d) for d in filtered[:max_per_file])
+    extra = len(filtered) - max_per_file
     if extra > 0:
         body += f"\n... and {extra} more"
     # quote=True also escapes ``"`` so a crafted file name can't break out of

@@ -16,7 +16,6 @@ logger = logging.getLogger("agent.lsp.protocol")
 
 # LSP error codes we care about (spec 3.17 #errorCodes).
 ERROR_CONTENT_MODIFIED = -32801
-ERROR_REQUEST_CANCELLED = -32800
 ERROR_METHOD_NOT_FOUND = -32601
 
 _MAX_HEADER_BYTES = 8192  # a well-behaved server fits in well under 200 bytes
@@ -40,16 +39,11 @@ class LSPRequestError(Exception):
 def encode_message(obj: dict) -> bytes:
     """Encode an envelope as compact UTF-8 JSON with an exact Content-Length header."""
     body = json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-    return header + body
+    return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
 
 
-async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
-    """Read one framed message.
-
-    Returns ``None`` on clean EOF between messages (typical shutdown);
-    raises :class:`LSPProtocolError` on malformed framing.
-    """
+async def _read_headers(reader: asyncio.StreamReader) -> Optional[dict]:
+    """Read the header block; ``None`` on clean EOF before any header started."""
     headers: dict = {}
     header_bytes = 0
     while True:
@@ -59,18 +53,14 @@ async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
             # EOF before any header started is a clean close; mid-block is bad framing.
             if not e.partial and not headers:
                 return None
-            raise LSPProtocolError(
-                f"unexpected EOF while reading LSP headers (partial={e.partial!r})"
-            ) from e
+            raise LSPProtocolError(f"unexpected EOF while reading LSP headers (partial={e.partial!r})") from e
         # Cap against a server streaming headers without ever emitting CRLF-CRLF.
         header_bytes += len(line)
         if header_bytes > _MAX_HEADER_BYTES:
-            raise LSPProtocolError(
-                "LSP header block exceeded 8 KiB without terminator"
-            )
+            raise LSPProtocolError("LSP header block exceeded 8 KiB without terminator")
         line = line[:-2]  # strip CRLF
         if not line:
-            break  # blank line ends header block
+            return headers  # blank line ends header block
         try:
             key, _, value = line.decode("ascii").partition(":")
         except UnicodeDecodeError as e:
@@ -78,6 +68,17 @@ async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
         if not key:
             raise LSPProtocolError(f"malformed LSP header line: {line!r}")
         headers[key.strip().lower()] = value.strip()
+
+
+async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
+    """Read one framed message.
+
+    Returns ``None`` on clean EOF between messages (typical shutdown);
+    raises :class:`LSPProtocolError` on malformed framing.
+    """
+    headers = await _read_headers(reader)
+    if headers is None:
+        return None
 
     cl = headers.get("content-length")
     if cl is None:
@@ -92,9 +93,7 @@ async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
     try:
         body = await reader.readexactly(n)
     except asyncio.IncompleteReadError as e:
-        raise LSPProtocolError(
-            f"truncated LSP body: expected {n} bytes, got {len(e.partial)}"
-        ) from e
+        raise LSPProtocolError(f"truncated LSP body: expected {n} bytes, got {len(e.partial)}") from e
 
     try:
         return json.loads(body.decode("utf-8"))
@@ -146,14 +145,13 @@ def classify_message(msg: dict) -> Tuple[str, Any]:
         return "request", msg["id"]
     if has_id and ("result" in msg or "error" in msg):
         return "response", msg["id"]
-    if has_method and not has_id:
+    if has_method:
         return "notification", msg["method"]
     return "invalid", None
 
 
 __all__ = [
     "ERROR_CONTENT_MODIFIED",
-    "ERROR_REQUEST_CANCELLED",
     "ERROR_METHOD_NOT_FOUND",
     "LSPProtocolError",
     "LSPRequestError",

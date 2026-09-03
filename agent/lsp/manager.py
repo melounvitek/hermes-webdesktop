@@ -1,19 +1,14 @@
 """Service-level orchestration for LSP clients.
 
 :class:`LSPService` bridges the synchronous file_operations layer and the
-async :class:`agent.lsp.client.LSPClient`:
-
-- One asyncio loop in a background thread; :meth:`get_diagnostics_sync`
-  opens + waits + drains in one blocking call.
-- One lazily spawned client per ``(server_id, workspace_root)``.
-- A **broken-set** of pairs that failed to spawn/initialize — never retried
-  for the life of the service.
-- A **delta baseline** per file: ``snapshot_baseline()`` runs BEFORE a write,
-  and the next ``get_diagnostics_sync()`` returns only diagnostics not in it.
-
-The service is off unless config enables it; :meth:`is_active` says whether
-it does anything, and file_operations falls back to the in-process syntax
-check otherwise.
+async :class:`agent.lsp.client.LSPClient`: one asyncio loop in a background
+thread (``get_diagnostics_sync`` opens + waits + drains in one blocking
+call), one lazily spawned client per ``(server_id, workspace_root)``, a
+**broken-set** of pairs that failed to spawn/initialize (never retried for
+the life of the service), and a **delta baseline** per file
+(``snapshot_baseline()`` runs BEFORE a write; the next
+``get_diagnostics_sync()`` returns only diagnostics not in it).  Off unless
+config enables it — file_operations falls back to in-process syntax checks.
 """
 from __future__ import annotations
 
@@ -30,21 +25,15 @@ from agent.lsp.client import (
     LSPClient,
     _diagnostic_key as _diag_key,
 )
-from agent.lsp.servers import (
-    ServerContext,
-    ServerDef,
-    find_server_for_file,
-    language_id_for,
-)
-from agent.lsp.workspace import (
-    clear_cache,
-    resolve_workspace_for_file,
-)
+from agent.lsp.servers import ServerContext, ServerDef, find_server_for_file, language_id_for
+from agent.lsp.workspace import clear_cache, resolve_workspace_for_file
 
 logger = logging.getLogger("agent.lsp.manager")
 
 DEFAULT_IDLE_TIMEOUT = 600  # seconds; servers idle for >10min get reaped
 MIN_IDLE_TIMEOUT = 30  # floor for config values; must exceed any per-op wait budget
+
+_Key = Tuple[str, str]
 
 
 class _BackgroundLoop:
@@ -58,11 +47,7 @@ class _BackgroundLoop:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._thread = threading.Thread(
-            target=self._run_forever,
-            name="hermes-lsp-loop",
-            daemon=True,
-        )
+        self._thread = threading.Thread(target=self._run_forever, name="hermes-lsp-loop", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=5.0)
 
@@ -140,10 +125,10 @@ class LSPService:
             self._loop.start()
 
         # Per-(server_id, workspace_root) state
-        self._clients: Dict[Tuple[str, str], LSPClient] = {}
+        self._clients: Dict[_Key, LSPClient] = {}
         self._broken: set = set()
-        self._spawning: Dict[Tuple[str, str], asyncio.Future] = {}
-        self._last_used: Dict[Tuple[str, str], float] = {}
+        self._spawning: Dict[_Key, asyncio.Future] = {}
+        self._last_used: Dict[_Key, float] = {}
         self._state_lock = threading.Lock()
         self._idle_reaper_task: Optional[asyncio.Task] = None
 
@@ -167,10 +152,6 @@ class LSPService:
         if not isinstance(lsp_cfg, dict):
             lsp_cfg = {}
 
-        enabled = bool(lsp_cfg.get("enabled", True))
-        wait_mode = lsp_cfg.get("wait_mode", "document")
-        wait_timeout = float(lsp_cfg.get("wait_timeout", DIAGNOSTICS_DOCUMENT_WAIT))
-        install_strategy = lsp_cfg.get("install_strategy", "auto")
         try:
             idle_timeout = float(lsp_cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
         except (TypeError, ValueError):
@@ -202,10 +183,10 @@ class LSPService:
                     init_overrides[name] = init
 
         return cls(
-            enabled=enabled,
-            wait_mode=wait_mode,
-            wait_timeout=wait_timeout,
-            install_strategy=install_strategy,
+            enabled=bool(lsp_cfg.get("enabled", True)),
+            wait_mode=lsp_cfg.get("wait_mode", "document"),
+            wait_timeout=float(lsp_cfg.get("wait_timeout", DIAGNOSTICS_DOCUMENT_WAIT)),
+            install_strategy=lsp_cfg.get("install_strategy", "auto"),
             binary_overrides=binary_overrides,
             env_overrides=env_overrides,
             init_overrides=init_overrides,
@@ -221,7 +202,7 @@ class LSPService:
         """Return True iff this service should be consulted at all."""
         return self._enabled
 
-    def _broken_key(self, srv: ServerDef, file_path: str) -> Optional[Tuple[str, str]]:
+    def _broken_key(self, srv: ServerDef, file_path: str) -> Optional[_Key]:
         """``(server_id, per-server root)`` broken-set key, or ``None`` when the file isn't gated in.
 
         Falls back to the workspace root when the per-server resolver fails —
@@ -265,11 +246,11 @@ class LSPService:
             # server gets falsely marked broken.
             t = max(8.0, self._wait_timeout + 3.0)
             diags = self._loop.run(self._snapshot_async(file_path), timeout=t)
-            self._delta_baseline[os.path.abspath(file_path)] = diags or []
         except Exception as e:  # noqa: BLE001
             logger.debug("baseline snapshot failed for %s: %s", file_path, e)
             self._mark_broken_for_file(file_path, e)
-            self._delta_baseline[os.path.abspath(file_path)] = []
+            diags = []
+        self._delta_baseline[os.path.abspath(file_path)] = diags or []
 
     def get_diagnostics_sync(
         self,
@@ -300,14 +281,13 @@ class LSPService:
         try:
             t = timeout if timeout is not None else self._wait_timeout + 2.0
             diags = self._loop.run(self._open_and_wait_async(file_path), timeout=t)
-        except asyncio.TimeoutError as e:
-            eventlog.log_timeout(server_id, file_path)
-            logger.debug("LSP diagnostics timeout for %s: %s", file_path, e)
-            self._mark_broken_for_file(file_path, e)
-            return []
         except Exception as e:  # noqa: BLE001
-            eventlog.log_server_error(server_id, file_path, e)
-            logger.debug("LSP diagnostics fetch failed for %s: %s", file_path, e)
+            if isinstance(e, asyncio.TimeoutError):
+                eventlog.log_timeout(server_id, file_path)
+                logger.debug("LSP diagnostics timeout for %s: %s", file_path, e)
+            else:
+                eventlog.log_server_error(server_id, file_path, e)
+                logger.debug("LSP diagnostics fetch failed for %s: %s", file_path, e)
             self._mark_broken_for_file(file_path, e)
             return []
 
@@ -353,9 +333,7 @@ class LSPService:
         ``exc`` is used only for logging.
         """
         srv = find_server_for_file(file_path)
-        if srv is None:
-            return
-        key = self._broken_key(srv, file_path)
+        key = self._broken_key(srv, file_path) if srv is not None else None
         if key is None:
             return
         already_broken = key in self._broken
@@ -372,7 +350,7 @@ class LSPService:
                 pass
 
         if not already_broken:
-            eventlog.log_spawn_failed(srv.server_id, key[1], exc)
+            eventlog.log_spawn_failed(key[0], key[1], exc)
 
     def shutdown(self) -> None:
         """Tear down all clients and stop the background loop."""
@@ -449,9 +427,7 @@ class LSPService:
             return None
         per_server_root = srv.resolve_root(file_path, ws_root)
         if per_server_root is None:
-            eventlog.log_disabled(
-                srv.server_id, file_path, "exclude marker hit (server gated off)"
-            )
+            eventlog.log_disabled(srv.server_id, file_path, "exclude marker hit (server gated off)")
             return None
 
         key = (srv.server_id, per_server_root)
@@ -470,51 +446,54 @@ class LSPService:
             except Exception:  # noqa: BLE001
                 return None
 
-        loop = asyncio.get_running_loop()
-        spawn_future: asyncio.Future = loop.create_future()
+        spawn_future: asyncio.Future = asyncio.get_running_loop().create_future()
         with self._state_lock:
             self._spawning[key] = spawn_future
         try:
-            ctx = ServerContext(
-                workspace_root=per_server_root,
-                install_strategy=self._install_strategy,
-                binary_overrides=self._binary_overrides,
-                env_overrides=self._env_overrides,
-                init_overrides=self._init_overrides,
-            )
-            spec = srv.build_spawn(per_server_root, ctx)
-            if spec is None:
-                # Binary not locatable (auto-install off, manual-only, or
-                # install failed) — surface once via the structured logger.
-                eventlog.log_server_unavailable(srv.server_id, srv.server_id)
+            client = await self._spawn_client(srv, per_server_root)
+            if client is not None:
+                with self._state_lock:
+                    self._clients[key] = client
+                    self._last_used[key] = time.time()
+                eventlog.log_active(srv.server_id, per_server_root)
+            else:
                 self._broken.add(key)
-                spawn_future.set_result(None)
-                return None
-            client = LSPClient(
-                server_id=srv.server_id,
-                workspace_root=spec.workspace_root,
-                command=spec.command,
-                env=spec.env,
-                cwd=spec.cwd,
-                initialization_options=spec.initialization_options,
-                seed_diagnostics_on_first_push=spec.seed_diagnostics_on_first_push or srv.seed_first_push,
-            )
-            try:
-                await client.start()
-            except Exception as e:  # noqa: BLE001
-                eventlog.log_spawn_failed(srv.server_id, per_server_root, e)
-                self._broken.add(key)
-                spawn_future.set_result(None)
-                return None
-            with self._state_lock:
-                self._clients[key] = client
-                self._last_used[key] = time.time()
-            eventlog.log_active(srv.server_id, per_server_root)
             spawn_future.set_result(client)
             return client
         finally:
             with self._state_lock:
                 self._spawning.pop(key, None)
+
+    async def _spawn_client(self, srv: ServerDef, root: str) -> Optional[LSPClient]:
+        """Resolve the binary and start a client; ``None`` (after logging) when either fails."""
+        ctx = ServerContext(
+            workspace_root=root,
+            install_strategy=self._install_strategy,
+            binary_overrides=self._binary_overrides,
+            env_overrides=self._env_overrides,
+            init_overrides=self._init_overrides,
+        )
+        spec = srv.build_spawn(root, ctx)
+        if spec is None:
+            # Binary not locatable (auto-install off, manual-only, or
+            # install failed) — surface once via the structured logger.
+            eventlog.log_server_unavailable(srv.server_id, srv.server_id)
+            return None
+        client = LSPClient(
+            server_id=srv.server_id,
+            workspace_root=spec.workspace_root,
+            command=spec.command,
+            env=spec.env,
+            cwd=spec.cwd,
+            initialization_options=spec.initialization_options,
+            seed_diagnostics_on_first_push=spec.seed_diagnostics_on_first_push or srv.seed_first_push,
+        )
+        try:
+            await client.start()
+        except Exception as e:  # noqa: BLE001
+            eventlog.log_spawn_failed(srv.server_id, root, e)
+            return None
+        return client
 
     async def _start_idle_reaper(self) -> None:
         self._idle_reaper_task = asyncio.create_task(self._idle_reaper_loop())
@@ -542,27 +521,16 @@ class LSPService:
     async def _reap_idle_once(self) -> None:
         cutoff = time.time() - self._idle_timeout
         with self._state_lock:
-            idle_keys = [
-                key
-                for key in self._clients
-                if self._last_used.get(key, 0) < cutoff
-            ]
+            idle_keys = [key for key in self._clients if self._last_used.get(key, 0) < cutoff]
             clients = [self._clients.pop(key) for key in idle_keys]
             for key in idle_keys:
                 self._last_used.pop(key, None)
         if clients:
-            eventlog.log_reaped(
-                [(c.server_id, c.workspace_root) for c in clients],
-                self._idle_timeout,
-            )
-            await asyncio.gather(
-                *(client.shutdown() for client in clients),
-                return_exceptions=True,
-            )
+            eventlog.log_reaped([(c.server_id, c.workspace_root) for c in clients], self._idle_timeout)
+            await asyncio.gather(*(client.shutdown() for client in clients), return_exceptions=True)
 
     async def _shutdown_async(self) -> None:
-        reaper = self._idle_reaper_task
-        self._idle_reaper_task = None
+        reaper, self._idle_reaper_task = self._idle_reaper_task, None
         if reaper is not None:
             reaper.cancel()
             await asyncio.gather(reaper, return_exceptions=True)
@@ -571,21 +539,13 @@ class LSPService:
             self._clients.clear()
             self._broken.clear()
             self._last_used.clear()
-        await asyncio.gather(
-            *(c.shutdown() for c in clients),
-            return_exceptions=True,
-        )
+        await asyncio.gather(*(c.shutdown() for c in clients), return_exceptions=True)
 
     def get_status(self) -> Dict[str, Any]:
         """Return a snapshot of the service for ``hermes lsp status``."""
         with self._state_lock:
             clients = [
-                {
-                    "server_id": k[0],
-                    "workspace_root": k[1],
-                    "state": c.state,
-                    "running": c.is_running,
-                }
+                {"server_id": k[0], "workspace_root": k[1], "state": c.state, "running": c.is_running}
                 for k, c in self._clients.items()
             ]
             broken = list(self._broken)

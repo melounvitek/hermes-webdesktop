@@ -2,16 +2,12 @@
 
 Hermes runs real language servers (pyright, gopls, rust-analyzer, ...) as
 subprocesses and pipes their ``textDocument/publishDiagnostics`` output into
-the post-write lint delta filter used by ``write_file`` and ``patch``.
-
-LSP is **gated on git workspace detection**: outside a git repository the
+the post-write lint delta filter used by ``write_file`` and ``patch``.  LSP is
+**gated on git workspace detection**: outside a git repository the
 file_operations layer falls back to its in-process syntax checks, so users
 on user-home cwd's (e.g. Telegram gateway chats) never spawn daemons.
-
-Public API: ``get_service()`` returns the singleton :class:`LSPService` (or
-``None`` when disabled); the wiring lives in
-:func:`tools.file_operations.FileOperations._check_lint_delta`.  Architecture
-docs: ``website/docs/user-guide/features/lsp.md``.
+``get_service()`` returns the singleton :class:`LSPService` (or ``None`` when
+disabled); wiring: :func:`tools.file_operations.FileOperations._check_lint_delta`.
 """
 from __future__ import annotations
 
@@ -43,15 +39,13 @@ def get_service() -> Optional[LSPService]:
     kernel reaps the stateless servers with their parent.)
     """
     global _service, _atexit_registered
-    if _service is not None:
-        return _active(_service)
-    with _service_lock:
-        if _service is not None:
-            return _active(_service)
-        _service = LSPService.create_from_config()
-        if not _atexit_registered:
-            atexit.register(_atexit_shutdown)
-            _atexit_registered = True
+    if _service is None:
+        with _service_lock:
+            if _service is None:
+                _service = LSPService.create_from_config()
+                if not _atexit_registered:
+                    atexit.register(_atexit_shutdown)
+                    _atexit_registered = True
     return _active(_service)
 
 
@@ -59,8 +53,7 @@ def shutdown_service() -> None:
     """Tear down the LSP service if one was started.  Idempotent."""
     global _service
     with _service_lock:
-        svc = _service
-        _service = None
+        svc, _service = _service, None
     if svc is not None:
         try:
             svc.shutdown()
