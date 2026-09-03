@@ -1469,6 +1469,35 @@ def _probe_launchd_service_running() -> bool:
     return get_launchd_plist_path().exists() and _launchctl_label_supervising_process(get_launchd_label())
 
 
+def _s6_gateway_snapshot(gateway_pids: tuple[int, ...]) -> GatewayRuntimeSnapshot | None:
+    """Snapshot for an s6-supervised container gateway, or None when s6 isn't the service manager."""
+    from hermes_cli.service_manager import detect_service_manager, get_service_manager
+
+    if detect_service_manager() != "s6":
+        return None
+    service_name = f"gateway-{_profile_suffix() or 'default'}"
+    mgr = get_service_manager()
+    service_installed = service_running = False
+    try:
+        service_dir = getattr(mgr, "scandir", None)
+        if service_dir is not None:
+            service_installed = (service_dir / service_name).is_dir()
+    except Exception:
+        service_installed = False
+    if service_installed:
+        try:
+            service_running = bool(mgr.is_running(service_name))
+        except Exception:
+            service_running = False
+    return GatewayRuntimeSnapshot(
+        manager="s6 (container supervisor)",
+        service_installed=service_installed,
+        service_running=service_running,
+        gateway_pids=gateway_pids,
+        service_scope="s6",
+    )
+
+
 def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot:
     """Return a unified view of gateway liveness for the current profile."""
     gateway_pids = tuple(find_gateway_pids())
@@ -1480,29 +1509,9 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
     if is_linux() and is_container():
         # Report s6 supervision under our /init; other container runtimes keep "docker (foreground)".
         try:
-            from hermes_cli.service_manager import detect_service_manager, get_service_manager
-            if detect_service_manager() == "s6":
-                service_name = f"gateway-{_profile_suffix() or 'default'}"
-                mgr = get_service_manager()
-                service_installed = service_running = False
-                try:
-                    service_dir = getattr(mgr, "scandir", None)
-                    if service_dir is not None:
-                        service_installed = (service_dir / service_name).is_dir()
-                except Exception:
-                    service_installed = False
-                if service_installed:
-                    try:
-                        service_running = bool(mgr.is_running(service_name))
-                    except Exception:
-                        service_running = False
-                return GatewayRuntimeSnapshot(
-                    manager="s6 (container supervisor)",
-                    service_installed=service_installed,
-                    service_running=service_running,
-                    gateway_pids=gateway_pids,
-                    service_scope="s6",
-                )
+            snapshot = _s6_gateway_snapshot(gateway_pids)
+            if snapshot is not None:
+                return snapshot
         except Exception:
             pass  # Fall through to the legacy label on any detection error.
         return GatewayRuntimeSnapshot(manager="docker (foreground)", gateway_pids=gateway_pids)
@@ -1747,9 +1756,7 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
 
 def _reaper_exclusion_pids(extra_exclude: set | None) -> set[int]:
     """PIDs the orphan reaper must never kill: self, caller extras, service-managed, recorded."""
-    own = {os.getpid()}
-    if extra_exclude:
-        own |= extra_exclude
+    own = {os.getpid()} | (extra_exclude or set())
     # Service-managed gateways are never orphans (on macOS supports_systemd_services() is False, so
     # a launchd gateway would otherwise be SIGTERM'd). all_profiles=True: the scan sees every
     # profile's gateway and a sibling's launchd gateway must not be reaped.
@@ -1761,22 +1768,13 @@ def _reaper_exclusion_pids(extra_exclude: set | None) -> set[int]:
     # standalone gateway would be hard-killed. For a KILL exclusion list a stale PID at worst spares
     # one process; a false-negative kills a live gateway.
     try:
-        from gateway.status import (
-            _pid_from_record,
-            _read_gateway_lock_record,
-            _read_pid_record,
-            get_running_pid,
-        )
+        from gateway.status import _pid_from_record, _read_gateway_lock_record, _read_pid_record, get_running_pid
 
-        recorded_pids = set()
-        for _record in (_read_pid_record(), _read_gateway_lock_record()):
-            _raw_pid = _pid_from_record(_record)
-            if _raw_pid and _raw_pid > 0:
-                recorded_pids.add(_raw_pid)
-        _probed = get_running_pid(cleanup_stale=False)
-        if _probed and _probed > 0:
-            recorded_pids.add(_probed)
+        recorded_pids = {_pid_from_record(rec) for rec in (_read_pid_record(), _read_gateway_lock_record())}
+        recorded_pids.add(get_running_pid(cleanup_stale=False))
         for recorded in recorded_pids:
+            if not recorded or recorded <= 0:
+                continue
             own.add(recorded)
             try:
                 import psutil  # type: ignore
@@ -1866,7 +1864,6 @@ def stop_profile_gateway() -> bool:
         return _reap_unsupervised_gateway_orphans()
 
     _mark_planned_stop(pid)
-
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1891,7 +1888,6 @@ def stop_profile_gateway() -> bool:
         _reap_unsupervised_gateway_orphans(extra_exclude={pid} if pid else None)
     except Exception as exc:
         logger.debug("orphan reap after stop_profile_gateway failed: %s", exc)
-
     return True
 
 
@@ -2149,14 +2145,11 @@ def _ensure_user_systemd_env() -> None:
     """
     uid = os.getuid()  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
     xdg = os.environ.get("XDG_RUNTIME_DIR")
-    if not xdg or not _runtime_dir_is_ours(xdg):
-        runtime_dir = f"/run/user/{uid}"
-        if _runtime_dir_is_ours(runtime_dir):
-            os.environ["XDG_RUNTIME_DIR"] = runtime_dir
+    if (not xdg or not _runtime_dir_is_ours(xdg)) and _runtime_dir_is_ours(f"/run/user/{uid}"):
+        os.environ["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
 
     if "DBUS_SESSION_BUS_ADDRESS" not in os.environ:
-        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")
-        bus_path = Path(xdg_runtime) / "bus"
+        bus_path = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{uid}")) / "bus"
         if _path_exists_safe(bus_path):
             os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
 
@@ -2282,7 +2275,7 @@ def _service_scope_label(system: bool = False) -> str:
 
 
 def get_installed_systemd_scopes() -> list[str]:
-    scopes = []
+    scopes: list[str] = []
     seen_paths: set[Path] = set()
     for system, label in ((False, "user"), (True, "system")):
         unit_path = get_systemd_unit_path(system=system)
@@ -2489,30 +2482,18 @@ def _default_system_service_user() -> str | None:
 def prompt_linux_gateway_install_scope() -> str | None:
     # Only root can create a boot-time system service, so that scope is offered only to root
     # sessions — a non-root user is never handed a "re-run under sudo" recipe.
-    user_option = "User service (no sudo; best for laptops/dev boxes; may need linger after logout)"
-    if os.geteuid() != 0:  # windows-footgun: ok — Linux systemd install wizard, never invoked on Windows
-        choice = prompt_choice(
-            "  Choose how the gateway should run in the background:",
-            [user_option, "Skip service install for now"],
-            default=0,
-        )
-        if choice == 0:
-            print_info(
-                "  Tip: for a boot-time system service, re-run setup as root "
-                "(e.g. from a root shell or `sudo -i`)."
-            )
-        return {0: "user", 1: None}[choice]
-
-    choice = prompt_choice(
-        "  Choose how the gateway should run in the background:",
-        [
-            user_option,
-            "System service (starts on boot; runs as your chosen user)",
-            "Skip service install for now",
-        ],
-        default=0,
-    )
-    return {0: "user", 1: "system", 2: None}[choice]
+    is_root = os.geteuid() == 0  # windows-footgun: ok — Linux systemd install wizard, never invoked on Windows
+    options = ["User service (no sudo; best for laptops/dev boxes; may need linger after logout)"]
+    values: list[str | None] = ["user"]
+    if is_root:
+        options.append("System service (starts on boot; runs as your chosen user)")
+        values.append("system")
+    options.append("Skip service install for now")
+    values.append(None)
+    choice = prompt_choice("  Choose how the gateway should run in the background:", options, default=0)
+    if not is_root and choice == 0:
+        print_info("  Tip: for a boot-time system service, re-run setup as root (e.g. from a root shell or `sudo -i`).")
+    return values[choice]
 
 
 def install_linux_gateway_from_setup(force: bool = False, enable_on_startup: bool = True) -> tuple[str | None, bool]:
@@ -2569,11 +2550,9 @@ def ensure_gateway_service(context: str = "setup") -> bool:
     try:
         if _is_service_running():
             return True
-
         if not _is_service_installed():
             if supports_systemd and has_conflicting_systemd_units():
-                # Both user and system units would fight over bot tokens.
-                # Don't pile a fresh install onto a conflicted state.
+                # Both units would fight over bot tokens; don't pile a fresh install onto a conflicted state.
                 print_systemd_scope_conflict_warning()
                 return False
             print_info("  Installing the gateway background service ...")
@@ -2582,11 +2561,9 @@ def ensure_gateway_service(context: str = "setup") -> bool:
             elif is_macos():
                 launchd_install(force=False)
             else:
-                # Registers the Scheduled Task AND starts it.
-                _gw_windows().install(force=False)
+                _gw_windows().install(force=False)  # Registers the Scheduled Task AND starts it.
                 print_success("  Gateway service installed and started.")
                 return True
-
         if supports_systemd:
             systemd_start()
         elif is_macos():
@@ -2602,8 +2579,7 @@ def ensure_gateway_service(context: str = "setup") -> bool:
         print_warning(f"  Gateway service needs root for this scope: {e}")
         _print_system_scope_remediation("start")
     except SystemExit:
-        # Some install/start paths sys.exit() on hard failures (e.g. temp-HOME
-        # guard). A background-service failure must never abort setup/import.
+        # Some install/start paths sys.exit() on hard failures (temp-HOME guard); never abort setup/import.
         print_warning("  Gateway service install did not complete.")
         print_info("  You can retry manually: hermes gateway install")
     except Exception as e:
@@ -3886,23 +3862,15 @@ def _spawn_deferred_launchd_reload(
         f"launchctl bootout {q_target} 2>/dev/null; "
         # Wait for the OLD gateway to exit: bootout only SIGTERMs and every bootstrap during the drain fails EIO.
         f"_wait_deadline=$(($(date +%s) + {_reload_budget})); "
-        f"while kill -0 {gateway_pid} 2>/dev/null; do "
-        f"  if [ $(date +%s) -ge $_wait_deadline ]; then "
+        f"while kill -0 {gateway_pid} 2>/dev/null; do   if [ $(date +%s) -ge $_wait_deadline ]; then "
         f"    echo \"[{stamp}] old gateway pid {gateway_pid} still alive after {_reload_budget}s drain wait — bootstrapping anyway\" >> {q_log}; "
-        f"    break; "
-        f"  fi; "
-        f"  sleep 1; "
-        f"done; "
+        f"    break;   fi;   sleep 1; done; "
         # Let launchd finish unregistering the label after the process exits.
-        f"sleep 1; "
-        f"_deadline=$(($(date +%s) + {_reload_budget})); "
-        f"while :; do "
+        f"sleep 1; _deadline=$(($(date +%s) + {_reload_budget})); while :; do "
         f"  launchctl bootstrap {shlex.quote(domain)} {shlex.quote(str(plist_path))} 2>/dev/null; "
         f"  if {listed}; then break; fi; "
         f"  echo \"[{stamp}] bootstrap not yet registered for {q_target} — retrying\" >> {q_log}; "
-        f"  if [ $(date +%s) -ge $_deadline ]; then break; fi; "
-        f"  sleep 2; "
-        f"done; "
+        f"  if [ $(date +%s) -ge $_deadline ]; then break; fi;   sleep 2; done; "
         f"if ! {listed}; then "
         f"  echo \"[{stamp}] FAILED launchd reload for {q_target} — service NOT registered after {_reload_budget}s of retries\" >> {q_log}; "
         f"fi; "
