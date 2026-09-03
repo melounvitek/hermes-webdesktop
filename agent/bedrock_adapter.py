@@ -6,6 +6,7 @@ and responses normalized back to OpenAI-shaped objects.
 """
 
 import base64
+import importlib
 import json
 import logging
 import os
@@ -150,8 +151,7 @@ class BedrockOpenAISigV4Auth(httpx.Auth):
         if credentials is None:
             raise RuntimeError(
                 "No AWS credentials available for Bedrock OpenAI Responses. "
-                "Configure AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, "
-                "SSO, or an instance/task role."
+                "Configure AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, SSO, or an instance/task role."
             )
         # SigV4 must own Authorization: drop the SDK's placeholder bearer header.
         headers = {str(k): str(v) for k, v in request.headers.items()
@@ -170,8 +170,7 @@ def build_bedrock_openai_http_client(region: str, *, timeout: Optional[float] = 
     return httpx.Client(**kwargs)
 
 
-def configure_bedrock_openai_client_kwargs(
-    client_kwargs: Dict[str, Any], *, timeout: Optional[float] = None) -> Dict[str, Any]:
+def configure_bedrock_openai_client_kwargs(client_kwargs: Dict[str, Any], *, timeout: Optional[float] = None) -> Dict[str, Any]:
     """Install SigV4 auth on OpenAI SDK kwargs for Bedrock Mantle; a real API key keeps the SDK's
     bearer auth, the ``aws-sdk``/``no-key-required`` placeholders mean IAM chain auth."""
     base_url = str(client_kwargs.get("base_url") or "")
@@ -196,7 +195,6 @@ _STALE_LIB_MODULE_PREFIXES = ("urllib3.", "botocore.", "boto3.")
 
 def _stale_error_types() -> tuple:
     """botocore + urllib3 transport-failure exception classes (best-effort import)."""
-    import importlib
     types: list = []
     for module, names in (
         ("botocore.exceptions", ("ConnectionError", "HTTPClientError")),
@@ -232,7 +230,6 @@ def is_streaming_access_denied_error(exc: BaseException) -> bool:
 
 
 # --- AWS credential detection ---
-
 # Priority order; the first group whose vars are ALL set names the auth source.
 _AWS_AUTH_ENV_CHAIN: Tuple[Tuple[str, ...], ...] = (
     ("AWS_BEARER_TOKEN_BEDROCK",),                    # Bedrock bearer token
@@ -300,7 +297,6 @@ def bedrock_model_ids_or_none() -> Optional[List[str]]:
 
 
 # --- Tool-calling / prompt-cache capability detection ---
-
 # Models known to reject toolConfig with a ValidationException; unknown models assumed OK.
 _NON_TOOL_CALLING_PATTERNS = [
     "deepseek.r1", "deepseek-r1",  # DeepSeek R1 (both ID formats) — reasoning only
@@ -328,11 +324,8 @@ def _model_supports_prompt_cache(model_id: str) -> bool:
 # record the verdict, drop the marker there for the rest of the process, and retry once without it.
 
 CACHE_POINT_PLACEMENTS = ("tools", "system", "messages")
-
-# model_id (lowercased) → placements Bedrock has rejected this process.
-_CACHE_POINT_REJECTIONS: Dict[str, set] = {}
-
-# "#/toolConfig/tools/18: extraneous key [cachePoint] is not permitted"
+_CACHE_POINT_REJECTIONS: Dict[str, set] = {}  # model_id (lowercased) → placements Bedrock has rejected this process
+# e.g. "#/toolConfig/tools/18: extraneous key [cachePoint] is not permitted"
 _CACHE_POINT_PATH_PATTERN = re.compile(r"#/(?P<path>[A-Za-z0-9_./\[\]-]*)", re.IGNORECASE)
 _CACHE_POINT = {"cachePoint": {"type": "default"}}
 
@@ -410,9 +403,8 @@ def recover_from_cache_point_rejection(exc: BaseException, kwargs: Dict[str, Any
     model_id = str(kwargs.get("modelId", ""))
     note_cache_point_rejection(model_id, placement)
     logger.warning(
-        "bedrock: %s rejected a cachePoint block in %s — dropping that cache "
-        "marker for this model and retrying. Prompt caching stays active for "
-        "the remaining sections.", model_id or "model", placement,
+        "bedrock: %s rejected a cachePoint block in %s — dropping that cache marker for this model and "
+        "retrying. Prompt caching stays active for the remaining sections.", model_id or "model", placement,
     )
     return retry_kwargs
 
@@ -489,10 +481,6 @@ def _tool_use_block(tool_use_id, name, input_dict) -> Dict:
     return {"toolUse": {"toolUseId": tool_use_id, "name": name, "input": input_dict}}
 
 
-def _tool_use_block_from(tu: Dict) -> Dict:
-    return _tool_use_block(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {}))
-
-
 def _decode_redacted(encoded) -> Optional[bytes]:
     """Strict base64 → bytes; None for empty/non-str/undecodable input."""
     try:
@@ -524,7 +512,8 @@ def _replay_ordered_blocks(ordered_blocks: List) -> List[Dict]:
             if replay:
                 content_blocks.append({"reasoningContent": replay})
         elif "toolUse" in block and isinstance(block["toolUse"], dict):
-            content_blocks.append(_tool_use_block_from(block["toolUse"]))
+            tu = block["toolUse"]
+            content_blocks.append(_tool_use_block(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})))
     return content_blocks
 
 
@@ -578,9 +567,7 @@ def convert_messages_to_converse(messages: List[Dict]) -> Tuple[Optional[List[Di
         elif role == "tool":
             result_content = content if isinstance(content, str) else json.dumps(content)
             append_turn("user", [{"toolResult": {
-                "toolUseId": msg.get("tool_call_id", ""),
-                "content": [{"text": _safe_text(result_content)}],
-            }}])
+                "toolUseId": msg.get("tool_call_id", ""), "content": [{"text": _safe_text(result_content)}]}}])
         elif role == "assistant":
             append_turn("assistant", _assistant_blocks(msg, content) or [dict(_PLACEHOLDER_BLOCK)])
         elif role == "user":
@@ -679,7 +666,7 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
                 ordered_blocks.append({"reasoningContent": ordered_reasoning})
         elif "toolUse" in block:
             tu = block["toolUse"]
-            ordered_blocks.append(_tool_use_block_from(tu))
+            ordered_blocks.append(_tool_use_block(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})))
             parts.tool_calls.append(_tool_call_ns(tu.get("toolUseId", ""), tu.get("name", ""), tu.get("input", {})))
     return parts.build(
         ordered_blocks, response.get("usage", {}), response.get("stopReason", "end_turn"), response.get("modelId", ""),
@@ -719,12 +706,6 @@ def stream_converse_with_callbacks(
             parts.text_parts.append("".join(current_text_buffer))
             current_text_buffer.clear()
 
-    def on_reasoning(reasoning: Any) -> None:
-        if not isinstance(reasoning, dict) or not (reasoning.get("text", "") or _encode_redacted(reasoning.get("redactedContent"))):
-            return
-        block = current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})
-        parts.absorb_reasoning(reasoning, block, on_reasoning_delta)
-
     for event in event_stream.get("stream", []):
         if on_event is not None:
             with suppress(Exception):
@@ -754,7 +735,10 @@ def stream_converse_with_callbacks(
             elif "toolUse" in delta and current_tool is not None:
                 current_tool["input_json"] += delta["toolUse"].get("input", "")
             elif "reasoningContent" in delta:
-                on_reasoning(delta["reasoningContent"])
+                reasoning = delta["reasoningContent"]
+                if isinstance(reasoning, dict) and (reasoning.get("text", "") or _encode_redacted(reasoning.get("redactedContent"))):
+                    block = current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})
+                    parts.absorb_reasoning(reasoning, block, on_reasoning_delta)
         elif "contentBlockStop" in event:
             if current_tool is not None:
                 input_dict = _parse_tool_args(current_tool["input_json"])  # "" → {} via the JSON-error path
@@ -785,15 +769,11 @@ def build_converse_kwargs(
     second-newest message (survives as the tail grows — mirrors Anthropic system_and_3), each only if the
     model supports caching and Bedrock has not rejected that placement."""
     system_prompt, converse_messages = convert_messages_to_converse(messages)
-    cache_enabled = _model_supports_prompt_cache(model)
-
-    def cache_here(placement: str) -> bool:
-        return cache_enabled and cache_point_allowed(model, placement)
-
+    cache_at = {p for p in CACHE_POINT_PLACEMENTS if cache_point_allowed(model, p)} if _model_supports_prompt_cache(model) else set()
     inference_config: Dict[str, Any] = {} if max_tokens is None else {"maxTokens": max_tokens}
     kwargs: Dict[str, Any] = {"modelId": model, "messages": converse_messages, "inferenceConfig": inference_config}
     if system_prompt:
-        kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if cache_here("system") else system_prompt
+        kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if "system" in cache_at else system_prompt
     from agent.anthropic_adapter import _forbids_sampling_params
     if not _forbids_sampling_params(model):
         inference_config.update({k: v for k, v in (("temperature", temperature), ("topP", top_p)) if v is not None})
@@ -807,8 +787,8 @@ def build_converse_kwargs(
             "The agent will operate in text-only mode.", model
         )
     elif converse_tools:
-        kwargs["toolConfig"] = {"tools": converse_tools + [dict(_CACHE_POINT)] if cache_here("tools") else converse_tools}
-    if cache_here("messages") and len(converse_messages) >= 2:
+        kwargs["toolConfig"] = {"tools": converse_tools + [dict(_CACHE_POINT)] if "tools" in cache_at else converse_tools}
+    if "messages" in cache_at and len(converse_messages) >= 2:
         content = converse_messages[-2].get("content")
         if isinstance(content, list) and content:
             content.append(dict(_CACHE_POINT))
@@ -856,10 +836,8 @@ def reset_discovery_cache():
 
 
 def _model_entry(model_id: str, name: Any, provider: str, input_mods: list, output_mods: list) -> Dict[str, Any]:
-    return {
-        "id": model_id, "name": (name or model_id).strip(), "provider": provider,
-        "input_modalities": input_mods, "output_modalities": output_mods, "streaming": True,
-    }
+    return {"id": model_id, "name": (name or model_id).strip(), "provider": provider,
+            "input_modalities": input_mods, "output_modalities": output_mods, "streaming": True}
 
 
 def _list_foundation_models(client, filter_set: set, models: List[Dict[str, Any]]) -> None:
