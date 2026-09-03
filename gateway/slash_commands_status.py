@@ -99,16 +99,12 @@ def _status_model_route(status_agent, persisted_route: dict, session_row: dict, 
     if not model_name or not provider_name or not context_total:
         user_config = _quiet_sync(_load_gateway_config, {})
     model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
-    if not isinstance(model_cfg, dict):
-        model_cfg = {}
-    if not model_name:
-        model_name = _resolve_gateway_model(user_config)
-    if not provider_name:
-        provider_name = _clean_str(model_cfg.get("provider"))
-    if not context_total:
-        configured_context = model_cfg.get("context_length")
-        if isinstance(configured_context, int) and configured_context > 0:
-            context_total = configured_context
+    model_cfg = model_cfg if isinstance(model_cfg, dict) else {}
+    model_name = model_name or _resolve_gateway_model(user_config)
+    provider_name = provider_name or _clean_str(model_cfg.get("provider"))
+    configured_context = model_cfg.get("context_length")
+    if not context_total and isinstance(configured_context, int) and configured_context > 0:
+        context_total = configured_context
     return model_name, provider_name, context_used, context_total
 
 
@@ -401,17 +397,13 @@ class GatewayStatusCommandsMixin:
         agent_rows.sort(key=lambda row: row["elapsed"], reverse=True)
         procs = _quiet_sync(process_registry.list_sessions, [])
         running_processes = [p for p in procs if p.get("status") == "running"]
-        background_tasks = [
-            task for task in (getattr(self, "_background_tasks", set()) or set())
-            if hasattr(task, "done") and not task.done()
-        ]
+        background_tasks = [task for task in (getattr(self, "_background_tasks", set()) or set())
+                            if hasattr(task, "done") and not task.done()]
 
         # Background (async) delegations — delegate_task(background=true).
         from tools.async_delegation import list_async_delegations
-        delegations = [
-            d for d in _quiet_sync(list_async_delegations, [])
-            if d.get("status") in ("running", "stalling", "finalizing")
-        ]
+        delegations = [d for d in _quiet_sync(list_async_delegations, [])
+                       if d.get("status") in ("running", "stalling", "finalizing")]
 
         def _agent_row(idx_row):
             idx, row = idx_row
@@ -464,9 +456,7 @@ class GatewayStatusCommandsMixin:
             payload = self._session_context_breakdown(agent, source)
             if not (payload.get("categories") or []):
                 return []
-            details = None
-            if expanded:
-                details = _quiet_sync(lambda: compute_context_details(agent), {"skills": [], "toolsets": []})
+            details = _quiet_sync(lambda: compute_context_details(agent), {"skills": [], "toolsets": []}) if expanded else None
             return render_context_breakdown_lines(payload, details=details, grid=False)
         except Exception:
             return []
@@ -474,11 +464,9 @@ class GatewayStatusCommandsMixin:
     def _session_context_breakdown(self, agent, source) -> dict:
         """Per-category context estimate (chars/4) for *agent* over the session transcript (sync)."""
         from agent.context_breakdown import compute_session_context_breakdown
-
-        def _history():
-            entry = self.session_store.get_or_create_session(source)
-            return self.session_store.load_transcript(entry.session_id) or []
-        return compute_session_context_breakdown(agent, _quiet_sync(_history, []))
+        store = self.session_store
+        history = _quiet_sync(lambda: store.load_transcript(store.get_or_create_session(source).session_id) or [], [])
+        return compute_session_context_breakdown(agent, history)
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:
         """/usage per-category context breakdown (chars/4 estimate). Returns [] and never raises."""
@@ -495,8 +483,7 @@ class GatewayStatusCommandsMixin:
                     continue
                 cat_id = str(cat.get("id") or "")
                 label = t(f"gateway.usage.breakdown_cat_{cat_id}")
-                # Missing key -> t() echoes the key back; fall back to the engine's English label.
-                if label.endswith(f"breakdown_cat_{cat_id}"):
+                if label.endswith(f"breakdown_cat_{cat_id}"):  # missing key: t() echoes it back
                     label = str(cat.get("label") or cat_id)
                 pct = round(tokens / total * 100) if total else 0
                 out.append(t("gateway.usage.breakdown_line", label=label, count=_fmt(tokens), pct=pct))
@@ -510,7 +497,7 @@ class GatewayStatusCommandsMixin:
         source = event.source
         session_key = self._session_key_for_source(source)
         raw_args = event.get_command_args().strip()
-        args = [a.lower() for a in raw_args.split()] if raw_args else []
+        args = raw_args.lower().split()
         wants_reset = bool(args) and args[0] == "reset"
         if args and not wants_reset:
             return t("gateway.usage.unknown_subcommand", args=raw_args)

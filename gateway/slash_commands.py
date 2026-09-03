@@ -188,13 +188,9 @@ def _home_thread_from_source(source) -> Optional[str]:
     thread_id = getattr(source, "thread_id", None)
     if not thread_id:
         return None
-    if (
-        getattr(source, "platform", None) == Platform.SLACK
-        and getattr(source, "message_id", None)
-        and str(thread_id) == str(source.message_id)
-    ):
-        return None
-    return str(thread_id)
+    synthetic = (getattr(source, "platform", None) == Platform.SLACK and getattr(source, "message_id", None)
+                 and str(thread_id) == str(source.message_id))
+    return None if synthetic else str(thread_id)
 
 
 class GatewaySlashCommandsMixin(
@@ -220,9 +216,7 @@ class GatewaySlashCommandsMixin(
                 entry = cache.get(session_key)
         except Exception:
             return None
-        if isinstance(entry, (tuple, list)):
-            return entry[0] if entry else None
-        return entry or None
+        return (entry[0] if entry else None) if isinstance(entry, (tuple, list)) else entry or None
 
     def _resident_agent_for(self, session_key: str):
         """The live running agent for *session_key*, else the cached one, else None. The pending
@@ -351,8 +345,8 @@ class GatewaySlashCommandsMixin(
         source = event.source
         policy = policy_for_source(self.config, source)
         platform = source.platform.value if source and source.platform else "?"
-        chat_type = (source.chat_type if source else "") or "dm"
-        scope = "DM" if chat_type.lower() in {"dm", "direct", "private", ""} else "group/channel"
+        chat_type = ((source.chat_type if source else "") or "dm").lower()
+        scope = "DM" if chat_type in {"dm", "direct", "private", ""} else "group/channel"
         user_id = (source.user_id if source else None) or "?"
         head = f"**You** — {platform} ({scope})\nUser ID: `{user_id}`\n"
         if not policy.enabled:
@@ -490,11 +484,11 @@ class GatewaySlashCommandsMixin(
         # e.g. Slack's persistent assistant.threads.setStatus survives a gateway restart or a turn
         # that died without a final send.
         adapter = getattr(self, "adapters", {}).get(source.platform)
-        if adapter and hasattr(adapter, "_stop_typing_with_metadata"):
-            try:
+        try:
+            if adapter and hasattr(adapter, "_stop_typing_with_metadata"):
                 await adapter._stop_typing_with_metadata(source.chat_id, self._reply_metadata(event))
-            except Exception:
-                logger.debug("Failed to clear typing on /stop with no active agent", exc_info=True)
+        except Exception:
+            logger.debug("Failed to clear typing on /stop with no active agent", exc_info=True)
         return t("gateway.stop.no_active")
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:
@@ -756,14 +750,11 @@ class GatewaySlashCommandsMixin(
 
         Diff body is truncated hard here (chat is not a pager); platform senders clamp further.
         """
-        stat_only = False
+        args = [a.lower() for a in event.get_command_args().strip().split()]
+        stat_only = bool({"--stat", "stat"} & set(args))
         mode = "working"
-        for arg in event.get_command_args().strip().split():
-            low = arg.lower()
-            if low in ("--stat", "stat"):
-                stat_only = True
-            else:
-                mode = _DIFF_MODE_BY_ARG.get(low, mode)
+        for low in args:
+            mode = _DIFF_MODE_BY_ARG.get(low, mode)
         cwd = self._terminal_cwd()
         if mode == "session":
             # Cumulative checkpoint-baseline diff.
