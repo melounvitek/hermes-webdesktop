@@ -13,6 +13,7 @@ timer that keeps the selector timeout finite so async recovery tasks can resume.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import faulthandler
 import json
 import logging
@@ -27,7 +28,6 @@ from typing import Any, Callable, Dict, Optional
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
-import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,7 @@ class _LoopLivenessWatchdogHandle:
 
 
 def _arm_loop_floor_timer(
-    loop: asyncio.AbstractEventLoop,
-    interval: float = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S,
+    loop: asyncio.AbstractEventLoop, interval: float = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S
 ) -> _LoopFloorTimerHandle:
     """Keep at least one timer pending so selector waits remain bounded."""
     try:
@@ -170,13 +169,8 @@ def start_loop_liveness_watchdog(
                 return
             # Record the exit in the lifecycle sentinel so the next boot reports
             # "watchdog hard-exit" rather than an unclean SIGKILL/OOM death.
-            try:
-                from gateway.lifecycle_ledger import mark_exited
-                mark_exited(exit_code, reason="loop_liveness_watchdog")
-            except Exception:
-                pass
+            _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
             os._exit(exit_code)
-            return
 
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
     try:
@@ -187,14 +181,22 @@ def start_loop_liveness_watchdog(
     return _LoopLivenessWatchdogHandle(stop_event, thread)
 
 
-def _process_hermes_home() -> Path:
-    """HERMES_HOME for process-level identity files (ignore profile overrides)."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    return Path(val) if val else get_hermes_home()
+def _mark_exited_quietly(exit_code: int, reason: str) -> None:
+    """Best-effort lifecycle-ledger stamp so the next boot names the watchdog, not SIGKILL/OOM."""
+    try:
+        from gateway.lifecycle_ledger import mark_exited
+
+        mark_exited(exit_code, reason=reason)
+    except Exception:
+        pass
 
 
 def _home(home: Optional[Path]) -> Path:
-    return home if home is not None else _process_hermes_home()
+    """``home`` or the process-level HERMES_HOME (env, ignoring profile overrides)."""
+    if home is not None:
+        return home
+    val = os.environ.get("HERMES_HOME", "").strip()
+    return Path(val) if val else get_hermes_home()
 
 
 def get_loop_heartbeat_path(home: Optional[Path] = None) -> Path:
@@ -209,9 +211,7 @@ def get_loop_tick_socket_path(home: Optional[Path] = None, pid: Optional[int] = 
     this gateway's witness. Served by the loop itself (``_tick_socket_handler``),
     so an answer proves the loop dispatches — what the off-loop heartbeat can't.
     """
-    return _home(home).joinpath(
-        "state", f"gateway.loop-tick.{int(pid if pid is not None else os.getpid())}.sock"
-    )
+    return _home(home) / "state" / f"gateway.loop-tick.{int(pid if pid is not None else os.getpid())}.sock"
 
 
 def get_shutdown_watchdog_dump_path(home: Optional[Path] = None) -> Path:
@@ -279,30 +279,25 @@ def _write_watchdog_dump(dump_path: Path, *, delay_s: float, snapshot: Optional[
         "fired_at": datetime.now(timezone.utc).isoformat(),
         "snapshot": snapshot or {},
     }
-    try:
-        with open(dump_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(header, default=str) + "\n")
-            fh.write("--- faulthandler dump (all threads) ---\n")
-            fh.flush()
-            try:
-                faulthandler.dump_traceback(file=fh, all_threads=True)
-            except Exception:
-                fh.write("(faulthandler.dump_traceback failed)\n")
-            fh.write("--- end dump ---\n")
-            fh.flush()
-    except Exception:
-        pass
+    with contextlib.suppress(Exception), open(dump_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(header, default=str) + "\n")
+        fh.write("--- faulthandler dump (all threads) ---\n")
+        fh.flush()
+        try:
+            faulthandler.dump_traceback(file=fh, all_threads=True)
+        except Exception:
+            fh.write("(faulthandler.dump_traceback failed)\n")
+        fh.write("--- end dump ---\n")
+        fh.flush()
 
     # Also to stderr so journald/launchd capture it even if the disk is wedged.
-    try:
+    with contextlib.suppress(Exception):
         sys.stderr.write(
             f"Gateway shutdown watchdog fired after {delay_s:.0f}s "
             f"(pid={os.getpid()}); dumping all thread stacks.\n"
         )
         sys.stderr.flush()
         faulthandler.dump_traceback(all_threads=True)
-    except Exception:
-        pass
 
 
 def arm_shutdown_watchdog(
@@ -358,23 +353,16 @@ def arm_shutdown_watchdog(
         # Mirror _exit_after_graceful_shutdown: release PID file + runtime lock
         # BEFORE the log drain (locks must never be stranded), then drain the async
         # log queue so logger.critical reaches the file before os._exit skips atexit.
-        try:
+        with contextlib.suppress(Exception):
             from gateway.status import remove_pid_file, release_gateway_runtime_lock
+
             remove_pid_file()
             release_gateway_runtime_lock()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             from hermes_logging import drain_log_queue
+
             drain_log_queue(timeout=1.0)
-        except Exception:
-            pass
-        # So the next boot reports "shutdown watchdog fired", not SIGKILL/OOM.
-        try:
-            from gateway.lifecycle_ledger import mark_exited
-            mark_exited(exit_code, reason="shutdown_watchdog")
-        except Exception:
-            pass
+        _mark_exited_quietly(exit_code, "shutdown_watchdog")
         os._exit(exit_code)
 
     try:
@@ -390,14 +378,30 @@ async def _tick_socket_handler(reader: asyncio.StreamReader, writer: asyncio.Str
     Runs on the gateway loop, so a reply witnesses loop schedulability; the write
     is a socket-buffer copy (no fsync), immune to the stalls that age the heartbeat.
     """
-    try:
+    with contextlib.suppress(Exception):
         writer.write(b"1")
         await writer.drain()
+    with contextlib.suppress(Exception):
+        writer.close()
+
+
+def _sweep_stale_tick_sockets(own_path: Path) -> None:
+    """Unlink loop-tick socket nodes left by dead PIDs (POSIX only; never raises).
+
+    create_unix_server removes a leftover node at OUR path (os._exit / SIGKILL skip
+    the finally-unlink) but not SIBLING nodes from other dead PIDs. os.kill(pid, 0)
+    is a liveness probe only on POSIX (Windows would TerminateProcess).
+    """
+    try:
+        for stale in own_path.parent.glob("gateway.loop-tick.*.sock"):
+            if stale == own_path:
+                continue
+            try:
+                os.kill(int(stale.name.split(".")[-2]), 0)  # windows-footgun: ok — POSIX-only caller
+            except (ValueError, IndexError, OSError):
+                stale.unlink(missing_ok=True)
     except Exception:
-        pass
-    finally:
-        with contextlib.suppress(Exception):
-            writer.close()
+        logger.debug("stale loop-tick socket sweep failed", exc_info=True)
 
 
 async def loop_heartbeat_forever(
@@ -412,10 +416,10 @@ async def loop_heartbeat_forever(
     Runs on the gateway loop so a frozen loop lets the file age for monitors. The
     write (``atomic_json_write`` -> ``os.fsync``) goes to a thread: inline, a stalled
     filesystem blocked the loop inside its own heartbeat and the liveness watchdog
-    killed it (WSL2 fsync stalls measured at p99 31s / max 112s vs a ~90-120s
-    budget). The thread write is *awaited*, never fire-and-forget: an unawaited
-    task would keep the file fresh while the loop was wedged, and one in-flight
-    write at a time keeps a long stall from queuing a thread per interval.
+    killed it (WSL2 fsync stalls p99 31s / max 112s vs a ~90-120s budget). The
+    thread write is *awaited*, never fire-and-forget: an unawaited task would keep
+    the file fresh while the loop was wedged, and one in-flight write at a time
+    keeps a long stall from queuing a thread per interval.
 
     Off-loop, file freshness alone no longer proves loop schedulability, so this
     task also arms a loop-scheduling witness (``_tick_socket_handler``) and records
@@ -428,43 +432,21 @@ async def loop_heartbeat_forever(
     # flag makes probes classify UNKNOWN, never WEDGED (drain backstop stays). asyncio
     # AF_UNIX is POSIX-only (ungated it raised AttributeError on native Windows), so
     # non-POSIX binds TCP loopback on 127.0.0.1 and publishes ``loop_tick_tcp_port``.
-    tick_server = None
-    tick_socket_path = None
-    tick_tcp_port = None
+    tick_server = tick_socket_path = tick_tcp_port = None
     try:
         if os.name == "posix":
             tick_socket_path = get_loop_tick_socket_path(home)
             tick_socket_path.parent.mkdir(parents=True, exist_ok=True)
-            # create_unix_server removes a leftover node at OUR path (os._exit /
-            # SIGKILL skip the finally-unlink) but not SIBLING nodes from other dead
-            # PIDs, so sweep those. os.kill(pid, 0) is a liveness probe only on
-            # POSIX (Windows would TerminateProcess), hence inside this gate.
-            try:
-                for _stale in tick_socket_path.parent.glob("gateway.loop-tick.*.sock"):
-                    if _stale == tick_socket_path:
-                        continue
-                    try:
-                        _stale_pid = int(_stale.name.split(".")[-2])
-                    except (ValueError, IndexError):
-                        _stale.unlink(missing_ok=True)
-                        continue
-                    try:
-                        os.kill(_stale_pid, 0)  # windows-footgun: ok — inside os.name == "posix" gate
-                    except OSError:
-                        _stale.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("stale loop-tick socket sweep failed", exc_info=True)
+            _sweep_stale_tick_sockets(tick_socket_path)
             tick_server = await asyncio.start_unix_server(_tick_socket_handler, path=str(tick_socket_path))
         else:
             tick_server = await asyncio.start_server(_tick_socket_handler, host="127.0.0.1", port=0)
             for _s in tick_server.sockets or []:
-                try:
+                with contextlib.suppress(Exception):
                     _sname = _s.getsockname()
                     if isinstance(_sname, tuple) and len(_sname) >= 2:
                         tick_tcp_port = int(_sname[1])
                         break
-                except Exception:
-                    pass
     except Exception:
         tick_server = None
         tick_tcp_port = None
@@ -479,9 +461,7 @@ async def loop_heartbeat_forever(
         # problem (shutdown, saturation) and must not kill the heartbeat task.
         try:
             await asyncio.to_thread(
-                write_loop_heartbeat,
-                start_time=start_time,
-                home=home,
+                write_loop_heartbeat, start_time=start_time, home=home,
                 extra={"loop_tick_socket": tick_server is not None, "loop_tick_tcp_port": tick_tcp_port},
             )
         except Exception:
