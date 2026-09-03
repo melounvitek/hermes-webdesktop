@@ -23,6 +23,7 @@ import threading
 import types
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple, Union
 
@@ -203,11 +204,7 @@ class PluginContext:
     def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
         self.manifest = manifest
         self._manager = manager
-        # Lazy-built facades (see the matching properties).
-        self._llm: Any = None
-        self._subagent_lifecycle: Any = None
-        self._state: PluginState | None = None
-        self._platform_actions: Any = None
+        self._llm: Any = None  # lazy; tests preseed it (see ``llm``)
 
     @property
     def plugin_id(self) -> str:
@@ -266,24 +263,19 @@ class PluginContext:
             config_mod.read_user_config_raw()
             config_mod.save_config(partial, preserve_keys={full_path}, merge_existing=True)
 
-    @property
+    @cached_property
     def state(self) -> PluginState:
-        """Return this plugin's profile-scoped durable JSON state facade."""
-        if self._state is None:
-            self._state = PluginState(self.plugin_id, self.manifest.skill_namespace)
-        return self._state
+        """This plugin's profile-scoped durable JSON state facade."""
+        return PluginState(self.plugin_id, self.manifest.skill_namespace)
 
-    @property
+    @cached_property
     def platform_actions(self):
         """Capability-gated platform action facade (``add_reaction``, ``set_thread_title``). Every call
         re-checks ``gateway.platform_actions`` (legacy ``plugins.entries.<id>.allow_platform_actions``,
         default OFF) and returns ``{"ok": bool, ...}`` — verbs never raise into hook dispatch; no adapter
         handles or raw SDK objects."""
-        if self._platform_actions is None:
-            from hermes_cli.platform_actions import PlatformActions
-
-            self._platform_actions = PlatformActions(self.plugin_id)
-        return self._platform_actions
+        from hermes_cli.platform_actions import PlatformActions
+        return PlatformActions(self.plugin_id)
 
     def _wrong_type(self, obj: Any, base_class: type, label: str, article: str = "a") -> bool:
         """Warn-and-ignore gate shared by every registrar that requires a base class."""
@@ -377,16 +369,12 @@ class PluginContext:
             self._llm = PluginLlm(plugin_id=self.plugin_id)
         return self._llm
 
-    @property
+    @cached_property
     def subagent_lifecycle(self) -> Any:
         """Plugin-safe subagent lifecycle service: serializable handles and immutable snapshots,
         never a live agent or private registry."""
-        if self._subagent_lifecycle is None:
-            from agent.subagent_lifecycle import (
-                SubagentLifecycleService, get_active_subagent_parent,
-            )
-            self._subagent_lifecycle = SubagentLifecycleService(get_active_subagent_parent)
-        return self._subagent_lifecycle
+        from agent.subagent_lifecycle import SubagentLifecycleService, get_active_subagent_parent
+        return SubagentLifecycleService(get_active_subagent_parent)
 
     @property
     def profile_name(self) -> str:
