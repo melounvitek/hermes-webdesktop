@@ -1,11 +1,9 @@
 """Kanban tools — structured tool-call surface for worker + orchestrator agents.
 
-Registered only under the dispatcher (``HERMES_KANBAN_TASK`` set) or when the
-profile enables the ``kanban`` toolset; a plain ``hermes chat`` sees none.
-Tools (not ``hermes kanban`` shell-outs) because they run in the agent's
-process: they reach ``~/.hermes/kanban.db`` even when the terminal backend is a
-container/SSH host, avoid shlex quoting of JSON metadata, and fail as
-structured JSON. Humans keep using the CLI, dashboard, and ``/kanban``.
+Registered only under the dispatcher (``HERMES_KANBAN_TASK`` set) or when the profile
+enables the ``kanban`` toolset. Tools rather than ``hermes kanban`` shell-outs: they run
+in the agent's process (reach ``kanban.db`` from a container/SSH terminal backend, no
+shlex quoting of JSON metadata, structured-JSON failures). Humans use CLI/dashboard.
 """
 from __future__ import annotations
 
@@ -106,12 +104,9 @@ def _check(cond: Any, message: str) -> None:
 
 
 def _kanban_handler(tool_name: str) -> Callable:
-    """Wrap a handler so every failure is a structured tool error.
-
-    ``ValueError`` (invalid board slug, DB validation such as cycle/self-link,
-    ``AttachmentTooLarge``) is reported without a traceback; anything else is
-    logged with ``logger.exception``.
-    """
+    """Wrap a handler so every failure is a structured tool error. ``ValueError``
+    (invalid board slug, DB validation such as cycle/self-link, ``AttachmentTooLarge``)
+    is reported without a traceback; anything else is logged with ``logger.exception``."""
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(args: dict, **kw) -> str:
@@ -206,10 +201,9 @@ def _require_orchestrator_tool(tool_name: str) -> None:
 
 @contextmanager
 def _board(board: Optional[str], *, quiet_close: bool = False):
-    """``with _board(slug) as (kb, conn)``; imported lazily so the module loads in
-    non-kanban contexts. ``board=None`` keeps the env/symlink resolution chain;
-    an explicit slug lets e.g. a Telegram-side agent override it per call.
-    ``quiet_close`` swallows close() errors (best-effort bridges)."""
+    """``with _board(slug) as (kb, conn)``; lazy import so the module loads in non-kanban
+    contexts. ``board=None`` keeps the env/symlink resolution chain; an explicit slug
+    overrides it per call. ``quiet_close`` swallows close() errors (best-effort bridges)."""
     from hermes_cli import kanban_db as kb
     conn = kb.connect(board=board)
     try:
@@ -224,6 +218,15 @@ def _board(board: Optional[str], *, quiet_close: bool = False):
 
 def _ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields})
+
+
+def _ok_landed(kb, conn, tid: str, default_status: str, **extra: Any) -> str:
+    """Success payload reporting where the task actually landed (routing may
+    not leave it in the requested status)."""
+    run = kb.latest_run(conn, tid)
+    landed = kb.get_task(conn, tid)
+    return _ok(task_id=tid, run_id=run.id if run else None,
+               status=landed.status if landed else default_status, **extra)
 
 
 def _redact(value: Any) -> str:
@@ -384,25 +387,20 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
 
 
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
-# The dispatcher watchdog reads ``tasks.last_heartbeat_at``, not the agent's
-# in-process activity timestamp, so normal work is mirrored onto the board here;
-# the explicit ``kanban_heartbeat`` tool stays for notes / pre-extending a claim.
-# Constraints: best-effort (never raise into the agent loop), rate-limited per
-# process (monotonic; a race costs one harmless extra write), no-op outside
-# dispatcher-spawned worker context, no durable note on auto-heartbeats.
+# The dispatcher watchdog reads ``tasks.last_heartbeat_at``, not the agent's in-process
+# activity timestamp, so normal work is mirrored onto the board here (``kanban_heartbeat``
+# stays for notes / pre-extending a claim). Best-effort: never raise into the agent loop;
+# rate-limited per process (a race costs one harmless extra write); no-op outside a
+# dispatcher-spawned worker.
 
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
 
 def heartbeat_current_worker_from_env() -> bool:
-    """Best-effort claim extension + board heartbeat for the current worker.
-
-    True iff a write was attempted (informational). Identity from env:
-    ``HERMES_KANBAN_TASK`` (required), ``HERMES_KANBAN_RUN_ID`` (pins the run
-    row so a reclaimed stale run is not heartbeated), ``HERMES_KANBAN_CLAIM_LOCK``
-    (default claimer for locally-driven workers when absent).
-    """
+    """Claim extension + board heartbeat for the current worker; True iff a write was
+    attempted. ``HERMES_KANBAN_RUN_ID`` pins the run row so a reclaimed stale run is not
+    heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers)."""
     global _auto_heartbeat_last_attempt
     tid = os.environ.get("HERMES_KANBAN_TASK")
     if not tid:
@@ -427,23 +425,17 @@ def heartbeat_current_worker_from_env() -> bool:
         return False
 
 
-# Live operator-note injection: poll the worker's task for new comments and
-# steer them in OUT-OF-BAND, so a user can talk to a running task without
-# block → comment → unblock. Polled tighter than the heartbeat; watermarked
-# per task (seeded on first poll so history already in the worker context
-# isn't re-injected).
+# Live operator-note injection: poll the task for new comments and steer them in
+# OUT-OF-BAND, so a user can talk to a running task without block → comment → unblock.
+# Watermarked per task (seeded on first poll: that history is already in the context).
 _COMMENT_POLL_MIN_INTERVAL_SECONDS = 6.0
 _comment_poll_last_attempt: float = 0.0
 _comment_watermark: dict[str, int] = {}
 
 
 def inject_new_comments_from_env(agent: Any) -> bool:
-    """Fold new operator comments on the worker's task into ``agent.steer``.
-
-    No-op unless ``HERMES_KANBAN_TASK`` is set and ``agent`` exposes ``steer``;
-    True iff a steer was injected; never raises. The worker's own comments
-    (matched by ``HERMES_PROFILE``) are skipped.
-    """
+    """Steer new operator comments on the worker's task into ``agent``; True iff a
+    steer was injected; never raises. Own comments (``HERMES_PROFILE``) are skipped."""
     tid = os.environ.get("HERMES_KANBAN_TASK")
     if not tid or agent is None or not hasattr(agent, "steer"):
         return False
@@ -613,11 +605,7 @@ def _handle_block(args: dict, **kw) -> str:
                 f"the completion judge will evaluate it.")
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
-        run = kb.latest_run(conn, tid)
-        # Report where the task actually landed; routing may not leave it in 'blocked'.
-        landed = kb.get_task(conn, tid)
-        return _ok(task_id=tid, run_id=run.id if run else None,
-                   status=landed.status if landed else "blocked", block_kind=kind)
+        return _ok_landed(kb, conn, tid, "blocked", block_kind=kind)
 
 
 @_kanban_handler("kanban_request_review")
@@ -644,10 +632,7 @@ def _handle_request_review(args: dict, **kw) -> str:
             expected_run_id=_worker_run_id(tid), with_reason=True)
         _check(ok, f"could not request review for {tid}: "
                    f"{fail_reason or 'unknown id or not in running/ready'}")
-        run = kb.latest_run(conn, tid)
-        landed = kb.get_task(conn, tid)
-        return _ok(task_id=tid, run_id=run.id if run else None,
-                   status=landed.status if landed else "review")
+        return _ok_landed(kb, conn, tid, "review")
 
 
 @_kanban_handler("kanban_request_changes")
@@ -660,10 +645,7 @@ def _handle_request_changes(args: dict, **kw) -> str:
         ok, detail = kb.request_changes(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not request changes for {tid}: {detail or 'invalid review state'}")
-        landed = kb.get_task(conn, tid)
-        run = kb.latest_run(conn, tid)
-        return _ok(task_id=tid, run_id=run.id if run else None,
-                   status=landed.status if landed else "ready", implementer=detail)
+        return _ok_landed(kb, conn, tid, "ready", implementer=detail)
 
 
 @_kanban_handler("kanban_heartbeat")
@@ -730,15 +712,12 @@ _MAX_ATTACH_URL_REDIRECTS = 5
 
 
 def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[str]]:
-    """Fetch ``url`` over http(s) with SSRF guarding, capped at ``max_bytes``.
+    """Fetch ``url`` over http(s) capped at ``max_bytes`` -> ``(data, content_type)``.
 
-    Every hop (initial URL and each redirect target) is checked with
-    ``tools.url_safety.is_safe_url`` so a model-controlled URL (or a public host
-    302ing to one) cannot reach loopback, private/CGNAT ranges, or cloud
-    metadata; redirects are followed manually to re-check each Location.
-    Returns ``(data, content_type)``; raises ``ValueError`` for a bad scheme,
-    blocked target, too many redirects, or a body over the cap (checked while
-    streaming, so nothing oversize is buffered).
+    Every hop is SSRF-checked (redirects followed manually) so a model-controlled URL,
+    or a public host 302ing, cannot reach loopback/private/cloud-metadata ranges.
+    ``ValueError`` for bad scheme, blocked target, too many redirects, or a body over
+    the cap (checked while streaming, so nothing oversize is buffered).
     """
     from urllib.parse import urljoin, urlparse
     import httpx
@@ -882,16 +861,12 @@ def _handle_create(args: dict, **kw) -> str:
 
 
 def _resolve_notify_target() -> Optional[dict[str, Any]]:
-    """``kanban_db.add_notify_sub`` kwargs for the calling session, or None.
+    """``kanban_db.add_notify_sub`` kwargs for the calling session, or None (CLI/cron/tests).
 
-    - Gateway (telegram/discord/...): ``HERMES_SESSION_PLATFORM`` /
-      ``HERMES_SESSION_CHAT_ID`` ContextVars set before dispatch.
-    - TUI/desktop: those ContextVars are cleared, but the subprocess inherits
-      ``HERMES_SESSION_KEY``; subscribe as ``platform="tui"``, ``chat_id=<key>``
-      for the TUI notification poller. ``HERMES_SESSION_ID`` is deliberately
-      NOT a fallback — it is set for every CLI/ACP invocation for telemetry and
-      would auto-subscribe every CLI run.
-    - CLI / cron / tests: no persistent channel -> None.
+    Gateway sessions: ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` ContextVars. TUI/desktop:
+    those are cleared but the subprocess inherits ``HERMES_SESSION_KEY`` -> ``platform="tui"``
+    for the TUI poller. ``HERMES_SESSION_ID`` is deliberately NOT a fallback: it is set for
+    every CLI/ACP invocation and would auto-subscribe every CLI run.
     """
     from gateway.session_context import get_session_env
 
@@ -938,15 +913,10 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
 
 
 def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
-    """Auto-subscribe the calling session to task completion / block events.
-
-    True iff a subscription row was written; surfaced as ``subscribed`` on
-    kanban_create so an orchestrator can fall back to explicit
-    ``kanban_notify-subscribe`` or polling. Gated by
-    ``kanban.auto_subscribe_on_create`` (default True; unreadable config also
-    means True). Any failure is logged at WARNING and swallowed: notification
-    bookkeeping must never fail the kanban_create the agent is mid-conversation about.
-    """
+    """Subscribe the calling session to completion/block events; True iff a row was
+    written (surfaced as ``subscribed`` so an orchestrator can fall back to explicit
+    ``kanban_notify-subscribe``). Gated by ``kanban.auto_subscribe_on_create`` (default
+    True). Failures are logged and swallowed: bookkeeping must never fail kanban_create."""
     try:
         cfg = load_config()
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
