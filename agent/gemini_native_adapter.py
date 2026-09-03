@@ -549,12 +549,9 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
             # Gemini re-sends the full args each event; emit only the new suffix.
             last_arguments = str(slot.get("last_arguments") or "")
             slot["last_arguments"] = args_str
-            chunks.append(_make_stream_chunk(model=model, tool_call_delta={
-                "index": slot["index"], "id": slot["id"], "name": name,
-                "arguments": args_str[len(last_arguments):] if args_str.startswith(last_arguments) else args_str,
-                "extra_content": _tool_call_extra_from_part(part),
-            }))
-
+            delta = {"index": slot["index"], "id": slot["id"], "name": name, "extra_content": _tool_call_extra_from_part(part),
+                     "arguments": args_str[len(last_arguments):] if args_str.startswith(last_arguments) else args_str}
+            chunks.append(_make_stream_chunk(model=model, tool_call_delta=delta))
     if finish_reason_raw := str(cand.get("finishReason") or ""):
         finish_reason = "tool_calls" if tool_call_indices else _FINISH_REASON_MAP.get(finish_reason_raw.upper(), "stop")
         finish_chunk = _make_stream_chunk(model=model, finish_reason=finish_reason)
@@ -575,27 +572,27 @@ def _error_info(err_obj: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     return reason, metadata
 
 
-def _parse_float(value: Any) -> Optional[float]:
+def _error_object(body_text: str) -> Dict[str, Any]:
+    """The ``error`` object of a Google JSON error body, or ``{}``."""
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+        parsed = json.loads(body_text) if body_text else None
+    except (ValueError, TypeError):
+        return {}
+    err_obj = parsed.get("error") if isinstance(parsed, dict) else None
+    return err_obj if isinstance(err_obj, dict) else {}
 
 
 def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = None) -> GeminiAPIError:
     status = response.status_code
     body_text = (_response_text(response) if body_text is None else body_text) or ""
-    err_obj: Any = None
-    try:
-        parsed = json.loads(body_text) if body_text else None
-        err_obj = parsed.get("error") if isinstance(parsed, dict) else None
-    except (ValueError, TypeError):
-        pass
-    err_obj = err_obj if isinstance(err_obj, dict) else {}
+    err_obj = _error_object(body_text)
     err_status = str(err_obj.get("status") or "").strip()
     err_message = str(err_obj.get("message") or "").strip()
     reason, metadata = _error_info(err_obj)
-    retry_after = _parse_float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
+    try:
+        retry_after: Optional[float] = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
+    except (TypeError, ValueError):
+        retry_after = None
     message = (
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"
