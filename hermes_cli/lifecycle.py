@@ -17,13 +17,16 @@ def _observe(hook_name: str, **kwargs: Any) -> None:
         logger.warning("Built-in observability hook failed", exc_info=True)
 
 
-def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
-    """Notify first-party observers, then invoke compatibility plugin hooks."""
-    _observe(hook_name, **kwargs)
-
+def _plugin_hooks(hook_name: str, **kwargs: Any) -> List[Any]:
     from hermes_cli import plugins
 
     return plugins.invoke_hook(hook_name, **kwargs)
+
+
+def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
+    """Notify first-party observers, then invoke compatibility plugin hooks."""
+    _observe(hook_name, **kwargs)
+    return _plugin_hooks(hook_name, **kwargs)
 
 
 def has_hook(hook_name: str) -> bool:
@@ -57,6 +60,4 @@ def finalize_session(**kwargs: Any) -> List[Any]:
         except Exception:
             logger.warning("Core Relay session finalization failed", exc_info=True)
 
-    from hermes_cli import plugins
-
-    return plugins.invoke_hook("on_session_finalize", **kwargs)
+    return _plugin_hooks("on_session_finalize", **kwargs)
