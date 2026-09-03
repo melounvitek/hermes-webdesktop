@@ -263,13 +263,34 @@ def _has_function_response(content: Dict[str, Any]) -> bool:
     return any(isinstance(part, dict) and "functionResponse" in part for part in content.get("parts", []))
 
 
+def _merge_alternating(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Alternation contract for generateContent: 1) adjacent same-role contents merge
+    (else HTTP 400 "multiturn requests [must] alternate"); 2) EXCEPT never fuse a human
+    user text turn into a preceding user content that only carries functionResponse
+    parts (or vice versa) — Gemini 3 accepts the fold but reads the text as a
+    continuation of the tool result and returns an empty candidate (parallel
+    functionResponse + functionResponse still merge); 3) the split pair stays API-valid
+    via an interposed placeholder model turn."""
+    merged: List[Dict[str, Any]] = []
+    for content in contents:
+        prev = merged[-1] if merged else None
+        same_role = prev is not None and prev["role"] == content["role"]
+        if same_role and content["role"] == "user" and _has_function_response(prev) != _has_function_response(content):
+            same_role = False
+            merged.append({"role": "model", "parts": [{"text": _INTERRUPTED_RESPONSE_PLACEHOLDER}]})
+        if same_role:
+            merged[-1]["parts"].extend(content["parts"])
+        else:
+            merged.append(content)
+    return merged
+
+
 def _build_gemini_contents(
     messages: List[Dict[str, Any]], include_tool_call_ids: bool = False, *, is_gemini3: bool = False
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     system_text_parts: List[str] = []
     contents: List[Dict[str, Any]] = []
     tool_name_by_call_id: Dict[str, str] = {}
-
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -285,37 +306,15 @@ def _build_gemini_contents(
             continue
         parts = _extract_multimodal_parts(msg.get("content"))
         tool_calls = msg.get("tool_calls") or []
-        for tool_call in tool_calls if isinstance(tool_calls, list) else []:
-            if not isinstance(tool_call, dict):
-                continue
+        for tool_call in (tc for tc in tool_calls if isinstance(tc, dict)) if isinstance(tool_calls, list) else ():
             tool_name = str((tool_call.get("function") or {}).get("name") or "")
             if _tool_call_id(tool_call) and tool_name:
                 tool_name_by_call_id[_tool_call_id(tool_call)] = tool_name
             parts.append(_translate_tool_call_to_gemini(tool_call, include_ids=include_tool_call_ids))
         if parts:
             contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
-
-    # Alternation contract for generateContent: 1) adjacent same-role contents merge
-    # (else HTTP 400 "multiturn requests [must] alternate"); 2) EXCEPT never fuse a
-    # human user text turn into a preceding user content that only carries
-    # functionResponse parts (or vice versa) — Gemini 3 accepts the fold but reads
-    # the text as a continuation of the tool result and returns an empty candidate
-    # (parallel functionResponse + functionResponse still merge); 3) the split pair
-    # stays API-valid via an interposed placeholder model turn.
-    merged: List[Dict[str, Any]] = []
-    for content in contents:
-        prev = merged[-1] if merged else None
-        same_role = prev is not None and prev["role"] == content["role"]
-        if same_role and content["role"] == "user" and _has_function_response(prev) != _has_function_response(content):
-            same_role = False
-            merged.append({"role": "model", "parts": [{"text": _INTERRUPTED_RESPONSE_PLACEHOLDER}]})
-        if same_role:
-            merged[-1]["parts"].extend(content["parts"])
-        else:
-            merged.append(content)
-
     joined_system = "\n".join(part for part in system_text_parts if part).strip()
-    return merged, ({"role": "system", "parts": [{"text": joined_system}]} if joined_system else None)
+    return _merge_alternating(contents), ({"role": "system", "parts": [{"text": joined_system}]} if joined_system else None)
 
 
 def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
