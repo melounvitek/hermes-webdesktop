@@ -26,11 +26,8 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.config import OPTIONAL_ENV_VARS, get_env_path, redact_key
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_models import (
-    MessagingPlatformUpdate,
-    TelegramOnboardingApply,
-    TelegramOnboardingStart,
-    WhatsAppOnboardingApply,
-    WhatsAppOnboardingStart,
+    MessagingPlatformUpdate, TelegramOnboardingApply, TelegramOnboardingStart,
+    WhatsAppOnboardingApply, WhatsAppOnboardingStart,
 )
 
 _log = logging.getLogger("hermes_cli.web_server")
@@ -69,8 +66,7 @@ _telegram_onboarding_pairings = LateState("_telegram_onboarding_pairings")
 # toggles, Twilio, HASS, Email, etc.) so the UI can still render a friendly label.
 _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
     "SIGNAL_HTTP_URL": {
-        "description": "signal-cli REST API base URL, e.g. http://127.0.0.1:8080",
-        "prompt": "Signal bridge URL",
+        "description": "signal-cli REST API base URL, e.g. http://127.0.0.1:8080", "prompt": "Signal bridge URL",
         "url": "https://github.com/bbernhard/signal-cli-rest-api",
     },
     "SIGNAL_ACCOUNT": {"description": "Signal account phone number registered with the bridge", "prompt": "Signal account"},
@@ -82,8 +78,7 @@ _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
     "HASS_URL": {"description": "Home Assistant base URL, e.g. https://homeassistant.local:8123", "prompt": "Home Assistant URL"},
     "HASS_TOKEN": {
         "description": "Long-lived access token from Home Assistant (Profile → Security)",
-        "prompt": "Home Assistant access token",
-        "password": True,
+        "prompt": "Home Assistant access token", "password": True,
     },
     "EMAIL_ADDRESS": {"description": "Email address to send and receive from", "prompt": "Email address"},
     "EMAIL_PASSWORD": {"description": "Email account password or app password", "prompt": "Email password", "password": True},
@@ -99,17 +94,14 @@ _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
     "WECOM_CALLBACK_TOKEN": {"description": "WeCom callback verification token", "prompt": "WeCom Token"},
     "WECOM_CALLBACK_ENCODING_AES_KEY": {"description": "WeCom callback AES encoding key", "prompt": "WeCom AES Key", "password": True},
     "WEIXIN_ACCOUNT_ID": {
-        "description": "iLink Bot account ID obtained through QR login in hermes gateway setup",
-        "prompt": "iLink Bot account ID",
+        "description": "iLink Bot account ID obtained through QR login in hermes gateway setup", "prompt": "iLink Bot account ID",
     },
     "WEIXIN_TOKEN": {
-        "description": "iLink Bot token obtained through QR login in hermes gateway setup",
-        "prompt": "iLink Bot token",
+        "description": "iLink Bot token obtained through QR login in hermes gateway setup", "prompt": "iLink Bot token",
         "password": True,
     },
     "WEIXIN_BASE_URL": {
-        "description": "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)",
-        "prompt": "iLink API base URL",
+        "description": "iLink API base URL saved by QR login (default: https://ilinkai.weixin.qq.com)", "prompt": "iLink API base URL",
     },
     "FEISHU_APP_ID": {"description": "Feishu / Lark app ID", "prompt": "App ID"},
     "FEISHU_APP_SECRET": {"description": "Feishu / Lark app secret", "prompt": "App secret", "password": True},
@@ -138,24 +130,19 @@ def _csv_ids(value: str) -> list[str]:
 _ENV_VALUE_RULES: dict[tuple[str, str], tuple[Any, str]] = {
     ("telegram", "TELEGRAM_BOT_TOKEN"): (
         _TELEGRAM_BOT_TOKEN_RE.fullmatch,
-        "Telegram bot token must be the complete token from @BotFather, such as 123456789:ABC…",
-    ),
+        "Telegram bot token must be the complete token from @BotFather, such as 123456789:ABC…"),
     ("telegram", "TELEGRAM_ALLOWED_USERS"): (
         lambda v: all(_TELEGRAM_USER_ID_RE.fullmatch(u) for u in _csv_ids(v)),
-        "Telegram allowed users must be comma-separated numeric user IDs.",
-    ),
+        "Telegram allowed users must be comma-separated numeric user IDs."),
     ("slack", "SLACK_BOT_TOKEN"): (
         lambda v: v.startswith("xoxb-"),
-        "Slack Bot Token must start with xoxb-. Paste the bot token from OAuth & Permissions.",
-    ),
+        "Slack Bot Token must start with xoxb-. Paste the bot token from OAuth & Permissions."),
     ("slack", "SLACK_APP_TOKEN"): (
         lambda v: v.startswith("xapp-"),
-        "Slack App Token must start with xapp-. Paste the app-level token from Basic Information > App-Level Tokens.",
-    ),
+        "Slack App Token must start with xapp-. Paste the app-level token from Basic Information > App-Level Tokens."),
     ("slack", "SLACK_ALLOWED_USERS"): (
         lambda v: all(u == "*" or _SLACK_MEMBER_ID_RE.fullmatch(u) for u in _csv_ids(v)),
-        "Slack allowed user IDs must be comma-separated member IDs like U01ABC2DEF3.",
-    ),
+        "Slack allowed user IDs must be comma-separated member IDs like U01ABC2DEF3."),
 }
 
 
@@ -261,16 +248,13 @@ def _messaging_platform_payload(
         # and would falsely report the root credentials as the profile's.
         return env_on_disk.get(key) or ("" if scoped else os.getenv(key, ""))
 
-    env_vars = []
-    for key in entry["env_vars"]:
-        value = env_value(key)
-        env_vars.append({
-            "key": key,
-            "required": key in entry["required_env"],
-            "is_set": bool(value),
-            "redacted_value": redact_key(value) if value else None,
-            **_messaging_env_info(key),
-        })
+    env_vars = [
+        {
+            "key": key, "required": key in entry["required_env"], "is_set": bool(value),
+            "redacted_value": redact_key(value) if value else None, **_messaging_env_info(key),
+        }
+        for key, value in ((key, env_value(key)) for key in entry["env_vars"])
+    ]
 
     enabled, configured, home_channel = _platform_enablement(platform_id, entry, env_on_disk, scoped)
 
@@ -291,19 +275,11 @@ def _messaging_platform_payload(
         error_message = error_message or rt.get("exit_reason")
 
     payload = {
-        "id": platform_id,
-        "name": entry["name"],
-        "description": entry["description"],
-        "docs_url": entry["docs_url"],
-        "enabled": enabled,
-        "configured": configured,
-        "gateway_running": gateway_running,
-        "state": state,
-        "error_code": error_code,
-        "error_message": error_message,
-        "updated_at": runtime_platform.get("updated_at"),
-        "home_channel": home_channel,
-        "env_vars": env_vars,
+        "id": platform_id, "name": entry["name"], "description": entry["description"],
+        "docs_url": entry["docs_url"], "enabled": enabled, "configured": configured,
+        "gateway_running": gateway_running, "state": state, "error_code": error_code,
+        "error_message": error_message, "updated_at": runtime_platform.get("updated_at"),
+        "home_channel": home_channel, "env_vars": env_vars,
     }
     if platform_id == "whatsapp":
         whatsapp_mode = env_value("WHATSAPP_MODE").strip()
@@ -431,9 +407,7 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         detail = (result.stderr or result.stdout or "").strip()
         if detail:
             detail = "\n".join(detail.splitlines()[-10:])
-        raise HTTPException(
-            status_code=500, detail=f"npm install failed for WhatsApp bridge: {detail or 'no output'}"
-        )
+        raise HTTPException(status_code=500, detail=f"npm install failed for WhatsApp bridge: {detail or 'no output'}")
 
 
 def _spawn_whatsapp_pairing_process(session_path: Path, mode: str) -> subprocess.Popen:
@@ -456,14 +430,8 @@ def _spawn_whatsapp_pairing_process(session_path: Path, mode: str) -> subprocess
     env["WHATSAPP_DM_POLICY"] = "pairing"
     return subprocess.Popen(
         [node, str(bridge_script), "--pair-only", "--pair-json", "--session", str(session_path)],
-        cwd=str(bridge_dir),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=True,
-        env=env,
+        cwd=str(bridge_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", start_new_session=True, env=env,
         creationflags=windows_hide_flags(),
     )
 
@@ -610,20 +578,15 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
         session_path = _whatsapp_session_path()
         expires_at_ts = time.time() + _WHATSAPP_ONBOARDING_TTL_SECONDS
         fields = dict(
-            proc=None,
-            mode=mode,
-            allowed_users=allowed_users,
-            session_path=str(session_path),
+            proc=None, mode=mode, allowed_users=allowed_users, session_path=str(session_path),
             expires_at=datetime.fromtimestamp(expires_at_ts, timezone.utc).isoformat().replace("+00:00", "Z"),
-            expires_at_ts=expires_at_ts,
-            profile=body.profile,
+            expires_at_ts=expires_at_ts, profile=body.profile,
         )
         already_linked = (session_path / "creds.json").exists()
         if already_linked:
             account_id, account_name, account_phone = _whatsapp_linked_account_from_session(session_path)
-            record = _WhatsAppOnboardingSession(
-                **fields, status="connected", account_id=account_id, account_name=account_name, account_phone=account_phone
-            )
+            record = _WhatsAppOnboardingSession(**fields, status="connected", account_id=account_id,
+                                                account_name=account_name, account_phone=account_phone)
             pairing_id = _register_whatsapp_session(session_path, record)
             return _whatsapp_onboarding_payload(pairing_id, record)
 
@@ -683,12 +646,7 @@ async def apply_whatsapp_onboarding(
         _whatsapp_onboarding_sessions.pop(pairing_id, None)
 
     restart_result = _restart_gateway_after_whatsapp_onboarding(effective_profile)
-    return {
-        "ok": True,
-        "platform": "whatsapp",
-        "needs_restart": not restart_result["restart_started"],
-        **restart_result,
-    }
+    return {"ok": True, "platform": "whatsapp", "needs_restart": not restart_result["restart_started"], **restart_result}
 
 
 @router.delete("/api/messaging/whatsapp/onboarding/{pairing_id}")
@@ -739,10 +697,8 @@ def _telegram_record_or_404(pairing_id: str):
 
 def _telegram_ready_payload(record) -> dict[str, Any]:
     return {
-        "status": "ready",
-        "bot_username": record.bot_username,
-        "owner_user_id": record.owner_user_id,
-        "expires_at": record.expires_at,
+        "status": "ready", "bot_username": record.bot_username,
+        "owner_user_id": record.owner_user_id, "expires_at": record.expires_at,
     }
 
 
@@ -811,12 +767,8 @@ async def get_telegram_onboarding_status(pairing_id: str):
     if status in {"expired", "claimed"}:
         with _telegram_onboarding_lock:
             _telegram_onboarding_pairings.pop(pairing_id, None)
-        raise HTTPException(
-            status_code=410,
-            detail=_telegram_onboarding_error_message(
-                status, "Telegram setup is no longer available. Start a new setup."
-            ),
-        )
+        raise HTTPException(status_code=410, detail=_telegram_onboarding_error_message(
+            status, "Telegram setup is no longer available. Start a new setup."))
 
     raise HTTPException(status_code=502, detail="Telegram setup service returned an unknown status.")
 
@@ -862,11 +814,8 @@ async def apply_telegram_onboarding(
     # authoritative; a failed restart is reported so the UI shows its banner.
     restart_result = _restart_gateway_after(effective_profile, what="Telegram onboarding", label="Telegram onboarding")
     return {
-        "ok": True,
-        "platform": "telegram",
-        "bot_username": bot_username,
-        "needs_restart": not restart_result["restart_started"],
-        **restart_result,
+        "ok": True, "platform": "telegram", "bot_username": bot_username,
+        "needs_restart": not restart_result["restart_started"], **restart_result,
     }
 
 
@@ -935,10 +884,9 @@ def _multiplex_port_binding_conflict(
             return None
 
     return (
-        f"Cannot enable '{platform_id}' on profile '{target}': it binds its "
-        "own listener port, and gateway.multiplex_profiles is on, so the "
-        "default profile owns the single shared HTTP listener for every "
-        "profile. Configure this channel on the default profile instead "
+        f"Cannot enable '{platform_id}' on profile '{target}': it binds its own listener port, "
+        "and gateway.multiplex_profiles is on, so the default profile owns the single shared HTTP "
+        "listener for every profile. Configure this channel on the default profile instead "
         "(disabling or clearing it here is still allowed)."
     )
 
@@ -957,9 +905,7 @@ async def update_messaging_platform(
             # loadable by the multiplexed gateway.
             _log.info(
                 "Rejected messaging platform update: platform=%s profile=%s "
-                "(multiplex port-binding conflict)",
-                platform_id,
-                target_profile or "current",
+                "(multiplex port-binding conflict)", platform_id, target_profile or "current",
             )
             raise HTTPException(status_code=409, detail=conflict)
 
@@ -992,11 +938,7 @@ async def update_messaging_platform(
         _log.info(
             "Messaging platform updated: platform=%s profile=%s enabled=%s "
             "env_keys=%s cleared_keys=%s",
-            platform_id,
-            target_profile or "current",
-            body.enabled,
-            sorted(body.env),
-            sorted(body.clear_env),
+            platform_id, target_profile or "current", body.enabled, sorted(body.env), sorted(body.clear_env),
         )
         return {"ok": True, "platform": platform_id}
     except HTTPException:
@@ -1023,16 +965,11 @@ async def test_messaging_platform(platform_id: str, profile: Optional[str] = Non
         return result(False, f"{entry['name']} is disabled. Enable it, then restart the gateway.")
     if not payload["configured"]:
         missing = [field["key"] for field in payload["env_vars"] if field["required"] and not field["is_set"]]
-        return result(
-            False, f"Missing required setup: {', '.join(missing)}" if missing else "Platform setup is incomplete."
-        )
+        return result(False, f"Missing required setup: {', '.join(missing)}" if missing else "Platform setup is incomplete.")
     if not payload["gateway_running"]:
         return result(False, "Gateway is not running. Restart the gateway to connect this platform.")
     if payload["state"] == "connected":
         return result(True, f"{entry['name']} is connected.")
     if payload.get("error_message"):
         return result(False, payload["error_message"])
-    return result(
-        False,
-        "Setup looks complete, but the gateway has not reported a connection yet. Restart the gateway.",
-    )
+    return result(False, "Setup looks complete, but the gateway has not reported a connection yet. Restart the gateway.")
