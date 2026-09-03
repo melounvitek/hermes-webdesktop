@@ -1,8 +1,5 @@
-"""Simple slash-command wrappers plus goal/heartbeat/loop manager hooks for the interactive CLI
-
-Mixin bound onto ``HermesCLI`` via the MRO. cli.py-internal symbols are imported LAZILY
-inside each method (``from cli import ...``) — never at module load (import cycle).
-"""
+"""Simple slash-command wrappers plus goal/heartbeat/loop manager hooks for the interactive CLI.
+Mixin on ``HermesCLI``; cli.py symbols are imported lazily inside methods (import cycle)."""
 
 from __future__ import annotations
 
@@ -198,14 +195,12 @@ class CLILoopsMixin:
 
     def _cmd_egress(self, cmd_original: str):
         from hermes_cli.slash_exec import CommandContext, execute_command
-        self._console_print(
-            execute_command("egress", CommandContext(surface="cli")).text,
-            highlight=False, markup=False)
+        text = execute_command("egress", CommandContext(surface="cli")).text
+        self._console_print(text, highlight=False, markup=False)
 
     def _cmd_statusbar(self, cmd_original: str):
         self._status_bar_visible = not self._status_bar_visible
-        state = "visible" if self._status_bar_visible else "hidden"
-        self._console_print(f"  Status bar {state}")
+        self._console_print(f"  Status bar {'visible' if self._status_bar_visible else 'hidden'}")
 
     def _cmd_update(self, cmd_original: str) -> bool:
         # A truthy result means the process is relaunching — leave the REPL.
@@ -276,10 +271,8 @@ class CLILoopsMixin:
             _cprint("  Usage: /queue <prompt>")
         else:
             self._pending_input.put(payload)
-            if self._agent_running:
-                _cprint(f"  Queued for the next turn: {_preview(payload)}")
-            else:
-                _cprint(f"  Queued: {_preview(payload)}")
+            when = " for the next turn" if self._agent_running else ""
+            _cprint(f"  Queued{when}: {_preview(payload)}")
 
     def _cmd_steer(self, cmd_original: str):
         # Inject a message after the next tool call without interrupting: while the
