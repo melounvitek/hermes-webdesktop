@@ -108,13 +108,10 @@ def _cua_permission_mode(session_id: str) -> str:
     Fails closed. Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted``
     daemon, dropping the configured ceiling: deliberate (``unrestricted`` is intentionally not a config value)
     but easy to trigger by accident."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
-        bypassed = is_approval_bypass_active_for_session(session_id)
-        if not bypassed:
-            current_key = get_current_session_key(default="")
-            bypassed = bool(current_key) and is_approval_bypass_active_for_session(current_key)
-        if bypassed:
+        if is_approval_bypass_active_for_session(session_id) or (
+                bool(key := get_current_session_key(default="")) and is_approval_bypass_active_for_session(key)):
             with _approval_lock:
                 warn = (key := str(session_id or "")) not in _escalation_warned
                 _escalation_warned.add(key)
@@ -126,8 +123,6 @@ def _cua_permission_mode(session_id: str) -> str:
                     "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
                     "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
             return "unrestricted"
-    except Exception:
-        pass
     return _configured_permission_mode()
 
 def _new_backend(permission_mode: str) -> ComputerUseBackend:
@@ -314,10 +309,9 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
                 _session_auto_approve[session_id] = True
     if verdict in ("approve_once", "approve_session", "always_approve"):
         return None
-    if verdict == "timeout":
-        return json.dumps({"error": ("approval prompt timed out — the user did not respond. Silence is not "
-                                     "consent; do not retry without the user."), "action": action})
-    return json.dumps({"error": "denied by user", "action": action})
+    return json.dumps({"error": ("approval prompt timed out — the user did not respond. Silence is not consent; "
+                                 "do not retry without the user.") if verdict == "timeout" else "denied by user",
+                       "action": action})
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
     fg = " [FOREGROUND — briefly raises the window / changes focus]" if args.get("delivery_mode") == "foreground" else ""
@@ -458,8 +452,8 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
             "Input was delivered but not confirmed. Re-capture and check the result BEFORE any "
             "retry — do not repeat the input on an escalation recommendation alone.")}
     if res.effect == "suspected_noop" or not res.ok or res.code is not None:
-        recommended = {"recommended": res.escalation.get("recommended")} if isinstance(res.escalation, dict) else {}
-        return {"decision": "escalate", **recommended, "hint": (
+        return {"decision": "escalate", **({"recommended": res.escalation.get("recommended")}
+                                           if isinstance(res.escalation, dict) else {}), "hint": (
             "The input likely did not land. Climb one rung following `recommended`: 'px' → "
             "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
             "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
@@ -684,11 +678,10 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
     from hermes_constants import get_hermes_dir  # lazy so tests can patch get_hermes_dir
     cache_dir = get_hermes_dir(subdir, legacy)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    if pattern:
-        with contextlib.suppress(Exception):
-            files = sorted(cache_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
-            for stale in files[: max(0, len(files) - (cap - 1))]:
-                stale.unlink(missing_ok=True)
+    with contextlib.suppress(Exception):
+        files = sorted(cache_dir.glob(pattern), key=lambda p: p.stat().st_mtime) if pattern else []
+        for stale in files[: max(0, len(files) - (cap - 1))]:
+            stale.unlink(missing_ok=True)
     return cache_dir / name
 
 def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int,
