@@ -93,12 +93,8 @@ class _NativePickerModelList(list[str]):
 
 
 def _fetch_picker_live_models(
-    api_key: str,
-    api_url: str,
-    native_catalog_provider: str,
-    preserve_native_models: bool,
-    headers: dict[str, str] | None = None,
-    timeout: float = 5.0,
+    api_key: str, api_url: str, native_catalog_provider: str, preserve_native_models: bool,
+    headers: dict[str, str] | None = None, timeout: float = 5.0,
     api_mode: str | None = None) -> list[str] | None:
     """Fetch picker models with native Ollama and cached generic discovery."""
     from hermes_cli.models import (
@@ -602,12 +598,14 @@ class _PickerBuild:
     builtin_endpoints: set = field(default_factory=set)
     # (display_name, base_url) pairs from section 3 so section 4 skips overlapping rows.
     section3_pairs: set = field(default_factory=set)
-    current_provider_norm: str = field(init=False)
-    current_base_url_norm: str = field(init=False)
 
-    def __post_init__(self):
-        self.current_provider_norm = self.current_provider.lower()
-        self.current_base_url_norm = self.current_base_url.rstrip("/").lower()
+    @property
+    def current_provider_norm(self) -> str:
+        return self.current_provider.lower()
+
+    @property
+    def current_base_url_norm(self) -> str:
+        return self.current_base_url.rstrip("/").lower()
 
     def can_probe_custom(self, *, row_is_current: bool) -> bool:
         return bool(self.probe_custom_providers or (self.probe_current_custom_provider and row_is_current))
