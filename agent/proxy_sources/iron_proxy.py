@@ -207,8 +207,7 @@ def _platform_asset_name() -> str:
         return f"iron-proxy_{_IRON_PROXY_VERSION}_{os_name}_{arch}.tar.gz"
     if system == "Windows":
         raise RuntimeError(
-            f"iron-proxy does not ship native Windows binaries as of v{_IRON_PROXY_VERSION}. "
-            "Run the proxy on a Linux/macOS host, or inside WSL."
+            f"iron-proxy does not ship native Windows binaries as of v{_IRON_PROXY_VERSION}. Run the proxy on a Linux/macOS host, or inside WSL."
         )
     raise RuntimeError(f"Unsupported platform for iron-proxy auto-install: {system} {machine}")
 
@@ -293,10 +292,7 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
     is never a hard dependency.  Raises ONLY on a present-but-bad signature (tamper signal)."""
     gpg = shutil.which("gpg")
     if not gpg:
-        logger.warning(
-            "gpg not found on PATH — skipping iron-proxy release-signature "
-            "verification (SHA-256 checksum check still enforced)."
-        )
+        logger.warning("gpg not found on PATH — skipping iron-proxy release-signature verification (SHA-256 checksum check still enforced).")
         return False
 
     sig_path, pubkey_path = tmp / _IRON_PROXY_CHECKSUM_SIG_NAME, tmp / _IRON_PROXY_PUBKEY_NAME
@@ -304,10 +300,7 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
         _release_asset(_IRON_PROXY_CHECKSUM_SIG_NAME, sig_path)
         _release_asset(_IRON_PROXY_PUBKEY_NAME, pubkey_path)
     except RuntimeError as exc:
-        logger.warning(
-            "iron-proxy release signature assets unavailable (%s) — skipping "
-            "GPG verification (SHA-256 checksum check still enforced).", exc,
-        )
+        logger.warning("iron-proxy release signature assets unavailable (%s) — skipping GPG verification (SHA-256 checksum check still enforced).", exc)
         return False
 
     gnupg_home = tmp / "gnupg"
@@ -315,17 +308,13 @@ def _verify_checksums_signature(tmp: Path, checksum_path: Path) -> bool:
     gpg_base = [gpg, "--homedir", str(gnupg_home), "--batch", "--no-tty"]
     imp = _run([*gpg_base, "--import", str(pubkey_path)], timeout=60)
     if imp.returncode != 0:
-        logger.warning(
-            "Could not import iron-proxy signing key — skipping GPG verification (SHA-256 still enforced): %s",
-            imp.stderr.decode("utf-8", "replace")[:200],
-        )
+        logger.warning("Could not import iron-proxy signing key — skipping GPG verification (SHA-256 still enforced): %s", imp.stderr.decode("utf-8", "replace")[:200])
         return False
     verify = _run([*gpg_base, "--verify", str(sig_path), str(checksum_path)], timeout=60)
     if verify.returncode != 0:
         raise RuntimeError(
-            "iron-proxy checksums.txt failed GPG signature verification — "
-            "refusing to install (possible release-channel tampering). "
-            f"gpg: {verify.stderr.decode('utf-8', 'replace')[:300]}"
+            "iron-proxy checksums.txt failed GPG signature verification — refusing to install (possible release-channel "
+            f"tampering). gpg: {verify.stderr.decode('utf-8', 'replace')[:300]}"
         )
     logger.info("Verified iron-proxy checksums.txt GPG signature.")
     return True
@@ -356,10 +345,7 @@ def _pick_tar_member(tf: tarfile.TarFile, binary_name: str) -> tarfile.TarInfo:
         and Path(m.name).name == binary_name
     ]
     if not candidates:
-        raise RuntimeError(
-            f"Could not find {binary_name} inside downloaded archive "
-            f"(members: {[m.name for m in tf.getmembers()[:5]]}...)"
-        )
+        raise RuntimeError(f"Could not find {binary_name} inside downloaded archive (members: {[m.name for m in tf.getmembers()[:5]]}...)")
     return min(candidates, key=lambda m: len(m.name))
 
 
@@ -419,9 +405,7 @@ def ensure_ca_cert(*, force: bool = False) -> Tuple[Path, Path]:
     if ca_crt.exists() and ca_key.exists() and not force:
         return ca_crt, ca_key
     if shutil.which("openssl") is None:
-        raise RuntimeError(
-            "openssl not found on PATH. Install OpenSSL (apt: `openssl`, brew: `openssl`) to generate the iron-proxy CA cert."
-        )
+        raise RuntimeError("openssl not found on PATH. Install OpenSSL (apt: `openssl`, brew: `openssl`) to generate the iron-proxy CA cert.")
 
     with tempfile.TemporaryDirectory(prefix="hermes-proxy-ca-") as tmpdir:
         tmp_key, tmp_crt = Path(tmpdir) / "ca.key", Path(tmpdir) / "ca.crt"
@@ -546,10 +530,9 @@ def reload_proxy() -> bool:
                 return True
             raise RuntimeError(f"management API returned unexpected status {resp.status}")
     except urllib.error.HTTPError as exc:
-        try:
+        body = ""
+        with suppress(OSError):
             body = exc.read().decode("utf-8", errors="replace")[:500]
-        except OSError:
-            body = ""
         message = _RELOAD_HTTP_ERRORS.get(exc.code, "management reload failed (HTTP {code}): {body}")
         raise RuntimeError(message.format(code=exc.code, body=body)) from exc
     except (urllib.error.URLError, OSError) as exc:
@@ -690,8 +673,7 @@ def ensure_audit_log(audit_path: Path) -> None:
         os.close(_open_private_append(audit_path, strict_chmod=True))
     except OSError as exc:
         raise RuntimeError(
-            f"Refusing to start: could not pre-create audit log "
-            f"{audit_path} with restrictive permissions ({exc}).  "
+            f"Refusing to start: could not pre-create audit log {audit_path} with restrictive permissions ({exc}).  "
             f"Move or chmod any existing file at that path and retry."
         ) from exc
 
@@ -746,14 +728,10 @@ def load_mappings() -> List[TokenMapping]:
         return []
     out: List[TokenMapping] = []
     for item in payload.get("tokens", []):
-        try:
+        try:  # pre-header-auth files load with the bearer defaults they were written under
             out.append(TokenMapping(
-                proxy_token=item["proxy_token"],
-                real_env_name=item["env_name"],
-                upstream_hosts=tuple(item.get("upstream_hosts") or ()),
-                # Pre-header-auth files load with the bearer defaults they were written under.
-                match_headers=tuple(item.get("match_headers") or ("Authorization",)),
-                alias_env_names=tuple(item.get("alias_env_names") or ()),
+                item["proxy_token"], item["env_name"], tuple(item.get("upstream_hosts") or ()),
+                tuple(item.get("match_headers") or ("Authorization",)), tuple(item.get("alias_env_names") or ()),
             ))
         except (KeyError, TypeError):
             continue
@@ -762,9 +740,7 @@ def load_mappings() -> List[TokenMapping]:
 
 def _env_names(available_env_names: Optional[List[str]]) -> set:
     """Explicit override (Bitwarden adapter) or the non-empty names in the host env."""
-    if available_env_names is not None:
-        return set(available_env_names)
-    return {k for k, v in os.environ.items() if v}
+    return set(available_env_names) if available_env_names is not None else {k for k, v in os.environ.items() if v}
 
 
 def discover_provider_mappings(*, available_env_names: Optional[List[str]] = None) -> List[TokenMapping]:
@@ -936,8 +912,7 @@ def start_proxy(
         return _abort(f"iron-proxy exited immediately (code {proc.returncode}). ", kill=False)
 
     def _interrupt_handler(_signum, _frame):  # pragma: no cover - signal path
-        # Ctrl-C while waiting must not leak an orphan holding the port.
-        _kill_and_wait(proc, grace_seconds=2)
+        _kill_and_wait(proc, grace_seconds=2)  # Ctrl-C while waiting must not leak an orphan holding the port
         pidfile.unlink(missing_ok=True)
         raise KeyboardInterrupt()
 
@@ -961,10 +936,7 @@ def start_proxy(
         raise _exited_error()
     # Alive-but-not-listening is a failure: an orphan holding the port breaks every restart.
     if not listening:
-        raise _abort(
-            f"iron-proxy did not bind {probe_host}:{tunnel_port} within {_STARTUP_GRACE_SECONDS}s.  Process was killed.  ",
-            kill=True,
-        )
+        raise _abort(f"iron-proxy did not bind {probe_host}:{tunnel_port} within {_STARTUP_GRACE_SECONDS}s.  Process was killed.  ", kill=True)
 
     logger.info("Started iron-proxy pid=%s config=%s", proc.pid, cfg)
     return get_status()
@@ -1020,10 +992,7 @@ def _write_pidfile_safely(pidfile: Path, pid: int) -> None:
     except FileExistsError:
         existing_pid = _read_pid()
         if existing_pid and _pid_alive(existing_pid):
-            raise RuntimeError(
-                f"Another iron-proxy start appears to be in progress (pidfile {pidfile} -> pid {existing_pid}).  "
-                f"Run `hermes egress stop` if that proxy is stuck."
-            )
+            raise RuntimeError(f"Another iron-proxy start appears to be in progress (pidfile {pidfile} -> pid {existing_pid}).  Run `hermes egress stop` if that proxy is stuck.")
         pidfile.unlink(missing_ok=True)
         fd = os.open(str(pidfile), open_flags, 0o600)
     except OSError as exc:
@@ -1074,13 +1043,9 @@ def _build_proxy_subprocess_env(
     needed = {m.real_env_name for m in mappings}
     alias_sources = {m.real_env_name: m.alias_env_names for m in mappings if m.alias_env_names}
     for name in needed:
-        if name in parent:
-            env[name] = parent[name]
-        else:
-            for alias in alias_sources.get(name, ()):
-                if parent.get(alias):
-                    env[name] = parent[alias]
-                    break
+        source = name if name in parent else next((a for a in alias_sources.get(name, ()) if parent.get(a)), None)
+        if source is not None:
+            env[name] = parent[source]
 
     if refresh_from_bitwarden and bitwarden_config:
         _refresh_secrets_from_bitwarden(env, needed, bitwarden_config, bool(bitwarden_config.get("allow_env_fallback")))
@@ -1114,16 +1079,12 @@ def _refresh_secrets_from_bitwarden(env: Dict[str, str], needed: set, bitwarden_
             # Don't interpolate access_token_name — CodeQL treats config values as tainted.
             _bitwarden_shortfall(
                 allow_env_fallback,
-                "credential_source=bitwarden but the access-token env or project_id is empty.  Either set both, "
-                "switch to credential_source: env, or set `proxy.allow_env_fallback: true` to opt into "
-                "the legacy fallback behaviour.",
-                "credential_source=bitwarden but access-token env or project_id is empty — "
-                "proxy will fall back to parent env (allow_env_fallback=true).",
+                "credential_source=bitwarden but the access-token env or project_id is empty.  Either set both, switch to "
+                "credential_source: env, or set `proxy.allow_env_fallback: true` to opt into the legacy fallback behaviour.",
+                "credential_source=bitwarden but access-token env or project_id is empty — proxy will fall back to parent env (allow_env_fallback=true).",
             )
             return
-        secrets, warnings = bw.fetch_bitwarden_secrets(
-            access_token=access_token, project_id=project_id, cache_ttl_seconds=0, use_cache=False,
-        )
+        secrets, warnings = bw.fetch_bitwarden_secrets(access_token=access_token, project_id=project_id, cache_ttl_seconds=0, use_cache=False)
     except ImportError as exc:
         # A dependency vanishing between setup and restart must not silently degrade.
         if not allow_env_fallback:
@@ -1132,10 +1093,7 @@ def _refresh_secrets_from_bitwarden(env: Dict[str, str], needed: set, bitwarden_
                 "proxy.allow_env_fallback: false).  Either fix the import, switch to credential_source: env, or set "
                 "`proxy.allow_env_fallback: true` to opt into the legacy fallback behaviour."
             ) from exc
-        logger.warning(
-            "Bitwarden refresh module unavailable at proxy start, falling back to parent env (allow_env_fallback=true): %s",
-            exc,
-        )
+        logger.warning("Bitwarden refresh module unavailable at proxy start, falling back to parent env (allow_env_fallback=true): %s", exc)
         return
 
     missing = sorted(needed - set(secrets))
@@ -1145,18 +1103,14 @@ def _refresh_secrets_from_bitwarden(env: Dict[str, str], needed: set, bitwarden_
     if missing:
         _bitwarden_shortfall(
             allow_env_fallback,
-            f"Bitwarden refresh did not return secrets for {missing}.  Either add the secrets to your BWS "
-            f"project, switch to credential_source: env via `hermes egress setup --no-bitwarden`, or set "
-            f"`proxy.allow_env_fallback: true` in config.yaml to opt into the legacy host-env fallback.",
-            "Bitwarden refresh did not return secrets for %s — falling back to host env for those names "
-            "(allow_env_fallback=true).",
+            f"Bitwarden refresh did not return secrets for {missing}.  Either add the secrets to your BWS project, switch to "
+            f"credential_source: env via `hermes egress setup --no-bitwarden`, or set `proxy.allow_env_fallback: true` in "
+            f"config.yaml to opt into the legacy host-env fallback.",
+            "Bitwarden refresh did not return secrets for %s — falling back to host env for those names (allow_env_fallback=true).",
             missing,
         )
-    # Log only the count: the taint analyzer can't tell bws status text is non-secret.
-    if warnings:
-        logger.warning(
-            "Bitwarden refresh produced %d warning(s); run `hermes secrets bitwarden status` for detail.", len(warnings),
-        )
+    if warnings:  # log only the count: the taint analyzer can't tell bws status text is non-secret
+        logger.warning("Bitwarden refresh produced %d warning(s); run `hermes secrets bitwarden status` for detail.", len(warnings))
 
 
 def _forget_daemon() -> None:
@@ -1191,9 +1145,7 @@ def stop_proxy() -> bool:
         time.sleep(0.1)
     else:
         starttime_after = _pid_proc_starttime(pid)
-        recycled = (
-            starttime_before is not None and starttime_after is not None and starttime_before != starttime_after
-        ) or not _pid_alive(pid)
+        recycled = (starttime_before is not None and starttime_after is not None and starttime_before != starttime_after) or not _pid_alive(pid)
         if recycled:
             logger.warning("iron-proxy pid=%s appears recycled before SIGKILL; not killing.", pid)
         else:
@@ -1219,8 +1171,7 @@ def get_status() -> ProxyStatus:
     status.ca_cert_path = ca if ca.exists() else None
     pid = _read_pid()
     if pid and _pid_alive(pid):
-        status.pid = pid
-        status.listening = _port_listening(probe_host, status.tunnel_port)
+        status.pid, status.listening = pid, _port_listening(probe_host, status.tunnel_port)
     return status
 
 
@@ -1238,8 +1189,7 @@ def _tail_log(path: Path, *, lines: int = 20) -> str:
     if not path.exists():
         return "(no log file)"
     try:
-        data = path.read_bytes()[-8192:]
-        return "\n".join(data.decode("utf-8", errors="replace").splitlines()[-lines:])
+        return "\n".join(path.read_bytes()[-8192:].decode("utf-8", errors="replace").splitlines()[-lines:])
     except OSError as exc:
         return f"(could not read log: {exc})"
 
