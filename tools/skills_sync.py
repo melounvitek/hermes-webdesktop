@@ -78,13 +78,17 @@ def _get_optional_dir() -> Path:
     return get_optional_skills_dir(Path(__file__).parent.parent / "optional-skills")
 
 
-def _iter_active_skill_mds(sort: bool = False) -> Iterator[Path]:
-    """Yield every non-excluded SKILL.md in the user's skills tree."""
-    root = _skills_dir()
+def _iter_skill_mds(root: Path, sort: bool = False) -> Iterator[Path]:
+    """Yield every non-excluded SKILL.md under ``root`` (nothing when it does not exist)."""
     found = root.rglob("SKILL.md") if root.exists() else iter(())
     for skill_md in sorted(found) if sort else found:
         if not is_excluded_skill_path(skill_md):
             yield skill_md
+
+
+def _iter_active_skill_mds(sort: bool = False) -> Iterator[Path]:
+    """Yield every non-excluded SKILL.md in the user's skills tree."""
+    return _iter_skill_mds(_skills_dir(), sort)
 
 
 def _build_external_skill_index() -> Set[str]:
@@ -94,9 +98,8 @@ def _build_external_skill_index() -> Set[str]:
     _external_dirs_cache_clear()  # so a config edit (or a test patch) is seen
     external_names: Set[str] = set()
     for ext_dir in get_external_skills_dirs():
-        for skill_md in ext_dir.rglob("SKILL.md"):
-            if not is_excluded_skill_path(skill_md):
-                external_names.update({skill_md.parent.name, _read_skill_name(skill_md, "")})
+        for skill_md in _iter_skill_mds(ext_dir):
+            external_names.update({skill_md.parent.name, _read_skill_name(skill_md, "")})
     external_names.discard("")
     return external_names
 
@@ -119,9 +122,9 @@ def _read_suppressed_names() -> set:
 def _write_manifest(entries: Dict[str, str]):
     """Atomic v2 write, preserving an existing file's mode/owner (not mkstemp's 0600)."""
     _manifest_file().parent.mkdir(parents=True, exist_ok=True)
-    data = "\n".join(f"{name}:{hash_val}" for name, hash_val in sorted(entries.items())) + "\n"
     try:
-        atomic_write_text(_manifest_file(), data, tmp_prefix=".bundled_manifest_", preserve_mode=True)
+        atomic_write_text(_manifest_file(), "".join(f"{n}:{h}\n" for n, h in sorted(entries.items())),
+                          tmp_prefix=".bundled_manifest_", preserve_mode=True)
     except Exception as e:
         logger.debug("Failed to write skills manifest %s: %s", _manifest_file(), e, exc_info=True)
 
@@ -145,13 +148,11 @@ def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
 def _dir_hash(directory: Path) -> str:
     """MD5 over relative paths + contents of every file in a directory."""
     hasher = hashlib.md5()
-    try:
+    with suppress(OSError):
         for fpath in sorted(directory.rglob("*")):
             if fpath.is_file():
                 hasher.update(str(fpath.relative_to(directory)).encode("utf-8"))
                 hasher.update(fpath.read_bytes())
-    except OSError:
-        pass
     return hasher.hexdigest()
 
 
@@ -208,7 +209,6 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
 @dataclass
 class _SyncState:
     """Mutable accumulator threaded through one sync_skills() run."""
-
     manifest: Dict[str, str]
     quiet: bool
     skipped: int = 0
@@ -309,8 +309,7 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
         st.skipped += 1
         return
     user_hash = _dir_hash(dest)
-    if not origin_hash:
-        # v1 migration: baseline from the user's copy (can't tell user-edit from upstream change).
+    if not origin_hash:  # v1 migration: baseline from the user's copy (can't tell edit from upstream change)
         st.manifest[skill_name] = user_hash
         st.skipped += 1
         return
@@ -330,8 +329,8 @@ def _update_existing_skill(st: _SyncState, skill_name: str, skill_src: Path, des
 
 
 def _seed_category_descriptions(bundled_dir: Path, only_dirs: Optional[Set[Path]]) -> None:
-    """Copy category DESCRIPTION.md files not already present; ``only_dirs``
-    restricts seeding to the essential skills' categories on opted-out profiles."""
+    """Copy category DESCRIPTION.md files not already present; ``only_dirs`` restricts
+    seeding to the essential skills' categories on opted-out profiles."""
     for desc_md in bundled_dir.rglob("DESCRIPTION.md"):
         dest_desc = _skills_dir() / desc_md.relative_to(bundled_dir)
         if (only_dirs is not None and dest_desc.parent not in only_dirs) or dest_desc.exists():
@@ -415,7 +414,6 @@ def _rmtree_writable(path: Path) -> None:
             with suppress(OSError):
                 os.chmod(p, stat.S_IRWXU)
         func(fpath)
-
     shutil.rmtree(path, onerror=_on_error)
 
 

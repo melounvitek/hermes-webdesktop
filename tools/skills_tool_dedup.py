@@ -1,10 +1,7 @@
-"""skill_view repeat-view dedup registry.
-
-Per-task cache of (skill name, file_path) -> (skill file mtime+size). A repeat
-view of an UNCHANGED file returns a short stub — the earlier tool result already
-carries the content verbatim. Cleared on context compression via
+"""skill_view repeat-view dedup registry: per-task cache of (skill name, file_path) ->
+(skill file mtime+size). A repeat view of an UNCHANGED file returns a short stub — the earlier
+tool result already carries the content verbatim. Cleared on context compression via
 ``reset_skill_view_dedup()`` because the original content is summarized away.
-Every name is re-imported into ``tools.skills_tool``; state lives only here.
 """
 
 import json
@@ -76,10 +73,9 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
                 cache.pop(key, None)
                 return None
             return json.dumps({
-                "success": True, "status": "unchanged", "name": rec_name,
-                "file": file_path or "SKILL.md", "dedup": True,
-                "content_returned": False, "message": _SKILL_VIEW_DEDUP_MESSAGE,
-            }, ensure_ascii=False)
+                "success": True, "status": "unchanged", "name": rec_name, "file": file_path or "SKILL.md",
+                "dedup": True, "content_returned": False, "message": _SKILL_VIEW_DEDUP_MESSAGE},
+                ensure_ascii=False)
     return None
 
 

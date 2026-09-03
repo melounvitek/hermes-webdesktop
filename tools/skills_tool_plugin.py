@@ -1,8 +1,7 @@
-"""Plugin-provided skill serving for ``skill_view`` (``plugin:skill`` names) plus
-the JSON / file-serving helpers shared with the local-skill path.
+"""Plugin-provided skill serving for ``skill_view`` (``plugin:skill`` names) plus the
+JSON / file-serving helpers shared with the local-skill path.
 
-Every name is re-imported by ``tools.skills_tool``. Helpers tests patch on the
-origin module (``_is_skill_disabled``, ``_parse_frontmatter``,
+Helpers tests patch on the origin module (``_is_skill_disabled``, ``_parse_frontmatter``,
 ``skill_matches_platform``) are looked up lazily via ``tools.skills_tool``.
 """
 
@@ -16,12 +15,9 @@ from tools.skills_tool_setup import SkillReadinessStatus
 
 logger = logging.getLogger("tools.skills_tool")
 
-# Anthropic-recommended limits for progressive disclosure efficiency
-MAX_NAME_LENGTH = 64
+MAX_NAME_LENGTH = 64  # Anthropic-recommended progressive-disclosure limits
 MAX_DESCRIPTION_LENGTH = 1024
-
-# Prompt injection detection — shared by local-skill and plugin-skill paths.
-_INJECTION_PATTERNS: list = [
+_INJECTION_PATTERNS: list = [  # shared by local-skill and plugin-skill paths
     "ignore previous instructions", "ignore all previous", "you are now",
     "disregard your", "forget your instructions", "new instructions:",
     "system prompt:", "<system>", "]]>"]
@@ -44,9 +40,9 @@ def _read_skill_text(path: Path) -> str:
 
 
 def _truncate_description(description: str) -> str:
-    if len(description) > MAX_DESCRIPTION_LENGTH:
-        return description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
-    return description
+    if len(description) <= MAX_DESCRIPTION_LENGTH:
+        return description
+    return description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
 
 
 def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -> Dict[str, Any]:
@@ -59,29 +55,26 @@ def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -
 
 
 def _available_skill_files(skill_dir: Path) -> Dict[str, List[str]]:
-    """Non-SKILL.md files grouped by support dir (+ "other" for known source
-    extensions at other locations); empty groups dropped."""
+    """Non-SKILL.md files grouped by support dir (+ "other" for known source extensions
+    elsewhere); empty groups dropped."""
     groups: Dict[str, List[str]] = {}
     for f in skill_dir.rglob("*"):
         if not f.is_file() or f.name == "SKILL.md":
             continue
         rel = str(f.relative_to(skill_dir))
         top = rel.split("/", 1)[0] if "/" in rel else None
-        if top in _SUPPORT_DIRS:
-            groups.setdefault(top, []).append(rel)
-        elif f.suffix in _SKILL_FILE_EXTS:
-            groups.setdefault("other", []).append(rel)
+        if top in _SUPPORT_DIRS or f.suffix in _SKILL_FILE_EXTS:
+            groups.setdefault(top if top in _SUPPORT_DIRS else "other", []).append(rel)
     return {k: groups[k] for k in (*_SUPPORT_DIRS, "other") if k in groups}
 
 
 def _serve_skill_file(
     skill_root: Path, file_path: str, label: str, *, hint: str | None = None,
     list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False) -> str:
-    """Serve one linked file from a skill directory as a skill_view JSON result.
-
-    ``hint`` decorates traversal/containment errors and ``list_available`` adds the
-    available-files listing on not-found (local skills); ``read_error_prefix`` wraps
-    non-decode read errors (plugin) instead of propagating to the caller's handler."""
+    """Serve one linked file from a skill directory as a skill_view JSON result. ``hint``
+    decorates traversal/containment errors; ``list_available`` adds the available-files listing
+    on not-found (local); ``read_error_prefix`` wraps non-decode read errors (plugin) instead
+    of propagating to the caller's handler."""
     from tools.path_security import has_traversal_component, validate_within_dir
     extra = {"hint": hint} if hint else {}
     if has_traversal_component(file_path):
@@ -91,12 +84,9 @@ def _serve_skill_file(
         return _fail(path_error, **extra)
     # is_file(), not exists(): a bare directory must take the not-found branch.
     if not target.is_file():
-        not_found = f"File '{file_path}' not found in skill '{label}'."
-        if list_available:
-            return _fail(
-                not_found, available_files=_available_skill_files(skill_root),
-                hint="Use one of the available file paths listed above")
-        return _fail(not_found)
+        listing = {"available_files": _available_skill_files(skill_root),
+                   "hint": "Use one of the available file paths listed above"} if list_available else {}
+        return _fail(f"File '{file_path}' not found in skill '{label}'.", **listing)
     try:
         content = _read_skill_text(target)
     except UnicodeDecodeError:
@@ -160,22 +150,17 @@ def _serve_plugin_skill(
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection", namespace, bare)
-    try:  # bundle-context banner: sibling skills of the same plugin
+    banner = ""
+    with suppress(Exception):  # bundle-context banner: sibling skills of the same plugin
         siblings = [s for s in get_plugin_manager().list_plugin_skills(namespace) if s != bare]
-        banner = f"[Bundle context: This skill is part of the '{namespace}' plugin."
-        if siblings:
-            banner += (
-                f"\nSibling skills: {', '.join(siblings)}.\n"
-                f"Use qualified form to invoke siblings (e.g. {namespace}:{siblings[0]}).")
-        banner += "]\n\n"
-    except Exception:
-        banner = ""
+        banner = f"[Bundle context: This skill is part of the '{namespace}' plugin." + (
+            f"\nSibling skills: {', '.join(siblings)}.\n"
+            f"Use qualified form to invoke siblings (e.g. {namespace}:{siblings[0]})." if siblings else ""
+        ) + "]\n\n"
     rendered_content = content if not preprocess else _preprocess_skill(
         content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s", namespace, bare)
     return _json({
-        "success": True,
-        "name": qualified_name,
-        "content": f"{banner}{rendered_content}" if banner else rendered_content,
+        "success": True, "name": qualified_name, "content": banner + rendered_content,
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
         "readiness_status": SkillReadinessStatus.AVAILABLE.value})
@@ -185,12 +170,8 @@ def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:
     from tools.path_security import validate_within_dir
     linked: Dict[str, List[str]] = {}
     for category in _SUPPORT_DIRS:
-        base = skill_root / category
-        if not base.is_dir():
-            continue
         files = [
-            str(path.relative_to(skill_root))
-            for path in sorted(base.rglob("*"))
+            str(path.relative_to(skill_root)) for path in sorted((skill_root / category).rglob("*"))
             if path.is_file() and validate_within_dir(path, skill_root) is None]
         if files:
             linked[category] = files

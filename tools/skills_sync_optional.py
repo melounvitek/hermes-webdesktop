@@ -1,8 +1,5 @@
-"""Official optional-skill provenance: hub-lock backfill and restore.
-
-Profile-scoped paths and patchable helpers are resolved through ``_ss()`` at call
-time so tests and multi-profile runtimes patching ``tools.skills_sync`` keep working.
-"""
+"""Official optional-skill provenance: hub-lock backfill and restore. Profile-scoped paths
+and patchable helpers resolve through ``_ss()`` at call time (``tools.skills_sync`` patches work)."""
 
 import json
 import logging
@@ -68,8 +65,9 @@ def _read_hub_install_paths() -> Set[str]:
 def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterator[Tuple[Path, Path, str]]:
     """Yield ``(skill_md, src, install_path)`` for every safe official optional skill."""
     for skill_md in sorted(optional_dir.rglob("SKILL.md")):
-        if (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir) if root_relative
-                else is_excluded_skill_path(skill_md)):
+        excluded = (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir)
+                    if root_relative else is_excluded_skill_path(skill_md))
+        if excluded:
             continue
         try:
             yield skill_md, skill_md.parent, _safe_rel_install_path(skill_md.parent, optional_dir)
@@ -93,8 +91,7 @@ def _move_to_restore_backup(path: Path, backup_root: Path) -> str:
     """Move an existing skill directory into a restore backup, preserving rel path."""
     ss = _ss()
     rel = path.relative_to(ss._skills_dir())
-    target = backup_root / rel
-    suffix = 0
+    target, suffix = backup_root / rel, 0
     while target.exists():
         suffix += 1
         target = (backup_root / rel).with_name(f"{rel.name}-{suffix}")

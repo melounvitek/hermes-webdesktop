@@ -1,8 +1,5 @@
 """Bundled-skill maintenance ops: reset, diff, list-modified, opt-out, remove-pristine.
-
-Profile-scoped paths and patchable helpers (``_get_bundled_dir``, ``sync_skills``, ...)
-are resolved through ``_ss()`` at call time so monkeypatching ``tools.skills_sync`` works.
-"""
+Profile-scoped paths and patchable helpers resolve through ``_ss()`` at call time."""
 
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -11,27 +8,24 @@ from tools.skills_sync_optional import _skill_file_list, _ss
 
 
 def _is_tracked_user_modification(origin_hash: str, user_hash: str) -> bool:
-    """User modification ``hermes update`` keeps: a recorded origin hash (un-baselined v1
-    entries don't count) AND differing content. Shared by the sync loop and
-    ``list_user_modified_bundled_skills`` so they never drift."""
+    """User modification ``hermes update`` keeps: a recorded origin hash (un-baselined v1 entries
+    don't count) AND differing content. Shared by the sync loop and list-modified so they never drift."""
     return bool(origin_hash) and user_hash != origin_hash
 
 
 def _bundled_state():
-    """``(skills_sync, manifest, bundled_dir, {skill_name: bundled_src})`` — the shared
-    preamble of every maintenance op."""
+    """``(skills_sync, manifest, bundled_dir, {skill_name: bundled_src})`` — shared op preamble."""
     ss = _ss()
     bundled_dir = ss._get_bundled_dir()
     return ss, ss._read_manifest(), bundled_dir, dict(ss._discover_bundled_skills(bundled_dir))
 
 
 def reset_bundled_skill(name: str, restore: bool = False) -> dict:
-    """Reset a bundled skill's manifest tracking so future syncs work normally.
-
-    An edited bundled skill stays ``user_modified`` forever because the manifest holds
-    the OLD origin hash; clearing the entry breaks that loop. ``restore`` also deletes
-    the user's copy so the next sync re-copies bundled. Returns ``{ok, action, message,
-    synced}``; action is manifest_cleared / restored / not_in_manifest / bundled_missing / not_reset."""
+    """Reset a bundled skill's manifest tracking so future syncs work normally. An edited bundled
+    skill stays ``user_modified`` forever because the manifest holds the OLD origin hash; clearing
+    the entry breaks that loop. ``restore`` also deletes the user's copy so the next sync re-copies
+    bundled. Returns ``{ok, action, message, synced}``; action is manifest_cleared / restored /
+    not_in_manifest / bundled_missing / not_reset."""
     ss, manifest, bundled_dir, bundled_by_name = _bundled_state()
     in_manifest = name in manifest
     is_bundled = name in bundled_by_name
@@ -71,8 +65,8 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
 
 
 def list_user_modified_bundled_skills() -> List[dict]:
-    """Bundled skills ``hermes update`` keeps because the user edited them (same test
-    the sync loop uses). Name-sorted ``{"name", "dest", "bundled_src"}`` dicts."""
+    """Bundled skills ``hermes update`` keeps because the user edited them (same test the sync
+    loop uses). Name-sorted ``{"name", "dest", "bundled_src"}`` dicts."""
     ss = _ss()
     if not (manifest := ss._read_manifest()):
         return []
@@ -98,9 +92,9 @@ def _read_for_diff(path: Path) -> Tuple[Optional[bytes], Optional[str]]:
 
 
 def diff_bundled_skill(name: str) -> dict:
-    """Diff a user's copy of a bundled skill against stock. Returns ``{ok, name, found,
-    modified, message, diffs}``; each diff is ``{"path", "status", "diff"}`` with status
-    modified / added (only in user copy) / removed (only in bundled) / binary."""
+    """Diff a user's copy of a bundled skill against stock. Returns ``{ok, name, found, modified,
+    message, diffs}``; each diff is ``{"path", "status", "diff"}`` with status modified / added
+    (only in user copy) / removed (only in bundled) / binary."""
     import difflib
     ss, _, bundled_dir, bundled_by_name = _bundled_state()
 
@@ -119,19 +113,20 @@ def diff_bundled_skill(name: str) -> dict:
     for rel in sorted(user_files | stock_files):
         if rel not in stock_files:
             diffs.append({"path": rel, "status": "added", "diff": f"+ only in your copy: {rel}"})
-        elif rel not in user_files:
+            continue
+        if rel not in user_files:
             diffs.append({"path": rel, "status": "removed", "diff": f"- only in stock: {rel}"})
-        else:
-            user_bytes, user_text = _read_for_diff(dest / rel)
-            stock_bytes, stock_text = _read_for_diff(bundled_src / rel)
-            if user_text is None or stock_text is None:  # a binary side: report only if bytes differ
-                if user_bytes != stock_bytes:
-                    diffs.append({"path": rel, "status": "binary", "diff": "<binary file differs>"})
-            elif user_text != stock_text:
-                text = "".join(difflib.unified_diff(
-                    stock_text.splitlines(keepends=True), user_text.splitlines(keepends=True),
-                    fromfile=f"stock/{rel}", tofile=f"yours/{rel}"))
-                diffs.append({"path": rel, "status": "modified", "diff": text})
+            continue
+        user_bytes, user_text = _read_for_diff(dest / rel)
+        stock_bytes, stock_text = _read_for_diff(bundled_src / rel)
+        if user_text is None or stock_text is None:  # a binary side: report only if bytes differ
+            if user_bytes != stock_bytes:
+                diffs.append({"path": rel, "status": "binary", "diff": "<binary file differs>"})
+        elif user_text != stock_text:
+            text = "".join(difflib.unified_diff(
+                stock_text.splitlines(keepends=True), user_text.splitlines(keepends=True),
+                fromfile=f"stock/{rel}", tofile=f"yours/{rel}"))
+            diffs.append({"path": rel, "status": "modified", "diff": text})
     message = (f"'{name}' differs from the stock version in {len(diffs)} file(s)." if diffs
                else f"'{name}' matches the stock version.")
     return {"ok": True, "name": name, "found": True, "modified": bool(diffs), "diffs": diffs, "message": message}
@@ -145,9 +140,8 @@ _OPT_OUT_MESSAGES = {  # (enabled, changed) -> message
 
 
 def set_bundled_skills_opt_out(enabled: bool) -> dict:
-    """Toggle the .no-bundled-skills marker (the on-disk half of ``hermes skills
-    opt-out`` / ``opt-in``); removing present skills is ``remove_pristine_bundled_skills``.
-    Returns ``{ok, changed, marker, message}``."""
+    """Toggle the .no-bundled-skills marker (on-disk half of ``hermes skills opt-out`` / ``opt-in``;
+    removing present skills is ``remove_pristine_bundled_skills``). ``{ok, changed, marker, message}``."""
     ss = _ss()
     marker = ss._hermes_home() / ss.NO_BUNDLED_SKILLS_MARKER
     existed = marker.exists()
@@ -168,10 +162,10 @@ def set_bundled_skills_opt_out(enabled: bool) -> dict:
 
 
 def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
-    """Delete bundled skills that are manifest-tracked (genuinely bundled), still in the
-    bundled source (hash-comparable) AND byte-identical to the origin hash; everything
-    else lands in ``skipped``. Removed skills lose their manifest entry so a later
-    opt-in re-seed treats them as new. Returns ``{ok, removed, skipped: [{name, reason}], dry_run, message}``."""
+    """Delete bundled skills that are manifest-tracked, still in the bundled source AND
+    byte-identical to the origin hash; everything else lands in ``skipped``. Removed skills lose
+    their manifest entry so a later opt-in re-seed treats them as new.
+    Returns ``{ok, removed, skipped: [{name, reason}], dry_run, message}``."""
     ss, manifest, bundled_dir, bundled_by_name = _bundled_state()
     removed: List[str] = []
     skipped: List[dict] = []
@@ -199,6 +193,5 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
     if not dry_run and removed:
         ss._write_manifest(manifest)
     verb = "Would remove" if dry_run else "Removed"
-    return {
-        "ok": True, "removed": removed, "skipped": skipped, "dry_run": dry_run,
-        "message": f"{verb} {len(removed)} pristine bundled skill(s); kept {len(skipped)}."}
+    return {"ok": True, "removed": removed, "skipped": skipped, "dry_run": dry_run,
+            "message": f"{verb} {len(removed)} pristine bundled skill(s); kept {len(skipped)}."}
