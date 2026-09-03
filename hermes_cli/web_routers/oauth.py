@@ -195,11 +195,9 @@ def _codex_full_login_worker(session_id: str) -> None:
             token_resp = client.post(
                 CODEX_OAUTH_TOKEN_URL,
                 data={
-                    "grant_type": "authorization_code",
-                    "code": authorization_code,
+                    "grant_type": "authorization_code", "code": authorization_code,
                     "redirect_uri": f"{issuer}/deviceauth/callback",
-                    "client_id": CODEX_OAUTH_CLIENT_ID,
-                    "code_verifier": code_verifier,
+                    "client_id": CODEX_OAUTH_CLIENT_ID, "code_verifier": code_verifier,
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -239,8 +237,7 @@ def _codex_full_login_worker(session_id: str) -> None:
 def _nous_status(raw):
     # Refresh-free snapshot so listing providers never performs an OAuth refresh.
     return {
-        "logged_in": bool(raw.get("logged_in")),
-        "source": "nous_portal",
+        "logged_in": bool(raw.get("logged_in")), "source": "nous_portal",
         "source_label": raw.get("portal_base_url") or "Nous Portal",
         "token_preview": _truncate_token(raw.get("access_token")),
         "expires_at": raw.get("access_expires_at"),
@@ -250,20 +247,16 @@ def _nous_status(raw):
 
 def _codex_status(raw):
     return {
-        "logged_in": bool(raw.get("logged_in")),
-        "source": raw.get("source") or "openai_codex",
+        "logged_in": bool(raw.get("logged_in")), "source": raw.get("source") or "openai_codex",
         "source_label": raw.get("auth_mode") or "OpenAI Codex",
-        "token_preview": _truncate_token(raw.get("api_key")),
-        "expires_at": None,
-        "has_refresh_token": False,
-        "last_refresh": raw.get("last_refresh"),
+        "token_preview": _truncate_token(raw.get("api_key")), "expires_at": None,
+        "has_refresh_token": False, "last_refresh": raw.get("last_refresh"),
     }
 
 
 def _qwen_status(raw):
     return {
-        "logged_in": bool(raw.get("logged_in")),
-        "source": "qwen_cli",
+        "logged_in": bool(raw.get("logged_in")), "source": "qwen_cli",
         "source_label": raw.get("auth_store_path") or "Qwen CLI",
         "token_preview": _truncate_token(raw.get("access_token")),
         "expires_at": raw.get("expires_at"),
@@ -273,12 +266,9 @@ def _qwen_status(raw):
 
 def _minimax_status(raw):
     return {
-        "logged_in": bool(raw.get("logged_in")),
-        "source": "minimax_oauth",
-        "source_label": f"MiniMax ({raw.get('region', 'global')})",
-        "token_preview": None,
-        "expires_at": raw.get("expires_at"),
-        "has_refresh_token": True,
+        "logged_in": bool(raw.get("logged_in")), "source": "minimax_oauth",
+        "source_label": f"MiniMax ({raw.get('region', 'global')})", "token_preview": None,
+        "expires_at": raw.get("expires_at"), "has_refresh_token": True,
     }
 
 
@@ -286,13 +276,10 @@ def _xai_status(raw):
     # source_label is a human-readable origin (auth-store path / credential
     # source), not the internal auth_mode string ("oauth_pkce").
     return {
-        "logged_in": bool(raw.get("logged_in")),
-        "source": raw.get("source") or "xai_oauth",
+        "logged_in": bool(raw.get("logged_in")), "source": raw.get("source") or "xai_oauth",
         "source_label": raw.get("auth_store") or raw.get("source") or "xAI Grok OAuth",
-        "token_preview": _truncate_token(raw.get("api_key")),
-        "expires_at": None,
-        "has_refresh_token": True,
-        "last_refresh": raw.get("last_refresh"),
+        "token_preview": _truncate_token(raw.get("api_key")), "expires_at": None,
+        "has_refresh_token": True, "last_refresh": raw.get("last_refresh"),
     }
 
 
@@ -373,12 +360,9 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
     )
     _start_poller(_nous_poller, sid)
     return {
-        "session_id": sid,
-        "flow": "device_code",
-        "user_code": str(device_data["user_code"]),
+        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
         "verification_url": str(device_data["verification_uri_complete"]),
-        "expires_in": int(device_data["expires_in"]),
-        "poll_interval": int(device_data["interval"]),
+        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
     }
 
 
@@ -402,11 +386,8 @@ async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
     if not s.get("user_code"):
         raise HTTPException(status_code=504, detail="device-auth timed out before returning a user code")
     return {
-        "session_id": sid,
-        "flow": "device_code",
-        "user_code": s["user_code"],
-        "verification_url": s["verification_url"],
-        "expires_in": int(s.get("expires_in") or 900),
+        "session_id": sid, "flow": "device_code", "user_code": s["user_code"],
+        "verification_url": s["verification_url"], "expires_in": int(s.get("expires_in") or 900),
         "poll_interval": int(s.get("interval") or 5),
     }
 
@@ -453,11 +434,8 @@ async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
     sess["expires_at"] = expires_at_ts
     _start_poller(_minimax_poller, sid)
     return {
-        "session_id": sid,
-        "flow": "device_code",
-        "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data["verification_uri"]),
-        "expires_in": expires_in_seconds,
+        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
+        "verification_url": str(device_data["verification_uri"]), "expires_in": expires_in_seconds,
         "poll_interval": max(2, (sess["interval_ms"] or 2000) // 1000),
     }
 
@@ -478,20 +456,15 @@ async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
     )
     _start_poller(_xai_device_poller, sid)
     return {
-        "session_id": sid,
-        "flow": "device_code",
-        "user_code": str(device_data["user_code"]),
+        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
         "verification_url": str(device_data.get("verification_uri_complete") or device_data["verification_uri"]),
-        "expires_in": int(device_data["expires_in"]),
-        "poll_interval": int(device_data["interval"]),
+        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
     }
 
 
 _DEVICE_CODE_STARTERS = {
-    "nous": _start_nous_device_code,
-    "openai-codex": _start_codex_device_code,
-    "minimax-oauth": _start_minimax_device_code,
-    "xai-oauth": _start_xai_device_code,
+    "nous": _start_nous_device_code, "openai-codex": _start_codex_device_code,
+    "minimax-oauth": _start_minimax_device_code, "xai-oauth": _start_xai_device_code,
 }
 
 
@@ -574,11 +547,8 @@ def _build_oauth_catalog() -> list[Dict[str, Any]]:
                 continue
             seen.add(d.slug)
             rows.append({
-                "id": d.slug,
-                "name": d.label,
-                "flow": "external",
-                "cli_command": f"hermes auth add {d.slug}",
-                "docs_url": d.signup_url or "",
+                "id": d.slug, "name": d.label, "flow": "external",
+                "cli_command": f"hermes auth add {d.slug}", "docs_url": d.signup_url or "",
                 "status_fn": None,
             })
     except Exception:
@@ -603,15 +573,11 @@ async def list_oauth_providers(profile: Optional[str] = None):
             status = _resolve_provider_status(p["id"], p.get("status_fn"))
             disconnect_hint = _oauth_provider_disconnect_hint(p, status)
             providers.append({
-                "id": p["id"],
-                "name": p["name"],
-                "flow": p["flow"],
+                "id": p["id"], "name": p["name"], "flow": p["flow"],
                 "cli_command": _external_process_cli_command(p["id"], p["cli_command"]),
-                "docs_url": p["docs_url"],
-                "disconnect_hint": disconnect_hint,
+                "docs_url": p["docs_url"], "disconnect_hint": disconnect_hint,
                 "disconnect_command": _oauth_provider_disconnect_command(p),
-                "disconnectable": disconnect_hint is None,
-                "status": status,
+                "disconnectable": disconnect_hint is None, "status": status,
             })
         return {"providers": providers}
 
@@ -769,10 +735,8 @@ async def poll_oauth_session(
     if sess.get("profile") != requested_profile:
         raise HTTPException(status_code=400, detail="OAuth session profile mismatch")
     return {
-        "session_id": session_id,
-        "status": sess["status"],
-        "error_message": sess.get("error_message"),
-        "expires_at": sess.get("expires_at"),
+        "session_id": session_id, "status": sess["status"],
+        "error_message": sess.get("error_message"), "expires_at": sess.get("expires_at"),
     }
 
 

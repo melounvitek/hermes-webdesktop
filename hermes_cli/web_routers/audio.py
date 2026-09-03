@@ -35,28 +35,16 @@ _ws_request_is_allowed = late("_ws_request_is_allowed")
 load_env = late("load_env")
 
 _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
-    "audio/aac": ".aac",
-    "audio/flac": ".flac",
-    "audio/m4a": ".m4a",
-    "audio/mp3": ".mp3",
-    "audio/mp4": ".mp4",
-    "audio/mpeg": ".mp3",
-    "audio/ogg": ".ogg",
-    "audio/wav": ".wav",
-    "audio/wave": ".wav",
-    "audio/webm": ".webm",
-    "audio/x-m4a": ".m4a",
-    "audio/x-wav": ".wav",
+    "audio/aac": ".aac", "audio/flac": ".flac", "audio/m4a": ".m4a", "audio/mp3": ".mp3",
+    "audio/mp4": ".mp4", "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/wav": ".wav",
+    "audio/wave": ".wav", "audio/webm": ".webm", "audio/x-m4a": ".m4a", "audio/x-wav": ".wav",
     "video/webm": ".webm",
 }
 
 _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
 
 _SPEAK_MIME_BY_EXT = {
-    ".mp3": "audio/mpeg",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg",
-    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav",
     ".flac": "audio/flac",
 }
 
@@ -145,8 +133,7 @@ async def transcribe_audio_upload(
         raise HTTPException(status_code=400, detail=err)
 
     return {
-        "ok": True,
-        "transcript": str(result.get("transcript") or "").strip(),
+        "ok": True, "transcript": str(result.get("transcript") or "").strip(),
         "provider": result.get("provider"),
     }
 
@@ -254,8 +241,7 @@ async def get_elevenlabs_voices(profile: Optional[str] = None):
             continue
 
         voices.append({
-            "voice_id": voice_id,
-            "name": str(voice.get("name") or voice_id),
+            "voice_id": voice_id, "name": str(voice.get("name") or voice_id),
             "label": _elevenlabs_voice_label(voice),
         })
 
@@ -315,9 +301,7 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 
     encoded = base64.b64encode(audio_bytes).decode("ascii")
     return {
-        "ok": True,
-        "data_url": f"data:{mime_type};base64,{encoded}",
-        "mime_type": mime_type,
+        "ok": True, "data_url": f"data:{mime_type};base64,{encoded}", "mime_type": mime_type,
         "provider": result.get("provider"),
     }
 

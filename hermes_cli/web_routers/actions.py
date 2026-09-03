@@ -224,21 +224,15 @@ async def gateway_drain(request: Request):
 
 def _update_refused(error: str, message: str, update_command: str) -> Dict[str, Any]:
     return {
-        "ok": False,
-        "pid": None,
-        "name": "hermes-update",
-        "error": error,
-        "message": message,
+        "ok": False, "pid": None, "name": "hermes-update", "error": error, "message": message,
         "update_command": update_command,
     }
 
 
 # Per-kind dashboard error codes the UI keys on, by admission-refusal code.
 _UPDATE_REFUSAL_ERROR_CODES = {
-    "docker": "docker_update_unsupported",
-    "image-marker": "docker_update_unsupported",
-    "image-marker-invalid": "docker_update_unsupported",
-    "apt": "apt_update_required",
+    "docker": "docker_update_unsupported", "image-marker": "docker_update_unsupported",
+    "image-marker-invalid": "docker_update_unsupported", "apt": "apt_update_required",
     "nix": "nix_update_unsupported",
 }
 
@@ -267,10 +261,7 @@ async def update_hermes():
     existing = _ACTION_PROCS.get("hermes-update")
     if existing is not None and existing.poll() is None:
         response = {
-            "ok": True,
-            "pid": existing.pid,
-            "name": "hermes-update",
-            "already_running": True,
+            "ok": True, "pid": existing.pid, "name": "hermes-update", "already_running": True,
         }
         action_id = _ACTION_IDS.get("hermes-update")
         if action_id:
@@ -300,13 +291,8 @@ def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
     try:
         out = subprocess.run(
             [
-                "git",
-                "-C",
-                str(_project_root()),
-                "log",
-                "--format=%H%x1f%s%x1f%an%x1f%ct",
-                "HEAD..origin/main",
-                f"-n{int(n)}",
+                "git", "-C", str(_project_root()), "log", "--format=%H%x1f%s%x1f%an%x1f%ct",
+                "HEAD..origin/main", f"-n{int(n)}",
             ],
             capture_output=True,
             text=True,
@@ -352,26 +338,18 @@ async def check_hermes_update(force: bool = False):
     """
     if _dashboard_local_update_managed_externally():
         return {
-            "install_method": "managed-runtime",
-            "current_version": __version__,
-            "behind": None,
-            "update_available": False,
-            "can_apply": False,
-            "update_command": "managed outside dashboard",
-            "message": _MANAGED_EXTERNALLY_MESSAGE,
+            "install_method": "managed-runtime", "current_version": __version__, "behind": None,
+            "update_available": False, "can_apply": False,
+            "update_command": "managed outside dashboard", "message": _MANAGED_EXTERNALLY_MESSAGE,
         }
 
     install_method = detect_install_method(_project_root())
     update_command = recommended_update_command_for_method(install_method)
 
     payload: Dict[str, Any] = {
-        "install_method": install_method,
-        "current_version": __version__,
-        "behind": None,
-        "update_available": False,
-        "can_apply": install_method == "git",
-        "update_command": update_command,
-        "message": None,
+        "install_method": install_method, "current_version": __version__, "behind": None,
+        "update_available": False, "can_apply": install_method == "git",
+        "update_command": update_command, "message": None,
     }
 
     if install_method == "docker":
@@ -468,11 +446,7 @@ async def get_action_status(name: str, lines: int = 200):
             _finish_action(name, exit_code, pid)
 
     response = {
-        "name": name,
-        "running": running,
-        "exit_code": exit_code,
-        "pid": pid,
-        "lines": tail,
+        "name": name, "running": running, "exit_code": exit_code, "pid": pid, "lines": tail,
     }
     if durable_update_action_id:
         response["action_id"] = durable_update_action_id

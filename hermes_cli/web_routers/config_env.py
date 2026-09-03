@@ -144,13 +144,8 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
 
 def _provider_card(d, description: str, url, *, is_password: bool, advanced: bool) -> dict:
     return {
-        "provider": d.slug,
-        "provider_label": d.label,
-        "description": description,
-        "url": url,
-        "is_password": is_password,
-        "advanced": advanced,
-        "category": "provider",
+        "provider": d.slug, "provider_label": d.label, "description": description, "url": url,
+        "is_password": is_password, "advanced": advanced, "category": "provider",
     }
 
 
@@ -377,41 +372,28 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
             endpoint_model = str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else ""))
             has_api_key, api_key_preview = _api_key_display(raw_entry)
             endpoints.append({
-                "id": endpoint_id,
-                "name": str(raw_entry.get("name") or endpoint_id),
-                "base_url": base_url,
-                "model": endpoint_model,
-                "models": models,
+                "id": endpoint_id, "name": str(raw_entry.get("name") or endpoint_id),
+                "base_url": base_url, "model": endpoint_model, "models": models,
                 "context_length": raw_entry.get("context_length"),
                 "discover_models": bool(raw_entry.get("discover_models", True)),
-                "has_api_key": has_api_key,
-                "api_key_preview": api_key_preview,
-                "is_current": endpoint_id == current_provider,
-                "source": "providers",
+                "has_api_key": has_api_key, "api_key_preview": api_key_preview,
+                "is_current": endpoint_id == current_provider, "source": "providers",
             })
 
     if current_provider.lower() == "custom" and current_base_url and not any(e["id"] == "custom" for e in endpoints):
         has_api_key, api_key_preview = _api_key_display(model_cfg)
         endpoints.insert(0, {
-            "id": "custom",
-            "name": "Custom",
-            "base_url": current_base_url,
-            "model": current_model,
+            "id": "custom", "name": "Custom", "base_url": current_base_url, "model": current_model,
             "models": [current_model] if current_model else [],
-            "context_length": model_cfg.get("context_length"),
-            "discover_models": True,
-            "has_api_key": has_api_key,
-            "api_key_preview": api_key_preview,
-            "is_current": True,
+            "context_length": model_cfg.get("context_length"), "discover_models": True,
+            "has_api_key": has_api_key, "api_key_preview": api_key_preview, "is_current": True,
             "source": "direct-config",
         })
 
     return {
         "endpoints": endpoints,
         "current": {
-            "provider": current_provider,
-            "model": current_model,
-            "base_url": current_base_url,
+            "provider": current_provider, "model": current_model, "base_url": current_base_url,
         },
     }
 
@@ -465,9 +447,7 @@ def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> T
     # silently dropped them on an unrelated edit.
     entry: Dict[str, Any] = dict(existing)
     entry.update({
-        "name": name,
-        "base_url": base_url,
-        "model": model,
+        "name": name, "base_url": base_url, "model": model,
         "discover_models": bool(body.discover_models),
     })
     # Same for the model map, so existing models keep their context lengths.

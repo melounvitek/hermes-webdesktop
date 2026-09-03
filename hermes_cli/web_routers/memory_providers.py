@@ -296,10 +296,7 @@ def _command_result(
     completed: Optional[subprocess.CompletedProcess] = None, error: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
-        "kind": kind,
-        "name": name,
-        "status": status,
-        "command": command,
+        "kind": kind, "name": name, "status": status, "command": command,
         "returncode": None if completed is None else completed.returncode,
         "stdout": "" if completed is None else _trim_setup_output(completed.stdout),
         "stderr": _trim_setup_output(error or ("" if completed is None else completed.stderr)),
@@ -495,20 +492,13 @@ def _install_memory_provider_setup(name: str) -> Dict[str, Any]:
 
 def _public_memory_provider_field(field: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "key": field["key"],
-        "label": field["label"],
-        "kind": field["kind"],
-        "description": field["description"],
-        "placeholder": field["placeholder"],
+        "key": field["key"], "label": field["label"], "kind": field["kind"],
+        "description": field["description"], "placeholder": field["placeholder"],
         "required": field["required"],
         "value": "" if field["kind"] == "secret" else _field_value(field, data),
-        "is_set": _field_is_set(field, data),
-        "options": field.get("options", []),
-        "url": field.get("url", ""),
-        "when": field.get("when"),
-        "minimum": field.get("minimum"),
-        "maximum": field.get("maximum"),
-        "step": field.get("step"),
+        "is_set": _field_is_set(field, data), "options": field.get("options", []),
+        "url": field.get("url", ""), "when": field.get("when"), "minimum": field.get("minimum"),
+        "maximum": field.get("maximum"), "step": field.get("step"),
     }
 
 
@@ -519,9 +509,7 @@ def _memory_provider_payload(name: str, provider: Any) -> Dict[str, Any]:
         for field in _normalize_memory_provider_schema(name, provider)
     ]
     return {
-        "name": name,
-        "label": _memory_provider_label(name),
-        "fields": fields,
+        "name": name, "label": _memory_provider_label(name), "fields": fields,
         "setup": _memory_provider_setup_info(name),
     }
 
