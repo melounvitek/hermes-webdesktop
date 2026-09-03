@@ -484,7 +484,7 @@ class GatewayStatusCommandsMixin:
         source = event.source
         session_key = self._session_key_for_source(source)
         raw_args = event.get_command_args().strip()
-        args = raw_args.lower().split()
+        args = [a.lower() for a in raw_args.split()] if raw_args else []
         wants_reset = bool(args) and args[0] == "reset"
         if args and not wants_reset:
             return t("gateway.usage.unknown_subcommand", args=raw_args)
