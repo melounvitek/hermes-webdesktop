@@ -51,14 +51,13 @@ def convert_base64_images_to_links(text: str) -> str:
 
     out = re.sub(r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", _md_repl, text)
     out = re.sub(r"\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", "[IMAGE]", out)
-    out = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
-    return out
+    return re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
 
 
 def _store_full_text(url: str, content: str) -> Optional[str]:
-    """Write the full page to cache/web; absolute path or None. cache/web is mounted read-only into remote
-    backends (credential_files _CACHE_DIRS) so read_file can page the complete text on any backend.
-    Best-effort: on failure the truncated content is still returned to the model."""
+    """Write the full page to cache/web; absolute path or None (best-effort: the truncated content is still
+    returned). cache/web is mounted read-only into remote backends (credential_files _CACHE_DIRS) so
+    read_file can page the complete text on any backend."""
     try:
         import hashlib
         from hermes_constants import get_hermes_dir
@@ -92,17 +91,14 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
     tail_budget = char_limit - head_budget
     head, tail = content[:head_budget], content[-tail_budget:]
     # Snap both cuts to line boundaries (head back, tail forward) so we never slice mid-line.
-    nl = head.rfind("\n")
-    if nl > head_budget * 0.5:
+    if (nl := head.rfind("\n")) > head_budget * 0.5:
         head = head[:nl]
-    nl = tail.find("\n")
-    if 0 <= nl < tail_budget * 0.5:
+    if 0 <= (nl := tail.find("\n")) < tail_budget * 0.5:
         tail = tail[nl + 1:]
 
     stored_path = _store_full_text(url, content)
     footer_lines = [
-        "",
-        "─" * 8 + " [TRUNCATED] " + "─" * 8,
+        "", "─" * 8 + " [TRUNCATED] " + "─" * 8,
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
         f"of {len(content):,} total clean characters.",
     ]
@@ -134,11 +130,9 @@ def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dic
     """In place: replace each successful entry's content with its base64-cleaned, budgeted text;
     per-page truncation metrics go into ``debug_call_data``."""
     for result in results:
-        if result.get("error"):
-            continue
         url = result.get("url", "")
         raw_content = result.get("raw_content", "") or result.get("content", "")
-        if not raw_content:
+        if result.get("error") or not raw_content:
             continue
         clean = convert_base64_images_to_links(raw_content)
         model_text, truncated = _truncate_with_footer(clean, url, char_limit)

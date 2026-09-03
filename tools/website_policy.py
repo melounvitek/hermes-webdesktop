@@ -36,18 +36,12 @@ class WebsitePolicyError(Exception):
 
 def _normalize_rule(rule: Any) -> Optional[str]:
     """Reduce a rule (bare host, URL, or ``host/path``) to a lowercase host; None for blanks/comments."""
-    if not isinstance(rule, str):
-        return None
-    value = rule.strip().lower()
-    if not value or value.startswith("#"):
+    if not isinstance(rule, str) or not (value := rule.strip().lower()) or value.startswith("#"):
         return None
     if "://" in value:
         parsed = urlparse(value)
         value = parsed.netloc or parsed.path
-    value = value.split("/", 1)[0].strip().rstrip(".")
-    if value.startswith("www."):
-        value = value[4:]
-    return value or None
+    return value.split("/", 1)[0].strip().rstrip(".").removeprefix("www.") or None
 
 
 def _iter_blocklist_file_rules(path: Path) -> List[str]:
@@ -115,7 +109,6 @@ def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]
             fresh = _cached_policy_path == resolved_path and (now - _cached_policy_time) < _CACHE_TTL_SECONDS
             if _cached_policy is not None and fresh:
                 return _cached_policy
-
     config_path = config_path or default_path
     policy = _load_policy_config(config_path)
     domains = map(_normalize_rule, _require_type(policy, "domains", list, []))
@@ -183,9 +176,8 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
     if not policy.get("enabled"):
         return None
     for rule in policy.get("rules", []):
-        pattern = rule.get("pattern", "")
+        pattern, source = rule.get("pattern", ""), rule.get("source", "config")
         if _match_host_against_rule(host, pattern):
-            source = rule.get("source", "config")
             logger.info("Blocked URL %s — matched rule '%s' from %s", url, pattern, source)
             return {
                 "url": url, "host": host, "rule": pattern, "source": source,

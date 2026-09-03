@@ -68,10 +68,6 @@ def _host_slug(url: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
 
 
-def _url_host(url: str) -> str:
-    return (urlparse(url).hostname or "").strip("[]")
-
-
 def _deep_copy(response: dict) -> dict:
     """Defensive copy so callers mutating a hit never corrupt the cached entry."""
     return json.loads(json.dumps(response))
@@ -89,7 +85,8 @@ class SearchMemo:
         self._store_lock = threading.Lock()
         self._key_locks: Dict[tuple, threading.Lock] = {}
 
-    def _key(self, provider: str, query: str, limit: int) -> tuple:
+    @staticmethod
+    def _key(provider: str, query: str, limit: int) -> tuple:
         return (provider, normalize_query(query), bucket_limit(limit))
 
     def lookup(self, provider: str, query: str, limit: int) -> Optional[dict]:
@@ -101,9 +98,8 @@ class SearchMemo:
             if hit is None or time.monotonic() >= hit[0]:
                 self._store.pop(key, None)
                 return None
-            response = hit[1]
         logger.info("web_search cache hit: %r via %s", query, provider)
-        return _deep_copy(response)
+        return _deep_copy(hit[1])
 
     def store(self, provider: str, query: str, limit: int, response: dict) -> None:
         """Cache a SUCCESSFUL response for the bucketed key."""
@@ -169,9 +165,8 @@ def _cache_dir() -> Optional[Path]:
 
 
 def _load_index() -> dict:
-    path = (d / _INDEX_FILENAME) if (d := _cache_dir()) else None
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path else {}
+        data = json.loads((_cache_dir() / _INDEX_FILENAME).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception:  # noqa: BLE001 — missing/corrupt index == empty cache
         return {}
@@ -225,7 +220,7 @@ def _is_cache_exempt_host(url: str) -> bool:
     (staging, tunnels, previews) that must fetch live."""
     try:
         patterns = _web_config().get("cache_exempt_hosts") or []
-        host = _url_host(url)
+        host = (urlparse(url).hostname or "").strip("[]")
         if not isinstance(patterns, (list, tuple)) or not host:
             return False
         return any(_host_matches_pattern(host, str(p)) for p in patterns)
@@ -238,13 +233,12 @@ def _is_local_dev_url(url: str) -> bool:
     Hostname heuristics only, no DNS: this is a freshness decision, not a security boundary (SSRF enforcement
     lives in tools/url_safety.py, which blocks these by default anyway)."""
     try:
-        host = _url_host(url).lower()
-        if not host:
-            return True  # unparseable → don't cache
-        if host == "localhost" or host.endswith((".localhost", ".local")):
+        host = (urlparse(url).hostname or "").strip("[]").lower()
+        # Unparseable → don't cache; single-label (no "." / ":") == LAN name, not public DNS.
+        if not host or host == "localhost" or host.endswith((".localhost", ".local")):
             return True
         if "." not in host and ":" not in host:
-            return True  # single-label LAN name, not public DNS
+            return True
         import ipaddress
         try:
             ip = ipaddress.ip_address(host)
@@ -289,10 +283,8 @@ def extract_cache_put(
         return
     try:
         from tools.web_tools import MAX_STORED_TEXT_CHARS
-        if len(content) > MAX_STORED_TEXT_CHARS:
-            return
         file_path = _entry_file_path(url, format, provider)
-        if file_path is None:
+        if len(content) > MAX_STORED_TEXT_CHARS or file_path is None:
             return
         from tools.spill_safety import write_text_exclusive
         write_text_exclusive(file_path, content, private=False, overwrite=True)

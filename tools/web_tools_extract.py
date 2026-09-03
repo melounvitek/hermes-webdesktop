@@ -57,8 +57,7 @@ def _strict_selection_error(capability: str, backend: str) -> str:
     """Error for a stored-but-unregistered backend: name the disabled plugin, else the bad selection.
     Strict selection never silently switches to whatever the availability walk finds."""
     failure = f"no registered web {capability} provider has that name"
-    fallback = selection_error("web", f"'{backend}'", failure)
-    return _no_provider_error(capability, fallback)
+    return _no_provider_error(capability, selection_error("web", f"'{backend}'", failure))
 
 
 def _result_entry(url: str, error: Optional[str]) -> Dict[str, Any]:
@@ -93,9 +92,7 @@ def _validate_extract_urls(urls: List[Any]):
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
 
-    normalized_urls: List[str] = []
-    normalized_indices: List[int] = []
-    invalid_urls: Dict[int, Dict[str, Any]] = {}
+    normalized_urls, normalized_indices, invalid_urls = [], [], {}
     for index, item in enumerate(urls):
         _url = _web_extract_url(item)
         if _url is None:
@@ -107,8 +104,7 @@ def _validate_extract_urls(urls: List[Any]):
                 "Blocked: URL contains what appears to be an API key or token. "
                 "Secrets must not be sent in URLs."
             )
-        sensitive_query_key = sensitive_query_param_name(normalized_url)
-        if sensitive_query_key:
+        if sensitive_query_key := sensitive_query_param_name(normalized_url):
             return _refuse_all(
                 "Blocked: URL contains a credential-like query parameter "
                 f"({sensitive_query_key}). Web extract backends are third-party "
@@ -169,10 +165,8 @@ async def _dispatch_extract(provider, fetch_urls: List[str], format: Optional[st
 
     # Cache each successful fetch's full clean text (best-effort; oversized skipped).
     for url, fetched in zip(fetch_urls, results):
-        if fetched.get("error"):
-            continue
         _content = fetched.get("raw_content", "") or fetched.get("content", "")
-        if _content:
+        if _content and not fetched.get("error"):
             extract_cache_put(url, _content, fetched.get("title", ""), format=format, provider=provider.name)
     return results
 
@@ -182,14 +176,11 @@ async def _extract_safe_urls(provider, safe_urls: List[str], format: Optional[st
 
     The disk cache (tools/web_result_cache.py) sits AFTER the secret-URL gate, SSRF gate, and provider
     resolution, and is gated per-URL on the website policy — a hit skips only the vendor call, never a
-    control. Policy-blocked URLs are cache misses so dispatch handles them exactly as without a cache.
-    Keys include provider and format, so switching either within the TTL never serves the other's content.
-    """
+    control; policy-blocked URLs are cache misses. Keys include provider and format, so switching either
+    within the TTL never serves the other's content."""
     from tools.web_result_cache import extract_cache_get
     from tools.website_policy import check_website_access as _check_site
-    cached_results: Dict[int, Dict[str, Any]] = {}
-    fetch_urls: List[str] = []
-    fetch_positions: List[int] = []
+    cached_results, fetch_urls, fetch_positions = {}, [], []
     for position, url in enumerate(safe_urls):
         try:
             _policy_block = _check_site(url)

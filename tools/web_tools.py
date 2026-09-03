@@ -12,7 +12,7 @@ Debug: ``WEB_TOOLS_DEBUG=true`` writes ``logs/web_tools_debug_<UUID>.json``.
 import json
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Any, Optional
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 
 # Vendor helpers re-exported so external code and test patches of ``tools.web_tools.<name>`` keep working.
@@ -105,6 +105,11 @@ def _registered_web_provider(backend: str):
     return _registry_call("get_provider", None, backend) if backend else None
 
 
+def _list_registered_web_providers():
+    """All plugin-registered web providers (empty list on failure)."""
+    return _registry_call("list_providers", [])
+
+
 def _probe(provider, method: str, context: str = "") -> Optional[bool]:
     """``bool(provider.<method>())``, or ``None`` if it raised (a broken provider is unavailable; *context* is
     appended to the debug log line, e.g. " during readiness check")."""
@@ -114,11 +119,6 @@ def _probe(provider, method: str, context: str = "") -> Optional[bool]:
         name = getattr(provider, "name", provider)
         logger.debug("web provider %r.%s() raised%s: %s", name, method, context, exc)
         return None
-
-
-def _list_registered_web_providers():
-    """All plugin-registered web providers (empty list on failure)."""
-    return _registry_call("list_providers", [])
 
 
 def _get_backend() -> str:
@@ -182,15 +182,6 @@ def _get_extract_backend() -> str:
     return _configured_backend("extract_backend") or _get_backend()
 
 
-def _xai_available() -> bool:
-    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may hit the network.
-    try:
-        from tools.xai_http import has_xai_credentials
-        return has_xai_credentials()
-    except Exception:
-        return False
-
-
 def _ddgs_package_importable() -> bool:
     """ddgs is the only backend gated on package presence; single symbol so tests can patch it."""
     try:
@@ -200,11 +191,19 @@ def _ddgs_package_importable() -> bool:
         return False
 
 
-# Built-in backends and their cheap availability probes; any other name is a plugin-registered provider
-# resolved via the registry's ``is_available()``. Lambdas so test patches of module-level helpers (e.g.
-# _ddgs_package_importable, check_firecrawl_api_key) are honored at call time. Includes ``xai`` (probed via
-# has_xai_credentials(), not a registered provider) though the registry's _LEGACY_PREFERENCE omits it —
-# drop it here if xai ever registers.
+def _xai_available() -> bool:
+    # Cheap probe only (env var OR auth.json OAuth): resolve_xai_http_credentials() may hit the network.
+    try:
+        from tools.xai_http import has_xai_credentials
+        return has_xai_credentials()
+    except Exception:
+        return False
+
+
+# Built-in backends -> cheap availability probes; any other name is a plugin provider resolved via the
+# registry's ``is_available()``. Lambdas so test patches of module-level helpers (_ddgs_package_importable,
+# check_firecrawl_api_key) are honored at call time. ``xai`` is probed via has_xai_credentials(), not a
+# registered provider, though the registry's _LEGACY_PREFERENCE omits it — drop it if xai ever registers.
 _BUILTIN_AVAILABILITY = {
     "exa": lambda: _has_env("EXA_API_KEY"),
     "parallel": lambda: _has_env("PARALLEL_API_KEY"),
@@ -240,7 +239,6 @@ def _web_requires_env() -> list[str]:
         "FIRECRAWL_API_URL", "FIRECRAWL_GATEWAY_URL", "TOOL_GATEWAY_DOMAIN", "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
     ]
-
 
 _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
 
@@ -302,12 +300,8 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             provider = get_active_search_provider()
 
         if provider is None:
-            response_data = {
-                "success": False,
-                "error": _no_provider_error(
-                    "search", "No web search provider configured. Run `hermes tools` to set one up."
-                ),
-            }
+            fallback = "No web search provider configured. Run `hermes tools` to set one up."
+            response_data = {"success": False, "error": _no_provider_error("search", fallback)}
         else:
             logger.info("Web search via %s: '%s' (limit: %d)", provider.name, query, limit)
             response_data = _memoized_search(provider, query, limit)
@@ -371,8 +365,7 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
     try:
         logger.info("Extracting content from %d URL(s)", len(normalized_urls))
         # SSRF protection — filter private/internal URLs before any backend.
-        safe_urls, safe_indices = [], []
-        ssrf_blocked: Dict[int, Dict[str, Any]] = {}
+        safe_urls, safe_indices, ssrf_blocked = [], [], {}
         for index, url in zip(normalized_indices, normalized_urls):
             if await async_is_safe_url(url):
                 safe_urls.append(url)
@@ -402,10 +395,10 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         debug_call_data["processing_applied"].append("truncate_and_store")
         _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
         trimmed = _trim_results(results)
-        if not trimmed:
-            result_json = tool_error("Content was inaccessible or not found")
-        else:
-            result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False)
+        result_json = (
+            json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed
+            else tool_error("Content was inaccessible or not found")
+        )
         # Belt-and-suspenders sweep of the serialized JSON: a provider may tuck a base64 blob in metadata.
         cleaned_result = convert_base64_images_to_links(result_json)
         debug_call_data["final_response_size"] = len(cleaned_result)
@@ -437,11 +430,9 @@ def check_web_api_key() -> bool:
     A plugin-registered provider reporting ``is_available()`` must light the tools up even with no
     built-in credentials; resolution funnels through :func:`_is_backend_available`.
     """
-    configured = _configured_backend()
-    if configured and _is_backend_available(configured):
-        return True
-    # Boolean OR over built-ins — probe order is irrelevant here.
-    if any(_is_backend_available(backend) for backend in _LEGACY_WEB_BACKENDS):
+    # Boolean OR over configured + built-ins — probe order is irrelevant here.
+    candidates = [c for c in (_configured_backend(),) if c] + list(_LEGACY_WEB_BACKENDS)
+    if any(_is_backend_available(backend) for backend in candidates):
         return True
     # Plugin path. Discovery must run first: check_fn fires at tool-registration time, before any dispatch.
     try:
@@ -503,27 +494,17 @@ WEB_EXTRACT_SCHEMA = {
 }
 
 registry.register(
-    name="web_search",
-    toolset="web",
-    schema=WEB_SEARCH_SCHEMA,
+    name="web_search", toolset="web", schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
-    requires_env=_web_requires_env(),
-    emoji="🔍",
+    check_fn=check_web_api_key, requires_env=_web_requires_env(), emoji="🔍",
     max_result_size_chars=100_000,
 )
 registry.register(
-    name="web_extract",
-    toolset="web",
-    schema=WEB_EXTRACT_SCHEMA,
+    name="web_extract", toolset="web", schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
-        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [],
-        "markdown",
+        args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
         char_limit=args.get("char_limit"),
     ),
-    check_fn=check_web_api_key,
-    requires_env=_web_requires_env(),
-    is_async=True,
-    emoji="📄",
+    check_fn=check_web_api_key, requires_env=_web_requires_env(), is_async=True, emoji="📄",
     max_result_size_chars=100_000,
 )
