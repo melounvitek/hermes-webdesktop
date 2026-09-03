@@ -25,31 +25,28 @@ def focus_pane_tool(pane: str) -> str:
     )
 
 
-FOCUS_PANE_SCHEMA = {
-    "name": "focus_pane",
-    "description": (
-        "Reveal and focus a Hermes desktop pane when the user asks to see it: "
-        "chat, files, terminal, review (git diff), or sessions. For URLs/"
-        "files use the desktop_preview tool instead."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "pane": {
-                "type": "string",
-                "enum": list(PANES),
-                "description": "Which pane to reveal.",
-            },
-        },
-        "required": ["pane"],
-    },
-}
-
-
 registry.register(
     name="focus_pane",
     toolset="desktop_ui",
-    schema=FOCUS_PANE_SCHEMA,
+    schema={
+        "name": "focus_pane",
+        "description": (
+            "Reveal and focus a Hermes desktop pane when the user asks to see it: "
+            "chat, files, terminal, review (git diff), or sessions. For URLs/"
+            "files use the desktop_preview tool instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pane": {
+                    "type": "string",
+                    "enum": list(PANES),
+                    "description": "Which pane to reveal.",
+                },
+            },
+            "required": ["pane"],
+        },
+    },
     handler=lambda args, **kw: focus_pane_tool(pane=args.get("pane", "")),
     emoji="🪟",
 )

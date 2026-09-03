@@ -31,15 +31,13 @@ def user_enabled(setting: str, default: bool) -> bool:
     """Read one of the desktop's Appearance switches from ``display.<setting>``.
 
     The renderer mirrors these toggles onto the CONNECTED gateway's config, so this
-    reads the user's real answer for local/SSH/URL/cloud gateways alike (an env var
-    would only describe the process). ``check_fn``s use it to withdraw a tool from the
-    schema when the user switched the feature off — Hermes should not be told about
-    a surface it may not use. Unreadable config -> ``default`` so a shipped-on
-    feature does not vanish on a transient read error.
+    is the user's real answer for local/SSH/URL/cloud gateways alike. ``check_fn``s
+    use it to withdraw a tool from the schema when the feature is switched off.
+    Unreadable config -> ``default`` so a shipped-on feature does not vanish on a
+    transient read error.
     """
     try:
         from hermes_cli.config import load_config_readonly
-
         display = load_config_readonly().get("display")
     except Exception:
         return default
@@ -49,9 +47,7 @@ def user_enabled(setting: str, default: bool) -> bool:
 
 
 def emit(event: str, payload: dict) -> bool:
-    """Route ``event`` to the window that owns the current turn.
-
-    Returns ``False`` when no emitter is wired (i.e. not the desktop app)."""
+    """Route ``event`` to the window owning the current turn; False when no emitter."""
     fn = _emit
     if fn is None:
         return False
@@ -60,11 +56,9 @@ def emit(event: str, payload: dict) -> bool:
 
 
 def emit_or_error(event: str, payload: dict, fail_prefix: str, desktop_only: str, result: dict) -> str:
-    """Emit ``event``; return ``tool_error`` text on failure, else ``result`` as JSON.
-
-    ``fail_prefix`` is prepended to the exception text; ``desktop_only`` is the error
-    when no emitter is wired. Looked up as ``desktop_ui.emit`` so tests can patch it.
-    """
+    """Emit ``event``; ``tool_error`` text on failure (``fail_prefix`` + exception, or
+    ``desktop_only`` when no emitter), else ``result`` as JSON. Calls ``emit`` via the
+    module attribute so tests can patch it."""
     try:
         ok = emit(event, payload)
     except Exception as exc:
