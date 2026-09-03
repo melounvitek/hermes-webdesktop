@@ -14,17 +14,14 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".m2a", ".wav", ".m4a", ".flac"}
 _VOICE_EXTS = {".ogg", ".opus"}
-# Telegram's sendAudio only accepts MP3 / M4A; other audio goes via sendVoice
-# (Opus/OGG) or falls back to document delivery.
+# Telegram's sendAudio only accepts MP3 / M4A; other audio goes via sendVoice (Opus/OGG) or document.
 _TELEGRAM_SEND_AUDIO_EXTS = {".mp3", ".m4a"}
 
-# Extensions that carry a native caption on the media bubble (photo/video/document).
-# Voice/audio notes are excluded: a caption on a voice note reads as a separate label,
-# so the accompanying text stays its own message.
+# Extensions carrying a native caption on the media bubble. Voice/audio notes are excluded:
+# a caption on a voice note reads as a separate label, so the text stays its own message.
 _CAPTIONABLE_EXTS = _IMAGE_EXTS | _VIDEO_EXTS | {".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".zip"}
 
-# Native caption length limits (characters). Telegram's photo/video cap is 1024;
-# WhatsApp/Discord are far more generous, so one conservative shared ceiling.
+# Native caption limits (chars): Telegram caps photo/video at 1024; one conservative shared ceiling elsewhere.
 _TELEGRAM_CAPTION_LIMIT = 1024
 _DEFAULT_CAPTION_LIMIT = 4096
 
@@ -49,16 +46,14 @@ def _media_caption_split(text, media_files, *, max_caption_len):
 
 
 _URL_SECRET_QUERY_RE = re.compile(
-    r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)",
-    re.IGNORECASE)
+    r"([?&](?:access_token|api[_-]?key|auth[_-]?token|token|signature|sig)=)([^&#\s]+)", re.IGNORECASE)
 _GENERIC_SECRET_ASSIGN_RE = re.compile(
     r"\b(access_token|api[_-]?key|auth[_-]?token|signature|sig)\s*=\s*([^\s,;]+)", re.IGNORECASE)
 
 
 def _sanitize_error_text(text) -> str:
     """Redact secrets from error text before surfacing it to users/models."""
-    redacted = redact_sensitive_text(text)
-    redacted = _URL_SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", redacted)
+    redacted = _URL_SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", redact_sensitive_text(text))
     return _GENERIC_SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
 
 
@@ -69,24 +64,19 @@ def _error(message: str) -> dict:
 
 def _success(platform: str, chat_id, warnings=None, **fields) -> dict:
     """Standard success payload; ``warnings`` is only included when non-empty."""
-    result = {"success": True, "platform": platform, "chat_id": chat_id, **fields}
-    if warnings:
-        result["warnings"] = warnings
-    return result
+    return {"success": True, "platform": platform, "chat_id": chat_id, **fields,
+            **({"warnings": warnings} if warnings else {})}
 
 
 def _display_chat_id(platform_name: str, chat_id: str) -> str:
     """Return a result-safe chat identifier for tool transcripts/log consumers."""
-    if platform_name == "signal" and str(chat_id).startswith("group:"):
-        return "group:***"
-    return chat_id
+    return "group:***" if platform_name == "signal" and str(chat_id).startswith("group:") else chat_id
 
 
 _NO_DELIVERABLE = "No deliverable text or media remained after processing MEDIA tags"
 
-_TELEGRAM_TRANSIENT_MARKERS = (
-    "bad gateway", "502", "too many requests", "429",
-    "service unavailable", "503", "gateway timeout", "504")
+_TELEGRAM_TRANSIENT_MARKERS = ("bad gateway", "502", "too many requests", "429",
+                               "service unavailable", "503", "gateway timeout", "504")
 
 
 def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
@@ -98,13 +88,10 @@ def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
             return max(float(retry_after), 0.0)
         except (TypeError, ValueError):
             return 1.0
-
     text = str(exc).lower()
     if "timed out" in text or "timeout" in text:
         return None
-    if any(marker in text for marker in _TELEGRAM_TRANSIENT_MARKERS):
-        return float(2 ** attempt)
-    return None
+    return float(2 ** attempt) if any(marker in text for marker in _TELEGRAM_TRANSIENT_MARKERS) else None
 
 
 async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs):
@@ -116,9 +103,8 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
             delay = _telegram_retry_delay(exc, attempt)
             if delay is None or attempt >= attempts - 1:
                 raise
-            logger.warning(
-                "Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
-                attempt + 1, attempts, delay, _sanitize_error_text(exc))
+            logger.warning("Transient Telegram send failure (attempt %d/%d), retrying in %.1fs: %s",
+                           attempt + 1, attempts, delay, _sanitize_error_text(exc))
             await asyncio.sleep(delay)
 
 
@@ -170,6 +156,18 @@ def _strip_mdv2_safe(text):
         return text
 
 
+def _adapter_media_method(ext, voice, force_document=False):
+    """Adapter media method name + kind for one file: document when forced, else image /
+    video / voice by extension (``voice`` already folds in the caller's audio rule)."""
+    if force_document:
+        return "send_document", "document"
+    if ext in _IMAGE_EXTS:
+        return "send_image_file", "image"
+    if ext in _VIDEO_EXTS:
+        return "send_video", "video"
+    return ("send_voice", "audio") if voice else ("send_document", "document")
+
+
 async def _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **kwargs):
     """Bot API media method by extension: photo (unless forced document), video, voice
     note, sendAudio (MP3/M4A only), else document."""
@@ -189,23 +187,20 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
     without ``message_thread_id`` (dropped from ``text_kwargs`` for later chunks too);
     parse failure -> plain text."""
     async def send(text, mode):
-        return await _send_telegram_message_with_retry(
-            bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
+        return await _send_telegram_message_with_retry(bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
 
     try:
         return await send(chunk, parse_mode)
     except Exception as md_error:
         if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
-            logger.warning(
-                "Thread %s not found in _send_telegram, retrying without message_thread_id",
-                text_kwargs.get("message_thread_id"))
+            logger.warning("Thread %s not found in _send_telegram, retrying without message_thread_id",
+                           text_kwargs.get("message_thread_id"))
             text_kwargs.pop("message_thread_id", None)
             return await send(chunk, parse_mode)
         err_text = str(md_error).lower()
         if "parse" in err_text or "markdown" in err_text or "html" in err_text:
-            logger.warning(
-                "Parse mode %s failed in _send_telegram, falling back to plain text: %s",
-                parse_mode, _sanitize_error_text(md_error))
+            logger.warning("Parse mode %s failed in _send_telegram, falling back to plain text: %s",
+                           parse_mode, _sanitize_error_text(md_error))
             return await send(chunk if has_html else _strip_mdv2_safe(chunk), None)
         raise
 
@@ -238,13 +233,11 @@ async def _telegram_send_one_media(
         except Exception as media_err:
             err_text = str(media_err).lower()
             if _is_telegram_thread_not_found(media_err) and media_kwargs.get("message_thread_id"):
-                logger.warning(
-                    "Thread %s not found for media send, retrying without message_thread_id",
-                    media_kwargs.pop("message_thread_id"))
+                logger.warning("Thread %s not found for media send, retrying without message_thread_id",
+                               media_kwargs.pop("message_thread_id"))
             elif media_kwargs.get("parse_mode") and ("parse" in err_text or "caption" in err_text):
-                logger.warning(
-                    "Caption parse failed for media send, retrying plain: %s",
-                    _sanitize_error_text(media_err))
+                logger.warning("Caption parse failed for media send, retrying plain: %s",
+                               _sanitize_error_text(media_err))
                 media_kwargs.pop("parse_mode", None)
                 if not has_html and media_kwargs.get("caption"):
                     media_kwargs["caption"] = _strip_mdv2_safe(media_kwargs["caption"])
@@ -258,8 +251,7 @@ def _telegram_format(message):
     """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
     HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
     from telegram.constants import ParseMode
-    has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
-    if has_html:
+    if re.search(r'<[a-zA-Z/][^>]*>', message):
         return message, ParseMode.HTML, True
     try:
         from plugins.platforms.telegram.adapter import TelegramAdapter
@@ -276,26 +268,22 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         formatted, send_parse_mode, _has_html = _telegram_format(message)
         bot = _telegram_bot(token)
         from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
-
         # Telegram accepts a numeric chat_id OR an @username string; never force-int.
         int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = _telegram_thread_kwargs(thread_id)
         # disable_web_page_preview is only valid for send_message, not media sends.
-        text_kwargs = dict(thread_kwargs)
-        if disable_link_previews:
-            text_kwargs["disable_web_page_preview"] = True
+        text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         last_msg, warnings = None, []
 
-        # MEDIA caption: a single captionable file + short text rides on the bubble as
-        # its *formatted* caption. Formatting can inflate a raw <1024 string past
-        # Telegram's cap, so re-check in UTF-16 units and fall back to a separate body.
+        # MEDIA caption: a single captionable file + short text rides on the bubble as its
+        # *formatted* caption. Formatting can inflate a raw <1024 string past Telegram's
+        # cap, so re-check in UTF-16 units and fall back to a separate body.
         _tg_caption = None
         from gateway.platforms.base import BasePlatformAdapter, utf16_len
         _cap, _ = _media_caption_split(message, media_files, max_caption_len=_TELEGRAM_CAPTION_LIMIT)
         if _cap is not None and utf16_len(formatted) <= _TELEGRAM_CAPTION_LIMIT:
-            _tg_caption = formatted
-            formatted = ""  # suppress the separate text send below
+            _tg_caption, formatted = formatted, ""  # suppress the separate text send below
 
         if formatted.strip():
             # Chunk *after* formatting, in UTF-16 units: MarkdownV2/HTML escaping inflates
@@ -306,9 +294,8 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
 
         for media_path, is_voice in media_files:
             if not os.path.exists(media_path):
-                warning = f"Media file not found, skipping: {media_path}"
-                logger.warning(warning)
-                warnings.append(warning)
+                warnings.append(f"Media file not found, skipping: {media_path}")
+                logger.warning(warnings[-1])
                 # Caption mode suppressed the text send; if the file it was meant to
                 # caption is gone, deliver the words on their own.
                 if _tg_caption is not None and last_msg is None:
@@ -318,20 +305,17 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                             parse_mode=send_parse_mode, **text_kwargs)
                         _tg_caption = None  # delivered — don't re-caption a later file
                     except Exception as _cap_err:
-                        logger.warning(
-                            "Telegram caption-fallback send failed for missing media: %s",
-                            _sanitize_error_text(_cap_err))
+                        logger.warning("Telegram caption-fallback send failed for missing media: %s",
+                                       _sanitize_error_text(_cap_err))
                 continue
-
             try:
                 last_msg = await _telegram_send_one_media(
                     bot, int_chat_id, media_path, is_voice,
                     caption=_tg_caption, parse_mode=send_parse_mode, has_html=_has_html,
                     thread_kwargs=thread_kwargs, force_document=force_document)
             except Exception as e:
-                warning = _sanitize_error_text(f"Failed to send media {media_path}: {e}")
-                logger.error(warning)
-                warnings.append(warning)
+                warnings.append(_sanitize_error_text(f"Failed to send media {media_path}: {e}"))
+                logger.error(warnings[-1])
 
         if last_msg is None:
             return {"error": _NO_DELIVERABLE, **({"warnings": warnings} if warnings else {})}
@@ -439,9 +423,8 @@ async def _resolve_slack_user_target(token, chat_id):
             user_id = chat_id[len("user:"):]
             opened = await post_api(session, "conversations.open", {"users": user_id})
             if not opened.get("ok"):
-                return None, _error(
-                    f"Slack conversations.open error: {opened.get('error', 'unknown')}. "
-                    "Check bot permissions (im:write).")
+                return None, _error(f"Slack conversations.open error: {opened.get('error', 'unknown')}. "
+                                    "Check bot permissions (im:write).")
             dm_id = (opened.get("channel") or {}).get("id")
             if not dm_id:
                 return None, _error("Slack conversations.open did not return a DM channel ID")
@@ -453,8 +436,8 @@ async def _resolve_slack_user_target(token, chat_id):
 async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, batch_message):
     """One Signal batch under the scheduler with rate-limit retries. None on success,
     False when retries were exhausted (batch lost), error dict for a non-rate-limit RPC error."""
-    n = len(att_batch)
-    for attempt in range(1, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS + 1):
+    n, max_attempts = len(att_batch), rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
         try:
             await scheduler.acquire(n)
             _rpc_t0 = time.monotonic()
@@ -469,26 +452,22 @@ async def _signal_send_batch(post, scheduler, rl, idx, n_batches, att_batch, bat
             server_retry_after = rl._extract_retry_after_seconds(err)
             scheduler.feedback(server_retry_after, n)
             retry_after_label = f"{server_retry_after:.0f}s" if server_retry_after else "unknown"
-            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                logger.error(
-                    "Signal: rate-limit retries exhausted on batch %d/%d "
-                    "(%d attachments lost, server retry_after=%s)",
-                    idx + 1, n_batches, n, retry_after_label)
+            if attempt >= max_attempts:
+                logger.error("Signal: rate-limit retries exhausted on batch %d/%d "
+                             "(%d attachments lost, server retry_after=%s)",
+                             idx + 1, n_batches, n, retry_after_label)
                 return False
-            logger.warning(
-                "Signal: rate-limited on batch %d/%d "
-                "(attempt %d/%d, server retry_after=%s); "
-                "scheduler will pace the retry",
-                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, retry_after_label)
+            logger.warning("Signal: rate-limited on batch %d/%d "
+                           "(attempt %d/%d, server retry_after=%s); "
+                           "scheduler will pace the retry",
+                           idx + 1, n_batches, attempt, max_attempts, retry_after_label)
         except Exception as e:
-            if attempt >= rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS:
-                logger.error(
-                    "Signal: send error on batch %d/%d after %d attempts: %s",
-                    idx + 1, n_batches, attempt, str(e))
+            if attempt >= max_attempts:
+                logger.error("Signal: send error on batch %d/%d after %d attempts: %s",
+                             idx + 1, n_batches, attempt, str(e))
                 return False
-            logger.warning(
-                "Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
-                idx + 1, n_batches, attempt, rl.SIGNAL_RATE_LIMIT_MAX_ATTEMPTS, str(e))
+            logger.warning("Signal: transient error on batch %d/%d (attempt %d/%d): %s; will retry",
+                           idx + 1, n_batches, attempt, max_attempts, str(e))
 
 
 async def _send_signal(extra, chat_id, message, media_files=None):
@@ -535,16 +514,14 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                 return await client.post(f"{http_url}/api/v1/rpc", json=payload)
 
         async def _post(batch_attachments, batch_message):
-            resp = await _rpc_send(
-                batch_message, id_prefix="send", timeout=rl._signal_send_timeout(len(batch_attachments)),
-                attachments=batch_attachments, styled=True)
+            resp = await _rpc_send(batch_message, id_prefix="send", attachments=batch_attachments, styled=True,
+                                   timeout=rl._signal_send_timeout(len(batch_attachments)))
             resp.raise_for_status()
             return resp.json()
 
         scheduler = rl.get_scheduler()
-        logger.info(
-            "send_message Signal: scheduler state=%s, %d attachment(s) in %d batch(es)",
-            scheduler.state(), len(attachment_paths), n_batches)
+        logger.info("send_message Signal: scheduler state=%s, %d attachment(s) in %d batch(es)",
+                    scheduler.state(), len(attachment_paths), n_batches)
         failed_batches: list[int] = []
         for idx, att_batch in enumerate(att_batches):
             n = len(att_batch)
@@ -557,8 +534,8 @@ async def _send_signal(extra, chat_id, message, media_files=None):
                     await _rpc_send(notice, id_prefix="notice", timeout=30.0)
                 except Exception as _e:
                     logger.warning("Signal: inline notice failed: %s", _e)
-            outcome = await _signal_send_batch(
-                _post, scheduler, rl, idx, n_batches, att_batch, plain_text if idx == 0 else "")
+            outcome = await _signal_send_batch(_post, scheduler, rl, idx, n_batches, att_batch,
+                                               plain_text if idx == 0 else "")
             if outcome is False:
                 failed_batches.append(idx + 1)
             elif outcome is not None:
@@ -584,13 +561,10 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     messages — so the ephemeral connect/disconnect path is only for standalone/cron."""
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
-
     from gateway.config import Platform
-    _, live_adapter = _live_adapter(
-        Platform.MATRIX,
-        lookup_failed_warning=(
-            "Matrix: live gateway adapter lookup failed; falling back to an "
-            "ephemeral connect (may re-init E2EE per send)"))
+    _, live_adapter = _live_adapter(Platform.MATRIX, lookup_failed_warning=(
+        "Matrix: live gateway adapter lookup failed; falling back to an "
+        "ephemeral connect (may re-init E2EE per send)"))
     if live_adapter is not None:
         # Owned by the gateway — must NOT be disconnected; return before the
         # ephemeral adapter (and its ``finally`` disconnect) exists.
@@ -619,7 +593,6 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
 async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
     """Core send logic shared by live and ephemeral Matrix adapters."""
     last_result = None
-
     if message.strip():
         last_result = await adapter.send(chat_id, message, metadata=metadata)
         if not last_result.success:
@@ -630,21 +603,13 @@ async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
             return _error(f"Media file not found: {media_path}")
 
         ext = os.path.splitext(media_path)[1].lower()
-        if ext in _IMAGE_EXTS:
-            method = adapter.send_image_file
-        elif ext in _VIDEO_EXTS:
-            method = adapter.send_video
-        elif (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS:
-            method = adapter.send_voice
-        else:
-            method = adapter.send_document
-        last_result = await method(chat_id, media_path, metadata=metadata)
+        method, _ = _adapter_media_method(ext, (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS)
+        last_result = await getattr(adapter, method)(chat_id, media_path, metadata=metadata)
         if not last_result.success:
             return _error(f"Matrix media send failed: {last_result.error}")
 
-    if last_result is None:
-        return {"error": _NO_DELIVERABLE}
-    return _success("matrix", chat_id, message_id=last_result.message_id)
+    return {"error": _NO_DELIVERABLE} if last_result is None else _success(
+        "matrix", chat_id, message_id=last_result.message_id)
 
 
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
@@ -657,9 +622,8 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
         return {"error": "Weixin adapter not available."}
 
     try:
-        return await send_weixin_direct(
-            extra=pconfig.extra, token=pconfig.token, chat_id=chat_id,
-            message=message, media_files=media_files)
+        return await send_weixin_direct(extra=pconfig.extra, token=pconfig.token, chat_id=chat_id,
+                                        message=message, media_files=media_files)
     except Exception as e:
         return _error(f"Weixin send failed: {e}")
 
@@ -700,16 +664,14 @@ async def _send_qqbot(pconfig, chat_id, message):
     from gateway.config import _getenv
     extra = pconfig.extra or {}
     appid = extra.get("app_id") or _getenv("QQ_APP_ID", "")
-    secret = (pconfig.token or extra.get("client_secret")
-              or _getenv("QQ_CLIENT_SECRET", ""))
+    secret = pconfig.token or extra.get("client_secret") or _getenv("QQ_CLIENT_SECRET", "")
     if not appid or not secret:
         return _error("QQBot: QQ_APP_ID / QQ_CLIENT_SECRET not configured.")
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            token_resp = await client.post(
-                "https://bots.qq.com/app/getAppAccessToken",
-                json={"appId": str(appid), "clientSecret": str(secret)})
+            token_resp = await client.post("https://bots.qq.com/app/getAppAccessToken",
+                                           json={"appId": str(appid), "clientSecret": str(secret)})
             if token_resp.status_code != 200:
                 return _error(f"QQBot token request failed: {token_resp.status_code}")
             access_token = token_resp.json().get("access_token")
@@ -717,8 +679,7 @@ async def _send_qqbot(pconfig, chat_id, message):
                 return _error("QQBot: no access_token in response")
 
             # Separate endpoints for guild channels, C2C (private) and groups; first 2xx wins.
-            headers = {
-                "Authorization": f"QQBot {access_token}", "Content-Type": "application/json"}
+            headers = {"Authorization": f"QQBot {access_token}", "Content-Type": "application/json"}
             payload = {"content": message[:4000], "msg_type": 0}
             endpoints = (
                 ("channel", f"https://api.sgroup.qq.com/channels/{chat_id}/messages"),
@@ -745,9 +706,7 @@ async def _send_yuanbao(chat_id, message, media_files=None):
 
     adapter = get_active_adapter()
     if adapter is None:
-        return _error(
-            "Yuanbao adapter is not running. "
-            "Start the gateway with yuanbao platform enabled first.")
+        return _error("Yuanbao adapter is not running. Start the gateway with yuanbao platform enabled first.")
 
     try:
         return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)

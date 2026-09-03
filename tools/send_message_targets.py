@@ -151,11 +151,8 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             return parsed[0], parsed[1], True
     if platform_name in _PHONE_PLATFORMS and _E164_TARGET_RE.fullmatch(target_ref):
         return target_ref.strip(), None, True
-    if target_ref.lstrip("-").isdigit():
-        return target_ref, None, True
-    if platform_name == "matrix" and target_ref.startswith(("!", "@")):
-        return target_ref, None, True
-    if platform_name == "xmpp" and "@" in target_ref:
+    if (target_ref.lstrip("-").isdigit() or (platform_name == "matrix" and target_ref.startswith(("!", "@")))
+            or (platform_name == "xmpp" and "@" in target_ref)):
         return target_ref, None, True
     return None, None, False
 
@@ -187,9 +184,8 @@ def resolve_send_target(
             return f"Target validator failed for platform '{platform_name}'"
         if verdict is True:
             return None
-        if isinstance(verdict, str) and verdict:
-            return f"Invalid target '{target_ref}' on {platform_name}: {verdict}"
-        return f"Invalid target '{target_ref}' on {platform_name}"
+        detail = f": {verdict}" if isinstance(verdict, str) and verdict else ""
+        return f"Invalid target '{target_ref}' on {platform_name}{detail}"
 
     def _validated(chat_id, thread_id):
         error = _validate(chat_id)

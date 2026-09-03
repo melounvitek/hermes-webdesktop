@@ -124,14 +124,9 @@ REACT_TO_MESSAGE_SCHEMA = {
 
 
 registry.register(
-    name="react_to_message",
-    toolset="desktop_ui",
-    schema=REACT_TO_MESSAGE_SCHEMA,
+    name="react_to_message", toolset="desktop_ui", schema=REACT_TO_MESSAGE_SCHEMA,
     handler=lambda args, **kw: react_to_message_tool(
-        emoji=args.get("emoji", ""),
-        message_row_id=args.get("message_row_id"),
-        messages_back=args.get("messages_back"),
-    ),
-    check_fn=check_react_requirements,
-    emoji="💛",
+        emoji=args.get("emoji", ""), message_row_id=args.get("message_row_id"),
+        messages_back=args.get("messages_back")),
+    check_fn=check_react_requirements, emoji="💛",
 )
