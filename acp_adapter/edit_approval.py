@@ -115,8 +115,8 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
     if not paths:
         raise ValueError("no file paths found in V4A patch")
     single = len(paths) == 1
-    # ACP only supports a single diff payload: surface the exact V4A patch as
-    # new_text so patch-mode calls are permissioned and denied patches cannot mutate.
+    # ACP only supports a single diff payload: surface the exact V4A patch as new_text so
+    # patch-mode calls are permissioned and denied patches cannot mutate.
     return EditProposal(
         "patch", paths[0] if single else ", ".join(paths),
         _read_text_if_exists(paths[0]) if single else None, patch_body, dict(arguments),
@@ -143,14 +143,6 @@ def _is_sensitive_auto_approve_path(path: str) -> bool:
     return bool(lowered & {".git", ".ssh"}) or Path(path).name.lower() in SENSITIVE_AUTO_APPROVE_NAMES
 
 
-def _is_under(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | None = None) -> bool:
     """Return whether an ACP edit proposal may bypass the prompt for this session.
 
@@ -165,10 +157,10 @@ def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | Non
     if policy == AUTO_APPROVE_WORKSPACE:
         # tempfile.gettempdir() is the real temp root on every platform
         # (``/private/tmp`` on macOS since resolve() follows the symlink).
-        if _is_under(path, Path(tempfile.gettempdir()).resolve(strict=False)):
+        if path.is_relative_to(Path(tempfile.gettempdir()).resolve(strict=False)):
             return True
         if cwd:
-            return _is_under(path, Path(cwd).expanduser().resolve(strict=False))
+            return path.is_relative_to(Path(cwd).expanduser().resolve(strict=False))
     return False
 
 

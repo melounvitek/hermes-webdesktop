@@ -1299,16 +1299,14 @@ class HermesACPAgent(acp.Agent):
         self, cwd: str, session_id: str, mcp_servers: list | None = None, **kwargs: Any
     ) -> ForkSessionResponse:
         state = self.session_manager.fork_session(session_id, cwd=cwd)
-        new_id = state.session_id if state else ""
-        if state is not None:
-            await self._register_session_mcp_servers(state, mcp_servers)
-        logger.info("Forked session %s -> %s", session_id, new_id)
-        if new_id:
-            self._schedule_available_commands_update(new_id)
+        if state is None:
+            logger.info("Forked session %s -> %s", session_id, "")
+            return ForkSessionResponse(session_id="")
+        await self._register_session_mcp_servers(state, mcp_servers)
+        logger.info("Forked session %s -> %s", session_id, state.session_id)
+        self._schedule_available_commands_update(state.session_id)
         return ForkSessionResponse(
-            session_id=new_id,
-            models=self._build_model_state(state) if state is not None else None,
-            modes=self._session_modes(state) if state is not None else None,
+            session_id=state.session_id, models=self._build_model_state(state), modes=self._session_modes(state)
         )
 
     async def list_sessions(

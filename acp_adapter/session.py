@@ -104,15 +104,9 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
 def _expand_acp_enabled_toolsets(toolsets: List[str] | None = None,
                                  mcp_server_names: List[str] | None = None) -> List[str]:
     """Return ACP toolsets plus explicit MCP server toolsets for this session."""
-    expanded: List[str] = []
-    for name in list(toolsets or ["hermes-acp"]):
-        if name and name not in expanded:
-            expanded.append(name)
-    for server_name in list(mcp_server_names or []):
-        toolset_name = f"mcp-{server_name}"
-        if server_name and toolset_name not in expanded:
-            expanded.append(toolset_name)
-    return expanded
+    names = [n for n in (toolsets or ["hermes-acp"]) if n]
+    names += [f"mcp-{s}" for s in (mcp_server_names or []) if s]
+    return list(dict.fromkeys(names))
 
 
 def _parse_model_config(mc: Any) -> dict:
@@ -223,7 +217,7 @@ class SessionManager:
             seen_ids = set(self._sessions.keys())
             results = []
             for s in self._sessions.values():
-                if len(s.history) <= 0 or not _matches(s.cwd):
+                if not s.history or not _matches(s.cwd):
                     continue
                 persisted = persisted_rows.get(s.session_id, {})
                 results.append(_session_info(
@@ -387,7 +381,7 @@ class SessionManager:
         default_model, config_provider = "", None
         if isinstance(model_cfg, dict):
             default_model, config_provider = str(model_cfg.get("default") or ""), model_cfg.get("provider")
-        elif isinstance(model_cfg, str) and model_cfg.strip():
+        elif isinstance(model_cfg, str):
             default_model = model_cfg.strip()
 
         configured_mcp_servers = [

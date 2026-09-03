@@ -65,12 +65,11 @@ def _send_update(conn: acp.Client, session_id: str, loop: asyncio.AbstractEventL
         logger.debug("Failed to send ACP update", exc_info=True)
 
 
-def _upgrade_queue(tool_call_ids: Dict[str, Deque[str]], key: Any, store_key: Any) -> Deque[str] | None:
+def _upgrade_queue(tool_call_ids: Dict[str, Deque[str]], name: str) -> Deque[str] | None:
     """Fetch the per-tool FIFO of pending call IDs, upgrading a legacy bare-string entry in place."""
-    queue = tool_call_ids.get(key)
+    queue = tool_call_ids.get(name)
     if isinstance(queue, str):
-        queue = deque([queue])
-        tool_call_ids[store_key] = queue
+        queue = tool_call_ids[name] = deque([queue])
     return queue
 
 
@@ -102,7 +101,7 @@ def make_tool_progress_cb(
             args = {}
 
         tc_id = make_tool_call_id()
-        queue = _upgrade_queue(tool_call_ids, name, name)
+        queue = _upgrade_queue(tool_call_ids, name)
         if queue is None:
             queue = tool_call_ids[name] = deque()
         queue.append(tc_id)
@@ -174,8 +173,10 @@ def make_step_cb(
             elif isinstance(tool_info, str):
                 tool_name = tool_info
 
-            queue = _upgrade_queue(tool_call_ids, tool_name or "", tool_name)
-            if not tool_name or not queue:
+            if not tool_name:
+                continue
+            queue = _upgrade_queue(tool_call_ids, tool_name)
+            if not queue:
                 continue
             tc_id = queue.popleft()
             meta = tool_call_meta.pop(tc_id, {})
