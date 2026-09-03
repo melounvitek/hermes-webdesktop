@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any
+
+_LIST_WORDS = {"list", "ls", "browse"}
+_SEARCH_WORDS = {"search", "find"}
 
 
 def parse_session_listing_args(raw_args: str) -> tuple[bool, bool, str, str | None]:
-    """Parse `/sessions`-style args into listing flags, a resume target, and a search query.
+    """Parse `/sessions`-style args into ``(include_all_sources, include_unnamed, target, search_query)``.
 
-    Returns ``(include_all_sources, include_unnamed, target, search_query)``. ``all`` widens
-    source scope, ``full`` keeps unnamed sessions, ``search``/``find`` makes the rest a query
-    (``None`` = not requested, ``""`` = requested with no terms). Flags are honored only before
-    the first positional word so titles containing "all" aren't misparsed; anything else is a
-    target so `/sessions <id-or-title>` can delegate to `/resume`.
+    ``all`` widens source scope, ``full`` keeps unnamed sessions, ``search``/``find`` makes the rest
+    a query (``None`` = not requested, ``""`` = requested with no terms). Flags are honored only
+    before the first positional word so titles containing "all" aren't misparsed; anything else is
+    a target so `/sessions <id-or-title>` can delegate to `/resume`.
     """
-    import shlex
-
     parts = shlex.split(raw_args or "")
     include_all = False
     include_unnamed = False
@@ -23,7 +24,7 @@ def parse_session_listing_args(raw_args: str) -> tuple[bool, bool, str, str | No
     for i, part in enumerate(parts):
         lower = part.strip().lower()
         if not target_parts:
-            if lower in {"list", "ls", "browse"}:
+            if lower in _LIST_WORDS:
                 continue
             if lower in {"all", "--all"}:
                 include_all = True
@@ -31,9 +32,8 @@ def parse_session_listing_args(raw_args: str) -> tuple[bool, bool, str, str | No
             if lower in {"full", "--full"}:
                 include_unnamed = True
                 continue
-            if lower in {"search", "find"}:
-                query = " ".join(parts[i + 1:]).strip()
-                return include_all, include_unnamed, "", query
+            if lower in _SEARCH_WORDS:
+                return include_all, include_unnamed, "", " ".join(parts[i + 1:]).strip()
         target_parts.append(part)
     return include_all, include_unnamed, " ".join(target_parts).strip(), None
 
@@ -59,14 +59,12 @@ def query_session_listing(
     limit applies. With ``search_query`` rows are filtered by title/id in SQL, ordered by recent
     activity, and unnamed sessions stay visible since an id match may be the only handle.
     """
-    query_source = None if include_all_sources else source
-    fetch_limit = max(limit * 4, limit)
     search = (search_query or "").strip()
     rows = session_db.list_sessions_rich(
-        source=query_source,
+        source=None if include_all_sources else source,
         session_key=session_key,
         exclude_sources=exclude_sources,
-        limit=fetch_limit,
+        limit=max(limit * 4, limit),
         search_query=search or None,
         order_by_last_active=bool(search),
     )
@@ -78,8 +76,7 @@ def query_session_listing(
         if not include_unnamed and not row.get("title") and not search and not is_current:
             continue
         if is_current:
-            row = dict(row)
-            row["is_current_session"] = True
+            row = {**row, "is_current_session": True}
         result.append(row)
         if len(result) >= limit:
             break
@@ -95,8 +92,8 @@ def format_gateway_session_listing(
 ) -> str:
     """Render a compact Markdown-ish session list for gateway messengers.
 
-    ``notice`` appends an explanatory line above the footer — used e.g. when a requested scope
-    widening (``all``) was declined so the caller isn't left guessing why sessions are missing.
+    ``notice`` adds an explanatory line above the footer — e.g. when a requested scope widening
+    (``all``) was declined, so the caller isn't left guessing why sessions are missing.
     """
     if not rows:
         parts = [
@@ -110,14 +107,15 @@ def format_gateway_session_listing(
 
     lines = [f"📋 **{title}**", ""]
     for idx, row in enumerate(rows, start=1):
-        session_id = str(row.get("id") or "")
-        title_text = str(row.get("title") or "—")
         current_part = " (current)" if row.get("is_current_session") else ""
         preview = str(row.get("preview") or "")[:40]
         source = str(row.get("source") or "")
         source_part = f" `{source}`" if include_source and source else ""
         preview_part = f" — _{preview}_" if preview else ""
-        lines.append(f"{idx}. **{title_text}**{current_part}{source_part} — `{session_id}`{preview_part}")
+        lines.append(
+            f"{idx}. **{row.get('title') or '—'}**{current_part}{source_part}"
+            f" — `{row.get('id') or ''}`{preview_part}"
+        )
     lines.append("")
     if notice:
         lines.append(notice)
