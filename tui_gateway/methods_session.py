@@ -47,14 +47,6 @@ def _with_db(code: int, *, session_scoped: bool):
     return deco
 
 
-def _with_session_db(code: int):
-    return _with_db(code, session_scoped=True)
-
-
-def _with_profile_db(code: int):
-    return _with_db(code, session_scoped=False)
-
-
 def _str_param(params: dict, key: str, default: str = "") -> str:
     """``str(params[key]).strip()`` with ``default`` for missing / falsy values."""
     return str(params.get(key) or "").strip() or default
@@ -141,8 +133,7 @@ def _session_row_summary(row: dict, *, tip_row: dict | None = None, resolved_id=
             "source": row.get("source") or ""}
 
 
-# Hidden from human-facing listings (sub-agent runs, kanban workers). A deny-list so
-# new platforms / custom HERMES_SESSION_SOURCE values surface automatically.
+# Hidden from human listings (sub-agent runs, kanban workers); a deny-list so new platforms surface automatically.
 _LISTING_DENY_SOURCES = frozenset({"kanban", "tool"})
 
 
@@ -309,18 +300,14 @@ def _(rid, params: dict) -> dict:
     history = _coerce_seed_history(params.get("messages"))
     # Branch: links back so list_sessions_rich keeps it visible and the sidebar nests it.
     parent_session_id = _str_param(params, "parent_session_id") or None
-    # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback lands
-    # in "No workspace".
-    raw_cwd = _str_param(params, "cwd")
+    # Only an explicitly chosen existing workspace persists as cwd; the launch-dir fallback is "No workspace".
     explicit_cwd = False
     with contextlib.suppress(Exception):
+        raw_cwd = _str_param(params, "cwd")
         explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
-    resolved_cwd = _completion_cwd(params)
     _enable_gateway_prompts()
-    # ``profile`` (app-global remote mode): stored on the session so the build and every turn
-    # re-bind HERMES_HOME.
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
+    # ``profile`` (app-global remote mode): stored so the build and every turn re-bind HERMES_HOME.
+    profile_home = _profile_home(profile := (params.get("profile") or "").strip() or None)
     session_model_override, create_reasoning_override, create_service_tier_override = _create_overrides(params)
     now = time.time()
     with _sessions_lock:
@@ -330,7 +317,7 @@ def _(rid, params: dict) -> dict:
             "active_session_lease": None,  # claimed lazily on the first turn (_ensure_active_session_slot)
             "cols": int(params.get("cols", 80)), "created_at": now, "edit_snapshots": {}, "explicit_cwd": explicit_cwd,
             "history": history, "history_lock": threading.Lock(), "history_version": 0, "image_counter": 0,
-            "cwd": resolved_cwd, "inflight_turn": None, "last_active": now,
+            "cwd": _completion_cwd(params), "inflight_turn": None, "last_active": now,
             "model_override": session_model_override,
             "create_reasoning_override": create_reasoning_override,
             "create_service_tier_override": create_service_tier_override,
@@ -342,8 +329,7 @@ def _(rid, params: dict) -> dict:
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport}
         _register_session_cwd(_sessions[sid])
-    # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded
-    # branch children, which must exist now.
+    # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded branch children.
     if parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
@@ -354,13 +340,12 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "session_id": sid, "stored_session_id": key, "message_count": len(history),
         "messages": _history_to_messages(history),
-        "info": {
-            # Reflect the override now so the client doesn't clobber its sticky pick.
-            "model": override.get("model") if override else _resolve_model(),
-            **({"provider": override["provider"]} if override.get("provider") else {}),
-            "tools": {}, "skills": {}, "cwd": cwd, "branch": _git_branch_for_cwd(cwd),
-            "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-            "profile_name": _response_profile_name(profile)}})
+        # Reflect the override now so the client doesn't clobber its sticky pick.
+        "info": {"model": override.get("model") if override else _resolve_model(),
+                 **({"provider": override["provider"]} if override.get("provider") else {}),
+                 "tools": {}, "skills": {}, "cwd": cwd, "branch": _git_branch_for_cwd(cwd),
+                 "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
+                 "profile_name": _response_profile_name(profile)}})
 
 
 def _session_list_by_title(rid, db, title_lookup: str) -> dict:
@@ -370,32 +355,29 @@ def _session_list_by_title(rid, db, title_lookup: str) -> dict:
     row = db.get_session_by_title(title_lookup)
     if row and row.get("archived"):
         from tools.bot_mode_probe import BOT_CHAT_TITLE
-        # A Bot Chat archived by the ws-orphan reaper / agent_close is an accident (the desktop
-        # would mint replacements forever): resurrect recoverable reasons only. Re-fetch by ID —
-        # title is not UNIQUE.
+        # A Bot Chat archived by the ws-orphan reaper / agent_close is an accident (the desktop would mint
+        # replacements forever): resurrect recoverable reasons only. Re-fetch by ID — title is not UNIQUE.
         if title_lookup == BOT_CHAT_TITLE and db.unarchive_recoverable_session(row["id"]):
             row = db.get_session(row["id"])
     if not row or row.get("archived") or _denied_source(row):
         return _ok(rid, {"sessions": []})
-    try:
-        # Real compression continuation only: the resume resolver's unmarked-child
-        # fallback could redirect the canonical Bot Chat to an unrelated child.
+    tip = row["id"]
+    with contextlib.suppress(Exception):
+        # Real compression continuation only: the resolver's unmarked-child fallback could redirect Bot Chat.
         tip = db.get_compression_tip(row["id"]) or row["id"]
-    except Exception:
-        tip = row["id"]
     tip_row = (db.get_session(tip) or row) if tip != row["id"] else row
     return _ok(rid, {"sessions": [_session_row_summary(row, tip_row=tip_row, resolved_id=tip)]})
 
 
 @method("session.list")
-@_with_profile_db(5006)
+@_with_db(5006, session_scoped=False)
 def _(rid, params: dict, db) -> dict:
     try:
         if title_lookup := _str_param(params, "title"):
             return _session_list_by_title(rid, db, title_lookup)
         limit = int(params.get("limit", 200) or 200)
-        # Over-fetch: per-source filtering + tip merging must not leave us short.
-        # ``include_hidden`` is for surfaces that OWN hidden sessions (Bots pane, pickers).
+        # Over-fetch: per-source filtering + tip merging must not leave us short. ``include_hidden`` is for
+        # surfaces that OWN hidden sessions (Bots pane, pickers).
         rows = _listing_rows(db, max(limit * 2, 200), include_hidden=_flag(params, "include_hidden"))[:limit]
         return _ok(rid, {"sessions": [_session_row_summary(s) for s in rows]})
     except Exception as e:
@@ -476,6 +458,11 @@ class _Resume:
         """Register ``record`` live under the resume lock, or reuse a concurrent winner's session."""
         live = _claim_or_reuse_live(sid, self.target, record, None)
         return None if live is None else _resume_reuse_live(self, *live)
+
+    def restore(self):
+        """``(sanitized model history, display history, raw history)`` for a cold/eager resume."""
+        raw, display = self.read_history()
+        return sanitize_replay_history(raw), display, raw
 
     def info(self, cwd: str, overrides: dict) -> dict:
         model_override = overrides.get("model_override") or {}
@@ -563,9 +550,8 @@ def _resume_locate(ctx: _Resume) -> dict | None:
         ctx.target = ctx.found["id"]
         return None
     if ctx.lazy and _child_run_active(ctx.target):
-        # Fresh subagent watch window: `subagent.start` relays BEFORE the child's first DB flush.
-        # Proceed lazily with empty history — the live mirror streams the turn and the row exists
-        # by upgrade time.
+        # Fresh subagent watch window: `subagent.start` relays BEFORE the child's first DB flush. Proceed lazily
+        # with empty history — the live mirror streams the turn and the row exists by upgrade time.
         ctx.found = {}
         return None
     live_sid = _find_live_unpersisted(ctx.target, ctx.profile_home)
@@ -583,14 +569,13 @@ def _resume_follow_tip(ctx: _Resume) -> None:
     for lazy watch windows (exact child). Bot Chat follows proven compression edges only."""
     if not ctx.found or ctx.lazy:
         return
-    try:
+    tip = ctx.target
+    with contextlib.suppress(Exception):
         from tools.bot_mode_probe import BOT_CHAT_TITLE
         if (ctx.found.get("title") or "").strip() == BOT_CHAT_TITLE:
             tip = ctx.db.get_compression_tip(ctx.target) or ctx.target
         else:
             tip = ctx.db.resolve_resume_session_id(ctx.target)
-    except Exception:
-        tip = ctx.target
     if tip and tip != ctx.target:
         ctx.target = tip
         ctx.found = ctx.db.get_session(tip) or ctx.found
@@ -672,17 +657,16 @@ def _resume_lazy(ctx: _Resume) -> dict:
     if (reused := ctx.claim(sid, record)) is not None:
         return reused
     # A child mid-run emits no session events — liveness comes from the relay registry.
-    child_running = _child_run_active(ctx.target)
-    # Display uses the VERBATIM child-only projection so model-invisible rows survive;
-    # the repaired ``history`` still feeds live replay.
+    running = _child_run_active(ctx.target)
+    # Display uses the VERBATIM child-only projection so model-invisible rows survive; repaired ``history``
+    # still feeds live replay.
+    display = history
     try:
         display = ctx.child_history(repair=False)
     except Exception:
         logger.debug("child-watch display projection read failed", exc_info=True)
-        display = history
     return _resume_response(ctx, sid, record, info=_lazy_resume_info(cwd, profile=ctx.profile), display=display,
-                            count_source=display, running=child_running,
-                            status="streaming" if child_running else "idle")
+                            count_source=display, running=running, status="streaming" if running else "idle")
 
 
 def _resume_deferred(ctx: _Resume) -> dict:
@@ -690,7 +674,7 @@ def _resume_deferred(ctx: _Resume) -> dict:
     defer_history SUPERSEDES omit_messages: the ONE history read happens in the worker."""
     sid, source, cwd = ctx.mint()
     _enable_gateway_prompts()
-    overrides = _stored_session_runtime_overrides(ctx.found) or {}
+    overrides = _stored_session_runtime_overrides(ctx.found)
     record = ctx.record(source, cwd, [], overrides)
     record.update(resume_history_ready=threading.Event(), resume_hydrating=True,
                   resume_message_count=int(ctx.found.get("message_count") or 0))
@@ -711,20 +695,19 @@ def _resume_cold(ctx: _Resume) -> dict:
     sid, source, cwd = ctx.mint()
     _enable_gateway_prompts()
     try:
-        raw_history, display_history = ctx.read_history()
+        history, display_history, raw_history = ctx.restore()
     except Exception as e:
         return _err(ctx.rid, 5000, f"resume failed: {e}")
-    history = sanitize_replay_history(raw_history)
-    overrides = _stored_session_runtime_overrides(ctx.found) or {}
+    overrides = _stored_session_runtime_overrides(ctx.found)
     record = ctx.record(source, cwd, history, overrides, display_history_prefix=ctx.display_prefix(),
                         todo_state=_todo_state_from_history(history))
     if (reused := ctx.claim(sid, record)) is not None:
         return reused
     _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
-    auto_continue = _maybe_schedule_auto_continue(sid, record, ctx.target)
     return _resume_response(ctx, sid, record, info=ctx.info(cwd, overrides), display=display_history,
-                            count_source=raw_history, auto_continue=auto_continue)
+                            count_source=raw_history,
+                            auto_continue=_maybe_schedule_auto_continue(sid, record, ctx.target))
 
 
 def _resume_eager(ctx: _Resume) -> dict:
@@ -734,12 +717,10 @@ def _resume_eager(ctx: _Resume) -> dict:
     _enable_gateway_prompts()
     with _profile_build_scope(ctx.profile_home):
         try:
-            raw_history, display_history = ctx.read_history()
+            history, display_history, raw_history = ctx.restore()
             display_history_prefix = ctx.display_prefix()
-            history = sanitize_replay_history(raw_history)
-            messages = ctx.messages(display_history)
-            # Profile db so turns persist to the right state.db; runtime identity from the stored row so
-            # switching chats does not inherit another chat's global model.
+            # Profile db so turns persist to the right state.db; stored runtime identity so switching chats does
+            # not inherit another chat's global model.
             stored_runtime_overrides = _stored_session_runtime_overrides(ctx.found)
             agent = _make_agent_in_context(
                 sid, ctx.target, session_db=ctx.db, platform_override=source,
@@ -757,11 +738,10 @@ def _resume_eager(ctx: _Resume) -> dict:
             with _profile_build_scope(ctx.profile_home):
                 _init_session(sid, ctx.target, agent, history, cols=ctx.cols, cwd=ctx.profile_resume_cwd,
                               session_db=ctx.db, source=source, explicit_cwd=bool(ctx.profile_resume_cwd))
-                # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases
-                # it). The owns_db drop is UNCONDITIONAL — the session is registered against the
-                # handle, so the finally must not close it even if the transfer was refused (a leak
-                # beats "closed database" every turn). Gated on owns_db: the SHARED launch handle
-                # must never move onto one session.
+                # Ownership TRANSFER: the agent holds the handle for life (AIAgent.close() releases it). The
+                # owns_db drop is UNCONDITIONAL — the session is registered against the handle, so the finally
+                # must not close it even if the transfer was refused (a leak beats "closed database" every
+                # turn). Gated on owns_db: the SHARED launch handle must never move onto one session.
                 if ctx.owns_db:
                     _transfer_db_to_agent(agent, ctx.db)
                 ctx.owns_db = False
@@ -773,17 +753,17 @@ def _resume_eager(ctx: _Resume) -> dict:
                     session["profile_home"] = str(ctx.profile_home)
                 session.update(display_history_prefix=display_history_prefix, active_session_lease=None)
         except Exception as e:
-            # _init_session registers _sessions[sid] BEFORE its first db read; left in place the
-            # fast path would serve that dead session forever.
+            # _init_session registers _sessions[sid] BEFORE its first db read; left in place the fast path
+            # would serve that dead session forever.
             if ctx.owns_db:
                 with _sessions_lock:
                     _sessions.pop(sid, None)
             return _err(ctx.rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
-    auto_continue = _maybe_schedule_auto_continue(sid, session, ctx.target) if session else None
     return _resume_response(
-        ctx, sid, session, info=_session_info(agent, session), messages=messages, count_source=raw_history,
-        started_at=float(session.get("created_at") or time.time()), auto_continue=auto_continue)
+        ctx, sid, session, info=_session_info(agent, session), display=display_history, count_source=raw_history,
+        started_at=float(session.get("created_at") or time.time()),
+        auto_continue=_maybe_schedule_auto_continue(sid, session, ctx.target) if session else None)
 
 
 @method("session.resume")
@@ -814,8 +794,8 @@ def _(rid, params: dict) -> dict:
             return _resume_eager(ctx)
         return _resume_deferred(ctx) if ctx.defer_history else _resume_cold(ctx)
     finally:
-        # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF once its background
-        # token writer starts (atexit.register); only close() unregisters.
+        # Refcounting alone does not release the sqlite fds: SessionDB pins ITSELF (atexit.register) once its
+        # background token writer starts; only close() unregisters.
         if ctx.owns_db and ctx.db is not None:
             with contextlib.suppress(Exception):
                 ctx.db.close()
@@ -884,9 +864,9 @@ def _(rid, params: dict) -> dict:
     snapshot, err = _snapshot_sessions(rid)
     if err:
         return err
-    # ``_finalized`` sessions linger until the reaper pops them (they inflated the footer). Do NOT
-    # filter on the WS-detached sentinel: detached is still attachable until grace-reap, and
-    # ``hermes --tui`` rides stdio. Keep insertion order (focused must not jump).
+    # ``_finalized`` sessions linger until the reaper pops them (they inflated the footer). Do NOT filter on
+    # the WS-detached sentinel: detached is attachable until grace-reap, and ``hermes --tui`` rides stdio.
+    # Keep insertion order (focused must not jump).
     rows = [_session_live_item(sid, session, current) for sid, session in snapshot if not session.get("_finalized")]
     return _ok(rid, {"sessions": rows})
 
@@ -915,17 +895,16 @@ def _(rid, params: dict) -> dict:
     with _profile_db(params) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5036)
-        sessions_dir = (Path(profile_home) if profile_home is not None else get_hermes_home()) / "sessions"
         try:
-            deleted = db.delete_session(target, sessions_dir=sessions_dir)
+            deleted = db.delete_session(
+                target, sessions_dir=(Path(profile_home) if profile_home is not None else get_hermes_home()) / "sessions")
         except Exception as e:
             return _err(rid, 5036, f"delete failed: {e}")
     return _ok(rid, {"deleted": target}) if deleted else _err(rid, 4007, "session not found")
 
 
-def _title_read(rid, params: dict, session: dict, db) -> dict:
+def _title_read(session: dict, db, key: str) -> str:
     """``session.title`` without ``title``: read it, applying a queued pending_title if possible."""
-    key = session["session_key"]
     fallback = session.get("pending_title") or ""
     try:
         resolved_title = db.get_session_title(key) or ""
@@ -940,38 +919,39 @@ def _title_read(rid, params: dict, session: dict, db) -> dict:
             resolved_title = fallback
     except Exception:
         resolved_title = fallback
-    _emit_session_info_for_session(params.get("session_id", ""), session)
-    return _ok(rid, {"title": resolved_title, "session_key": key})
+    return resolved_title
 
 
 @method("session.title")
-@_with_session_db(5007)
+@_with_db(5007, session_scoped=True)
 def _(rid, params: dict, session: dict, db) -> dict:
-    if "title" not in params:
-        return _title_read(rid, params, session, db)
     key = session["session_key"]
-    if not (title := (params.get("title", "") or "").strip()):
+    if "title" not in params:
+        result = {"title": _title_read(session, db, key), "session_key": key}
+    elif not (title := (params.get("title", "") or "").strip()):
         return _err(rid, 4021, "title required")
-    try:
-        if db.set_session_title(key, title):
-            pending, value = False, title
-        # rowcount == 0 can mean "same value" as well as "missing row".
-        elif existing_row := db.get_session(key):
-            pending, value = False, existing_row.get("title") or title
-        else:
-            # No row yet: an explicit /title is clear intent, so persist the row NOW (as the gateway's
-            # _handle_title_command). The min-messages sidebar filter hides a titled 0-message row.
-            _ensure_session_db_row(session)
-            with _session_db(session) as scoped_db:
-                # Row creation didn't take — queue so the post-turn apply block can recover.
-                pending, value = not (scoped_db is not None and scoped_db.set_session_title(key, title)), title
+    else:
+        try:
+            if db.set_session_title(key, title):
+                pending, value = False, title
+            # rowcount == 0 can mean "same value" as well as "missing row".
+            elif existing_row := db.get_session(key):
+                pending, value = False, existing_row.get("title") or title
+            else:
+                # No row yet: an explicit /title is clear intent, so persist the row NOW (as the gateway's
+                # _handle_title_command); the min-messages sidebar filter hides a titled 0-message row.
+                _ensure_session_db_row(session)
+                with _session_db(session) as scoped_db:
+                    # Row creation didn't take — queue so the post-turn apply block can recover.
+                    pending, value = not (scoped_db is not None and scoped_db.set_session_title(key, title)), title
+        except ValueError as e:
+            return _err(rid, 4022, str(e))
+        except Exception as e:
+            return _err(rid, 5007, str(e))
         session["pending_title"] = value if pending else None
-        _emit_session_info_for_session(params.get("session_id", ""), session)
-        return _ok(rid, {"pending": pending, "title": value})
-    except ValueError as e:
-        return _err(rid, 4022, str(e))
-    except Exception as e:
-        return _err(rid, 5007, str(e))
+        result = {"pending": pending, "title": value}
+    _emit_session_info_for_session(params.get("session_id", ""), session)
+    return _ok(rid, result)
 
 
 @method("session.set_hidden")
@@ -988,13 +968,11 @@ def _(rid, params: dict) -> dict:
             if session is not None:
                 key = session["session_key"]
                 if not db.set_session_hidden(key, hidden):
-                    # No row yet: _ensure_session_db_row is born hidden (as pending_title).
-                    session["pending_hidden"] = hidden
+                    session["pending_hidden"] = hidden  # no row yet: _ensure_session_db_row is born hidden
             else:
                 # ``resolve_session_id`` follows key/title aliases like the REST pin/archive path.
                 target = _str_param(params, "session_id")
-                key = db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else target
-                if not key:
+                if not (key := db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else target):
                     return err
                 db.set_session_hidden(key, hidden)
             return _ok(rid, {"hidden": hidden, "session_key": key})
@@ -1086,8 +1064,7 @@ def _(rid, params: dict, session: dict) -> dict:
         return _err(rid, 5021, f"could not load gateway config: {e}")
     if not getattr(gw_config.platforms.get(platform), "enabled", False):
         return _err(rid, 4025, f"platform '{platform_name}' is not configured/enabled in the gateway")
-    home = gw_config.get_home_channel(platform)
-    if not home or not home.chat_id:
+    if not (home := gw_config.get_home_channel(platform)) or not home.chat_id:
         return _err(rid, 4026, f"no home channel configured for {platform_name} — set one with "
                     "/sethome on the destination chat first")
     # The watcher transfers a persisted row, so make sure one exists for an empty chat.
@@ -1107,7 +1084,7 @@ def _(rid, params: dict, session: dict) -> dict:
 
 
 @method("handoff.state")
-@_with_session_db(5007)
+@_with_db(5007, session_scoped=True)
 def _(rid, params: dict, session: dict, db) -> dict:
     """Poll ``{state, platform, error}``; ``state`` is pending|running|completed|failed or empty."""
     record = db.get_handoff_state(session["session_key"]) or {}
@@ -1535,79 +1512,58 @@ def _(rid, params: dict) -> dict:
         subscription_change_preview_from_payload(post_subscription_preview(subscription_type_id=tier_id))))
 
 
-@method("subscription.change")
-def _(rid, params: dict) -> dict:
-    """PUT pending-change: schedule a downgrade / same-price change OR a period-end cancellation."""
-    from hermes_cli.nous_billing import put_subscription_pending_change
-    cancel = bool(params.get("cancel"))
-    tier_id = params.get("subscription_type_id")
-    if not cancel and not tier_id:
-        return _billing_invalid(rid, "subscription_type_id or cancel is required")
-    return _billing_call(rid, lambda: _billing_pending_change(
-        put_subscription_pending_change(subscription_type_id=tier_id, cancel=cancel)))
+def _billing_route(name: str, call, *, invalid=None, message: str = "", error: str = "invalid_request",
+                   idempotent: bool = False):
+    """Portal write route on ``hermes_cli.nous_billing`` (lazy; tests patch its functions): ``invalid(params)``
+    → ``_billing_invalid(message, error)``; ``call(nb, params, key)`` performs the request. ``idempotent``
+    mints ``idempotency_key`` if absent and echoes it (also on error) so the TUI retries the SAME operation."""
+    @method(name)
+    def _(rid, params: dict) -> dict:
+        import hermes_cli.nous_billing as nb
+        if invalid is not None and invalid(params):
+            return _billing_invalid(rid, message, error=error)
+        key = extra = None
+        if idempotent:
+            from agent.billing_view import new_idempotency_key
+            key = params.get("idempotency_key") or new_idempotency_key()
+            extra = {"idempotency_key": key}
+        return _billing_call(rid, lambda: call(nb, params, key) | (extra or {}), extra=extra)
 
 
-@method("subscription.resume")
-def _(rid, params: dict) -> dict:
-    """DELETE pending-change: clear a scheduled downgrade / cancellation (re-enables recurring spend)."""
-    from hermes_cli.nous_billing import delete_subscription_pending_change
-    return _billing_call(rid, lambda: _billing_pending_change(delete_subscription_pending_change()))
+# PUT pending-change: schedule a downgrade / same-price change OR a period-end cancellation.
+_billing_route("subscription.change", lambda nb, p, _k: _billing_pending_change(nb.put_subscription_pending_change(
+    subscription_type_id=p.get("subscription_type_id"), cancel=bool(p.get("cancel")))),
+    invalid=lambda p: not p.get("cancel") and not p.get("subscription_type_id"),
+    message="subscription_type_id or cancel is required")
+# DELETE pending-change: clear a scheduled downgrade / cancellation (re-enables recurring spend).
+_billing_route("subscription.resume",
+               lambda nb, p, _k: _billing_pending_change(nb.delete_subscription_pending_change()))
+# The money route (prorate + charge + flip plan). SCA / decline → status requires_action / payment_failed +
+# recovery_url.
+_billing_route("subscription.upgrade", lambda nb, p, key: _billing_pick(
+    nb.post_subscription_upgrade(subscription_type_id=p.get("subscription_type_id"), idempotency_key=key),
+    status="status", target_tier_name="targetTierName", recovery_url="recoveryUrl", reason="reason"),
+    invalid=lambda p: not p.get("subscription_type_id"), message="subscription_type_id is required", idempotent=True)
+# POST /api/billing/charge → {ok, charge_id, idempotency_key}.
+_billing_route("billing.charge", lambda nb, p, key: _billing_pick(
+    nb.post_charge(amount_usd=p.get("amount_usd"), idempotency_key=key), charge_id="chargeId"),
+    invalid=lambda p: p.get("amount_usd") is None, message="amount_usd is required", idempotent=True)
+# GET /api/billing/charge/{id} — a single status read; the caller drives the poll cadence.
+_billing_route("billing.charge_status", lambda nb, p, _k: _billing_pick(
+    nb.get_charge_status(p.get("charge_id")), status="status", amount_usd="amountUsd", settled_at="settledAt",
+    reason="reason"), invalid=lambda p: not p.get("charge_id"), message="charge_id is required",
+    error="invalid_charge_id")
 
 
-@method("subscription.upgrade")
-def _(rid, params: dict) -> dict:
-    """The money route (prorate + charge + flip plan). SCA / decline → status requires_action /
-    payment_failed + recovery_url. Idempotency key minted if absent, echoed (also on error) for retry."""
-    from agent.billing_view import new_idempotency_key
-    from hermes_cli.nous_billing import post_subscription_upgrade
-    if not (tier_id := params.get("subscription_type_id")):
-        return _billing_invalid(rid, "subscription_type_id is required")
-    key = params.get("idempotency_key") or new_idempotency_key()
-    return _billing_call(rid, lambda: _billing_pick(
-        post_subscription_upgrade(subscription_type_id=tier_id, idempotency_key=key), status="status",
-        target_tier_name="targetTierName", recovery_url="recoveryUrl", reason="reason",
-    ) | {"idempotency_key": key}, extra={"idempotency_key": key})
-
-
-@method("billing.charge")
-def _(rid, params: dict) -> dict:
-    """POST /api/billing/charge → {ok, charge_id, idempotency_key}; key minted if absent and echoed
-    (also on error) so the TUI retries the SAME purchase."""
-    from hermes_cli.nous_billing import post_charge
-    from agent.billing_view import new_idempotency_key
-    if (amount := params.get("amount_usd")) is None:
-        return _billing_invalid(rid, "amount_usd is required")
-    key = params.get("idempotency_key") or new_idempotency_key()
-    return _billing_call(rid, lambda: _billing_pick(
-        post_charge(amount_usd=amount, idempotency_key=key), charge_id="chargeId") | {"idempotency_key": key},
-        extra={"idempotency_key": key})
-
-
-@method("billing.charge_status")
-def _(rid, params: dict) -> dict:
-    """GET /api/billing/charge/{id} — a single status read; the caller drives the poll cadence."""
-    from hermes_cli.nous_billing import get_charge_status
-    if not (charge_id := params.get("charge_id")):
-        return _billing_invalid(rid, "charge_id is required", error="invalid_charge_id")
-    return _billing_call(rid, lambda: _billing_pick(
-        get_charge_status(charge_id), status="status", amount_usd="amountUsd", settled_at="settledAt",
-        reason="reason"))
-
-
-@method("billing.auto_reload")
-def _(rid, params: dict) -> dict:
+def _auto_reload(nb, p: dict, _key) -> dict:
     """PATCH /api/billing/auto-top-up. params: {enabled, threshold, top_up_amount}."""
-    from hermes_cli.nous_billing import patch_auto_top_up
-    enabled = bool(params.get("enabled"))
-    threshold = params.get("threshold")
-    top_up_amount = params.get("top_up_amount")
-    if threshold is None or top_up_amount is None:
-        return _billing_invalid(rid, "threshold and top_up_amount are required")
+    nb.patch_auto_top_up(enabled=bool(p.get("enabled")), threshold=p.get("threshold"),
+                         top_up_amount=p.get("top_up_amount"))
+    return {"ok": True}
 
-    def call():
-        patch_auto_top_up(enabled=enabled, threshold=threshold, top_up_amount=top_up_amount)
-        return {"ok": True}
-    return _billing_call(rid, call)
+
+_billing_route("billing.auto_reload", _auto_reload, message="threshold and top_up_amount are required",
+               invalid=lambda p: p.get("threshold") is None or p.get("top_up_amount") is None)
 
 
 @method("billing.step_up")
@@ -1682,8 +1638,8 @@ def _(rid, params: dict, session: dict) -> dict:
     if session.get("session_key"):
         with _session_db(session) as db:
             if db is not None:
-                # include_row_ids: the durable row id is how clients address a persisted
-                # turn (reactions, truncation targets); _history_to_messages forwards it.
+                # include_row_ids: the durable row id is how clients address a persisted turn (reactions,
+                # truncation targets); _history_to_messages forwards it.
                 with contextlib.suppress(Exception):
                     history = db.get_messages_as_conversation(
                         session["session_key"], include_ancestors=True, include_row_ids=True)
@@ -1703,10 +1659,9 @@ def _(rid, params: dict, session: dict) -> dict:
         history = _history_without_ephemeral_scaffolding(session.get("history", []))
         # Truncate from the last *real* user turn (not a timeline marker / compaction handoff).
         from agent.context_compressor import user_originated_turn_view
-        user_indices = [i for i, message in enumerate(history) if user_originated_turn_view(message) is not None]
-        if user_indices:
+        if user_turns := sum(1 for message in history if user_originated_turn_view(message) is not None):
             try:
-                removed = _rewind_active_session_history(session, len(user_indices) - 1)[2]
+                removed = _rewind_active_session_history(session, user_turns - 1)[2]
             except Exception as exc:
                 return _err(rid, 5008, f"undo: {exc}")
     return _ok(rid, {"removed": removed})
@@ -1727,8 +1682,7 @@ def _save_via_compute_host(rid, params: dict) -> dict:
         return _err(rid, 5011, f"compute-host session save failed: {exc}")
     if (resp := _compute_host_ack_error(rid, ack, 5011, "compute-host session save failed")) is not None:
         return resp
-    result = ack.get("result")
-    if not isinstance(result, dict):
+    if not isinstance(result := ack.get("result"), dict):
         return _err(rid, 5011, "compute-host session save returned an invalid response")
     return _ok(rid, result)
 
@@ -1737,15 +1691,14 @@ def _compress_via_compute_host(rid, params: dict, session: dict) -> dict:
     """``session.compress`` for a turn-isolated session: forward ``/compress`` to the host."""
     sid = str(params.get("session_id") or "")
     focus_topic = _str_param(params, "focus_topic")
-    command = "/compress" + (f" {focus_topic}" if focus_topic else "")
 
     def _on_late_ack(late: dict, _sid=sid) -> None:
         _adopt_late_compute_host_compress_ack(_sid, session, late, route_name="session.compress")
     try:
         ack = _send_compute_host_control(
-            sid, route_name="session.compress", command=command, wait=True,
+            sid, route_name="session.compress", command="/compress" + (f" {focus_topic}" if focus_topic else ""),
             # compression.context_total_ceiling_seconds: the host legitimately runs that long.
-            timeout=_compute_host_compress_wait_seconds(), on_late_ack=_on_late_ack)
+            wait=True, timeout=_compute_host_compress_wait_seconds(), on_late_ack=_on_late_ack)
     except queue.Empty:
         # Waiter gave up, host still compressing; the late-ack handler adopts the rotated session when it
         # lands. Not an error (a 5019 here reported timeouts that later succeeded).
@@ -1757,8 +1710,7 @@ def _compress_via_compute_host(rid, params: dict, session: dict) -> dict:
     if (resp := _compute_host_ack_error(rid, ack, 4009, "compute-host compress failed")) is not None:
         return resp
     _apply_compute_host_metadata_mirror(session, ack)
-    host_result = ack.get("result")
-    if isinstance(host_result, dict):
+    if isinstance(host_result := ack.get("result"), dict):
         # Host-owned result verbatim (carries `status: aborted` / `summary.aborted`).
         return _ok(rid, {**host_result, "turn_isolation": True})
     host_info = ack.get("session_info") if isinstance(ack.get("session_info"), dict) else {}
@@ -1784,9 +1736,12 @@ def _compress_live(rid, sid: str, session: dict, focus_topic: str) -> dict:
     _sys_prompt = getattr(_agent, "_cached_system_prompt", "") or ""
     _tools = getattr(_agent, "tools", None) or None
 
-    def _tokens(msgs, sys_prompt, tools) -> int:
+    def _tokens(msgs) -> int:
+        # Re-reads prompt + tools each call: _compress_context may have rebuilt the system prompt.
+        sys_prompt = getattr(_agent, "_cached_system_prompt", "") or _sys_prompt
+        tools = getattr(_agent, "tools", None) or _tools
         return estimate_request_tokens_rough(msgs, system_prompt=sys_prompt, tools=tools) if msgs else 0
-    before_tokens = _tokens(before_messages, _sys_prompt, _tools)
+    before_tokens = _tokens(before_messages)
     if before_count >= 4:
         focus_suffix = f', focus: "{focus_topic}"' if focus_topic else ""
         _status_update(sid, "compressing",
@@ -1797,9 +1752,7 @@ def _compress_live(rid, sid: str, session: dict, focus_topic: str) -> dict:
             history_version=history_version)
         with session["history_lock"]:
             messages = list(session.get("history", []))
-        # Re-read prompt + tools: _compress_context may have rebuilt the system prompt.
-        after_tokens = _tokens(messages, getattr(_agent, "_cached_system_prompt", "") or _sys_prompt,
-                               getattr(_agent, "tools", None) or _tools)
+        after_tokens = _tokens(messages)
         agent = session["agent"]
         _sync_session_key_after_compress(sid, session)
         summary = summarize_manual_compression(before_messages, messages, before_tokens, after_tokens,
@@ -1896,13 +1849,11 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
     branch_db, branch_owns_db = _profile_session_db(parent_home) if parent_home else (None, False)
     try:
         with _profile_build_scope(parent_home):
-            agent = _make_agent_in_context(
-                new_sid, new_key, session_db=branch_db, platform_override=source,
-                context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session))
-            _init_session(
-                new_sid, new_key, agent, list(history), cols=session.get("cols", 80),
-                cwd=_session_cwd(session), session_db=branch_db, source=source, profile_home=parent_home,
-                explicit_cwd=bool(session.get("explicit_cwd")))
+            agent = _make_agent_in_context(new_sid, new_key, session_db=branch_db, platform_override=source,
+                                           context_cwd_is_launch_artifact=_context_cwd_is_launch_artifact(session))
+            _init_session(new_sid, new_key, agent, list(history), cols=session.get("cols", 80),
+                          cwd=_session_cwd(session), session_db=branch_db, source=source, profile_home=parent_home,
+                          explicit_cwd=bool(session.get("explicit_cwd")))
             _transfer_db_to_agent(agent, branch_db)
             branch_owns_db = False
         if new_sid in _sessions:
@@ -1915,8 +1866,8 @@ def _build_branch_agent(session: dict, new_sid: str, new_key: str, history: list
 
 _BRANCH_COPY_FIELDS = (
     "reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items",
-    # Timeline markers ride as role=user; without the tag they become bare user turns after a restart,
-    # corrupting the truncate ordinal address space.
+    # Timeline markers ride as role=user; untagged they become bare user turns after a restart, corrupting
+    # the truncate ordinal address space.
     "display_kind", "display_metadata",
     # Branch copies are history, not new activity: keep the parent's timestamps.
     "timestamp")
@@ -1930,12 +1881,10 @@ def _branch_source_history(db, session: dict, old_key: str) -> list:
             dict(msg) for msg in list(session.get("display_history_prefix") or []) + list(session.get("history", []))
             if isinstance(msg, dict)]
     history = None
-    get_resume_conversations = getattr(db, "get_resume_conversations", None)
-    if callable(get_resume_conversations):
+    if callable(get_resume_conversations := getattr(db, "get_resume_conversations", None)):
         try:
             _, display_history = get_resume_conversations(old_key)
-            display_history = _reconcile_display_with_live(display_history, in_memory_history)
-            history = _visible_branch_history(display_history)
+            history = _visible_branch_history(_reconcile_display_with_live(display_history, in_memory_history))
         except Exception:
             logger.debug("branch display projection read failed", exc_info=True)
     return history or _visible_branch_history(in_memory_history)
@@ -1951,12 +1900,9 @@ def _(rid, params: dict, session: dict) -> dict:
         history = _branch_source_history(db, session, old_key)
         if not history:
             return _err(rid, 4008, "nothing to branch — send a message first")
-        count = params.get("count")
-        if isinstance(count, int) and count > 0:
+        if isinstance(count := params.get("count"), int) and count > 0:
             history = history[:count]
-        new_key = _new_session_key()
-        new_sid = uuid.uuid4().hex[:8]
-        source = _session_source(session)
+        new_key, new_sid, source = _new_session_key(), uuid.uuid4().hex[:8], _session_source(session)
         try:
             title = params.get("name", "") or _branch_title(db, old_key)
             profile_name = Path(session["profile_home"]).name if session.get("profile_home") else _current_profile_name()
@@ -1981,11 +1927,10 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    if expected_hosted_task_id := _str_param(params, "expected_hosted_task_id"):
+    if expected := _str_param(params, "expected_hosted_task_id"):
         with session["history_lock"]:
-            active_task = session.get("_hosted_room_task")
-            if not (session.get("running") and isinstance(active_task, dict)
-                    and active_task.get("task_id") == expected_hosted_task_id):
+            task = session.get("_hosted_room_task")
+            if not (session.get("running") and isinstance(task, dict) and task.get("task_id") == expected):
                 return _ok(rid, {"status": "not_interrupted", "interrupted": False})
     sid = str(params.get("session_id") or "")
     if _session_uses_compute_host(session):
@@ -1998,9 +1943,9 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     _interrupt_session_turn(sid, session)
-    # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a
-    # crash and session.resume auto-continues the turn the user just stopped. The extra key covers
-    # compression rotating session_key mid-turn.
+    # Retire the crash-recovery marker NOW: until the run thread's finally, a backend exit looks like a crash
+    # and session.resume auto-continues the turn the user just stopped (the extra key covers compression
+    # rotating session_key mid-turn).
     with session["history_lock"]:
         active_marker_key = str(session.pop("_active_turn_marker_key", "") or "")
     _retire_turn_marker(session, active_marker_key)
@@ -2048,10 +1993,9 @@ def _(rid, params: dict) -> dict:
     text, session, err = _correction_args(rid, params)
     if err:
         return err
-    agent = session.get("agent")
-    # Turn-build window (running=True, agent None): queue for the next turn instead of a misleading 4010
-    # the client swallows into a lost follow-up.
-    if agent is None and session.get("running"):
+    # Turn-build window (running=True, agent None): queue for the next turn instead of a misleading 4010 the
+    # client swallows into a lost follow-up.
+    if (agent := session.get("agent")) is None and session.get("running"):
         _enqueue_prompt(session, text, current_transport() or _stdio_transport)
         session["last_active"] = time.time()
         return _ok(rid, {"status": "queued", "text": text})
@@ -2165,10 +2109,9 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     if not (raw_path := _str_param(params, "path")):
         return _err(rid, 4000, "path required")
-    root = _spawn_trees_root().resolve()
     try:
         resolved = Path(raw_path).resolve()
-        resolved.relative_to(root)
+        resolved.relative_to(_spawn_trees_root().resolve())
     except (ValueError, OSError) as exc:
         return _err(rid, 4030, f"path outside spawn-trees root: {exc}")
     try:
