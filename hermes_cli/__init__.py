@@ -10,9 +10,9 @@ __release_date__ = "2026.8.31"
 def _ensure_utf8():
     """Force UTF-8 stdout/stderr to prevent UnicodeEncodeError crashes.
 
-    The CLI prints box-drawing characters (┌│├└─) and the ⚕ glyph in the setup wizard, doctor, and
-    status banners. Encoding those under a non-UTF-8 codec raises an unhandled UnicodeEncodeError
-    that crashes the command before it can even start — e.g. `hermes setup` on a fresh Pi.
+    The CLI prints box-drawing characters and the ⚕ glyph in the setup wizard, doctor, and status
+    banners; under a non-UTF-8 codec that raises before the command can even start (e.g.
+    `hermes setup` on a fresh Pi).
     """
     repaired = False
 
@@ -25,30 +25,24 @@ def _ensure_utf8():
             if encoding == "utf8":
                 continue
 
-            # Preferred: reconfigure the existing TextIOWrapper in place. This
-            # preserves object identity so any code already holding a reference
-            # to the old sys.stdout benefits from the repair too.
+            # Preferred: reconfigure in place, preserving object identity so code already holding
+            # a reference to the old sys.stdout benefits from the repair too.
             reconfigure = getattr(stream, "reconfigure", None)
             if callable(reconfigure):
                 reconfigure(encoding="utf-8", errors="replace")
                 repaired = True
                 continue
 
-            # Fallback: reopen the underlying file descriptor as UTF-8. Used
-            # for streams that don't expose reconfigure() (e.g. some wrapped
-            # or replaced streams). closefd=False keeps the original fd open.
-            new_stream = open(
-                stream.fileno(), "w", encoding="utf-8",
-                errors="replace", buffering=1, closefd=False,
-            )
+            # Fallback for streams without reconfigure(): reopen the fd as UTF-8 (closefd=False
+            # keeps the original fd open).
+            new_stream = open(stream.fileno(), "w", encoding="utf-8", errors="replace", buffering=1, closefd=False)
             setattr(sys, stream_name, new_stream)
             repaired = True
         except (AttributeError, OSError, ValueError):
             pass
 
-    # Only nudge child processes toward UTF-8 when we actually detected a
-    # non-UTF-8 locale. On a healthy UTF-8 host children inherit UTF-8 from the
-    # locale already, so leave the environment untouched (minimal footprint).
+    # Only nudge child processes toward UTF-8 when a non-UTF-8 locale was actually detected; on a
+    # healthy UTF-8 host children inherit it from the locale already.
     if repaired:
         os.environ.setdefault("PYTHONUTF8", "1")
         os.environ.setdefault("PYTHONIOENCODING", "utf-8")
