@@ -582,7 +582,7 @@ def test_no_read_connection_is_opened_without_descriptor_headroom(db, monkeypatc
     subprocess pipes, and EMFILE lands on whoever asks next -- which in the
     report was terminal_tool, not SQLite.
     """
-    import hermes_state
+    import hermes_state_readpool as readpool
 
     # Drain the pool so the next read must OPEN rather than reuse.
     while True:
@@ -591,19 +591,19 @@ def test_no_read_connection_is_opened_without_descriptor_headroom(db, monkeypatc
         except queue.Empty:
             break
 
-    monkeypatch.setattr(hermes_state, "_fd_soft_limit", lambda: 256)
-    monkeypatch.setattr(hermes_state, "_open_fd_count", lambda: 250)
-    monkeypatch.setattr(hermes_state, "_fd_usage_cache", (0.0, None))
+    monkeypatch.setattr(readpool, "_fd_soft_limit", lambda: 256)
+    monkeypatch.setattr(readpool, "_open_fd_count", lambda: 250)
+    monkeypatch.setattr(readpool, "_fd_usage_cache", (0.0, None))
 
     assert db._get_read_conn() is None, "a read connection was opened with 6 fds left"
     # The read still has to work -- degradation, not failure.
     assert db.get_session("s1") is not None
-    assert hermes_state._read_open_denied_fd_headroom > 0, (
+    assert readpool._read_open_denied_fd_headroom > 0, (
         "the guard fired without leaving a trace to diagnose it from"
     )
 
-    monkeypatch.setattr(hermes_state, "_open_fd_count", lambda: 10)
-    monkeypatch.setattr(hermes_state, "_fd_usage_cache", (0.0, None))
+    monkeypatch.setattr(readpool, "_open_fd_count", lambda: 10)
+    monkeypatch.setattr(readpool, "_fd_usage_cache", (0.0, None))
     conn = db._get_read_conn()
     assert conn is not None, "headroom returned but the read path stayed degraded"
     db._close_read_conn(conn)
@@ -611,17 +611,17 @@ def test_no_read_connection_is_opened_without_descriptor_headroom(db, monkeypatc
 
 def test_fd_headroom_guard_fails_open_where_it_cannot_measure(monkeypatch):
     """No RLIMIT_NOFILE (Windows) means unmeasurable, not tight."""
-    import hermes_state
+    import hermes_state_readpool as readpool
 
-    monkeypatch.setattr(hermes_state, "_fd_soft_limit", lambda: None)
-    assert hermes_state._fd_headroom_ok() is True
+    monkeypatch.setattr(readpool, "_fd_soft_limit", lambda: None)
+    assert readpool._fd_headroom_ok() is True
 
     # A probe that could not get a descriptor of its own is evidence, not
     # absence of evidence.
-    monkeypatch.setattr(hermes_state, "_fd_soft_limit", lambda: 256)
-    monkeypatch.setattr(hermes_state, "_open_fd_count", lambda: -1)
-    monkeypatch.setattr(hermes_state, "_fd_usage_cache", (0.0, None))
-    assert hermes_state._fd_headroom_ok() is False
+    monkeypatch.setattr(readpool, "_fd_soft_limit", lambda: 256)
+    monkeypatch.setattr(readpool, "_open_fd_count", lambda: -1)
+    monkeypatch.setattr(readpool, "_fd_usage_cache", (0.0, None))
+    assert readpool._fd_headroom_ok() is False
 
 
 @pytest.mark.requires_wal
