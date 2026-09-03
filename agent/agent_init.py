@@ -748,7 +748,7 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # ANTHROPIC_TOKEN fallback only for native Anthropic — other anthropic_messages providers
     # must use their own key or Anthropic credentials leak to third-party endpoints.
     _is_native_anthropic = agent.provider == "anthropic"
-    effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
+    effective_key = api_key or (resolve_anthropic_token() if _is_native_anthropic else None) or ""
 
     # MiniMax OAuth tokens live ~15 min and the SDK freezes api_key at construction, so use a
     # callable provider: build_anthropic_client mints a fresh bearer per request (re-reading
@@ -1939,7 +1939,7 @@ def _compressor_max_tokens(agent):
         from agent.gemini_native_adapter import (
             GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, is_native_gemini_base_url
         )
-        _gemini_provider = str(getattr(agent, "provider", "") or "").strip().lower() in {
+        _gemini_provider = str(agent.provider or "").strip().lower() in {
             "gemini", "google", "google-gemini", "google-ai-studio",
         }
         if _gemini_provider or is_native_gemini_base_url(agent.base_url):
@@ -2029,7 +2029,7 @@ def _enforce_minimum_context(agent):
     # positive model.context_length on LM Studio is allowed below the floor.
     _ctx = getattr(agent.context_compressor, "context_length", 0)
     _allow_lmstudio_explicit_below_floor = (
-        str(getattr(agent, "provider", "") or "").strip().lower() == "lmstudio"
+        str(agent.provider or "").strip().lower() == "lmstudio"
         and isinstance(agent._config_context_length, int)
         and not isinstance(agent._config_context_length, bool)
         and agent._config_context_length > 0
