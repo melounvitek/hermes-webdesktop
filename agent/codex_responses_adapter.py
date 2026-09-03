@@ -89,6 +89,10 @@ def _lower_or_none(value: Any) -> Optional[str]:
     return value.strip().lower() if isinstance(value, str) else None
 
 
+def _as_list(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
 def _field(obj: Any, name: str, default: Any = None) -> Any:
     """Read ``name`` from a dict or an attribute-style (SDK/SimpleNamespace) object."""
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, default)
@@ -165,15 +169,6 @@ def _iter_content_parts(content: list) -> Iterator[tuple[str, Any]]:
                 yield "image", part
 
 
-def _resolve_image_ref(part: Dict[str, Any]) -> tuple[Any, Any]:
-    """Return ``(url, detail)`` from either ``image_url: str`` or ``{url, detail}``."""
-    image_ref = part.get("image_url")
-    detail = part.get("detail")
-    if isinstance(image_ref, dict):
-        return image_ref.get("url"), image_ref.get("detail", detail)
-    return image_ref, detail
-
-
 def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
     image_part: Dict[str, Any] = {"type": "input_image", "image_url": url}
     if _nonblank(detail):
@@ -186,7 +181,9 @@ def _image_part_for_role(part: Dict[str, Any], role: str, *, keep_empty_url: boo
     ``input_image`` 400s every replay); user → ``input_image`` (None for an empty url unless kept)."""
     if role == "assistant":
         return {"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER}
-    url, detail = _resolve_image_ref(part)
+    url, detail = part.get("image_url"), part.get("detail")  # ``image_url`` may be a str or ``{url, detail}``
+    if isinstance(url, dict):
+        url, detail = url.get("url"), url.get("detail", detail)
     if _nonempty_str(url):
         return _input_image_part(url, detail)
     return _input_image_part(str(url or ""), detail) if keep_empty_url else None
@@ -200,12 +197,10 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
     messages it becomes a text marker (an assistant ``input_image`` 400s every replay)."""
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
-    for kind, payload in _iter_content_parts(content if isinstance(content, list) else []):
-        image_part = None if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
-        if kind == "text":
-            converted.append({"type": text_type, "text": payload})
-        elif image_part is not None:
-            converted.append(image_part)
+    for kind, payload in _iter_content_parts(_as_list(content)):
+        part = {"type": text_type, "text": payload} if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
+        if part is not None:
+            converted.append(part)
     return converted
 
 
@@ -375,11 +370,8 @@ def _replay_reasoning_items(
     model that cannot decrypt it), and items stamped by another issuer (HTTP 400).
     Unstamped legacy items pass. ``id`` (store=False lookups 404) and ``_issuer_kind`` are stripped."""
     global _CROSS_ISSUER_WARN_EMITTED
-    codex_reasoning = msg.get("codex_reasoning_items")
-    if not isinstance(codex_reasoning, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for ri in codex_reasoning:
+    for ri in _as_list(msg.get("codex_reasoning_items")):
         if not (isinstance(ri, dict) and ri.get("encrypted_content")):
             continue
         item_id = ri.get("id")
@@ -405,11 +397,8 @@ def _replay_reasoning_items(
 
 def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> List[Dict[str, Any]]:
     """Replay exact assistant message items (id/phase) for prefix-cache hits."""
-    codex_message_items = msg.get("codex_message_items")
-    if not isinstance(codex_message_items, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for raw_item in codex_message_items:
+    for raw_item in _as_list(msg.get("codex_message_items")):
         is_assistant_message = (
             isinstance(raw_item, dict) and raw_item.get("type") == "message"
             and raw_item.get("role") == "assistant" and isinstance(raw_item.get("content"), list)
@@ -426,11 +415,8 @@ def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> 
 
 def _replay_tool_call_items(msg: Dict[str, Any], *, start_index: int) -> List[Dict[str, Any]]:
     """Convert an assistant message's ``tool_calls`` into ``function_call`` items."""
-    tool_calls = msg.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return []
     replayed: List[Dict[str, Any]] = []
-    for tc in tool_calls:
+    for tc in _as_list(msg.get("tool_calls")):
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function", {})
@@ -648,29 +634,24 @@ def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _Prefli
     return {"type": "function_call_output", "call_id": call_id, "output": output_value}
 
 
-def _preflight_reasoning(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
+def _preflight_encrypted(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
+    """``reasoning`` / ``compaction`` items: opaque, issuer-sealed; forward only API-defined fields."""
     encrypted = item.get("encrypted_content")
     if not _nonempty_str(encrypted):
         return None
+    if item["type"] == "compaction":
+        return {"type": "compaction", "encrypted_content": encrypted}
     # ``id`` is used only for local dedup and NOT forwarded (store=False → server-side 404).
     item_id = item.get("id")
     if _nonempty_str(item_id):
         if item_id in ctx.seen_ids:
             return None
         ctx.seen_ids.add(item_id)
-    summary = item.get("summary")
-    if not isinstance(summary, list):
-        summary = []
+    summary = _as_list(item.get("summary"))
     return {
         "type": "reasoning", "encrypted_content": encrypted,
         "summary": _neutralize_harmony_structure(summary) if ctx.sanitize_harmony_tokens else summary,
     }
-
-
-def _preflight_compaction(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
-    # Opaque, issuer-sealed checkpoint; forward only the fields the API defines.
-    encrypted = item.get("encrypted_content")
-    return {"type": "compaction", "encrypted_content": encrypted} if _nonempty_str(encrypted) else None
 
 
 def _preflight_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
@@ -725,8 +706,8 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _Pre
 _PREFLIGHT_ITEM_HANDLERS: Dict[str, Callable[..., Optional[Dict[str, Any]]]] = {
     "function_call": _preflight_function_call,
     "function_call_output": _preflight_function_call_output,
-    "reasoning": _preflight_reasoning,
-    "compaction": _preflight_compaction,
+    "reasoning": _preflight_encrypted,
+    "compaction": _preflight_encrypted,
     "message": _preflight_message,
 }
 
@@ -866,13 +847,12 @@ def _preflight_codex_api_kwargs(
     extra_body = _optional_dict(api_kwargs, "extra_body")
     if extra_body:
         normalized["extra_body"] = dict(extra_body)
-    allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
     stream = api_kwargs.get("stream")
     if not allow_stream and "stream" in api_kwargs:
         raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
-    if allow_stream and stream is not None and stream is not True:
-        raise ValueError("Codex Responses 'stream' must be true when set.")
-    if allow_stream and stream is True:
+    if allow_stream and stream is not None:
+        if stream is not True:
+            raise ValueError("Codex Responses 'stream' must be true when set.")
         normalized["stream"] = True
     # Defense-in-depth slash-enum strip for xAI (rejects ``Qwen/Qwen3.5`` enum values);
     # gated on the model name because native Codex accepts slashes.
@@ -883,6 +863,7 @@ def _preflight_codex_api_kwargs(
             normalized["tools"], _ = strip_slash_enum(normalized["tools"])
         except Exception:
             pass  # Best-effort — the caller-level sanitization should have handled it
+    allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
     unexpected = sorted(key for key in api_kwargs if key not in allowed_keys)
     if unexpected:
         raise ValueError(f"Codex Responses request has unsupported field(s): {', '.join(unexpected)}.")
@@ -893,11 +874,9 @@ def _preflight_codex_api_kwargs(
 
 def _text_chunks(parts: Any, types: Optional[set] = None) -> List[str]:
     """Non-empty ``.text`` of each part (optionally filtered by ``.type``); [] if not a list."""
-    if not isinstance(parts, list):
-        return []
     return [
         text for text in (
-            getattr(part, "text", None) for part in parts if types is None or getattr(part, "type", None) in types
+            getattr(part, "text", None) for part in _as_list(parts) if types is None or getattr(part, "type", None) in types
         )
         if _nonempty_str(text)
     ]
@@ -929,10 +908,6 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
 
 
 # --- Full response normalization ----------------------------------------------
-
-def _synthetic_message(content: List[Any]) -> SimpleNamespace:
-    return SimpleNamespace(type="message", role="assistant", status="completed", content=content)
-
 
 def _response_tool_call(item: Any, item_type: str, index: int) -> SimpleNamespace:
     """Build a chat-style tool_call from a ``function_call``/``custom_tool_call`` item."""
@@ -1064,12 +1039,13 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
                 "Codex response has empty output but output_text is present (%d chars); synthesizing output item.",
                 len(out_text.strip()),
             )
-            output = [_synthetic_message([SimpleNamespace(type="output_text", text=out_text.strip())])]
+            content: List[Any] = [SimpleNamespace(type="output_text", text=out_text.strip())]
         elif response_incomplete_content_filter:
             # Provider safety block, not a partial answer: finish content_filter, not incomplete.
-            output = [_synthetic_message([])]
+            content = []
         else:
             raise RuntimeError("Responses API returned no output items")
+        output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
         response.output = output
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
