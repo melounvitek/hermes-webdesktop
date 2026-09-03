@@ -1498,21 +1498,21 @@ def _clear_pending(sid: str | None = None) -> None:
 # ── Agent factory ────────────────────────────────────────────────────
 
 
+def _env_model_seed() -> str:
+    """The launch-scoped model seed (``hermes --tui -m``, hosted provisioning); "" when unset."""
+    return (os.environ.get("HERMES_MODEL", "") or os.environ.get("HERMES_INFERENCE_MODEL", "")).strip()
+
+
 def _resolve_model() -> str:
-    env = (
-        os.environ.get("HERMES_MODEL", "")
-        or os.environ.get("HERMES_INFERENCE_MODEL", "")
-    ).strip()
-    if env:
+    if env := _env_model_seed():
         return env
     m = _load_cfg().get("model", "")
     if isinstance(m, dict):
         return str(m.get("default", "") or "").strip()
     if isinstance(m, str) and m:
         return m.strip()
-    # No env seed and no config preference: fall back to the cost-safe silent
-    # default (catalog-labeled, cache-only read), never an expensive Anthropic
-    # flagship the user didn't pick.
+    # No env seed and no config preference: the cost-safe silent default (catalog-labeled,
+    # cache-only read), never an expensive flagship the user didn't pick.
     try:
         from hermes_cli.models import get_preferred_silent_default_model
         return get_preferred_silent_default_model()
@@ -1521,33 +1521,17 @@ def _resolve_model() -> str:
 
 
 def _resolve_session_platform() -> str:
-    """Resolve the platform tag for a tui_gateway-routed session.
-
-    Stamping the desktop chat panel ``platform="tui"`` makes the agent suggest
-    TUI-only slash commands to chat-panel users.
-      * ``HERMES_DESKTOP=1`` with ``HERMES_DESKTOP_TERMINAL`` unset → "desktop"
-      * ``HERMES_DESKTOP_TERMINAL=1`` → "tui" (embedded terminal pane; the tui
-        hint's clarifier in system_prompt.py describes the embedding)
-      * neither → "tui" (standalone ``hermes --tui``)
-    """
-    if is_truthy_value(os.environ.get("HERMES_DESKTOP")) and not is_truthy_value(
-        os.environ.get("HERMES_DESKTOP_TERMINAL")
-    ):
-        return "desktop"
-    return "tui"
+    """Platform tag for a tui_gateway-routed session: ``HERMES_DESKTOP=1`` without
+    ``HERMES_DESKTOP_TERMINAL`` → "desktop" (chat panel; the agent then suggests TUI-only slash
+    commands), else "tui" (embedded terminal pane or standalone ``hermes --tui``)."""
+    desktop = is_truthy_value(os.environ.get("HERMES_DESKTOP"))
+    return "desktop" if desktop and not is_truthy_value(os.environ.get("HERMES_DESKTOP_TERMINAL")) else "tui"
 
 
 def _resolve_session_source(explicit: str | None) -> str:
-    """Default the session DB ``source`` field from the resolved platform.
-
-    A caller that explicitly passes ``source`` (e.g. a plugin session tagged
-    ``"telegram"``) keeps its value. Only an empty/None ``source`` falls back
-    to the env-resolved platform — so env-driven resolution never silently
-    rewrites a caller's intent.
-    """
-    if explicit:
-        return explicit
-    return _resolve_session_platform()
+    """Session DB ``source``: an explicit caller value (plugin session tagged ``"telegram"``) is
+    never rewritten; only empty/None falls back to the env-resolved platform."""
+    return explicit or _resolve_session_platform()
 
 
 def _resolve_agent_platform(source: str | None) -> str:
@@ -1555,40 +1539,24 @@ def _resolve_agent_platform(source: str | None) -> str:
 
 
 def _config_model_target() -> tuple[str, str]:
-    """(model, provider) currently selected by config.yaml — and ONLY config.
+    """(model, provider) selected by config.yaml — and ONLY config.
 
-    Unlike `_resolve_model()`, this never reads HERMES_MODEL /
-    HERMES_INFERENCE_MODEL. Those env vars are a launch-scoped seed
-    (`hermes --tui -m <model>`, hosted-instance provisioning); if they
-    fed the per-turn sync, the seed would be replayed as a /model switch
-    and persisted globally, or would pin the session so dashboard/CLI
-    model changes never reach an open chat.
+    Never reads HERMES_MODEL / HERMES_INFERENCE_MODEL: that launch-scoped seed fed into the
+    per-turn sync would be replayed as a /model switch and persisted globally, or pin the session
+    so dashboard/CLI model changes never reach an open chat. Empty model = "no preference" → no-op sync.
     """
     cfg_model = _load_cfg().get("model")
-    model = ""
-    provider = ""
     if isinstance(cfg_model, dict):
-        model = str(cfg_model.get("default", "") or "").strip()
         provider = str(cfg_model.get("provider") or "").strip()
-        if provider.lower() == "auto":
-            provider = ""
-    elif isinstance(cfg_model, str):
-        model = cfg_model.strip()
-    # No _resolve_model() fallback: that reads the launch-scoped -m env seed,
-    # which the per-turn sync would replay as a /model switch and persist
-    # globally. Empty model = "config expresses no preference" → sync is a no-op.
-    return model, provider
+        return str(cfg_model.get("default", "") or "").strip(), "" if provider.lower() == "auto" else provider
+    return (cfg_model.strip() if isinstance(cfg_model, str) else ""), ""
 
 
 def _resolve_startup_runtime() -> tuple[str, str | None]:
     model = _resolve_model()
-    explicit_provider = os.environ.get("HERMES_TUI_PROVIDER", "").strip()
-    if explicit_provider:
+    if explicit_provider := os.environ.get("HERMES_TUI_PROVIDER", "").strip():
         return model, explicit_provider
-    explicit_model = (
-        os.environ.get("HERMES_MODEL", "")
-        or os.environ.get("HERMES_INFERENCE_MODEL", "")
-    ).strip()
+    explicit_model = _env_model_seed()
     if not explicit_model:
         return model, None
     with contextlib.suppress(Exception):
@@ -1599,34 +1567,19 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
             or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower()
             or "auto"
         )
-        detected = detect_static_provider_for_model(explicit_model, current_provider)
-        if detected:
+        if detected := detect_static_provider_for_model(explicit_model, current_provider):
             provider, detected_model = detected
             return detected_model, provider
     return model, None
 
 
-# Bare billing buckets are not routable provider identities; restoring one as a
-# session provider override breaks resume. ``openrouter`` is deliberately NOT in
-# this set (fully routable; dropping it resumed OpenRouter sessions on the wrong
-# provider) — agent_init's fail-fast gate is a different set that skips it.
+# Bare billing buckets are not routable provider identities; restoring one as a session
+# provider override breaks resume. ``openrouter`` is deliberately NOT in this set (fully
+# routable) — agent_init's fail-fast gate is a different set that skips it.
 from hermes_state import _BARE_BILLING_PROVIDERS
 
 
-def _overrides_have_routable_provider(overrides: dict) -> bool:
-    """Whether persisted runtime overrides still name a routable provider.
-
-    A session row written under a provider that has since been renamed or
-    removed would otherwise fail agent init with "Unknown provider".
-    Empty provider counts as NOT routable here, so the caller falls back
-    to the model the user picked for this session / the configured
-    default instead of restoring a provider-less snapshot override.
-    """
-    provider = str(overrides.get("provider_override") or "").strip()
-    if not provider:
-        provider = str((overrides.get("model_override") or {}).get("provider") or "").strip()
-    if not provider:
-        return False
+def _is_routable_provider(provider: str) -> bool:
     try:
         from hermes_cli.runtime_provider import is_routable_provider
         return is_routable_provider(provider)
@@ -1634,37 +1587,45 @@ def _overrides_have_routable_provider(overrides: dict) -> bool:
         return False
 
 
+def _overrides_have_routable_provider(overrides: dict) -> bool:
+    """Whether persisted runtime overrides still name a routable provider (renamed/removed →
+    "Unknown provider" at agent init). Empty counts as NOT routable, so the caller falls back to the
+    session's picked model / configured default instead of a provider-less snapshot."""
+    provider = str(overrides.get("provider_override") or "").strip()
+    if not provider:
+        provider = str((overrides.get("model_override") or {}).get("provider") or "").strip()
+    return bool(provider) and _is_routable_provider(provider)
+
+
+def _parse_model_config(raw, *, quiet: bool = False) -> dict:
+    """A row's ``model_config`` (dict or JSON text) as a dict; ``{}`` when absent/invalid."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            if not quiet:
+                raise
+            logger.debug("failed to parse stored session model_config", exc_info=True)
+    return {}
+
+
 def _stored_session_runtime_overrides(row: dict | None) -> dict:
-    """Return runtime fields persisted with a stored session.
+    """Runtime fields persisted with a stored session (model column, ``billing_provider``, JSON ``model_config``).
 
-    ``session.resume`` is session-scoped: reopening an older chat must restore
-    the model/provider/reasoning state that chat actually used, not the global
-    model most recently selected elsewhere.  The row stores the model directly,
-    the billing provider in ``billing_provider``, and richer knobs in JSON
-    ``model_config``.
-
-    Plugin-owned Bot-Mode sessions are exempt and always rebuild from the member
-    profile's CURRENT config — restoring a stale provider pin is what left room
-    bots / bot DMs failing ("out of Nous credits") after the profile switched.
-    Signals, in order: the explicit ``room_plumbing`` / ``follow_profile_config``
-    markers persisted by session.create consumers; the legacy hidden +
-    "Group:" title shape (older desktop builds sent no marker); and the title
-    exactly "Bot Chat" (the plugin's own identity rule for the forever-DM,
-    UNIQUE(title) makes it exact; pre-policy rows may be visible or hidden).
+    ``session.resume`` is session-scoped: reopening an older chat restores the model/provider/
+    reasoning THAT chat used, not the global model most recently selected elsewhere.
+    Plugin-owned Bot-Mode sessions are exempt and always rebuild from the member profile's CURRENT
+    config (a stale provider pin left room bots failing "out of Nous credits" after a profile
+    switch). Signals, in order: explicit ``room_plumbing`` / ``follow_profile_config`` markers;
+    the legacy hidden + "Group:" title shape; the title exactly "Bot Chat" (UNIQUE(title)).
     """
     if not row:
         return {}
-    raw_config = row.get("model_config")
-    model_config: dict = {}
-    if isinstance(raw_config, dict):
-        model_config = raw_config
-    elif isinstance(raw_config, str) and raw_config.strip():
-        try:
-            parsed = json.loads(raw_config)
-            if isinstance(parsed, dict):
-                model_config = parsed
-        except Exception:
-            logger.debug("failed to parse stored session model_config", exc_info=True)
+    model_config = _parse_model_config(row.get("model_config"), quiet=True)
     _row_title = str(row.get("title") or "").strip()
     if (
         model_config.get("room_plumbing")
@@ -1675,64 +1636,45 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         return {}
     overrides: dict = {}
     model = str(row.get("model") or model_config.get("model") or "").strip()
-    # ``billing_provider`` is only the billing bucket — for a custom endpoint it
-    # is the bare class ``"custom"``, which agent_init treats as non-routable, so
-    # restoring it as the provider override fails resume with "No LLM provider
-    # configured".  Only restore an explicit provider; otherwise leave it unset
-    # so resume falls back to the configured default (CLI parity).
-    explicit_provider = str(model_config.get("provider") or "").strip()
-    billing_provider = str(
-        model_config.get("billing_provider") or row.get("billing_provider") or ""
-    ).strip()
-    provider = explicit_provider
+    # ``billing_provider`` is only the billing bucket — for a custom endpoint the bare class
+    # "custom", which agent_init treats as non-routable ("No LLM provider configured" on resume).
+    # Only restore an explicit provider; otherwise resume falls back to the configured default.
+    provider = str(model_config.get("provider") or "").strip()
+    billing_provider = str(model_config.get("billing_provider") or row.get("billing_provider") or "").strip()
     if not provider and billing_provider.lower() not in _BARE_BILLING_PROVIDERS:
         provider = billing_provider
     base_url = str(model_config.get("base_url") or "").strip()
     api_mode = str(model_config.get("api_mode") or "").strip()
     reasoning_config = model_config.get("reasoning_config")
     service_tier = str(model_config.get("service_tier") or "").strip()
-
-    # Heal a stale/expired provider name persisted by an older build (a renamed
-    # or removed custom provider would fail agent init with "Unknown provider").
-    # Recover the durable ``custom:<name>`` key from the stored base_url, then
-    # from the entry serving the stored model; when nothing names a real entry,
-    # drop the provider so resume falls back to the configured default.
-    if provider:
+    # Heal a stale provider name persisted by an older build (renamed/removed custom provider →
+    # "Unknown provider"): recover the durable ``custom:<name>`` key from the stored base_url, then
+    # from the entry serving the stored model; when nothing names a real entry, drop the provider.
+    if provider and not _is_routable_provider(provider):
+        healed = None
         try:
-            from hermes_cli.runtime_provider import is_routable_provider
-            routable = is_routable_provider(provider)
+            from hermes_cli.runtime_provider import canonical_custom_identity
+            healed = canonical_custom_identity(base_url=base_url or None, model=model or None)
         except Exception:
-            routable = False
-        if not routable:
-            healed = None
-            try:
-                from hermes_cli.runtime_provider import canonical_custom_identity
-                healed = canonical_custom_identity(base_url=base_url or None, model=model or None)
-            except Exception:
-                logger.debug("custom provider identity recovery failed", exc_info=True)
-            if healed:
-                logger.info("healed stale session provider %r to %r", provider, healed)
-                provider = healed
-                # The healed identity owns a registered endpoint; the snapshot's
-                # base_url must not override the registry URL.
-                base_url = ""
-            else:
-                provider = ""
+            logger.debug("custom provider identity recovery failed", exc_info=True)
+        if healed:
+            logger.info("healed stale session provider %r to %r", provider, healed)
+            provider = healed
+            base_url = ""  # the healed identity owns a registered endpoint; the snapshot URL must not override it
+        else:
+            provider = ""
     if model:
-        # Same dict-shaped override live /model switches use, so a DB-restored
-        # session keeps custom endpoint metadata across resume and rebuilds
-        # (/new).  Raw api_key is deliberately never persisted or restored here.
+        # Same dict-shaped override live /model switches use, so a DB-restored session keeps custom
+        # endpoint metadata across resume and rebuilds (/new). Raw api_key is never persisted/restored.
         overrides["model_override"] = {
-            "model": model, "provider": provider or None, "base_url": base_url or None,
-            "api_mode": api_mode or None,
+            "model": model, "provider": provider or None, "base_url": base_url or None, "api_mode": api_mode or None,
         }
     if provider:
         overrides["provider_override"] = provider
     if isinstance(reasoning_config, dict):
         overrides["reasoning_config_override"] = reasoning_config
     if service_tier.lower() == "normal":
-        # None means "inherit the profile" at _make_agent; "" is a real override
-        # meaning "do not request a priority service tier".
+        # None = "inherit the profile" at _make_agent; "" = real override "no priority tier".
         overrides["service_tier_override"] = ""
     elif service_tier:
         overrides["service_tier_override"] = service_tier
@@ -1740,30 +1682,21 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
 
 
 def _runtime_model_config(agent, existing: dict | None = None) -> dict:
-    """Merge the agent's CURRENT runtime identity onto an existing config.
+    """Merge the agent's CURRENT runtime identity onto the row's persisted ``model_config``.
 
-    ``existing`` is the row's previously-persisted ``model_config`` JSON (may
-    be absent on first write). The returned dict must mirror the agent's live
-    state: falsy agent attributes DELETE the corresponding key rather than
-    merely omit the write, so a stale value from an earlier session state can
-    never survive into the merged config. Keeping stale values here is what
-    desynced the ``sessions.model`` column (fresh) from ``model_config``
-    (stale provider/endpoint): ``_persist_live_session_runtime`` writes the
-    model column separately, and on resume ``_stored_session_runtime_overrides``
-    reads provider/endpoint from this JSON — so a stale provider would silently
-    route the resumed chat to the wrong endpoint while the model column claimed
-    the new one.
+    Falsy agent attributes DELETE the key rather than skip the write, so a stale value can never
+    survive the merge: ``_persist_live_session_runtime`` writes the model column separately and
+    resume reads provider/endpoint from this JSON — a stale provider would silently route the
+    resumed chat to the wrong endpoint while the model column claimed the new one.
     """
     config = dict(existing or {})
     model = str(getattr(agent, "model", "") or "").strip()
     provider = str(getattr(agent, "provider", "") or "").strip()
     base_url = str(getattr(agent, "base_url", "") or "").strip()
     if provider.lower() == "custom":
-        # ``agent.provider`` resolves every named custom entry to the literal
-        # "custom", which loses the entry identity (api_key is never persisted,
-        # so resume couldn't re-resolve credentials). Recover the canonical
-        # ``custom:<name>`` key from the endpoint URL, else from the configured
-        # provider (the no-base_url case that routed to OpenRouter with no key).
+        # ``agent.provider`` resolves every named custom entry to the literal "custom", losing the
+        # entry identity (api_key is never persisted, so resume couldn't re-resolve credentials).
+        # Recover the canonical ``custom:<name>`` key from the endpoint URL, else the configured provider.
         try:
             from hermes_cli.runtime_provider import canonical_custom_identity
             provider = canonical_custom_identity(base_url=base_url, model=model or None) or provider
@@ -1771,9 +1704,7 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
             logger.debug("custom provider identity lookup failed", exc_info=True)
     reasoning_config = getattr(agent, "reasoning_config", None)
     live = {
-        "model": model,
-        "provider": provider,
-        "base_url": base_url,
+        "model": model, "provider": provider, "base_url": base_url,
         "api_mode": str(getattr(agent, "api_mode", "") or "").strip(),
         # An empty dict is still a real (present) reasoning config.
         "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
@@ -1800,20 +1731,11 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         return
     try:
         row = db.get_session(session_key) or {}
-        raw_config = row.get("model_config")
-        existing_config = {}
-        if isinstance(raw_config, dict):
-            existing_config = raw_config
-        elif isinstance(raw_config, str) and raw_config.strip():
-            parsed = json.loads(raw_config)
-            if isinstance(parsed, dict):
-                existing_config = parsed
-        model_config = _runtime_model_config(agent, existing_config)
+        model_config = _runtime_model_config(agent, _parse_model_config(row.get("model_config")))
         create_service_tier_override = session.get("create_service_tier_override")
         if create_service_tier_override is not None:
-            # _runtime_model_config sees agent.service_tier=None for explicit
-            # normal and would otherwise erase the distinction on every live
-            # metadata persist.
+            # _runtime_model_config sees agent.service_tier=None for explicit normal and would
+            # otherwise erase the distinction on every live metadata persist.
             model_config["service_tier"] = create_service_tier_override or "normal"
         model = str(getattr(agent, "model", "") or "").strip()
         if hasattr(db, "update_session_meta"):
@@ -1836,13 +1758,11 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
     if db is None or not hasattr(db, "update_system_prompt"):
         return
 
-    # Re-bind HERMES_HOME to the session's profile: the build's finally already
-    # reset it, and the rebuilt prompt would use the root profile's SOUL.md/skills.
+    # Re-bind HERMES_HOME to the session's profile (the build's finally reset it; the rebuilt
+    # prompt would use the root profile's SOUL.md/skills) and the session context (on the RPC
+    # thread _SESSION_CWD is unset, so the prompt would persist the process TERMINAL_CWD).
     profile_home = session.get("profile_home")
-    home_token = (set_hermes_home_override(profile_home) if profile_home else None)
-    # Bind the session context too: on the RPC dispatcher thread _SESSION_CWD is
-    # unset, so resolve_agent_cwd() falls back to the process TERMINAL_CWD and
-    # the rebuilt prompt persists the wrong cwd (later turns reuse the bytes).
+    home_token = set_hermes_home_override(profile_home) if profile_home else None
     session_tokens = _set_session_context(session_key, cwd=_session_cwd(session))
     try:
         prompt = agent._build_system_prompt(None)
@@ -1873,28 +1793,18 @@ def _is_model_switch_marker(entry: Any) -> bool:
 
 
 def _is_pivot_marker(entry: Any) -> bool:
-    """Whether a history entry is a marker the gateway splices in mid-turn.
-
-    Model switches and personality changes both inject a ``role=user`` pivot
-    into the live history from the RPC thread while a turn may be running, so
-    either one can be the sole reason turn-start and current history differ.
-    Only the model-switch marker is self-replacing, which is why the dedup in
-    :func:`_append_model_switch_marker` stays narrower than this.
-    """
-    if _is_model_switch_marker(entry):
-        return True
-    return isinstance(entry, dict) and entry.get("display_kind") == "personality_switch"
+    """Whether a history entry is a ``role=user`` pivot the gateway splices in mid-turn (model switch
+    or personality change) — either can be the sole reason turn-start and current history differ.
+    Only the model-switch marker is self-replacing, so :func:`_append_model_switch_marker` dedups narrower."""
+    return _is_model_switch_marker(entry) or (isinstance(entry, dict) and entry.get("display_kind") == "personality_switch")
 
 
 def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:
     """Record a real system-history pivot after a live model switch.
 
-    Only the most recent marker is kept: each new switch first strips any
-    prior model-switch markers from the live history, so N switches leave one
-    marker (naming the active model), not N stale ones accumulating tokens on
-    every subsequent API call (#65891). The in-memory history is the payload
-    re-sent each turn; the dedup is self-healing across resumes because the
-    next switch collapses whatever markers a reload brought back.
+    Only the newest marker is kept: each switch strips prior model-switch markers first, so N
+    switches leave one marker rather than N stale ones re-sent on every API call; self-healing
+    across resumes because the next switch collapses whatever a reload brought back.
     """
     if not session:
         return
@@ -1907,44 +1817,31 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         f"{model}{provider_part}. From this point forward, use this runtime "
         "metadata when answering questions about what model/provider is active.]"
     )
-    # A user message, not system: strict OpenAI-compatible providers (vLLM,
-    # Qwen) reject non-leading system messages.
+    # A user message, not system: strict OpenAI-compatible providers (vLLM, Qwen) reject
+    # non-leading system messages.
     entry = {"role": "user", "content": marker, "display_kind": "model_switch"}
-
-    def _replace_markers() -> None:
+    with session.get("history_lock") or contextlib.nullcontext():
         history = session.setdefault("history", [])
-        # Drop any earlier markers in place before appending the new one.
         history[:] = [h for h in history if not _is_model_switch_marker(h)]
         history.append(entry)
         session["history_version"] = int(session.get("history_version", 0)) + 1
-    lock = session.get("history_lock")
-    if lock is not None:
-        with lock:
-            _replace_markers()
-    else:
-        _replace_markers()
     try:
         agent = session.get("agent")
         db = getattr(agent, "_session_db", None) if agent is not None else None
-        if db is not None:
-            db.append_message(
-                session_id=session_key, role="user", content=marker, display_kind="model_switch",
-            )
-            return
-        _ensure_session_db_row(session)
-        with _session_db(session) as scoped_db:
-            if scoped_db is not None:
-                scoped_db.append_message(
-                    session_id=session_key, role="user", content=marker,
-                    display_kind="model_switch",
-                )
+        if db is None:
+            _ensure_session_db_row(session)
+            with _session_db(session) as db:
+                if db is not None:
+                    db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
+        else:
+            db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
     except Exception:
         logger.debug("failed to persist model switch marker", exc_info=True)
 
 
 def _write_config_key(key_path: str, value):
-    # Write-back round-trip: raw read is mandatory — saving the managed-
-    # overlaid / env-expanded view would persist those values into the file.
+    # Write-back round-trip: raw read is mandatory — saving the managed-overlaid / env-expanded
+    # view would persist those values into the file.
     cfg = _load_cfg_raw()
     current = cfg
     keys = key_path.split(".")
@@ -1959,26 +1856,18 @@ def _write_config_key(key_path: str, value):
 _STATUSBAR_MODES = frozenset({"off", "top", "bottom"})
 _APPROVAL_MODES = frozenset({"manual", "smart", "off"})
 
-# Appearance switches the renderer owns but the AGENT must see (each gates a
-# tool's `check_fn`), so the toggle must reach whichever gateway the app talks
-# to. `config.set` answers 4002 for unlisted keys — a mirrored switch missing
-# here writes nothing and its tool stays dark. Add renderer mirrors here too.
-_DISPLAY_TOGGLE_KEYS = frozenset(
-    {"display.message_reactions", "display.in_app_tips", "display.in_app_tours"}
-)
+# Appearance switches the renderer owns but the AGENT must see (each gates a tool's `check_fn`),
+# so the toggle must reach whichever gateway the app talks to. `config.set` answers 4002 for
+# unlisted keys — a mirrored switch missing here writes nothing and its tool stays dark.
+_DISPLAY_TOGGLE_KEYS = frozenset({"display.message_reactions", "display.in_app_tips", "display.in_app_tours"})
 _BOOL_WORDS = {
-    "1": True, "on": True, "true": True, "yes": True, "0": False, "off": False, "false": False,
-    "no": False,
+    "1": True, "on": True, "true": True, "yes": True, "0": False, "off": False, "false": False, "no": False,
 }
 
 
 def _load_approval_mode() -> str:
-    """Resolve the effective ``approvals.mode`` for the TUI surface.
-
-    Delegates to ``tools.approval._get_approval_mode`` so the mode cannot drift
-    from the approval gate's own view (a local raw-config re-read missed the
-    managed overlay and ``${VAR}`` expansion).
-    """
+    """Effective ``approvals.mode`` via ``tools.approval._get_approval_mode`` so it cannot drift from
+    the gate's own view (a raw-config re-read missed the managed overlay and ``${VAR}`` expansion)."""
     from tools.approval import _get_approval_mode
     mode = _get_approval_mode()
     return mode if mode in _APPROVAL_MODES else "manual"
@@ -2000,62 +1889,37 @@ _MOUSE_TRACKING_ALIASES = {
 
 
 def _display_mouse_tracking(display: dict) -> str:
-    """Resolve display.mouse_tracking to one of ``off|wheel|buttons|all``.
-
-    Boolean values keep their legacy meaning (``True`` → ``all``, ``False`` →
-    ``off``). The ``wheel`` preset (DEC 1000+1006) is the tmux-friendly
-    subset — wheel + click only, no hover events to trigger prompt-row
-    clipboard probes. Legacy ``tui_mouse`` is honored only when
-    ``mouse_tracking`` is absent.
-    """
+    """display.mouse_tracking → ``off|wheel|buttons|all``. Booleans keep their legacy meaning
+    (True → all, False → off); ``wheel`` (DEC 1000+1006) is the tmux-friendly subset without hover
+    events that trigger prompt-row clipboard probes. Legacy ``tui_mouse`` only when ``mouse_tracking`` is absent."""
     if not isinstance(display, dict):
         return "all"
-    if "mouse_tracking" in display:
-        raw = display.get("mouse_tracking")
-    else:
-        raw = display.get("tui_mouse", True)
+    raw = display.get("mouse_tracking") if "mouse_tracking" in display else display.get("tui_mouse", True)
     if raw is False or raw == 0:
         return "off"
-    if raw is True or raw is None:
-        return "all"
-    if isinstance(raw, (int, float)):
-        return "all"
     if isinstance(raw, str):
         return _MOUSE_TRACKING_ALIASES.get(raw.strip().lower(), "all")
     return "all"
 
 
 def _load_reasoning_config(model: str = "") -> dict | None:
-    """Load reasoning effort from config.yaml, respecting per-model overrides.
-
-    Thin wrapper over the shared chokepoint
-    :func:`hermes_constants.resolve_reasoning_config` (per-model override >
-    global ``agent.reasoning_effort``; YAML boolean False = disabled).
-    Closes #21256.
-    """
+    """Reasoning effort via the shared chokepoint :func:`hermes_constants.resolve_reasoning_config`
+    (per-model override > global ``agent.reasoning_effort``; YAML False = disabled)."""
     from hermes_constants import resolve_reasoning_config
     return resolve_reasoning_config(_load_cfg(), model)
 
 
+_SERVICE_TIER_ALIASES = {"fast": "priority", "priority": "priority", "on": "priority", "auto": "auto", "cold": "cold"}
+
+
 def _load_service_tier() -> str | None:
-    raw = (str((_load_cfg().get("agent") or {}).get("service_tier", "") or "") .strip() .lower())
-    if not raw or raw in {"normal", "default", "standard", "off", "none"}:
-        return None
-    if raw in {"fast", "priority", "on"}:
-        return "priority"
-    if raw in {"auto", "cold"}:
-        return raw
-    return None
+    raw = str((_load_cfg().get("agent") or {}).get("service_tier", "") or "").strip().lower()
+    return _SERVICE_TIER_ALIASES.get(raw)
 
 
 def _load_provider_routing() -> dict:
-    """OpenRouter provider-routing prefs from config.yaml (``provider_routing``).
-
-    Parity with the messaging gateway (``gateway/run.py::_load_provider_routing``)
-    and the classic CLI: without this the desktop/TUI backend builds agents with
-    no routing prefs, so OpenRouter falls back to its default (effectively random)
-    provider selection even when the user configured ``provider_routing``.
-    """
+    """OpenRouter ``provider_routing`` prefs (gateway/CLI parity — without them OpenRouter picks an
+    effectively random provider even when the user configured routing)."""
     try:
         return _load_cfg().get("provider_routing", {}) or {}
     except Exception:
@@ -2063,30 +1927,25 @@ def _load_provider_routing() -> dict:
 
 
 def _load_show_reasoning() -> bool:
-    # Fallback True — keep in sync with DEFAULT_CONFIG display.show_reasoning
-    # (this loader reads the raw user YAML without the DEFAULT_CONFIG merge).
+    # Fallback True — keep in sync with DEFAULT_CONFIG display.show_reasoning (no DEFAULT_CONFIG merge here).
     return bool(_display_cfg().get("show_reasoning", True))
 
 
 def _load_memory_notifications() -> str:
-    """Self-improvement review notification mode from config.yaml.
-
-    Parity with the messaging gateway (``gateway/run.py``) and the classic CLI:
-    ``display.memory_notifications`` controls whether the background review's
-    "💾 Self-improvement review: …" summary is surfaced. Without this the
-    TUI/desktop backend always behaved as ``"on"`` and silently ignored a user
-    who set ``off``. Accepts ``off`` / ``on`` (default) / ``verbose``; a bool is
-    normalized for back-compat.
-    """
+    """``display.memory_notifications`` (``off`` / ``on`` default / ``verbose``; bool normalized) — gates
+    the "💾 Self-improvement review" summary, gateway/CLI parity (this backend used to ignore ``off``)."""
     raw = _display_cfg().get("memory_notifications")
     if isinstance(raw, bool):
         return "on" if raw else "off"
     return str(raw).lower() if raw else "on"
 
 
+_TOOL_PROGRESS_MODES = frozenset({"off", "new", "all", "verbose"})
+
+
 def _load_tool_progress_mode() -> str:
     env = os.environ.get("HERMES_TUI_TOOL_PROGRESS", "").strip().lower()
-    if env in {"off", "new", "all", "verbose"}:
+    if env in _TOOL_PROGRESS_MODES:
         return env
     raw = _display_cfg().get("tool_progress", "all")
     if raw is False:
@@ -2094,23 +1953,14 @@ def _load_tool_progress_mode() -> str:
     if raw is True:
         return "all"
     mode = str(raw or "all").strip().lower()
-    return mode if mode in {"off", "new", "all", "verbose"} else "all"
+    return mode if mode in _TOOL_PROGRESS_MODES else "all"
 
 
 def _gui_surface_toolsets(platform: str) -> set[str]:
-    """Toolsets that exist because of the CLIENT on the other end, not the host.
-
-    Both entries are off ``_HERMES_CORE_TOOLS`` (no other platform should carry
-    their schema), so this resolver is the one gate that exposes them.
-    ``platform`` is the SESSION's source, never a process env var: the desktop
-    may drive a URL/cloud backend where ``HERMES_DESKTOP`` is unset, and keying
-    off the env var stripped every pane/browser tool there.  See the
-    surface-capability rule in AGENTS.md.
-    """
-    surfaces = {"project"}
-    if platform == "desktop":
-        surfaces.add("desktop_ui")
-    return surfaces
+    """Toolsets that exist because of the CLIENT, not the host — both off ``_HERMES_CORE_TOOLS``, so this
+    is the one gate exposing them. ``platform`` is the SESSION's source, never a process env var: the
+    desktop may drive a URL/cloud backend where ``HERMES_DESKTOP`` is unset (see AGENTS.md surface rule)."""
+    return {"project", "desktop_ui"} if platform == "desktop" else {"project"}
 
 
 def _enabled_mcp_server_names() -> tuple[set[str], set[str]]:
