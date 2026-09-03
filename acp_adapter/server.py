@@ -8,6 +8,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import threading
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -302,29 +303,21 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
         if not model:
             return None
-
-        fallback_choice = encode_model_choice(provider, model)
-        return SessionModelState(
-            available_models=[ModelInfo(model_id=fallback_choice, name=model)], current_model_id=fallback_choice
-        )
+        choice = encode_model_choice(provider, model)
+        return SessionModelState(available_models=[ModelInfo(model_id=choice, name=model)], current_model_id=choice)
 
     @staticmethod
     def _resolve_model_selection(raw_model: str, current_provider: str) -> tuple[str, str]:
         """Resolve ``provider:model`` input into the provider and normalized model id."""
-        target_provider = current_provider
-        new_model = raw_model.strip()
-
+        target_provider, new_model = current_provider, raw_model.strip()
         try:
             from hermes_cli.models import detect_provider_for_model, parse_model_input
 
             target_provider, new_model = parse_model_input(new_model, current_provider)
-            if target_provider == current_provider:
-                detected = detect_provider_for_model(new_model, current_provider)
-                if detected:
-                    target_provider, new_model = detected
+            if target_provider == current_provider and (detected := detect_provider_for_model(new_model, current_provider)):
+                target_provider, new_model = detected
         except Exception:
             logger.debug("Provider detection failed, using model as-is", exc_info=True)
-
         return target_provider, new_model
 
     def _switch_model(
@@ -351,27 +344,20 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
     def _build_usage_update(state: SessionState) -> UsageUpdate | None:
         """``usage_update`` for Zed's context indicator: ``size`` = context window, ``used`` =
         estimated request pressure (system prompt + history + tool schemas)."""
-        agent = state.agent
-        compressor = getattr(agent, "context_compressor", None)
+        compressor = getattr(state.agent, "context_compressor", None)
         size = int(getattr(compressor, "context_length", 0) or 0)
         if size <= 0:
             return None
-
         try:
-            used = _estimate_tokens(state.history, agent)
+            used = _estimate_tokens(state.history, state.agent)
         except Exception:
             logger.debug("Could not estimate ACP native context usage", exc_info=True)
             used = int(getattr(compressor, "last_prompt_tokens", 0) or 0)
-
         return UsageUpdate(session_update="usage_update", size=max(size, 0), used=max(used, 0))
 
     async def _send_usage_update(self, state: SessionState) -> None:
-        if not self._conn:
-            return
-        update = self._build_usage_update(state)
-        if update is None:
-            return
-        await self._send(state.session_id, update, fail_msg="Failed to send ACP usage update for session %s")
+        if self._conn and (update := self._build_usage_update(state)) is not None:
+            await self._send(state.session_id, update, fail_msg="Failed to send ACP usage update for session %s")
 
     def _provenance_meta(
         self, acp_session_id: str, current_hermes_session_id: str, previous_hermes_session_id: Optional[str] = None
@@ -401,7 +387,6 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             return
         if not row:
             return
-
         title = row.get("title")
         # `sessions` has no `updated_at`; "now" is right since this fires when the title changed.
         update = SessionInfoUpdate(
@@ -422,42 +407,37 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         """Register ACP-provided MCP servers and refresh the agent tool surface."""
         if not mcp_servers:
             return
-
         try:
             from tools.mcp_tool import register_mcp_servers
 
-            config_map = {server.name: _mcp_server_config(server) for server in mcp_servers}
-            await asyncio.to_thread(register_mcp_servers, config_map)
+            await asyncio.to_thread(register_mcp_servers, {s.name: _mcp_server_config(s) for s in mcp_servers})
         except Exception:
             logger.warning("Session %s: failed to register ACP MCP servers", state.session_id, exc_info=True)
             return
-
         try:
             from model_tools import get_tool_definitions
             from agent.memory_manager import inject_memory_provider_tools
 
-            enabled_toolsets = _expand_acp_enabled_toolsets(
-                getattr(state.agent, "enabled_toolsets", None) or ["hermes-acp"],
-                mcp_server_names=[server.name for server in mcp_servers],
+            agent = state.agent
+            agent.enabled_toolsets = _expand_acp_enabled_toolsets(
+                getattr(agent, "enabled_toolsets", None) or ["hermes-acp"],
+                mcp_server_names=[s.name for s in mcp_servers],
             )
-            state.agent.enabled_toolsets = enabled_toolsets
-            state.agent.tools = get_tool_definitions(
-                enabled_toolsets=enabled_toolsets,
-                disabled_toolsets=getattr(state.agent, "disabled_toolsets", None), quiet_mode=True,
+            agent.tools = get_tool_definitions(
+                enabled_toolsets=agent.enabled_toolsets,
+                disabled_toolsets=getattr(agent, "disabled_toolsets", None), quiet_mode=True,
             )
-            state.agent.valid_tool_names = {tool["function"]["name"] for tool in state.agent.tools or []}
-            inject_memory_provider_tools(state.agent)
-            invalidate = getattr(state.agent, "_invalidate_system_prompt", None)
-            if callable(invalidate):
+            agent.valid_tool_names = {tool["function"]["name"] for tool in agent.tools or []}
+            inject_memory_provider_tools(agent)
+            if callable(invalidate := getattr(agent, "_invalidate_system_prompt", None)):
                 invalidate()
             logger.info(
                 "Session %s: refreshed tool surface after ACP MCP registration (%d tools)",
-                state.session_id, len(state.agent.tools or []),
+                state.session_id, len(agent.tools or []),
             )
         except Exception:
             logger.warning(
-                "Session %s: failed to refresh tool surface after ACP MCP registration",
-                state.session_id, exc_info=True,
+                "Session %s: failed to refresh tool surface after ACP MCP registration", state.session_id, exc_info=True,
             )
 
     def _schedule_mcp_late_refresh(self, state: SessionState) -> None:
@@ -475,11 +455,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             return
         if not mcp_discovery_in_flight():
             return
-
-        import threading
-
-        agent = state.agent
-        session_id = state.session_id
+        agent, session_id = state.agent, state.session_id
 
         def _wait_then_refresh() -> None:
             try:
