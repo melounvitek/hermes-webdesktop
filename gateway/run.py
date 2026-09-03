@@ -5411,16 +5411,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     loop.set_exception_handler(_gateway_loop_exception_handler)
 
     if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, shutdown_signal_handler, sig)  # windows-footgun: ok — wrapped in try/except NotImplementedError for Windows
-            except NotImplementedError:
-                pass
+        # add_signal_handler raises NotImplementedError on Windows; SIGUSR1 is POSIX-only.
+        handlers = [(sig, shutdown_signal_handler, (sig,)) for sig in (signal.SIGINT, signal.SIGTERM)]
         if hasattr(signal, "SIGUSR1"):
-            try:
-                loop.add_signal_handler(signal.SIGUSR1, restart_signal_handler)  # windows-footgun: ok — POSIX signal, guarded by hasattr above + try/except NotImplementedError
-            except NotImplementedError:
-                pass
+            handlers.append((signal.SIGUSR1, restart_signal_handler, ()))  # windows-footgun: ok — hasattr-guarded
+        for sig, handler, args in handlers:
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(sig, handler, *args)  # windows-footgun: ok — suppress(NotImplementedError)
     else:
         logger.info("Skipping signal handlers (not running in main thread).")
 
@@ -5472,6 +5469,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if not success:
         _shutdown_gateway_health_export(runner)
         return False
+
     def _recover_pending() -> None:
         from gateway.shutdown_flush import recover_pending_to_db
         recovered = recover_pending_to_db()
@@ -5508,9 +5506,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     # READY is emitted only after adapters, cron and housekeeping reach their running boundary;
     # missing config/systemd runtime state leaves the watchdog disabled without changing behavior.
-    start_watchdog = getattr(runner, "_start_systemd_watchdog", None)
-    if callable(start_watchdog):
-        start_watchdog()
+    runner._start_systemd_watchdog()
 
     await runner.wait_for_shutdown()
 
