@@ -102,19 +102,12 @@ _GENERATION_TRANSITIONS = {
 
 
 class DriverStateError(ValueError): """Base class for invalid or conflicting driver-state operations."""
-
 class DriverValidationError(DriverStateError): """Raised when an identifier, clock, TTL, or payload is invalid."""
-
 class RoomUnavailableError(DriverStateError): """Raised when the hosted room does not exist or was disbanded."""
-
 class LeaseHeldError(DriverStateError): """Raised when another unexpired driver generation owns the room."""
-
 class StaleLeaseError(DriverStateError): """Raised when a lease generation can no longer mutate room state."""
-
 class TaskConflictError(DriverStateError): """Raised when an idempotency key is reused for different task state."""
-
 class StaleTaskError(DriverStateError): """Raised when an obsolete task attempt or cancellation tries to commit."""
-
 class InvalidTaskTransitionError(DriverStateError): """Raised when a requested task transition is not allowed."""
 
 
@@ -290,9 +283,9 @@ def _connect(db_path: DbPath) -> sqlite3.Connection:
     def ready(conn: sqlite3.Connection) -> bool:
         existing.append(_schema_objects_exist(conn))
         return existing[0] and _task_schema_supports_current_statuses(conn)
-    def initialize(conn: sqlite3.Connection) -> None:
-        (_migrate_task_status_constraint if existing[0] else _initialize_schema)(conn)
-    conn = connect(db_path, db_label="state.db (hosted_room_driver)", ready=ready, initialize=initialize)
+    conn = connect(
+        db_path, db_label="state.db (hosted_room_driver)", ready=ready,
+        initialize=lambda conn: (_migrate_task_status_constraint if existing[0] else _initialize_schema)(conn))
     if existing[0]:
         try:
             _validate_schema(conn)
@@ -599,10 +592,9 @@ def release_lease(db_path: DbPath, lease: DriverLease, *, clock: Clock) -> dict[
             return {"lease": _lease_from_row(row), "idempotent": True}
         if float(row["expires_at"]) <= now:
             raise StaleLeaseError("driver lease expired before release")
-        running = conn.execute(
+        if conn.execute(
             "SELECT 1 FROM hosted_room_driver_tasks WHERE room_id=? AND status='running' LIMIT 1", (lease.room_id,)
-        ).fetchone()
-        if running is not None:
+        ).fetchone() is not None:
             raise InvalidTaskTransitionError("cannot release a room lease while tasks are running")
         conn.execute("""UPDATE hosted_room_driver_leases SET expires_at=?, updated_at=?, released_at=?
                WHERE room_id=? AND lease_generation=?""",
@@ -625,10 +617,9 @@ def admit_task(db_path: DbPath, identity: TaskIdentity, *, payload: Any, clock: 
             if existing["payload_digest"] != payload_digest or existing["payload_json"] != payload_json:
                 raise TaskConflictError("task_id is already bound to a different payload")
             return _task_from_row(existing, idempotent=True)
-        turn = conn.execute(
+        if conn.execute(
             "SELECT * FROM hosted_room_driver_tasks WHERE room_id=? AND thread_id=? AND turn_id=?",
-            (identity.room_id, identity.thread_id, identity.turn_id)).fetchone()
-        if turn is not None:
+            (identity.room_id, identity.thread_id, identity.turn_id)).fetchone() is not None:
             raise TaskConflictError("thread_id and turn_id are already bound to a task")
         conn.execute("""INSERT INTO hosted_room_driver_tasks (
                    room_id, task_id, thread_id, turn_id, source_event_seq, payload_json, payload_digest,
@@ -653,11 +644,10 @@ def start_task(
         _require_cancel_generation(row, expected_cancel_generation)
         if row["status"] != "queued":
             raise InvalidTaskTransitionError(f"cannot start task in state '{row['status']}'")
-        unresolved = conn.execute(
+        if conn.execute(
             f"""SELECT task_id, status FROM hosted_room_driver_tasks
                WHERE room_id=? AND status IN ('running', 'indeterminate', 'stopping') {_TASK_ORDER} LIMIT 1""",
-            (identity.room_id,)).fetchone()
-        if unresolved is not None:
+            (identity.room_id,)).fetchone() is not None:
             raise InvalidTaskTransitionError("room recovery must resolve the prior task before starting new work")
         next_queued = conn.execute(
             f"SELECT task_id FROM hosted_room_driver_tasks WHERE room_id=? AND status='queued' {_TASK_ORDER} LIMIT 1",
@@ -895,8 +885,7 @@ def prune_published_terminal_tasks(
         ][:MAX_TASK_PRUNE_BATCH]
         if not candidates:
             return 0
-        placeholders = ",".join("?" for _ in candidates)
         deleted = conn.execute(
-            f"DELETE FROM hosted_room_driver_tasks WHERE room_id=? AND task_id IN ({placeholders})",
+            f"DELETE FROM hosted_room_driver_tasks WHERE room_id=? AND task_id IN ({','.join('?' * len(candidates))})",
             (room_id, *candidates))
         return max(0, int(deleted.rowcount))
