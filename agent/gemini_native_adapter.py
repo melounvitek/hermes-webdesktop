@@ -175,8 +175,8 @@ def _inline_data_part(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
     try:
         header, encoded = url.split(",", 1)
-        mime = header.split(":", 1)[1].split(";", 1)[0]
-        return {"inlineData": {"mimeType": mime, "data": base64.b64encode(base64.b64decode(encoded)).decode("ascii")}}
+        data = base64.b64encode(base64.b64decode(encoded)).decode("ascii")
+        return {"inlineData": {"mimeType": header.split(":", 1)[1].split(";", 1)[0], "data": data}}
     except Exception:
         return None
 
@@ -227,10 +227,7 @@ def _looks_like_json_schema(node: Any) -> bool:
     tool result that is itself a JSON Schema (e.g. ``tool_describe`` output) is forwarded as opaque text.
     False positives only lose the structured shape, never the content."""
     if isinstance(node, dict):
-        return any(
-            (key == "$ref" and isinstance(value, str) and value.startswith("#/")) or _looks_like_json_schema(value)
-            for key, value in node.items()
-        )
+        return any((k == "$ref" and isinstance(v, str) and v.startswith("#/")) or _looks_like_json_schema(v) for k, v in node.items())
     return isinstance(node, list) and any(_looks_like_json_schema(item) for item in node)
 
 
@@ -304,8 +301,8 @@ def _build_gemini_contents(
         tool_calls = msg.get("tool_calls") or []
         for tool_call in (tc for tc in tool_calls if isinstance(tc, dict)) if isinstance(tool_calls, list) else ():
             tool_name = str((tool_call.get("function") or {}).get("name") or "")
-            if _tool_call_id(tool_call) and tool_name:
-                tool_name_by_call_id[_tool_call_id(tool_call)] = tool_name
+            if (call_id := _tool_call_id(tool_call)) and tool_name:
+                tool_name_by_call_id[call_id] = tool_name
             parts.append(_translate_tool_call_to_gemini(tool_call, include_ids=include_tool_call_ids))
         if parts:
             contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
