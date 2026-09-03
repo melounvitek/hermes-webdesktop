@@ -486,14 +486,8 @@ def _tool_failure(prefix: str, provider: str, exc: BaseException) -> str:
 
 
 def _text_to_speech_single(
-    text: str,
-    file_str: str,
-    *,
-    provider: str,
-    tts_config: Dict[str, Any],
-    command_provider_config: Optional[Dict[str, Any]],
-    want_opus: bool,
-    instructions: Optional[str],
+    text: str, file_str: str, *, provider: str, tts_config: Dict[str, Any],
+    command_provider_config: Optional[Dict[str, Any]], want_opus: bool, instructions: Optional[str],
 ) -> str:
     """Synthesize one provider-safe text chunk into *file_str* and return one final-encoded file.
 
@@ -580,11 +574,8 @@ def _synthesize_chunks(chunks: List[str], base_path: Path, generated_artifacts: 
 
 
 def text_to_speech_tool(
-    text: str,
-    output_path: Optional[str] = None,
-    speed: Optional[float] = None,
-    instructions: Optional[str] = None,
-    provider: Optional[str] = None,
+    text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
+    instructions: Optional[str] = None, provider: Optional[str] = None,
 ) -> str:
     """Convert text to speech audio with long-form chunking; returns the JSON result envelope.
 
@@ -628,11 +619,8 @@ def text_to_speech_tool(
     final_paths: List[str] = []
     try:
         encoded_paths, chunk_results = _synthesize_chunks(
-            chunks, base_path, generated_artifacts,
-            provider=provider,
-            tts_config=tts_config,
-            command_provider_config=command_provider_config,
-            want_opus=want_opus,
+            chunks, base_path, generated_artifacts, provider=provider, tts_config=tts_config,
+            command_provider_config=command_provider_config, want_opus=want_opus,
             instructions=instructions,
         )
         voice_compatible = bool(chunk_results) and all(bool(r.get("voice_compatible")) for r in chunk_results)

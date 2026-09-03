@@ -337,11 +337,8 @@ class _StreamerPlayback:
 
 
 def stream_tts_to_speaker(
-    text_queue: queue.Queue,
-    stop_event: threading.Event,
-    tts_done_event: threading.Event,
-    display_callback: Optional[Callable[[str], None]] = None,
-    provider: Optional[str] = None,
+    text_queue: queue.Queue, stop_event: threading.Event, tts_done_event: threading.Event,
+    display_callback: Optional[Callable[[str], None]] = None, provider: Optional[str] = None,
 ):
     """Consume text deltas from *text_queue*, cut them into sentences, and speak each one
     the moment it's ready — the conversational path.
