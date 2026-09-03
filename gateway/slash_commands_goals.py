@@ -1,8 +1,7 @@
 """Autonomy-loop gateway commands: /goal, /subgoal, /heartbeat, /loop, /refine, /review.
 
 Split out of ``gateway/slash_commands.py``; bound onto ``GatewayRunner`` through
-``GatewaySlashCommandsMixin``. Origin internals are imported lazily (``from gateway.slash_commands
-import ...``) inside the bodies to avoid the import cycle.
+``GatewaySlashCommandsMixin``.
 """
 
 from __future__ import annotations
@@ -16,19 +15,23 @@ from gateway.platforms.base import MessageEvent, MessageType
 logger = logging.getLogger("gateway.run")
 
 
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}{'s' if n != 1 else ''}"
+
+
 class GatewayGoalCommandsMixin:
     """Autonomy-loop gateway commands: /goal, /subgoal, /heartbeat, /loop, /refine, /review."""
 
-    async def _handle_goal_command(self, event: "MessageEvent") -> str:
-        """Handle /goal for gateway platforms.
+    async def _handle_goal_command(self, event: MessageEvent) -> str:
+        """Handle /goal: status / show / unwait / clear / pause / resume / wait / gate / <new goal>.
 
-        Subcommands: status / pause / resume / clear. Setting a new goal queues the goal text as the
-        next turn so the agent starts immediately; the post-turn continuation hook takes over after.
+        Setting a new goal queues the goal text as the next turn so the agent starts immediately;
+        the post-turn continuation hook takes over after.
         """
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
 
-        mgr, session_entry = await self._get_goal_manager_for_event(event)
+        mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
 
@@ -52,40 +55,51 @@ class GatewayGoalCommandsMixin:
         if lower == "resume":
             return self._goal_resume(mgr, event)
         # Verb-prefixed forms take the remainder as their argument.
-        for verb, handler in (("wait ", self._goal_wait), ("gate ", self._goal_gate)):
-            if lower == verb.strip() or lower.startswith(verb):
-                return handler(mgr, args[len(verb) - 1:].strip(), event)
+        for verb, handler in (("wait", self._goal_wait), ("gate", self._goal_gate)):
+            if lower == verb or lower.startswith(verb + " "):
+                return handler(mgr, args[len(verb):].strip(), event)
         return await self._goal_set(mgr, args, lower, event)
 
     def _clear_goal_continuations(self, event: MessageEvent, verb: str) -> None:
         try:
-            adapter, _quick_key = self._adapter_and_key_for(event)
-            if adapter and _quick_key:
-                self._clear_goal_pending_continuations(_quick_key, adapter)
+            adapter, quick_key = self._adapter_and_key_for(event)
+            if adapter and quick_key:
+                self._clear_goal_pending_continuations(quick_key, adapter)
         except Exception as exc:
             logger.debug("goal %s: pending continuation cleanup failed: %s", verb, exc)
+
+    def _enqueue_goal_turn(
+        self, event: MessageEvent, text: str, *, label: str, kickoff: bool, route=None
+    ) -> None:
+        """Enqueue *text* as the next turn through the adapter FIFO (the post-turn judge's path).
+
+        A kickoff keeps the triggering message id / channel prompt; a resume continuation carries
+        none. *route* is a pre-resolved ``(adapter, quick_key)``; otherwise resolved here.
+        Best-effort: enqueue failures are logged, never surfaced.
+        """
+        try:
+            adapter, quick_key = route or self._adapter_and_key_for(event)
+            if text and adapter and quick_key:
+                turn = MessageEvent(
+                    text=text,
+                    message_type=MessageType.TEXT,
+                    source=event.source,
+                    message_id=event.message_id if kickoff else None,
+                    channel_prompt=event.channel_prompt if kickoff else None,
+                )
+                self._enqueue_fifo(quick_key, turn, adapter)
+        except Exception as exc:
+            logger.debug("goal %s failed: %s", label, exc)
 
     def _goal_resume(self, mgr, event: MessageEvent) -> str:
         state = mgr.resume()
         if state is None:
             return t("gateway.goal.no_resume")
         # Resume must restart work, not just flip persisted state: enqueue the canonical
-        # continuation through the adapter FIFO — the same path the post-turn judge uses — so
-        # the next turn fires as soon as this reply is delivered.
-        prompt = mgr.next_continuation_prompt()
-        try:
-            adapter, _quick_key = self._adapter_and_key_for(event)
-            if prompt and adapter and _quick_key:
-                cont_event = MessageEvent(
-                    text=prompt,
-                    message_type=MessageType.TEXT,
-                    source=event.source,
-                    message_id=None,
-                    channel_prompt=None,
-                )
-                self._enqueue_fifo(_quick_key, cont_event, adapter)
-        except Exception as exc:
-            logger.debug("goal resume: continuation enqueue failed: %s", exc)
+        # continuation so the next turn fires as soon as this reply is delivered.
+        self._enqueue_goal_turn(
+            event, mgr.next_continuation_prompt(), label="resume: continuation enqueue", kickoff=False
+        )
         return t("gateway.goal.resumed", goal=state.goal)
 
     @staticmethod
@@ -113,12 +127,12 @@ class GatewayGoalCommandsMixin:
             return mgr.render_gates()
         if gate_lower.startswith("add "):
             # SECURITY: a gate is persisted and later executed with shell=True at every goal turn
-            # boundary (run_gate), with no approval prompt. Letting an allowed but non-admin gateway
-            # sender choose that string is authenticated RCE under the Hermes process account — and
-            # with no admin list configured (the backward-compatible default) every allowed sender
-            # is treated as unrestricted. Gate ONLY this shell-creating operation behind a real,
-            # explicitly-configured admin (the same fail-closed check that guards cross-origin
-            # /resume); list/remove/clear stay open so a non-admin can still recover.
+            # boundary (run_gate), with no approval prompt. Letting an allowed but non-admin sender
+            # choose that string is authenticated RCE under the Hermes process account — and with
+            # no admin list configured (the default) every allowed sender is unrestricted. Gate ONLY
+            # this shell-creating operation behind a real, explicitly-configured admin (the same
+            # fail-closed check that guards cross-origin /resume); list/remove/clear stay open so
+            # a non-admin can still recover.
             if not self._resume_caller_is_admin(event.source):
                 return (
                     "⛔ /goal gate add requires an explicitly configured "
@@ -134,7 +148,7 @@ class GatewayGoalCommandsMixin:
                 f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
                 f"It must pass before the goal can complete."
             )
-        if gate_lower.startswith("remove ") or gate_lower.startswith("rm "):
+        if gate_lower.startswith(("remove ", "rm ")):
             try:
                 removed = mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip()))
             except (RuntimeError, ValueError, IndexError) as exc:
@@ -145,23 +159,22 @@ class GatewayGoalCommandsMixin:
                 prev = mgr.clear_gates()
             except RuntimeError as exc:
                 return f"/goal gate clear: {exc}"
-            return f"✓ Cleared {prev} gate{'s' if prev != 1 else ''}."
+            return f"✓ Cleared {_plural(prev, 'gate')}."
         return "Usage: /goal gate [list | add <command> | remove <N> | clear]"
 
     async def _goal_set(self, mgr, args: str, lower: str, event: MessageEvent) -> str:
         """Set a new goal from free text, inline ``field: value`` contract lines, or ``draft <objective>``."""
-        if lower.startswith("draft"):
-            # Draft a structured completion contract, then set it. The aux LLM call is sync;
-            # run it off the event loop.
+        drafting = lower.startswith("draft")
+        if drafting:
             objective = args[len("draft"):].strip()
             if not objective:
                 return "Usage: /goal draft <objective in plain language>"
             try:
                 from hermes_cli.goals import draft_contract
 
-                # _run_in_executor_with_context, not a bare hop: drafting a contract calls the
-                # auxiliary LLM, whose provider/credential resolution reads the profile secret scope
-                # — a contextvar that a default-executor hop drops, leaving it unscoped.
+                # _run_in_executor_with_context, not a bare hop: drafting calls the auxiliary LLM,
+                # whose provider/credential resolution reads the profile secret scope — a
+                # contextvar a default-executor hop drops.
                 contract = await self._run_in_executor_with_context(draft_contract, objective)
             except Exception as exc:
                 logger.debug("goal draft failed: %s", exc)
@@ -181,62 +194,48 @@ class GatewayGoalCommandsMixin:
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
-        # Queue the goal text as an immediate first turn so the agent starts making progress. The
-        # post-turn hook takes over after.
-        adapter, _quick_key = self._adapter_and_key_for(event)
-        if adapter and _quick_key:
-            try:
-                kickoff_event = MessageEvent(
-                    text=state.goal,
-                    message_type=MessageType.TEXT,
-                    source=event.source,
-                    message_id=event.message_id,
-                    channel_prompt=event.channel_prompt,
-                )
-                self._enqueue_fifo(_quick_key, kickoff_event, adapter)
-            except Exception as exc:
-                logger.debug("goal kickoff enqueue failed: %s", exc)
+        # Queue the goal text as an immediate first turn; the post-turn hook takes over after.
+        self._enqueue_goal_turn(
+            event, state.goal, label="kickoff enqueue", kickoff=True, route=self._adapter_and_key_for(event)
+        )
 
         base = t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
         if state.has_contract():
             return f"{base}\nCompletion contract:\n{state.contract.render_block()}"
-        if lower.startswith("draft"):
-            # Drafting was requested but the aux model couldn't produce one.
+        if drafting:
             return f"{base}\n(Couldn't draft a contract — running as a free-form goal.)"
         return base
 
-    async def _handle_heartbeat_command(self, event: "MessageEvent") -> str:
-        """Handle /heartbeat for gateway platforms (mirror of CLI handler).
-
-        Manages the session's one recurring re-entry prompt. The gateway-wide poller injects due
-        heartbeats through the adapter FIFO as ordinary user turns, so alternation and caching hold.
-        """
+    async def _handle_heartbeat_command(self, event: MessageEvent) -> str:
+        """Handle /heartbeat (mirror of the CLI handler): the session's one recurring re-entry
+        prompt. The gateway-wide poller injects due heartbeats through the adapter FIFO as
+        ordinary user turns, so alternation and caching hold."""
         from hermes_cli.heartbeat import parse_interval, format_interval, MIN_INTERVAL_SECONDS
 
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
 
-        mgr, session_entry = await self._get_heartbeat_manager_for_event(event)
+        mgr, _session_entry = await self._get_heartbeat_manager_for_event(event)
         if mgr is None:
             return "Heartbeats unavailable (no session)."
 
         quick_key = self._session_key_for_source(event.source) if event.source else None
 
+        def _watch():
+            if quick_key and event.source is not None:
+                self._register_heartbeat_watch(quick_key, event.source, mgr.session_id)
+
         if not args or lower == "status":
             return mgr.status_line()
-
         if lower == "pause":
             state = mgr.pause()
             return f"⏸ Heartbeat paused: {state.prompt}" if state else "No heartbeat set."
-
         if lower == "resume":
             state = mgr.resume()
             if state is None:
                 return "No heartbeat to resume."
-            if quick_key and event.source is not None:
-                self._register_heartbeat_watch(quick_key, event.source, mgr.session_id)
+            _watch()
             return f"▶ Heartbeat resumed (every {format_interval(state.interval_seconds)}): {state.prompt}"
-
         if lower in {"clear", "stop", "off"}:
             had = mgr.clear()
             if quick_key:
@@ -268,8 +267,7 @@ class GatewayGoalCommandsMixin:
             state = mgr.set(prompt, interval)
         except ValueError as exc:
             return f"Invalid heartbeat: {exc}"
-        if quick_key and event.source is not None:
-            self._register_heartbeat_watch(quick_key, event.source, mgr.session_id)
+        _watch()
         return (
             f"♥ Heartbeat set (every {format_interval(state.interval_seconds)}): {state.prompt}\n"
             "Fires as a normal turn whenever this session is idle and the interval has "
@@ -291,14 +289,14 @@ class GatewayGoalCommandsMixin:
             return quick_key, None, f"Nothing to {verb} yet — send a message first."
         return quick_key, agent, None
 
-    async def _handle_refine_command(self, event: "MessageEvent") -> str:
+    async def _handle_refine_command(self, event: MessageEvent) -> str:
         """Handle /refine — run the memory/skill review fork on demand.
 
         Runs in a daemon thread against a snapshot of the cached AIAgent's conversation; the live
         session and prompt cache are untouched. Requires at least one completed turn.
         """
         args = (event.get_command_args() or "").strip()
-        quick_key, agent, error = self._idle_cached_agent_or_error(event, "refine")
+        _quick_key, agent, error = self._idle_cached_agent_or_error(event, "refine")
         if error:
             return error
 
@@ -306,12 +304,11 @@ class GatewayGoalCommandsMixin:
         if not snapshot:
             return "Nothing to refine yet — the conversation is empty."
 
-        review_skills = "skill_manage" in getattr(agent, "valid_tool_names", set())
         try:
             agent._spawn_background_review(
                 messages_snapshot=snapshot,
                 review_memory=True,
-                review_skills=review_skills,
+                review_skills="skill_manage" in getattr(agent, "valid_tool_names", set()),
                 focus=args or None,
             )
         except Exception as exc:
@@ -322,7 +319,7 @@ class GatewayGoalCommandsMixin:
             f"any memory/skill updates will be reported when done."
         )
 
-    async def _handle_review_command(self, event: "MessageEvent") -> str:
+    async def _handle_review_command(self, event: MessageEvent) -> str:
         """Handle /review — spawn an independent reviewer subagent.
 
         The approval session-key contextvar is only bound during agent turns, so bind it explicitly
@@ -335,10 +332,7 @@ class GatewayGoalCommandsMixin:
 
         snapshot = list(getattr(agent, "_session_messages", None) or [])
 
-        from tools.approval import (
-            reset_current_session_key,
-            set_current_session_key,
-        )
+        from tools.approval import reset_current_session_key, set_current_session_key
 
         def _dispatch():
             token = set_current_session_key(quick_key)
@@ -350,9 +344,8 @@ class GatewayGoalCommandsMixin:
                 reset_current_session_key(token)
 
         try:
-            # _run_in_executor_with_context, not a bare hop: the reviewer
-            # subagent is spawned from the worker and inherits its context,
-            # so a bare hop would run it under the launch home / no secret scope.
+            # _run_in_executor_with_context, not a bare hop: the reviewer subagent is spawned from
+            # the worker and inherits its context; a bare hop would run it under the launch home.
             result = await self._run_in_executor_with_context(_dispatch)
         except ValueError as exc:
             return str(exc)
@@ -363,20 +356,16 @@ class GatewayGoalCommandsMixin:
 
         return format_dispatch_note(result, args)
 
-    async def _handle_subgoal_command(self, event: "MessageEvent") -> str:
-        """Handle /subgoal for gateway platforms (mirror of CLI handler).
-
-        Subgoals are extra criteria appended to the active goal mid-loop. They modify state read
-        at the next turn boundary, so this is safe to invoke while the agent is running.
-        """
+    async def _handle_subgoal_command(self, event: MessageEvent) -> str:
+        """Handle /subgoal (mirror of the CLI handler): extra criteria appended to the active goal
+        mid-loop. They modify state read at the next turn boundary, so this is safe while the
+        agent is running."""
         args = (event.get_command_args() or "").strip()
         mgr, _session_entry = await self._get_goal_manager_for_event(event)
         if mgr is None:
             return t("gateway.goal.unavailable")
         if not mgr.has_goal():
             return "No active goal. Set one with /goal <text>."
-
-        # No args → list current subgoals.
         if not args:
             return f"{mgr.status_line()}\n{mgr.render_subgoals()}"
 
@@ -402,9 +391,7 @@ class GatewayGoalCommandsMixin:
                 prev = mgr.clear_subgoals()
             except RuntimeError as exc:
                 return f"/subgoal clear: {exc}"
-            if prev:
-                return f"✓ Cleared {prev} subgoal{'s' if prev != 1 else ''}."
-            return "No subgoals to clear."
+            return f"✓ Cleared {_plural(prev, 'subgoal')}." if prev else "No subgoals to clear."
 
         try:
             text = mgr.add_subgoal(args)
@@ -413,45 +400,29 @@ class GatewayGoalCommandsMixin:
         idx = len(mgr.state.subgoals) if mgr.state else 0
         return f"✓ Added subgoal {idx}: {text}"
 
-    async def _get_loop_manager_for_event(self, event: "MessageEvent"):
-        """Return a LoopManager bound to the session for this gateway event.
+    async def _handle_loop_command(self, event: MessageEvent) -> str:
+        """Handle /loop — recurring in-session wakeups, via ``dispatch_loop_command`` (CLI mirror).
 
-        Returns ``(manager, session_entry)``, or ``(None, None)`` when the loops module or session
-        can't be loaded. Mirrors ``_get_goal_manager_for_event``.
+        New loops capture the event's routing (platform/chat/thread) so the idle loop-wakeup
+        watcher can inject ticks here after a restart.
         """
         try:
-            from hermes_cli.loops import LoopManager
-        except Exception as exc:
-            logger.debug("loop manager unavailable: %s", exc)
-            return None, None
-        # Warm the SessionDB cache off-loop. A cold cache drops the first
-        # /loop write while the reply claims the loop was set (same class
-        # as the /goal false-ack fix).
-        await self._warm_goals_session_db("loop manager")
-        try:
-            session_entry = await self.async_session_store.get_or_create_session(event.source)
-        except Exception:
-            return None, None
-        sid = getattr(session_entry, "session_id", None) or ""
-        if not sid:
-            return None, None
-        return LoopManager(session_id=sid), session_entry
-
-    async def _handle_loop_command(self, event: "MessageEvent") -> str:
-        """Handle /loop for gateway platforms — recurring in-session wakeups.
-
-        Mirrors the CLI handler via ``dispatch_loop_command``. New loops capture the event's routing
-        (platform/chat/thread) so the idle loop-wakeup watcher can inject ticks here after a restart.
-        """
-        try:
-            from hermes_cli.loops import dispatch_loop_command, goal_blocks_loop_tick
+            from hermes_cli.loops import LoopManager, dispatch_loop_command, goal_blocks_loop_tick
         except Exception as exc:
             logger.debug("loops module unavailable: %s", exc)
             return "Loops unavailable."
 
-        mgr, _session_entry = await self._get_loop_manager_for_event(event)
-        if mgr is None:
+        # Warm the SessionDB cache off-loop: a cold cache drops the first /loop write while the
+        # reply claims the loop was set (same class as the /goal false-ack fix).
+        await self._warm_goals_session_db("loop manager")
+        try:
+            session_entry = await self.async_session_store.get_or_create_session(event.source)
+        except Exception:
+            session_entry = None
+        sid = getattr(session_entry, "session_id", None) or ""
+        if not sid:
             return "Loops unavailable (no active session)."
+        mgr = LoopManager(session_id=sid)
 
         route: dict = {}
         try:
