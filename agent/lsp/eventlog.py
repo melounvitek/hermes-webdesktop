@@ -1,20 +1,12 @@
 """Structured logging with steady-state silence for the LSP layer.
 
-LSP fires on every write_file/patch, so the level model keeps ``agent.log``
-greppable (``rg 'lsp\\['``) without noise:
-
-- ``DEBUG`` for steady-state events with no novel signal (clean, skipped,
-  repeat "no project root", repeat "server unavailable").
-- ``INFO`` for once-per-session transitions (``active for <root>`` the first
-  time a client starts, first ``no project root`` per file) and for every
-  diagnostic event (rare and exactly what users grep for).
-- ``WARNING`` for action-required failures: first ``server unavailable`` per
-  (server_id, binary), ``no server configured`` once per language, and every
-  timeout / unexpected error.
-
-Dedup uses module-level sets bounded by the distinct pairs touched in one
-process.  A bounded LRU was rejected: evicting an entry would re-fire the
-line we explicitly want suppressed.
+LSP fires on every write_file/patch, so the level model keeps ``agent.log`` greppable
+(``rg 'lsp\\['``) without noise: DEBUG for steady-state events with no novel signal (clean,
+skipped, repeat "no project root" / "server unavailable"); INFO for once-per-session
+transitions (first ``active for <root>``, first ``no project root`` per file) and every
+diagnostic event; WARNING for action-required failures (first ``server unavailable`` per
+(server_id, binary), every timeout / unexpected error).  Dedup uses module-level sets bounded
+by the distinct pairs touched in one process — a bounded LRU would re-fire suppressed lines.
 """
 from __future__ import annotations
 
@@ -42,35 +34,22 @@ def _short_path(file_path: str) -> str:
         rel = os.path.relpath(file_path)
     except ValueError:
         return file_path
-    if rel.startswith(".." + os.sep) or rel == "..":
-        return file_path
-    return rel
+    return file_path if rel.startswith(".." + os.sep) or rel == ".." else rel
 
 
 def _emit(server_id: str, level: int, message: str) -> None:
     event_log.log(level, "lsp[%s] %s", server_id, message)
 
 
-def _announce_once(bucket: set, key: Tuple) -> bool:
-    """Atomically mark *key* announced; True only for the first caller."""
-    with _announce_lock:
-        if key in bucket:
-            return False
-        bucket.add(key)
-        return True
-
-
 def _emit_once(bucket: set, key: Tuple, server_id: str, level: int, first: str, repeat: str) -> None:
     """Log *first* at *level* the first time *key* is seen, *repeat* at DEBUG thereafter."""
-    if _announce_once(bucket, key):
-        _emit(server_id, level, first)
-    else:
-        _emit(server_id, logging.DEBUG, repeat)
+    with _announce_lock:
+        is_first = key not in bucket
+        bucket.add(key)
+    _emit(server_id, level if is_first else logging.DEBUG, first if is_first else repeat)
 
 
-# ---------------------------------------------------------------------------
-# Public event helpers — call these from the LSP layer.
-# ---------------------------------------------------------------------------
+# ---- Public event helpers — call these from the LSP layer ----
 
 
 def log_clean(server_id: str, file_path: str) -> None:
@@ -85,10 +64,8 @@ def log_disabled(server_id: str, file_path: str, reason: str) -> None:
 
 def log_active(server_id: str, workspace_root: str) -> None:
     """A client started for (server_id, workspace_root).  INFO once per pair, DEBUG thereafter."""
-    _emit_once(
-        _announced_active, (server_id, workspace_root), server_id, logging.INFO,
-        f"active for {workspace_root}", f"reused client for {workspace_root}",
-    )
+    _emit_once(_announced_active, (server_id, workspace_root), server_id, logging.INFO,
+               f"active for {workspace_root}", f"reused client for {workspace_root}")
 
 
 def log_diagnostics(server_id: str, file_path: str, count: int) -> None:
@@ -119,20 +96,12 @@ def log_timeout(server_id: str, file_path: str, kind: str = "diagnostics") -> No
 
 def log_server_error(server_id: str, file_path: str, exc: BaseException) -> None:
     """An unexpected exception bubbled out of the LSP layer.  WARNING."""
-    _emit(
-        server_id,
-        logging.WARNING,
-        f"unexpected error for {_short_path(file_path)}: {type(exc).__name__}: {exc}",
-    )
+    _emit(server_id, logging.WARNING, f"unexpected error for {_short_path(file_path)}: {type(exc).__name__}: {exc}")
 
 
 def log_spawn_failed(server_id: str, workspace_root: str, exc: BaseException) -> None:
     """The LSP server failed to spawn or initialize.  WARNING."""
-    _emit(
-        server_id,
-        logging.WARNING,
-        f"spawn/initialize failed for {workspace_root}: {type(exc).__name__}: {exc}",
-    )
+    _emit(server_id, logging.WARNING, f"spawn/initialize failed for {workspace_root}: {type(exc).__name__}: {exc}")
 
 
 def log_reaped(keys: List[Tuple[str, str]], idle_timeout: float) -> None:
@@ -142,14 +111,9 @@ def log_reaped(keys: List[Tuple[str, str]], idle_timeout: float) -> None:
     re-announces at INFO instead of a misleading DEBUG "reused client".
     """
     with _announce_lock:
-        for key in keys:
-            _announced_active.discard(key)
+        _announced_active.difference_update(keys)
     summary = ", ".join(f"{sid} ({root})" for sid, root in keys)
-    _emit(
-        "reaper",
-        logging.INFO,
-        f"reaped {len(keys)} idle client(s) after {idle_timeout:.0f}s: {summary}",
-    )
+    _emit("reaper", logging.INFO, f"reaped {len(keys)} idle client(s) after {idle_timeout:.0f}s: {summary}")
 
 
 def reset_announce_caches() -> None:
@@ -160,16 +124,7 @@ def reset_announce_caches() -> None:
 
 
 __all__ = [
-    "event_log",
-    "log_clean",
-    "log_disabled",
-    "log_active",
-    "log_diagnostics",
-    "log_no_project_root",
-    "log_server_unavailable",
-    "log_timeout",
-    "log_server_error",
-    "log_spawn_failed",
-    "log_reaped",
+    "event_log", "log_clean", "log_disabled", "log_active", "log_diagnostics", "log_no_project_root",
+    "log_server_unavailable", "log_timeout", "log_server_error", "log_spawn_failed", "log_reaped",
     "reset_announce_caches",
 ]
