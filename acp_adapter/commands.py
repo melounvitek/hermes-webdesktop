@@ -194,27 +194,22 @@ class SlashCommandsMixin:
         elif approx_tokens > 0:
             lines.append(f"Context usage: ~{approx_tokens:,} tokens")
 
-        if threshold_tokens > 0:
-            if approx_tokens > 0:
-                threshold_pct = (threshold_tokens / context_length) * 100 if context_length > 0 else 0
-                pct_note = f", {threshold_pct:.0f}%" if threshold_pct else ""
-                if approx_tokens >= threshold_tokens:
-                    lines.append(f"Compression: due now (threshold ~{threshold_tokens:,}{pct_note}). Run /compress.")
-                else:
-                    remaining = max(threshold_tokens - approx_tokens, 0)
-                    lines.append(
-                        f"Compression: ~{remaining:,} tokens until threshold (~{threshold_tokens:,}{pct_note})."
-                    )
+        if threshold_tokens > 0 and approx_tokens > 0:
+            threshold_pct = (threshold_tokens / context_length) * 100 if context_length > 0 else 0
+            pct_note = f", {threshold_pct:.0f}%" if threshold_pct else ""
+            if approx_tokens >= threshold_tokens:
+                lines.append(f"Compression: due now (threshold ~{threshold_tokens:,}{pct_note}). Run /compress.")
             else:
-                lines.append(f"Compression threshold: ~{threshold_tokens:,} tokens")
+                remaining = max(threshold_tokens - approx_tokens, 0)
+                lines.append(f"Compression: ~{remaining:,} tokens until threshold (~{threshold_tokens:,}{pct_note}).")
+        elif threshold_tokens > 0:
+            lines.append(f"Compression threshold: ~{threshold_tokens:,} tokens")
 
-        if getattr(agent, "compression_enabled", True) is False:
-            lines.append(
-                "Auto-compaction is disabled (compression.enabled: false); /compress still compresses manually."
-            )
-        else:
-            lines.append("Tip: run /compress to compress manually before the threshold.")
-
+        lines.append(
+            "Auto-compaction is disabled (compression.enabled: false); /compress still compresses manually."
+            if getattr(agent, "compression_enabled", True) is False
+            else "Tip: run /compress to compress manually before the threshold."
+        )
         return "\n".join(lines)
 
     def _cmd_reset(self, args: str, state: SessionState) -> str:
