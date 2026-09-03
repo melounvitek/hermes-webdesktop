@@ -321,8 +321,7 @@ class SessionPersistenceMixin:
                 # A non-dict entry (corrupt file) must not abort the whole load.
                 if not isinstance(entry_data, dict):
                     logger.warning(
-                        "Skipping invalid session entry %r: "
-                        "expected dict, got %s",
+                        "Skipping invalid session entry %r: expected dict, got %s",
                         key, type(entry_data).__name__,
                     )
                     continue

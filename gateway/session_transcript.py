@@ -178,9 +178,7 @@ class SessionTranscriptMixin:
                 spool_dropped_transcript_message(session_id, dropped)
             except Exception:
                 logger.warning(
-                    "pending fallback failed for replaced "
-                    "state.db transcript on %s",
-                    session_id,
+                    "pending fallback failed for replaced state.db transcript on %s", session_id,
                     exc_info=True,
                 )
         try:
@@ -188,9 +186,7 @@ class SessionTranscriptMixin:
             divert_session_transcript_jsonl(session_id, remaining)
         except Exception:
             logger.warning(
-                "JSONL divert failed for replaced state.db "
-                "transcript on %s",
-                session_id,
+                "JSONL divert failed for replaced state.db transcript on %s", session_id,
                 exc_info=True,
             )
 
