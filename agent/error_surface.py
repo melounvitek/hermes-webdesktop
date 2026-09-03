@@ -90,9 +90,8 @@ def _disk_full(candidate: Any) -> bool:
 
 
 def _result_layer(reason: str, error_text: str, provider: str) -> str:
-    layer = _REASON_TO_LAYER.get(reason)
-    if layer is not None:
-        return layer
+    if reason in _REASON_TO_LAYER:
+        return _REASON_TO_LAYER[reason]
     if reason in _TRANSPORT_REASONS and _is_custom_endpoint(provider):
         return LAYER_ENDPOINT
     return LAYER_STREAMING if _looks_like_stream_drop(error_text) else LAYER_PROVIDER
@@ -117,11 +116,9 @@ def build_error_surface_from_result(result: Any, provider: str = "", model: str 
             return _surface(LAYER_DISK, "disk_full", False, provider, model)
         if result.get("billing_block") or reason in ("billing", "billing_unverified"):
             return _surface(LAYER_BILLING, reason or "billing", False, provider, model)
-        if not reason:
-            # Failed result without a classified reason (legacy paths).
-            if _looks_like_stream_drop(error_text):
-                return _surface(LAYER_STREAMING, "stream_drop", True, provider, model)
-            return _surface(LAYER_PROVIDER, "unknown", True, provider, model)
+        if not reason:  # failed result without a classified reason (legacy paths)
+            drop = _looks_like_stream_drop(error_text)
+            return _surface(LAYER_STREAMING if drop else LAYER_PROVIDER, "stream_drop" if drop else "unknown", True, provider, model)
         # Prefer the classifier's own verdict (``failure_retryable``); the
         # reason-set fallback covers older results.
         retryable = result.get("failure_retryable")

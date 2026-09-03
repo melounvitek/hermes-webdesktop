@@ -552,15 +552,14 @@ def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> 
 
 def _resolved_path(path: str) -> Path:
     """Resolve a possibly-relative filesystem path against the current cwd."""
-    candidate = Path(os.path.expanduser(path))
-    return candidate if candidate.is_absolute() else Path.cwd() / candidate
+    return Path.cwd() / Path(os.path.expanduser(path))  # a `/` with an absolute rhs keeps the rhs
 
 
 def _snapshot_text(path: Path) -> str | None:
     """Return UTF-8 file content, or None for missing/unreadable files."""
     try:
         return path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
+    except (UnicodeDecodeError, OSError):  # FileNotFoundError/IsADirectoryError are OSErrors
         return None
 
 
@@ -853,8 +852,7 @@ class KawaiiSpinner:
     def start(self):
         if self.running:
             return
-        self.running = True
-        self.start_time = time.time()
+        self.running, self.start_time = True, time.time()
         self.thread = threading.Thread(target=self._animate, daemon=True)
         self.thread.start()
 
