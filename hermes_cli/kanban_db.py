@@ -1301,6 +1301,17 @@ def _host_prefix() -> str:
 # Task creation / mutation
 # ---------------------------------------------------------------------------
 
+def _validate_model_override(model: Optional[str], provider: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Strip both; a provider without a model is rejected (a bare ``--provider``
+    would re-resolve the profile's model against another backend — exactly
+    the mismatch the override exists to kill)."""
+    model = (model or "").strip() or None
+    provider = (provider or "").strip() or None
+    if provider and not model:
+        raise ValueError("provider_override requires a model_override")
+    return model, provider
+
+
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity)."""
     if assignee is None:
@@ -1503,11 +1514,8 @@ def create_task(
     this board supplies the repo and branch convention (its literal worktree is
     never reused). See ``_resolve_project_link``.
     """
-    model_override = (model_override or "").strip() or None
-    provider_override = (provider_override or "").strip() or None
+    model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
-    if provider_override and not model_override:
-        raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -1523,8 +1531,7 @@ def create_task(
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
 
-    # Inherit the board's scoped project when the caller didn't name one, so a
-    # project-scoped board anchors every new task to that project's repo
+    # A project-scoped board anchors every new task to its project's repo
     # (deterministic worktree + branch) without each surface repeating it.
     if project_id is None:
         try:
@@ -1853,12 +1860,7 @@ def set_model_override(
     running task that's about to be reclaimed/retried is the primary
     rate-limit-recovery flow. Returns True on success.
     """
-    model = (model or "").strip() or None
-    provider = (provider or "").strip() or None
-    if provider and not model:
-        raise ValueError("provider_override requires a model_override")
-    if not model:
-        provider = None
+    model, provider = _validate_model_override(model, provider)
     return _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
@@ -2243,12 +2245,10 @@ def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[
             return None
         conn.execute("DELETE FROM task_attachments WHERE id = ?", (attachment_id,))
         _append_event(conn, att.task_id, "attachment_removed", {"filename": att.filename})
-    try:
+    with contextlib.suppress(OSError):
         p = Path(att.stored_path)
         if p.is_file():
             p.unlink()
-    except OSError:
-        pass
     return att
 
 
@@ -2362,6 +2362,18 @@ def _task_status(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 def _current_run_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
     row = conn.execute("SELECT current_run_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return int(row["current_run_id"]) if row and row["current_run_id"] else None
+
+
+def _end_or_synthesize_run(
+    conn: sqlite3.Connection, task_id: str, *, outcome: str, status: str,
+    summary: Optional[str] = None, metadata: Optional[dict] = None, synthesize: bool,
+) -> Optional[int]:
+    """:func:`_end_run`; when no run was active and ``synthesize`` holds, record a
+    zero-duration run instead so the handoff fields survive in attempt history."""
+    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    if run_id is None and synthesize:
+        run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata)
+    return run_id
 
 
 def _synthesize_ended_run(
@@ -3445,19 +3457,17 @@ def _persist_scratch_completion_artifacts(
             persisted.append(artifact)
             continue
 
+        problem = None
         if not src.is_file():
-            _discard_copies()
-            raise ArtifactPreservationError(
-                f"declared scratch artifact is unavailable or not a regular file: {artifact}"
-            )
-
-        size = resolved_src.stat().st_size
-        if size > KANBAN_ATTACHMENT_MAX_BYTES:
-            _discard_copies()
-            raise ArtifactPreservationError(
+            problem = f"declared scratch artifact is unavailable or not a regular file: {artifact}"
+        elif resolved_src.stat().st_size > KANBAN_ATTACHMENT_MAX_BYTES:
+            problem = (
                 f"declared scratch artifact exceeds the "
                 f"{KANBAN_ATTACHMENT_MAX_BYTES}-byte limit: {artifact}"
             )
+        if problem:
+            _discard_copies()
+            raise ArtifactPreservationError(problem)
 
         dest: Optional[Path] = None
         try:
@@ -3653,11 +3663,9 @@ def block_task(
         cur = conn.execute(sql, params)
         if cur.rowcount != 1:
             return False
-        run_id = _end_run(conn, task_id, outcome="blocked", status="blocked", summary=reason)
-        # Synthesize a run when blocking a never-claimed task so the reason
-        # is preserved in attempt history.
-        if run_id is None and reason:
-            run_id = _synthesize_ended_run(conn, task_id, outcome="blocked", summary=reason)
+        run_id = _end_or_synthesize_run(
+            conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+        )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
@@ -3771,22 +3779,14 @@ def request_review(
             )
         implementer = trow["assignee"]
         if reviewer is None:
-            changes_run = conn.execute(
-                "SELECT id FROM task_runs "
-                "WHERE task_id = ? AND outcome = 'changes_requested' "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if changes_run is not None:
-                changes_event = _latest_event(conn, task_id, "changes_requested", changes_run["id"])
-                reviewer = _json_dict(_row_get(changes_event, "payload")).get("reviewer")
-                if not isinstance(reviewer, str) or not reviewer.strip():
-                    return _ret(
-                        False,
-                        "re-review has no durable reviewer provenance (the "
-                        "latest changes_requested event is missing or "
-                        "malformed); pass reviewer= explicitly",
-                    )
+            reviewer = _prior_reviewer(conn, task_id)
+            if reviewer is False:
+                return _ret(
+                    False,
+                    "re-review has no durable reviewer provenance (the "
+                    "latest changes_requested event is missing or "
+                    "malformed); pass reviewer= explicitly",
+                )
         reviewer = _canonical_assignee(reviewer)
         assignee_sql = ", assignee = ?" if reviewer is not None else ""
         run_guard = "" if expected_run_id is None else " AND current_run_id = ?"
@@ -3814,22 +3814,10 @@ def request_review(
                 "task is not in running/ready (or expected_run_id did not "
                 "match the current run)",
             )
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="review_requested",
-            status="review",
-            summary=summary,
-            metadata=metadata,
+        run_id = _end_or_synthesize_run(
+            conn, task_id, outcome="review_requested", status="review",
+            summary=summary, metadata=metadata, synthesize=bool(summary or metadata),
         )
-        if run_id is None and (summary or metadata):
-            run_id = _synthesize_ended_run(
-                conn,
-                task_id,
-                outcome="review_requested",
-                summary=summary,
-                metadata=metadata,
-            )
         _append_event(
             conn,
             task_id,
@@ -3842,6 +3830,27 @@ def request_review(
             run_id=run_id,
         )
     return _ret(True)
+
+
+def _prior_reviewer(conn: sqlite3.Connection, task_id: str):
+    """Reviewer recorded by the latest ``changes_requested`` run's event.
+    ``None`` = first review (no such run); ``False`` = a run exists but its
+    provenance is missing/malformed."""
+    changes_run = conn.execute(
+        "SELECT id FROM task_runs "
+        "WHERE task_id = ? AND outcome = 'changes_requested' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if changes_run is None:
+        return None
+    changes_event = _latest_event(conn, task_id, "changes_requested", changes_run["id"])
+    reviewer = _json_dict(_row_get(changes_event, "payload")).get("reviewer")
+    return reviewer if isinstance(reviewer, str) and reviewer.strip() else False
+
+
+def _nonblank_str(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def request_changes(
@@ -3884,11 +3893,10 @@ def request_changes(
         requested_event = _latest_event(conn, task_id, "review_requested")
         if requested_event is None:
             return False, "no prior review_requested event"
-        implementer = _json_dict(requested_event["payload"]).get("implementer")
-        if not isinstance(implementer, str) or not implementer.strip():
+        implementer = _nonblank_str(_json_dict(requested_event["payload"]).get("implementer"))
+        if implementer is None:
             return False, "review handoff has no valid implementer provenance"
-        reviewer = task_row["assignee"]
-        reviewer = _canonical_assignee(reviewer) if isinstance(reviewer, str) and reviewer.strip() else None
+        reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
 
         new_status = _landing_status_after_parents(conn, task_id)
         # NOTE: consecutive_failures is deliberately PRESERVED (neither
@@ -3967,10 +3975,7 @@ def promote_task(
             "WHERE l.child_id = ?",
             (task_id,),
         ).fetchall()
-        unsatisfied = [
-            p["id"] for p in parents
-            if p["status"] not in ("done", "archived")
-        ]
+        unsatisfied = [p["id"] for p in parents if p["status"] not in ("done", "archived")]
         if unsatisfied:
             return False, (
                 f"unsatisfied parent dependencies: "
@@ -4120,9 +4125,7 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         new_status = _landing_status_after_parents(conn, task_id)
         review_event = _latest_event(conn, task_id, "review_requested")
         handoff = _json_dict(_row_get(review_event, "payload"))
-        implementer = handoff.get("implementer")
-        if not isinstance(implementer, str) or not implementer.strip():
-            implementer = None
+        implementer = _nonblank_str(handoff.get("implementer"))
         params: tuple[Any, ...] = (new_status, *((implementer,) if implementer else ()), task_id)
         cur = conn.execute(
             # consecutive_failures deliberately PRESERVED: review reopen is not
@@ -4620,9 +4623,9 @@ def schedule_task(
         cur = conn.execute(sql, params)
         if cur.rowcount != 1:
             return False
-        run_id = _end_run(conn, task_id, outcome="scheduled", status="scheduled", summary=reason)
-        if run_id is None and reason:
-            run_id = _synthesize_ended_run(conn, task_id, outcome="scheduled", summary=reason)
+        run_id = _end_or_synthesize_run(
+            conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
+        )
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
         return True
 
@@ -4867,13 +4870,7 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     ):
         by_status[row["status"]] = int(row["n"])
 
-    by_assignee: dict[str, dict[str, int]] = {}
-    for row in conn.execute(
-        "SELECT assignee, status, COUNT(*) AS n FROM tasks "
-        "WHERE status != 'archived' AND assignee IS NOT NULL "
-        "GROUP BY assignee, status"
-    ):
-        by_assignee.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
+    by_assignee = _counts_by_assignee(conn)
 
     oldest_row = conn.execute(
         "SELECT MIN(created_at) AS ts FROM tasks WHERE status = 'ready'"
@@ -4892,6 +4889,18 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+def _counts_by_assignee(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """``{assignee: {status: n}}`` over non-archived tasks."""
+    counts: dict[str, dict[str, int]] = {}
+    for row in conn.execute(
+        "SELECT assignee, status, COUNT(*) AS n FROM tasks "
+        "WHERE status != 'archived' AND assignee IS NOT NULL "
+        "GROUP BY assignee, status"
+    ):
+        counts.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
+    return counts
+
+
 def _to_epoch(val) -> Optional[int]:
     """Normalise a timestamp to unix epoch seconds.
 
@@ -4900,9 +4909,7 @@ def _to_epoch(val) -> Optional[int]:
     """
     if val is None:
         return None
-    if isinstance(val, int):
-        return val
-    if isinstance(val, float):
+    if isinstance(val, (int, float)):
         return int(val)
     s = str(val).strip()
     if not s:
@@ -4926,13 +4933,10 @@ def task_age(task: Task) -> dict:
     _c = _to_epoch(task.created_at)
     _s = _to_epoch(task.started_at)
     _co = _to_epoch(task.completed_at)
-    age_since_created = now - _c if _c is not None else None
-    age_since_started = now - _s if _s is not None else None
-    time_to_complete = (_co - (_s or _c) if _co is not None else None)
     return {
-        "created_age_seconds": age_since_created,
-        "started_age_seconds": age_since_started,
-        "time_to_complete_seconds": time_to_complete,
+        "created_age_seconds": now - _c if _c is not None else None,
+        "started_age_seconds": now - _s if _s is not None else None,
+        "time_to_complete_seconds": _co - (_s or _c) if _co is not None else None,
     }
 
 
@@ -4967,12 +4971,10 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
     cutoff = time.time() - older_than_seconds
     removed = 0
     for p in log_dir.iterdir():
-        try:
+        with contextlib.suppress(OSError):
             if p.is_file() and p.stat().st_mtime < cutoff:
                 p.unlink()
                 removed += 1
-        except OSError:
-            continue
     return removed
 
 
@@ -5008,16 +5010,13 @@ def read_worker_log(
         with open(path, "rb") as f:
             if size > tail_bytes:
                 f.seek(size - tail_bytes)
-                # Skip a partial line if we tailed mid-line. But if the
-                # window has no newline at all (one giant log line),
-                # readline() would eat everything — in that case don't
-                # skip and return the raw tail.
+                # Skip the partial first line — unless the window has no
+                # newline at all (one giant line), where readline() would eat
+                # everything; then return the raw tail.
                 probe = f.tell()
-                partial = f.readline()
-                if not partial.endswith(b"\n") and f.tell() >= size:
+                if not f.readline().endswith(b"\n") and f.tell() >= size:
                     f.seek(probe)
-            data = f.read()
-        return data.decode("utf-8", errors="replace")
+            return f.read().decode("utf-8", errors="replace")
     except OSError:
         return None
 
@@ -5041,17 +5040,11 @@ def list_profiles_on_disk() -> list[str]:
     names: set[str] = set()
     if default_root.exists():
         names.add("default")
-
     if profiles_dir.is_dir():
         try:
-            for entry in sorted(profiles_dir.iterdir()):
-                if not entry.is_dir():
-                    continue
-                if (entry / "config.yaml").is_file():
-                    names.add(entry.name)
+            names.update(e.name for e in profiles_dir.iterdir() if e.is_dir() and (e / "config.yaml").is_file())
         except OSError:
             pass
-
     return sorted(names)
 
 
@@ -5061,24 +5054,10 @@ def known_assignees(conn: sqlite3.Connection) -> list[dict]:
     profile appears in pickers before it has any task.
     """
     on_disk = set(list_profiles_on_disk())
-
-    # Count tasks per (assignee, status), excluding archived.
-    counts: dict[str, dict[str, int]] = {}
-    for row in conn.execute(
-        "SELECT assignee, status, COUNT(*) AS n FROM tasks "
-        "WHERE status != 'archived' AND assignee IS NOT NULL "
-        "GROUP BY assignee, status"
-    ):
-        counts.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
-
-    names = sorted(on_disk | set(counts.keys()))
+    counts = _counts_by_assignee(conn)
     return [
-        {
-            "name": name,
-            "on_disk": name in on_disk,
-            "counts": counts.get(name, {}),
-        }
-        for name in names
+        {"name": name, "on_disk": name in on_disk, "counts": counts.get(name, {})}
+        for name in sorted(on_disk | set(counts))
     ]
 
 
