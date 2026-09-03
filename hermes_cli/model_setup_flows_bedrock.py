@@ -8,8 +8,7 @@ Prompt strings and config write order are behavior.
 from __future__ import annotations
 
 from hermes_cli.model_setup_flows_common import (
-    _ask, _ensure_dict_section, _finish_model, _pick_model_or_prompt, _say,
-)
+    _ask, _ensure_dict_section, _finish_model, _pick_model_or_prompt, _say)
 
 
 # AWS cross-region inference profile prefixes. A geo-prefixed profile only routes
@@ -86,8 +85,7 @@ def _model_flow_bedrock_api_key(config, region, current_model=""):
     print(f"  Showing {len(model_list)} curated models")
     selected = _pick_model_or_prompt(
         model_list, "  Model ID: ", current_model=current_model, confirm_provider="custom",
-        confirm_base_url=mantle_base_url, confirm_api_key=existing_key,
-    )
+        confirm_base_url=mantle_base_url, confirm_api_key=existing_key)
 
     def _finish(cfg, _model):
         # The bearer token rides on a named provider entry: a bare ``provider: custom``
@@ -139,8 +137,7 @@ def _bedrock_text_model_ids(live_models: list, region: str) -> list[str]:
         m for m in live_models
         if not any(m["id"].startswith(p) for p in _BEDROCK_EXCLUDE_PREFIXES)
         and not any(s in m["id"].lower() for s in _BEDROCK_EXCLUDE_SUBSTRINGS)
-        and bedrock_model_routable_from_region(m["id"], region)
-    ]
+        and bedrock_model_routable_from_region(m["id"], region)]
     # Deduplicate: prefer inference profiles (geo-prefixed or global.*) over bare foundation model IDs.
     profile_base_ids = {_base_id(m["id"]) for m in filtered if m["id"].startswith(_BEDROCK_PROFILE_PREFIXES)}
     deduped = [m for m in filtered if m["id"].startswith(_BEDROCK_PROFILE_PREFIXES) or m["id"] not in profile_base_ids]

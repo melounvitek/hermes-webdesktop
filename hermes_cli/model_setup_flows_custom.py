@@ -15,8 +15,7 @@ from hermes_cli.cli_output import line_input
 from hermes_cli.providers import custom_provider_slug
 from hermes_cli.model_setup_flows_common import (
     _HTTP, _ask, _commit_model_config, _load_config_model_section,
-    _prune_replaced_custom_model_config_credentials, _say,
-)
+    _prune_replaced_custom_model_config_credentials, _say)
 
 
 def _parse_context_length(text: str):
@@ -214,8 +213,7 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     from hermes_cli.config import normalize_extra_headers
     from hermes_cli.models import (
         fetch_api_models, fetch_ollama_local_models, _get_ollama_native_headers, _normalize_openai_base_url,
-        should_use_ollama_native_catalog,
-    )
+        should_use_ollama_native_catalog)
 
     name, base_url = provider_info["name"], provider_info["base_url"]
     api_mode = provider_info.get("api_mode", "")

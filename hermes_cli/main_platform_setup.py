@@ -34,8 +34,7 @@ def cmd_whatsapp(args):
         print("  1. Separate bot number (recommended)")
         print("     People message the bot's number directly — cleanest experience.")
         print(
-            "     Requires a second phone number with WhatsApp installed on a device."
-        )
+            "     Requires a second phone number with WhatsApp installed on a device.")
         print()
         print("  2. Personal number (self-chat)")
         print("     You message yourself to talk to the agent.")
@@ -71,8 +70,7 @@ def cmd_whatsapp(args):
     else:
         wa_mode = current_mode
         mode_label = (
-            "separate bot number" if wa_mode == "bot" else "personal number (self-chat)"
-        )
+            "separate bot number" if wa_mode == "bot" else "personal number (self-chat)")
         print(f"\n✓ Mode: {mode_label}")
 
     # ── Step 2: Mode is selected, will enable WhatsApp only after pairing ──
@@ -99,8 +97,7 @@ def cmd_whatsapp(args):
         if response.lower() in {"y", "yes"}:
             if wa_mode == "bot":
                 phone = line_input(
-                    "  Phone numbers that can message the bot (comma-separated): "
-                ).strip()
+                    "  Phone numbers that can message the bot (comma-separated): ").strip()
             else:
                 phone = line_input("  Your phone number (e.g. 15551234567): ").strip()
             if phone:
@@ -111,8 +108,7 @@ def cmd_whatsapp(args):
         if wa_mode == "bot":
             print("  Who should be allowed to message the bot?")
             phone = line_input(
-                "  Phone numbers (comma-separated, or * for anyone): "
-            ).strip()
+                "  Phone numbers (comma-separated, or * for anyone): ").strip()
         else:
             phone = line_input("  Your phone number (e.g. 15551234567): ").strip()
         if phone:
@@ -132,8 +128,7 @@ def cmd_whatsapp(args):
 
     if not (bridge_dir / "node_modules").exists():
         print(
-            "\n→ Installing WhatsApp bridge dependencies (this can take a few minutes)..."
-        )
+            "\n→ Installing WhatsApp bridge dependencies (this can take a few minutes)...")
         npm = find_node_executable("npm")
         if not npm:
             print("  ✗ npm not found on PATH — install Node.js first")
@@ -147,8 +142,7 @@ def cmd_whatsapp(args):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env=with_hermes_node_path(),
-            )
+                env=with_hermes_node_path())
         except KeyboardInterrupt:
             print("\n  ✗ Install cancelled")
             return
@@ -170,8 +164,7 @@ def cmd_whatsapp(args):
         print("✓ Existing WhatsApp session found")
         try:
             response = input(
-                "\n  Re-pair? This will clear the existing session. [y/N] "
-            ).strip()
+                "\n  Re-pair? This will clear the existing session. [y/N] ").strip()
         except (EOFError, KeyboardInterrupt):
             response = "n"
         if response.lower() in {"y", "yes"}:
@@ -209,11 +202,9 @@ def cmd_whatsapp(args):
                 str(bridge_script),
                 "--pair-only",
                 "--session",
-                str(session_dir),
-            ],
+                str(session_dir)],
             cwd=str(bridge_dir),
-            env=with_hermes_node_path(),
-        )
+            env=with_hermes_node_path())
     except KeyboardInterrupt:
         pass
 
@@ -290,8 +281,7 @@ def cmd_sync(args):
             "\n"
             "Shared with your team:\n"
             "  propose <skill>   Share a skill with your organisation",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
         return 1
 
     if sub == "device":
@@ -308,8 +298,7 @@ def cmd_sync(args):
             print(
                 "New commits from this device will use this label; existing "
                 "commits keep their previous one.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
             return 0
         # No --name: print the current (creating a default on first use).
         print(ssc.stable_device_id())
@@ -331,8 +320,7 @@ def cmd_sync(args):
             print(
                 f"Shared '{name}' with your organisation — an admin needs to "
                 f"approve it (proposal #{result.get('proposal_id')}). It is "
-                f"not live for the team until then."
-            )
+                f"not live for the team until then.")
         else:
             print(f"Added '{name}' to your organisation's shared skills.")
         return 0
@@ -346,8 +334,7 @@ def cmd_sync(args):
                 f"'{skill}' is not sync-eligible (bundled, hub-installed, "
                 f"external, or not found). Only agent-created / user-authored "
                 f"skills under ~/.hermes/skills/ can sync.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
             return 1
         set_sync(skill, sub == "enable")
         print(f"sync {'enabled' if sub == 'enable' else 'disabled'} for '{skill}'.")
@@ -365,41 +352,34 @@ def cmd_sync(args):
                 f"\nOrg skills: {n} shared skill(s) from your organisation "
                 f"(your role: {status.get('org_role')}). They load alongside "
                 f"your own, labeled by origin, and you can edit them.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
             if modified:
                 print(
                     f"  {len(modified)} with local edits not yet shared: "
                     f"{', '.join(modified)}\n"
                     f"  Share them back with `hermes sync propose <skill>`. "
                     f"Org updates will not overwrite them.",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr)
         elif status.get("logged_in"):
             print(
                 "\nOrg skills: not applicable — this account isn't a member "
                 "of a shared organisation.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
         if not status.get("logged_in"):
             print("\nNot logged into Nous Portal — sync is inert.", file=sys.stderr)
         elif not status.get("nous_admin"):
             print(
-                "\nSync is not enabled for your account yet.",
-                file=sys.stderr,
-            )
+                "\nSync is not enabled for your account yet.", file=sys.stderr)
         elif not status.get("feature_enabled"):
             print(
                 "\nSync feature is off for this instance (set HERMES_SYNC_ENABLED=1 "
                 "or config.yaml sync.enabled: true). Sync is inert.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
         elif not status.get("base_url"):
             print(
                 "\nNo sync base URL configured (config.yaml sync.base_url or "
                 "HERMES_SYNC_BASE_URL). Sync is inert.",
-                file=sys.stderr,
-            )
+                file=sys.stderr)
         return 0
 
     # pull / push / now — enforce the gate up front with a clear message.
@@ -410,16 +390,13 @@ def cmd_sync(args):
         return 1
     if not identity.get("nous_admin"):
         print(
-            "sync unavailable: not enabled for your account yet.",
-            file=sys.stderr,
-        )
+            "sync unavailable: not enabled for your account yet.", file=sys.stderr)
         return 1
     if not ssc.resolve_sync_base_url():
         print(
             "sync inert: no sync base URL configured (config.yaml sync.base_url "
             "or HERMES_SYNC_BASE_URL).",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
         return 1
 
     try:
@@ -433,8 +410,7 @@ def cmd_sync(args):
                 print(
                     f"org: refreshed {n} shared skill(s) from your "
                     f"organisation.",
-                    file=sys.stderr,
-                )
+                    file=sys.stderr)
                 clashes = org_result.get("conflicted") or []
                 if clashes:
                     print(
@@ -444,8 +420,7 @@ def cmd_sync(args):
                         f"     Your local version is intact. Review it, then "
                         f"either propose it or delete the local copy and pull "
                         f"again to take the org version.",
-                        file=sys.stderr,
-                    )
+                        file=sys.stderr)
         elif sub == "push":
             result = ssc.push_skills(identity=identity, message="hermes sync push")
         elif sub == "now":
@@ -481,8 +456,7 @@ def cmd_slack(args):
             "             command registered as a native slash\n"
             "\n"
             "Run `hermes slack manifest -h` for details.",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
         return 1
 
     if sub == "manifest":

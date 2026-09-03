@@ -32,8 +32,7 @@ _GENERIC_API_KEY_PROVIDERS = frozenset({
     "openai-api", "gemini", "deepseek", "xai", "zai", "kimi-coding-cn",
     "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go",
     "opencode-free", "alibaba", "huggingface", "xiaomi", "arcee", "gmi",
-    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio",
-})
+    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio"})
 
 
 def _clear_stale_openai_base_url():
@@ -62,8 +61,7 @@ def _clear_stale_openai_base_url():
         print(
             f"Cleared stale OPENAI_BASE_URL from .env (was: {stale_url[:40]}...)"
             if len(stale_url) > 40
-            else f"Cleared stale OPENAI_BASE_URL from .env (was: {stale_url})"
-        )
+            else f"Cleared stale OPENAI_BASE_URL from .env (was: {stale_url})")
 
 
 # (task_key, display_name, short_description)
@@ -80,8 +78,7 @@ _AUX_TASKS: list[tuple[str, str, str]] = [
     ("triage_specifier", "Triage specifier", "kanban spec fleshing"),
     ("kanban_decomposer", "Kanban decomposer", "task decomposition"),
     ("profile_describer", "Profile describer", "auto profile descriptions"),
-    ("curator", "Curator", "skill-usage review pass"),
-]
+    ("curator", "Curator", "skill-usage review pass")]
 
 
 # Special non-auxiliary task surfaced in the same picker: subagent delegation.
@@ -154,8 +151,7 @@ def _delegation_cfg_as_task(cfg: dict) -> dict:
         "provider": str(d.get("provider") or "").strip(),
         "model": str(d.get("model") or "").strip(),
         "base_url": str(d.get("base_url") or "").strip(),
-        "api_key": str(d.get("api_key") or "").strip(),
-    }
+        "api_key": str(d.get("api_key") or "").strip()}
 
 
 def _aux_task_display_name(task: str) -> str:
@@ -166,13 +162,7 @@ def _aux_task_display_name(task: str) -> str:
 
 
 def _save_aux_choice(
-    task: str,
-    *,
-    provider: str,
-    model: str = "",
-    base_url: str = "",
-    api_key: str = "",
-) -> None:
+    task: str, *, provider: str, model: str = "", base_url: str = "", api_key: str = "") -> None:
     """Persist an auxiliary task's provider/model to config.yaml.
 
     Only writes the four routing fields — timeout, download_timeout, and any
@@ -287,8 +277,7 @@ def _aux_config_menu() -> None:
         # Build the task menu with current settings inline
         all_tasks = _all_aux_tasks()
         menu_tasks = all_tasks + [
-            (_DELEGATION_TASK_KEY, _DELEGATION_TASK_NAME, _DELEGATION_TASK_DESC)
-        ]
+            (_DELEGATION_TASK_KEY, _DELEGATION_TASK_NAME, _DELEGATION_TASK_DESC)]
         name_col = max(len(name) for _, name, _ in menu_tasks) + 2
         desc_col = max(len(desc) for _, _, desc in menu_tasks) + 4
         entries: list[tuple[str, str]] = []
@@ -297,20 +286,16 @@ def _aux_config_menu() -> None:
                 task_cfg = _delegation_cfg_as_task(cfg)
             else:
                 task_cfg = (
-                    aux.get(task_key, {}) if isinstance(aux.get(task_key), dict) else {}
-                )
+                    aux.get(task_key, {}) if isinstance(aux.get(task_key), dict) else {})
             current = _format_aux_current(task_cfg)
             label = (
-                f"{name.ljust(name_col)}{('(' + desc + ')').ljust(desc_col)}{current}"
-            )
+                f"{name.ljust(name_col)}{('(' + desc + ')').ljust(desc_col)}{current}")
             entries.append((task_key, label))
         entries.append(("__reset__", "Reset all to auto"))
         entries.append(("__back__", "Back"))
 
         idx = _prompt_provider_choice(
-            [label for _, label in entries],
-            default=0,
-        )
+            [label for _, label in entries], default=0)
         if idx is None:
             return
         key = entries[idx][0]
@@ -360,8 +345,7 @@ def _aux_select_for_task(task: str) -> None:
         providers = build_aux_picker_rows(
             current_provider=current_provider,
             current_model=current_model,
-            current_base_url=current_base_url,
-        )
+            current_base_url=current_base_url)
     except Exception as exc:
         print(f"Could not detect authenticated providers: {exc}")
         providers = []
@@ -369,22 +353,14 @@ def _aux_select_for_task(task: str) -> None:
     entries: list[tuple[str, str, list[str]]] = []  # (slug, label, models)
     # "auto" always first
     auto_marker = (
-        "  ← current" if current_provider == "auto" and not current_base_url else ""
-    )
+        "  ← current" if current_provider == "auto" and not current_base_url else "")
     auto_label = (
-        "auto (inherit main agent)"
-        if task == _DELEGATION_TASK_KEY
-        else "auto (recommended)"
-    )
+        "auto (inherit main agent)" if task == _DELEGATION_TASK_KEY else "auto (recommended)")
     entries.append(("__auto__", f"{auto_label}{auto_marker}", []))
 
     entries.extend(
         format_aux_picker_entries(
-            providers,
-            current_provider=current_provider,
-            current_base_url=current_base_url,
-        )
-    )
+            providers, current_provider=current_provider, current_base_url=current_base_url))
 
     # Custom endpoint (raw base_url)
     custom_marker = "  ← current" if current_base_url else ""
@@ -417,11 +393,7 @@ def _aux_select_for_task(task: str) -> None:
 
 
 def _aux_flow_provider_model(
-    task: str,
-    provider_slug: str,
-    curated_models: list,
-    current_model: str = "",
-) -> None:
+    task: str, provider_slug: str, curated_models: list, current_model: str = "") -> None:
     """Prompt for a model under an already-authenticated provider, save to aux."""
     from hermes_cli.auth import _prompt_model_selection
     from hermes_cli.models import get_pricing_for_provider
@@ -451,18 +423,14 @@ def _aux_flow_provider_model(
         selected = val or ""
     else:
         selected = _prompt_model_selection(
-            model_list,
-            current_model=current_model,
-            pricing=pricing,
-            confirm_provider=provider_slug,
+            model_list, current_model=current_model, pricing=pricing, confirm_provider=provider_slug
         )
         if selected is None:
             print("No change.")
             return
 
     _save_aux_choice(
-        task, provider=provider_slug, model=selected or "", base_url="", api_key=""
-    )
+        task, provider=provider_slug, model=selected or "", base_url="", api_key="")
     if selected:
         print(f"{display_name}: {provider_slug} · {selected}")
     else:
@@ -483,8 +451,7 @@ def _aux_flow_custom_endpoint(task: str, task_cfg: dict) -> None:
     print()
     try:
         url_prompt = (
-            f"Base URL [{current_base_url}]: " if current_base_url else "Base URL: "
-        )
+            f"Base URL [{current_base_url}]: " if current_base_url else "Base URL: ")
         url = line_input(url_prompt).strip()
     except (KeyboardInterrupt, EOFError):
         print()
@@ -497,8 +464,7 @@ def _aux_flow_custom_endpoint(task: str, task_cfg: dict) -> None:
         model_prompt = (
             f"Model slug (optional) [{current_model}]: "
             if current_model
-            else "Model slug (optional): "
-        )
+            else "Model slug (optional): ")
         model = line_input(model_prompt).strip()
     except (KeyboardInterrupt, EOFError):
         print()
@@ -506,19 +472,13 @@ def _aux_flow_custom_endpoint(task: str, task_cfg: dict) -> None:
     model = model or current_model
     try:
         api_key = masked_secret_prompt(
-            "API key (optional, blank = use OPENAI_API_KEY): "
-        ).strip()
+            "API key (optional, blank = use OPENAI_API_KEY): ").strip()
     except (KeyboardInterrupt, EOFError):
         print()
         return
 
     _save_aux_choice(
-        task,
-        provider="custom",
-        model=model,
-        base_url=url,
-        api_key=api_key,
-    )
+        task, provider="custom", model=model, base_url=url, api_key=api_key)
     short_url = url.replace("https://", "").replace("http://", "").rstrip("/")
     print(f"{display_name}: custom ({short_url})" + (f" · {model}" if model else ""))
 
@@ -563,9 +523,7 @@ def _prompt_provider_choice(choices, *, default=0, title="Select provider:"):
 
 
 _DEFAULT_QWEN_PORTAL_MODELS = [
-    "qwen3-coder-plus",
-    "qwen3-coder",
-]
+    "qwen3-coder-plus", "qwen3-coder"]
 
 
 def _prompt_custom_api_mode_selection(base_url: str, current_api_mode: str = "") -> Optional[str]:
@@ -583,24 +541,19 @@ def _prompt_custom_api_mode_selection(base_url: str, current_api_mode: str = "")
         (
             "",
             "Auto-detect",
-            "Use Hermes URL heuristics; best for standard OpenAI-compatible endpoints.",
-        ),
+            "Use Hermes URL heuristics; best for standard OpenAI-compatible endpoints."),
         (
             "chat_completions",
             "Chat Completions",
-            "Use /chat/completions for standard OpenAI-compatible servers.",
-        ),
+            "Use /chat/completions for standard OpenAI-compatible servers."),
         (
             "codex_responses",
             "Responses / Codex",
-            "Use /responses for Codex-compatible tool-calling backends.",
-        ),
+            "Use /responses for Codex-compatible tool-calling backends."),
         (
             "anthropic_messages",
             "Anthropic Messages",
-            "Use /v1/messages for Anthropic-compatible endpoints.",
-        ),
-    ]
+            "Use /v1/messages for Anthropic-compatible endpoints.")]
 
     print()
     print("Select API compatibility mode:")
@@ -616,8 +569,7 @@ def _prompt_custom_api_mode_selection(base_url: str, current_api_mode: str = "")
 
     try:
         raw = input(
-            "Choice [1-4, Enter to keep current/detected]: "
-        ).strip().lower()
+            "Choice [1-4, Enter to keep current/detected]: ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.")
         raise
@@ -681,9 +633,7 @@ def _custom_provider_base_url_config_value(provider_info, resolved_base_url=""):
 
 
 def _save_custom_provider(
-    base_url, api_key="", model="", context_length=None, name=None, api_mode=None,
-    key_env=""
-):
+    base_url, api_key="", model="", context_length=None, name=None, api_mode=None, key_env=""):
     """Save a custom endpoint to custom_providers in config.yaml.
 
     Deduplicates by base_url — if the URL already exists, updates the
@@ -781,11 +731,7 @@ def _remove_custom_provider(config):
         from hermes_cli.curses_ui import curses_radiolist
 
         idx = curses_radiolist(
-            "Select provider to remove:",
-            list(choices),
-            selected=0,
-            cancel_returns=-1,
-        )
+            "Select provider to remove:", list(choices), selected=0, cancel_returns=-1)
         print()
         if idx < 0:
             idx = None
@@ -807,18 +753,14 @@ def _remove_custom_provider(config):
     cfg["custom_providers"] = providers
     save_config(cfg)
     removed_name = (
-        removed.get("name", "unnamed") if isinstance(removed, dict) else str(removed)
-    )
+        removed.get("name", "unnamed") if isinstance(removed, dict) else str(removed))
     print(f'✅ Removed "{removed_name}" from custom providers.')
 
 
 def _prompt_reasoning_effort_selection(efforts, current_effort=""):
     """Prompt for a reasoning effort. Returns effort, 'none', or None to keep current."""
     deduped = list(
-        dict.fromkeys(
-            str(effort).strip().lower() for effort in efforts if str(effort).strip()
-        )
-    )
+        dict.fromkeys( str(effort).strip().lower() for effort in efforts if str(effort).strip() ))
     canonical_order = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
     ordered = [effort for effort in canonical_order if effort in deduped]
     ordered.extend(effort for effort in deduped if effort not in canonical_order)
@@ -849,11 +791,7 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
         choices.append(disable_label)
         choices.append(skip_label)
         idx = curses_radiolist(
-            "Select reasoning effort:",
-            choices,
-            selected=default_idx,
-            cancel_returns=-1,
-        )
+            "Select reasoning effort:", choices, selected=default_idx, cancel_returns=-1)
         if idx < 0:
             return None
         print()
@@ -893,11 +831,7 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
 
 
 def _prompt_api_key(
-    pconfig,
-    existing_key: str,
-    provider_id: str = "",
-    existing_source: str = "",
-) -> tuple:
+    pconfig, existing_key: str, provider_id: str = "", existing_source: str = "") -> tuple:
     """Shared API-key entry point for ``hermes setup`` / ``hermes model``.
 
     Handles both first-time entry and the already-configured case.  When a key
@@ -955,8 +889,7 @@ def _prompt_api_key(
     menu = (
         "  [K]eep / [R]eplace (default K): "
         if pool_backed
-        else "  [K]eep / [R]eplace / [C]lear (default K): "
-    )
+        else "  [K]eep / [R]eplace / [C]lear (default K): ")
     try:
         choice = input(menu).strip().lower()
     except (KeyboardInterrupt, EOFError):
@@ -977,8 +910,7 @@ def _prompt_api_key(
     if choice.startswith("c") and not pool_backed:
         save_env_value(key_env, "")
         print(
-            f"  API key cleared.  Re-run `hermes setup` to configure {pconfig.name} again."
-        )
+            f"  API key cleared.  Re-run `hermes setup` to configure {pconfig.name} again.")
         return "", True
 
     # Keep (default, or any other input)
@@ -996,28 +928,18 @@ def _infer_stepfun_region(base_url: str) -> str:
 
 def _stepfun_base_url_for_region(region: str) -> str:
     from hermes_cli.auth import (
-        STEPFUN_STEP_PLAN_CN_BASE_URL,
-        STEPFUN_STEP_PLAN_INTL_BASE_URL,
-    )
+        STEPFUN_STEP_PLAN_CN_BASE_URL, STEPFUN_STEP_PLAN_INTL_BASE_URL)
 
     return (
-        STEPFUN_STEP_PLAN_CN_BASE_URL
-        if region == "china"
-        else STEPFUN_STEP_PLAN_INTL_BASE_URL
-    )
+        STEPFUN_STEP_PLAN_CN_BASE_URL if region == "china" else STEPFUN_STEP_PLAN_INTL_BASE_URL)
 
 
 def _run_anthropic_oauth_flow(save_env_value):
     """Run the Claude OAuth setup-token flow. Returns True if credentials were saved."""
     from agent.anthropic_adapter import (
-        run_oauth_setup_token,
-        read_claude_code_credentials,
-        is_claude_code_token_valid,
-    )
+        run_oauth_setup_token, read_claude_code_credentials, is_claude_code_token_valid)
     from hermes_cli.config import (
-        save_anthropic_oauth_token,
-        use_anthropic_claude_code_credentials,
-    )
+        save_anthropic_oauth_token, use_anthropic_claude_code_credentials)
 
     def _activate_claude_code_credentials_if_available() -> bool:
         try:
@@ -1025,8 +947,7 @@ def _run_anthropic_oauth_flow(save_env_value):
         except Exception:
             creds = None
         if creds and (
-            is_claude_code_token_valid(creds) or bool(creds.get("refreshToken"))
-        ):
+            is_claude_code_token_valid(creds) or bool(creds.get("refreshToken"))):
             use_anthropic_claude_code_credentials(save_fn=save_env_value)
             print("  ✓ Claude Code credentials linked.")
             from hermes_constants import display_hermes_home as _dhh_fn
@@ -1058,8 +979,7 @@ def _run_anthropic_oauth_flow(save_env_value):
 
         try:
             manual_token = masked_secret_prompt(
-                "  Paste setup-token (or Enter to cancel): "
-            ).strip()
+                "  Paste setup-token (or Enter to cancel): ").strip()
         except (KeyboardInterrupt, EOFError):
             print()
             return False
@@ -1118,12 +1038,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
     raw_cfg = read_raw_config()
 
     def _record_raw(
-        name: str,
-        provider_key: str,
-        model: str,
-        api_key: str,
-        base_url: str,
-    ) -> None:
+        name: str, provider_key: str, model: str, api_key: str, base_url: str) -> None:
         template = str(api_key or "").strip()
         base_template = str(base_url or "").strip()
         name = str(name or "").strip()
@@ -1138,8 +1053,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
             identities.extend(((name.lower(),), (name.lower(), model)))
         if provider_key:
             identities.extend(
-                ((provider_key.lower(),), (provider_key.lower(), model))
-            )
+                ((provider_key.lower(),), (provider_key.lower(), model)))
         if "${" in template:
             for identity in identities:
                 raw_api_key_refs.setdefault(identity, template)
@@ -1159,8 +1073,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
                 raw_entry.get("api_key", ""),
                 raw_entry.get("base_url", "")
                 or raw_entry.get("url", "")
-                or raw_entry.get("api", ""),
-            )
+                or raw_entry.get("api", ""))
     raw_providers = raw_cfg.get("providers")
     if isinstance(raw_providers, dict):
         for raw_key, raw_entry in raw_providers.items():
@@ -1173,24 +1086,15 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
                 raw_entry.get("api_key", ""),
                 raw_entry.get("base_url", "")
                 or raw_entry.get("url", "")
-                or raw_entry.get("api", ""),
-            )
+                or raw_entry.get("api", ""))
 
     def _lookup_ref(
-        refs: dict[tuple, str],
-        name: str,
-        provider_key: str,
-        model: str,
-    ) -> str:
+        refs: dict[tuple, str], name: str, provider_key: str, model: str) -> str:
         name_lc = str(name or "").strip().lower()
         pkey_lc = str(provider_key or "").strip().lower()
         model = str(model or "").strip()
         for identity in (
-            (pkey_lc, model),
-            (pkey_lc,),
-            (name_lc, model),
-            (name_lc,),
-        ):
+            (pkey_lc, model), (pkey_lc,), (name_lc, model), (name_lc,)):
             if identity[0] and identity in refs:
                 return refs[identity]
         return ""
@@ -1218,12 +1122,9 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
             "api_mode": entry.get("api_mode", ""),
             "provider_key": provider_key,
             "api_key_ref": _lookup_ref(
-                raw_api_key_refs, name, provider_key, entry.get("model", "")
-            ),
+                raw_api_key_refs, name, provider_key, entry.get("model", "")),
             "base_url_ref": _lookup_ref(
-                raw_base_url_refs, name, provider_key, entry.get("model", "")
-            ),
-        }
+                raw_base_url_refs, name, provider_key, entry.get("model", ""))}
     return custom_provider_map
 
 
@@ -1231,8 +1132,7 @@ def _build_provider_picker_rows(
     config: dict,
     active: str,
     provider_labels: dict[str, str],
-    custom_provider_map: dict[str, dict[str, str]],
-) -> tuple[list[tuple[str, str, list[str]]], int]:
+    custom_provider_map: dict[str, dict[str, str]]) -> tuple[list[tuple[str, str, list[str]]], int]:
     """Rows for the ``hermes model`` provider picker plus the pre-selected index.
 
     Canonical providers are folded into display groups (see PROVIDER_GROUPS in
@@ -1243,11 +1143,7 @@ def _build_provider_picker_rows(
     the CLI hides the same providers the gateway/TUI pickers do.
     """
     from hermes_cli.models import (
-        CANONICAL_PROVIDERS,
-        _PROVIDER_ALIASES,
-        group_providers,
-        provider_group_for_slug,
-    )
+        CANONICAL_PROVIDERS, _PROVIDER_ALIASES, group_providers, provider_group_for_slug)
 
     _custom_provider_map = custom_provider_map
     canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
@@ -1259,8 +1155,7 @@ def _build_provider_picker_rows(
     _cli_excluded = {
         str(p).strip().lower()
         for p in (config.get("model_catalog", {}) or {}).get("excluded_providers") or []
-        if p
-    }
+        if p}
     if _cli_excluded:
         _alias_to_canon = _PROVIDER_ALIASES
         _names_for: dict[str, set[str]] = {}
@@ -1270,8 +1165,7 @@ def _build_provider_picker_rows(
             _names_for.setdefault(_canon, {_canon.lower()}).add(_alias.lower())
         _visible_slugs = [
             p.slug for p in CANONICAL_PROVIDERS
-            if not _names_for.get(p.slug, {p.slug.lower()}) & _cli_excluded
-        ]
+            if not _names_for.get(p.slug, {p.slug.lower()}) & _cli_excluded]
     else:
         _visible_slugs = [p.slug for p in CANONICAL_PROVIDERS]
     grouped_rows = group_providers(_visible_slugs)
@@ -1320,8 +1214,7 @@ def _build_provider_picker_rows(
 
     ordered.append(("custom", "Custom endpoint (enter URL manually)", []))
     _has_saved_custom_list = isinstance(config.get("custom_providers"), list) and bool(
-        config.get("custom_providers")
-    )
+        config.get("custom_providers"))
     if _has_saved_custom_list:
         ordered.append(("remove-custom", "Remove a saved custom provider", []))
     ordered.append(("aux-config", "Configure auxiliary models...", []))

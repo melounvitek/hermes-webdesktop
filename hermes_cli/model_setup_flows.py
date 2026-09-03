@@ -38,22 +38,18 @@ from hermes_cli.model_setup_flows_common import (  # noqa: F401
     _prune_replaced_custom_model_config_credentials,
     _run_login,
     _say,
-    _show_curated,
-)
+    _show_curated)
 from hermes_cli.model_setup_flows_custom import (  # noqa: F401
     _model_flow_custom,
-    _model_flow_named_custom,
-)
+    _model_flow_named_custom)
 from hermes_cli.model_setup_flows_azure import (  # noqa: F401
-    _model_flow_azure_foundry,
-)
+    _model_flow_azure_foundry)
 from hermes_cli.model_setup_flows_bedrock import (  # noqa: F401
     BEDROCK_GEO_PREFIXES,
     bedrock_region_geo_prefix,
     bedrock_model_routable_from_region,
     _model_flow_bedrock_api_key,
-    _model_flow_bedrock,
-)
+    _model_flow_bedrock)
 
 
 def _model_flow_openrouter(config, current_model=""):
@@ -64,8 +60,7 @@ def _model_flow_openrouter(config, current_model=""):
     # OpenRouter isn't in PROVIDER_REGISTRY so we synthesize a minimal pconfig.
     pconfig = ProviderConfig(id="openrouter", name="OpenRouter", auth_type="api_key", api_key_env_vars=("OPENROUTER_API_KEY",))
     existing_key, _resolved, abort = _ensure_flow_api_key(
-        "openrouter", pconfig, missing_hint=("Get one at: https://openrouter.ai/keys", "")
-    )
+        "openrouter", pconfig, missing_hint=("Get one at: https://openrouter.ai/keys", ""))
     if abort:
         return
 
@@ -76,8 +71,7 @@ def _model_flow_openrouter(config, current_model=""):
     pricing = get_pricing_for_provider("openrouter", force_refresh=True)
     selected = _prompt_model_selection(
         openrouter_models, current_model=current_model, pricing=pricing, confirm_provider="openrouter",
-        confirm_base_url=OPENROUTER_BASE_URL, confirm_api_key=_resolved or existing_key,
-    )
+        confirm_base_url=OPENROUTER_BASE_URL, confirm_api_key=_resolved or existing_key)
     _finish_model(selected, "openrouter", f"Default model set to: {selected} (via OpenRouter)",
                   base_url=OPENROUTER_BASE_URL, api_mode="chat_completions")
 
@@ -185,8 +179,7 @@ def _nous_login_args(args) -> argparse.Namespace:
         no_browser=bool(getattr(args, "no_browser", False)),
         timeout=getattr(args, "timeout", None) or 15.0,
         ca_bundle=getattr(args, "ca_bundle", None),
-        insecure=bool(getattr(args, "insecure", False)),
-    )
+        insecure=bool(getattr(args, "insecure", False)))
 
 
 def _nous_model_catalog(free_tier: bool, portal_url: str, model_ids: list, pricing: dict):
@@ -197,8 +190,7 @@ def _nous_model_catalog(free_tier: bool, portal_url: str, model_ids: list, prici
     """
     from hermes_cli.models import (
         nous_policy_allowed_ids, partition_nous_models_by_tier, restrict_to_nous_policy,
-        union_with_portal_free_recommendations, union_with_portal_paid_recommendations,
-    )
+        union_with_portal_free_recommendations, union_with_portal_paid_recommendations)
 
     # Free users: augment with the Portal's freeRecommendedModels (so newly launched
     # free models appear before this build's curated list catches up), then partition
@@ -324,8 +316,7 @@ def _model_flow_nous(config, current_model="", args=None):
     selected = _prompt_model_selection(
         model_ids, current_model=current_model, pricing=pricing, unavailable_models=unavailable_models,
         portal_url=_nous_portal_url, unavailable_message=unavailable_message, confirm_provider="nous",
-        confirm_base_url=creds.get("base_url", ""), confirm_api_key=creds.get("api_key", ""),
-    )
+        confirm_base_url=creds.get("base_url", ""), confirm_api_key=creds.get("api_key", ""))
     if not selected:
         print("No change.")
         return
@@ -393,8 +384,7 @@ def _model_flow_openai_codex(config, current_model=""):
     codex_models = get_codex_model_ids(access_token=_codex_token)
     selected = _prompt_model_selection(
         codex_models, current_model=current_model, confirm_provider="openai-codex",
-        confirm_base_url=DEFAULT_CODEX_BASE_URL, confirm_api_key=_codex_token or "",
-    )
+        confirm_base_url=DEFAULT_CODEX_BASE_URL, confirm_api_key=_codex_token or "")
     _activate_provider_model(selected, "openai-codex", DEFAULT_CODEX_BASE_URL,
                              f"Default model set to: {selected} (via OpenAI Codex)")
 
@@ -403,15 +393,13 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
     """xAI Grok OAuth (SuperGrok / Premium+) provider: ensure logged in, then pick model."""
     from hermes_cli.auth import (
         get_xai_oauth_auth_status, _prompt_model_selection, resolve_xai_oauth_runtime_credentials, _login_xai_oauth,
-        DEFAULT_XAI_OAUTH_BASE_URL, PROVIDER_REGISTRY,
-    )
+        DEFAULT_XAI_OAUTH_BASE_URL, PROVIDER_REGISTRY)
     from hermes_cli.models import provider_model_ids
 
     login_args = argparse.Namespace(no_browser=bool(getattr(args, "no_browser", False)), timeout=getattr(args, "timeout", None))
     if not _oauth_gate(
         bool(get_xai_oauth_auth_status().get("logged_in")), "xAI Grok OAuth (SuperGrok / Premium+)", _login_xai_oauth,
-        login_args, PROVIDER_REGISTRY["xai-oauth"], fresh_name="xAI OAuth",
-    ):
+        login_args, PROVIDER_REGISTRY["xai-oauth"], fresh_name="xAI OAuth"):
         return
 
     # ``resolve_xai_oauth_runtime_credentials`` only reads the auth.json singleton,
@@ -466,8 +454,7 @@ def _model_flow_minimax_oauth(config, current_model="", args=None):
     """MiniMax OAuth provider: ensure logged in, then pick model."""
     from hermes_cli.auth import (
         get_provider_auth_state, _prompt_model_selection, resolve_minimax_oauth_runtime_credentials, AuthError,
-        format_auth_error, _login_minimax_oauth, PROVIDER_REGISTRY,
-    )
+        format_auth_error, _login_minimax_oauth, PROVIDER_REGISTRY)
 
     state = get_provider_auth_state("minimax-oauth")
     if not state or not state.get("access_token"):
@@ -475,8 +462,7 @@ def _model_flow_minimax_oauth(config, current_model="", args=None):
         mock_args = argparse.Namespace(
             region=getattr(args, "region", None) or "global",
             no_browser=bool(getattr(args, "no_browser", False)),
-            timeout=getattr(args, "timeout", None) or 15.0,
-        )
+            timeout=getattr(args, "timeout", None) or 15.0)
         if not _run_login(_login_minimax_oauth, mock_args, PROVIDER_REGISTRY["minimax-oauth"]):
             return
 
@@ -567,8 +553,7 @@ def _model_flow_copilot(config, current_model=""):
     from hermes_cli.config import load_config
     from hermes_cli.models import (
         fetch_api_models, fetch_github_model_catalog, github_model_reasoning_efforts, copilot_model_api_mode,
-        normalize_copilot_model_id,
-    )
+        normalize_copilot_model_id)
 
     provider_id = "copilot"
     pconfig = PROVIDER_REGISTRY[provider_id]
@@ -600,8 +585,7 @@ def _model_flow_copilot(config, current_model=""):
 
     selected = _pick_model_or_prompt(
         _copilot_model_list(live_models), "Model name: ", current_model=_normalize(current_model),
-        confirm_provider=provider_id, confirm_base_url=effective_base, confirm_api_key=api_key,
-    )
+        confirm_provider=provider_id, confirm_base_url=effective_base, confirm_api_key=api_key)
     if not selected:
         print("No change.")
         return
@@ -631,8 +615,7 @@ def _model_flow_copilot_acp(config, current_model=""):
     """GitHub Copilot ACP flow using the local Copilot CLI."""
     from hermes_cli.auth import (
         PROVIDER_REGISTRY, get_external_process_provider_status, resolve_api_key_provider_credentials,
-        resolve_external_process_provider_credentials,
-    )
+        resolve_external_process_provider_credentials)
     from hermes_cli.models import fetch_github_model_catalog, normalize_copilot_model_id
 
     del config
@@ -666,8 +649,7 @@ def _model_flow_copilot_acp(config, current_model=""):
     model_list = _copilot_model_list([item.get("id", "") for item in catalog if item.get("id")] if catalog else [])
     selected = _pick_model_or_prompt(
         model_list, "Model name: ", current_model=_normalize(current_model), confirm_provider=provider_id,
-        confirm_base_url=effective_base, confirm_api_key=catalog_api_key,
-    )
+        confirm_base_url=effective_base, confirm_api_key=catalog_api_key)
     if selected:
         selected = _normalize(selected)
     _finish_model(selected, provider_id, f"Default model set to: {selected} (via {pconfig.name})",
@@ -712,8 +694,7 @@ def _model_flow_kimi(config, current_model=""):
     model_list = _PROVIDER_MODELS.get("kimi-coding" if is_coding_plan else "moonshot", [])
     selected = _pick_model_or_prompt(
         model_list, "Enter model name: ", current_model=current_model, confirm_provider=provider_id,
-        confirm_base_url=effective_base, confirm_api_key=existing_key,
-    )
+        confirm_base_url=effective_base, confirm_api_key=existing_key)
     # api_mode is dropped so the runtime auto-detects it from the URL.
     _finish_model(selected, provider_id, f"Default model set to: {selected} (via {'Kimi Coding' if is_coding_plan else 'Moonshot'})",
                   base_url=effective_base, drop_api_mode=True)
@@ -745,8 +726,7 @@ def _model_flow_stepfun(config, current_model=""):
 
     region_choices = [
         ("international", f"International ({_stepfun_base_url_for_region('international')})"),
-        ("china", f"China ({_stepfun_base_url_for_region('china')})"),
-    ]
+        ("china", f"China ({_stepfun_base_url_for_region('china')})")]
     ordered_regions = []
     for region_key, label in region_choices:
         if region_key == current_region:
@@ -773,8 +753,7 @@ def _model_flow_stepfun(config, current_model=""):
 
     selected = _pick_model_or_prompt(
         model_list, "Model name: ", current_model=current_model, confirm_provider=provider_id,
-        confirm_base_url=effective_base, confirm_api_key=existing_key,
-    )
+        confirm_base_url=effective_base, confirm_api_key=existing_key)
     model = _finish_model(selected, provider_id, f"Default model set to: {selected} (via {pconfig.name})",
                           base_url=effective_base, drop_api_mode=True)
     if model is not None:
@@ -877,8 +856,7 @@ _GEMINI_FREE_TIER_NOTICE = (
     "   To use Gemini with Hermes, enable billing on your Google Cloud project and regenerate",
     "   the key in a billing-enabled project: https://aistudio.google.com/apikey", "",
     "   Alternatives with workable free usage: DeepSeek, OpenRouter (free models), Groq, Nous.", "",
-    "Not saving Gemini as the default provider.",
-)
+    "Not saving Gemini as the default provider.")
 
 
 def _gemini_tier_ok(existing_key: str, pconfig, base_url_env: str) -> bool:
@@ -1050,16 +1028,14 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             pricing = {}
     selected = _pick_model_or_prompt(
         model_list, "Model name: ", current_model=current_model, pricing=pricing, confirm_provider=provider_id,
-        confirm_base_url=effective_base, confirm_api_key=existing_key,
-    )
+        confirm_base_url=effective_base, confirm_api_key=existing_key)
     if selected and is_opencode:
         selected = normalize_opencode_model_id(provider_id, selected)
     # OpenCode pins its api_mode; everyone else drops it so the runtime auto-detects.
     _finish_model(
         selected, provider_id, f"Default model set to: {selected} (via {pconfig.name})", base_url=effective_base,
         api_mode=opencode_model_api_mode(provider_id, selected) if selected and is_opencode else None,
-        drop_api_mode=not is_opencode,
-    )
+        drop_api_mode=not is_opencode)
 
 
 def _model_flow_anthropic(config, current_model=""):
@@ -1137,8 +1113,7 @@ def _model_flow_anthropic(config, current_model=""):
 
     selected = _pick_model_or_prompt(
         _PROVIDER_MODELS.get("anthropic", []), "Model name (e.g., claude-sonnet-4-20250514): ",
-        current_model=current_model, confirm_provider="anthropic",
-    )
+        current_model=current_model, confirm_provider="anthropic")
     # Clear base_url: resolve_runtime_provider() always hardcodes Anthropic's URL,
     # and a stale value can contaminate other providers on a later switch.
     _finish_model(selected, "anthropic", f"Default model set to: {selected} (via Anthropic)", drop_base_url=True, drop_api_mode=True)

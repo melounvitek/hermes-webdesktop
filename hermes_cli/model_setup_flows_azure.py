@@ -21,8 +21,7 @@ def _azure_entra_preflight(current_entra: dict):
     try:
         from agent.azure_identity_adapter import (
             EntraIdentityConfig, SCOPE_AI_AZURE_DEFAULT, build_token_provider, describe_active_credential,
-            has_azure_identity_installed,
-        )
+            has_azure_identity_installed)
     except ImportError as exc:
         _say("", f"⚠ Could not import azure-identity adapter: {exc}", "  Falling back to API key auth.")
         return False

@@ -252,15 +252,13 @@ def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_n
                 not isinstance(pool_key, str)
                 or not pool_key.startswith(CUSTOM_POOL_PREFIX)
                 or pool_key in active_pool_keys
-                or not isinstance(entries, list)
-            ):
+                or not isinstance(entries, list)):
                 continue
             retained = [e for e in entries if not (isinstance(e, dict) and e.get("source") == "model_config")]
             if len(retained) != len(entries):
                 removed_ids = [
                     str(e["id"]) for e in entries
-                    if isinstance(e, dict) and e.get("source") == "model_config" and e.get("id")
-                ]
+                    if isinstance(e, dict) and e.get("source") == "model_config" and e.get("id")]
                 write_credential_pool(pool_key, retained, removed_ids=removed_ids)
     except Exception:
         return
