@@ -105,6 +105,7 @@ def aux_probe_mode():
     finally:
         _aux_probe_state.active = prev
 
+
 from agent.credential_pool import load_pool
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH, get_model_context_length,
@@ -2422,6 +2423,8 @@ def _relay_sync_stream(
         model_name=str(kwargs.get("model") or fallback_model), finalizer=dict, metadata=metadata,
         completed_response_predicate=lambda value: hasattr(value, "choices"),
     )
+
+
 _RUNTIME_MAIN_COMPAT_SNAPSHOT: Tuple[Any, ...] = ("", "", "", "", "", "")
 _RUNTIME_MAIN_COMPAT_LOCK = threading.Lock()
 

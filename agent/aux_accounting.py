@@ -43,10 +43,7 @@ def reset_accounting_context(token) -> None:
 
 
 def record_aux_usage(
-    response: Any,
-    task: Optional[str],
-    *,
-    provider: Optional[str] = None,
+    response: Any, task: Optional[str], *, provider: Optional[str] = None,
     base_url: Optional[str] = None,
 ) -> None:
     """Record an auxiliary response's token usage against the ambient session.
@@ -85,17 +82,10 @@ def record_aux_usage(
         except Exception:
             logger.debug("Aux usage cost estimation failed", exc_info=True)
         session_db.record_auxiliary_usage(
-            session_id,
-            task,
-            model=model,
-            billing_provider=provider,
-            billing_base_url=base_url,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            reasoning_tokens=usage.reasoning_tokens,
-            estimated_cost_usd=estimated_cost,
+            session_id, task, model=model, billing_provider=provider, billing_base_url=base_url,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens, cache_write_tokens=usage.cache_write_tokens,
+            reasoning_tokens=usage.reasoning_tokens, estimated_cost_usd=estimated_cost,
         )
     except Exception:
         logger.debug("Aux usage recording failed (non-fatal)", exc_info=True)
