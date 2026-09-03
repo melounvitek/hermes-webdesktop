@@ -161,15 +161,12 @@ def build_recap(
         lines[0] += f" — {session_title}"
     elif session_id:
         lines[0] += f" — {session_id[:8]}"
-
     if not messages:
         lines.append("  (nothing to recap — no messages yet)")
         return "\n".join(lines)
-
     users, assistants, tool_msgs = _count_visible_turns(messages)
     window = _recent_window(messages)
     win_users, win_assistants, _ = _count_visible_turns(window)
-
     scope = (
         f"{win_users} user turn{'s' if win_users != 1 else ''} / "
         f"{win_assistants} assistant repl{'ies' if win_assistants != 1 else 'y'}"
@@ -177,7 +174,6 @@ def build_recap(
     if (users, assistants) != (win_users, win_assistants):
         scope += f" (of {users}/{assistants} total)"
     lines.append(f"  Recent: {scope}, {tool_msgs} tool result{'s' if tool_msgs != 1 else ''}")
-
     tool_calls = list(_iter_assistant_tool_calls(window))
     tool_counts, files = _summarise_tool_activity(tool_calls)
     if tool_counts:
@@ -185,18 +181,14 @@ def build_recap(
         lines.append(f"  Tools used: {top}")
     if files:
         lines.append(f"  Files touched: {_join_capped(files, _MAX_FILES_LISTED)}")
-
     latest_user = _latest_text(window, "user")
     if latest_user:
         lines.append(f"  Last ask: {_truncate(latest_user, _PROMPT_PREVIEW_CHARS)}")
-
     latest_reply = _latest_text(window, "assistant")
     if latest_reply:
         lines.append(f"  Last reply: {_truncate(latest_reply, _ASSISTANT_PREVIEW_CHARS)}")
-
     if len(lines) == 2:  # only header + scope line: nothing substantive to show
         lines.append("  (no assistant activity yet in this window)")
-
     return "\n".join(lines)
 
 

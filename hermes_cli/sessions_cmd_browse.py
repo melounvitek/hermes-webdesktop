@@ -98,13 +98,11 @@ class _CursesBrowser:
             header = "  Browse sessions — ↑↓ navigate  Enter select  Type to filter  Esc quit"
             header_attr = c.A_BOLD | self._pair(2)
         self._put(stdscr, 0, 0, header, max_x - 1, header_attr)
-
         name_width = max(20, max_x - _FIXED_COLS)
         col_header = (
             f"   {'Title / Preview':<{name_width}}  {'Stat':<5}  {'Msgs':>5}  {'Active':<10}  {'Src':<5} {'ID'}"
         )
         self._put(stdscr, 1, 0, col_header, max_x - 1, self._pair(4, c.A_DIM))
-
         visible_rows = max(max_y - 4, 1)  # header + col header + blank + footer
         filtered = self.filtered
         if not filtered:
@@ -130,7 +128,6 @@ class _CursesBrowser:
                         stdscr.addnstr(y, tag_x, f"{_session_status_tag(status):<5}", 5, self._status_attr(status))
                 except c.error:
                     pass
-
         footer_attr = self._pair(4, c.A_DIM)
         if self.confirm_delete is not None:
             label = _label(self.confirm_delete)
@@ -163,7 +160,6 @@ class _CursesBrowser:
                 else:
                     self.flash = "Delete failed."
             return False
-
         if key in (c.KEY_UP, c.KEY_DOWN):
             if self.filtered:
                 self.cursor = (self.cursor + (1 if key == c.KEY_DOWN else -1)) % len(self.filtered)
@@ -230,7 +226,6 @@ def _fallback_picker(sessions: list) -> Optional[str]:
             f"{_msgs_str(s):>5}  {_relative_time(s.get('last_active')):<10}  "
             f"{s.get('source', '')[:6]}"
         )
-
     while True:
         try:
             val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
@@ -256,13 +251,11 @@ def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
     if not sessions:
         print("No sessions found.")
         return None
-
     _annotate_session_statuses(sessions, session_db)
 
     def _delete_session(session_id: str) -> bool:
         try:
             from hermes_cli.sessions_cmd import get_hermes_home
-
             sessions_dir = get_hermes_home() / "sessions"
         except Exception:
             sessions_dir = None
@@ -270,10 +263,8 @@ def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
             return bool(session_db.delete_session(session_id, sessions_dir=sessions_dir))
         except Exception:
             return False
-
     try:  # curses first; any failure (no curses module, odd terminal) falls back
         import curses
-
         browser = _CursesBrowser(curses, sessions, _delete_session if session_db is not None else None)
         curses.wrapper(browser.run)
         return browser.result

@@ -112,7 +112,6 @@ def run_cli_lost_and_found_recover(
         attempt["usable"] = _lost_and_found_db_usable(lf_path)
         if attempt["usable"]:
             return {"binary": sqlite3_bin, "attempts": attempts}
-
     raise LostAndFoundError(
         "sqlite3 .recover did not produce a usable lost_and_found database: "
         + "; ".join(
@@ -178,7 +177,6 @@ def _looks_like_source(value: Any) -> bool:
 
 def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional[str]:
     """Classify one lost_and_found record by field count + sentinel values."""
-
     if len(cells) >= 3 and cells[0] is None:
         # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL; messages is the only canonical
         # table shaped like that with a session id second and a role third.
@@ -262,7 +260,6 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
             for index in protected:
                 defaults.pop(index, None)
             targets[kind_name] = (_table_columns(dest, kind_name), defaults)
-
         lf_tables = [
             str(row[0])
             for row in lf_conn.execute(
@@ -270,7 +267,6 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
             )
         ]
         report["lost_and_found_tables"] = lf_tables
-
         for lf_table in lf_tables:
             if _table_columns(lf_conn, lf_table)[:3] != ["rootpgno", "pgno", "nfield"]:
                 continue
@@ -338,7 +334,6 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
             "EXISTS (SELECT 1 FROM sessions WHERE sessions.id = u.session_id)"
         ):
             orphan_ids.setdefault(str(session_id), {"started_at": 0.0, "message_count": 0})
-
         titles = _placeholder_titles(dest, "best-effort recovered")
         for session_id, info in sorted(orphan_ids.items()):
             title = next(titles)
@@ -348,7 +343,6 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
             )
             result["sessions_stubbed"] += 1
             result["messages_retained"] += info["message_count"]
-
         result["usage_rows_retained"] = int(dest.execute("SELECT COUNT(*) FROM session_model_usage").fetchone()[0])
 
         # Repair dangling intra-sessions references without deleting rows.

@@ -108,7 +108,6 @@ def _cmd_repair(args):
         print(f"  strategy: {report.get('strategy')}")
         try:
             from hermes_state import SessionDB
-
             with SessionDB() as _repair_db:
                 n = _repair_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             print(f"✓ Repaired — {n} sessions recovered.")
@@ -135,7 +134,6 @@ def _cmd_repair(args):
 def _cmd_recover(args):
     """Offline recovery: works on a disposable copy of the source; never touches the active database."""
     import sqlite3
-
     from hermes_cli.session_recovery import (
         SessionRecoveryError, inspect_session_database, recover_session_database, write_recovery_report,
     )
@@ -158,7 +156,6 @@ def _cmd_recover(args):
         if bad:
             print(f"Error: {msg}")
             return 2
-
     work_dir = getattr(args, "work_dir", None)
     try:
         if inspect_only:
@@ -175,7 +172,6 @@ def _cmd_recover(args):
         print(f"Error: session recovery failed: {exc}")
         print("The supplied source database was not replaced or deleted.")
         return 1
-
     if report_path is not None:
         try:
             written_report = write_recovery_report(report_path, report)
@@ -185,7 +181,6 @@ def _cmd_recover(args):
         print(f"Recovery report: {written_report}")
     else:
         print(json.dumps(report, indent=2, sort_keys=True))
-
     if inspect_only:
         return 0 if report.get("recoverable") else 1
     return _print_recovery_verdict(report, output, allow_partial)
@@ -270,9 +265,7 @@ def _cmd_list(db, args):
         def _in_workspace(s):
             key = (_ws_key(s) or "").lower()
             return bool(key) and (_needle in key or _needle == os.path.basename(key.rstrip("/\\")))
-
         sessions = [s for s in sessions if _in_workspace(s)]
-
     if not sessions:
         print("No sessions found.")
         return
@@ -284,11 +277,9 @@ def _cmd_list(db, args):
     def _ws(s):  # repo/dir basename, "—" when unbound
         key = _ws_key(s)
         return ((os.path.basename(key.rstrip("/\\")) or key) if key else "—")[:16]
-
     _title = lambda s, n: (s.get("title") or "—")[:n]  # noqa: E731
     _preview = lambda s, n: s.get("preview", "")[:n]  # noqa: E731
     _ago = lambda s: _relative_time(s.get("last_active"))  # noqa: E731
-
     layouts = {  # (has_ws, has_titles): header, rule width, row formatter
         (True, True): (f"{'Title':<28} {'Workspace':<18} {'Last Active':<13} {'ID'}", 110,
                        lambda s: f"{_title(s, 26):<28} {_ws(s):<18} {_ago(s):<13} {s['id']}"),
@@ -344,7 +335,6 @@ def _cmd_export(db, args):
             print("--dry-run requires at least one filter.")
             return None
         return [_redact(s) for s in db.export_all(source=None)]
-
     if getattr(args, "only", None):
         return _export_only(args, _collect_sessions)
     if args.format == "trace":
@@ -408,10 +398,8 @@ def _export_trace(db, args, filters):
     if session_id and not db.resolve_session_id(session_id):
         _not_found(session_id)
         return
-
     from agent.trace_upload import TraceRedactionError, build_trace_jsonl, upload_session_trace
     redact_trace = not getattr(args, "no_redact", False)
-
     if getattr(args, "upload", False):
         if not session_id:
             print("--upload exports one session: pass --session-id (or drop filters to use the most recent).")
@@ -420,7 +408,6 @@ def _export_trace(db, args, filters):
         db.close()
         print(upload_session_trace(resolved, cwd="", redact=redact_trace, private=not getattr(args, "public", False)))
         return
-
     if session_id:
         ids = [db.resolve_session_id(session_id)]
     else:
@@ -435,7 +422,6 @@ def _export_trace(db, args, filters):
         if not messages:
             return None
         return build_trace_jsonl(messages, session_id=sid, model=meta.get("model") or "", cwd="", redact=redact_trace)
-
     try:
         if len(ids) == 1:
             jsonl = _render_trace(ids[0])
@@ -473,7 +459,6 @@ def _export_markdown(db, args, filters, redact):
         path = write_session_markdown(data, output_dir, fmt=args.format, force=args.force)
         append_manifest_entry(output_dir, data, path, fmt=args.format)
         return data, path
-
     if args.delete_after_verified and not args.yes:
         print("--delete-after-verified requires --yes.")
         return
@@ -481,10 +466,8 @@ def _export_markdown(db, args, filters, redact):
         print("--delete-after-verified is only supported with --session-id.")
         return
     lineage_is_logical = getattr(args, "lineage", "single") == "logical"
-
     if args.session_id:
         return _export_markdown_single(db, args, _export_one, output_dir, lineage_is_logical)
-
     if not filters:
         print("Refusing bulk export without a filter. Pass --session-id or "
               "at least one filter (e.g. --older-than 90, --source telegram).")
@@ -527,7 +510,6 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
             print(f"Session '{target_id}' disappeared during export; nothing was deleted.")
             return
         exported_items.append((data, exported_path))
-
     message_count = sum(len(data.get("messages") or []) for data, _path in exported_items)
     suffix = "" if message_count == 1 else "s"
     n = len(exported_items)
@@ -590,12 +572,10 @@ def _prune_never_active_keyed(db, args):
             )
             return
         days = seconds / 86400.0
-
     candidates = db.list_never_active_keyed_sessions(older_than_days=days)
     if not candidates:
         print(f"No never-active keyed sessions older than {days:g} day(s).")
         return
-
     shown = candidates if args.dry_run else candidates[:15]
     print(f"{len(candidates)} never-active keyed session(s) older than {days:g} day(s) "
           "— no messages, tokens, tool calls or title:")
@@ -604,14 +584,12 @@ def _prune_never_active_keyed(db, args):
               f"{s.get('session_key') or '-'}")
     if len(candidates) > len(shown):
         print(f"  … {len(candidates) - len(shown)} more")
-
     if args.dry_run:
         print("Dry run — nothing deleted.")
         return
     if not args.yes and not _confirm_prompt(f"Delete {len(candidates)} session(s)? [y/N] "):
         print("Aborted.")
         return
-
     deleted, routing_deleted = db.prune_never_active_keyed_sessions(
         older_than_days=days, sessions_dir=_sessions_dir()
     )
@@ -664,7 +642,6 @@ def _cmd_prune_or_archive(db, args, action):
     filters["include_pinned"] = getattr(args, "include_pinned", False)
     if not filters["include_pinned"]:
         _note_pinned_skipped(db, filters, action)
-
     candidates = db.list_prune_candidates(**filters)
     # Archive expands each row to its compression lineage (may include open continuations), so a
     # direct-open count would misdescribe its effect.
@@ -774,12 +751,10 @@ def _cmd_retitle_skills(db, args):
         """Reject non-titles: an auxiliary model occasionally answers the prompt instead of titling it
         ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that."""
         return bool(candidate) and candidate[0].isalnum()
-
     candidates = db.list_skill_scaffolded_sessions(limit=limit)
     if not candidates:
         print("No sessions were titled from a /skill invocation.")
         return
-
     mode = "" if apply_changes else " (dry run — pass --apply to write)"
     print(f"{len(candidates)} session(s) opened with a /skill{mode}:")
     changed = 0
@@ -806,7 +781,6 @@ def _cmd_retitle_skills(db, args):
             except ValueError as e:
                 print(f"    skipped: {e}")
                 changed -= 1
-
     if not changed:
         print("  every title already reflects the user's request.")
     elif apply_changes:
@@ -822,7 +796,6 @@ def _cmd_browse(db, args):
         db.close()
         print("No sessions found.")
         return
-
     try:  # keep the DB open: the picker uses it for status tags and 'd' delete
         selected_id = _session_browse_picker(sessions, session_db=db)
     finally:
@@ -909,7 +882,6 @@ def _cmd_optimize_storage(db, args):
         if resp not in ("y", "yes"):
             print("Cancelled.")
             return
-
     _last = {"phase": None}
 
     def _progress(info):
@@ -921,7 +893,6 @@ def _cmd_optimize_storage(db, args):
             label = {"teardown": "Reclaiming old index", "vacuum": "Compacting database (VACUUM)", "done": "Done"}
             print(f"\n  {label.get(phase, phase)}…", flush=True)
         _last["phase"] = phase
-
     print("Optimizing search-index storage…")
     try:
         result = db.optimize_fts_storage(progress_cb=_progress, vacuum=do_vacuum)
@@ -948,7 +919,6 @@ def _cmd_repair_routing(db, args):
                   f"evidence: {record['evidence']})")
         else:
             print(f"  ✗ not repairable — {record['reason']}")
-
     if not records:
         print("✓ No gateway sessions are missing their routing identity.")
         return
@@ -1012,15 +982,12 @@ def cmd_sessions(args, sessions_parser=None):
     pre = _PRE_DB_HANDLERS.get(action)
     if pre is not None:
         return pre(args)
-
     try:
         from hermes_state import SessionDB
-
         db = SessionDB()
     except Exception as e:
         print(f"Error: Could not open session database: {e}")
         return 1
-
     with db:
         handler = _DB_HANDLERS.get(action)
         if handler is None:
