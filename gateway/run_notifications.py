@@ -14,14 +14,12 @@ import logging
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, cast
+from typing import Any, Dict, Optional, cast
 
 from gateway.config import Platform, _BUILTIN_PLATFORM_VALUES
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionEntry, SessionSource
-
-if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
-    from gateway.run import GatewayRunner, TurnRunner  # noqa: F401
+from gateway.run_shutdown import _notice_target_key, _send_error, _send_failed
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -78,6 +76,9 @@ class GatewayNotificationsMixin:
             from gateway.run import _non_conversational_metadata
             return _non_conversational_metadata(self.metadata, platform=self.platform)
 
+        async def send(self, text: str):
+            return await self.adapter.send(self.chat_id, text, metadata=self.send_metadata())
+
     @dataclasses.dataclass
     class _CompletionClaim:
         """Pre-flight outcome for one completion delivery."""
@@ -99,11 +100,10 @@ class GatewayNotificationsMixin:
         if config and getattr(source, "platform", None) == Platform.SLACK and _is_slack_ignored_channel(config, chat_id):
             logger.info("Skipping Slack platform notice for configured ignored channel %s", chat_id)
             return
-
-        notice_delivery = "public"
-        if config and hasattr(config, "get_notice_delivery"):
-            notice_delivery = config.get_notice_delivery(source.platform)
-
+        notice_delivery = (
+            config.get_notice_delivery(source.platform) if config and hasattr(config, "get_notice_delivery")
+            else "public"
+        )
         metadata = self._thread_metadata_for_source(source)
         if notice_delivery == "private" and getattr(source, "user_id", None):
             try:
@@ -400,12 +400,9 @@ class GatewayNotificationsMixin:
                     return None
                 platform = Platform(platform_str)
                 adapter = self.adapters.get(platform)
-                metadata = self._thread_metadata_for_target(
-                    platform, chat_id, pending.get("thread_id"), chat_type=pending.get("chat_type"),
-                    reply_to_message_id=pending.get("message_id"), adapter=adapter,
-                )
                 if not adapter:
                     return None
+                metadata = self._pending_marker_metadata(platform, chat_id, pending, adapter)
                 # Fallback session key if not stored (old pending files)
                 return self._UpdateTarget(
                     adapter, chat_id, session_key or f"{platform_str}:{chat_id}", metadata, platform,
@@ -413,6 +410,13 @@ class GatewayNotificationsMixin:
             except Exception:
                 pass
         return None
+
+    def _pending_marker_metadata(self, platform, chat_id, data: dict, adapter):
+        """Thread metadata for a persisted update/restart marker (thread_id/chat_type/message_id keys)."""
+        return self._thread_metadata_for_target(
+            platform, chat_id, data.get("thread_id"), chat_type=data.get("chat_type"),
+            reply_to_message_id=data.get("message_id"), adapter=adapter,
+        )
 
     async def _watch_update_completion_only(self, paths: "_UpdatePaths", deadline: float, poll_interval: float) -> None:
         """Fallback when no adapter/chat can be resolved: wait for the exit code, then notify."""
@@ -448,9 +452,7 @@ class GatewayNotificationsMixin:
         max_chunk = 3500
         for i in range(0, len(clean), max_chunk):
             try:
-                await target.adapter.send(
-                    target.chat_id, f"```\n{clean[i:i + max_chunk]}\n```", metadata=target.send_metadata(),
-                )
+                await target.send(f"```\n{clean[i:i + max_chunk]}\n```")
             except Exception as e:
                 logger.debug("Update stream send failed: %s", e)
 
@@ -470,11 +472,9 @@ class GatewayNotificationsMixin:
         if not sent_buttons:
             default_hint = f" (default: {default})" if default else ""
             _p = getattr(adapter, "typed_command_prefix", "/")
-            await adapter.send(
-                target.chat_id,
+            await target.send(
                 f"⚕ **Update needs your input:**\n\n{prompt_text}{default_hint}\n\n"
-                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), or type your answer directly.",
-                metadata=target.send_metadata(),
+                f"Reply `{_p}approve` (yes) or `{_p}deny` (no), or type your answer directly."
             )
         # Keep the prompt marker on disk until the user answers so a watcher after a mid-prompt
         # gateway restart can recover by re-forwarding it.
@@ -531,11 +531,9 @@ class GatewayNotificationsMixin:
                 await _flush_buffer()
                 try:
                     exit_code = int(paths.exit_code.read_text(encoding="utf-8").strip() or "1")
-                    await target.adapter.send(
-                        target.chat_id,
+                    await target.send(
                         "✅ Hermes update finished." if exit_code == 0
-                        else "❌ Hermes update failed (exit code {}).".format(exit_code),
-                        metadata=target.send_metadata(),
+                        else "❌ Hermes update failed (exit code {}).".format(exit_code)
                     )
                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
                 except Exception as e:
@@ -570,9 +568,7 @@ class GatewayNotificationsMixin:
             paths.exit_code.write_text("124", encoding="utf-8")
             await _flush_buffer()
             with suppress(Exception):
-                await target.adapter.send(
-                    target.chat_id, "❌ Hermes update timed out after 30 minutes.", metadata=target.send_metadata(),
-                )
+                await target.send("❌ Hermes update timed out after 30 minutes.")
             self._clear_update_markers(paths, session_key)
 
     async def _send_update_notification(self) -> bool:
@@ -626,10 +622,7 @@ class GatewayNotificationsMixin:
                 return _defer("Update notification deferred: %s adapter not connected yet", platform_str)
 
             if adapter and chat_id:
-                metadata = self._thread_metadata_for_target(
-                    platform, chat_id, pending.get("thread_id"), chat_type=pending.get("chat_type"),
-                    reply_to_message_id=pending.get("message_id"), adapter=adapter,
-                )
+                metadata = self._pending_marker_metadata(platform, chat_id, pending, adapter)
                 from tools.ansi_strip import strip_ansi
                 output = strip_ansi(output).strip()
                 if output:
@@ -682,10 +675,7 @@ class GatewayNotificationsMixin:
                 )
                 return None
 
-            metadata = self._thread_metadata_for_target(
-                platform, chat_id, thread_id, chat_type=data.get("chat_type"),
-                reply_to_message_id=data.get("message_id"), adapter=transport.adapter,
-            )
+            metadata = self._pending_marker_metadata(platform, chat_id, data, transport.adapter)
             if data.get("delivered_via_upstream_relay") is True:
                 metadata = dict(metadata or {})
                 for field in ("user_id", "scope_id"):
@@ -697,10 +687,9 @@ class GatewayNotificationsMixin:
             )
             # adapter.send() catches provider errors (e.g. "Chat not found") and returns
             # SendResult(success=False) rather than raising, so inspect the result before claiming success.
-            if result is not None and getattr(result, "success", True) is False:
+            if _send_failed(result):
                 logger.warning(
-                    "Restart notification to %s:%s was not delivered: %s",
-                    platform_str, chat_id, getattr(result, "error", "send returned success=False"),
+                    "Restart notification to %s:%s was not delivered: %s", platform_str, chat_id, _send_error(result),
                 )
                 return None
 
@@ -740,10 +729,8 @@ class GatewayNotificationsMixin:
                 result = await transport.send(platform, str(home.chat_id), message, metadata=send_metadata)
             else:
                 result = await transport.adapter.send(str(home.chat_id), message)
-            if result is not None and getattr(result, "success", True) is False:
-                logger.warning(
-                    failure_fmt, platform.value, home.chat_id, getattr(result, "error", "send returned success=False"),
-                )
+            if _send_failed(result):
+                logger.warning(failure_fmt, platform.value, home.chat_id, _send_error(result))
                 return False
             return True
         except Exception as exc:
@@ -770,7 +757,7 @@ class GatewayNotificationsMixin:
                 )
                 continue
 
-            target = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+            target = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if target in skipped or target in delivered:
                 continue
 
@@ -921,22 +908,19 @@ class GatewayNotificationsMixin:
         """
         from gateway.wake import deliver_wake, persist_delegation_delivery
         if evt.get("type") == "async_delegation":
-            try:
-                logger.info(
-                    "Async delegation completion — persisting delivery row for api_server session %s (no wake turn)",
-                    raw_sid,
-                )
-                await persist_delegation_delivery(adapter, text=synth_text, session_id=raw_sid, evt=evt)
-                return True
-            except Exception as e:
-                logger.warning("Async delegation delivery persist failed for session %s: %s", raw_sid, e)
-                return False
+            info = "Async delegation completion — persisting delivery row for api_server session %s (no wake turn)"
+            fail = "Async delegation delivery persist failed for session %s: %s"
+            deliver = lambda: persist_delegation_delivery(adapter, text=synth_text, session_id=raw_sid, evt=evt)  # noqa: E731
+        else:
+            info = "Watch pattern notification — waking api_server session %s via self-post"
+            fail = "Watch notification self-post wake failed for session %s: %s"
+            deliver = lambda: deliver_wake(adapter, text=synth_text, session_id=raw_sid)  # noqa: E731
         try:
-            logger.info("Watch pattern notification — waking api_server session %s via self-post", raw_sid)
-            await deliver_wake(adapter, text=synth_text, session_id=raw_sid)
+            logger.info(info, raw_sid)
+            await deliver()
             return True
         except Exception as e:
-            logger.warning("Watch notification self-post wake failed for session %s: %s", raw_sid, e)
+            logger.warning(fail, raw_sid, e)
             return False
 
     def _resolve_injection_adapter(self, platform_name: str):
@@ -972,10 +956,9 @@ class GatewayNotificationsMixin:
             # API-server sessions bind the RAW X-Hermes-Session-Id key (_bind_api_server_session), not a
             # structured ``agent:main:...`` key, so _build_process_event_source returned None above.
             raw_sid = str(evt.get("origin_session_id") or "").strip()
-            if not raw_sid:
-                _sk = str(evt.get("session_key") or "").strip()
-                if _sk and _parse_session_key(_sk) is None:
-                    raw_sid = _sk
+            _sk = str(evt.get("session_key") or "").strip()
+            if not raw_sid and _sk and _parse_session_key(_sk) is None:
+                raw_sid = _sk
             if raw_sid:
                 adapter = self.adapters.get(Platform.API_SERVER)
                 if adapter is not None and not adapter_supports_push(adapter):
@@ -1297,12 +1280,16 @@ class GatewayNotificationsMixin:
         finally:
             # Never strand watcher futures when formatting, delivery, or cancellation interrupts a batch:
             # False follows the existing watcher retry path; None remains the ordinary dedupe result.
-            for _text, _evt, future in entries:
-                if not future.done():
-                    future.set_result(delivered)
+            self._settle_batch_waiters(entries, delivered)
             # Do not remove a newer flush task that reused the same route key.
             if self._completion_notification_batch_tasks.get(key) is current_task:
                 self._completion_notification_batch_tasks.pop(key, None)
+
+    @staticmethod
+    def _settle_batch_waiters(entries, result) -> None:
+        for _text, _evt, future in entries:
+            if not future.done():
+                future.set_result(result)
 
     async def _cancel_process_completion_batch_tasks(self) -> None:
         """Settle pending completion batches before adapter teardown."""
@@ -1320,9 +1307,7 @@ class GatewayNotificationsMixin:
         # Defensive cleanup for an orphaned queue with no live flush task.
         batches = getattr(self, "_completion_notification_batches", {})
         for entries in batches.values():
-            for _text, _evt, future in entries:
-                if not future.done():
-                    future.set_result(False)
+            self._settle_batch_waiters(entries, False)
         batches.clear()
         getattr(self, "_completion_notification_batch_tasks", {}).clear()
         getattr(self, "_completion_notification_batch_flush_tasks", set()).clear()
@@ -1352,10 +1337,8 @@ class GatewayNotificationsMixin:
             task = asyncio.create_task(self._flush_process_completion_batch(key))
             self._completion_notification_batch_tasks[key] = task
             # Keep the flush alive under the gateway's normal lifecycle accounting.
-            self._background_tasks.add(task)
-            self._completion_notification_batch_flush_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-            task.add_done_callback(self._completion_notification_batch_flush_tasks.discard)
+            self._retain_background_task(task)
+            self._track_task_in(self._completion_notification_batch_flush_tasks, task)
         return await future
 
     def _enrich_async_delegation_routing(self, evt: dict) -> None:
@@ -1642,11 +1625,9 @@ class GatewayNotificationsMixin:
                         "via wait/log — skipping raw notification (#65379)", session_id,
                     )
                     break
-                should_notify = (
-                    notify_mode in {"concise", "all", "result"}
-                    or (notify_mode == "error" and session.exit_code not in {0, None})
-                )
-                if should_notify:
+                if notify_mode in {"concise", "all", "result"} or (
+                    notify_mode == "error" and session.exit_code not in {0, None}
+                ):
                     message_text = self._format_process_final_message(session_id, session, notify_mode)
                     await self._send_watcher_message(platform_name, chat_id, thread_id, message_text)
                 break
@@ -1655,9 +1636,9 @@ class GatewayNotificationsMixin:
                 # New output — deliver a status update (only in "all" mode; agent_notify watchers
                 # only care about completion).
                 new_output = self._redacted_output_tail(session, 500)
-                message_text = (
-                    f"[Background process {session_id} is still running~ New output:\n{new_output}]"
+                await self._send_watcher_message(
+                    platform_name, chat_id, thread_id,
+                    f"[Background process {session_id} is still running~ New output:\n{new_output}]",
                 )
-                await self._send_watcher_message(platform_name, chat_id, thread_id, message_text)
 
         logger.debug("Process watcher ended: %s", session_id)

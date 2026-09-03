@@ -18,7 +18,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from gateway.config import Platform
 from gateway.restart import (
@@ -26,9 +26,6 @@ from gateway.restart import (
 )
 from gateway.run_common import _UNSET
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
-
-if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
-    from gateway.run import GatewayRunner, TurnRunner  # noqa: F401
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -86,6 +83,16 @@ subprocess.Popen(
 def _send_failed(result: Any) -> bool:
     """True when an adapter ``send()`` result explicitly reports failure."""
     return result is not None and getattr(result, "success", True) is False
+
+
+def _send_error(result: Any) -> str:
+    """Error text of a failed ``send()`` result (adapters may omit it)."""
+    return getattr(result, "error", "send returned success=False")
+
+
+def _notice_target_key(platform_value: str, chat_id, thread_id) -> tuple:
+    """Dedup key for one notice destination: thread/topic platforms share a chat but route apart."""
+    return (platform_value, str(chat_id), str(thread_id) if thread_id else None)
 
 
 class GatewayShutdownMixin:
@@ -321,17 +328,14 @@ class GatewayShutdownMixin:
             from cron.scheduler import get_running_job_ids
             return len(get_running_job_ids())
 
-        def _dashboard_seen():
-            from gateway.scale_to_zero import dashboard_client_last_seen
-            return dashboard_client_last_seen()
-
         cron_count = _read_or_awake("cron work count", _cron_count, 1)
         api_count = _read_or_awake("api work count", lambda: self._api_server_hook("active_agent_work_count"), 1)
         # An attached dashboard/desktop/TUI client (heartbeat file mtime from the dashboard process) is
         # inbound activity too — folded into the inbound clock, not a conjunct, so disconnect gets the
         # same idle_timeout grace as a message and a lingering marker cannot pin the box.
         last_inbound = self._last_inbound_at
-        seen = _read_or_awake("dashboard heartbeat", _dashboard_seen, time.time())
+        from gateway.scale_to_zero import dashboard_client_last_seen
+        seen = _read_or_awake("dashboard heartbeat", dashboard_client_last_seen, time.time())
         if seen is not None and seen > last_inbound:
             last_inbound = seen
         return is_idle(
@@ -524,10 +528,9 @@ class GatewayShutdownMixin:
         info["pause_reason"] = reason or "auto-paused after repeated failures"
         # Push next_retry far enough out that a stale code path missing "paused" still never fires.
         info["next_retry"] = float("inf")
-        with suppress(Exception):
-            self._update_platform_runtime_status(
-                platform.value, platform_state="paused", error_code=None, error_message=info["pause_reason"],
-            )
+        self._update_platform_runtime_status(
+            platform.value, platform_state="paused", error_code=None, error_message=info["pause_reason"],
+        )
         logger.warning(
             "%s paused after %d consecutive failures (%s) — "
             "fix the underlying issue then run `/platform resume %s` "
@@ -544,10 +547,7 @@ class GatewayShutdownMixin:
         info.pop("pause_reason", None)
         info["attempts"] = 0
         info["next_retry"] = time.monotonic()  # retry on next watcher tick
-        with suppress(Exception):
-            self._update_platform_runtime_status(
-                platform.value, platform_state="retrying", error_code=None, error_message=None,
-            )
+        self._update_platform_runtime_status(platform.value, platform_state="retrying")
         logger.info("%s resumed — retrying on next watcher tick", platform.value)
         return True
 
@@ -687,7 +687,7 @@ class GatewayShutdownMixin:
                     continue
                 chat_id = str(target.get("chat_id"))
                 thread_id = target.get("thread_id")
-                dedup_key = (job_id, platform.value, chat_id, str(thread_id) if thread_id else None)
+                dedup_key = (job_id, *_notice_target_key(platform.value, chat_id, thread_id))
                 if dedup_key in notified:
                     continue
                 try:
@@ -695,8 +695,7 @@ class GatewayShutdownMixin:
                     result = await adapter.send(chat_id, msg, metadata=metadata)
                     if _send_failed(result):
                         logger.debug(
-                            "Cron interrupt notice to %s:%s failed: %s", platform.value, chat_id,
-                            getattr(result, "error", "send returned success=False"),
+                            "Cron interrupt notice to %s:%s failed: %s", platform.value, chat_id, _send_error(result),
                         )
                         continue
                     notified.add(dedup_key)
@@ -735,8 +734,8 @@ class GatewayShutdownMixin:
             result = await adapter.send(chat_id, msg, **send_kwargs)
             if _send_failed(result):
                 logger.debug(
-                    "Failed to send shutdown notification to %s%s:%s: %s",
-                    where, platform_str, chat_id, getattr(result, "error", "send returned success=False"),
+                    "Failed to send shutdown notification to %s%s:%s: %s", where, platform_str, chat_id,
+                    _send_error(result),
                 )
                 return False
             logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
@@ -762,9 +761,8 @@ class GatewayShutdownMixin:
         restart_key = None
         if restart_source is not None:
             with suppress(Exception):
-                restart_key = (
-                    restart_source.platform.value, str(restart_source.chat_id),
-                    str(restart_source.thread_id) if restart_source.thread_id else None,
+                restart_key = _notice_target_key(
+                    restart_source.platform.value, restart_source.chat_id, restart_source.thread_id
                 )
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in self._snapshot_running_agents():
@@ -772,9 +770,7 @@ class GatewayShutdownMixin:
             if target is None:
                 continue
             source, platform_str, chat_id, thread_id = target
-            # Dedupe only identical targets: thread/topic platforms share a parent chat yet route to
-            # distinct destinations via metadata.
-            dedup_key = (platform_str, chat_id, str(thread_id) if thread_id else None)
+            dedup_key = _notice_target_key(platform_str, chat_id, thread_id)
             if dedup_key in notified:
                 continue
             try:
@@ -830,7 +826,7 @@ class GatewayShutdownMixin:
                     platform.value,
                 )
                 continue
-            dedup_key = (platform.value, str(home.chat_id), str(home.thread_id) if home.thread_id else None)
+            dedup_key = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if dedup_key in notified:
                 continue
             try:
@@ -921,12 +917,10 @@ class GatewayShutdownMixin:
             await self._cleanup_agent_resources_off_loop(agent, context=context)
 
         self._track_deferred_agent_worker(future, agent)
-        task = asyncio.create_task(_cleanup_when_done())
         tasks = getattr(self, "_deferred_agent_cleanup_tasks", None)
         if tasks is None:
             tasks = self._deferred_agent_cleanup_tasks = set()
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        self._track_task_in(tasks, asyncio.create_task(_cleanup_when_done()))
 
     async def _finalize_session_off_loop(self, *, session_id: Any, platform: str, reason: str, **extra: Any) -> None:
         """Run hermes_cli.lifecycle.finalize_session off-loop, bounded; on timeout the worker is left alone."""
@@ -1213,8 +1207,7 @@ class GatewayShutdownMixin:
             "deferring stop() until they finish (cap=%.0fs) so in-flight "
             "turns are not amputated (#77184)", active, timeout,
         )
-        with suppress(Exception):
-            self._update_runtime_status("draining")
+        self._scale_to_zero_status("draining", "restart wait: status mark failed")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         last_status_at = 0.0
@@ -1233,8 +1226,7 @@ class GatewayShutdownMixin:
                     "(%d wedged and excluded; %.0fs remaining before force drain)",
                     self._awaitable_work_count(), self._wedged_agent_count(), deadline - now,
                 )
-                with suppress(Exception):
-                    self._update_runtime_status("draining")
+                self._scale_to_zero_status("draining", "restart wait: status mark failed")
                 last_status_at = now
             await asyncio.sleep(0.1)
         if self._active_work_count() > 0:
@@ -1299,6 +1291,15 @@ class GatewayShutdownMixin:
     # stop() phases. Invoked as ``GatewayRunner._stop_<phase>(self, ctx)`` so shutdown-path tests
     # can drive them from bare doubles that are not GatewayRunner instances.
     @staticmethod
+    def _quiet_step(label: str, fn: Callable[[], Any]) -> Any:
+        """Run one best-effort teardown step; a failure is debug-logged as ``"<label>: <exc>"``."""
+        try:
+            return fn()
+        except Exception as _e:
+            logger.debug("%s: %s", label, _e)
+            return None
+
+    @staticmethod
     def _stop_kill_tool_subprocesses(phase: str) -> list:
         """Kill tool subprocesses + terminal envs + browsers; returns cron job IDs marked interrupted.
 
@@ -1307,11 +1308,7 @@ class GatewayShutdownMixin:
         """
 
         def _step(label: str, fn: Callable[[], Any]) -> Any:
-            try:
-                return fn()
-            except Exception as _e:
-                logger.debug("%s (%s) error: %s", label, phase, _e)
-                return None
+            return GatewayShutdownMixin._quiet_step(f"{label} ({phase}) error", fn)
 
         def _kill_processes() -> None:
             from tools.process_registry import process_registry
@@ -1510,12 +1507,12 @@ class GatewayShutdownMixin:
         for platform, adapter in list(self.adapters.items()):
             await self._bounded_adapter_teardown(adapter, platform)
         # Disconnect secondary-profile adapters (multiplex mode).
-        for _prof, _amap in list(getattr(self, "_profile_adapters", {}).items()):
+        _profile_adapters = getattr(self, "_profile_adapters", {})
+        for _prof, _amap in list(_profile_adapters.items()):
             for platform, adapter in list(_amap.items()):
                 await self._bounded_adapter_teardown(adapter, platform, profile=_prof)
             _amap.clear()
-        if hasattr(self, "_profile_adapters"):
-            self._profile_adapters.clear()
+        _profile_adapters.clear()
         logger.info("Shutdown phase: all adapters disconnected at +%.2fs", ctx.elapsed())
 
     def _stop_release_runtime_state(self, ctx: "GatewayShutdownMixin._StopContext") -> None:
@@ -1561,11 +1558,11 @@ class GatewayShutdownMixin:
         logger.info("Shutdown phase: final-cleanup tool kill done at +%.2fs", ctx.elapsed())
         # Reap the process-global auxiliary-client cache: per-turn cleanup misses clients bound to
         # worker-thread loops that died with their executor (cron ticks) → httpx transports leak to EMFILE.
-        try:
+        def _reap_aux_clients() -> None:
             from agent.auxiliary_client import shutdown_cached_clients
             shutdown_cached_clients()
-        except Exception as _e:
-            logger.debug("shutdown_cached_clients error: %s", _e)
+
+        GatewayShutdownMixin._quiet_step("shutdown_cached_clients error", _reap_aux_clients)
 
     def _stop_quiesce_and_close_session_dbs(self, timeout: float, ctx: "GatewayShutdownMixin._StopContext") -> None:
         """Quiesce the executor, then close SessionDB handles only if no worker is still live."""
@@ -1591,13 +1588,7 @@ class GatewayShutdownMixin:
             )
             return
         logger.info("Shutdown phase: executor quiesced at +%.2fs", ctx.elapsed())
-
-        def _step(label: str, fn: Callable[[], Any]) -> None:
-            try:
-                fn()
-            except Exception as _e:
-                logger.debug("%s: %s", label, _e)
-
+        _step = GatewayShutdownMixin._quiet_step
         # Close SQLite session DBs so the WAL lock is released; otherwise --replace leaves the old
         # connection holding it until exit and the new gateway gets 'database is locked'.
         # ``_session_db`` is an AsyncSessionDB facade — unwrap; ``session_store`` holds ``_db``.

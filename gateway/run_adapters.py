@@ -188,12 +188,22 @@ class GatewayAdapterLifecycleMixin:
         tasks = getattr(self, "_fatal_handler_tasks", None)
         if tasks is None:
             tasks = self._fatal_handler_tasks = set()
-        task = asyncio.create_task(self._handle_adapter_fatal_error_detached(adapter))
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        task = self._track_task_in(tasks, asyncio.create_task(self._handle_adapter_fatal_error_detached(adapter)))
         # shield(): a plain `await task` would tunnel the caller's cancellation into the detached
         # task; with shield the caller sees CancelledError and the handler runs to completion.
         await asyncio.shield(task)
+
+    def _reconnect_queue_entry(
+        self, platform, adapter, platform_config, *, attempts: int, delay: float, queued: bool = True
+    ) -> dict:
+        """Build a ``_failed_platforms`` entry (startup failures and runtime fatals share the shape)."""
+        now = time.monotonic()
+        return {
+            "config": platform_config, "attempts": attempts, "next_retry": now + delay,
+            **({"queued_at": now} if queued else {}),
+            "credential_claim": self._adapter_credential_claim(platform, adapter),
+            "listener_claim": self._adapter_listener_claim(platform, adapter),
+        }
 
     def _queue_retryable_fatal_platform(self, adapter: BasePlatformAdapter) -> bool:
         """Queue a retryable fatal adapter for background reconnection (True when newly queued).
@@ -211,14 +221,9 @@ class GatewayAdapterLifecycleMixin:
             # permanent outage — nothing retries and the stranded check treats "queued" as safe.
             self._ensure_reconnect_watcher_running()
             return False
-        self._failed_platforms[adapter.platform] = {
-            "config": platform_config,
-            "attempts": 0,
-            "next_retry": time.monotonic(),
-            "queued_at": time.monotonic(),
-            "credential_claim": self._adapter_credential_claim(adapter.platform, adapter),
-            "listener_claim": self._adapter_listener_claim(adapter.platform, adapter),
-        }
+        self._failed_platforms[adapter.platform] = self._reconnect_queue_entry(
+            adapter.platform, adapter, platform_config, attempts=0, delay=0.0,
+        )
         logger.info("%s queued for background reconnection", adapter.platform.value)
         self._ensure_reconnect_watcher_running()
         return True
@@ -337,6 +342,13 @@ class GatewayAdapterLifecycleMixin:
         tasks = getattr(self, "_background_tasks", None)
         if not isinstance(tasks, set):
             tasks = self._background_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
+    @staticmethod
+    def _track_task_in(tasks: set, task: "asyncio.Task") -> "asyncio.Task":
+        """Register ``task`` in an arbitrary lifecycle set with self-removal on completion."""
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return task
@@ -640,6 +652,13 @@ class GatewayAdapterLifecycleMixin:
             retrying_since=retrying_since_iso,
         )
 
+    def _mark_platform_fatal(self, status_key: str, adapter) -> None:
+        """Record an adapter's fatal error code/message as ``fatal`` runtime status."""
+        self._update_platform_runtime_status(
+            status_key, platform_state="fatal", error_code=adapter.fatal_error_code,
+            error_message=adapter.fatal_error_message,
+        )
+
     def _bump_reconnect_backoff(
         self, platform, info: dict, attempt: int, error_code, error_message: str
     ) -> int:
@@ -687,10 +706,7 @@ class GatewayAdapterLifecycleMixin:
             if success:
                 await self._install_reconnected_adapter(platform, adapter)
             elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
-                self._update_platform_runtime_status(
-                    platform.value, platform_state="fatal", error_code=adapter.fatal_error_code,
-                    error_message=adapter.fatal_error_message,
-                )
+                self._mark_platform_fatal(platform.value, adapter)
                 logger.warning(
                     "Reconnect %s: non-retryable error (%s), removing from retry queue",
                     platform.value, adapter.fatal_error_message,
@@ -779,8 +795,7 @@ class GatewayAdapterLifecycleMixin:
             _done, unfinished = await asyncio.wait(tasks, timeout=timeout)
             if unfinished:
                 logger.warning(
-                    "Timed out waiting for %d secondary profile reconnect task(s) during shutdown",
-                    len(unfinished),
+                    "Timed out waiting for %d secondary profile reconnect task(s) during shutdown", len(unfinished),
                 )
         pending.clear()
 
@@ -880,18 +895,9 @@ class GatewayAdapterLifecycleMixin:
 
             # Register this profile's shell hooks / outbound webhooks: start() registers before any
             # profile scope exists, so a secondary profile's `hooks:` block would be silently inert.
-            try:
-                from hermes_cli.config import load_config as _load_profile_config
-                from agent.shell_hooks import register_from_config as _register_shell_hooks
-                from agent.outbound_webhooks import (register_from_config as _register_outbound_webhooks)
-
-                _profile_hooks_cfg = _load_profile_config()
-                _register_shell_hooks(_profile_hooks_cfg, accept_hooks=False)
-                _register_outbound_webhooks(_profile_hooks_cfg)
-            except Exception:
-                logger.warning(
-                    "shell-hook/webhook registration failed for profile '%s'", profile_name, exc_info=True,
-                )
+            self._register_config_hooks(
+                "shell-hook/webhook registration failed for profile '%s'", profile_name, level=logging.WARNING,
+            )
 
             profile_cfg = load_gateway_config()
             violation = _own_policy_open_startup_violation(profile_cfg)
@@ -929,31 +935,27 @@ class GatewayAdapterLifecycleMixin:
         owner = claimed.get(claim) if claim is not None else None
         if owner is None:
             return False
+        pv = platform.value
         if kind == "credential":
             message = (
-                f"Profile '{owner}' and '{profile_name}' both configure "
-                f"{platform.value} with the same credential. Give each "
-                f"profile its own {platform.value} credential."
+                f"Profile '{owner}' and '{profile_name}' both configure {pv} with the same credential. "
+                f"Give each profile its own {pv} credential."
             )
             logger.error(
-                "Profile '%s' and '%s' both configure %s with the same "
-                "credential — refusing to start the duplicate (one "
-                "credential cannot be consumed twice). Give each profile "
-                "its own %s credential.", owner, profile_name, platform.value, platform.value,
+                "Profile '%s' and '%s' both configure %s with the same credential — refusing to start the "
+                "duplicate (one credential cannot be consumed twice). Give each profile its own %s credential.",
+                owner, profile_name, pv, pv,
             )
         else:
             bind, port = claim[-2:]
             message = (
-                f"Profile '{owner}' and '{profile_name}' both configure "
-                f"{platform.value} sidecars on the same listener. Configure "
-                f"a distinct listener for profile '{profile_name}'."
+                f"Profile '{owner}' and '{profile_name}' both configure {pv} sidecars on the same listener. "
+                f"Configure a distinct listener for profile '{profile_name}'."
             )
             logger.error(
-                "Profile '%s' and '%s' both configure %s sidecars on "
-                "%s:%s — refusing to start the duplicate listener. "
-                "Set platforms.%s.extra.sidecar_port to a distinct port "
-                "for profile '%s'.",
-                owner, profile_name, platform.value, bind, port, platform.value, profile_name,
+                "Profile '%s' and '%s' both configure %s sidecars on %s:%s — refusing to start the duplicate "
+                "listener. Set platforms.%s.extra.sidecar_port to a distinct port for profile '%s'.",
+                owner, profile_name, pv, bind, port, pv, profile_name,
             )
         self._update_platform_runtime_status(
             f"{profile_name}:{platform.value}", platform_state="fatal",
@@ -1204,10 +1206,7 @@ class GatewayAdapterLifecycleMixin:
                 "gateway (%s) — parked, not retried. %s", profile_name, platform.value,
                 adapter.fatal_error_code, adapter.fatal_error_message or "",
             )
-            self._update_platform_runtime_status(
-                f"{profile_name}:{platform.value}", platform_state="fatal",
-                error_code=adapter.fatal_error_code, error_message=adapter.fatal_error_message,
-            )
+            self._mark_platform_fatal(f"{profile_name}:{platform.value}", adapter)
             return
 
         def _handoff() -> None:
