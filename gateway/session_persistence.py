@@ -475,35 +475,31 @@ class SessionPersistenceMixin:
         self, session_key: str, *, entry_data: Optional[Dict[str, Any]] = None,
         lock_held: bool = False) -> None:
         """Persist ONE routing entry via UPSERT — the per-turn fast path (a full rewrite fsyncs a
-        multi-MB sessions.json, ~50ms at ~1100 keys). The key -> session_id mapping never changes
-        here: structural transitions use the full rewrite, which also refreshes the sessions.json
-        mirror (it may lag in metadata only; state.db stays primary). The entry is serialized under
-        ``_lock`` with a revision from the shared routing generation counter; under ``_save_lock``
-        the upsert is skipped if a full snapshot or a newer fast save of this key already persisted
-        (the reverse case lives in ``_persist_routing_data``). No DB or a failed upsert falls back
-        to the full rewrite so DB-less installs stay durable. ``entry_data`` persists a candidate
-        BEFORE it is published to the live entry (failure-atomic transitions); the fallback carries
-        the same candidate."""
-        def _capture() -> Optional[tuple[str, int, Optional[Dict[str, Any]]]]:
-            entry = self._entries.get(session_key)
-            if entry is None:
-                return None
-            serialized_entry = dict(entry_data) if entry_data is not None else entry.to_dict()
-            entry_json = json.dumps(serialized_entry)
-            revision = self._next_routing_generation_locked()
-            # The O(n) full snapshot is deferred to the fallback branch.
-            return entry_json, revision, serialized_entry if entry_data is not None else None
-
+        multi-MB sessions.json). The key -> session_id mapping never changes here: structural
+        transitions use the full rewrite (which also refreshes the sessions.json mirror; it may lag
+        in metadata only). The revision comes from the shared routing generation counter; under
+        ``_save_lock`` the upsert is skipped if a full snapshot or a newer fast save of this key
+        already persisted (the reverse case lives in ``_persist_routing_data``). No DB or a failed
+        upsert falls back to the full rewrite. ``entry_data`` persists a candidate BEFORE it is
+        published to the live entry (failure-atomic transitions); the fallback carries it too."""
         def _locked(fn):
             if lock_held:
                 return fn()
             with self._lock:
                 return fn()
 
+        def _capture():
+            if session_key not in self._entries:
+                return None
+            entry = self._entries[session_key]
+            serialized = dict(entry_data) if entry_data is not None else entry.to_dict()
+            # The O(n) full snapshot is deferred to the fallback branch.
+            return json.dumps(serialized), self._next_routing_generation_locked()
+
         captured = _locked(_capture)
         if captured is None:
             return
-        entry_json, revision, candidate_entry = captured
+        entry_json, revision = captured
         saver = self._routing_db_method("save_gateway_routing_entry")
         if saver is not None:
             try:
@@ -521,10 +517,10 @@ class SessionPersistenceMixin:
                 logger.warning(
                     "gateway.session: single-entry routing save failed for %r (%s); falling back "
                     "to full index rewrite", session_key, exc)
-        if candidate_entry is not None:
+        if entry_data is not None:
             # Full-snapshot fallback carrying the candidate transition.
             fallback_data = _locked(self._entries_as_dicts)
-            fallback_data[session_key] = candidate_entry
+            fallback_data[session_key] = dict(entry_data)
             self._persist_routing_data(fallback_data, revision)
         else:
             self._save_entries()
