@@ -217,13 +217,11 @@ class GatewayStreamConsumer(
     def _clear_turn_final_flags(self) -> None:
         """Reset every turn-final delivery flag to "nothing delivered yet".
 
-        ``_delivered_final_text``: exact cleaned payload of the turn-final delivery;
-        the gateway compares it to the completed final_response before trusting the
-        flags (a successful finalize edit may carry only a stale preview); None =
-        legacy trust.  ``_turn_split_delivery``: answer delivered across multiple
-        sealed messages — payload-less split delivery must NOT inherit legacy trust.
-        ``_delivery_ambiguous``: a full-final send timed out in a way that MAY have
-        reached the platform — the only payload-less case that keeps legacy trust.
+        ``_delivered_final_text`` is the cleaned turn-final payload the gateway compares
+        to the completed final_response before trusting the flags (a successful
+        finalize edit may carry a stale preview); None = legacy trust.  A payload-less
+        ``_turn_split_delivery`` must NOT inherit legacy trust; ``_delivery_ambiguous``
+        (a full-final send timed out but MAY have landed) is the only case that does.
         """
         self._final_response_sent = False
         self._final_content_delivered = False  # content landed even if the cosmetic edit failed
@@ -238,12 +236,12 @@ class GatewayStreamConsumer(
         primary identity), else the legacy attribute; both on the CLASS (MagicMock-safe).
         """
         probe = getattr(type(self.adapter), "stream_is_message_for_chat", None)
-        if callable(probe):
-            try:
-                return probe(self.adapter, str(self.chat_id)) is True
-            except Exception:
-                return False
-        return getattr(self.adapter, "draft_stream_is_message", False) is True
+        if not callable(probe):
+            return getattr(self.adapter, "draft_stream_is_message", False) is True
+        try:
+            return probe(self.adapter, str(self.chat_id)) is True
+        except Exception:
+            return False
 
     @property
     def accepts_tool_progress(self) -> bool:
@@ -289,12 +287,11 @@ class GatewayStreamConsumer(
         if self._before_finalize_notified:
             return
         self._before_finalize_notified = True
-        if self._on_before_finalize is None:
-            return
-        with contextlib.suppress(Exception):
-            result = self._on_before_finalize()
-            if inspect.isawaitable(result):
-                await result
+        if self._on_before_finalize is not None:
+            with contextlib.suppress(Exception):
+                result = self._on_before_finalize()
+                if inspect.isawaitable(result):
+                    await result
 
     def _append_accumulated(self, text: str) -> None:
         """Append to the live buffer and the split-stable stream ledger."""
@@ -313,11 +310,10 @@ class GatewayStreamConsumer(
         last ack may be an older cursor-suffixed preview, which must not suppress the
         corrective send.
         """
-        self._mark_final_delivered()
         acked = self._last_sent_text or self._accumulated
         if self.cfg.cursor and acked.endswith(self.cfg.cursor):
             acked = acked[: -len(self.cfg.cursor)]
-        self._record_turn_final_payload(acked)
+        self._mark_final_delivered(record=acked)
 
     def _mark_final_delivered(self, record: Optional[str] = None) -> None:
         """Set both turn-final flags; ``record`` also records the delivered payload."""
@@ -337,10 +333,9 @@ class GatewayStreamConsumer(
         ``_stream_ledger`` is recorded instead — else the gateway sees a mismatch and
         re-sends an answer the user already received.
         """
-        source = text or ""
         if self._turn_split_delivery and self._stream_ledger:
-            source = self._stream_ledger
-        self._delivered_final_text = self._display_payload(source)
+            text = self._stream_ledger
+        self._delivered_final_text = self._display_payload(text)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
         """Tri-state reconcile of the recorded turn-final payload against ``final_text``.
@@ -353,33 +348,29 @@ class GatewayStreamConsumer(
         target = self._display_payload(final_text)
         if not target:
             return None
-        if self._delivered_final_text is None:
-            if self._turn_split_delivery:
-                return False
-            # No recorded payload: judge against the FINAL content, not the flag — a
-            # consumer whose visible text lacks the completed response has
-            # demonstrably NOT delivered it.  ``_already_sent`` gates the match:
-            # draft frames set ``_last_sent_text`` but deliberately not ``_already_sent``.
-            if self._already_sent and self.has_delivered_text(final_text):
-                return True
-            # Only a timed-out full-final send that MAY have landed keeps legacy trust.
-            return None if self._delivery_ambiguous else False
-        if self._delivered_final_text.strip() == target:
+        if self._delivered_final_text is not None:
+            # A segment break / commentary may have delivered it under another record.
+            return (
+                self._delivered_final_text.strip() == target or self.has_delivered_text(final_text)
+            )
+        if self._turn_split_delivery:
+            return False
+        # No recorded payload: judge against the FINAL content, not the flag — a
+        # consumer whose visible text lacks the completed response has demonstrably
+        # NOT delivered it.  ``_already_sent`` gates the match: draft frames set
+        # ``_last_sent_text`` but deliberately not ``_already_sent``.
+        if self._already_sent and self.has_delivered_text(final_text):
             return True
-        # A segment break / commentary may have delivered it under another record.
-        return bool(self.has_delivered_text(final_text))
+        # Only a timed-out full-final send that MAY have landed keeps legacy trust.
+        return None if self._delivery_ambiguous else False
 
     def has_delivered_text(self, text: str) -> bool:
         """Return True if *text* was already delivered as visible chat content."""
         target = self._clean_for_display(text or "").strip()
-        if not target:
-            return False
-        if self._visible_prefix().strip() == target:
-            return True
-        return any(
-            sent.strip() == target
-            for sent in (*self._delivered_commentary_texts, *self._delivered_segment_texts)
+        seen = (
+            self._visible_prefix(), *self._delivered_commentary_texts, *self._delivered_segment_texts,
         )
+        return bool(target) and any(sent.strip() == target for sent in seen)
 
     def on_segment_break(self) -> None:
         """Finalize the current stream segment and start a fresh message."""

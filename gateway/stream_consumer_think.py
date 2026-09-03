@@ -2,11 +2,14 @@
 
 Some models emit inline <think>...</think> blocks in content.  The agent strips
 them from the final response, but intermediate edits go out before that, so this
-mirrors the CLI's _stream_delta state machine."""
+mirrors the CLI's _stream_delta state machine; tag primitives are shared with
+``agent/think_scrubber.py`` so the progressive display matches the post-stream scrubber."""
 
 from __future__ import annotations
 
 import logging
+
+from agent.think_scrubber import StreamingThinkScrubber
 
 logger = logging.getLogger("gateway.stream_consumer")
 
@@ -66,11 +69,7 @@ class StreamThinkFilterMixin:
             # Case-insensitive: models emit <Think>, <THINKING>, …
             lower_buf = buf.lower()
             if self._in_think_block:
-                best_idx, best_len = -1, 0
-                for tag in self._CLOSE_THINK_TAGS:
-                    idx = lower_buf.find(tag.lower())
-                    if idx != -1 and (best_idx == -1 or idx < best_idx):
-                        best_idx, best_len = idx, len(tag)
+                best_idx, best_len = StreamingThinkScrubber._find_first_tag(buf, self._CLOSE_THINK_TAGS)
                 if best_len:
                     self._in_think_block = False
                     buf = buf[best_idx + best_len:]
@@ -87,11 +86,7 @@ class StreamThinkFilterMixin:
                     buf = buf[best_idx + best_len:]
                 else:
                     # Hold back a partial open tag at the tail.
-                    held_back = max(
-                        (i for tag in self._OPEN_THINK_TAGS for i in range(1, len(tag))
-                         if lower_buf.endswith(tag.lower()[:i])),
-                        default=0,
-                    )
+                    held_back = StreamingThinkScrubber._max_partial_suffix(buf, self._OPEN_THINK_TAGS)
                     if held_back:
                         self._append_accumulated(buf[:-held_back])
                         self._think_buffer = buf[-held_back:]
@@ -101,34 +96,10 @@ class StreamThinkFilterMixin:
                         self._append_accumulated(self._strip_orphan_close_tags(buf))
                     return
 
-    @classmethod
-    def _strip_orphan_close_tags(cls, text: str) -> str:
-        """Remove close tags (plus trailing whitespace) that have no matching open.
-
-        Mirrors ``agent/think_scrubber.py::StreamingThinkScrubber`` so the
-        progressive display matches the post-stream scrubber.
-        """
-        if "</" not in text:
-            return text
-        text_lower = text.lower()
-        out: list[str] = []
-        i = 0
-        while i < len(text):
-            matched = False
-            if text_lower[i:i + 2] == "</":
-                for tag in cls._CLOSE_THINK_TAGS:
-                    tag_lower = tag.lower()
-                    if text_lower.startswith(tag_lower, i):
-                        j = i + len(tag_lower)
-                        while j < len(text) and text[j] in " \t\n\r":
-                            j += 1
-                        i = j
-                        matched = True
-                        break
-            if not matched:
-                out.append(text[i])
-                i += 1
-        return "".join(out)
+    @staticmethod
+    def _strip_orphan_close_tags(text: str) -> str:
+        """Remove close tags (plus trailing whitespace) that have no matching open."""
+        return StreamingThinkScrubber._strip_orphan_close_tags(text)
 
     def _flush_think_buffer(self) -> None:
         """On stream end, flush text held back waiting for a possible open tag."""

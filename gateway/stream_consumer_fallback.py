@@ -173,18 +173,16 @@ class StreamFallbackMixin:
             self._already_sent = True
             self._fallback_prefix = ""
             self._fallback_preserve_partial_messages = False
-            if delivery in {"ambiguous", "preview"}:
-                # Timeout: Telegram may have accepted the send.  Flood rejection: the
-                # complete ACKed preview is authoritative.  Keep dup suppression.
-                self._final_content_delivered = True
-                if delivery == "preview":
-                    self._record_turn_final_payload(final_text)
-                else:
-                    self._delivery_ambiguous = True
+            # "ambiguous" (timeout: Telegram may have accepted) and "preview" (flood:
+            # the complete ACKed preview is authoritative) keep dup suppression;
+            # "failed" lets the gateway perform its normal final send.
+            self._final_content_delivered = delivery in {"ambiguous", "preview"}
+            if delivery == "preview":
+                self._record_turn_final_payload(final_text)
+            elif delivery == "ambiguous":
+                self._delivery_ambiguous = True
             else:
-                # Confirmed failure: gateway performs its normal final send.
                 self._final_response_sent = False
-                self._final_content_delivered = False
             return None
         # The prefix may be from a *previous* segment (before a tool boundary),
         # wrongly reading as "already shown" — send final_text as-is.
