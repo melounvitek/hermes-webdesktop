@@ -142,24 +142,26 @@ class _ManagedAttempt:
         """Re-raise the provider's own error, or recover a completed provider result.
         Must be called from the ``except`` handling ``exc`` (bare ``raise``)."""
         callback_error = self.raw_response.get("error")
-        if (callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)):
+        if callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error):
             raise callback_error
-        if (not isinstance(exc, Exception) or callback_error is not None or "value" not in self.raw_response):
+        if not isinstance(exc, Exception) or callback_error is not None or "value" not in self.raw_response:
             raise
         logger.warning(
             "NeMo Relay LLM post-processing failed after provider success; returning the provider response",
             exc_info=True,
         )
-        if not defer_logical_completion:
-            _complete_logical(self.logical, outcome="success")
+        self._complete(defer_logical_completion)
         return self.raw_response["value"]
 
     def result(self, managed: Any, defer_logical_completion: bool) -> Any:
-        if not defer_logical_completion:
-            _complete_logical(self.logical, outcome="success")
+        self._complete(defer_logical_completion)
         if "value" in self.raw_response and _json_equal(managed, self.raw_response["json"]):
             return self.raw_response["value"]
         return _namespace(managed)
+
+    def _complete(self, defer_logical_completion: bool) -> None:
+        if not defer_logical_completion:
+            _complete_logical(self.logical, outcome="success")
 
 
 def execute(
@@ -242,12 +244,10 @@ def stream_current(
     pipeline: a genuine first chunk is buffered, but provider latency and pre-first-yield
     errors may surface before this returns."""
     session_id = _current_session_id()
-    if session_id is None:
-        return stream_factory(request)
-    if _has_running_event_loop():
-        # We are on the Relay session's loop (inside a managed callback): a nested
-        # ManagedLlmStream would be iterated synchronously on that loop, which asyncio
-        # forbids. The outer managed stream already tracks this attempt.
+    # On the Relay session's loop (inside a managed callback) a nested ManagedLlmStream would
+    # be iterated synchronously on that loop, which asyncio forbids; the outer managed stream
+    # already tracks this attempt.
+    if session_id is None or _has_running_event_loop():
         return stream_factory(request)
     managed = stream(
         request, stream_factory, session_id=session_id, name=name, model_name=model_name,
@@ -289,7 +289,6 @@ class ManagedLlmStream(Iterator[Any]):
     _callback_error: BaseException | None = None
     _logical: _LogicalCall | None = None
     _logical_response_model_name: str | None = None
-    _relay_observes_chunks = False
     _provider_completed = False
 
     def __init__(
@@ -400,7 +399,6 @@ class ManagedLlmStream(Iterator[Any]):
             self._release_runtime_lease()
             raise
         self._loop = loop
-        self._relay_observes_chunks = True
         try:
             self._stream = loop.run_until_complete(
                 attempt.run_managed(
@@ -482,7 +480,7 @@ class ManagedLlmStream(Iterator[Any]):
             raise StopIteration from None
         except BaseException as exc:
             callback_error = self._callback_error
-            if (callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)):
+            if callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error):
                 self._close(logical_outcome="failed")
                 raise callback_error
             if self._recoverable_relay_failure(exc):
@@ -490,8 +488,6 @@ class ManagedLlmStream(Iterator[Any]):
                 return next(self)
             self._close(logical_outcome="cancelled" if _is_cancellation(exc) else "failed")
             raise
-        if not self._relay_observes_chunks and self._on_chunk is not None:
-            self._on_chunk(chunk)
         for index, (encoded, raw) in enumerate(self._raw_chunks):
             if _json_equal(chunk, encoded):
                 if index > 0:
