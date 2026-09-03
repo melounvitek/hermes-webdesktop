@@ -28,10 +28,7 @@ from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH,
-    get_model_context_length,
-    estimate_messages_tokens_rough,
-    estimate_tokens_rough,
+    MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough
 )
 from agent.redact import redact_sensitive_text
 from agent.turn_context import drop_stale_api_content
