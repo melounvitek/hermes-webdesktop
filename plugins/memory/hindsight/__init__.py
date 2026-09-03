@@ -32,18 +32,17 @@ from hermes_constants import get_hermes_home
 from hermes_time import now as _hermes_now
 from tools.registry import tool_error
 
-# Re-exported (tests patch/import these via this module).
-from .embedded import (  # noqa: F401
-    _PORT_HEALTH_GRACE_ENV, _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
+from .embedded import (
+    _RETRIABLE_CONNECTION_MARKERS, _build_embedded_profile_env,
     _check_local_runtime, _embedded_llm_api_key, _embedded_profile_env_path,
     _export_port_health_grace_timeout, _load_simple_env, _local_runtime_hint, _materialize_embedded_profile_env,
 )
-from .settings import (  # noqa: F401
+from .settings import (
     _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_RETAIN_SOURCE,
     _DEFAULT_TIMEOUT, _HINDSIGHT_GLYPH, _MIN_CLIENT_VERSION, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
     _PROVIDER_DEFAULT_MODELS, _VALID_BUDGETS, _daemon_llm_provider,
     _normalize_observation_scopes, _normalize_retain_tags, _parse_int_setting,
-    _resolve_bank_id_template, _sanitize_bank_segment,
+    _resolve_bank_id_template,
 )
 
 logger = logging.getLogger(__name__)

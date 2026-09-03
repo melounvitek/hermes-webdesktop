@@ -19,9 +19,7 @@ from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider, is_trivial_prompt
 from plugins.memory.honcho.client import spawn_context_thread
 from plugins.memory.honcho.dialectic import DialecticMixin
-from plugins.memory.honcho.tool_schemas import (  # noqa: F401 — re-exported
-    ALL_TOOL_SCHEMAS, CONCLUDE_SCHEMA, CONTEXT_SCHEMA, PROFILE_SCHEMA, REASONING_SCHEMA, SEARCH_SCHEMA,
-)
+from plugins.memory.honcho.tool_schemas import ALL_TOOL_SCHEMAS
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)

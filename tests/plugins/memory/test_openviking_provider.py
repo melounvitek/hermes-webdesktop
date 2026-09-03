@@ -243,7 +243,7 @@ def test_link_ovcli_profile_removes_stale_inline_config(tmp_path):
     }
     ovcli_path = tmp_path / "ovcli.conf.VPS_ROOT"
 
-    openviking_module._link_ovcli_profile(
+    openviking_module._setup._link_ovcli_profile(
         config=config,
         provider_config=provider_config,
         env_path=env_path,
@@ -347,7 +347,7 @@ def test_local_setup_recommends_user_api_key_before_unauthenticated_mode(monkeyp
             return "user-key"
         raise AssertionError(f"Unexpected prompt: {label}")
 
-    values = openviking_module._prompt_manual_connection_values(
+    values = openviking_module._setup._prompt_manual_connection_values(
         prompt,
         select,
         -1,
@@ -611,7 +611,7 @@ def test_handle_unreachable_endpoint_waits_long_enough_after_autostart(monkeypat
         lambda endpoint, *, timeout_seconds=0: wait_calls.append((endpoint, timeout_seconds)) or True,
     )
 
-    result = openviking_module._handle_unreachable_endpoint(
+    result = openviking_module._setup._handle_unreachable_endpoint(
         "http://127.0.0.1:1934",
         "OpenViking server is not reachable.",
         lambda *args, **kwargs: 0,

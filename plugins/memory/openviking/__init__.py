@@ -1037,13 +1037,6 @@ def _classify_runtime_openviking_health(client: _VikingClient, endpoint: str) ->
 
 
 from . import _setup  # noqa: E402  (needs the helpers above at call time)
-from ._setup import (  # noqa: E402,F401  re-exported: tests and callers patch these here
-    _SETUP_CANCELLED,
-    _handle_unreachable_endpoint,
-    _link_ovcli_profile,
-    _prompt_manual_connection_values,
-    _save_hermes_only_config,
-)
 
 
 # -- MemoryProvider implementation ------------------------------------------

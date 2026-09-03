@@ -27,10 +27,8 @@ from agent.secret_scope import get_secret
 from hermes_cli.profiles import _get_default_hermes_home
 from hermes_constants import get_hermes_home
 
-# Cache/slot cluster lives in client_cache.py; re-exported because tests and reset
-# bookkeeping reach these names through this module.
-from plugins.memory.honcho.client_cache import (  # noqa: F401
-    _DEFAULT_HTTP_TIMEOUT, _client_cache_key, _client_slots, _client_slots_lock, _credential_fingerprint,
+from plugins.memory.honcho.client_cache import (
+    _DEFAULT_HTTP_TIMEOUT, _client_cache_key, _client_slots, _client_slots_lock,
     _honcho_json_timeout_memo, _refresh_oauth, _slot_for,
 )
 

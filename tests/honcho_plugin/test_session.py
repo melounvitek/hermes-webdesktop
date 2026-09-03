@@ -131,7 +131,7 @@ class TestPeerLookupHelpers:
 class TestConcludeToolDispatch:
     def test_conclude_schema_has_no_anyof(self):
         """anyOf/oneOf/allOf breaks Anthropic and Fireworks APIs — schema must be plain object."""
-        from plugins.memory.honcho import CONCLUDE_SCHEMA
+        from plugins.memory.honcho.tool_schemas import CONCLUDE_SCHEMA
         params = CONCLUDE_SCHEMA["parameters"]
         assert params["type"] == "object"
         assert "conclusion" in params["properties"]

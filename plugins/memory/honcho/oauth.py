@@ -43,8 +43,6 @@ def redact_tokens(text: str) -> str:
     """Replace any embedded token values with their prefix plus a placeholder."""
     return _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}[redacted]", text)
 
-_redact_tokens = redact_tokens  # backward-compat alias for older importers
-
 class OAuthRefreshError(Exception):
     """Token endpoint rejected the refresh. ``permanent`` means re-login is required."""
 
@@ -231,7 +229,7 @@ def _exchange_refresh_token(
     if status >= 400:
         error, description = str(body.get("error") or ""), str(body.get("error_description") or "")
         detail = " — ".join(p for p in (error, description) if p) or "no error body"
-        message = _redact_tokens(f"token endpoint returned HTTP {status}: {detail}")
+        message = redact_tokens(f"token endpoint returned HTTP {status}: {detail}")
         raise OAuthRefreshError(message, error=error, permanent=error in _PERMANENT_OAUTH_ERRORS)
     return OAuthCredential.from_token_response(
         body, now=now, client_id=cred.client_id, token_endpoint=cred.token_endpoint,
@@ -251,7 +249,7 @@ def _exchange_with_retry(cred: OAuthCredential, *, now: float) -> OAuthCredentia
     remaining = deadline - time.monotonic() - _REFRESH_RETRY_DELAY_SECONDS
     if remaining <= 0:
         raise first
-    logger.warning("Honcho OAuth token exchange failed, retrying once: %s", _redact_tokens(str(first)))
+    logger.warning("Honcho OAuth token exchange failed, retrying once: %s", redact_tokens(str(first)))
     time.sleep(_REFRESH_RETRY_DELAY_SECONDS)
     return _exchange_refresh_token(cred, now=now, timeout=min(remaining, _REFRESH_TIMEOUT_SECONDS))
 
@@ -269,7 +267,7 @@ def _rotate_and_persist(
                          "run 'hermes honcho setup' to re-authenticate", host, exc)
             return None
         _refresh_failure_at[key] = time.monotonic()
-        logger.warning("Honcho OAuth %s failed for host %s: %s", op_label, host, _redact_tokens(str(exc)))
+        logger.warning("Honcho OAuth %s failed for host %s: %s", op_label, host, redact_tokens(str(exc)))
         return None
     _persist_credential(path, host, rotated)
     return rotated
