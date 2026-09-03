@@ -106,7 +106,6 @@ def _sample_skills(names: list[str]) -> list[str]:
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
     from hermes_cli.kanban_specify import _extract_json_blob as _extract
-
     return _extract(raw, _FENCE_RE)
 
 
@@ -121,7 +120,6 @@ def describe_profile(
     canon = profiles_mod.normalize_profile_name(profile_name)
     if not profiles_mod.profile_exists(canon):  # handles the virtual "default" name
         return DescribeOutcome(canon, False, "profile not found")
-
     try:
         if canon == "default":
             from hermes_constants import get_hermes_home  # type: ignore
@@ -130,32 +128,26 @@ def describe_profile(
             profile_dir = profiles_mod.get_profile_dir(canon)
     except Exception as exc:
         return DescribeOutcome(canon, False, f"cannot resolve profile dir: {exc}")
-
     existing = profiles_mod.read_profile_meta(profile_dir)
     if existing.get("description") and not existing.get("description_auto") and not overwrite:
         return DescribeOutcome(
             canon, False, "profile already has a user-authored description (use --overwrite to replace)"
         )
-
     all_skills = _collect_skills(profile_dir)
     skill_list = "\n".join(f"  - {n}" for n in _sample_skills(all_skills)) or "  (no skills installed)"
-
     try:
         model, provider = profiles_mod._read_config_model(profile_dir)
     except Exception:
         model, provider = None, None
-
     try:
         from agent.auxiliary_client import call_llm  # type: ignore
     except Exception as exc:
         logger.debug("describe: auxiliary client import failed: %s", exc)
         return DescribeOutcome(canon, False, "auxiliary client unavailable")
-
     user_msg = _USER_TEMPLATE.format(
         name=canon, model=(model or "(unset)"), provider=(provider or "(unset)"), skill_count=len(all_skills),
         skill_cap=MAX_SKILLS_FOR_PROMPT, skill_list=skill_list,
     )
-
     try:
         # call_llm applies auxiliary.profile_describer.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries); the direct-create path dropped extra_body.
@@ -171,12 +163,10 @@ def describe_profile(
     except Exception as exc:
         logger.info("describe: API call failed for %s (%s)", canon, exc)
         return DescribeOutcome(canon, False, f"LLM error: {type(exc).__name__}")
-
     try:
         raw = resp.choices[0].message.content or ""
     except Exception:
         raw = ""
-
     parsed = _extract_json_blob(raw)
     if parsed is None:
         # Fall back: raw text trimmed to one paragraph.
@@ -191,14 +181,12 @@ def describe_profile(
                 canon, False, "LLM response missing 'description' field"
             )
         description = val.strip()[:280]
-
     try:
         profiles_mod.write_profile_meta(
             profile_dir, description=description, description_auto=True
         )
     except Exception as exc:
         return DescribeOutcome(canon, False, f"failed to write profile.yaml: {exc}")
-
     return DescribeOutcome(canon, True, "described", description=description)
 
 

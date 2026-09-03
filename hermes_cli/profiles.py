@@ -1,5 +1,6 @@
 """Profile management for multiple isolated Hermes instances."""
 
+import contextlib
 import json
 import logging
 import os
@@ -126,9 +127,7 @@ _HERMES_SUBCOMMANDS = frozenset({
 })
 
 
-# ---------------------------------------------------------------------------
 # Path helpers
-# ---------------------------------------------------------------------------
 
 def _get_profiles_root() -> Path:
     """Named-profiles root, anchored to the hermes root (NOT the current HERMES_HOME, which
@@ -170,9 +169,7 @@ def _missing_profile_error(canon: str) -> FileNotFoundError:
     )
 
 
-# ---------------------------------------------------------------------------
 # Validation
-# ---------------------------------------------------------------------------
 
 def normalize_profile_name(name: str) -> str:
     """Canonical profile id used on disk and in ``-p`` argv: lowercase, ``default`` matched
@@ -221,6 +218,15 @@ def _canon_valid(name: str) -> str:
     return canon
 
 
+def _existing_profile_dir(name: str) -> Tuple[str, Path]:
+    """``(canon, profile_dir)`` for an existing profile; FileNotFoundError otherwise."""
+    canon = _canon_valid(name)
+    profile_dir = get_profile_dir(canon)
+    if not profile_dir.is_dir():
+        raise FileNotFoundError(f"Profile '{canon}' does not exist.")
+    return canon, profile_dir
+
+
 def get_profile_dir(name: str) -> Path:
     """Resolve a profile name to its HERMES_HOME directory."""
     canon = normalize_profile_name(name)
@@ -248,7 +254,6 @@ def profile_matches_home(name: str, home: "Path | None" = None) -> bool:
         target = get_profile_dir(name)
         if home is None:
             from hermes_constants import get_hermes_home
-
             home = get_hermes_home()
         return (
             Path(target).expanduser().resolve(strict=False) == Path(home).expanduser().resolve(strict=False)
@@ -275,16 +280,12 @@ def list_profile_names() -> List[str]:
     """Cheap name-only listing (``default`` + profile dirs). Unlike :func:`list_profiles` this
     reads NO per-profile config — safe for hot paths (cron target listings, create validation)."""
     names = ["default"]
-    try:
+    with contextlib.suppress(OSError):
         names.extend(entry.name for entry in _iter_named_profile_dirs(live_only=False))
-    except OSError:
-        pass
     return names
 
 
-# ---------------------------------------------------------------------------
 # Alias / wrapper script management
-# ---------------------------------------------------------------------------
 
 def check_alias_collision(name: str) -> Optional[str]:
     """Return a human-readable collision message, or None if the name is safe."""
@@ -297,7 +298,6 @@ def check_alias_collision(name: str) -> Optional[str]:
         return f"'{canon}' is a reserved name"
     if canon in _HERMES_SUBCOMMANDS:
         return f"'{canon}' conflicts with a hermes subcommand"
-
     try:
         result = subprocess.run(
             ["where" if sys.platform == "win32" else "which", canon],
@@ -311,7 +311,6 @@ def check_alias_collision(name: str) -> Optional[str]:
             return f"'{canon}' conflicts with an existing command ({existing_path})"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-
     return None  # safe
 
 
@@ -331,7 +330,6 @@ def create_wrapper_script(name: str, target: Optional[str] = None) -> Optional[P
     except OSError as e:
         print(f"⚠ Could not create {wrapper_dir}: {e}")
         return None
-
     wrapper_path = _wrapper_path(canon)
     try:
         if sys.platform == "win32":
@@ -359,14 +357,11 @@ def remove_wrapper_script(name: str) -> bool:
     candidates = [_get_wrapper_dir() / canon]
     if sys.platform == "win32":
         candidates.insert(0, _get_wrapper_dir() / f"{canon}.bat")
-
     for wrapper_path in candidates:
         if wrapper_path.exists() and _is_our_wrapper(wrapper_path):
-            try:
+            with contextlib.suppress(Exception):
                 wrapper_path.unlink()
                 return True
-            except Exception:
-                pass
     return False
 
 
@@ -375,11 +370,11 @@ def _migrate_profile_config_if_outdated(profile_dir: Path) -> None:
     profile); otherwise the first desktop/doctor view shows a scary ``v0 -> latest`` warning."""
     if not (profile_dir / "config.yaml").exists():
         return
-
-    try:
+    # Creation must not fail over an unmigratable old config; `hermes doctor --fix` surfaces
+    # the detailed error in the target profile.
+    with contextlib.suppress(Exception):
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         from hermes_cli.config import check_config_version, migrate_config
-
         token = set_hermes_home_override(str(profile_dir))
         try:
             current_ver, latest_ver = check_config_version()
@@ -387,10 +382,6 @@ def _migrate_profile_config_if_outdated(profile_dir: Path) -> None:
                 migrate_config(interactive=False, quiet=True)
         finally:
             reset_hermes_home_override(token)
-    except Exception:
-        # Creation must not fail over an unmigratable old config; `hermes doctor --fix`
-        # surfaces the detailed error in the target profile.
-        pass
 
 
 def find_alias_for_profile(profile_name: str) -> Optional[str]:
@@ -419,7 +410,6 @@ def build_alias_map() -> dict[str, str]:
         return result
     is_windows = sys.platform == "win32"
     prefix = "hermes -p "
-
     for entry in sorted(wrapper_dir.iterdir()):
         if not entry.is_file():
             continue
@@ -450,9 +440,7 @@ def build_alias_map() -> dict[str, str]:
     return result
 
 
-# ---------------------------------------------------------------------------
 # ProfileInfo
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ProfileInfo:
@@ -489,8 +477,7 @@ def _load_yaml_dict(path: Path) -> Optional[dict]:
         return None
     try:
         import yaml
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -512,15 +499,14 @@ def _read_config_model(profile_dir: Path) -> tuple:
     try:
         # load_config() targets the ACTIVE profile's home; read THIS profile's file raw.
         from hermes_cli.config import read_user_config_raw
-        cfg = read_user_config_raw(config_path)
-        model_cfg = cfg.get("model", {})
+        model_cfg = read_user_config_raw(config_path).get("model", {})
         if isinstance(model_cfg, str):
             return model_cfg, None
         if isinstance(model_cfg, dict):
             return model_cfg.get("default") or model_cfg.get("model"), model_cfg.get("provider")
-        return None, None
     except Exception:
-        return None, None
+        pass
+    return None, None
 
 
 def _seed_model_config(profile_dir: Path) -> None:
@@ -529,22 +515,14 @@ def _seed_model_config(profile_dir: Path) -> None:
     config_path = profile_dir / "config.yaml"
     if config_path.exists():
         return
-    try:
+    with contextlib.suppress(Exception):  # creation must not fail over this; `hermes model` sets it later
         import yaml
         from hermes_constants import get_hermes_home
         from hermes_cli.config import read_user_config_raw
-
         source = get_hermes_home() / "config.yaml"
-        if not source.is_file():
-            return
-        model_cfg = read_user_config_raw(source).get("model")
-        if not model_cfg:
-            return
-        config_path.write_text(
-            yaml.safe_dump({"model": model_cfg}, sort_keys=False), encoding="utf-8"
-        )
-    except Exception:
-        pass  # creation must not fail over this; `hermes model` sets it later
+        model_cfg = read_user_config_raw(source).get("model") if source.is_file() else None
+        if model_cfg:
+            config_path.write_text(yaml.safe_dump({"model": model_cfg}, sort_keys=False), encoding="utf-8")
 
 
 def _check_gateway_running(profile_dir: Path) -> bool:
@@ -574,7 +552,6 @@ def _served_by_running_multiplexer(profile_name: str) -> bool:
     gateway.pid of its own, so ``_check_gateway_running`` alone reports it stopped)."""
     try:
         from hermes_cli.gateway import named_profile_served_by_running_multiplexer
-
         return named_profile_served_by_running_multiplexer(profile_name)
     except Exception:
         return False
@@ -601,9 +578,7 @@ def _skills_dir_signature(skills_dir: Path) -> float:
             for entry in it:
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        m = entry.stat(follow_symlinks=False).st_mtime
-                        if m > sig:
-                            sig = m
+                        sig = max(sig, entry.stat(follow_symlinks=False).st_mtime)
                 except OSError:
                     continue
     except OSError:
@@ -616,7 +591,6 @@ def _count_skills(profile_dir: Path) -> int:
     skills_dir = profile_dir / "skills"
     if not skills_dir.is_dir():
         return 0
-
     key = str(skills_dir)
     signature = _skills_dir_signature(skills_dir)
     now = time.time()
@@ -625,15 +599,12 @@ def _count_skills(profile_dir: Path) -> int:
         cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS
     ):
         return cached[2]
-
     count = sum(1 for md in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(md))
     _SKILL_COUNT_CACHE[key] = (signature, now, count)
     return count
 
 
-# ---------------------------------------------------------------------------
 # profile.yaml — per-profile metadata (description, role, etc.)
-# ---------------------------------------------------------------------------
 # Deliberately tiny and separate from ``config.yaml`` (user-facing Hermes config, ~5000
 # lines of defaults): this is metadata ABOUT the profile. Missing file -> empty defaults,
 # never an error; the kanban decomposer falls back to the profile name.
@@ -643,9 +614,7 @@ def read_profile_meta(profile_dir: Path) -> dict:
     """Read ``profile.yaml`` -> ``{description, description_auto, display_name}`` (empty
     defaults when missing/unreadable). Never raises — a corrupt file on one profile must not
     break ``hermes profile list``."""
-    data = _load_yaml_dict(profile_dir / "profile.yaml")
-    if data is None:
-        return {"description": "", "description_auto": False, "display_name": ""}
+    data = _load_yaml_dict(profile_dir / "profile.yaml") or {}
     return {
         "description": str(data.get("description") or "").strip(),
         "description_auto": bool(data.get("description_auto", False)),
@@ -676,7 +645,6 @@ def write_profile_meta(
     # Atomic write: bare open("w") truncates before the dump, and the read path swallows
     # parse errors as {}, so a crashed write would silently drop unspecified fields.
     from utils import atomic_yaml_write
-
     atomic_yaml_write(path, existing, sort_keys=False)
 
 
@@ -690,10 +658,7 @@ def format_profile_label(name: str, display_name: Optional[str]) -> str:
 def set_profile_display_name(profile_name: str, display_name: str) -> str:
     """Set (or clear, with ``""``) a presentation-only display name. Returns the stored value;
     raises ``ValueError`` over 64 chars."""
-    canon = _canon_valid(profile_name)
-    profile_dir = get_profile_dir(canon)
-    if not profile_dir.is_dir():
-        raise FileNotFoundError(f"Profile '{canon}' does not exist.")
+    canon, profile_dir = _existing_profile_dir(profile_name)
     cleaned = (display_name or "").strip()
     if len(cleaned) > 64:
         raise ValueError(f"Display name too long ({len(cleaned)} chars, max 64).")
@@ -701,9 +666,7 @@ def set_profile_display_name(profile_name: str, display_name: str) -> str:
     return cleaned
 
 
-# ---------------------------------------------------------------------------
 # CRUD operations
-# ---------------------------------------------------------------------------
 
 def _profile_info(name: str, path: Path, *, is_default: bool, alias_name: Optional[str] = None) -> ProfileInfo:
     """Build one :class:`ProfileInfo` from a profile directory."""
@@ -721,8 +684,7 @@ def _profile_info(name: str, path: Path, *, is_default: bool, alias_name: Option
         provider=provider, has_env=(path / ".env").exists(), skill_count=_count_skills(path),
         alias_path=alias_path, alias_name=alias_name, distribution_name=dist_name,
         distribution_version=dist_version, distribution_source=dist_source,
-        description=meta.get("description", ""), description_auto=meta.get("description_auto", False),
-        display_name=meta.get("display_name", ""),
+        **meta,
     )
 
 
@@ -732,7 +694,6 @@ def list_profiles() -> List[ProfileInfo]:
     default_home = _get_default_hermes_home()
     if default_home.is_dir():
         profiles.append(_profile_info("default", default_home, is_default=True))
-
     named = _iter_named_profile_dirs()
     if named:
         alias_map = build_alias_map()  # ONCE, not per profile (was the dominant cost)
@@ -755,7 +716,6 @@ def profiles_to_serve(
     active = get_active_profile_name() or "default"
     if not multiplex:
         return [(active, get_profile_dir(active))]
-
     serve: List[Tuple[str, Path]] = [("default", _get_default_hermes_home())]
     allowed: Optional[set[str]] = None
     if profile_allowlist is not None:
@@ -769,11 +729,9 @@ def profiles_to_serve(
                 continue
             if name != "default":
                 allowed.add(name)
-
     for entry in _iter_named_profile_dirs():
         if allowed is None or entry.name in allowed:
             serve.append((entry.name, entry))
-
     if allowed is not None:
         missing = tuple(sorted(allowed - {name for name, _ in serve}))
         if missing and missing not in _WARNED_MISSING_ALLOWLIST_ENTRIES:
@@ -781,7 +739,6 @@ def profiles_to_serve(
             logger.warning(
                 "Skipping missing gateway.multiplex_profile_allowlist profile(s): %s", ", ".join(missing)
             )
-
     return serve
 
 
@@ -804,12 +761,10 @@ def _seed_file_if_missing(path: Path, text: str, mode: Optional[int] = None) -> 
     """Best-effort: write *text* to *path* unless it already exists; never raises."""
     if path.exists():
         return
-    try:
+    with contextlib.suppress(OSError):
         path.write_text(text, encoding="utf-8")
         if mode is not None:
             os.chmod(str(path), mode)
-    except OSError:
-        pass
 
 
 def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
@@ -822,10 +777,8 @@ def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     if relpath == ".env":
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(str(dst), 0o600)
-        except OSError:
-            pass
 
 
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
@@ -856,7 +809,6 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path]) -> Non
     profile_dir.mkdir(parents=True, exist_ok=True)
     for subdir in _PROFILE_DIRS:
         (profile_dir / subdir).mkdir(parents=True, exist_ok=True)
-
     if source_dir is None:
         _seed_model_config(profile_dir)
         return
@@ -885,12 +837,10 @@ def create_profile(
             "(cloning explicitly copies skills from the source profile)."
         )
     canon = _canon_valid(name)
-
     if canon == "default":
         raise ValueError(
             "Cannot create a profile named 'default' — it is the built-in profile (~/.hermes)."
         )
-
     profile_dir = get_profile_dir(canon)
     if profile_dir.exists() and named_profile_is_deleted(profile_dir):
         # Empty shells left by post-delete mkdir may be replaced. Identity files mean the
@@ -901,11 +851,9 @@ def create_profile(
     if profile_dir.exists():
         raise FileExistsError(f"Profile '{canon}' already exists at {profile_dir}")
     clear_named_profile_deleted(profile_dir)
-
     source_dir = None
     if clone_from is not None or clone_all or clone_config:
         source_dir = _resolve_clone_source(clone_from)
-
     if clone_all and source_dir:
         _clone_all_into(source_dir, profile_dir, canon)
     else:
@@ -918,11 +866,9 @@ def create_profile(
     _seed_file_if_missing(profile_dir / ".env", _PLACEHOLDER_ENV, 0o600)
 
     # Default SOUL.md to customize immediately (skipped when a clone already provided one).
-    try:
+    with contextlib.suppress(Exception):  # best-effort — don't fail profile creation over this
         from hermes_cli.default_soul import DEFAULT_SOUL_MD
         _seed_file_if_missing(profile_dir / "SOUL.md", DEFAULT_SOUL_MD)
-    except Exception:
-        pass  # best-effort — don't fail profile creation over this
 
     # Opt-out marker read by seed_profile_skills() and `hermes update`'s all-profile sync
     # (the feature still works via the empty skills/ dir if this fails).
@@ -941,18 +887,13 @@ def create_profile(
 
     # Description last, so a partial-create failure doesn't strand a description file.
     if description and description.strip():
-        try:
-            write_profile_meta(
-                profile_dir, description=description.strip(), description_auto=False
-            )
-        except Exception:
-            pass  # non-fatal — user can describe later with `hermes profile describe`
+        with contextlib.suppress(Exception):  # non-fatal — `hermes profile describe` works later
+            write_profile_meta(profile_dir, description=description.strip(), description_auto=False)
 
     # Inside a container under s6, register the gateway as a runtime s6 service so
     # `hermes -p <profile> gateway start` supervises via `s6-svc -u` instead of a bare
     # process. No-op on host (systemd/launchd/windows unit generation handles lifecycle).
     _maybe_register_gateway_service(canon)
-
     return profile_dir
 
 
@@ -992,7 +933,6 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
     the placeholder header). Never overwrites an existing profile ``.env``."""
     backfilled: List[str] = []
     default_env = _get_default_hermes_home() / ".env"
-
     for entry in _iter_named_profile_dirs():
         env_path = entry / ".env"
         if env_path.exists():
@@ -1007,7 +947,6 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
         except OSError as e:
             if not quiet:
                 print(f"⚠ Could not seed .env for profile '{entry.name}': {e}")
-
     return backfilled
 
 
@@ -1055,7 +994,6 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
         import psutil  # type: ignore
     except Exception:
         return []
-
     try:
         resolved_dir = profile_dir.resolve()
     except OSError:
@@ -1064,21 +1002,16 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     # Never terminate ourselves or a parent (`hermes -p <canon> profile delete` runs under
     # the very profile it's deleting).
     skip: set[int] = {os.getpid()}
-    try:
+    with contextlib.suppress(Exception):
         parent = psutil.Process(os.getpid()).parent()
         while parent is not None:
             skip.add(parent.pid)
             parent = parent.parent()
-    except Exception:
-        pass
-
     try:
         current_user = psutil.Process(os.getpid()).username()
     except Exception:
         current_user = None
-
     pids: list[int] = []
-
     for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
         try:
             info = proc.info
@@ -1087,7 +1020,6 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
                 continue
             if current_user is not None and info.get("username") != current_user:
                 continue
-
             argv = info.get("cmdline") or []
             if not argv or not _is_hermes_argv(argv):
                 continue
@@ -1099,18 +1031,13 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
                 normalize_profile_name(sel) == canon for sel in _argv_profile_selectors(argv)
             )
             if not bound:
-                try:
+                with contextlib.suppress(Exception):  # environ() can raise AccessDenied even same-user
                     env_home = (proc.environ() or {}).get("HERMES_HOME", "")
-                    if env_home and Path(env_home).resolve() == resolved_dir:
-                        bound = True
-                except Exception:
-                    pass  # environ() can raise AccessDenied even same-user; argv signal only
-
+                    bound = bool(env_home) and Path(env_home).resolve() == resolved_dir
             if bound:
                 pids.append(pid)
         except Exception:
             continue  # NoSuchProcess / AccessDenied / ZombieProcess and anything else
-
     return pids
 
 
@@ -1119,19 +1046,14 @@ def _wait_then_force_kill(pids: List[int], start_times: dict, *, wait: float = 1
     to exit, then force-kill stragglers. True when every pid exited gracefully.
     ``start_times`` pins each force kill to the same process incarnation (PID reuse guard)."""
     from gateway.status import _pid_exists, get_process_start_time, terminate_pid
-
     for _ in range(int(wait / 0.5)):
         time.sleep(0.5)
         if not any(_pid_exists(pid) for pid in pids):
             return True
     for pid in pids:
         if _pid_exists(pid):
-            try:
-                terminate_pid(
-                    pid, force=True, expected_start_time=start_times.get(pid, get_process_start_time(pid))
-                )
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                terminate_pid(pid, force=True, expected_start_time=start_times.get(pid, get_process_start_time(pid)))
     return False
 
 
@@ -1146,14 +1068,12 @@ def _stop_profile_backends(canon: str, profile_dir: Path) -> None:
         from gateway.status import terminate_pid
     except Exception:
         return
-
     for pid in pids:
         try:
             terminate_pid(pid)  # graceful first
         except (ProcessLookupError, PermissionError, OSError):
             continue
     _wait_then_force_kill(pids, {})
-
     print(f"✓ Stopped {len(pids)} profile backend process(es)")
 
 
@@ -1167,10 +1087,8 @@ def _rmtree_make_writable(func, path, exc):
         raise
     for target in (path, os.path.dirname(path)):  # parent needed for unlink/rmdir
         if target:
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR)
-            except OSError:
-                pass
     func(path)
 
 
@@ -1202,7 +1120,6 @@ def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapp
     model, provider = _read_config_model(profile_dir)
     skill_count = _count_skills(profile_dir)
     dist_name, dist_version, dist_source = _read_distribution_meta(profile_dir)
-
     print(f"\nProfile: {canon}")
     print(f"Path:    {profile_dir}")
     if model:
@@ -1213,7 +1130,6 @@ def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapp
         print(f"Distribution: {dist_name}@{dist_version or '?'}")
         if dist_source:
             print(f"Installed from: {dist_source}")
-
     print("\nThis will permanently delete:")
     print("  • All config, API keys, memories, sessions, skills, cron jobs")
     if wrapper_path is not None:
@@ -1225,22 +1141,16 @@ def _print_delete_summary(canon: str, profile_dir: Path, gw_running: bool, wrapp
 def delete_profile(name: str, yes: bool = False) -> Path:
     """Delete a profile, its wrapper script, and its gateway service (service disabled first
     to prevent auto-restart, gateway stopped if running)."""
-    canon = _canon_valid(name)
-
+    canon = normalize_profile_name(name)
     if canon == "default":
         raise ValueError(
             "Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall"
         )
-
-    profile_dir = get_profile_dir(canon)
-    if not profile_dir.is_dir():
-        raise FileNotFoundError(f"Profile '{canon}' does not exist.")
-
+    canon, profile_dir = _existing_profile_dir(canon)
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _get_wrapper_dir() / canon
     has_wrapper = wrapper_path.exists()
     _print_delete_summary(canon, profile_dir, gw_running, wrapper_path if has_wrapper else None)
-
     if not yes:
         print()
         try:
@@ -1270,14 +1180,11 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # Desktop's main serve process opens memory_store.db for every profile and is
     # deliberately not stopped above; on Windows its handles fail rmtree with WinError 32.
     # Inside serve (DELETE /api/profiles/<name>) the handles live here; from the CLI no-op.
-    try:
+    with contextlib.suppress(Exception):  # best-effort: never block the delete on the release path
         from plugins.memory.holographic.store import MemoryStore as _MemoryStore
-
         _released = _MemoryStore.release_all_under(profile_dir)
         if _released:
             print(f"✓ Released {_released} memory-store connection(s) held by this process")
-    except Exception:
-        pass  # best-effort: never block the delete on the release path
 
     # 3. Remove wrapper script
     if has_wrapper and remove_wrapper_script(canon):
@@ -1294,10 +1201,8 @@ def delete_profile(name: str, yes: bool = False) -> Path:
 
     # 5. Clear active_profile if it pointed to this profile
     _retarget_active_profile(canon, "default", "✓ Active profile reset to default")
-
     if remove_error is not None:
         raise RuntimeError(f"Could not remove profile directory {profile_dir}: {remove_error}") from remove_error
-
     print(f"\nProfile '{canon}' deleted.")
     return profile_dir
 
@@ -1372,10 +1277,9 @@ def _cleanup_gateway_service(name: str, profile_dir: Path) -> None:
     except Exception as e:
         print(f"⚠ Service cleanup: {e}")
     finally:
+        os.environ.pop("HERMES_HOME", None)
         if old_home is not None:
             os.environ["HERMES_HOME"] = old_home
-        else:
-            os.environ.pop("HERMES_HOME", None)
 
 
 def _stop_gateway_process(profile_dir: Path) -> None:
@@ -1383,7 +1287,6 @@ def _stop_gateway_process(profile_dir: Path) -> None:
     pid_file = profile_dir / "gateway.pid"
     if not pid_file.exists():
         return
-
     try:
         raw = pid_file.read_text(encoding="utf-8").strip()
         data = json.loads(raw) if raw.startswith("{") else {"pid": int(raw)}
@@ -1394,7 +1297,6 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         from gateway.status import (
             get_process_start_time, recorded_gateway_home_conflicts, terminate_pid
         )
-
         if recorded_gateway_home_conflicts(data, expected_home=profile_dir):
             print(
                 f"✗ Refusing to stop PID {pid}: its recorded HERMES_HOME "
@@ -1418,9 +1320,7 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         print(f"⚠ Could not stop gateway: {e}")
 
 
-# ---------------------------------------------------------------------------
 # Active profile (sticky default)
-# ---------------------------------------------------------------------------
 
 def get_active_profile() -> str:
     """Read the sticky active profile name."""
@@ -1436,7 +1336,6 @@ def set_active_profile(name: str) -> None:
     canon = _canon_valid(name)
     if canon != "default" and not profile_exists(canon):
         raise _missing_profile_error(canon)
-
     path = _get_active_profile_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     if canon == "default":
@@ -1449,12 +1348,10 @@ def set_active_profile(name: str) -> None:
 
 def _retarget_active_profile(old: str, new: str, message: str) -> None:
     """If the sticky active profile is *old*, point it at *new* and print *message*. Never raises."""
-    try:
+    with contextlib.suppress(Exception):
         if get_active_profile() == old:
             set_active_profile(new)
             print(message)
-    except Exception:
-        pass
 
 
 def get_active_profile_name() -> str:
@@ -1462,10 +1359,8 @@ def get_active_profile_name() -> str:
     name under ``~/.hermes/profiles/<name>``, ``"custom"`` for any other path."""
     from hermes_constants import get_hermes_home
     resolved = get_hermes_home().resolve()
-
     if resolved == _get_default_hermes_home().resolve():
         return "default"
-
     profiles_root = _get_profiles_root().resolve()
     try:
         parts = resolved.relative_to(profiles_root).parts
@@ -1473,13 +1368,10 @@ def get_active_profile_name() -> str:
             return parts[0]
     except ValueError:
         pass
-
     return "custom"
 
 
-# ---------------------------------------------------------------------------
 # Export / Import
-# ---------------------------------------------------------------------------
 
 def _inside_git_checkout(path: Path) -> bool:
     """True when *path* lies inside a Git checkout. Walks the path's OWN resolved ancestry
@@ -1497,7 +1389,6 @@ def _inside_git_checkout(path: Path) -> bool:
 def _profile_export_directory() -> Path:
     """Choose an export directory that cannot become source-tree input."""
     import tempfile
-
     export_dir = _get_default_hermes_home() / "profile-exports"
     if not _inside_git_checkout(export_dir):
         return export_dir
@@ -1592,7 +1483,6 @@ def _scrub_export_secrets(staged: Path) -> None:
     sessions export --redact``). Runs on the staged copy only; symlinks to text files are
     materialized when content changes so redaction never follows a link back into the source."""
     from agent.redact import redact_sensitive_text
-
     for path in staged.rglob("*"):
         try:
             is_link = path.is_symlink()
@@ -1600,19 +1490,15 @@ def _scrub_export_secrets(staged: Path) -> None:
                 continue
         except OSError:
             continue
-
         if not _should_redact_export_file(path):
             continue
-
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-
         redacted = redact_sensitive_text(text, force=True)
         if redacted == text:
             continue
-
         if is_link:
             path.unlink()
         path.write_text(redacted, encoding="utf-8")
@@ -1622,12 +1508,7 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     """Export a profile to a tar.gz archive; credential files are excluded and staged text is
     force-redacted first. Returns the output file path."""
     import tempfile
-
-    canon = _canon_valid(name)
-    profile_dir = get_profile_dir(canon)
-    if not profile_dir.is_dir():
-        raise FileNotFoundError(f"Profile '{canon}' does not exist.")
-
+    canon, profile_dir = _existing_profile_dir(name)
     # Archive base name without extension (.tar.gz appended by the writer).
     base = str(Path(output_path)).removesuffix(".tar.gz").removesuffix(".tgz")
 
@@ -1652,11 +1533,9 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
 def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
     """Import a profile from a tar.gz archive."""
     import tempfile
-
     archive = Path(archive_path)
     if not archive.exists():
         raise FileNotFoundError(f"Archive not found: {archive}")
-
     top_dirs = archive_root_dirs(archive)
     archive_root = top_dirs.pop() if len(top_dirs) == 1 else None
     inferred_name = name or archive_root
@@ -1678,36 +1557,27 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
             "Cannot import as 'default' — that is the built-in root profile (~/.hermes). "
             "Specify a different name: hermes profile import <archive> --name <name>"
         )
-
     profile_dir = get_profile_dir(canon)
     if profile_dir.exists():
         raise FileExistsError(f"Profile '{canon}' already exists at {profile_dir}")
-
     _get_profiles_root().mkdir(parents=True, exist_ok=True)
-
     with tempfile.TemporaryDirectory(prefix="hermes_profile_import_") as tmpdir:
         staging_root = Path(tmpdir)
         safe_extract_targz(archive, staging_root)
-
         extracted = staging_root / archive_root
         if not extracted.is_dir():
             raise ValueError(
                 f"Profile archive root is missing or invalid: {archive_root}"
             )
-
         final_source = extracted
         if archive_root != canon:
             final_source = staging_root / canon
             extracted.rename(final_source)
-
         shutil.move(str(final_source), str(profile_dir))
-
     return profile_dir
 
 
-# ---------------------------------------------------------------------------
 # Rename
-# ---------------------------------------------------------------------------
 
 def _atomic_write_json(path: Path, data: dict) -> bool:
     """Write *data* to *path* via a sibling ``.tmp`` + rename. Returns False (tmp cleaned) on OSError."""
@@ -1717,10 +1587,8 @@ def _atomic_write_json(path: Path, data: dict) -> bool:
         tmp.replace(path)
         return True
     except OSError:
-        try:
+        with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
 
@@ -1729,11 +1597,9 @@ def _migrate_honcho_profile_host(old_name: str, new_name: str, new_dir: Path) ->
     old_host = f"hermes_{old_name}"
     legacy_old_host = f"hermes.{old_name}"
     new_host = f"hermes_{new_name}"
-
     candidates = [
         new_dir / "honcho.json", _get_default_hermes_home() / "honcho.json", Path.home() / ".honcho" / "config.json"
     ]
-
     seen: set[Path] = set()
     for path in candidates:
         try:
@@ -1743,23 +1609,19 @@ def _migrate_honcho_profile_host(old_name: str, new_name: str, new_dir: Path) ->
         if resolved in seen or not path.is_file():
             continue
         seen.add(resolved)
-
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-
         hosts = raw.get("hosts")
         if not isinstance(hosts, dict):
             continue
         source_host = old_host if old_host in hosts else legacy_old_host
         if source_host not in hosts:
             continue
-
         if new_host in hosts:
             print(f"⚠ Honcho host block not migrated: {new_host} already exists in {path}")
             continue
-
         block = hosts[source_host]
         if isinstance(block, dict) and "aiPeer" not in block:
             block["aiPeer"] = old_name  # source_host is ``hermes_<old>`` or legacy ``hermes.<old>``
@@ -1773,22 +1635,17 @@ def rename_profile(old_name: str, new_name: str) -> Path:
     profile's home IS the installation root, so "renaming" it sets a presentation-only
     ``display_name`` instead — the canonical id stays ``default``."""
     old_canon = _canon_valid(old_name)
-
     if old_canon == "default":
         if not (new_name or "").strip():
             raise ValueError("Display name cannot be empty.")
         cleaned = set_profile_display_name("default", new_name)
         print(f"✓ Display name set: {cleaned} (canonical id remains 'default')")
         return _get_default_hermes_home()
-
     new_canon = _canon_valid(new_name)
-
     if new_canon == "default":
         raise ValueError("Cannot rename to 'default' — it is reserved.")
-
     old_dir = get_profile_dir(old_canon)
     new_dir = get_profile_dir(new_canon)
-
     if not old_dir.is_dir():
         raise FileNotFoundError(f"Profile '{old_canon}' does not exist.")
     if new_dir.exists():
@@ -1817,13 +1674,10 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 
     # 5. Update active_profile if it pointed to old name
     _retarget_active_profile(old_canon, new_canon, f"✓ Active profile updated: {new_canon}")
-
     return new_dir
 
 
-# ---------------------------------------------------------------------------
 # Profile env resolution (called from _apply_profile_override)
-# ---------------------------------------------------------------------------
 
 def resolve_profile_env(profile_name: str) -> str:
     """Resolve a profile name to a HERMES_HOME path string. Called early in the CLI entry
@@ -1840,8 +1694,6 @@ def resolve_profile_env(profile_name: str) -> str:
     if canon == "default":
         return str(root)
     profile_dir = root / "profiles" / canon
-
     if not profile_dir.is_dir() or named_profile_is_deleted(profile_dir):
         raise _missing_profile_error(canon)
-
     return str(profile_dir)

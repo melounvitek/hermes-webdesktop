@@ -260,7 +260,6 @@ def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
     """Resolve *source* to ``(staged_dir, provenance)``: git URLs are shallow-cloned into
     *workdir* (``.git`` removed); a local directory is used in place."""
     src_str = source.strip()
-
     if _looks_like_git_url(src_str):
         staged, provenance = workdir / "clone", src_str
         _git_clone(src_str, staged)
@@ -331,7 +330,6 @@ def plan_install(
         get_profile_dir, normalize_profile_name, validate_profile_name
     )
     from hermes_cli import __version__ as hermes_version
-
     staged, provenance = _stage_source(source, workdir)
     _reject_distribution_symlinks(staged)
     manifest = read_manifest(staged)
@@ -339,9 +337,7 @@ def plan_install(
         raise DistributionError(
             f"No {MANIFEST_FILENAME} found at the distribution root — this source is not a Hermes distribution."
         )
-
     check_hermes_requires(manifest.hermes_requires, hermes_version)  # fail fast
-
     canon = normalize_profile_name(override_name or manifest.name)
     validate_profile_name(canon)
     if canon == "default":
@@ -353,7 +349,6 @@ def plan_install(
     manifest.source = provenance
     # Stamped once here so both fresh install and update propagate a fresh timestamp.
     manifest.installed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-
     target_dir = get_profile_dir(canon)
     existing = target_dir.is_dir()
     return InstallPlan(
@@ -430,7 +425,6 @@ def _copy_dist_payload(
 def _bootstrap_user_dirs(target: Path) -> None:
     """Create the bootstrap dirs a fresh profile expects (same set as ``create_profile``)."""
     from hermes_cli.profiles import _PROFILE_DIRS
-
     for d in _PROFILE_DIRS:
         (target / d).mkdir(parents=True, exist_ok=True)
 
@@ -443,10 +437,8 @@ def install_distribution(
     from hermes_cli.profiles import (
         check_alias_collision, create_wrapper_script
     )
-
     with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
         plan = plan_install(source, Path(tmp), override_name=name)
-
         if plan.existing and not force:
             raise DistributionError(
                 f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
@@ -456,10 +448,8 @@ def install_distribution(
         # Fresh install: config.yaml comes from the distribution.
         _bootstrap_user_dirs(plan.target_dir)
         _copy_dist_payload(plan.staged_dir, plan.target_dir, plan.manifest, preserve_config=False)
-
         if create_alias and check_alias_collision(plan.manifest.name) is None:
             create_wrapper_script(plan.manifest.name)
-
         return plan
 
 
@@ -468,7 +458,6 @@ def _existing_profile(profile_name: str) -> Tuple[str, Path]:
     from hermes_cli.profiles import (
         get_profile_dir, normalize_profile_name, validate_profile_name
     )
-
     canon = normalize_profile_name(profile_name)
     validate_profile_name(canon)
     target = get_profile_dir(canon)
@@ -494,7 +483,6 @@ def update_distribution(
             f"Profile '{canon}' has no recorded source.  Re-install with "
             "`hermes profile install <source> --name {canon} --force`."
         )
-
     with tempfile.TemporaryDirectory(prefix="hermes_dist_update_") as tmp:
         plan = plan_install(existing_manifest.source, Path(tmp), override_name=canon)
         plan.preserves_config = not force_config
