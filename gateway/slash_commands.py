@@ -334,6 +334,12 @@ class GatewaySlashCommandsMixin(
         from tools.terminal_scope import terminal_env
         return terminal_env("TERMINAL_CWD", str(Path.home()))
 
+    @staticmethod
+    def _display_config_target(event: MessageEvent):
+        """``(config.yaml path, platform config key)`` for the per-platform display settings."""
+        from gateway.run import _gateway_config_home, _platform_config_key
+        return _gateway_config_home() / "config.yaml", _platform_config_key(event.source.platform)
+
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.
 
@@ -372,7 +378,6 @@ class GatewaySlashCommandsMixin(
         chat_type = (source.chat_type if source else "") or "dm"
         scope = "DM" if chat_type.lower() in {"dm", "direct", "private", ""} else "group/channel"
         user_id = (source.user_id if source else None) or "?"
-
         head = f"**You** — {platform} ({scope})\nUser ID: `{user_id}`\n"
         if not policy.enabled:
             return head + "Tier: unrestricted (no admin list configured for this scope)\nSlash commands: all available"
@@ -447,8 +452,7 @@ class GatewaySlashCommandsMixin(
 
         platform = getattr(source, "platform", None)
         platform_str = (platform.value if hasattr(platform, "value") else str(platform or "")).lower()
-        chat_id = _field("chat_id")
-        chat_type = _field("chat_type")
+        chat_id, chat_type = _field("chat_id"), _field("chat_type")
         delivery_metadata = self._reply_metadata(event) or None
         if isinstance(delivery_metadata, dict) and chat_type:
             delivery_metadata.setdefault("chat_type", chat_type)
@@ -530,7 +534,6 @@ class GatewaySlashCommandsMixin(
                 await adapter._stop_typing_with_metadata(source.chat_id, self._reply_metadata(event))
             except Exception:
                 logger.debug("Failed to clear typing on /stop with no active agent", exc_info=True)
-
         return t("gateway.stop.no_active")
 
     async def _handle_platform_command(self, event: MessageEvent) -> str:
@@ -685,9 +688,7 @@ class GatewaySlashCommandsMixin(
 
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
-            platform=source.platform,
-            chat_id=str(chat_id),
-            name=chat_name,
+            platform=source.platform, chat_id=str(chat_id), name=chat_name,
             thread_id=str(thread_id) if thread_id else None,
             user_id=str(source.user_id) if getattr(source, "user_id", None) else None,
             scope_id=str(source.scope_id) if getattr(source, "scope_id", None) else None,
@@ -890,17 +891,12 @@ class GatewaySlashCommandsMixin(
             return t("gateway.background.usage")
 
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"
-        self._track_background_task(
-            self._run_background_task(
-                prompt,
-                event.source,
-                task_id,
-                event_message_id=self._reply_anchor_for_event(event),
-                # Forward image/audio attachments so the background agent can see them.
-                media_urls=list(event.media_urls) if event.media_urls else [],
-                media_types=list(event.media_types) if event.media_types else [],
-            )
-        )
+        self._track_background_task(self._run_background_task(
+            prompt, event.source, task_id, event_message_id=self._reply_anchor_for_event(event),
+            # Forward image/audio attachments so the background agent can see them.
+            media_urls=list(event.media_urls) if event.media_urls else [],
+            media_types=list(event.media_types) if event.media_types else [],
+        ))
         return t("gateway.background.started", preview=_preview(prompt), task_id=task_id)
 
     async def _handle_btw_command(self, event: MessageEvent) -> str:
@@ -1037,10 +1033,8 @@ class GatewaySlashCommandsMixin(
         Gated by ``display.tool_progress_command`` (default off). Cycles off → new → all → verbose
         → log per *current platform*, saved to ``display.platforms.<platform>.tool_progress``.
         """
-        from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key
-        config_path = _gateway_config_home() / "config.yaml"
-        platform_key = _platform_config_key(event.source.platform)
-
+        from gateway.run import _load_gateway_config
+        config_path, platform_key = self._display_config_target(event)
         try:
             user_config = _load_gateway_config()
             gate_enabled = is_truthy_value(cfg_get(user_config, "display", "tool_progress_command"), default=False)
@@ -1104,10 +1098,9 @@ class GatewaySlashCommandsMixin(
 
     async def _handle_footer_command(self, event: MessageEvent) -> str:
         """Handle /footer command — toggle the runtime-metadata footer."""
-        from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key, _resolve_gateway_model
-        from gateway.runtime_footer import resolve_footer_config
-        config_path = _gateway_config_home() / "config.yaml"
-        platform_key = _platform_config_key(event.source.platform)
+        from gateway.run import _load_gateway_config, _resolve_gateway_model
+        from gateway.runtime_footer import format_runtime_footer, resolve_footer_config
+        config_path, platform_key = self._display_config_target(event)
 
         arg = ""
         try:
@@ -1149,11 +1142,8 @@ class GatewaySlashCommandsMixin(
         example = ""
         if new_state:
             # Show a preview using current agent state if available.
-            from gateway.runtime_footer import format_runtime_footer
             preview = format_runtime_footer(
-                model=_resolve_gateway_model(user_config) or None,
-                context_tokens=0,
-                context_length=None,
+                model=_resolve_gateway_model(user_config) or None, context_tokens=0, context_length=None,
                 fields=effective.get("fields") or ["model", "context_pct", "cwd"],
             )
             if preview:
@@ -1173,8 +1163,7 @@ class GatewaySlashCommandsMixin(
         # invocation without restarting the gateway.
         user_config = self._read_user_config()
         approvals = user_config.get("approvals") if isinstance(user_config, dict) else None
-        confirm_required = bool(approvals.get("mcp_reload_confirm", True)) if isinstance(approvals, dict) else True
-        if not confirm_required:
+        if isinstance(approvals, dict) and not approvals.get("mcp_reload_confirm", True):
             return await self._execute_mcp_reload(event)
 
         # Route through slash-confirm. The primitive sends the prompt and stores the resume handler;
@@ -1198,11 +1187,8 @@ class GatewaySlashCommandsMixin(
             return result
 
         return await self._request_slash_confirm(
-            event=event,
-            command="reload-mcp",
-            title="/reload-mcp",
-            message=t("gateway.reload_mcp.confirm_prompt"),
-            handler=_on_confirm,
+            event=event, command="reload-mcp", title="/reload-mcp",
+            message=t("gateway.reload_mcp.confirm_prompt"), handler=_on_confirm,
         )
 
     async def _handle_reload_skills_command(self, event: MessageEvent) -> str:
@@ -1240,8 +1226,7 @@ class GatewaySlashCommandsMixin(
                 return "\n".join(lines)
 
             def _fmt_line(item: dict) -> str:
-                nm = item.get("name", "")
-                desc = item.get("description", "")
+                nm, desc = item.get("name", ""), item.get("description", "")
                 if desc:
                     return t("gateway.reload_skills.item_with_desc", name=nm, desc=desc)
                 return t("gateway.reload_skills.item_no_desc", name=nm)
@@ -1375,9 +1360,8 @@ class GatewaySlashCommandsMixin(
         use ``hermes debug share`` from the CLI for full uploads.
         """
         from hermes_cli.debug import (
-            _capture_dump, collect_debug_report,
-            upload_to_pastebin, _schedule_auto_delete,
-            _GATEWAY_PRIVACY_NOTICE, _best_effort_sweep_expired_pastes,
+            _GATEWAY_PRIVACY_NOTICE, _best_effort_sweep_expired_pastes, _capture_dump, _schedule_auto_delete,
+            collect_debug_report, upload_to_pastebin,
         )
 
         # Run blocking I/O (dump capture, log reads, uploads) in a thread.
@@ -1419,11 +1403,11 @@ class GatewaySlashCommandsMixin(
 
         # Block non-messaging platforms (API server, webhooks, ACP); plugin platforms with
         # allow_update_command=True are also allowed.
-        platform = event.source.platform
-        if platform not in self._UPDATE_ALLOWED_PLATFORMS:
+        src = event.source
+        if src.platform not in self._UPDATE_ALLOWED_PLATFORMS:
             try:
                 from gateway.platform_registry import platform_registry
-                entry = platform_registry.get(platform.value)
+                entry = platform_registry.get(src.platform.value)
                 if not entry or not entry.allow_update_command:
                     return t("gateway.update.platform_not_messaging")
             except Exception:
@@ -1442,7 +1426,6 @@ class GatewaySlashCommandsMixin(
         pending_path = _hermes_home / ".update_pending.json"
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
-        src = event.source
         pending = {
             "platform": src.platform.value, "chat_id": src.chat_id, "chat_type": src.chat_type,
             "user_id": src.user_id, "session_key": self._session_key_for_source(src),
