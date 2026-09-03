@@ -24,9 +24,7 @@ from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseB
 
 logger = logging.getLogger(__name__)
 
-
 # ── Approval & safety ───────────────────────────────────────────────────────
-
 _approval_callback = None
 
 def set_approval_callback(cb) -> None:
@@ -45,8 +43,7 @@ _BLOCKED_KEY_COMBOS = {
 }
 _KEY_ALIASES = {"command": "cmd", "control": "ctrl", "alt": "option", "⌘": "cmd", "⌥": "option",
                 "windows": "win", "super": "win", "meta": "win"}
-# Dangerous shell patterns for the `type` action (last one: fork bomb).
-_BLOCKED_TYPE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
+_BLOCKED_TYPE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (  # dangerous shell patterns for `type` (last one: fork bomb)
     r"curl\s+[^|]*\|\s*bash", r"curl\s+[^|]*\|\s*sh", r"wget\s+[^|]*\|\s*bash",
     r"\bsudo\s+rm\s+-[rf]", r"\brm\s+-rf\s+/\s*$", r":\s*\(\)\s*\{\s*:\|:\s*&\s*\}")]
 
@@ -59,11 +56,9 @@ def _reject_unsafe(action: str, args: Dict[str, Any]) -> Optional[str]:
     if action == "type" and (pat := next((p.pattern for p in _BLOCKED_TYPE_PATTERNS if p.search(args.get("text", ""))), None)):
         return json.dumps({"error": f"blocked pattern in type text: {pat!r}",
                            "hint": "Dangerous shell patterns cannot be typed via computer_use."})
-    if action == "key":
-        combo = _canon_key_combo(args.get("keys", ""))
-        if (blocked := next((b for b in _BLOCKED_KEY_COMBOS if b.issubset(combo)), None)) is not None:
-            return json.dumps({"error": f"blocked key combo: {sorted(blocked)}",
-                               "hint": "Destructive system shortcuts are hard-blocked."})
+    if action == "key" and (blocked := next((b for b in _BLOCKED_KEY_COMBOS
+                                             if b.issubset(_canon_key_combo(args.get("keys", "")))), None)) is not None:
+        return json.dumps({"error": f"blocked key combo: {sorted(blocked)}", "hint": "Destructive system shortcuts are hard-blocked."})
     if args.get("bring_to_front") and args.get("delivery_mode") != "foreground":
         return json.dumps({"error": "bring_to_front requires delivery_mode='foreground'",
                            "code": "bring_to_front_requires_foreground"})
@@ -76,13 +71,10 @@ def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
     current, wanted = (last_app or "").strip().lower(), requested_app.strip().lower()
     return None if not current or not wanted or wanted in current or current in wanted else last_app
 
-
 # ── Backend selection — env-swappable for tests ─────────────────────────────
-
 # Per-Hermes-session cached backends (own cua-driver session, native target, refs, grant namespace).
-# `_backend` is the backward-compatible empty-session injection hook (older tests).
 _backend_lock = threading.Lock()
-_backend: Optional[ComputerUseBackend] = None
+_backend: Optional[ComputerUseBackend] = None  # backward-compatible empty-session injection hook (older tests)
 _backends: Dict[str, ComputerUseBackend] = {}
 _backend_call_locks: Dict[str, threading.RLock] = {}
 _backend_permission_modes: Dict[str, str] = {}
@@ -94,19 +86,17 @@ _session_auto_approve: Dict[str, bool] = {}   # sid -> "always_approve everythin
 _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_mode) scope keys
 _escalation_warned: set = set()               # sids already warned that a bypass widened the driver mode
 
-def _configured_permission_mode() -> str:
-    """Configured cua mode (standard | bounded; "standard" if unresolvable). bounded needs a
-    computer_use.capability_manifest — the backend fails loudly without it."""
-    with contextlib.suppress(Exception):
-        from tools.computer_use.cua_backend import _cua_configured_permission_mode
-        return _cua_configured_permission_mode()
-    return "standard"
-
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's approval bypass onto Cua's immutable mode; fails closed. Both identity namespaces are consulted
     (DB ``session_id`` and gateway ``session_key`` contextvar) or a gateway ``/yolo`` would be invisible here.
     Warns once per session that ``-z``/``--yolo`` swapped the driver onto a private ``unrestricted`` daemon, dropping
     the configured ceiling: deliberate (``unrestricted`` is not a config value) but easy to trigger by accident."""
+    # Configured cua mode (standard | bounded; "standard" if unresolvable). bounded needs a
+    # computer_use.capability_manifest — the backend fails loudly without it.
+    configured = "standard"
+    with contextlib.suppress(Exception):
+        from tools.computer_use.cua_backend import _cua_configured_permission_mode
+        configured = _cua_configured_permission_mode()
     with contextlib.suppress(Exception):
         from tools.approval import get_current_session_key, is_approval_bypass_active_for_session
         if is_approval_bypass_active_for_session(session_id) or (
@@ -115,14 +105,13 @@ def _cua_permission_mode(session_id: str) -> str:
                 warn = (key := str(session_id or "")) not in _escalation_warned
                 _escalation_warned.add(key)
             if warn:
-                configured = _configured_permission_mode()
                 logger.warning(
                     "computer_use: approval bypass (--yolo / -z) escalated the cua-driver permission mode from the "
                     "configured '%s' to 'unrestricted' for this session. Runtime approval prompts are disabled and the "
                     "driver's residual ceilings no longer apply. Drop the bypass flag to keep '%s', or declare a "
                     "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
             return "unrestricted"
-    return _configured_permission_mode()
+    return configured
 
 def _new_backend(permission_mode: str) -> ComputerUseBackend:
     backend_name = os.environ.get("HERMES_COMPUTER_USE_BACKEND", "cua").lower()
@@ -139,8 +128,7 @@ def _install_backend(sid: str, backend: ComputerUseBackend, permission_mode: str
     global _backend
     _backends[sid], _backend_permission_modes[sid] = backend, permission_mode
     _backend_call_locks[sid] = threading.RLock()
-    if sid == "":
-        _backend = backend
+    _backend = backend if sid == "" else _backend
     return backend
 
 def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[threading.RLock]]:
@@ -154,16 +142,13 @@ def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[thr
         _backend = None if _backend is backend else _backend
     return backend, call_lock
 
-def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock],
-                  on_error: Optional[Callable[[Exception], None]] = None) -> None:
+def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock], on_error: Callable[[Exception], None]) -> None:
     """Stop under the session call lock (if any) so an in-flight action finishes first. Never called under
-    ``_backend_lock`` (unrelated sessions stay free). Raises unless ``on_error`` absorbs the failure."""
+    ``_backend_lock`` (unrelated sessions stay free). ``on_error`` absorbs the failure (never raises)."""
     try:
         with call_lock if call_lock is not None else contextlib.nullcontext():
             backend.stop()
     except Exception as e:
-        if on_error is None:
-            raise
         on_error(e)
 
 def _get_backend(session_id: str = "") -> ComputerUseBackend:
@@ -199,6 +184,7 @@ def release_computer_use_session(session_id: str) -> bool:
                   lambda e: logger.debug("computer_use backend release failed for session %s", sid, exc_info=True))
     return True
 
+@atexit.register
 def _shutdown_backend_atexit() -> None:
     """Stop all cached backends so cua-driver subprocesses don't outlive us. atexit only, no signal handlers: a
     ``SystemExit`` from a prompt_toolkit key binding corrupts its coroutine state and makes the process unkillable.
@@ -215,46 +201,33 @@ def _shutdown_backend_atexit() -> None:
     for backend, call_lock in unique.values():
         _stop_backend(backend, call_lock, lambda e: logger.debug("cua-driver atexit teardown failed: %s", e))
 
-atexit.register(_shutdown_backend_atexit)
-
 def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cached backend and per-session state
     _shutdown_backend_atexit()
     _AUX_VISION_ROUTE_CACHE.clear()
 
 def _noop_stub(name: str, *params: str, result: Any = None):
-    # Recording stub: positional args are folded in under *params* (declared params default to None).
+    # Recording stub: positional args are folded in under *params* (declared params default to None). ``result`` may
+    # be a factory of the recorded kwargs; None -> a trivial ok ActionResult.
     def method(self, *pos, **kw):
-        return self._record(name, {**dict.fromkeys(params), **dict(zip(params, pos)), **kw}, result)
+        self.calls.append((name, call := {**dict.fromkeys(params), **dict(zip(params, pos)), **kw}))
+        return result(call) if callable(result) else ActionResult(ok=True, action=name) if result is None else result
     return method
 
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     """Test/CI stub (HERMES_COMPUTER_USE_BACKEND=noop). Records ``(name, kwargs)`` calls; returns trivial results."""
 
-    def __init__(self) -> None:
-        self.calls: List[Tuple[str, Dict[str, Any]]] = []
-
-    def start(self) -> None: pass
-    def stop(self) -> None: pass
+    def __init__(self) -> None: self.calls: List[Tuple[str, Dict[str, Any]]] = []
+    start = stop = lambda self: None
     def is_available(self) -> bool: return True
 
-    def _record(self, name: str, kw: Dict[str, Any], result: Any = None) -> Any:
-        self.calls.append((name, kw))
-        return ActionResult(ok=True, action=name) if result is None else result
-
-    def capture(self, mode="som", app=None, pid=None, window_id=None) -> CaptureResult:
-        return self._record("capture", {"mode": mode, "app": app, "pid": pid, "window_id": window_id},
-                            CaptureResult(mode=mode, width=1024, height=768, png_b64=None, elements=[],
-                                          app=app or "", window_title=""))
-
+    capture = _noop_stub("capture", "mode", "app", "pid", "window_id", result=lambda kw: CaptureResult(
+        mode=kw["mode"] or "som", width=1024, height=768, png_b64=None, elements=[], app=kw["app"] or "", window_title=""))
     click, drag, scroll = _noop_stub("click"), _noop_stub("drag"), _noop_stub("scroll")
     type_text, key, set_value = _noop_stub("type", "text"), _noop_stub("key", "keys"), _noop_stub("set_value", "value", "element")
     list_apps, list_windows = _noop_stub("list_apps", result=[]), _noop_stub("list_windows", result=[])
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        return self._record("focus_app", {"app": app, "raise": raise_window})
-
+    focus_app = _noop_stub("focus_app", "app", "raise_window")
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
-
 def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     """Main entry point (tools.registry): a JSON string (text-only) or a dict marked `_multimodal`. Order: hard
     blocks (_reject_unsafe) -> approval scopes (destructive action, then 'bring_to_front' — persistent focus is a
@@ -265,9 +238,8 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     session_id = str(kwargs.get("session_id") or "")  # approval-state / daemon-mode isolation key
     if (err := _reject_unsafe(action, args)) is not None:
         return err
-    scopes = [action] if action in _ACTIONS and _ACTIONS[action].destructive else []
-    if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")):
-        scopes.append("bring_to_front")
+    scopes = ([action] if action in _ACTIONS and _ACTIONS[action].destructive else []) + (
+        ["bring_to_front"] if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")) else [])
     for scope in scopes:
         if (err := _request_approval(scope, args, session_id)) is not None:
             return err
@@ -319,13 +291,11 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 # --- handlers: (backend, action, args, **delivery) -> ActionResult (_dispatch applies the follow-up capture) or a
 #     final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
 
-def _xy(args: Dict[str, Any]) -> Tuple[Any, Any]:
-    coord = args.get("coordinate")
-    return (coord[0], coord[1]) if coord and coord[0] is not None else (None, None)
+def _xy(args: Dict[str, Any]) -> Dict[str, Any]:
+    return dict(x=coord[0], y=coord[1]) if (coord := args.get("coordinate")) and coord[0] is not None else dict(x=None, y=None)
 
 def _do_click(backend, action, args, button=None, count=1, **delivery):
-    x, y = _xy(args)
-    return backend.click(element=args.get("element"), x=x, y=y, button=button or args.get("button") or "left",
+    return backend.click(element=args.get("element"), **_xy(args), button=button or args.get("button") or "left",
                          click_count=count, modifiers=args.get("modifiers"), **delivery)
 
 def _do_drag(backend, action, args, **delivery):
@@ -337,31 +307,18 @@ def _do_drag(backend, action, args, **delivery):
                         button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
 
 def _do_scroll(backend, action, args, **delivery):
-    x, y = _xy(args)
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
-                          element=args.get("element"), x=x, y=y, modifiers=args.get("modifiers"), **delivery)
-
-def _do_set_value(backend, action, args, **delivery):
-    if args.get("value") is None:
-        return json.dumps({"error": "set_value requires `value`"})
-    return backend.set_value(value=str(args["value"]), element=args.get("element"))
+                          element=args.get("element"), **_xy(args), modifiers=args.get("modifiers"), **delivery)
 
 def _do_capture(backend, action, args, **_):
-    mode = str(args.get("mode", "som"))
-    if mode not in {"som", "vision", "ax"}:
+    if (mode := str(args.get("mode", "som"))) not in {"som", "vision", "ax"}:
         return json.dumps({"error": f"bad mode {mode!r}; use som|vision|ax"})
     # pid/window_id forwarded only when given so older backends keep their defaults.
-    target = {k: args.get(k) for k in ("pid", "window_id")}
     return _capture_response(backend.capture(mode=mode, app=args.get("app"),
-                                             **(target if any(v is not None for v in target.values()) else {})))
+                                             **{k: args[k] for k in ("pid", "window_id") if args.get(k) is not None}))
 
-def _do_focus_app(backend, action, args, **_):
-    if not args.get("app"):
-        return json.dumps({"error": "focus_app requires `app`"})
-    return backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
-
-def _listing(key: str, method: str):
-    return lambda backend, action, args, **_: json.dumps({key: (items := getattr(backend, method)()), "count": len(items)})
+def _do_listing(backend, action, args, key, **_):
+    return json.dumps({key: (items := getattr(backend, action)()), "count": len(items)})
 
 def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
     where = (f" element #{args['element']}" if args.get("element") is not None
@@ -373,49 +330,46 @@ def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
 # ``summarize(action, args, fg_suffix)`` renders the one-line approval prompt.
 _ActionSpec = namedtuple("_ActionSpec", "handler input destructive summarize",
                          defaults=(False, False, lambda a, args, fg: a + fg))
-
-def _input(handler, summarize=None) -> _ActionSpec:
-    return _ActionSpec(handler, True, True, **({"summarize": summarize} if summarize else {}))
+_input = partial(_ActionSpec, input=True, destructive=True)
 
 _ACTIONS: Dict[str, _ActionSpec] = {
-    "click": _input(_do_click, _summarize_click),
-    "double_click": _input(partial(_do_click, count=2), _summarize_click),
-    "right_click": _input(partial(_do_click, button="right"), _summarize_click),
-    "middle_click": _input(partial(_do_click, button="middle"), _summarize_click),
-    "drag": _input(_do_drag, lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
-                                                  f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
-    "scroll": _input(_do_scroll, lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
+    "click": _input(_do_click, summarize=_summarize_click),
+    "double_click": _input(partial(_do_click, count=2), summarize=_summarize_click),
+    "right_click": _input(partial(_do_click, button="right"), summarize=_summarize_click),
+    "middle_click": _input(partial(_do_click, button="middle"), summarize=_summarize_click),
+    "drag": _input(_do_drag, summarize=lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
+                                                             f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
+    "scroll": _input(_do_scroll, summarize=lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
     "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
-                   lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
-                                        + ("..." if len(args.get("text", "")) > 60 else "") + fg)),
+                   summarize=lambda a, args, fg: f"type {args.get('text', '')[:60]!r}" + ("..." if len(args.get("text", "")) > 60 else "") + fg),
     "key": _input(lambda backend, action, args, **delivery: backend.key(args.get("keys", ""), **delivery),
-                  lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
-    "set_value": _input(_do_set_value),
-    "focus_app": _ActionSpec(_do_focus_app, destructive=True, summarize=lambda a, args, fg: (
-        f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""))),
+                  summarize=lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}"),
+    "set_value": _input(lambda backend, action, args, **_: (
+        json.dumps({"error": "set_value requires `value`"}) if args.get("value") is None
+        else backend.set_value(value=str(args["value"]), element=args.get("element")))),
+    "focus_app": _ActionSpec(lambda backend, action, args, **_: (
+        json.dumps({"error": "focus_app requires `app`"}) if not args.get("app")
+        else backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))), destructive=True,
+        summarize=lambda a, args, fg: f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else "")),
     "capture": _ActionSpec(_do_capture),
     "wait": _ActionSpec(lambda backend, action, args, **_: _text_response(backend.wait(float(args.get("seconds", 1.0))))),
-    "list_apps": _ActionSpec(_listing("apps", "list_apps")),
-    "list_windows": _ActionSpec(_listing("windows", "list_windows")),
+    "list_apps": _ActionSpec(partial(_do_listing, key="apps")),
+    "list_windows": _ActionSpec(partial(_do_listing, key="windows")),
 }
-# Native input actions deliver to the backend's sticky target; `app=` on these calls is NOT a
-# targeting parameter — see the mismatch guard in _dispatch.
+# Native input actions deliver to the backend's sticky target; `app=` is NOT a targeting parameter (guard in _dispatch).
 _INPUT_ACTIONS = frozenset(a for a, s in _ACTIONS.items() if s.input)
 
-# Unknown actions are never aliased (no repairing bad model output), but the nearest real action is
-# named so a bare error isn't the only guidance.
+# Unknown actions are never aliased (no repairing bad model output), but the nearest real action is named as guidance.
 _ACTION_SUGGESTIONS = {
-    "hotkey": "key", "press_key": "key", "keypress": "key", "key_combo": "key", "shortcut": "key",
-    "type_text": "type", "input_text": "type", "screenshot": "capture", "get_window_state": "capture",
-    "left_click": "click", "mouse_click": "click",
+    "hotkey": "key", "press_key": "key", "keypress": "key", "key_combo": "key", "shortcut": "key", "type_text": "type",
+    "input_text": "type", "screenshot": "capture", "get_window_state": "capture", "left_click": "click", "mouse_click": "click",
 }
 
 def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) -> Any:
     spec = _ACTIONS.get(action)
     if spec is None:
-        hint = _ACTION_SUGGESTIONS.get(str(action))
-        return json.dumps({"error": f"unknown action {action!r}"
-                           + (f" — did you mean {hint!r}? See the action enum in the tool schema." if hint else "")})
+        return json.dumps({"error": f"unknown action {action!r}" + (f" — did you mean {hint!r}? See the action enum in the tool schema."
+                                                                 if (hint := _ACTION_SUGGESTIONS.get(str(action))) else "")})
     # app= guard: input goes to the sticky target from the last capture/focus_app and the backend drops app=
     # silently — refuse a clear mismatch rather than type into the wrong window while reporting ok:true.
     if (spec.input and isinstance(requested_app := args.get("app"), str) and requested_app.strip()
@@ -429,30 +383,23 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                        bring_to_front=bool(args.get("bring_to_front")))
     return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
 
-
 # ── Response shaping ────────────────────────────────────────────────────────
-
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
     """Next ladder step from semantic evidence, in precedence order. Escalation is advisory: it never overrides
     a confirmed effect nor licenses repeating input."""
     if res.effect == "confirmed" or res.verified is True:
         return {"decision": "done"}
     if res.effect == "unverifiable":
-        return {"decision": "verify_fresh_state", "hint": (
-            "Input was delivered but not confirmed. Re-capture and check the result BEFORE any "
-            "retry — do not repeat the input on an escalation recommendation alone.")}
+        return {"decision": "verify_fresh_state", "hint": ("Input was delivered but not confirmed. Re-capture and check the "
+                "result BEFORE any retry — do not repeat the input on an escalation recommendation alone.")}
     if res.effect == "suspected_noop" or not res.ok or res.code is not None:
         return {"decision": "escalate", **({"recommended": res.escalation.get("recommended")}
                                            if isinstance(res.escalation, dict) else {}), "hint": (
-            "The input likely did not land. Climb one rung following `recommended`: 'px' → "
-            "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
-            "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
-            "app being Electron/Chromium — react to this signal.")}
-    # Transport success without semantic proof is not proof of effect.
-    return {"decision": "verify_fresh_state",
+            "The input likely did not land. Climb one rung following `recommended`: 'px' → re-issue by coordinate; "
+            "'foreground' (or a failed pixel click) → re-issue with delivery_mode='foreground' (separate approval). "
+            "Do not predict the rung from the app being Electron/Chromium — react to this signal.")}
+    return {"decision": "verify_fresh_state",  # transport success without semantic proof is not proof of effect
             "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
-
-_VERDICT_FIELDS = ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
 
 def _present(**fields: Any) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v}  # only the truthy optional fields, in the given order
@@ -461,28 +408,25 @@ def _action_payload(res: ActionResult) -> Dict[str, Any]:
     # cua-driver's structured verdict fields only when returned (None = old driver). ok is transport success;
     # effect/escalation are the semantic verdict.
     return {"ok": res.ok, "action": res.action, **_present(message=res.message),
-            **{k: v for k in _VERDICT_FIELDS if (v := getattr(res, k)) is not None}, **_present(meta=res.meta),
+            **{k: v for k in ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
+               if (v := getattr(res, k)) is not None}, **_present(meta=res.meta),
             "verdict": _classify_action_result(res)}
 
 def _text_response(res: ActionResult) -> str:
     return json.dumps(_action_payload(res))
 
-# AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file.
-_DEFAULT_MAX_ELEMENTS = 100
-# Some providers reject images below 8x8 before the model sees the result; such captures fall back to text.
-_MIN_PROVIDER_IMAGE_DIMENSION = 8
+_DEFAULT_MAX_ELEMENTS = 100  # AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file
+_MIN_PROVIDER_IMAGE_DIMENSION = 8  # some providers reject images below 8x8 before the model sees the result; such captures fall back to text
 # Some AX trees (Discord/Slack via UIA, Electron chat clients) expose ENTIRE message bodies as labels; uncapped
 # they blew the tool-result budget and leaked private chat text. Labels identify a control, not text extraction.
 _MAX_ELEMENT_LABEL_CHARS = 120
-# Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
-_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
+_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20  # bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup
 
-def _capture_mime(cap: CaptureResult) -> str:
-    # cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/, PNG with iVBOR).
-    return cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
-
-def _capture_image_ext(cap: CaptureResult) -> str:
-    return ".jpg" if _capture_mime(cap).lower() == "image/jpeg" else ".png"  # matches on-disk bytes for MIME sniffing
+def _capture_image_format(cap: CaptureResult) -> Tuple[str, str]:
+    # (MIME, file extension): cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/,
+    # PNG with iVBOR). The extension matches the on-disk bytes for MIME sniffing.
+    mime = cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
+    return mime, (".jpg" if mime.lower() == "image/jpeg" else ".png")
 
 def _bounds_unknown(bounds) -> bool:
     # No real geometry: KDE/Qt apps report [0, 0, 0, 0] for elements clickable by index; serializing that as a
@@ -492,23 +436,18 @@ def _bounds_unknown(bounds) -> bool:
     return False
 
 def _element_to_dict(e: UIElement) -> Dict[str, Any]:
-    # A zero rect is "geometry unknown", not a position — null it so no coordinate= is ever derived from it.
-    # The element index still works.
+    # A zero rect is "geometry unknown", not a position — null it so no coordinate= is ever derived from it (the index still works).
     return {"index": e.index, "role": e.role, "label": e.label[:_MAX_ELEMENT_LABEL_CHARS],
             "bounds": None if _bounds_unknown(e.bounds) else list(e.bounds), "app": e.app,
             **({"label_truncated": True} if len(e.label) > _MAX_ELEMENT_LABEL_CHARS else {})}
 
 def _format_elements(elements: List[UIElement], max_lines: int = 40) -> List[str]:
-    out: List[str] = []
-    for e in elements[:max_lines]:
-        where = "@ bounds-unknown (click by element index)" if _bounds_unknown(e.bounds) else f"@ {e.bounds}"
-        out.append(f"  #{e.index} {e.role} {e.label.replace(chr(10), ' ')[:60]!r} {where}" + (f" [{e.app}]" if e.app else ""))
-    if len(elements) > max_lines:
-        out.append(f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)")
-    return out
+    out = [f"  #{e.index} {e.role} {e.label.replace(chr(10), ' ')[:60]!r} "
+           + ("@ bounds-unknown (click by element index)" if _bounds_unknown(e.bounds) else f"@ {e.bounds}")
+           + (f" [{e.app}]" if e.app else "") for e in elements[:max_lines]]
+    return out + ([f"  ... +{len(elements) - max_lines} more (call capture with app= to narrow)"] if len(elements) > max_lines else [])
 
-def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
-                  ) -> Tuple[Optional[float], Optional[str]]:
+def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int) -> Tuple[Optional[float], Optional[str]]:
     """(scale, note) when element bounds live in a different coordinate space than the screenshot, else (None, None).
     On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate= clicks read off the
     screenshot miss by the scale factor. 5% slack: window chrome can hang a few px past the captured frame without
@@ -527,20 +466,12 @@ def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
             "space — derive click points from element bounds, or scale screenshot positions up accordingly")
     return round(max(max_x / image_width, max_y / image_height), 2), note
 
-def _bounds_scale(elements: List[UIElement], image_width: int, image_height: int) -> Optional[float]:
-    return _bounds_hints(elements, image_width, image_height)[0]
-
-def _bounds_space_note(elements: List[UIElement], image_width: int, image_height: int) -> Optional[str]:
-    return _bounds_hints(elements, image_width, image_height)[1]
-
-def _view(cap: CaptureResult, visible: List[UIElement], width: int, height: int, **facts: Any) -> SimpleNamespace:
-    """One capture's derived facts, computed once for every response branch: ``visible`` is the capped element list,
-    ``dims_omitted`` an image below the provider minimum; ``facts`` override the None/False defaults."""
-    return SimpleNamespace(**{**dict(cap=cap, visible=visible, total=len(cap.elements), width=width, height=height,
-                                     truncated=len(cap.elements) - len(visible), bounds_scale=None, bounds_note=None,
-                                     elements_file=None, screenshot_path=None, dims_omitted=None, has_image=False), **facts})
+_bounds_scale = lambda elements, image_width, image_height: _bounds_hints(elements, image_width, image_height)[0]  # noqa: E731
+_bounds_space_note = lambda elements, image_width, image_height: _bounds_hints(elements, image_width, image_height)[1]  # noqa: E731
 
 def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
+    """One capture's derived facts, computed once for every response branch: ``visible`` is the capped element list,
+    ``dims_omitted`` an image below the provider minimum."""
     visible, dims = cap.elements[:max_elements], None
     with contextlib.suppress(Exception):  # (width, height) of the inline PNG/JPEG screenshot, else the backend's
         dims = image_dimensions_from_bytes(base64.b64decode(cap.png_b64, validate=False)) if cap.png_b64 else None
@@ -550,26 +481,26 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
     lost_detail = len(cap.elements) > len(visible) or any(len(e.label) > _MAX_ELEMENT_LABEL_CHARS for e in visible)
     too_small = bool(dims) and min(dims) < _MIN_PROVIDER_IMAGE_DIMENSION
     has_image = bool(cap.png_b64) and cap.mode != "ax" and not too_small
-    return _view(cap, visible, width, height, bounds_scale=scale, bounds_note=note,
-                 elements_file=_spill_elements_to_file(cap) if lost_detail else None,
-                 screenshot_path=_persist_capture_image(cap) if has_image else None,
-                 dims_omitted=dims if too_small else None, has_image=has_image)
+    return SimpleNamespace(cap=cap, visible=visible, total=len(cap.elements), width=width, height=height,
+                           truncated=len(cap.elements) - len(visible), bounds_scale=scale, bounds_note=note,
+                           elements_file=_spill_elements_to_file(cap) if lost_detail else None,
+                           screenshot_path=_persist_capture_image(cap) if has_image else None,
+                           dims_omitted=dims if too_small else None, has_image=has_image)
 
 def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
     summary names indices the model can't find."""
-    cap = v.cap
     notes = (
         v.bounds_note and v.bounds_note + (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
                                            f"{v.bounds_scale} ≈ native coordinate)" if v.bounds_scale else ""),
         v.screenshot_path and f"shareable screenshot saved to {v.screenshot_path}",
-        cap.note,
+        v.cap.note,
         v.elements_file and (f"full element tree with untruncated labels saved to {v.elements_file} — "
                              "read_file/search_files it if you need dropped label text or elements beyond the cap"),
     )
     return [
-        f"capture mode={cap.mode} {v.width}x{v.height}"
-        + (f" app={cap.app}" if cap.app else "") + (f" window={cap.window_title!r}" if cap.window_title else ""),
+        f"capture mode={v.cap.mode} {v.width}x{v.height}"
+        + (f" app={v.cap.app}" if v.cap.app else "") + (f" window={v.cap.window_title!r}" if v.cap.window_title else ""),
         f"{v.total} interactable element(s):",
         *(f"  ({note})" for note in notes if note),
         *_format_elements(v.visible),
@@ -577,40 +508,33 @@ def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
            f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum)"] if v.dims_omitted else []),
     ]
 
-def _multimodal_capture(v: SimpleNamespace, summary: str) -> Dict[str, Any]:
-    cap = v.cap  # envelope carrying the screenshot (not the elements array, so no truncation note)
-    return {
-        "_multimodal": True,
-        "content": [{"type": "text", "text": summary},
-                    {"type": "image_url", "image_url": {"url": f"data:{_capture_mime(cap)};base64,{cap.png_b64}"}}],
-        "text_summary": summary,
-        "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total,
-                 "png_bytes": cap.png_bytes_len, **_present(screenshot_path=v.screenshot_path,
-                                                          elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
-    }
-
 def _text_capture_payload(v: SimpleNamespace, summary: str, extra: Optional[Dict[str, Any]] = None) -> str:
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches. Key order is contract:
     fixed fields, ``extra`` branch markers, then set optionals."""
-    cap = v.cap
     return json.dumps({
-        "mode": cap.mode, "width": v.width, "height": v.height, "app": cap.app, "window_title": cap.window_title,
+        "mode": v.cap.mode, "width": v.width, "height": v.height, "app": v.cap.app, "window_title": v.cap.window_title,
         "elements": [_element_to_dict(e) for e in v.visible], "total_elements": v.total, "summary": summary,
         **(extra or {}),
-        **_present(truncated_elements=v.truncated, elements_file=v.elements_file,
-                   screenshot_path=v.screenshot_path, bounds_scale=v.bounds_scale),
+        **_present(truncated_elements=v.truncated, elements_file=v.elements_file, screenshot_path=v.screenshot_path,
+                   bounds_scale=v.bounds_scale),
     })
 
 def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
     v = _capture_view(cap, max_elements)
     lines = _capture_summary_lines(v)
-    summary = "\n".join(lines)  # multimodal/aux paths use this; text paths append notes and rebuild
-    extra = None
+    summary, extra = "\n".join(lines), None  # multimodal/aux paths use this; text paths append notes and rebuild
     if v.has_image:
         # Hand the screenshot to auxiliary.vision (text-only result) when the main model may not consume images
         # natively; returning the multimodal envelope unconditionally tripped HTTP 404/400 at the provider.
-        if not _should_route_through_aux_vision():
-            return _multimodal_capture(v, summary)
+        if not _should_route_through_aux_vision():  # envelope carrying the screenshot (not the elements array, so no truncation note)
+            return {
+                "_multimodal": True,
+                "content": [{"type": "text", "text": summary},
+                            {"type": "image_url", "image_url": {"url": f"data:{_capture_image_format(cap)[0]};base64,{cap.png_b64}"}}],
+                "text_summary": summary,
+                "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total, "png_bytes": cap.png_bytes_len,
+                         **_present(screenshot_path=v.screenshot_path, elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
+            }
         routed = _route_capture_through_aux_vision(
             cap, summary, visible_elements=v.visible, truncated_elements=v.truncated,
             elements_file=v.elements_file, screenshot_path=v.screenshot_path)
@@ -633,8 +557,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     try:
         # Recapture the exact window when known: on Linux several unrelated windows may share an app name, so
         # app-only recapture can switch targets.
-        target = getattr(backend, "_last_target", None) or {}
-        exact = {k: target.get(k) for k in ("pid", "window_id")}
+        exact = {k: (getattr(backend, "_last_target", None) or {}).get(k) for k in ("pid", "window_id")}
         cap = backend.capture(mode=_capture_after_mode(), **(exact if None not in exact.values()
                                                             else {"app": getattr(backend, "_last_app", None)}))
     except Exception as e:
@@ -643,19 +566,12 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     resp, payload = _capture_response(cap), _action_payload(res)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the evidence/verdict contract visible alongside the image — it governs whether input may repeat.
-        prefix = json.dumps(payload) + "\n\n"
-        resp["content"][0]["text"] = prefix + resp["content"][0]["text"]
-        resp["text_summary"] = prefix + resp["text_summary"]
+        resp["content"][0]["text"] = resp["text_summary"] = json.dumps(payload) + "\n\n" + resp["text_summary"]
         resp["action_result"] = payload
         return resp
-    data = {"capture": resp}  # text capture: merge the action payload in
-    with contextlib.suppress(TypeError, json.JSONDecodeError):
-        data = json.loads(resp)
-    return json.dumps({**data, **payload})
-
+    return json.dumps({**json.loads(resp), **payload})  # text capture: merge the action payload in
 
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
-
 def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int = 0):
     """Path for a new file under ``$HERMES_HOME/<subdir>`` (dir created). With ``pattern``/``cap``, first unlinks the
     oldest matching files so at most ``cap - 1`` remain (best-effort)."""
@@ -668,8 +584,7 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
             stale.unlink(missing_ok=True)
     return cache_dir / name
 
-def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int,
-                      write: Callable[[Any], None]) -> Optional[str]:
+def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int, write: Callable[[Any], None]) -> Optional[str]:
     """Bounded cache write via ``write(path)``; the path, or None on any failure — an unwritable cache must never
     break control (a capture keeps working without its spill/screenshot copy)."""
     try:
@@ -682,26 +597,22 @@ def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: s
 def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
     """Copy of the capture in Hermes' media cache so attachment surfaces can deliver it (None without an image)."""
     return _write_cache_file(
-        "screenshot persistence", "cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_ext(cap)}",
+        "screenshot persistence", "cache/images", "image_cache", f"computer_use_{uuid.uuid4().hex}{_capture_image_format(cap)[1]}",
         "computer_use_*.*", _MAX_CAPTURE_FILES, lambda p: p.write_bytes(base64.b64decode(cap.png_b64, validate=False)),
     ) if cap.png_b64 else None
 
 def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
     """FULL element tree (untruncated labels) in a cache file — the read_file/search_files escape hatch for capped text."""
-    def write(path) -> None:
-        payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
-                   "elements": [{"index": e.index, "role": e.role, "label": e.label,
-                                 "bounds": list(e.bounds), "app": e.app} for e in cap.elements]}
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache",
-                             f"elements_{uuid.uuid4().hex}.json", "elements_*.json", _MAX_SPILL_FILES, write)
-
+    payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
+               "elements": [{"index": e.index, "role": e.role, "label": e.label, "bounds": list(e.bounds), "app": e.app}
+                            for e in cap.elements]}
+    return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache", f"elements_{uuid.uuid4().hex}.json",
+                             "elements_*.json", _MAX_SPILL_FILES,
+                             lambda p: p.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"))
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
-
-# Longest image side handed to the aux vision model. Full-resolution desktop captures tokenize heavily and can
-# overflow small local-model context windows; ~1456px keeps SOM badges legible while cutting vision latency.
-_MAX_VISION_DIM = 1456
+_MAX_VISION_DIM = 1456  # longest image side handed to the aux vision model: full-resolution desktop captures tokenize heavily
+# and can overflow small local-model context windows; ~1456px keeps SOM badges legible while cutting vision latency.
 
 def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_DIM) -> tuple[bytes, Optional[str]]:
     """Downscale encoded image bytes so the longest side is <= max_dim -> ``(bytes, scale_note)``. note is None when
@@ -718,12 +629,9 @@ def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_
         new_w, new_h = img.size
         img.save(out, format="JPEG" if ext == ".jpg" else "PNG")
         fx, fy = (orig_w / new_w if new_w else 1.0), (orig_h / new_h if new_h else 1.0)
-        factor_clause = (f"multiply any coordinates you report by {fx:.2f} to map back to the real screen."
-                         if f"{fx:.2f}" == f"{fy:.2f}" else
-                         f"multiply any x coordinates you report by {fx:.2f} and "
-                         f"any y coordinates by {fy:.2f} to map back to the real screen.")
-        return out.getvalue(), (f"Screenshot downscaled from {orig_w}x{orig_h} to "
-                                f"{new_w}x{new_h} for vision; {factor_clause}")
+        factor_clause = (f"multiply any coordinates you report by {fx:.2f} to map back to the real screen." if f"{fx:.2f}" == f"{fy:.2f}"
+                         else f"multiply any x coordinates you report by {fx:.2f} and any y coordinates by {fy:.2f} to map back to the real screen.")
+        return out.getvalue(), f"Screenshot downscaled from {orig_w}x{orig_h} to {new_w}x{new_h} for vision; {factor_clause}"
     except Exception as exc:
         logger.debug("computer_use: vision downscale skipped: %s", exc)
         return raw, None
@@ -755,16 +663,14 @@ def _capture_after_mode() -> str:
         return mode if (mode := mode.strip().lower()) in {"som", "vision", "ax"} else "som"
     return "som"
 
-_VISION_PROMPT = ("Describe what is visible in this desktop application screenshot in concise but specific "
-                  "terms. Mention the app name and window title if visible, the overall layout, any labelled "
-                  "buttons, menus or text fields, and any prominent text content the user would need to know "
-                  "about. Do not invent details that are not actually visible.\n\nAX/SOM index for "
-                  "cross-reference:\n")
+_VISION_PROMPT = ("Describe what is visible in this desktop application screenshot in concise but specific terms. Mention "
+                  "the app name and window title if visible, the overall layout, any labelled buttons, menus or text fields, "
+                  "and any prominent text content the user would need to know about. Do not invent details that are not "
+                  "actually visible.\n\nAX/SOM index for cross-reference:\n")
 
-def _route_capture_through_aux_vision(
-    cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
-    truncated_elements: int = 0, elements_file: Optional[str] = None, screenshot_path: Optional[str] = None,
-) -> Optional[str]:
+def _route_capture_through_aux_vision(cap: CaptureResult, summary: str, *, visible_elements: Optional[List[UIElement]] = None,
+                                      truncated_elements: int = 0, elements_file: Optional[str] = None,
+                                      screenshot_path: Optional[str] = None) -> Optional[str]:
     """Pre-analyse the capture via ``vision_analyze_tool`` (temp file under ``$HERMES_HOME/cache/vision/``) and merge
     the description with the AX/SOM summary into one text payload. JSON, or None on any failure."""
     if not cap.png_b64:
@@ -776,7 +682,7 @@ def _route_capture_through_aux_vision(
         problem = "failed to decode capture base64"
         raw = base64.b64decode(cap.png_b64, validate=False)
         problem = None  # from here on failures are loud (warning)
-        ext = _capture_image_ext(cap)
+        ext = _capture_image_format(cap)[1]
         temp_image_path = _cache_file("cache/vision", "temp_vision_images", f"computer_use_{uuid.uuid4().hex}{ext}")
         raw, scale_note = _shrink_capture_for_vision(raw, ext)
         temp_image_path.write_bytes(raw)
@@ -802,14 +708,13 @@ def _route_capture_through_aux_vision(
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
     # exactly for non-vision main models. Dimensions are the backend's on this branch.
-    view = _view(cap, cap.elements if visible_elements is None else visible_elements, cap.width, cap.height,
-                 truncated=truncated_elements, elements_file=elements_file, screenshot_path=screenshot_path)
+    view = SimpleNamespace(cap=cap, visible=cap.elements if visible_elements is None else visible_elements,
+                           total=len(cap.elements), width=cap.width, height=cap.height, truncated=truncated_elements,
+                           elements_file=elements_file, screenshot_path=screenshot_path, bounds_scale=None)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
 
-
 # ── Availability check (used by the tool registry check_fn) ─────────────────
-
 def check_computer_use_requirements() -> bool:
     """macOS/Windows/Linux + cua-driver binary (or env override). `hermes computer-use doctor` names blocked checks."""
     if sys.platform not in ("darwin", "win32", "linux"):
