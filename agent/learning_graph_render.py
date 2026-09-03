@@ -1,12 +1,8 @@
-"""Terminal renderer for the learning timeline (learned skills + memories).
-
-Same data as the desktop starmap (``apps/desktop/src/app/starmap``), drawn as a
-timeline bar chart (date rows, skill/memory bars colored by dominant category,
-cumulative trajectory sparkline) plus per-slice bucket metadata the TUI walks as
-a tree. Age gradient and memory ink are ported from the desktop source. Grids
-are style runs ``[text, style, alpha, hex?]``: consumers map style + brightness
-onto their palette; hex overrides the base color (category heatmap). Pure, stdlib-only.
-"""
+"""Terminal renderer for the learning timeline (learned skills + memories): the desktop starmap's data
+(``apps/desktop/src/app/starmap``) drawn as a timeline bar chart (date rows, skill/memory bars colored by dominant
+category, cumulative trajectory sparkline) plus per-slice bucket metadata the TUI walks as a tree. Age gradient and
+memory ink are ported from the desktop source. Grids are style runs ``[text, style, alpha, hex?]``: consumers map
+style + brightness onto their palette; hex overrides the base color (category heatmap). Pure, stdlib-only."""
 
 from __future__ import annotations
 
@@ -24,28 +20,42 @@ STYLE_BG, STYLE_SKILL, STYLE_MEMORY, STYLE_LABEL, STYLE_DIM = "bg", "skill", "me
 SKILL_GLYPH, MEMORY_GLYPH = "●", "◆"
 _LABEL_KEYS = tuple("123456789abc")
 
-Run = list  # [text, style, alpha, hex?]
-Row = list  # list[Run]
-Grid = list  # list[Row]
+Row = list  # of runs ``[text, style, alpha, hex?]``; a grid is a list of rows
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
+
+
 def _smoothstep(p: float) -> float:
     p = _clamp(p, 0.0, 1.0)
     return p * p * (3 - 2 * p)
+
+
 def _is_memory(node: dict[str, Any]) -> bool:
     return node.get("kind") == "memory"
+
+
 def _node_id(node: dict[str, Any]) -> str:
     return str(node.get("id", ""))
+
+
 def _utc(ts: float) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
 def _lead_in(ratio: float) -> float:
     return LEAD_IN + (1 - LEAD_IN) * ratio
+
+
 def _visible_count(reveal: float, n: int) -> int:
     return int(_clamp(math.ceil(reveal * n), 0, n))
+
+
 def _node_raw_label(node: dict[str, Any]) -> str:
     return str(node.get("label") or node.get("id") or "unknown").strip()
 
@@ -328,7 +338,7 @@ def render_graph(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, rev
     label_w = min(9, max(len(b.label) for b in buckets))
     bar_w = max(14, cols - label_w - 16)
 
-    grid: Grid = []
+    grid: list[Row] = []
     labels: list[dict[str, Any]] = []
     visible = 0
     for i, bucket in enumerate(buckets[:visible_bucket_count]):

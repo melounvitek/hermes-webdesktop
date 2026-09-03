@@ -1,15 +1,10 @@
 """Curator — background skill maintenance orchestrator.
 
-Inactivity-triggered (no cron daemon): when the agent is idle and the last run
-is older than ``interval_hours``, ``maybe_run_curator()`` auto-transitions
-lifecycle states from activity timestamps, optionally forks an AIAgent that may
-pin/archive/consolidate/patch skills via skill_manage, and persists scheduler
-state in ``.curator_state``.
-
-Invariants: only curator-managed skills are touched; never delete, only archive
-(recoverable); pinned skills bypass all auto-transitions; the fork uses the
-auxiliary client and never touches the main session's prompt cache.
-"""
+Inactivity-triggered (no cron daemon): when the agent is idle and the last run is older than ``interval_hours``,
+``maybe_run_curator()`` auto-transitions lifecycle states from activity timestamps, optionally forks an AIAgent that
+may pin/archive/consolidate/patch skills via skill_manage, and persists scheduler state in ``.curator_state``.
+Invariants: only curator-managed skills are touched; never delete, only archive (recoverable); pinned skills bypass
+all auto-transitions; the fork uses the auxiliary client and never touches the main session's prompt cache."""
 
 from __future__ import annotations
 
@@ -30,10 +25,8 @@ from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_INTERVAL_HOURS = 24 * 7  # 7 days
-DEFAULT_MIN_IDLE_HOURS = 2
-DEFAULT_STALE_AFTER_DAYS = 30
-DEFAULT_ARCHIVE_AFTER_DAYS = 90
+DEFAULT_INTERVAL_HOURS, DEFAULT_MIN_IDLE_HOURS = 24 * 7, 2  # 7 days
+DEFAULT_STALE_AFTER_DAYS, DEFAULT_ARCHIVE_AFTER_DAYS = 30, 90
 # The LLM consolidation fork is opt-in; the deterministic inactivity prune
 # (apply_automatic_transitions) always runs when the curator is enabled.
 DEFAULT_CONSOLIDATE = False
@@ -68,7 +61,8 @@ def save_state(data: Dict[str, Any]) -> None:
         logger.debug("Failed to save curator state: %s", e, exc_info=True)
 
 
-def set_paused(paused: bool) -> None: save_state({**load_state(), "paused": bool(paused)})
+def set_paused(paused: bool) -> None:
+    save_state({**load_state(), "paused": bool(paused)})
 
 
 def is_paused() -> bool:
@@ -677,8 +671,12 @@ def _write_file(path: Path, label: str, render: Any) -> None:
         logger.debug("Curator %s write failed: %s", label, e)
 
 
-def _new_run_dir(started_at: datetime) -> Optional[Path]:
-    """``logs/curator/{YYYYMMDD-HHMMSS}[-N]/`` (N disambiguates a crash-rerun in the same second); None when it can't be created."""
+def _write_run_report(
+    *, started_at: datetime, elapsed_seconds: float, auto_counts: Dict[str, int], auto_summary: str,
+    before_report: List[Dict[str, Any]], before_names: Set[str], after_report: List[Dict[str, Any]], llm_meta: Dict[str, Any],
+) -> Optional[Path]:
+    """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}[-N]/ (N disambiguates a crash-rerun in the same
+    second). Returns the report dir, or None if it couldn't be created (reporting is best-effort)."""
     root, stamp = _reports_root(), started_at.strftime("%Y%m%d-%H%M%S")
     run_dir, suffix = root / stamp, 1
     while run_dir.exists():
@@ -686,19 +684,8 @@ def _new_run_dir(started_at: datetime) -> Optional[Path]:
         run_dir = root / f"{stamp}-{suffix}"
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
-        return run_dir
     except Exception as e:
         logger.debug("Curator run dir create failed: %s", e)
-        return None
-
-
-def _write_run_report(
-    *, started_at: datetime, elapsed_seconds: float, auto_counts: Dict[str, int], auto_summary: str,
-    before_report: List[Dict[str, Any]], before_names: Set[str], after_report: List[Dict[str, Any]], llm_meta: Dict[str, Any],
-) -> Optional[Path]:
-    """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}/. Returns the report dir, or None if it couldn't be created (best-effort)."""
-    run_dir = _new_run_dir(started_at)
-    if run_dir is None:
         return None
     tool_calls = llm_meta.get("tool_calls", []) or []
     after_by_name, before_by_name = _by_name(after_report), _by_name(before_report)
@@ -886,11 +873,10 @@ def run_curator_review(
 ) -> Dict[str, Any]:
     """Execute a single curator review pass: (1) automatic state transitions (no LLM); (2) if *consolidate* and there are
     candidates, fork an AIAgent on the review prompt; (3) update .curator_state; (4) call *on_summary*.
-    *synchronous* runs the LLM review in the calling thread (default: daemon thread).
-    *consolidate* ``None`` reads ``curator.consolidate`` (OFF by default); when off
-    only the deterministic prune runs — no fork, no aux cost. *dry_run* SKIPS the
-    stale/archive transitions and instructs the fork to report only; REPORT.md is still
-    written and recorded in ``state.last_report_path`` so users can read what WOULD have happened."""
+    *synchronous* runs the LLM review in the calling thread (default: daemon thread). *consolidate* ``None`` reads
+    ``curator.consolidate`` (OFF by default); when off only the deterministic prune runs — no fork, no aux cost.
+    *dry_run* SKIPS the stale/archive transitions and instructs the fork to report only; REPORT.md is still written and
+    recorded in ``state.last_report_path`` so users can read what WOULD have happened."""
     consolidate = get_consolidate() if consolidate is None else consolidate
     start = datetime.now(timezone.utc)
     if dry_run:  # count candidates without mutating state
@@ -970,26 +956,25 @@ def _merge_request_overrides(runtime_overrides: Any, slot_extra_body: Any) -> Di
     return merged
 
 
-def _slot_binding(provider: str, model: str, slot: Dict[str, Any]) -> _ReviewRuntimeBinding:
-    api_key, base_url = ((str(v).strip() or None) if v is not None else None for v in (slot.get("api_key"), slot.get("base_url")))
-    return _ReviewRuntimeBinding(provider, model, api_key, base_url, _merge_request_overrides({}, slot.get("extra_body")))
-
-
 def _resolve_review_runtime(cfg: Dict[str, Any]) -> _ReviewRuntimeBinding:
     """Curator is a regular auxiliary task slot (``auxiliary.curator.*``), so it rides the canonical aux-model plumbing. Precedence:
       1. ``auxiliary.curator.{provider,model}`` when both are set non-auto
       2. Legacy ``curator.auxiliary.{provider,model}`` (deprecated) when both set
       3. Main ``model.{provider,default/model}`` pair ("auto" + "" = main chat model)
     Non-empty slot ``api_key``/``base_url`` are returned as explicit overrides so ``resolve_runtime_provider`` doesn't reuse the main chat credential chain."""
+    def _slot(provider: str, model: str, slot: Dict[str, Any]) -> _ReviewRuntimeBinding:
+        api_key, base_url = ((str(v).strip() or None) if v is not None else None for v in (slot.get("api_key"), slot.get("base_url")))
+        return _ReviewRuntimeBinding(provider, model, api_key, base_url, _merge_request_overrides({}, slot.get("extra_body")))
+
     task = _subdict(cfg, "auxiliary", "curator")
     task_provider = (task.get("provider") or "").strip() or None
     task_model = (task.get("model") or "").strip() or None
     if task_provider and task_provider != "auto" and task_model:
-        return _slot_binding(task_provider, task_model, task)
+        return _slot(task_provider, task_model, task)
     legacy = _subdict(cfg, "curator", "auxiliary")
     if legacy.get("provider") and legacy.get("model"):
         logger.info("curator: using deprecated curator.auxiliary.{provider,model} config — please migrate to auxiliary.curator.{provider,model}")
-        return _slot_binding(str(legacy["provider"]), str(legacy["model"]), legacy)
+        return _slot(str(legacy["provider"]), str(legacy["model"]), legacy)
     main = _subdict(cfg, "model")
     return _ReviewRuntimeBinding(main.get("provider") or "auto", main.get("default") or main.get("model") or "", None, None, {})
 
@@ -1016,16 +1001,6 @@ def _resolve_review_provider() -> tuple:
     except Exception as e:
         logger.debug("Curator provider resolution failed: %s", e, exc_info=True)
     return rp, model_name, provider, overrides
-
-
-def _collect_tool_calls(review_agent: Any) -> List[Dict[str, Any]]:
-    """[{name, arguments}] from the fork's session; arguments truncated to 400 chars so a giant skill_manage create doesn't blow up the report."""
-    calls: List[Dict[str, Any]] = []
-    for msg in getattr(review_agent, "_session_messages", []) or []:
-        for fn in ((tc.get("function") or {}) for tc in (msg.get("tool_calls") or []) if isinstance(tc, dict)) if isinstance(msg, dict) else []:
-            args_raw = fn.get("arguments") or ""
-            calls.append({"name": fn.get("name") or "", "arguments": args_raw[:400] + "…" if isinstance(args_raw, str) and len(args_raw) > 400 else args_raw})
-    return calls
 
 
 def _run_llm_review(prompt: str) -> Dict[str, Any]:
@@ -1072,7 +1047,13 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         final = str(conv_result.get("final_response") or "").strip() if isinstance(conv_result, dict) else ""
         result_meta["final"] = final
         result_meta["summary"] = (final[:240] + "…") if len(final) > 240 else (final or "no change")
-        result_meta["tool_calls"] = _collect_tool_calls(review_agent)
+        # Tool calls for the report; arguments truncated to 400 chars so a giant skill_manage create doesn't blow it up.
+        fns = (tc.get("function") or {} for msg in getattr(review_agent, "_session_messages", []) or [] if isinstance(msg, dict)
+               for tc in (msg.get("tool_calls") or []) if isinstance(tc, dict))
+        result_meta["tool_calls"] = [
+            {"name": fn.get("name") or "", "arguments": a[:400] + "…" if isinstance(a, str) and len(a) > 400 else a}
+            for fn in fns for a in (fn.get("arguments") or "",)
+        ]
     except Exception as e:
         result_meta["error"] = result_meta["summary"] = f"error: {e}"
     finally:

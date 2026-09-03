@@ -60,7 +60,6 @@ def _write_memory(path: Path, chunks: list[str]) -> None:
     """Atomic temp-file + rename via the memory tool, so a concurrent reader
     never sees a half-written file (and the §-join stays single-sourced)."""
     from tools.memory_tool import MemoryStore
-
     MemoryStore._write_file(path, [c.strip() for c in chunks if c.strip()])
 
 
@@ -95,7 +94,6 @@ def _memory_detail(node_id: str) -> dict[str, Any]:
 
 def _skill_detail(node_id: str) -> dict[str, Any]:
     from tools.skill_manager_tool import _find_skill
-
     found = _find_skill(node_id)
     if not found:
         return {"ok": False, "message": f"skill '{node_id}' not found"}
@@ -113,7 +111,6 @@ def delete_node(node_id: str) -> dict[str, Any]:
 
 def _delete_skill(name: str) -> dict[str, Any]:
     from tools import skill_usage
-
     if skill_usage.get_record(name).get("pinned"):
         return {"ok": False, "message": f"'{name}' is pinned — unpin it first (hermes curator unpin {name})"}
     ok, message = skill_usage.archive_skill(name)
@@ -137,7 +134,6 @@ def edit_node(node_id: str, content: str) -> dict[str, Any]:
 
 def _edit_skill(name: str, content: str) -> dict[str, Any]:
     from tools.skill_manager_tool import _edit_skill as _do_edit
-
     result = _do_edit(name, content)
     if result.get("success"):
         _clear_skill_cache()
