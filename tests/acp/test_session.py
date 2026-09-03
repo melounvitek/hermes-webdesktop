@@ -240,6 +240,51 @@ class TestListAndCleanup:
         assert messages[0]["content"] == "original"
         assert isinstance(messages[0].get("timestamp"), (int, float))
 
+    def test_cleanup_clears_all(self, manager):
+        s1 = manager.create_session()
+        s2 = manager.create_session()
+        s1.history.append({"role": "user", "content": "one"})
+        s2.history.append({"role": "user", "content": "two"})
+        assert len(manager.list_sessions()) == 2
+        manager.cleanup()
+        assert manager.list_sessions() == []
+
+    def test_cleanup_removes_db_only_sessions_and_clears_task_cwd(self, manager, monkeypatch):
+        """cleanup() must also purge ACP sessions that live only in the DB (e.g.
+        left over from a previous process) and drop every task-cwd override."""
+        cleared: list[str] = []
+        monkeypatch.setattr("tools.terminal_tool.clear_task_env_overrides", cleared.append)
+        live = manager.create_session()
+        db = manager._get_db()
+        db.create_session(session_id="acp-db-only", source="acp", model="test")
+        db.create_session(session_id="cli-keep", source="cli", model="test")
+        manager.cleanup()
+        assert manager._sessions == {}
+        assert db.get_session(live.session_id) is None
+        assert db.get_session("acp-db-only") is None
+        assert db.get_session("cli-keep") is not None  # non-ACP sessions untouched
+        assert set(cleared) == {live.session_id, "acp-db-only"}
+
+    def test_remove_session(self, manager):
+        state = manager.create_session()
+        assert manager.remove_session(state.session_id) is True
+        assert manager.get_session(state.session_id) is None
+        # Removing again returns False
+        assert manager.remove_session(state.session_id) is False
+
+    def test_remove_session_db_only_and_task_cwd(self, manager, monkeypatch):
+        """remove_session() handles a DB-only session (True, row deleted, cwd
+        override cleared) and leaves overrides alone for unknown ids (False)."""
+        cleared: list[str] = []
+        monkeypatch.setattr("tools.terminal_tool.clear_task_env_overrides", cleared.append)
+        db = manager._get_db()
+        db.create_session(session_id="acp-db-only", source="acp", model="test")
+        assert manager.remove_session("acp-db-only") is True
+        assert db.get_session("acp-db-only") is None
+        assert cleared == ["acp-db-only"]
+        assert manager.remove_session("never-existed") is False
+        assert cleared == ["acp-db-only"]
+
 
 # ---------------------------------------------------------------------------
 # persistence — sessions survive process restarts (via SessionDB)

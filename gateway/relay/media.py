@@ -65,6 +65,10 @@ class RelayMediaClient:
     def _bearer(self) -> str:
         return make_upgrade_token(self._gateway_id, self._secret)
 
+    def is_relay_media_url(self, url: str) -> bool:
+        """Is ``url`` a connector re-host reference (needs our bearer to GET)?"""
+        return "/relay/media/" in (url or "")
+
     async def upload(
         self, file_path: str, *, mime: Optional[str] = None, filename: Optional[str] = None
     ) -> Optional[str]:
@@ -113,7 +117,7 @@ class RelayMediaClient:
         """
         if not url:
             return None
-        needs_auth = "/relay/media/" in url
+        needs_auth = self.is_relay_media_url(url)
         if needs_auth and not self.enabled:
             return None
         headers = {"User-Agent": _MEDIA_USER_AGENT}
