@@ -228,10 +228,11 @@ def test_browser_use_explicit_local_mode_stays_local_even_when_managed_gateway_i
     })
 
     with patch.dict(os.environ, env, clear=True):
-        browser_tool = _load_tool_module("tools.browser_tool", "browser_tool.py")
+        _load_tool_module("tools.browser_tool", "browser_tool.py")
+        browser_tool_cloud = sys.modules["tools.browser_tool_cloud"]
 
-        local_mode = browser_tool._is_local_mode()
-        provider = browser_tool._get_cloud_provider()
+        local_mode = browser_tool_cloud._is_local_mode()
+        provider = browser_tool_cloud._get_cloud_provider()
 
     assert local_mode is True
     assert provider is None

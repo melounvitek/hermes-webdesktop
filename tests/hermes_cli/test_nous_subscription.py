@@ -6,6 +6,7 @@ import sys
 from hermes_cli.nous_account import NousPortalAccountInfo, NousToolAccessInfo
 from hermes_cli import nous_subscription as ns
 from tools import tool_backend_helpers
+from tools import browser_tool_install as bt_install
 
 
 _POOL_COVERAGE = {
@@ -124,7 +125,7 @@ def _stub_browser_probes(monkeypatch, *, has_agent_browser, chromium, lightpanda
     """Common monkeypatches for local-browser readiness scenarios.
 
     ``chromium`` / ``lightpanda`` drive the runtime probes that
-    ``_local_browser_runnable`` reuses from ``tools.browser_tool`` (lazy import,
+    ``_local_browser_runnable`` reuses from the ``tools.browser_tool_*`` siblings (lazy import,
     so patching the module attributes is enough).
     """
     monkeypatch.setattr(ns, "get_env_value", lambda name: "")
@@ -136,9 +137,9 @@ def _stub_browser_probes(monkeypatch, *, has_agent_browser, chromium, lightpanda
     monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
     monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
     monkeypatch.setattr(ns, "is_managed_tool_gateway_ready", lambda vendor: False)
-    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: chromium)
+    monkeypatch.setattr("tools.browser_tool_install._chromium_installed", lambda: chromium)
     monkeypatch.setattr(
-        "tools.browser_tool._using_lightpanda_engine", lambda: lightpanda
+        "tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: lightpanda
     )
 
 
@@ -471,7 +472,6 @@ def test_has_agent_browser_true_for_npx_only_resolution(monkeypatch):
     """No PATH binary and no runnable node_modules copy, but the browser_tool
     cascade resolves the npx fallback: browser capability is available."""
     _block_legacy_agent_browser_checks(monkeypatch)
-    import tools.browser_tool as browser_tool
 
     calls = []
 
@@ -479,9 +479,9 @@ def test_has_agent_browser_true_for_npx_only_resolution(monkeypatch):
         calls.append({"validate": validate})
         return "npx agent-browser"
 
-    monkeypatch.setattr(browser_tool, "_find_agent_browser", fake_find_agent_browser)
+    monkeypatch.setattr(bt_install, "_find_agent_browser", fake_find_agent_browser)
     monkeypatch.setattr(
-        browser_tool, "_requires_real_termux_browser_install", lambda cmd: False
+        "tools.browser_tool_install._requires_real_termux_browser_install", lambda cmd: False
     )
 
     assert ns._has_agent_browser() is True
@@ -492,16 +492,14 @@ def test_has_agent_browser_true_for_npx_only_resolution(monkeypatch):
 def test_has_agent_browser_false_for_termux_local_bare_npx(monkeypatch):
     """On Termux in local mode the bare npx fallback is not a usable install."""
     _block_legacy_agent_browser_checks(monkeypatch)
-    import tools.browser_tool as browser_tool
 
     monkeypatch.setattr(
-        browser_tool,
+        bt_install,
         "_find_agent_browser",
         lambda *, validate=True: "npx agent-browser",
     )
     monkeypatch.setattr(
-        browser_tool,
-        "_requires_real_termux_browser_install",
+        "tools.browser_tool_install._requires_real_termux_browser_install",
         lambda cmd: cmd.strip() == "npx agent-browser",
     )
 
@@ -510,20 +508,19 @@ def test_has_agent_browser_false_for_termux_local_bare_npx(monkeypatch):
 
 def test_has_agent_browser_false_when_nothing_resolvable(monkeypatch):
     _block_legacy_agent_browser_checks(monkeypatch)
-    import tools.browser_tool as browser_tool
 
     def raise_not_found(*, validate=True):
         raise FileNotFoundError("agent-browser CLI not found")
 
-    monkeypatch.setattr(browser_tool, "_find_agent_browser", raise_not_found)
+    monkeypatch.setattr(bt_install, "_find_agent_browser", raise_not_found)
 
     assert ns._has_agent_browser() is False
 
 
 def test_has_agent_browser_import_failure_falls_back_to_path_check(monkeypatch):
-    """If tools.browser_tool cannot be imported, the old PATH + node_modules
+    """If tools.browser_tool_install cannot be imported, the old PATH + node_modules
     check must still answer (prior behaviour), not crash."""
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", None)
+    monkeypatch.setitem(sys.modules, "tools.browser_tool_install", None)
     real_which = shutil.which
     monkeypatch.setattr(
         shutil,
@@ -545,11 +542,11 @@ def test_has_agent_browser_import_failure_falls_back_to_path_check(monkeypatch):
 def test_has_agent_browser_import_failure_falls_back_to_hermes_managed_node_path(
     monkeypatch, tmp_path
 ):
-    """If tools.browser_tool cannot be imported, the managed-Node rung must
+    """If tools.browser_tool_install cannot be imported, the managed-Node rung must
     still find a runnable agent-browser under the Hermes Node dir even when
     it's absent from the probe process's PATH — the Windows installer shape
     where install succeeded but the GUI still said needs setup."""
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", None)
+    monkeypatch.setitem(sys.modules, "tools.browser_tool_install", None)
     managed_dir = tmp_path / "node"
     managed_dir.mkdir()
     managed_bin = managed_dir / "agent-browser"
@@ -578,7 +575,7 @@ def test_has_agent_browser_import_failure_falls_back_to_hermes_managed_node_path
 
 
 def test_has_agent_browser_import_failure_and_no_binary_is_false(monkeypatch):
-    monkeypatch.setitem(sys.modules, "tools.browser_tool", None)
+    monkeypatch.setitem(sys.modules, "tools.browser_tool_install", None)
     _block_legacy_agent_browser_checks(monkeypatch)
 
     assert ns._has_agent_browser() is False

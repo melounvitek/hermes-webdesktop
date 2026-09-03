@@ -377,7 +377,7 @@ class TestAgentBrowserPostSetup:
 
     agent-browser is no longer a root package.json dependency (there's no
     local `npm install` step anymore); it resolves at runtime via
-    tools.browser_tool._find_agent_browser (PATH -> Homebrew/Hermes-managed
+    tools.browser_tool_install._find_agent_browser (PATH -> Homebrew/Hermes-managed
     node -> local .bin -> npx). This class exercises the Chromium-install
     branch of _run_post_setup, which now delegates to that same resolution
     cascade instead of hand-rolling its own node_modules/.bin/agent-browser
@@ -410,7 +410,7 @@ class TestAgentBrowserPostSetup:
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed"
+            "tools.browser_tool_install._chromium_installed"
         ) as chromium_check:
             _run_post_setup("browserbase")
 
@@ -419,11 +419,11 @@ class TestAgentBrowserPostSetup:
 
     def test_chromium_already_installed_skips_subprocess(self):
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=True
+            "tools.browser_tool_install._chromium_installed", return_value=True
         ), patch(
             "hermes_cli.tools_config_post_setup._print_success"
         ) as success:
@@ -435,13 +435,13 @@ class TestAgentBrowserPostSetup:
 
     def test_docker_with_missing_chromium_warns_instead_of_installing(self):
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=True
+            "tools.browser_tool_install._running_in_docker", return_value=True
         ), patch(
             "hermes_cli.tools_config_post_setup._print_warning"
         ) as warn:
@@ -457,11 +457,11 @@ class TestAgentBrowserPostSetup:
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed"
+            "tools.browser_tool_install._chromium_installed"
         ) as chromium_check, patch(
-            "tools.browser_tool._running_in_docker"
+            "tools.browser_tool_install._running_in_docker"
         ) as docker_check, patch(
-            "tools.browser_tool._find_agent_browser",
+            "tools.browser_tool_install._find_agent_browser",
             side_effect=FileNotFoundError("agent-browser CLI not found"),
         ), patch(
             "hermes_cli.tools_config_post_setup._print_warning"
@@ -483,13 +483,13 @@ class TestAgentBrowserPostSetup:
             # calls shutil.which with, not just the bare-PATH positional form.
             side_effect=lambda name, path=None: "/usr/bin/npx" if name == "npx" else None,
         ), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch("subprocess.run") as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
             "hermes_cli.tools_config_post_setup._print_success"
         ):
@@ -511,13 +511,13 @@ class TestAgentBrowserPostSetup:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
-            "tools.browser_tool._resolve_npx_bin", return_value=hermes_npx
+            "tools.browser_tool_install._resolve_npx_bin", return_value=hermes_npx
         ), patch(
             "hermes_cli.tools_config_post_setup._print_success"
         ):
@@ -537,13 +537,13 @@ class TestAgentBrowserPostSetup:
         with patch("shutil.which", return_value=None), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
-            "tools.browser_tool._resolve_npx_bin", return_value=None
+            "tools.browser_tool_install._resolve_npx_bin", return_value=None
         ), patch(
             "hermes_cli.tools_config_post_setup._print_warning"
         ) as warn:
@@ -559,11 +559,11 @@ class TestAgentBrowserPostSetup:
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
             "subprocess.run"
         ) as run, patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser",
+            "tools.browser_tool_install._find_agent_browser",
             return_value="/usr/local/bin/agent-browser",
         ), patch(
             "hermes_cli.tools_config_post_setup._print_success"
@@ -580,16 +580,16 @@ class TestAgentBrowserPostSetup:
         import tools.browser_tool as _bt
 
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch(
             "subprocess.run",
             return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
         ), patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
             "hermes_cli.tools_config_post_setup._print_success"
         ):
@@ -605,18 +605,18 @@ class TestAgentBrowserPostSetup:
         import tools.browser_tool as _bt
 
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch(
             "subprocess.run",
             return_value=SimpleNamespace(
                 returncode=1, stdout="", stderr="line1\nline2\nfatal: network error"
             ),
         ), patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
             "hermes_cli.tools_config_post_setup._print_warning"
         ) as warn, patch(
@@ -633,16 +633,16 @@ class TestAgentBrowserPostSetup:
 
     def test_install_timeout_warns_without_raising(self):
         with patch("shutil.which", return_value="/usr/bin/npx"), patch(
-            "tools.browser_tool.node_tool_runnable", return_value=True
+            "tools.browser_tool_install.node_tool_runnable", return_value=True
         ), patch(
             "subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd=["npx"], timeout=600),
         ), patch(
-            "tools.browser_tool._chromium_installed", return_value=False
+            "tools.browser_tool_install._chromium_installed", return_value=False
         ), patch(
-            "tools.browser_tool._running_in_docker", return_value=False
+            "tools.browser_tool_install._running_in_docker", return_value=False
         ), patch(
-            "tools.browser_tool._find_agent_browser", return_value="npx agent-browser"
+            "tools.browser_tool_install._find_agent_browser", return_value="npx agent-browser"
         ), patch(
             "hermes_cli.tools_config_post_setup._print_warning"
         ) as warn:

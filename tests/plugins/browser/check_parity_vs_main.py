@@ -4,7 +4,7 @@ Spawns one subprocess per (version, scenario) cell — pinned to either
 origin/main (legacy in-tree providers + class-instantiation lookup) or
 this PR's worktree (plugin-based registry) via `sys.path[0]`. Each
 subprocess clears all browser-related env vars + writes a config.yaml,
-loads `tools.browser_tool._get_cloud_provider()`, and emits a reduced
+loads `tools.browser_tool_cloud._get_cloud_provider()`, and emits a reduced
 "shape tuple" {is_local, provider_name, is_available} as JSON.
 
 The parent process diffs the shapes per scenario. A diff means the
@@ -74,7 +74,7 @@ for name in list(sys.modules):
     if name.startswith("tools.") or name.startswith("agent.") or name.startswith("plugins."):
         sys.modules.pop(name, None)
 
-from tools.browser_tool import _get_cloud_provider, _is_local_mode
+from tools.browser_tool_cloud import _get_cloud_provider, _is_local_mode
 
 provider = _get_cloud_provider()
 

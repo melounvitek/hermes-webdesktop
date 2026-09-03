@@ -32,9 +32,9 @@ class TestBrowserSecretExfil:
         """Cloud browser providers must not receive opaque token query params."""
         from tools.browser_tool import browser_navigate
 
-        with patch("tools.browser_tool._is_local_backend", return_value=False), \
+        with patch("tools.browser_tool_cloud._is_local_backend", return_value=False), \
              patch("tools.browser_tool._navigation_session_key", return_value="default"), \
-             patch("tools.browser_tool._run_browser_command") as mock_run:
+             patch("tools.browser_tool_session._run_browser_command") as mock_run:
             result = browser_navigate("https://example.com/callback?token=opaque-oauth-code")
 
         parsed = json.loads(result)
@@ -48,9 +48,9 @@ class TestBrowserSecretExfil:
         from tools.browser_tool import browser_navigate
 
         mock_result = {"success": True, "data": {"title": "ok", "url": "https://example.com/callback?token=opaque-oauth-code"}}
-        with patch("tools.browser_tool._run_browser_command", return_value=mock_result), \
-             patch("tools.browser_tool._get_session_info", return_value={"_first_nav": False}), \
-             patch("tools.browser_tool._is_local_backend", return_value=True):
+        with patch("tools.browser_tool_session._run_browser_command", return_value=mock_result), \
+             patch("tools.browser_tool_session._get_session_info", return_value={"_first_nav": False}), \
+             patch("tools.browser_tool_cloud._is_local_backend", return_value=True):
             result = browser_navigate("https://example.com/callback?token=opaque-oauth-code")
 
         parsed = json.loads(result)
@@ -62,9 +62,9 @@ class TestBrowserSecretExfil:
         # Patch the actual browser command — we only care that the secret
         # check doesn't block a clean URL, not that Chrome starts in CI.
         mock_result = {"success": True, "data": {"title": "ok", "url": "https://github.com/NousResearch/hermes-agent"}}
-        with patch("tools.browser_tool._run_browser_command", return_value=mock_result), \
-             patch("tools.browser_tool._get_session_info", return_value={"_first_nav": False}), \
-             patch("tools.browser_tool._is_local_backend", return_value=True):
+        with patch("tools.browser_tool_session._run_browser_command", return_value=mock_result), \
+             patch("tools.browser_tool_session._get_session_info", return_value={"_first_nav": False}), \
+             patch("tools.browser_tool_cloud._is_local_backend", return_value=True):
             result = browser_navigate("https://github.com/NousResearch/hermes-agent")
         parsed = json.loads(result)
         # Should NOT be blocked by secret detection
@@ -80,9 +80,9 @@ class TestBrowserSecretExfil:
                 captured["url"] = args[0]
             return {"success": True, "data": {"title": "ok", "url": args[0]}}
 
-        with patch("tools.browser_tool._run_browser_command", side_effect=mock_run), \
-             patch("tools.browser_tool._get_session_info", return_value={"_first_nav": False}), \
-             patch("tools.browser_tool._is_local_backend", return_value=True):
+        with patch("tools.browser_tool_session._run_browser_command", side_effect=mock_run), \
+             patch("tools.browser_tool_session._get_session_info", return_value={"_first_nav": False}), \
+             patch("tools.browser_tool_cloud._is_local_backend", return_value=True):
             result = browser_navigate("https://wttr.in/Köln")
 
         parsed = json.loads(result)
@@ -210,7 +210,7 @@ class TestBrowserSnapshotRedaction:
     def test_stored_snapshot_redacts_secrets(self):
         """Secrets in a snapshot must be masked in the stored full-text file."""
         from pathlib import Path
-        from tools.browser_tool import _store_full_snapshot
+        from tools.browser_tool_snapshot import _store_full_snapshot
 
         fake_key = "sk-" + "FAKESECRETVALUE1234567890ABCDEF"
         snapshot_with_secret = (

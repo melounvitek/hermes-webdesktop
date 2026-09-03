@@ -23,6 +23,7 @@ from hermes_cli import doctor_tools
 from hermes_cli import doctor_state
 from hermes_cli import doctor_platform
 from hermes_cli import doctor_config
+from tools import browser_tool_install as bt_install
 
 
 class TestDoctorPlatformHints:
@@ -829,8 +830,7 @@ def test_run_doctor_reports_agent_browser_resolves_via_npx(monkeypatch, tmp_path
     this is the expected common case now, not a warning)."""
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    import tools.browser_tool as bt
-    monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "npx agent-browser")
+    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
     warm_calls = []
     monkeypatch.setattr(
         "tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: warm_calls.append(1) or True
@@ -855,8 +855,7 @@ def test_run_doctor_fix_warms_npx_cache_when_agent_browser_resolves_via_npx(
     when agent-browser resolves via npx, and report success."""
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    import tools.browser_tool as bt
-    monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "npx agent-browser")
+    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
     warm_calls = []
     monkeypatch.setattr(
         "tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: warm_calls.append(1) or True
@@ -878,8 +877,7 @@ def test_run_doctor_fix_reports_when_npx_warmup_fails(monkeypatch, tmp_path):
     claiming success — and must not count it as a fix."""
     _doctor_env_for_agent_browser(monkeypatch, tmp_path)
 
-    import tools.browser_tool as bt
-    monkeypatch.setattr(bt, "_find_agent_browser", lambda **_kw: "npx agent-browser")
+    monkeypatch.setattr(bt_install, "_find_agent_browser", lambda **_kw: "npx agent-browser")
     monkeypatch.setattr("tools.browser_tool_install.warm_agent_browser_npx_cache", lambda *a, **kw: False)
 
     buf = io.StringIO()
@@ -1714,7 +1712,6 @@ class TestMacOSTCCGrants:
 
 def test_run_doctor_reports_shadowed_lightpanda_engine(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
-    import tools.browser_tool as bt
 
     monkeypatch.setattr("tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: True)
     monkeypatch.setattr(
@@ -1728,7 +1725,6 @@ def test_run_doctor_reports_shadowed_lightpanda_engine(monkeypatch, tmp_path):
 
 def test_run_doctor_reports_lightpanda_ok(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
-    import tools.browser_tool as bt
 
     monkeypatch.setattr("tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: True)
     monkeypatch.setattr("tools.browser_tool_lightpanda_fallback.lightpanda_engine_status", lambda: (True, "Browser Use mode"))
@@ -1740,7 +1736,6 @@ def test_run_doctor_reports_lightpanda_ok(monkeypatch, tmp_path):
 
 def test_run_doctor_warns_when_lightpanda_binary_missing(monkeypatch, tmp_path):
     helper = TestDoctorMemoryProviderSection()
-    import tools.browser_tool as bt
 
     monkeypatch.setattr("tools.browser_tool_lightpanda_fallback._using_lightpanda_engine", lambda: True)
     monkeypatch.setattr("tools.browser_tool_lightpanda_fallback.lightpanda_engine_status", lambda: (True, "Browser Use mode"))

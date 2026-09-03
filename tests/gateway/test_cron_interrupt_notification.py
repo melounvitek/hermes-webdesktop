@@ -19,6 +19,7 @@ import pytest
 
 from gateway.config import Platform
 from tests.gateway.restart_test_helpers import make_restart_runner
+from tools import browser_tool_lifecycle as bt_lifecycle
 
 
 @pytest.fixture(autouse=True)
@@ -199,7 +200,6 @@ class TestShutdownDeliversNoticeBeforeDisconnect:
         """The whole point is ordering: a notice sent after teardown is lost,
         which is the bug."""
         import cron.scheduler as sched
-        import tools.browser_tool as _bt
         import tools.process_registry as _pr
         import tools.terminal_tool as _tt
 
@@ -209,7 +209,7 @@ class TestShutdownDeliversNoticeBeforeDisconnect:
 
         monkeypatch.setattr(_pr.process_registry, "kill_all", lambda task_id=None: 1)
         monkeypatch.setattr(_tt, "cleanup_all_environments", lambda: None)
-        monkeypatch.setattr(_bt, "cleanup_all_browsers", lambda: None)
+        monkeypatch.setattr(bt_lifecycle, "cleanup_all_browsers", lambda: None)
 
         events: list[str] = []
         real_send = adapter.send
