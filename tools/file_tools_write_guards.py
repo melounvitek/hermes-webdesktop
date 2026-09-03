@@ -1,7 +1,7 @@
 """Write-side safety guards for write_file / patch.
 
 Every guard returns ``None`` when the write may proceed, else an error string
-the tool returns verbatim. ``tools.file_tools`` re-imports every name here.
+the tool returns verbatim.
 Guards, in the order the tools apply them: ``_check_sensitive_path`` (hard
 deny), ``_check_binary_document_write``, ``_check_protected_instruction_write``
 (ALWAYS ask), ``_check_approval_required_write`` (normal gate),
@@ -198,12 +198,15 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
 
     try:
         import tools.approval as _approval
+        from tools.approval_context import get_current_session_key
+        from tools.approval_gateway_wait import _await_gateway_decision
+        from tools.approval_prompt import prompt_dangerous_approval
     except Exception:
         return blocked.format(why=_APPROVAL_UNAVAILABLE)
 
     # Gateway surface: block on the button round-trip when a notify callback
     # is registered for this session. One-operation only — no scope buttons.
-    session_key = _approval.get_current_session_key()
+    session_key = get_current_session_key()
     try:
         with _approval._lock:
             notify_cb = _approval._gateway_notify_cbs.get(session_key)
@@ -218,7 +221,7 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
             "description": description,
             "allow_permanent": False,
             "allow_session": False}
-        decision = _approval._await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
+        decision = _await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
         if decision.get("notify_failed"):
             return blocked.format(why="requires approval but the approval request could not be delivered.")
         choice, timed = decision.get("choice"), not decision.get("resolved")
@@ -233,7 +236,7 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
             # No human channel (script, cron, background thread): fail closed —
             # auto-approving here would recreate the persistence vector.
             return blocked.format(why=_NO_HUMAN)
-        choice = _approval.prompt_dangerous_approval(
+        choice = prompt_dangerous_approval(
             display, description, allow_permanent=False, allow_session=False, approval_callback=callback)
         timed = choice == "timeout"
     # Any tapped scope is a one-operation grant; nothing is persisted.

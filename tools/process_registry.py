@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 from hermes_cli.config import get_hermes_home
 
 from agent.redact import redact_sensitive_text
+from tools.process_registry_notifications import format_process_notification
 
 logger = logging.getLogger(__name__)
 
@@ -1968,16 +1969,6 @@ class ProcessRegistry:
 process_registry = ProcessRegistry()
 
 
-# Notification rendering lives in tools.process_registry_notifications; re-exported so
-# `from tools.process_registry import format_process_notification` and
-# `patch("tools.process_registry._x")` keep resolving.
-from tools.process_registry_notifications import (  # noqa: F401,E402
-    _delegation_attribution_line, _delegation_config, _delegation_model_not_found,
-    _delegation_model_not_found_notice, _format_age, _format_async_delegation,
-    _model_not_found_patterns, format_process_notification,
-)
-
-
 # --- the "process_manage" tool schema + handler -----------------------------------
 from tools.registry import registry, tool_error
 
@@ -2056,7 +2047,7 @@ def _list_processes(task_id) -> dict:
     session_key = ""
     with suppress(Exception):
         # See #29177.
-        from tools.approval import get_current_session_key
+        from tools.approval_context import get_current_session_key
         session_key = get_current_session_key(default="") or ""
     return {"processes": [
         _redact_process_result(p)

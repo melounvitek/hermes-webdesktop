@@ -445,7 +445,7 @@ class TestOverflowNotificationFormatting:
     to the completion formatter as a phantom 'process exited (exit code ?)'."""
 
     def test_overflow_tripped_formats_message(self):
-        from tools.process_registry import format_process_notification
+        from tools.process_registry_notifications import format_process_notification
 
         evt = {
             "type": "watch_overflow_tripped",
@@ -457,7 +457,7 @@ class TestOverflowNotificationFormatting:
         assert "exit code" not in out
 
     def test_overflow_released_formats_message(self):
-        from tools.process_registry import format_process_notification
+        from tools.process_registry_notifications import format_process_notification
 
         evt = {
             "type": "watch_overflow_released",

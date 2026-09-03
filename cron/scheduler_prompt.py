@@ -277,7 +277,8 @@ def _scan_assembled_cron_prompt(
     Since cron runs non-interactively (auto-approves tool calls), a malicious skill carrying an injection
     payload bypassed every gate. See #3968.
     """
-    from tools.cronjob_tools import _scan_cron_prompt, _scan_cron_skill_assembled
+    from tools.cronjob_tools import _scan_cron_prompt
+    from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
     if has_skills or has_injected_data:
         # The cleaned (sanitized) prompt is what actually runs.
         assembled, scan_error = _scan_cron_skill_assembled(assembled)

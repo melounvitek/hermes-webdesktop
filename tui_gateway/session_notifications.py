@@ -408,7 +408,8 @@ def _notification_poller_loop(stop_event: threading.Event, sid: str, session: di
     subscriptions and delivers terminal task events the same way (status.update + agent turn) — the delivery
     path tools/kanban_tools.py documents for platform="tui" rows (issue #59890).
     """
-    from tools.process_registry import process_registry, format_process_notification
+    from tools.process_registry import process_registry
+    from tools.process_registry_notifications import format_process_notification
     queue = process_registry.completion_queue
     emitted: set = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy
     handle = lambda evt, deferred: _notif_handle_event(  # noqa: E731

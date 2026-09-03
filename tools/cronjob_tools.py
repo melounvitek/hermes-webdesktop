@@ -41,11 +41,8 @@ from cron.jobs import (
     resolve_job_ref,
     resume_job,
     update_job)
-from tools.cronjob_prompt_scan import (  # noqa: F401  (re-exported; tests/scheduler import via this module)
-    _CRON_INVISIBLE_CHARS,
-    _scan_cron_prompt,
-    _scan_cron_skill_assembled)
-from tools.cronjob_job_args import (  # noqa: F401  (re-exported; tests/scheduler import via this module)
+from tools.cronjob_prompt_scan import _scan_cron_prompt
+from tools.cronjob_job_args import (
     _apply_continuity,
     _canonical_skills,
     _clean_str_list,
@@ -379,7 +376,7 @@ def _background_session_key(session_id: Optional[str]) -> str:
     """Routing key for a detached completion, captured on THIS thread (contextvars don't
     cross the pool). Empty string = no durable consumer."""
     try:
-        from tools.approval import get_current_session_key
+        from tools.approval_context import get_current_session_key
         session_key = get_current_session_key(default="")
     except Exception:
         session_key = ""

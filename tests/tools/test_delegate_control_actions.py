@@ -691,7 +691,8 @@ def test_attribution_line_uses_owner_task_id(monkeypatch):
     """format_process_notification resolves attribution from owner_task_id
     when task_id is a collapsed container key (surface flag on)."""
     import hermes_cli.config as _cfg
-    from tools.process_registry import ProcessRegistry, format_process_notification
+    from tools.process_registry import ProcessRegistry
+    from tools.process_registry_notifications import format_process_notification
 
     monkeypatch.setattr(
         _cfg,
@@ -719,7 +720,7 @@ def test_attribution_line_uses_owner_task_id(monkeypatch):
 
 
 def test_completion_notification_trims_subagent_output_wall():
-    from tools.process_registry import format_process_notification
+    from tools.process_registry_notifications import format_process_notification
 
     parent = _StubParentWithSession("sess-attr-4")
     child = _StubChild(parent)
@@ -745,7 +746,7 @@ def test_completion_notification_trims_subagent_output_wall():
 
 def test_parent_owned_process_notification_unchanged():
     """Processes NOT started by a subagent keep the exact legacy shape."""
-    from tools.process_registry import format_process_notification
+    from tools.process_registry_notifications import format_process_notification
 
     text = format_process_notification(
         {

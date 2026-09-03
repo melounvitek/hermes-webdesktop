@@ -1458,7 +1458,8 @@ class GatewayNotificationsMixin:
         (``display.background_process_notifications``): concise (default one-liner; failures append
         the output tail) / all (running updates + final raw) / result (final raw) / error (final raw
         if exit != 0) / off."""
-        from tools.process_registry import format_process_notification, process_registry
+        from tools.process_registry import process_registry
+        from tools.process_registry_notifications import format_process_notification
         session_id = watcher["session_id"]
         interval = watcher["check_interval"]
         platform_name = watcher.get("platform", "")

@@ -233,27 +233,27 @@ class TestCheckSensitivePathMacOSBypass:
     """Verify _check_sensitive_path blocks /private/etc paths (issue #8734)."""
 
     def test_etc_hosts_blocked(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/etc/hosts") is not None
 
     def test_private_etc_hosts_blocked(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/private/etc/hosts") is not None
 
     def test_private_etc_ssh_config_blocked(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/private/etc/ssh/sshd_config") is not None
 
     def test_private_var_blocked(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/private/var/db/something") is not None
 
     def test_boot_still_blocked(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/boot/grub/grub.cfg") is not None
 
     def test_safe_path_allowed(self):
-        from tools.file_tools import _check_sensitive_path
+        from tools.file_tools_write_guards import _check_sensitive_path
         assert _check_sensitive_path("/tmp/safe_file.txt") is None
 
 
@@ -447,6 +447,7 @@ class TestProtectedInstructionFiles:
     def test_prompts_even_under_yolo(self, tmp_path, approvals, monkeypatch):
         """The whole point: auto-approve/yolo must NOT bypass this gate."""
         import tools.approval as A
+        from tools import approval_context
         monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", True)
         target = tmp_path / "AGENTS.md"
         approvals["answer"] = "deny"
@@ -638,8 +639,9 @@ class TestProtectedInstructionFiles:
 
     def test_gateway_notify_resolve_once_allows(self, tmp_path):
         import tools.approval as A
+        from tools import approval_context
         session_key = "protected-files-test-session"
-        token = A.set_current_session_key(session_key)
+        token = approval_context.set_current_session_key(session_key)
         try:
             def notify(approval_data):
                 # Buttons must not offer persistent scopes for this gate.
@@ -655,7 +657,7 @@ class TestProtectedInstructionFiles:
             finally:
                 A.unregister_gateway_notify(session_key)
         finally:
-            A.reset_current_session_key(token)
+            approval_context.reset_current_session_key(token)
 
     def test_gateway_payload_renders_only_once_and_deny(self, tmp_path):
         """End-to-end: what this gate emits, a TUI/desktop client can render.
@@ -666,10 +668,11 @@ class TestProtectedInstructionFiles:
         the two layers together is what catches that drift.
         """
         import tools.approval as A
+        from tools import approval_context
         from tui_gateway.server import _approval_request_payload
 
         session_key = "protected-files-payload-session"
-        token = A.set_current_session_key(session_key)
+        token = approval_context.set_current_session_key(session_key)
         rendered = {}
         try:
             def notify(approval_data):
@@ -682,7 +685,7 @@ class TestProtectedInstructionFiles:
             finally:
                 A.unregister_gateway_notify(session_key)
         finally:
-            A.reset_current_session_key(token)
+            approval_context.reset_current_session_key(token)
 
         assert rendered["choices"] == ["once", "deny"]
 

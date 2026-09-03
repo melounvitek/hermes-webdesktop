@@ -1,7 +1,7 @@
 """Per-task read/search bookkeeping for the file tools.
 
-Process-lifetime state behind read_file/search_files/write_file/patch;
-``tools.file_tools`` re-imports every name here. Per task_id ``_read_tracker``
+Process-lifetime state behind read_file/search_files/write_file/patch.
+Per task_id ``_read_tracker``
 stores: ``last_key``/``consecutive`` (loop detection; reset by any OTHER tool
 call), ``read_history`` (diagnostics), ``dedup`` (key -> mtime; survives context
 compression), ``dedup_generation_reads`` (keys whose full content was served since
