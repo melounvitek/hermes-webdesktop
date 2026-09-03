@@ -1,11 +1,8 @@
 """``hermes gateway enroll`` — enroll a self-hosted gateway with a relay connector.
 
-Managed/hosted installs do NOT self-enroll: the orchestrator (NAS) mints the secret directly and
-stamps it into the container env, so this command refuses to run under ``is_managed()`` (mirrors
-``dashboard register``).
-
-EXPERIMENTAL: the relay auth scheme may change without a deprecation cycle until ≥2 Class-1
-platforms validate the contract.
+Managed/hosted installs do NOT self-enroll: the orchestrator mints the secret and stamps it into the
+container env, so this refuses to run under ``is_managed()`` (mirrors ``dashboard register``).
+EXPERIMENTAL: the relay auth scheme may change without a deprecation cycle.
 """
 
 from __future__ import annotations
@@ -21,11 +18,8 @@ from typing import Optional
 
 
 def _default_gateway_id() -> str:
-    """A stable-ish default gateway instance id: ``<hostname>-<pid-free slug>``.
-
-    The gatewayId gives kill-switch granularity (the connector indexes its secret verify list by
-    it), so default to the host name for recognizability; override via ``--gateway-id``.
-    """
+    """``gw-<hostname>``: the gatewayId is the connector's kill-switch granularity, so default to
+    the host name for recognizability; override via ``--gateway-id``."""
     try:
         host = socket.gethostname().strip()
     except Exception:
@@ -34,44 +28,24 @@ def _default_gateway_id() -> str:
 
 
 def _resolve_connector_url(override: Optional[str]) -> Optional[str]:
-    """Resolve the connector base URL (no trailing slash) for enrollment.
-
-    Precedence: explicit ``--connector-url`` flag > ``GATEWAY_RELAY_URL`` env >
-    ``gateway.relay_url`` in config.yaml. The relay URL is a ``ws(s)://`` dial target; enrollment is
-    an ``http(s)://`` POST to the same host, so we map the scheme. Returns None when nothing is
-    configured (the user must supply one).
-    """
+    """Connector base URL (no trailing slash): ``--connector-url`` > ``GATEWAY_RELAY_URL`` >
+    ``gateway.relay_url``. The relay URL is a ``ws(s)://…/relay`` dial target; enrollment POSTs to
+    ``http(s)://`` on the same host, so map the scheme and strip a pasted ``/relay`` suffix."""
     raw = (override or os.environ.get("GATEWAY_RELAY_URL", "")).strip()
     if not raw:
         try:
             from gateway.run import _load_gateway_config  # late import to avoid cycle
 
-            cfg = (_load_gateway_config().get("gateway") or {})
-            raw = str(cfg.get("relay_url", "") or "").strip()
+            raw = str((_load_gateway_config().get("gateway") or {}).get("relay_url", "") or "").strip()
         except Exception:
             raw = ""
     if not raw:
         return None
-    # The relay dial URL is ws(s)://…/relay; enrollment posts to http(s)://…/relay/enroll.
-    # Strip a trailing /relay path segment if the user pasted the dial URL.
     for ws_scheme, http_scheme in (("ws://", "http://"), ("wss://", "https://")):
         if raw.startswith(ws_scheme):
             raw = http_scheme + raw[len(ws_scheme):]
             break
     return raw.rstrip("/").removesuffix("/relay")
-
-
-def _resolve_identity_token() -> str:
-    """Resolve the caller-identity bearer token (generic-OIDC or Nous Portal).
-
-    Delegates to the canonical resolver in ``gateway.relay`` so the enroll CLI and the runtime self-
-    provision path share ONE implementation (generic OAuth2 client-credentials when
-    ``gateway.idp.token_url`` is set — the air-gapped / self-hosted-IdP path; otherwise Nous
-    Portal). Raises RuntimeError on failure.
-    """
-    from gateway.relay import _resolve_relay_identity_token
-
-    return _resolve_relay_identity_token()
 
 
 def _post_enroll(
@@ -82,11 +56,8 @@ def _post_enroll(
     gateway_id: str,
     timeout: float = 15.0,
 ) -> dict:
-    """POST to the connector's ``/relay/enroll`` and return the JSON body.
-
-    Raises RuntimeError with a user-facing message on any non-2xx / transport failure. Success
-    returns ``{secret, deliveryKey, tenant, gatewayId}``; 400/401/403 return ``{error}``.
-    """
+    """POST to the connector's ``/relay/enroll``; return ``{secret, deliveryKey, tenant, gatewayId}``.
+    Raises RuntimeError with a user-facing message on any non-2xx / transport failure."""
     url = f"{connector_base_url.rstrip('/')}/relay/enroll"
     data = json.dumps({"enrollmentToken": enrollment_token, "gatewayId": gateway_id}).encode("utf-8")
     req = urllib.request.Request(
@@ -139,10 +110,8 @@ def cmd_gateway_enroll(args) -> None:
     from hermes_cli.auth import AuthError
     from hermes_cli.config import is_managed, save_env_value
 
-    # Managed installs get GATEWAY_RELAY_* stamped in by the orchestrator (NAS
-    # mints the secret directly per the design's managed shape). Self-enrolling
-    # from inside such a container is a mistake — and save_env_value refuses to
-    # write anyway.
+    # Managed installs get GATEWAY_RELAY_* stamped in by the orchestrator; save_env_value refuses
+    # to write there anyway.
     if is_managed():
         _fail(
             "✗ `hermes gateway enroll` is not available in a managed/hosted install.\n"
@@ -167,11 +136,13 @@ def cmd_gateway_enroll(args) -> None:
 
     gateway_id = (getattr(args, "gateway_id", None) or _default_gateway_id()).strip()
 
-    # 1. Resolve the caller-identity token (the tenant-proving identity). Generic
-    #    OIDC client-credentials when an IdP token endpoint is configured (air-
-    #    gapped / self-hosted-IdP, NO Nous Portal); otherwise the Nous Portal token.
+    # Caller-identity token (proves the tenant). ``gateway.relay`` owns the ONE resolver shared with
+    # the runtime self-provision path: generic OIDC client-credentials when ``gateway.idp.token_url``
+    # is set (air-gapped / self-hosted IdP), otherwise Nous Portal.
     try:
-        access_token = _resolve_identity_token()
+        from gateway.relay import _resolve_relay_identity_token
+
+        access_token = _resolve_relay_identity_token()
     except AuthError as exc:
         if getattr(exc, "relogin_required", False):
             _fail(
@@ -182,7 +153,6 @@ def cmd_gateway_enroll(args) -> None:
     except Exception as exc:
         _fail(f"✗ Could not resolve a caller-identity token: {exc}")
 
-    # 2-3. Redeem the enrollment token at the connector.
     try:
         result = _post_enroll(
             connector_base_url=connector_base_url,
@@ -196,19 +166,15 @@ def cmd_gateway_enroll(args) -> None:
     tenant = str(result.get("tenant") or "")
     resolved_gateway_id = str(result.get("gatewayId") or gateway_id)
 
-    # 4. Persist the creds idempotently. The secret + delivery key are sensitive;
-    #    save_env_value writes them to ~/.hermes/.env (0600 dir) and never logs.
+    # Persist idempotently; save_env_value writes the sensitive values to ~/.hermes/.env and never
+    # logs them. Explicitly supplied URLs are persisted too: the ws(s):// dial target so the runtime
+    # needn't re-specify it, and the wake URL so self_provision_relay forwards it to the connector
+    # (which pokes it when buffered work arrives while idle; omitted ⇒ drains on next reconnect).
     to_write = {
         "GATEWAY_RELAY_ID": resolved_gateway_id,
         "GATEWAY_RELAY_SECRET": str(result.get("secret") or ""),
         "GATEWAY_RELAY_DELIVERY_KEY": str(result.get("deliveryKey") or ""),
     }
-    # Persist the connector URL too (as the ws(s):// dial target) when supplied
-    # explicitly, so the runtime can dial without re-specifying it. Phase 5
-    # §5.2: likewise the wake URL, so self_provision_relay forwards it to the
-    # connector (which pokes it to wake this gateway when buffered work arrives
-    # while it's idle). Optional — omitted ⇒ the connector can't wake it, but
-    # the gateway still drains on its next reconnect.
     explicit_urls = {
         env_key: (getattr(args, arg, None) or "").strip()
         for arg, env_key in (("connector_url", "GATEWAY_RELAY_URL"), ("wake_url", "GATEWAY_RELAY_WAKE_URL"))
@@ -232,15 +198,10 @@ def cmd_gateway_enroll(args) -> None:
         shown = "<hidden>" if key in ("GATEWAY_RELAY_SECRET", "GATEWAY_RELAY_DELIVERY_KEY") else value
         print(f"    {key}={shown}")
     print()
-    # GATEWAY_RELAY_URL / GATEWAY_RELAY_WAKE_URL are process-global deployment
-    # stamps (agent/secret_scope.py): a multiplexed gateway resolves them from
-    # the PROCESS environment only, never from a secondary profile's .env
-    # (which is loaded into an isolated secret scope, not exported). The .env
-    # write above works for a single-profile gateway and for the profile the
-    # process is launched under (load_hermes_dotenv exports that .env), so
-    # warn rather than refuse — but don't let a secondary-profile enroll claim
-    # a config that will silently never activate. Emitted BEFORE the generic
-    # restart line so the two don't contradict each other.
+    # GATEWAY_RELAY_URL / GATEWAY_RELAY_WAKE_URL are process-global deployment stamps
+    # (agent/secret_scope.py): a multiplexed gateway reads them from the PROCESS environment only,
+    # never a secondary profile's .env. Warn (don't refuse) so a secondary-profile enroll can't claim
+    # a config that silently never activates — BEFORE the generic restart line so they don't clash.
     if not (any(explicit_urls.values()) and _warn_if_secondary_multiplex_profile()):
         print(
             "  The gateway now authenticates its relay WS upgrade with the per-gateway\n"
@@ -250,10 +211,8 @@ def cmd_gateway_enroll(args) -> None:
 
 
 def _warn_if_secondary_multiplex_profile() -> bool:
-    """Warn when relay routing stamps were written to a secondary profile's .env that a multiplexed
-    gateway will never read them from. Returns True when the warning fired (the caller suppresses
-    the generic restart text).
-    """
+    """Warn when relay routing stamps landed in a secondary profile's .env that a multiplexed gateway
+    will never read. Returns True when the warning fired (caller suppresses the restart text)."""
     try:
         from hermes_constants import get_default_hermes_root
         from hermes_cli.config import get_hermes_home
@@ -265,11 +224,9 @@ def _warn_if_secondary_multiplex_profile() -> bool:
         except ValueError:
             return False  # default profile or custom layout — not a secondary
 
-        # Multiplex flag precedence mirrors gateway.config: recognized env
-        # override wins, else the DEFAULT root's config.yaml (raw read — the
-        # active profile's load_gateway_config() is the wrong owner AND runs
-        # the full enablement pass, including the relay-exclusive sweep's own
-        # log output, which has no place in enroll output).
+        # Multiplex precedence mirrors gateway.config: recognized env override wins, else a RAW read
+        # of the DEFAULT root's config.yaml (the active profile's load_gateway_config() is the wrong
+        # owner and runs the full enablement pass, whose log output has no place in enroll output).
         from gateway.config import _env_multiplex_profiles_override
         env_multiplex = _env_multiplex_profiles_override()
         if env_multiplex is False:
