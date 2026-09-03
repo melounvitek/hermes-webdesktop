@@ -74,8 +74,7 @@ def _forget_home_registrations(registry: Set[tuple], lock: threading.Lock) -> No
 
 
 def _split(command: str) -> List[str]:
-    # Windows-safe: plain shlex.split eats backslashes in paths.
-    from hermes_cli._subprocess_compat import split_command_line
+    from hermes_cli._subprocess_compat import split_command_line  # Windows-safe: shlex eats path backslashes
 
     return split_command_line(command)
 
@@ -90,7 +89,6 @@ def _utc_now_iso() -> str:
 
 def _payload_fields(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Common stdin/POST payload fields (shared with outbound webhooks); key order is wire order."""
-    extras = {k: v for k, v in kwargs.items() if k not in _TOP_LEVEL_PAYLOAD_KEYS}
     try:
         cwd = str(Path.cwd())
     except OSError:
@@ -100,7 +98,7 @@ def _payload_fields(kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "tool_input": kwargs.get("args") if isinstance(kwargs.get("args"), dict) else None,
         "session_id": kwargs.get("session_id") or kwargs.get("parent_session_id") or "",
         "cwd": cwd,
-        "extra": extras,
+        "extra": {k: v for k, v in kwargs.items() if k not in _TOP_LEVEL_PAYLOAD_KEYS},
     }
 
 
@@ -129,9 +127,9 @@ class _ToolMatcherMixin:
             return True
         if tool_name is None:
             return False
-        if self.compiled_matcher is not None:
-            return self.compiled_matcher.fullmatch(tool_name) is not None
-        return tool_name == self.matcher  # regex failed to compile: literal fallback
+        if self.compiled_matcher is None:
+            return tool_name == self.matcher  # regex failed to compile: literal fallback
+        return self.compiled_matcher.fullmatch(tool_name) is not None
 
 
 @dataclass
@@ -259,10 +257,7 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
         if not isinstance(entries, list):
             logger.warning("hooks.%s must be a list of hook definitions; got %s", event_name, type(entries).__name__)
             continue
-        for i, raw in enumerate(entries):
-            spec = _parse_single_entry(event_name, i, raw)
-            if spec is not None:
-                specs.append(spec)
+        specs.extend(filter(None, (_parse_single_entry(event_name, i, raw) for i, raw in enumerate(entries))))
 
     return specs
 
@@ -440,16 +435,17 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
     stdout = (r["stdout"] or "").strip()
     parsed = _parse_response(spec.event, stdout)
 
-    if parsed is None and fail_closed and stdout:
+    if parsed is None and fail_closed and stdout and not _is_json_object(stdout):
         # A fail-closed gate must not silently allow on garbage stdout (e.g. a stack trace).
-        try:
-            valid_json = isinstance(json.loads(stdout), dict)
-        except json.JSONDecodeError:
-            valid_json = False
-        if not valid_json:
-            return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
-
+        return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
     return parsed
+
+
+def _is_json_object(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 def _serialize_payload(event: str, kwargs: Dict[str, Any]) -> str:
@@ -524,7 +520,7 @@ def load_allowlist() -> Dict[str, Any]:
     """Return the parsed allowlist, or an empty skeleton if absent."""
     try:
         raw = json.loads(allowlist_path().read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         raw = None
     if not isinstance(raw, dict):
         return {"approvals": []}
@@ -683,11 +679,10 @@ def script_mtime_iso(command: str) -> Optional[str]:
     if not path:
         return None
     try:
-        return datetime.fromtimestamp(
-            os.path.getmtime(os.path.expanduser(path)), tz=timezone.utc,
-        ).isoformat().replace("+00:00", "Z")
+        mtime = os.path.getmtime(os.path.expanduser(path))
     except OSError:
         return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def script_is_executable(command: str) -> bool:
