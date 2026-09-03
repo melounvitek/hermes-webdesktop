@@ -58,6 +58,21 @@ def _chat_msgs(history) -> list[dict]:
     return [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]
 
 
+async def _quiet(call, default=None):
+    """Await ``call()`` fail-open: any exception (sync or in the awaitable) yields *default*."""
+    try:
+        return await call()
+    except Exception:
+        return default
+
+
+def _quiet_sync(call, default=None):
+    try:
+        return call()
+    except Exception:
+        return default
+
+
 def _status_model_route(status_agent, persisted_route: dict, session_row: dict, session_entry):
     """``(model, provider, context_used, context_total)`` for /status.
 
@@ -65,7 +80,6 @@ def _status_model_route(status_agent, persisted_route: dict, session_row: dict, 
     (only loaded when something is still missing).
     """
     from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
-
     model_name = provider_name = ""
     context_used = context_total = 0
     if status_agent is not None and status_agent is not _AGENT_PENDING_SENTINEL:
@@ -204,7 +218,6 @@ class GatewayStatusCommandsMixin:
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         from gateway.run import _AGENT_PENDING_SENTINEL
-
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
@@ -272,33 +285,18 @@ class GatewayStatusCommandsMixin:
         agent's per-turn token deltas are persisted into sessions_db (run_agent.py), not into
         SessionEntry, so session_entry.total_tokens is always 0.
         """
-        title = None
-        session_row: dict[str, Any] = {}
-        db_total_tokens = 0
-        persisted_route: dict[str, Any] = {}
-        if not self._session_db:
-            return title, session_row, db_total_tokens, persisted_route
-        try:
-            title = await self._session_db.get_session_title(session_id)
-        except Exception:
-            title = None
-        try:
-            row = await self._session_db.get_session(session_id)
-            if isinstance(row, dict):
-                session_row = row
-                db_total_tokens = sum(
-                    _int_value(row.get(k))
-                    for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
-                )
-        except Exception:
-            db_total_tokens = 0
-        try:
-            route = await self._session_db.get_dominant_session_model_route(session_id)
-            if isinstance(route, dict):
-                persisted_route = route
-        except Exception:
-            persisted_route = {}
-        return title, session_row, db_total_tokens, persisted_route
+        db = self._session_db
+        if not db:
+            return None, {}, 0, {}
+        title = await _quiet(lambda: db.get_session_title(session_id))
+        row = await _quiet(lambda: db.get_session(session_id))
+        session_row = row if isinstance(row, dict) else {}
+        db_total_tokens = sum(
+            _int_value(session_row.get(k))
+            for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
+        )
+        route = await _quiet(lambda: db.get_dominant_session_model_route(session_id))
+        return title, session_row, db_total_tokens, route if isinstance(route, dict) else {}
 
     @staticmethod
     def _redact_matrix_session_key(session_key: str) -> str:
@@ -357,7 +355,6 @@ class GatewayStatusCommandsMixin:
         history = await self.async_session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
-
             msgs = _chat_msgs(history)
             return "\n".join([
                 t("gateway.context.header"),
@@ -380,41 +377,30 @@ class GatewayStatusCommandsMixin:
         if not used:
             used = _int_value(getattr(session_entry, "last_prompt_tokens", 0))
         if not model_name and self._session_db:
-            try:
-                row = await self._session_db.get_session(session_entry.session_id) or {}
-                if isinstance(row, dict):
-                    model_name = _clean_str(row.get("model", ""))
-            except Exception:
-                model_name = ""
+            row = await _quiet(lambda: self._session_db.get_session(session_entry.session_id))
+            model_name = _clean_str(row.get("model", "")) if isinstance(row, dict) else ""
         if not context_length:
-            try:
-                from gateway.run import _profile_runtime_scope, _resolve_gateway_model_context
+            from gateway.run import _profile_runtime_scope, _resolve_gateway_model_context
 
-                def _resolve_nonresident_context():
-                    if getattr(getattr(self, "config", None), "multiplex_profiles", False):
-                        with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
-                            return _resolve_gateway_model_context(model_name or None)
-                    return _resolve_gateway_model_context(model_name or None)
+            def _resolve_nonresident_context():
+                if getattr(getattr(self, "config", None), "multiplex_profiles", False):
+                    with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
+                        return _resolve_gateway_model_context(model_name or None)
+                return _resolve_gateway_model_context(model_name or None)
 
-                resolved = await asyncio.to_thread(_resolve_nonresident_context)
+            resolved = await _quiet(lambda: asyncio.to_thread(_resolve_nonresident_context))
+            if resolved is not None:
                 model_name = model_name or resolved.model
                 context_length = _int_value(resolved.context_length)
-            except Exception:
-                context_length = 0
         if not context_length and model_name:
-            try:
-                from agent.model_metadata import get_model_context_length
-
-                context_length = _int_value(await asyncio.to_thread(get_model_context_length, model_name))
-            except Exception:
-                context_length = 0
+            from agent.model_metadata import get_model_context_length
+            context_length = _int_value(await _quiet(lambda: asyncio.to_thread(get_model_context_length, model_name)))
         return used, context_length, model_name
 
     async def _handle_agents_command(self, event: MessageEvent) -> str:
         """Handle /agents command - list active agents and running tasks."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         from tools.process_registry import format_uptime_short, process_registry
-
         now = time.time()
         current_session_key = self._session_key_for_source(event.source)
         running_started: dict = getattr(self, "_running_agents_ts", {}) or {}
@@ -431,10 +417,8 @@ class GatewayStatusCommandsMixin:
             })
         agent_rows.sort(key=lambda row: row["elapsed"], reverse=True)
 
-        try:
-            running_processes = [p for p in process_registry.list_sessions() if p.get("status") == "running"]
-        except Exception:
-            running_processes = []
+        procs = _quiet_sync(process_registry.list_sessions, [])
+        running_processes = [p for p in procs if p.get("status") == "running"]
 
         background_tasks = [
             task for task in (getattr(self, "_background_tasks", set()) or set())
@@ -442,14 +426,11 @@ class GatewayStatusCommandsMixin:
         ]
 
         # Background (async) delegations — delegate_task(background=true).
-        try:
-            from tools.async_delegation import list_async_delegations
-            delegations = [
-                d for d in list_async_delegations()
-                if d.get("status") in ("running", "stalling", "finalizing")
-            ]
-        except Exception:
-            delegations = []
+        from tools.async_delegation import list_async_delegations
+        delegations = [
+            d for d in _quiet_sync(list_async_delegations, [])
+            if d.get("status") in ("running", "stalling", "finalizing")
+        ]
 
         def _agent_row(idx_row):
             idx, row = idx_row
@@ -483,12 +464,7 @@ class GatewayStatusCommandsMixin:
         shows the new balance. Fetched off the event loop; fail-open.
         """
         from agent.account_usage import build_credits_view
-
-        try:
-            view = await asyncio.to_thread(build_credits_view, markdown=True)
-        except Exception:
-            view = None
-
+        view = await _quiet(lambda: asyncio.to_thread(build_credits_view, markdown=True))
         if view is None or not view.logged_in:
             return t("gateway.credits.not_logged_in")
 
@@ -511,16 +487,12 @@ class GatewayStatusCommandsMixin:
         """
         try:
             from agent.context_breakdown import compute_context_details, render_context_breakdown_lines
-
             payload = self._session_context_breakdown(agent, source)
             if not (payload.get("categories") or []):
                 return []
             details = None
             if expanded:
-                try:
-                    details = compute_context_details(agent)
-                except Exception:
-                    details = {"skills": [], "toolsets": []}
+                details = _quiet_sync(lambda: compute_context_details(agent), {"skills": [], "toolsets": []})
             return render_context_breakdown_lines(payload, details=details, grid=False)
         except Exception:
             return []
@@ -529,12 +501,11 @@ class GatewayStatusCommandsMixin:
         """Per-category context estimate (chars/4) for *agent* over the session transcript (sync)."""
         from agent.context_breakdown import compute_session_context_breakdown
 
-        try:
+        def _history():
             entry = self.session_store.get_or_create_session(source)
-            history = self.session_store.load_transcript(entry.session_id) or []
-        except Exception:
-            history = []
-        return compute_session_context_breakdown(agent, history)
+            return self.session_store.load_transcript(entry.session_id) or []
+
+        return compute_session_context_breakdown(agent, _quiet_sync(_history, []))
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:
         """Render the per-category context breakdown for /usage.
@@ -590,7 +561,6 @@ class GatewayStatusCommandsMixin:
             if str(provider or "").strip().lower() != "openai-codex":
                 return t("gateway.usage.reset_wrong_provider")
             from agent.account_usage import redeem_codex_reset_credit
-
             result = await asyncio.to_thread(
                 redeem_codex_reset_credit, base_url=base_url, api_key=api_key, force="--force" in args[1:],
             )
@@ -600,24 +570,17 @@ class GatewayStatusCommandsMixin:
         # failures are non-fatal (account_lines stays []).
         account_lines: list[str] = []
         if provider:
-            try:
-                account_snapshot = await asyncio.to_thread(
-                    fetch_account_usage, provider, base_url=base_url, api_key=api_key,
-                )
-            except Exception:
-                account_snapshot = None
+            account_snapshot = await _quiet(
+                lambda: asyncio.to_thread(fetch_account_usage, provider, base_url=base_url, api_key=api_key)
+            )
             if account_snapshot:
                 account_lines = render_account_usage_lines(account_snapshot, markdown=True)
 
         # Nous credits + monthly-grant gauge (shared with CLI/TUI). Gates on "a Nous account is
         # logged in" — NOT the inference provider — so a Nous user inferring elsewhere still sees
         # a balance. Fail-open: never break /usage.
-        try:
-            from agent.account_usage import nous_credits_lines
-
-            credits_lines = await asyncio.to_thread(nous_credits_lines, markdown=True)
-        except Exception:
-            credits_lines = []
+        from agent.account_usage import nous_credits_lines
+        credits_lines = await _quiet(lambda: asyncio.to_thread(nous_credits_lines, markdown=True), [])
 
         def _with_account_blocks(lines: list[str]) -> str:
             # Each block is preceded by a blank divider only when something precedes it.

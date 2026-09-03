@@ -184,7 +184,6 @@ class GatewayGoalCommandsMixin:
             # Inline `field: value` lines parse into a completion contract; the remaining prose is
             # the goal headline. Plain free-form goals (no such lines) behave exactly as before.
             from hermes_cli.goals import parse_contract
-
             headline, parsed = parse_contract(args)
             args = headline or args
             contract = parsed if not parsed.is_empty() else None
@@ -211,7 +210,6 @@ class GatewayGoalCommandsMixin:
         prompt. The gateway-wide poller injects due heartbeats through the adapter FIFO as
         ordinary user turns, so alternation and caching hold."""
         from hermes_cli.heartbeat import parse_interval, format_interval, MIN_INTERVAL_SECONDS
-
         args = (event.get_command_args() or "").strip()
         lower = args.lower()
 
@@ -338,7 +336,6 @@ class GatewayGoalCommandsMixin:
             token = set_current_session_key(quick_key)
             try:
                 from agent.review_engine import start_review
-
                 return start_review(agent, snapshot, args)
             finally:
                 reset_current_session_key(token)
@@ -353,7 +350,6 @@ class GatewayGoalCommandsMixin:
             return f"/review failed to start: {exc}"
 
         from agent.review_engine import format_dispatch_note
-
         return format_dispatch_note(result, args)
 
     async def _handle_subgoal_command(self, event: MessageEvent) -> str:
@@ -429,14 +425,9 @@ class GatewayGoalCommandsMixin:
             src = event.source
             if src is not None:
                 platform = getattr(src, "platform", "")
-                route = {
-                    "platform": platform.value if hasattr(platform, "value") else str(platform or ""),
-                    "chat_id": str(getattr(src, "chat_id", "") or ""),
-                    "chat_type": str(getattr(src, "chat_type", "") or ""),
-                    "thread_id": str(getattr(src, "thread_id", "") or ""),
-                    "user_id": str(getattr(src, "user_id", "") or ""),
-                    "user_name": str(getattr(src, "user_name", "") or ""),
-                }
+                route = {"platform": platform.value if hasattr(platform, "value") else str(platform or "")}
+                for key in ("chat_id", "chat_type", "thread_id", "user_id", "user_name"):
+                    route[key] = str(getattr(src, key, "") or "")
                 route = {k: v for k, v in route.items() if v}
         except Exception:
             route = {}

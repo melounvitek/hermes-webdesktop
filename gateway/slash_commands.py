@@ -10,6 +10,7 @@ run.py helpers are imported lazily inside handler bodies to avoid the import cyc
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import inspect
 import logging
@@ -123,7 +124,6 @@ def _preview(text: str, limit: int = 60) -> str:
 def _execute(command: str, **ctx_kwargs):
     """Run *command* through the shared slash executor on the gateway surface."""
     from hermes_cli.slash_exec import CommandContext, execute_command
-
     return execute_command(command, CommandContext(surface="gateway", **ctx_kwargs))
 
 
@@ -161,10 +161,8 @@ def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     """
     import shutil
     import subprocess
-
     if sys.platform == "win32":
         from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
-
         subprocess.Popen(
             [
                 sys.executable, "-c", _WINDOWS_UPDATE_HELPER,
@@ -231,12 +229,8 @@ class GatewaySlashCommandsMixin(
         cache = getattr(self, "_agent_cache", None)
         if cache is None:
             return None
-        lock = getattr(self, "_agent_cache_lock", None)
         try:
-            if lock is not None:
-                with lock:
-                    entry = cache.get(session_key)
-            else:
+            with getattr(self, "_agent_cache_lock", None) or contextlib.nullcontext():
                 entry = cache.get(session_key)
         except Exception:
             return None
@@ -250,7 +244,6 @@ class GatewaySlashCommandsMixin(
         The pending sentinel (a run that is starting) never counts as a usable agent.
         """
         from gateway.run import _AGENT_PENDING_SENTINEL
-
         agent = self._running_agents.get(session_key)
         if agent is not None and agent is not _AGENT_PENDING_SENTINEL:
             return agent
@@ -279,15 +272,12 @@ class GatewaySlashCommandsMixin(
         """A CheckpointManager from gateway config, or None when checkpoints are disabled."""
         from gateway.run import _checkpoint_agent_kwargs, _load_gateway_config
         from tools.checkpoint_manager import CheckpointManager
-
-        cp_kwargs = _checkpoint_agent_kwargs(_load_gateway_config())
-        if not cp_kwargs["checkpoints_enabled"]:
+        cp = _checkpoint_agent_kwargs(_load_gateway_config())
+        if not cp["checkpoints_enabled"]:
             return None
         return CheckpointManager(
-            enabled=True,
-            max_snapshots=cp_kwargs["checkpoint_max_snapshots"],
-            max_total_size_mb=cp_kwargs["checkpoint_max_total_size_mb"],
-            max_file_size_mb=cp_kwargs["checkpoint_max_file_size_mb"],
+            enabled=True, max_snapshots=cp["checkpoint_max_snapshots"],
+            max_total_size_mb=cp["checkpoint_max_total_size_mb"], max_file_size_mb=cp["checkpoint_max_file_size_mb"],
         )
 
     def _write_approval_setter(self, section: str, event: MessageEvent):
@@ -326,15 +316,11 @@ class GatewaySlashCommandsMixin(
         if adapter:
             try:
                 await adapter.send(
-                    source.chat_id,
-                    confirmation_text,
-                    reply_to=event.message_id,
+                    source.chat_id, confirmation_text, reply_to=event.message_id,
                     metadata={"is_approval_prompt": True, "force_proactive_send": True},
                 )
             except Exception as exc:
-                logger.warning(
-                    "Failed to send /%s confirmation to %s: %s", verb, source.chat_id, exc, exc_info=True,
-                )
+                logger.warning("Failed to send /%s confirmation to %s: %s", verb, source.chat_id, exc, exc_info=True)
         return None
 
     def _typed_command_prefix_for(self, platform) -> str:
@@ -346,7 +332,6 @@ class GatewaySlashCommandsMixin(
 
     def _terminal_cwd(self) -> str:
         from tools.terminal_scope import terminal_env
-
         return terminal_env("TERMINAL_CWD", str(Path.home()))
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
@@ -358,14 +343,12 @@ class GatewaySlashCommandsMixin(
         off the stamp is ignored, mirroring ``_run_agent``.
         """
         from hermes_constants import display_hermes_home
-
         source = getattr(event, "source", None)
         profile_name = display = ""
         if getattr(getattr(self, "config", None), "multiplex_profiles", False):
             profile_name = (getattr(source, "profile", "") or "").strip()
             try:
                 from gateway.run import _profile_runtime_scope
-
                 with _profile_runtime_scope(self._resolve_profile_home_for_source(source)):
                     display = display_hermes_home()
             except Exception:
@@ -383,7 +366,6 @@ class GatewaySlashCommandsMixin(
         """Handle /whoami — the user's slash command access on this scope (always allowed: slash_access
         floor). Reports platform, DM-vs-group scope, tier, and the commands the user can run here."""
         from gateway.slash_access import policy_for_source
-
         source = event.source
         policy = policy_for_source(self.config, source)
         platform = source.platform.value if source and source.platform else "?"
@@ -658,7 +640,6 @@ class GatewaySlashCommandsMixin(
         # restart policy restarts us — detached setsid+bash fails there (systemd KillMode=mixed kills
         # the cgroup; tini exits with the gateway). The explicit marker covers ``sudo env -i`` wrappers.
         from gateway.restart import is_container_restart_context, is_gateway_supervisor_process
-
         via_service = is_gateway_supervisor_process() or is_container_restart_context()
         self.request_restart(detached=not via_service, via_service=via_service)
         if active_agents:
@@ -700,10 +681,7 @@ class GatewaySlashCommandsMixin(
                 or not callable(fronts_platform)
                 or not fronts_platform(source.platform)
             ):
-                return t(
-                    "gateway.set_home.save_failed",
-                    error="Relay does not authenticate this logical home target",
-                )
+                return t("gateway.set_home.save_failed", error="Relay does not authenticate this logical home target")
 
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
@@ -766,12 +744,8 @@ class GatewaySlashCommandsMixin(
             return await self._handle_voice_channel_leave(event)
         if args == "status":
             mode = self._voice_mode.get(voice_key, "off")
-            labels = {
-                "off": t("gateway.voice.label_off"),
-                "voice_only": t("gateway.voice.label_voice_only"),
-                "all": t("gateway.voice.label_all"),
-            }
-            mode_line = t("gateway.voice.status_mode", label=labels.get(mode, mode))
+            label = t(f"gateway.voice.label_{mode}") if mode in ("off", "voice_only", "all") else mode
+            mode_line = t("gateway.voice.status_mode", label=label)
             # Append voice channel info if connected
             guild_id = self._get_guild_id(event)
             info = adapter.get_voice_channel_info(guild_id) if guild_id and hasattr(adapter, "get_voice_channel_info") else None
@@ -803,7 +777,6 @@ class GatewaySlashCommandsMixin(
     async def _handle_rollback_command(self, event: MessageEvent) -> str:
         """Handle /rollback command — list or restore filesystem checkpoints."""
         from tools.checkpoint_manager import format_checkpoint_list
-
         mgr = self._checkpoint_manager()
         if mgr is None:
             return t("gateway.rollback.not_enabled")
@@ -864,7 +837,6 @@ class GatewaySlashCommandsMixin(
             result = await asyncio.to_thread(mgr.session_diff, cwd)
         else:
             from tools.working_diff import collect_working_diff
-
             result = await asyncio.to_thread(collect_working_diff, cwd, mode)
         if not result.get("success"):
             return t("gateway.diff.failed", error=result.get("error", "Could not generate diff"))
@@ -992,7 +964,6 @@ class GatewaySlashCommandsMixin(
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         from tools.memory_tool import load_on_disk_store
-
         args = event.get_command_args().strip().split()
         # Apply approved writes against a fresh on-disk store (the gateway has no long-lived agent;
         # the store persists to the same MEMORY/USER.md and honors the configured char limits).
@@ -1013,7 +984,6 @@ class GatewaySlashCommandsMixin(
         """
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
-
         args = event.get_command_args().strip().split()
         sub = args[0].lower() if args else ""
         if not wa.write_approval_enabled(wa.SKILLS) and sub not in {"approval", "mode"} and wa.pending_count(wa.SKILLS) == 0:
@@ -1040,7 +1010,6 @@ class GatewaySlashCommandsMixin(
         """Show or persist the profile-wide dangerous-command approval mode."""
         from gateway.slash_access import policy_for_source
         from hermes_cli.approval_mode import run_approval_mode_command
-
         requested = event.get_command_args().strip() or None
         # This mutates profile-wide security policy. The central slash gate can allow selected
         # commands to non-admin users, so enforce admin again at this side-effect boundary.
@@ -1055,7 +1024,6 @@ class GatewaySlashCommandsMixin(
     async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""
         from tools.approval import disable_session_yolo, enable_session_yolo, is_session_yolo_enabled
-
         session_key = self._session_key_for_source(event.source)
         if is_session_yolo_enabled(session_key):
             disable_session_yolo(session_key)
@@ -1070,7 +1038,6 @@ class GatewaySlashCommandsMixin(
         → log per *current platform*, saved to ``display.platforms.<platform>.tool_progress``.
         """
         from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key
-
         config_path = _gateway_config_home() / "config.yaml"
         platform_key = _platform_config_key(event.source.platform)
 
@@ -1084,7 +1051,6 @@ class GatewaySlashCommandsMixin(
 
         # Cycle mode (per-platform), reading the current effective mode via the resolver.
         from gateway.display_config import resolve_display_setting
-
         cycle = ["off", "new", "all", "verbose", "log"]
         current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
         if current not in cycle:
@@ -1123,7 +1089,6 @@ class GatewaySlashCommandsMixin(
         profile_name = self._busy_profile_name_for_source(event.source)
         if profile_name:
             from gateway.run import _load_gateway_runtime_config
-
             self._snapshot_profile_busy_modes(profile_name, _load_gateway_runtime_config())
         else:
             self._busy_input_mode = arg
@@ -1141,7 +1106,6 @@ class GatewaySlashCommandsMixin(
         """Handle /footer command — toggle the runtime-metadata footer."""
         from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key, _resolve_gateway_model
         from gateway.runtime_footer import resolve_footer_config
-
         config_path = _gateway_config_home() / "config.yaml"
         platform_key = _platform_config_key(event.source.platform)
 
@@ -1150,8 +1114,7 @@ class GatewaySlashCommandsMixin(
             text = (getattr(event, "message", None) or "").strip()
             if text.startswith("/"):
                 parts = text.split(None, 1)
-                if len(parts) > 1:
-                    arg = parts[1].strip().lower()
+                arg = parts[1].strip().lower() if len(parts) > 1 else ""
         except Exception:
             arg = ""
 
@@ -1264,10 +1227,8 @@ class GatewaySlashCommandsMixin(
             # error). Adapters without refresh_skill_group are skipped; the in-process reload suffices.
             for adapter in list(self.adapters.values()):
                 refresh = getattr(adapter, "refresh_skill_group", None)
-                if not callable(refresh):
-                    continue
                 try:
-                    maybe = refresh()
+                    maybe = refresh() if callable(refresh) else None
                     if inspect.isawaitable(maybe):
                         await maybe
                 except Exception as exc:
@@ -1305,7 +1266,6 @@ class GatewaySlashCommandsMixin(
                 self._pending_skills_reload_notes = {}
             if session_key:
                 self._pending_skills_reload_notes[session_key] = "\n".join(sections)
-
             return "\n".join(lines)
 
         except Exception as e:
@@ -1346,7 +1306,6 @@ class GatewaySlashCommandsMixin(
         A pending-approvals entry with no blocked thread is a stale prompt: drop it and say so.
         """
         from tools.approval import has_blocking_approval
-
         session_key = self._session_key_for_source(event.source)
         if has_blocking_approval(session_key):
             return session_key, None
@@ -1362,7 +1321,6 @@ class GatewaySlashCommandsMixin(
         command executes inline — same flow as the CLI's synchronous approval.
         """
         from tools.approval import resolve_gateway_approval
-
         session_key, stale = self._blocking_approval_or_stale(event, "gateway.approval_expired", "gateway.approve.no_pending")
         if stale:
             return stale
@@ -1389,7 +1347,6 @@ class GatewaySlashCommandsMixin(
         as in the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything.
         """
         from tools.approval import resolve_gateway_approval
-
         session_key, stale = self._blocking_approval_or_stale(event, "gateway.deny.stale", "gateway.deny.no_pending")
         if stale:
             return stale
@@ -1485,16 +1442,14 @@ class GatewaySlashCommandsMixin(
         pending_path = _hermes_home / ".update_pending.json"
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
+        src = event.source
         pending = {
-            "platform": event.source.platform.value,
-            "chat_id": event.source.chat_id,
-            "chat_type": event.source.chat_type,
-            "user_id": event.source.user_id,
-            "session_key": self._session_key_for_source(event.source),
+            "platform": src.platform.value, "chat_id": src.chat_id, "chat_type": src.chat_type,
+            "user_id": src.user_id, "session_key": self._session_key_for_source(src),
             "timestamp": datetime.now().isoformat(),
         }
-        if event.source.thread_id:
-            pending["thread_id"] = event.source.thread_id
+        if src.thread_id:
+            pending["thread_id"] = src.thread_id
         if event.message_id:
             pending["message_id"] = event.message_id
         _tmp_pending = pending_path.with_suffix(".tmp")
