@@ -1,9 +1,5 @@
-"""
-Cron job management tools for Hermes Agent.
-
-Expose a single compressed action-oriented tool to avoid schema/context bloat.
-Compatibility wrappers remain for direct Python callers and legacy tests.
-"""
+"""Cron job management tool: one compressed action-oriented `cronjob_manage` tool
+(schema/context bloat avoided); `cronjob()` stays callable for direct Python callers."""
 
 import contextlib
 import json
@@ -18,15 +14,11 @@ from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
 
-# Heartbeat cadence that keeps the calling agent's inactivity watchdog at bay
-# while a manual `cronjob(action="run")` executes synchronously in-process
-# (mirrors tools/environments/base.py::touch_activity_if_due; comfortably
-# below the default HERMES_AGENT_TIMEOUT).
+# Heartbeat cadence keeping the caller's inactivity watchdog at bay while a manual
+# `cronjob(action="run")` executes in-process (comfortably below HERMES_AGENT_TIMEOUT).
 _CRON_RUN_HEARTBEAT_INTERVAL = 10.0
-
-# Hard ceiling on the heartbeat: with HERMES_CRON_TIMEOUT=0 (unlimited) a truly
-# hung run would otherwise mask the gateway watchdog forever. Past this, the
-# heartbeat stops and the gateway watchdog regains authority over the turn.
+# Hard ceiling: with HERMES_CRON_TIMEOUT=0 a truly hung run would otherwise mask the
+# gateway watchdog forever; past this the heartbeat stops and the watchdog regains authority.
 _CRON_RUN_HEARTBEAT_CEILING = 6 * 3600.0
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -43,17 +35,12 @@ from cron.jobs import (
     remove_job,
     resolve_job_ref,
     resume_job,
-    update_job,
-)
-from tools.cronjob_prompt_scan import (  # noqa: F401  (re-exported)
-    _CRON_EXFIL_COMMAND_PATTERNS,
+    update_job)
+from tools.cronjob_prompt_scan import (  # noqa: F401  (re-exported; tests/scheduler import via this module)
     _CRON_INVISIBLE_CHARS,
-    _CRON_SKILL_ASSEMBLED_PATTERNS,
-    _CRON_THREAT_PATTERNS,
     _scan_cron_prompt,
-    _scan_cron_skill_assembled,
-)
-from tools.cronjob_job_args import (  # noqa: F401  (re-exported)
+    _scan_cron_skill_assembled)
+from tools.cronjob_job_args import (  # noqa: F401  (re-exported; tests/scheduler import via this module)
     _apply_continuity,
     _canonical_skills,
     _clean_str_list,
@@ -70,13 +57,16 @@ from tools.cronjob_job_args import (  # noqa: F401  (re-exported)
     _validate_bot_chat_deliver,
     _validate_context_from_refs,
     _validate_cron_base_url,
-    _validate_cron_script_path,
-)
+    _validate_cron_script_path)
+from tools.registry import registry, tool_error
+
+
+def _dumps(payload: Dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2)
 
 
 def _notify_provider_jobs_changed_safe() -> None:
-    """Tell the active cron scheduler provider the job set changed (no-op for
-    the built-in). Best-effort — never lets a provider error break the tool."""
+    """Tell the active scheduler provider the job set changed; best-effort, never raises."""
     try:
         from cron.scheduler import _notify_provider_jobs_changed
         _notify_provider_jobs_changed()
@@ -99,68 +89,15 @@ def _relay_fronted_delivery_platforms(job: Dict[str, Any]) -> set:
         return set()
     try:
         from cron.scheduler import _resolve_delivery_targets
-
         targets = _resolve_delivery_targets(job) or []
     except Exception:
         return set()
     return {t.get("platform") for t in targets if t.get("platform")} & fronted
 
 
-def _forward_relay_fronted_run(
-    job: Dict[str, Any], extra_prompt: Optional[str] = None
-) -> Optional[str]:
-    """Forward a manual run to the gateway when it targets a relay-fronted
-    platform and this process has no live relay adapter.
-
-    Relay-fronted delivery has no standalone sender — the gateway's live relay
-    adapter is the only path, reached via ``POST /api/jobs/{id}/run`` (which
-    marks the job due for the gateway ticker; ``extra_prompt`` rides in the
-    body). Returns a JSON result string when forwarding engages, else None to
-    fall through to the normal in-process run.
-    """
-    if not _relay_fronted_delivery_platforms(job):
-        return None
-    url = f"{_api_server_base_url()}/api/jobs/{job['id']}/run"
-
-    from agent.secret_scope import get_secret
-
-    key = get_secret("API_SERVER_KEY", "") or ""
-    try:
-        import httpx
-
-        resp = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {key}"},
-            json=({"prompt": extra_prompt} if extra_prompt else {}),
-            timeout=10.0,
-        )
-    except Exception:
-        resp = None
-
-    if resp is not None and resp.status_code < 300:
-        return _dumps({
-            "success": True,
-            "forwarded_to_gateway": True,
-            "note": (
-                "This job targets a relay-fronted platform; it was dispatched "
-                "to the running gateway, whose live relay adapter owns that "
-                "delivery."
-            ),
-        })
-    return _dumps({
-        "success": False,
-        "error": (
-            "This job targets a relay-fronted platform, which has no "
-            "standalone sender. Start the gateway — its ticker will "
-            "deliver the job on schedule via the live relay adapter."
-        ),
-    })
-
-
 def _api_server_base_url() -> str:
-    """``http://host:port`` of the local api_server, mirroring its bind
-    resolution (extra.host -> API_SERVER_HOST -> 127.0.0.1); a wildcard bind
-    listens on loopback too."""
+    """``http://host:port`` of the local api_server, mirroring its bind resolution
+    (extra.host -> API_SERVER_HOST -> 127.0.0.1); a wildcard bind listens on loopback too."""
     import os
 
     port_raw = os.getenv("API_SERVER_PORT", "").strip()
@@ -170,18 +107,10 @@ def _api_server_base_url() -> str:
         port = 8642
     try:
         from hermes_cli.config import cfg_get, load_config_readonly
-
-        host = str(
-            cfg_get(
-                load_config_readonly(), "platforms", "api_server", "extra", "host",
-                default="",
-            )
-            or ""
-        ).strip()
+        host = str(cfg_get(load_config_readonly(), "platforms", "api_server", "extra", "host", default="") or "").strip()
     except Exception:
         host = ""
-    if not host:
-        host = os.getenv("API_SERVER_HOST", "").strip()
+    host = host or os.getenv("API_SERVER_HOST", "").strip()
     if not host or host in ("0.0.0.0", "::", "*"):
         host = "127.0.0.1"
     if ":" in host and not host.startswith("["):
@@ -189,13 +118,49 @@ def _api_server_base_url() -> str:
     return f"http://{host}:{port}"
 
 
+def _forward_relay_fronted_run(job: Dict[str, Any], extra_prompt: Optional[str] = None) -> Optional[str]:
+    """Forward a manual run to the gateway when it targets a relay-fronted platform.
+
+    Relay-fronted delivery has no standalone sender — the gateway's live relay adapter is
+    the only path, reached via ``POST /api/jobs/{id}/run`` (marks the job due for the
+    gateway ticker; ``extra_prompt`` rides in the body). Returns a JSON result string when
+    forwarding engages, else None to fall through to the normal in-process run.
+    """
+    if not _relay_fronted_delivery_platforms(job):
+        return None
+    from agent.secret_scope import get_secret
+
+    key = get_secret("API_SERVER_KEY", "") or ""
+    try:
+        import httpx
+        resp = httpx.post(
+            f"{_api_server_base_url()}/api/jobs/{job['id']}/run", headers={"Authorization": f"Bearer {key}"},
+            json=({"prompt": extra_prompt} if extra_prompt else {}), timeout=10.0)
+    except Exception:
+        resp = None
+    if resp is not None and resp.status_code < 300:
+        return _dumps({
+            "success": True,
+            "forwarded_to_gateway": True,
+            "note": (
+                "This job targets a relay-fronted platform; it was dispatched "
+                "to the running gateway, whose live relay adapter owns that "
+                "delivery."),
+        })
+    return _dumps({
+        "success": False,
+        "error": (
+            "This job targets a relay-fronted platform, which has no "
+            "standalone sender. Start the gateway — its ticker will "
+            "deliver the job on schedule via the live relay adapter."),
+    })
+
+
 def _manual_run_delivery_note(deliver: str, refreshed: Dict[str, Any]) -> str:
-    """Parenthetical delivery note for a manual run's completion summary,
-    following the refreshed record's ``last_delivery_error`` so the summary
-    never claims success over a failed post-run delivery."""
-    # Falsy deliver ("", stored JSON null) is normalized to "local" at fire
-    # time -> read as saved-locally. Whitespace-only values fall through to
-    # the error check so the fire-time "no delivery target" error surfaces.
+    """Parenthetical delivery note for a manual run's summary; follows the refreshed record's
+    ``last_delivery_error`` so the summary never claims success over a failed delivery."""
+    # Falsy deliver ("", stored JSON null) is normalized to "local" at fire time -> saved
+    # locally. Whitespace-only values fall through so the fire-time "no target" error surfaces.
     if not deliver or deliver == "local":
         return " (output saved locally only)"
     err = str(refreshed.get("last_delivery_error") or "").strip()
@@ -206,17 +171,15 @@ def _manual_run_delivery_note(deliver: str, refreshed: Dict[str, Any]) -> str:
 
 _ALREADY_RUNNING_ERROR = (
     "Job is already running (a scheduler tick or another "
-    "manual run is executing it); not started again."
-)
+    "manual run is executing it); not started again.")
 
 
 def _claim_for_manual_run(job_id: str, log_label: str):
     """At-most-once claim shared by the sync and background run paths.
 
-    Returns ``(claimed_job, None)`` on success, else ``(None, error_dict)``
-    where the dict has the ``_execute_job_now`` result shape. A lost claim is
-    labelled precisely: claim_job_for_fire also returns False for paused /
-    disabled / missing jobs, which must not read as "already being fired".
+    Returns ``(claimed_job, None)`` or ``(None, error_dict)`` in the ``_execute_job_now``
+    result shape. A lost claim is labelled precisely: claim_job_for_fire also returns False
+    for paused / disabled / missing jobs, which must not read as "already being fired".
     """
     try:
         claimed_job = claim_job_for_fire(job_id, return_job=True)
@@ -232,58 +195,30 @@ def _claim_for_manual_run(job_id: str, log_label: str):
         return None, {"claimed": False, "success": False, "error": reason}
     except Exception as e:
         logger.error("Failed to claim cron job %s for %s: %s", job_id, log_label, e)
-        try:
+        with contextlib.suppress(Exception):
             mark_job_run(job_id, False, str(e))
-        except Exception:
-            pass
         return None, {"claimed": True, "success": False, "error": str(e)}
 
 
-def _execute_job_now(
-    job: Dict[str, Any], extra_prompt: Optional[str] = None
-) -> Dict[str, Any]:
-    """Execute a cron job immediately, outside the scheduler tick.
-
-    Claims first via ``claim_job_for_fire`` (the same CAS the ticker uses, so a
-    concurrent tick cannot double-fire and next_run_at advances), then fires
-    through the shared ``run_one_job`` body so delivery / [SILENT] handling
-    cannot drift between paths.
-    Returns {"claimed": bool, "success": bool, "error": str|None}.
-    """
+def _execute_job_now(job: Dict[str, Any], extra_prompt: Optional[str] = None) -> Dict[str, Any]:
+    """Run a job now, outside the scheduler tick: claim via ``claim_job_for_fire`` (the ticker's
+    CAS, so a concurrent tick cannot double-fire and next_run_at advances), then fire through
+    the shared ``run_one_job`` body. Returns {"claimed", "success", "error"}."""
     claimed_job, err = _claim_for_manual_run(job["id"], "immediate run")
-    if err is not None:
-        return err
-    return _run_claimed_job(claimed_job, extra_prompt=extra_prompt)
-
-
-def _gateway_adapters_and_loop():
-    """Live gateway adapter map + event loop when running inside the gateway
-    process, else ``(None, None)``. Manual runs from a gateway agent must
-    deliver on the loop that owns clients such as Matrix/aiohttp (a standalone
-    asyncio.run() loop breaks them)."""
-    runner_ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
-    runner = runner_ref() if callable(runner_ref) else None
-    if runner is None:
-        return None, None
-    return getattr(runner, "adapters", None), getattr(runner, "_gateway_loop", None)
+    return err if err is not None else _run_claimed_job(claimed_job, extra_prompt=extra_prompt)
 
 
 @contextlib.contextmanager
 def _run_heartbeat(job_name: str):
-    """Heartbeat into the caller's activity tracker while a manual run
-    executes; stops and joins the thread on exit.
-
-    A manual run executes synchronously on the caller's thread and can take
-    minutes; without tool activity the gateway inactivity watchdog would kill
-    the parent turn. Best-effort: no callback -> no thread, unchanged behavior.
-    """
+    """Heartbeat into the caller's activity tracker while a manual run executes (minutes,
+    synchronously on the caller's thread — without tool activity the gateway inactivity
+    watchdog would kill the parent turn). Best-effort: no callback -> no thread."""
     stop = threading.Event()
     thread = None
     try:
         from tools.environments.base import get_activity_callback
-
-        # Capture on THIS thread: the callback is thread-local (installed by
-        # the tool executor), so a freshly spawned thread cannot read it.
+        # Capture on THIS thread: the callback is thread-local (installed by the tool
+        # executor), so a freshly spawned thread cannot read it.
         activity_cb = get_activity_callback()
     except Exception:
         activity_cb = None
@@ -293,14 +228,11 @@ def _run_heartbeat(job_name: str):
         while not stop.wait(_CRON_RUN_HEARTBEAT_INTERVAL):
             elapsed = time.monotonic() - started
             if elapsed > _CRON_RUN_HEARTBEAT_CEILING:
-                # A run this long with an unlimited child watchdog is
-                # likely wedged — stop masking the gateway watchdog.
+                # A run this long with an unlimited child watchdog is likely wedged.
                 logger.warning(
                     "cronjob run heartbeat ceiling reached for job "
-                    "'%s' (%.0fs) — stopping heartbeat; gateway "
-                    "watchdog regains authority",
-                    job_name, elapsed,
-                )
+                    "'%s' (%.0fs) — stopping heartbeat; gateway watchdog regains authority",
+                    job_name, elapsed)
                 return
             try:
                 activity_cb(f"cronjob: running job '{job_name}' ({int(elapsed)}s elapsed)")
@@ -318,28 +250,19 @@ def _run_heartbeat(job_name: str):
             thread.join(timeout=_CRON_RUN_HEARTBEAT_INTERVAL + 1)
 
 
-def _run_claimed_job(
-    job: Dict[str, Any], extra_prompt: Optional[str] = None
-) -> Dict[str, Any]:
-    """Fire an already-claimed job through the shared ``run_one_job`` body.
-
-    Split from ``_execute_job_now`` so the background path can take the claim
-    synchronously (reporting paused/already-firing immediately) and hand the
-    run to a worker. Returns {"claimed": True, "success": bool, "error": ...}.
-    """
+def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) -> Dict[str, Any]:
+    """Fire an already-claimed job through the shared ``run_one_job`` body (split from
+    ``_execute_job_now`` so the background path can claim synchronously and hand the run
+    to a worker). Returns {"claimed": True, "success": bool, "error": ...}."""
     job_id = job["id"]
     _registered = False
     fire_owner = None
     try:
-        from cron.scheduler import (
-            release_running_job,
-            run_one_job,
-            try_register_running_job,
-        )
+        from cron.scheduler import release_running_job, run_one_job, try_register_running_job
 
-        # In-flight dedupe: the fire claim's TTL is routinely outlived by real
-        # jobs, so register in the scheduler's shared running set (same guard
-        # the ticker uses; also visible to the gateway shutdown drain).
+        # In-flight dedupe: the fire claim's TTL is routinely outlived by real jobs, so
+        # register in the scheduler's shared running set (same guard the ticker uses;
+        # also visible to the gateway shutdown drain).
         if not try_register_running_job(job_id):
             return {"claimed": True, "success": False, "error": _ALREADY_RUNNING_ERROR}
         _registered = True
@@ -347,60 +270,49 @@ def _run_claimed_job(
         claim = job.get("fire_claim")
         fire_owner = str(claim.get("by") or "") if isinstance(claim, dict) else None
 
-        adapters, gateway_loop = _gateway_adapters_and_loop()
+        # Inside the gateway process deliver on the loop that owns clients such as
+        # Matrix/aiohttp (a standalone asyncio.run() loop breaks them).
+        runner_ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
+        runner = runner_ref() if callable(runner_ref) else None
+        adapters = getattr(runner, "adapters", None) if runner is not None else None
+        gateway_loop = getattr(runner, "_gateway_loop", None) if runner is not None else None
         try:
-            # run_one_job records last_run_at/last_status via mark_job_run;
-            # `job` is the owner-bearing claimed snapshot, so terminal writes
-            # stay fenced by that owner.
+            # run_one_job records last_run_at/last_status via mark_job_run; `job` is the
+            # owner-bearing claimed snapshot, so terminal writes stay fenced by that owner.
             with _run_heartbeat(str(job.get("name") or job_id)):
-                processed = run_one_job(
-                    job, adapters=adapters, loop=gateway_loop,
-                    extra_prompt=extra_prompt,
-                )
+                processed = run_one_job(job, adapters=adapters, loop=gateway_loop, extra_prompt=extra_prompt)
         finally:
             _registered = False
             release_running_job(job_id)
         refreshed = get_job(job_id) or {}
         last_status = refreshed.get("last_status")
-        # "delivery_failed": the run succeeded but output never reached the
-        # user — not a success for the caller; surface last_delivery_error.
+        # "delivery_failed": the run succeeded but output never reached the user — not a
+        # success for the caller; surface last_delivery_error.
         run_error = refreshed.get("last_error")
         if last_status == "delivery_failed" and not run_error:
             run_error = refreshed.get("last_delivery_error")
-        return {
-            "claimed": True,
-            "success": bool(processed and last_status == "ok"),
-            "error": run_error,
-        }
-
+        return {"claimed": True, "success": bool(processed and last_status == "ok"), "error": run_error}
     except Exception as e:
         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
         if _registered:
-            # We raised before the run's own release (e.g. heartbeat setup);
-            # don't leave the job marked in-flight. Only release registrations
-            # WE took — a bare discard could erase a ticker-owned entry.
-            try:
+            # Raised before the run's own release (e.g. heartbeat setup): don't leave the
+            # job marked in-flight. Only release registrations WE took — a bare discard
+            # could erase a ticker-owned entry.
+            with contextlib.suppress(Exception):
                 release_running_job(job_id)
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(Exception):
             mark_job_run(job_id, False, str(e), expected_fire_owner=fire_owner)
-        except Exception:
-            pass
         return {"claimed": True, "success": False, "error": str(e)}
 
 
 def _latest_job_output_excerpt(job_id: str, max_chars: int = 2000) -> Optional[str]:
-    """Best-effort excerpt of the job's most recent saved output file, for the
-    background-run completion block (parent sees what the job produced). Never raises."""
+    """Excerpt of the job's most recent saved output file for the background completion
+    block (parent sees what the job produced). Never raises."""
     try:
         from cron.jobs import get_cron_output_dir
 
-        out_dir = get_cron_output_dir() / job_id
-        files = sorted(out_dir.glob("*.md"))
-        if not files:
-            return None
-        text = files[-1].read_text(encoding="utf-8", errors="replace").strip()
+        files = sorted((get_cron_output_dir() / job_id).glob("*.md"))
+        text = files[-1].read_text(encoding="utf-8", errors="replace").strip() if files else ""
         if not text:
             return None
         if len(text) > max_chars:
@@ -411,46 +323,39 @@ def _latest_job_output_excerpt(job_id: str, max_chars: int = 2000) -> Optional[s
 
 
 def _reap_stale_executions(job_name: str) -> None:
-    """Reap execution rows left 'claimed'/'running' by a dead owner process
-    (e.g. a prior one-shot `hermes cron run` that exited mid-run). The ticker
-    does this at its own startup; one-shot invocations have no such moment, so
-    a stale claim would block every later manual run. Only provably-dead
-    owners are reaped. Best-effort self-heal: must not block dispatch."""
+    """Reap execution rows left 'claimed'/'running' by a provably-dead owner (e.g. a prior
+    one-shot `hermes cron run` that died mid-run). The ticker does this at startup; one-shot
+    invocations have no such moment, so a stale claim would block every later manual run.
+    Best-effort self-heal: must not block dispatch."""
     try:
         from cron.executions import recover_interrupted_executions
 
         _reclaimed = recover_interrupted_executions()
         if _reclaimed:
             logger.warning(
-                "Reclaimed %d stale cron execution(s) from dead owner(s) "
-                "before dispatching job '%s'",
-                _reclaimed,
-                job_name,
-            )
+                "Reclaimed %d stale cron execution(s) from dead owner(s) before dispatching job '%s'",
+                _reclaimed, job_name)
     except Exception as _reap_exc:
         logger.debug("Stale execution reclaim failed: %s", _reap_exc)
 
 
 def _background_session_key(session_id: Optional[str]) -> str:
-    """Routing key for a detached completion, captured on THIS thread
-    (contextvars don't cross the pool). Empty string = no durable consumer."""
+    """Routing key for a detached completion, captured on THIS thread (contextvars don't
+    cross the pool). Empty string = no durable consumer."""
     try:
         from tools.approval import get_current_session_key
 
         session_key = get_current_session_key(default="")
     except Exception:
         session_key = ""
-    if not session_key and session_id:
-        # CLI path: the approval contextvar is only bound during gateway/TUI
-        # turns; the CLI drain filters completions by the durable session id,
-        # and an empty key would fail closed (completion never claimable).
-        session_key = str(session_id)
-    return session_key
+    # CLI path: the approval contextvar is only bound during gateway/TUI turns; the CLI
+    # drain filters completions by the durable session id, and an empty key would fail
+    # closed (completion never claimable).
+    return session_key or (str(session_id) if session_id else "")
 
 
 def _manual_run_completion(
-    res: Dict[str, Any], job_id: str, job_name: str, deliver: str, started_at: float
-) -> Dict[str, Any]:
+    res: Dict[str, Any], job_id: str, job_name: str, deliver: str, started_at: float) -> Dict[str, Any]:
     """Async-delegation completion block for a finished background manual run."""
     duration = round(time.time() - started_at, 2)
     refreshed = get_job(job_id) or {}
@@ -458,15 +363,13 @@ def _manual_run_completion(
         f"Cron job '{job_name}' ({job_id}) finished its manual run.",
         f"Result: {'ok' if res.get('success') else 'FAILED'}"
         + (f" — {res.get('error')}" if res.get("error") else ""),
-        f"Delivery target: {deliver}"
-        + _manual_run_delivery_note(deliver, refreshed),
+        f"Delivery target: {deliver}" + _manual_run_delivery_note(deliver, refreshed),
     ]
     if refreshed.get("next_run_at"):
         lines.append(f"Next scheduled run: {refreshed['next_run_at']}")
     excerpt = _latest_job_output_excerpt(job_id)
     if excerpt:
-        lines.append("--- JOB OUTPUT ---")
-        lines.append(excerpt)
+        lines += ["--- JOB OUTPUT ---", excerpt]
     return {
         "status": "completed" if res.get("success") else "error",
         "summary": "\n".join(lines),
@@ -477,26 +380,23 @@ def _manual_run_completion(
 
 
 def _try_dispatch_background_run(
-    job: Dict[str, Any], session_id: Optional[str] = None,
-    extra_prompt: Optional[str] = None,
+    job: Dict[str, Any], session_id: Optional[str] = None, extra_prompt: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Claim ``job`` now, then fire it on the async-delegation daemon executor.
 
-    A cron job is a full agent run (minutes to hours); running it inline made
-    the parent turn uninterruptible and serialized batches. This dispatches
-    like ``delegate_task``'s background mode: the tool returns a handle, and a
-    ``type="async_delegation"`` completion event re-enters the conversation as
-    a fresh turn (keeps role alternation legal and the prompt cache intact).
-    The claim is taken SYNCHRONOUSLY so unrunnable jobs report immediately.
+    A cron job is a full agent run (minutes to hours); inline it made the parent turn
+    uninterruptible. Dispatches like ``delegate_task``'s background mode: the tool returns a
+    handle and a ``type="async_delegation"`` completion re-enters the conversation as a
+    fresh turn (role alternation legal, prompt cache intact). The claim is taken
+    SYNCHRONOUSLY so unrunnable jobs report immediately.
 
-    Returns None when background delivery is unavailable on this runtime
-    (caller falls back to the sync path); ``{"claimed": False, ...}`` on a lost
-    claim; ``{"claimed": True, "dispatched": True, "delegation_id": ...}`` when
-    running in the background; ``{"claimed": True, "dispatched": False, ...}``
-    when the pool was full and the run executed inline (claim already taken).
+    Returns None when background delivery is unavailable (caller falls back to the sync
+    path); ``{"claimed": False, ...}`` on a lost claim; ``{"claimed": True, "dispatched":
+    True, "delegation_id"}`` when running in the background; ``{"claimed": True,
+    "dispatched": False, ...}`` when the pool was full and the run executed inline.
     """
-    # Finite sessions cannot route a detached result back after the turn ends
-    # — mirror delegate_task's gate and fall back to sync execution.
+    # Finite sessions cannot route a detached result back after the turn ends — mirror
+    # delegate_task's gate and fall back to sync execution.
     try:
         from gateway.session_context import async_delivery_supported
 
@@ -509,17 +409,15 @@ def _try_dispatch_background_run(
     job_name = str(job.get("name") or job_id)
     _reap_stale_executions(job_name)
 
-    # Routing capture BEFORE the claim: with no routable session there is no
-    # durable consumer for a detached completion, so we must not
-    # claim-and-dispatch. Direct Python callers (`hermes cron run`, tests):
-    # process exits right after the tool returns, so run synchronously.
+    # Routing capture BEFORE the claim: with no routable session there is no durable
+    # consumer for a detached completion, so we must not claim-and-dispatch. Direct Python
+    # callers (`hermes cron run`, tests) exit right after the tool returns -> run sync.
     session_key = _background_session_key(session_id)
     if not session_key:
         return None
 
-    # Best-effort early dedupe so a mid-run job reports in THIS tool response
-    # instead of as a delayed error completion. The authoritative (atomic)
-    # check is try_register_running_job inside _run_claimed_job.
+    # Best-effort early dedupe so a mid-run job reports in THIS tool response instead of
+    # as a delayed error completion (authoritative check: try_register_running_job).
     try:
         from cron.scheduler import get_running_job_ids
 
@@ -543,17 +441,12 @@ def _try_dispatch_background_run(
         pass
 
     try:
-        from tools.async_delegation import (
-            _current_origin_session_id,
-            dispatch_async_delegation,
-        )
+        from tools.async_delegation import _current_origin_session_id, dispatch_async_delegation
 
         origin_session_id = _current_origin_session_id()
     except Exception as e:
         logger.warning(
-            "cronjob run: async delegation registry unavailable (%s); "
-            "running job '%s' inline.", e, job_name,
-        )
+            "cronjob run: async delegation registry unavailable (%s); running job '%s' inline.", e, job_name)
         result = _run_claimed_job(claimed_job, extra_prompt=extra_prompt)
         result["dispatched"] = False
         return result
@@ -566,8 +459,8 @@ def _try_dispatch_background_run(
         max_async = 3
 
     started_at = time.time()
-    # Canonicalize with the scheduler's own normalizer (falsy -> "local", list
-    # -> comma string), reading the claimed snapshot the run actually executes.
+    # Canonicalize with the scheduler's own normalizer (falsy -> "local", list -> comma
+    # string), reading the claimed snapshot the run actually executes.
     from cron.scheduler import _normalize_deliver_value
 
     deliver = _normalize_deliver_value(claimed_job.get("deliver", "local"))
@@ -580,8 +473,7 @@ def _try_dispatch_background_run(
         goal=f"Manual run of cron job '{job_name}' ({job_id})",
         context=(
             "Triggered via cronjob(action='run'). The job executed in its own "
-            "fresh cron session; this block reports its outcome."
-        ),
+            "fresh cron session; this block reports its outcome."),
         toolsets=None,
         role="cron_run",
         model=job.get("model"),
@@ -590,22 +482,15 @@ def _try_dispatch_background_run(
         runner=_runner,
         origin_ui_session_id=origin_ui_session_id,
         origin_session_id=origin_session_id,
-        max_async_children=max_async,
-    )
-
+        max_async_children=max_async)
     if dispatch.get("status") == "dispatched":
-        return {
-            "claimed": True,
-            "dispatched": True,
-            "delegation_id": dispatch.get("delegation_id"),
-        }
+        return {"claimed": True, "dispatched": True, "delegation_id": dispatch.get("delegation_id")}
 
-    # Pool at capacity (or submit failure): the claim is already taken and
-    # must not be stranded — run inline exactly as the legacy path did.
+    # Pool at capacity (or submit failure): the claim is already taken and must not be
+    # stranded — run inline exactly as the legacy path did.
     logger.info(
         "cronjob run: background pool unavailable (%s); running job '%s' inline.",
-        dispatch.get("error", "rejected"), job_name,
-    )
+        dispatch.get("error", "rejected"), job_name)
     result = _run_claimed_job(job, extra_prompt=extra_prompt)
     result["dispatched"] = False
     return result
@@ -616,8 +501,12 @@ def _try_dispatch_background_run(
 # job record for job-bound actions) and returns the JSON result string.
 # ---------------------------------------------------------------------------
 
-def _dumps(payload: Dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2)
+def _with_guidance(result: Dict[str, Any], job: Dict[str, Any], deliver: Optional[str]) -> Dict[str, Any]:
+    """Attach mode/delivery guidance (create and update echo the same notes)."""
+    _notes = _mode_guidance_notes(job, deliver)
+    if _notes:
+        result["guidance"] = _notes
+    return result
 
 
 def _action_create(a: Dict[str, Any]) -> str:
@@ -627,8 +516,7 @@ def _action_create(a: Dict[str, Any]) -> str:
         return tool_error("schedule is required for create", success=False)
     canonical_skills = _canonical_skills(a["skill"], a["skills"])
     _no_agent = bool(a["no_agent"])
-    # no_agent=True -> the script IS the job (prompt/skills optional);
-    # otherwise at least one of prompt/skills is required.
+    # no_agent=True -> the script IS the job (prompt/skills optional); else prompt or skills.
     if _no_agent:
         if not script:
             return tool_error(
@@ -636,27 +524,23 @@ def _action_create(a: Dict[str, Any]) -> str:
                 "the script is the job. In no_agent mode the LLM is "
                 "skipped entirely: prompt and skills are ignored, "
                 "non-empty stdout is delivered verbatim, empty stdout "
-                "sends nothing (watchdog pattern), and a non-zero "
-                "exit or timeout sends an error alert.",
-                success=False,
-            )
+                "sends nothing (watchdog pattern), and a non-zero exit or timeout sends an error alert.",
+                success=False)
     elif not prompt and not canonical_skills:
         return tool_error("create requires either prompt or at least one skill", success=False)
     error = (
         (prompt and _scan_cron_prompt(prompt))
         or (script and _validate_cron_script_path(script))
         or (a["monitor_script"] and _validate_cron_script_path(a["monitor_script"]))
-        # A model-supplied base_url must not route a named provider's stored
-        # credential to an attacker endpoint.
+        # A model-supplied base_url must not route a named provider's stored credential
+        # to an attacker endpoint.
         or _validate_cron_base_url(a["provider"], a["base_url"])
         # bot-chat targets are machine-local: fail the CREATE, not the run.
         or _validate_bot_chat_deliver(deliver)
-        # failure_deliver shares deliver's grammar and validators (NS-788).
+        # failure_deliver shares deliver's grammar and validators.
         or _validate_bot_chat_deliver(_normalize_deliver_param(a["failure_deliver"]))
         or (a["context_from"] and _validate_context_from_refs(
-            [a["context_from"]] if isinstance(a["context_from"], str) else a["context_from"]
-        ))
-    )
+            [a["context_from"]] if isinstance(a["context_from"], str) else a["context_from"])))
     if error:
         return tool_error(error, success=False)
 
@@ -664,10 +548,7 @@ def _action_create(a: Dict[str, Any]) -> str:
     if a["continuity"] is not None:
         context_from = _apply_continuity(context_from, a["continuity"])
 
-    from cron.scheduler import (
-        CronSchedulerRegistrationError,
-        create_job_with_scheduler_registration,
-    )
+    from cron.scheduler import CronSchedulerRegistrationError, create_job_with_scheduler_registration
 
     try:
         job = create_job_with_scheduler_registration(
@@ -689,13 +570,10 @@ def _action_create(a: Dict[str, Any]) -> str:
             attach_to_session=a["attach_to_session"],
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
-            # CLI-only lane: deliberately absent from CRONJOB_SCHEMA and the
-            # model dispatch — models do not make model-config decisions.
+            # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch — models
+            # do not make model-config decisions.
             reasoning_effort=a["reasoning_effort"],
-            failure_deliver=_resolve_cron_context_deliver(
-                _normalize_deliver_param(a["failure_deliver"])
-            ),
-        )
+            failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])))
     except CronSchedulerRegistrationError as exc:
         _partial = exc.to_dict()
         return tool_error(_partial.pop("error"), success=False, **_partial)
@@ -703,9 +581,8 @@ def _action_create(a: Dict[str, Any]) -> str:
     _local_notice = _local_delivery_notice(job, deliver)
     if _local_notice:
         _create_message = f"{_create_message} {_local_notice}"
-    # The builtin ticker lives in the gateway process: a job created with no
-    # gateway running is stored but never fires — tell the model (the CLI
-    # already warns; the agent path otherwise reports a clean success).
+    # The builtin ticker lives in the gateway process: a job created with no gateway
+    # running is stored but never fires — tell the model (the CLI already warns).
     _result = {
         "success": True,
         "job_id": job["id"],
@@ -721,14 +598,6 @@ def _action_create(a: Dict[str, Any]) -> str:
         **_gateway_liveness_notice(),
     }
     return _dumps(_with_guidance(_result, job, deliver))
-
-
-def _with_guidance(result: Dict[str, Any], job: Dict[str, Any], deliver: Optional[str]) -> Dict[str, Any]:
-    """Attach mode/delivery guidance (create and update echo the same notes)."""
-    _notes = _mode_guidance_notes(job, deliver)
-    if _notes:
-        result["guidance"] = _notes
-    return result
 
 
 def _action_list(a: Dict[str, Any]) -> str:
@@ -748,20 +617,8 @@ def _action_remove(job: Dict[str, Any], a: Dict[str, Any]) -> str:
     return _dumps({
         "success": True,
         "message": f"Cron job '{job['name']}' removed.",
-        "removed_job": {
-            "id": job_id,
-            "name": job["name"],
-            "schedule": job.get("schedule_display"),
-        },
+        "removed_job": {"id": job_id, "name": job["name"], "schedule": job.get("schedule_display")},
     })
-
-
-def _action_pause(job: Dict[str, Any], a: Dict[str, Any]) -> str:
-    return _job_state_result(pause_job(job["id"], reason=a["reason"]))
-
-
-def _action_resume(job: Dict[str, Any], a: Dict[str, Any]) -> str:
-    return _job_state_result(resume_job(job["id"]))
 
 
 def _job_state_result(updated: Dict[str, Any]) -> str:
@@ -776,19 +633,16 @@ def _refreshed_job_view(job_id: str) -> Dict[str, Any]:
 
 def _action_run(job: Dict[str, Any], a: Dict[str, Any]) -> str:
     job_id = job["id"]
-    # `prompt` on run is transient per-fire context appended to the stored
-    # prompt, never persisted; same strict scan as stored prompts.
+    # `prompt` on run is transient per-fire context appended to the stored prompt, never
+    # persisted; same strict scan as stored prompts.
     extra_prompt = a["prompt"] or None
     if extra_prompt:
         scan_error = _scan_cron_prompt(extra_prompt)
         if scan_error:
             return tool_error(scan_error, success=False)
-    # A manual run must actually run even with no ticker active. Preferred:
-    # background dispatch (handle now, outcome as a completion event); falls
-    # back to inline execution when the runtime can't receive completions.
-    bg = _try_dispatch_background_run(
-        job, session_id=a["session_id"], extra_prompt=extra_prompt
-    )
+    # A manual run must actually run even with no ticker active. Preferred: background
+    # dispatch (handle now, outcome as a completion event); inline fallback otherwise.
+    bg = _try_dispatch_background_run(job, session_id=a["session_id"], extra_prompt=extra_prompt)
     if bg is not None and bg.get("dispatched"):
         _notify_provider_jobs_changed_safe()
         result = _refreshed_job_view(job_id)
@@ -802,21 +656,19 @@ def _action_run(job: Dict[str, Any], a: Dict[str, Any]) -> str:
                 "The job is running in the background. You and the "
                 "user can keep working; its outcome re-enters the "
                 "conversation as a new message when it finishes. "
-                "Do not wait or poll — just continue."
-            ),
+                "Do not wait or poll — just continue."),
         })
     if bg is not None:
         exec_result = bg  # terminal result: claim lost or inline fallback
     else:
-        # Relay-fronted manual run: no live adapter here — forward to the
-        # running gateway, whose adapter owns that delivery.
+        # Relay-fronted manual run: no live adapter here — forward to the running gateway.
         forwarded = _forward_relay_fronted_run(job, extra_prompt=extra_prompt)
         if forwarded is not None:
             return forwarded
         exec_result = _execute_job_now(job, extra_prompt=extra_prompt)
-    # A claimed direct run advances next_run_at and may race an external
-    # provider's one-shot for the same occurrence; a lost consumed fire cannot
-    # re-arm itself, so reconcile after the run has persisted its final state.
+    # A claimed direct run advances next_run_at and may race an external provider's
+    # one-shot for the same occurrence; a lost consumed fire cannot re-arm itself, so
+    # reconcile after the run has persisted its final state.
     claimed = exec_result.get("claimed", False)
     if claimed:
         _notify_provider_jobs_changed_safe()
@@ -825,8 +677,7 @@ def _action_run(job: Dict[str, Any], a: Dict[str, Any]) -> str:
     result["execution_success"] = exec_result.get("success", False)
     if not claimed:
         result["execution_skipped"] = exec_result.get("error") or (
-            "Already being fired by the scheduler; not run again."
-        )
+            "Already being fired by the scheduler; not run again.")
     elif exec_result.get("error"):
         result["execution_error"] = exec_result["error"]
     return _dumps({"success": True, "job": result})
@@ -846,8 +697,8 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
             return scan_error
         updates["prompt"] = prompt
     if a["name"] is not None and a["name"].strip():
-        # Blank name is a no-op, not a clear: a model re-sending the whole
-        # schema with type-default empties must not wipe untouched fields.
+        # Blank name is a no-op, not a clear: a model re-sending the whole schema with
+        # type-default empties must not wipe untouched fields.
         updates["name"] = a["name"]
     if deliver is not None:
         bot_chat_error = _validate_bot_chat_deliver(_normalize_deliver_param(deliver))
@@ -855,10 +706,9 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
             return bot_chat_error
         updates["deliver"] = _resolve_cron_context_deliver(_normalize_deliver_param(deliver))
     if a["failure_deliver"] is not None:
-        # '' clears the override (job falls back to deliver on failures);
-        # non-empty values share deliver's validation AND its cron-context
-        # origin resolution (a job created from inside a cron run must never
-        # store literal 'origin' — same rule as deliver).
+        # '' clears the override (failures fall back to deliver); non-empty values share
+        # deliver's validation AND its cron-context origin resolution (a job created from
+        # inside a cron run must never store literal 'origin').
         _norm_fd = _normalize_deliver_param(a["failure_deliver"])
         if _norm_fd:
             bot_chat_error = _validate_bot_chat_deliver(_norm_fd)
@@ -879,10 +729,9 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
     if a["reasoning_effort"] is not None:
         # CLI-only lane; update_job validates, empty string clears the pin.
         updates["reasoning_effort"] = a["reasoning_effort"]
-    # Re-validate the EFFECTIVE provider/base_url on EVERY update: a job
-    # persisted before this guard may already hold an unsafe pair, and editing
-    # an unrelated field must not leave it schedulable. Merging this update's
-    # values over the stored job lets an operator remediate in the same call.
+    # Re-validate the EFFECTIVE provider/base_url on EVERY update: a job persisted before
+    # this guard may hold an unsafe pair, and editing an unrelated field must not leave it
+    # schedulable. Merging this update over the stored job lets an operator remediate.
     return _validate_cron_base_url(_pick(updates, job, "provider"), _pick(updates, job, "base_url"))
 
 
@@ -899,24 +748,19 @@ def _update_script_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[
     if monitor_url is not None:
         updates["monitor_url"] = _normalize_optional_job_value(monitor_url) if monitor_url else None
     if (monitor_script is not None or monitor_url is not None) and (
-        _pick(updates, job, "monitor_script") and _pick(updates, job, "monitor_url")
-    ):
-        return (
-            "monitor_script and monitor_url are mutually exclusive — "
-            "clear one before setting the other."
-        )
+        _pick(updates, job, "monitor_script") and _pick(updates, job, "monitor_url")):
+        return("monitor_script and monitor_url are mutually exclusive — clear one before setting the other.")
     return None
 
 
 def _update_context_from(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[str, Any]) -> Optional[str]:
-    """context_from / continuity: empty string / list clears; otherwise every
-    ref must exist. Stored as a list (or None) to match create_job()."""
+    """context_from / continuity: empty string / list clears; otherwise every ref must
+    exist. Stored as a list (or None) to match create_job()."""
     context_from, continuity = a["context_from"], a["continuity"]
     if context_from is None and continuity is None:
         return None
     if context_from is None:
-        # continuity-only update: start from the job's stored refs.
-        context_from = list(job.get("context_from") or [])
+        context_from = list(job.get("context_from") or [])  # continuity-only update
     refs = _clean_str_list(context_from)
     if continuity is not None:
         refs = _apply_continuity(refs, continuity) or []
@@ -938,18 +782,15 @@ def _update_run_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[str
         # Empty string clears; otherwise update_job() validates/normalizes.
         updates["workdir"] = _normalize_optional_job_value(a["workdir"]) or None
     if a["no_agent"] is not None:
-        # Flipping to True needs a script on the job or in this same update,
-        # otherwise the next tick would error out.
+        # Flipping to True needs a script on the job or in this same update.
         target_no_agent = bool(a["no_agent"])
         if target_no_agent and not _pick(updates, job, "script"):
             return (
                 "Cannot set no_agent=True on a job without a script. "
-                "Set `script` in the same update, or on the job first."
-            )
+                "Set `script` in the same update, or on the job first.")
         updates["no_agent"] = target_no_agent
     if a["repeat"] is not None:
-        # Shared chokepoint coerces string forms ('forever'/'once'/'3') and
-        # 0/negative values (a bare `repeat <= 0` raised TypeError on strings).
+        # Shared chokepoint coerces string forms ('forever'/'once'/'3') and 0/negative.
         from cron.jobs import normalize_repeat_value
         repeat_state = dict(job.get("repeat") or {})
         repeat_state["times"] = normalize_repeat_value(a["repeat"])
@@ -980,16 +821,15 @@ def _action_update(job: Dict[str, Any], a: Dict[str, Any]) -> str:
     _notify_provider_jobs_changed_safe()
     # An update can switch modes or delivery — echo the same guidance as create.
     return _dumps(_with_guidance(
-        {"success": True, "job": _format_job(updated)}, updated, _normalize_deliver_param(a["deliver"])
-    ))
+        {"success": True, "job": _format_job(updated)}, updated, _normalize_deliver_param(a["deliver"])))
 
 
 # Actions that need no job_id, and job-bound actions (job resolved first).
 _JOBLESS_ACTIONS = {"create": _action_create, "list": _action_list}
 _JOB_ACTIONS = {
     "remove": _action_remove,
-    "pause": _action_pause,
-    "resume": _action_resume,
+    "pause": lambda job, a: _job_state_result(pause_job(job["id"], reason=a["reason"])),
+    "resume": lambda job, a: _job_state_result(resume_job(job["id"])),
     "run": _action_run,
     "run_now": _action_run,
     "trigger": _action_run,
@@ -1006,12 +846,7 @@ def _resolve_job_or_error(job_id: str):
             "success": False,
             "error": str(exc),
             "matches": [
-                {
-                    "id": m["id"],
-                    "name": m.get("name"),
-                    "schedule": m.get("schedule_display"),
-                    "next_run_at": m.get("next_run_at"),
-                }
+                {"id": m["id"], "name": m.get("name"), "schedule": m.get("schedule_display"), "next_run_at": m.get("next_run_at")}
                 for m in exc.matches
             ],
         })
@@ -1049,32 +884,26 @@ def cronjob(
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[Union[str, List[str]]] = None,
     task_id: str = None,
-    session_id: Optional[str] = None,
-) -> str:
+    session_id: Optional[str] = None) -> str:
     """Unified cron job management tool."""
     a = dict(locals())
     del a["task_id"]  # unused but kept for handler signature compatibility
-
     try:
         normalized = (action or "").strip().lower()
-
         handler = _JOBLESS_ACTIONS.get(normalized)
         if handler is not None:
             return handler(a)
-
         if not job_id:
             return tool_error(f"job_id is required for action '{normalized}'", success=False)
-        # Job resolution precedes the action check (an unknown action on a
-        # missing job reports the missing job) — preserved ordering.
+        # Job resolution precedes the action check (an unknown action on a missing job
+        # reports the missing job) — preserved ordering.
         job, error = _resolve_job_or_error(job_id)
         if error is not None:
             return error
-
         handler = _JOB_ACTIONS.get(normalized)
         if handler is None:
             return tool_error(f"Unknown cron action '{action}'", success=False)
         return handler(job, a)
-
     except Exception as e:
         return tool_error(str(e), success=False)
 
@@ -1167,9 +996,8 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
 
 
 def check_cronjob_requirements() -> bool:
-    """Available in interactive CLI mode and gateway/messaging platforms (the
-    scheduler is internal; no crontab needed). Flags must be explicitly truthy
-    via the shared ``env_var_enabled`` helper."""
+    """Available in interactive CLI mode and gateway/messaging platforms (the scheduler is
+    internal; no crontab needed). Flags must be explicitly truthy via ``env_var_enabled``."""
     from utils import env_var_enabled
 
     return (
@@ -1179,15 +1007,10 @@ def check_cronjob_requirements() -> bool:
     )
 
 
-# --- Registry ---
-from tools.registry import registry, tool_error
-
-
-# Agent-facing arguments forwarded verbatim to cronjob(). model / provider /
-# base_url are intentionally NOT in this list: per-job inference pins are
-# user-owned (dashboard, `hermes cron create/edit --model`, or hand-edited
-# jobs). The agent must not be able to point unattended spend at a different
-# model. Programmatic callers of cronjob() itself retain the parameters.
+# Agent-facing arguments forwarded verbatim to cronjob(). model / provider / base_url are
+# intentionally NOT here: per-job inference pins are user-owned (dashboard, `hermes cron
+# create/edit --model`, hand-edited jobs) — the agent must not point unattended spend at a
+# different model. Programmatic callers of cronjob() itself retain the parameters.
 _HANDLER_FORWARDED_ARGS = (
     "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills",
     "reason", "script", "context_from", "continuity", "enabled_toolsets", "workdir",
@@ -1196,12 +1019,9 @@ _HANDLER_FORWARDED_ARGS = (
 
 
 def _cronjob_handler(args, **kw):
-    """Model-tool dispatch for ``cronjob``: resolves the one model-facing
-    ``monitor`` field into the stored ``monitor_script``/``monitor_url`` pair
-    (legacy field names still accepted for older transcripts)."""
-    _mon_script, _mon_url = _split_monitor_arg(
-        args.get("monitor"), args.get("monitor_script"), args.get("monitor_url")
-    )
+    """Model-tool dispatch: resolves the one model-facing ``monitor`` field into the stored
+    ``monitor_script``/``monitor_url`` pair (legacy field names still accepted)."""
+    _mon_script, _mon_url = _split_monitor_arg(args.get("monitor"), args.get("monitor_script"), args.get("monitor_url"))
     return cronjob(
         action=args.get("action", ""),
         include_disabled=args.get("include_disabled", True),
