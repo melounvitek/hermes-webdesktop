@@ -494,6 +494,10 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
     return None
 
 
+def _is_known_provider_base_url(base_url: str) -> bool:
+    return _infer_provider_from_url(base_url) is not None
+
+
 def _lmstudio_server_root(base_url: str) -> str:
     """LM Studio server root for native ``/api/v1`` endpoints."""
     root = _normalize_base_url(base_url)
@@ -2114,7 +2118,7 @@ def get_model_context_length(
             return ctx
     # 2. Live /models for truly custom endpoints. Known providers skip this: their
     # /models may report a provider-imposed limit (Copilot: 128k) rather than the window.
-    if _is_custom_endpoint(base_url) and _infer_provider_from_url(base_url) is None:
+    if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url):
         return _resolve_custom_endpoint_context_length(model, base_url, api_key, provider)
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (base_url and base_url_hostname(base_url) == "api.anthropic.com"):
