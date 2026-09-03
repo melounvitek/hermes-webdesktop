@@ -216,6 +216,20 @@ def _hygiene_compression_timeout_message(
     )
 
 
+def _cached_agent_for_hygiene(gateway, session_key: str):
+    """The cached live AIAgent for ``session_key`` (or the pending sentinel / None), read under the cache lock."""
+    cache = getattr(gateway, "_agent_cache", None)
+    if cache is None:
+        return None
+    lock = getattr(gateway, "_agent_cache_lock", None)
+    try:
+        with (lock or suppress()):
+            entry = cache.get(session_key)
+    except Exception:
+        entry = None
+    return entry[0] if isinstance(entry, tuple) and entry else entry
+
+
 async def run_codex_hygiene_compaction(
     gateway, session_key: str, session_id: str, *, auto_mode: str, history: list,
     approx_tokens: int, timeout_seconds: float, failure_cooldown_seconds: float = 300.0,
@@ -236,19 +250,7 @@ async def run_codex_hygiene_compaction(
         # fallback cannot shrink the thread in any mode, so both skip cleanly with no eviction.
         return f"skipped:mode={mode}"
 
-    agent = None
-    lock = getattr(gateway, "_agent_cache_lock", None)
-    cache = getattr(gateway, "_agent_cache", None)
-    if cache is not None:
-        try:
-            if lock:
-                with lock:
-                    entry = cache.get(session_key)
-            else:
-                entry = cache.get(session_key)
-        except Exception:
-            entry = None
-        agent = entry[0] if isinstance(entry, tuple) and entry else entry
+    agent = _cached_agent_for_hygiene(gateway, session_key)
     if agent is None or agent is _AGENT_PENDING_SENTINEL:
         # No live agent → no live thread; the detached path's mirror-only rewrite would be the
         # exact no-op this function exists to remove, so skip honestly.
@@ -256,49 +258,33 @@ async def run_codex_hygiene_compaction(
     if getattr(agent, "_codex_session", None) is None:
         return "skipped:no-live-thread"
 
-    loop = asyncio.get_running_loop()
     compressor = getattr(agent, "context_compressor", None)
     count_before = getattr(compressor, "compression_count", 0)
-    worker_future = loop.run_in_executor(
-        None,
-        # Keep the caller's multiplexed profile secret scope and HERMES_HOME
-        # override in the worker. The default executor does not propagate
-        # ContextVars on the Python runtimes Hermes currently ships.
-        copy_context().run,
-        lambda: agent._compress_context(
-            history, "", approx_tokens=approx_tokens
-        ),
-    )
+    # copy_context keeps the caller's multiplexed profile secret scope and HERMES_HOME override in the
+    # worker (the default executor does not propagate ContextVars on the runtimes Hermes ships).
+    worker_future = asyncio.get_running_loop().run_in_executor(
+        None, copy_context().run, lambda: agent._compress_context(history, "", approx_tokens=approx_tokens))
     track_worker = getattr(gateway, "_track_deferred_agent_worker", None)
     if callable(track_worker):
-        # ``wait_for`` only cancels the asyncio wrapper; the executor thread
-        # keeps running. Keep it visible to gateway shutdown until the real
-        # worker finishes, just like the detached local-compressor path.
+        # ``wait_for`` only cancels the asyncio wrapper; the executor thread keeps running. Keep it
+        # visible to gateway shutdown until the real worker finishes, like the detached local path.
         track_worker(worker_future, agent)
     try:
-        await asyncio.wait_for(
-            asyncio.shield(worker_future), timeout=max(float(timeout_seconds), 1.0)
-        )
+        await asyncio.wait_for(asyncio.shield(worker_future), timeout=max(float(timeout_seconds), 1.0))
     except asyncio.TimeoutError:
         # The executor thread keeps running (compact_thread has its own RPC timeouts); brake
         # retries so a wedged app-server does not re-trigger compaction on every message.
         if failure_cooldown_seconds >= 0:
             _record_hygiene_cooldown(
-                gateway,
-                session_id,
-                failure_cooldown_seconds,
-                "codex app-server thread compaction timed out")
+                gateway, session_id, failure_cooldown_seconds, "codex app-server thread compaction timed out")
         logger.warning(
             "Session hygiene: codex app-server thread compaction for "
             "session %s timed out after %.1fs; continuing without compaction",
-            session_id,
-            timeout_seconds)
+            session_id, timeout_seconds)
         return "failed:timeout"
     except Exception as exc:
         logger.warning(
-            "Session hygiene: codex app-server thread compaction for session %s failed: %s",
-            session_id,
-            exc)
+            "Session hygiene: codex app-server thread compaction for session %s failed: %s", session_id, exc)
         return f"failed:{exc}"
 
     count_after = getattr(compressor, "compression_count", 0)
