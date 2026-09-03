@@ -82,9 +82,7 @@ from tools.mcp_tool_discovery import (  # noqa: F401
 _OSV_MALWARE_CHECK_TIMEOUT_S = 12.0
 
 
-# ---------------------------------------------------------------------------
-# Optional MCP SDK: availability probe now, symbol import on first use
-# ---------------------------------------------------------------------------
+# ---- Optional MCP SDK: availability probe now, symbol import on first use ----
 
 _MCP_AVAILABLE = _MCP_HTTP_AVAILABLE = _MCP_NEW_HTTP = _MCP_LEGACY_HTTP = False
 _MCP_SAMPLING_TYPES = _MCP_NOTIFICATION_TYPES = _MCP_ELICITATION_TYPES = False
@@ -245,24 +243,21 @@ _MCP_LOG_LEVEL_MAP = {
     "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.ERROR,
     "alert": logging.ERROR, "emergency": logging.ERROR}
 
-# ---------------------------------------------------------------------------
-# Reconnect / keepalive tuning
-# ---------------------------------------------------------------------------
+# ---- Reconnect / keepalive tuning ----
 
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
+_RECYCLED_RECONNECT_TIMEOUT = 15.0
 # Parked servers (tools deregistered) self-probe on this cadence: nothing else can revive them.
 _PARKED_RETRY_INTERVAL = 300
-_RECYCLED_RECONNECT_TIMEOUT = 15.0
 # Bounded wait for a respawned stdio child when a call finds it dead (gateway restarts kill
 # every MCP child); bounded so a broken server still parks via run()'s rapid-drop budget.
 _STDIO_RESPAWN_WAIT_SEC = 15.0
 # The client MUST ping faster than the server's idle-session TTL (short-TTL servers need a
 # smaller configured ``keepalive_interval``); the floor stops a tiny interval busy-looping.
-_DEFAULT_KEEPALIVE_INTERVAL = 180
-_MIN_KEEPALIVE_INTERVAL = 5
+_DEFAULT_KEEPALIVE_INTERVAL, _MIN_KEEPALIVE_INTERVAL = 180, 5
 # One bounded cancellation cycle at final shutdown so resistant tasks cannot hang exit.
 _MCP_LOOP_DRAIN_TIMEOUT = 3.0
 # JSON-RPC 2.0 "method not found" (server without optional ``ping``); _ensure_mcp_sdk()
@@ -306,9 +301,7 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
     return items
 
 
-# ---------------------------------------------------------------------------
-# Server task -- each MCP server lives in one long-lived asyncio Task
-# ---------------------------------------------------------------------------
+# ---- Server task -- each MCP server lives in one long-lived asyncio Task ----
 
 class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthMixin):
     """One MCP server connection in one long-lived asyncio Task (the transport's anyio cancel
@@ -335,11 +328,11 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # Set -> _run_http/_run_stdio exit cleanly and run() re-enters the transport.
         self._reconnect_event = asyncio.Event()
         self._tools: list = []
-        self._error: Optional[Exception] = None
+        self._registered_tool_names: list[str] = []
         self._config: dict = {}
+        self._error: Optional[Exception] = None
         self._sampling: Optional[SamplingHandler] = None
         self._elicitation: Optional[ElicitationHandler] = None
-        self._registered_tool_names: list[str] = []
         self._reconnect_retries: int = 0
         # Rapid-drop budget: a session is UNPROVEN until it survives a keepalive interval or a
         # successful call; only a proven session clears the budget, so a post-handshake flapper
@@ -374,9 +367,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # task that does not inherit HERMES_SESSION_PLATFORM, so the callback replays this.
         self._pending_call_context: Optional[contextvars.Context] = None
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
-        self._idle_timeout_seconds: Optional[float] = None
-        self._max_lifetime_seconds: Optional[float] = None
-        self._recycled_reason: Optional[str] = None
+        self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
         # Handshake InitializeResult: the server's REAL advertised capabilities.
         self.initialize_result: Optional[Any] = None
         # SEP-2549 cache hints from the last tools/list (ttl_ms, cache_scope).
@@ -389,9 +380,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
     _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
 
 
-# ---------------------------------------------------------------------------
-# Module-level state (every mutation under ``_lock``)
-# ---------------------------------------------------------------------------
+# ---- Module-level state (every mutation under ``_lock``) ----
 
 _servers: Dict[str, MCPServerTask] = {}
 # Profile registry scope per live connection (None outside multiplex) so a multiplexed
@@ -415,15 +404,13 @@ _connect_server_claim: contextvars.ContextVar[Optional[Callable[[MCPServerTask],
 # deadline honoured by ``register_mcp_servers``; cleared on success.
 _server_connect_retry_after: Dict[str, float] = {}   # name -> monotonic deadline
 _server_connect_failures: Dict[str, int] = {}        # name -> consecutive failures
-_CONNECT_RETRY_BASE_BACKOFF_SEC = 30.0
-_CONNECT_RETRY_MAX_BACKOFF_SEC = 600.0
+_CONNECT_RETRY_BASE_BACKOFF_SEC, _CONNECT_RETRY_MAX_BACKOFF_SEC = 30.0, 600.0
 
 # Per-server circuit breaker: closed -> open (calls short-circuit until the cooldown) ->
 # half-open (next call probes). Mutate only via _bump_server_error / _reset_server_error.
 _server_error_counts: Dict[str, int] = {}
 _server_breaker_opened_at: Dict[str, float] = {}
-_CIRCUIT_BREAKER_THRESHOLD = 3
-_CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
+_CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 
 # Trust-tier gating (``trust: full | untrusted``): on an untrusted server every write-capable
 # call (discovery-time ``readOnlyHint`` not exactly True; malformed fails closed) needs approval
@@ -434,8 +421,7 @@ _CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
 _server_trust_levels: Dict[str, str] = {}
 _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
 
-_TRUST_FULL = "full"
-_TRUST_UNTRUSTED = "untrusted"
+_TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
 
 
 def _bump_server_error(server_name: str) -> None:
@@ -458,10 +444,10 @@ _parallel_safe_servers: set = set()
 # registry tool name -> raw server name (the generated name is lossy; never re-parse it).
 _mcp_tool_server_names: Dict[str, str] = {}
 
-# Dedicated event loop running in a background daemon thread.
+# Dedicated event loop in a background daemon thread; _lock guards the loop handles, _servers,
+# the status maps and the PID ledgers.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
-# Guards the loop handles, _servers, the status maps and the PID ledgers.
 _lock = threading.Lock()
 
 
@@ -486,5 +472,4 @@ def _server_registry_scope(name: str) -> Optional[str]:
 _LOCK_UNAVAILABLE: Any = object()  # sentinel: locking broken/unavailable
 _MCP_DISCOVERY_LOCK_PATH: Optional[str] = None  # resolved lazily
 # Bounded wait when another process holds the lock.
-_MCP_DISCOVERY_LOCK_MAX_RETRIES: int = 240
-_MCP_DISCOVERY_LOCK_RETRY_DELAY_S: float = 0.5
+_MCP_DISCOVERY_LOCK_MAX_RETRIES, _MCP_DISCOVERY_LOCK_RETRY_DELAY_S = 240, 0.5
