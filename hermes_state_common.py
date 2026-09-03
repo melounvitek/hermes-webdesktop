@@ -1012,7 +1012,6 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
             lock_path, exc)
         yield False
         return
-
     acquired = False
     try:
         if _IS_WINDOWS:

@@ -202,7 +202,6 @@ def quarantine_cross_process_lock(path: Path, timeout: float = 5.0):
     try:
         if platform.system() == "Windows":
             import msvcrt
-
             def _lock(mode):  # msvcrt locks a byte range from the current position
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), mode, 1)
@@ -304,18 +303,15 @@ def collect_state_db_stats(db_path: Path) -> Dict[str, Any]:
     except Exception as exc:
         logger.debug("collect_state_db_stats: cannot open %s read-only: %s", db_path, exc)
         return stats
-
     def _scalar(sql: str, params=()) -> Any:
         try:
             row = conn.execute(sql, params).fetchone()
             return row[0] if row else None
         except Exception:
             return None
-
     def _int(sql: str, params=()) -> Optional[int]:
         value = _scalar(sql, params)
         return int(value) if value is not None else None
-
     def _meta_int(key: str) -> Optional[int]:
         try:  # a non-numeric meta value must yield None, not fail the snapshot
             return _int("SELECT value FROM state_meta WHERE key = ?", (key,))

@@ -293,7 +293,6 @@ class SessionMessagesMixin:
         num_tool_calls = _tool_calls_count(tool_calls)
         params = self._message_row_params(
             session_id, role, msg, tool_calls, _coerce_timestamp(timestamp, time.time()), keep_reasoning=True)
-
         def _do(conn):
             self._check_transcript_write_guards(
                 conn, session_id, compression_lock_holder,
@@ -322,7 +321,6 @@ class SessionMessagesMixin:
                     compression_lock_holder=compression_lock_holder, turn_lease_holder=turn_lease_holder,
                     turn_lease_ttl_seconds=turn_lease_ttl_seconds)
                 for start in range(0, len(messages), chunk_rows))
-
         def _do(conn):
             self._check_transcript_write_guards(
                 conn, session_id, compression_lock_holder,
@@ -348,7 +346,6 @@ class SessionMessagesMixin:
         from hermes_state import _scrub_surrogates
         if not session_id or not content or not display_kind:
             return False
-
         def _do(conn):
             row = conn.execute(
                 "SELECT id FROM messages WHERE session_id = ? AND role = ? "
@@ -376,7 +373,6 @@ class SessionMessagesMixin:
         from hermes_state import _scrub_surrogates
         if not session_id or message_row_id is None:
             return None
-
         def _do(conn):
             row = conn.execute(_DISPLAY_META_ROW_SQL, (message_row_id, session_id)).fetchone()
             if row is None:
@@ -409,7 +405,6 @@ class SessionMessagesMixin:
         cache-safe); the ``seen`` stamp makes each announcement exactly once."""
         if not session_id:
             return []
-
         def _do(conn):
             rows = conn.execute(
                 "SELECT id, role, content, display_metadata FROM messages "
@@ -493,7 +488,6 @@ class SessionMessagesMixin:
         turn_lease`` runs the lease check in-txn for user rewrites that don't own it."""
         from hermes_state import CompressionSessionClosedError
         active_clause = " AND active = 1" if active_only else ""
-
         def _do(conn):
             if reject_active_turn_lease:
                 self._check_transcript_write_guards(
@@ -563,7 +557,6 @@ class SessionMessagesMixin:
         search doesn't return each carried message once per compaction.
         ``model_config_patch`` merges in the same txn (``None`` removes a key)."""
         from hermes_state import SessionCompressionInProgressError
-
         def _do(conn):
             if lock_holder is not None:
                 lock_row = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
@@ -1115,7 +1108,6 @@ class SessionMessagesMixin:
             head_row = conn.execute(
                 "SELECT MAX(id) FROM messages WHERE session_id = ? AND active = 1", (session_id,)).fetchone()
             return target_row, ids, head_row[0] if head_row else None, replacement_message_id
-
         target_row, rewound, new_head_id, replacement_message_id = self._execute_write(_do)
         # Decode for the prompt-buffer prefill without a second fallible DB operation.
         target_row["content"] = self._decode_content(target_row.get("content"))
@@ -1192,7 +1184,6 @@ class SessionMessagesMixin:
         is touched. ``backup``: ``VACUUM INTO`` snapshot first (none when nothing changes). Returns
         ``{"dry_run", "rows_affected", "row_ids", "backup_path"}``."""
         from hermes_state import _STALE_TOOL_CALL_MARKER_RE
-
         def _find_affected(conn) -> List[int]:
             cursor = conn.execute(
                 "SELECT id, content FROM messages "
@@ -1200,7 +1191,6 @@ class SessionMessagesMixin:
             return [
                 row["id"] for row in cursor.fetchall()
                 if isinstance(row["content"], str) and _STALE_TOOL_CALL_MARKER_RE.fullmatch(row["content"].strip())]
-
         def _result(affected, backup_path=None):
             return {"dry_run": dry_run, "rows_affected": len(affected), "row_ids": affected, "backup_path": backup_path}
 
@@ -1217,7 +1207,6 @@ class SessionMessagesMixin:
                 self._conn.execute("VACUUM INTO ?", (str(dest),))
             backup_path = str(dest)
             logger.info("Backed up state.db to %s before clean-markers write", backup_path)
-
         def _do(conn):
             ids = _find_affected(conn)
             if ids:

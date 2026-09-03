@@ -213,7 +213,6 @@ class SessionGatewayMixin:
         identity = (session_key, source, user_id, chat_id, chat_type, thread_id, display_name, origin_json)
         ancestors = include_compression_ancestors
         query_params = [session_id, *identity] if ancestors else [*identity, session_id]
-
         def _do(conn):
             conn.execute(
                 f"""{_COMPRESSION_LINEAGE_CTE if ancestors else ""}
@@ -248,7 +247,6 @@ class SessionGatewayMixin:
                     (session_id, source, user_id, session_key, chat_id, chat_type, thread_id, display_name,
                      origin_json, self._own_profile_name(), time.time()),
                 )
-
         self._execute_write(_do)
 
     def save_gateway_routing_entry(self, session_key: str, entry_json: str, *, scope: str = "") -> None:
@@ -269,7 +267,6 @@ class SessionGatewayMixin:
         """Atomically replace the routing index for *scope* (keys absent from *entries*
         are removed); other scopes untouched."""
         now = time.time()
-
         def _do(conn):
             conn.execute("DELETE FROM gateway_routing WHERE scope = ?", (scope,))
             if entries:
@@ -277,7 +274,6 @@ class SessionGatewayMixin:
                     "INSERT INTO gateway_routing (scope, session_key, entry_json, updated_at) "
                     "VALUES (?, ?, ?, ?)",
                     [(scope, k, v, now) for k, v in entries.items() if k and v])
-
         self._execute_write(_do)
 
     def load_gateway_routing_entries(self, *, scope: str = "") -> Dict[str, str]:
@@ -464,7 +460,6 @@ class SessionGatewayMixin:
         either row makes this a no-op. Non-NULL orphan columns are preserved."""
         if not orphan_id or not donor_id or orphan_id == donor_id:
             return False
-
         def _do(conn):
             donor = conn.execute(
                 "SELECT session_key, chat_id, chat_type, thread_id, user_id, "
@@ -497,14 +492,12 @@ class SessionGatewayMixin:
                 "end_reason = 'superseded_by_repair' WHERE id = ?",
                 (time.time(), donor_id))
             return True
-
         return self._execute_write(_do)
 
     def increment_hygiene_failure_streak(self, session_key: str) -> int:
         """Atomically increment the session-hygiene failure streak for one chat."""
         if not session_key:
             return 1
-
         def _do(conn):
             conn.execute(
                 """INSERT INTO gateway_hygiene_state (session_key, failure_streak)
@@ -517,7 +510,6 @@ class SessionGatewayMixin:
                 "SELECT failure_streak FROM gateway_hygiene_state WHERE session_key = ?", (session_key,),
             ).fetchone()
             return int(row[0])
-
         return self._execute_write(_do)
 
     def reset_hygiene_failure_streak(self, session_key: str) -> None:
@@ -591,7 +583,6 @@ class SessionGatewayMixin:
         if max_age_seconds <= 0:
             return []
         cutoff = time.time() - max_age_seconds
-
         def _do(conn):
             cur = conn.execute(
                 "DELETE FROM gateway_heartbeats WHERE last_heartbeat < ? RETURNING backend_id",

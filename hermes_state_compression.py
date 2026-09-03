@@ -82,7 +82,6 @@ class SessionCompressionMixin:
         an active lease or any canonical child means another path owns the lineage."""
         if not session_id:
             return False
-
         def _do(conn):
             if not _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()):
                 return False
@@ -123,7 +122,6 @@ class SessionCompressionMixin:
             # added past this point must raise instead: the lease DELETE above commits unless
             # _do raises.
             return updated.rowcount == 1
-
         return bool(self._execute_write(_do))
 
     def _publish_child_session_row(self, conn, parent, *, parent_session_id, child_session_id, source,
@@ -169,7 +167,6 @@ class SessionCompressionMixin:
         TOCTOU window), so a refresher that died on transient DB errors gets one last chance.
         """
         from hermes_state import CompressionSessionBusyError
-
         def _do(conn):
             if require_lease_refresh and compression_lock_holder:
                 conn.execute(
@@ -230,7 +227,6 @@ class SessionCompressionMixin:
                 "WHERE id = ? AND ended_at IS NULL", (time.time(), parent_session_id))
             if updated.rowcount != 1:
                 raise RuntimeError(f"Compression parent changed during publication: {parent_session_id}")
-
         self._execute_write(_do)
 
     def _write_sql_logged(self, op: str, session_id: str, sql: str, params) -> None:
@@ -279,7 +275,6 @@ class SessionCompressionMixin:
             return
         deadline = snapshot.get("cooldown_until")
         error = snapshot.get("error")
-
         def _do(conn):
             cursor = conn.execute(
                 "UPDATE sessions SET compression_failure_cooldown_until = ?, "
@@ -385,7 +380,6 @@ class SessionCompressionMixin:
             return False
         now = time.time()
         expires_at = now + ttl_seconds
-
         def _do(conn):
             return _claim_lease_row(
                 conn, "compression_locks", "session_id", session_id, holder, now, expires_at,
@@ -418,7 +412,6 @@ class SessionCompressionMixin:
         errors propagate so ``_execute_write`` can retry."""
         if not session_id:
             return session_id
-
         def _row(sid: str):
             row = conn.execute(
                 "SELECT id, parent_session_id, source, model_config, end_reason FROM sessions WHERE id = ?",
@@ -457,14 +450,12 @@ class SessionCompressionMixin:
             return False
         now = time.time()
         expires_at = now + max(0.1, float(ttl_seconds))
-
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,
                 lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h),
             )[0]
-
         return bool(self._execute_write(_do, patience_s=patience_s))
 
     def acquire_session_turn_lease(
@@ -517,27 +508,23 @@ class SessionCompressionMixin:
         if not session_id or not holder:
             return False
         expires_at = time.time() + max(0.1, float(ttl_seconds))
-
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return conn.execute(
                 "UPDATE session_turn_leases SET expires_at = ? "
                 "WHERE conversation_id = ? AND holder = ?", (expires_at, conversation_id, holder),
             ).rowcount > 0
-
         return bool(self._execute_write(_do))
 
     def release_session_turn_lease(self, session_id: str, holder: str) -> None:
         """Release a turn lease iff ``holder`` still owns it; idempotent."""
         if not session_id or not holder:
             return
-
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             conn.execute(
                 "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                 (conversation_id, holder))
-
         self._execute_write(_do)
 
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
