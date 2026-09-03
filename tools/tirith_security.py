@@ -24,7 +24,6 @@ from contextlib import suppress
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
-
 _REPO = "sheeki03/tirith"
 # Cosign provenance pinned to the release workflow, not the whole repo.
 _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/release\\.yml@refs/tags/v"
@@ -58,7 +57,6 @@ def _load_security_config() -> dict:
 
 
 # --- Module state ---
-
 # Cached path after first resolution. _INSTALL_FAILED means "tried and failed" (distinct
 # from None = "not yet tried") so a failed install is not retried per command.
 _resolved_path: str | None | bool = None

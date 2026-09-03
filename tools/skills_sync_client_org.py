@@ -21,9 +21,7 @@ from tools.skills_sync_client_wire import (
     checked_capabilities, materialize_tree, read_ref_hash, root_tree_of_commit, skill_trees_of_root)
 
 logger = logging.getLogger("tools.skills_sync_client")
-
 ORG_DIR_NAME = "_org"
-
 # Propose re-splices onto a moved org HEAD at most this many times. Small: contention means
 # other members are actively proposing; unbounded would spin.
 _ORG_CAS_MAX_ATTEMPTS = 5

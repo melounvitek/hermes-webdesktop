@@ -18,7 +18,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("tools.skills_sync_client")
-
 WIRE_VERSION = "1"
 DEFAULT_MAX_OBJECT_BYTES = 26214400  # 25 MiB, mirrors capabilities default
 KIND_BLOB, KIND_TREE, KIND_COMMIT = "blob", "tree", "commit"
@@ -37,7 +36,6 @@ SYNC_MANIFEST_VERSION = 1
 # Content addressing: the wire uses the FULL 64-hex sha256 -- a different namespace from the
 # truncated 16-hex local `content_hash` (skills_guard.py).
 def wire_address(data: bytes) -> str:
-    """``sha256:<64-hex>`` -- the wire address of ``data``."""
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
@@ -116,8 +114,8 @@ def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> 
         if child.is_symlink():
             logger.debug("skills_sync_client: skipping symlink %s", child)
         elif child.is_dir():
-            sub_hash = build_tree(child, objects, max_object_bytes=max_object_bytes)
-            entries.append(_entry(child.name, KIND_TREE, sub_hash, MODE_DIR))
+            entries.append(_entry(child.name, KIND_TREE, build_tree(child, objects, max_object_bytes=max_object_bytes),
+                                  MODE_DIR))
         elif child.is_file():
             data = child.read_bytes()
             if len(data) > max_object_bytes:
@@ -217,13 +215,10 @@ class SyncClient:
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_key}"
 
-    def _url(self, path: str) -> str:
-        return f"{self.base}/v1/sync/{path.lstrip('/')}"
-
     def _request(self, method: str, path: str, op: str, *, ok=(200,), errors: Optional[Dict[int, Any]] = None, **kw):
-        """One wire call; SyncError unless the status is in *ok*. *errors* maps a status to a message
-        (str or ``fn(response)``); anything else gets ``"<op> failed: <code>"``."""
-        r = self._session.request(method, self._url(path), timeout=self.timeout, **kw)
+        """One wire call to ``/v1/sync/<path>``; SyncError unless the status is in *ok*. *errors* maps a
+        status to a message (str or ``fn(response)``); anything else gets ``"<op> failed: <code>"``."""
+        r = self._session.request(method, f"{self.base}/v1/sync/{path.lstrip('/')}", timeout=self.timeout, **kw)
         if r.status_code in ok:
             return r
         msg = (errors or {}).get(r.status_code)
@@ -237,9 +232,7 @@ class SyncClient:
         """GET refs?prefix=... (or org/refs, filtered client-side by *prefix*)."""
         path, params = ("org/refs", None) if org_scope else ("refs", {"prefix": prefix})
         refs = (self._request("GET", path, "get_refs", params=params).json() or {}).get("refs", [])
-        if org_scope:
-            refs = [r_ for r_ in refs if str(r_.get("name", "")).startswith(prefix)]
-        return refs
+        return [r_ for r_ in refs if str(r_.get("name", "")).startswith(prefix)] if org_scope else refs
 
     def get_object(self, obj_hash: str, *, org_scope: bool = False) -> Tuple[str, bytes]:
         """GET objects/:hash -> ``(kind, bytes)``; kind from the object-type header, blob default."""

@@ -25,7 +25,6 @@ from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
     read_ref_hash, root_tree_of_commit, skill_trees_of_root, wire_address)
 
 logger = logging.getLogger(__name__)
-
 # Gate claim (NAS's wire name; means "Nous admin" / Permissions.ADMIN_ACCESS). The bearer comes
 # from resolve_nous_runtime_credentials(); its payload is decoded unverified to read this.
 NOUS_ADMIN_CLAIM = "tool_gateway_admin"
