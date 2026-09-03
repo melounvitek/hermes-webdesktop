@@ -122,8 +122,7 @@ _RESERVED_NAMES = frozenset({"hermes", "default", "test", "tmp", "root", "sudo"}
 _HERMES_SUBCOMMANDS = frozenset({
     "chat", "model", "gateway", "setup", "whatsapp", "login", "logout",
     "status", "cron", "doctor", "dump", "config", "pairing", "skills", "tools",
-    "mcp", "sessions", "insights", "version", "update", "uninstall",
-    "profile", "plugins", "honcho", "acp",
+    "mcp", "sessions", "insights", "version", "update", "uninstall", "profile", "plugins", "honcho", "acp",
 })
 
 
@@ -655,10 +654,7 @@ def read_profile_meta(profile_dir: Path) -> dict:
 
 
 def write_profile_meta(
-    profile_dir: Path,
-    *,
-    description: Optional[str] = None,
-    description_auto: Optional[bool] = None,
+    profile_dir: Path, *, description: Optional[str] = None, description_auto: Optional[bool] = None,
     display_name: Optional[str] = None,
 ) -> None:
     """Update ``profile.yaml`` in place: only passed fields are overwritten; the file is
@@ -721,21 +717,11 @@ def _profile_info(name: str, path: Path, *, is_default: bool, alias_name: Option
     if not is_default:
         gateway_running = gateway_running or _served_by_running_multiplexer(name)
     return ProfileInfo(
-        name=name,
-        path=path,
-        is_default=is_default,
-        gateway_running=gateway_running,
-        model=model,
-        provider=provider,
-        has_env=(path / ".env").exists(),
-        skill_count=_count_skills(path),
-        alias_path=alias_path,
-        alias_name=alias_name,
-        distribution_name=dist_name,
-        distribution_version=dist_version,
-        distribution_source=dist_source,
-        description=meta.get("description", ""),
-        description_auto=meta.get("description_auto", False),
+        name=name, path=path, is_default=is_default, gateway_running=gateway_running, model=model,
+        provider=provider, has_env=(path / ".env").exists(), skill_count=_count_skills(path),
+        alias_path=alias_path, alias_name=alias_name, distribution_name=dist_name,
+        distribution_version=dist_version, distribution_source=dist_source,
+        description=meta.get("description", ""), description_auto=meta.get("description_auto", False),
         display_name=meta.get("display_name", ""),
     )
 
@@ -884,13 +870,8 @@ def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path]) -> Non
 
 
 def create_profile(
-    name: str,
-    clone_from: Optional[str] = None,
-    clone_all: bool = False,
-    clone_config: bool = False,
-    no_alias: bool = False,
-    no_skills: bool = False,
-    description: Optional[str] = None,
+    name: str, clone_from: Optional[str] = None, clone_all: bool = False, clone_config: bool = False,
+    no_alias: bool = False, no_skills: bool = False, description: Optional[str] = None,
 ) -> Path:
     """Create a new profile directory and return its path.
 
@@ -1590,10 +1571,8 @@ _EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env"})
 
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
-    ".md", ".txt", ".yaml", ".yml", ".json", ".jsonl",
-    ".toml", ".ini", ".cfg", ".conf", ".py", ".sh",
-    ".bash", ".zsh", ".js", ".ts", ".tsx", ".jsx",
-    ".css", ".html", ".xml", ".csv",
+    ".md", ".txt", ".yaml", ".yml", ".json", ".jsonl", ".toml", ".ini", ".cfg", ".conf", ".py", ".sh",
+    ".bash", ".zsh", ".js", ".ts", ".tsx", ".jsx", ".css", ".html", ".xml", ".csv",
 })
 # ``Path(".cursorrules").suffix`` is "" — name-match; ``*.env.example`` uses endswith.
 _EXPORT_REDACT_NAMES = frozenset({".cursorrules"})

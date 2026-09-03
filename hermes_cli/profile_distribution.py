@@ -83,9 +83,7 @@ class EnvRequirement:
         if not name:
             raise DistributionError("env_requires entry missing 'name'")
         return cls(
-            name=name,
-            description=_str(data, "description"),
-            required=bool(data.get("required", True)),
+            name=name, description=_str(data, "description"), required=bool(data.get("required", True)),
             default=data.get("default"),
         )
 
@@ -129,29 +127,21 @@ class DistributionManifest:
         if dist_owned_raw and not isinstance(dist_owned_raw, list):
             raise DistributionError("distribution_owned must be a list")
         return cls(
-            name=name,
-            version=_str(data, "version", "0.1.0"),
-            description=_str(data, "description"),
-            hermes_requires=_str(data, "hermes_requires"),
-            author=_str(data, "author"),
-            license=_str(data, "license"),
-            env_requires=[EnvRequirement.from_dict(e) for e in env_raw],
+            name=name, version=_str(data, "version", "0.1.0"), description=_str(data, "description"),
+            hermes_requires=_str(data, "hermes_requires"), author=_str(data, "author"),
+            license=_str(data, "license"), env_requires=[EnvRequirement.from_dict(e) for e in env_raw],
             distribution_owned=[str(p).strip().strip("/") for p in dist_owned_raw if str(p).strip()],
-            source=_str(data, "source"),
-            installed_at=_str(data, "installed_at"),
+            source=_str(data, "source"), installed_at=_str(data, "installed_at"),
         )
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"name": self.name, "version": self.version}
         # Key order is the on-disk YAML order (write_manifest uses sort_keys=False).
         optional = (
-            ("description", self.description),
-            ("hermes_requires", self.hermes_requires),
-            ("author", self.author),
-            ("license", self.license),
+            ("description", self.description), ("hermes_requires", self.hermes_requires),
+            ("author", self.author), ("license", self.license),
             ("env_requires", [e.to_dict() for e in self.env_requires]),
-            ("distribution_owned", self.distribution_owned),
-            ("source", self.source),
+            ("distribution_owned", self.distribution_owned), ("source", self.source),
             ("installed_at", self.installed_at),
         )
         out.update((k, v) for k, v in optional if v)
@@ -221,8 +211,7 @@ def _env_template_from_manifest(manifest: DistributionManifest) -> str:
     """Generate a ``.env.template`` body from env_requires."""
     lines = [
         "# Environment variables required by this Hermes distribution.",
-        "# Copy to `.env` and fill in your own values before running.",
-        "",
+        "# Copy to `.env` and fill in your own values before running.", "",
     ]
     for req in manifest.env_requires:
         if req.description:
@@ -257,11 +246,8 @@ def _git_clone(url: str, dest: Path) -> None:
         url = f"https://{url.rstrip('/')}"
     try:
         subprocess.run(
-            ["git", "clone", "--depth", "1", url, str(dest)],
-            check=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
+            ["git", "clone", "--depth", "1", url, str(dest)], check=True, capture_output=True,
+            stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
         )
     except FileNotFoundError as exc:
         raise DistributionError("git is required for git-URL installs") from exc
@@ -371,13 +357,8 @@ def plan_install(
     target_dir = get_profile_dir(canon)
     existing = target_dir.is_dir()
     return InstallPlan(
-        manifest=manifest,
-        staged_dir=staged,
-        provenance=provenance,
-        target_dir=target_dir,
-        existing=existing,
-        preserves_config=existing,
-        has_cron=_has_cron_jobs(staged),
+        manifest=manifest, staged_dir=staged, provenance=provenance, target_dir=target_dir, existing=existing,
+        preserves_config=existing, has_cron=_has_cron_jobs(staged),
     )
 
 

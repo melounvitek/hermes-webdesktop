@@ -152,12 +152,8 @@ def describe_profile(
         return DescribeOutcome(canon, False, "auxiliary client unavailable")
 
     user_msg = _USER_TEMPLATE.format(
-        name=canon,
-        model=(model or "(unset)"),
-        provider=(provider or "(unset)"),
-        skill_count=len(all_skills),
-        skill_cap=MAX_SKILLS_FOR_PROMPT,
-        skill_list=skill_list,
+        name=canon, model=(model or "(unset)"), provider=(provider or "(unset)"), skill_count=len(all_skills),
+        skill_cap=MAX_SKILLS_FOR_PROMPT, skill_list=skill_list,
     )
 
     try:

@@ -157,13 +157,8 @@ def _profile_use(args):
 
 def _profile_create(args):
     from hermes_cli.profiles import (
-        _get_wrapper_dir,
-        _is_wrapper_dir_in_path,
-        check_alias_collision,
-        create_profile,
-        create_wrapper_script,
-        get_active_profile_name,
-        seed_profile_skills,
+        _get_wrapper_dir, _is_wrapper_dir_in_path, check_alias_collision, create_profile,
+        create_wrapper_script, get_active_profile_name, seed_profile_skills,
     )
 
     name = args.profile_name
@@ -177,13 +172,8 @@ def _profile_create(args):
 
     try:
         profile_dir = create_profile(
-            name=name,
-            clone_from=clone_from,
-            clone_all=clone_all,
-            clone_config=clone_config,
-            no_alias=no_alias,
-            no_skills=no_skills,
-            description=getattr(args, "description", None),
+            name=name, clone_from=clone_from, clone_all=clone_all, clone_config=clone_config,
+            no_alias=no_alias, no_skills=no_skills, description=getattr(args, "description", None),
         )
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         _die(f"Error: {e}")
@@ -339,17 +329,9 @@ def _profile_describe(args):
 def _profile_show(args):
     name = args.profile_name
     from hermes_cli.profiles import (
-        get_profile_dir,
-        profile_exists,
-        _read_config_model,
-        _check_gateway_running,
-        _served_by_running_multiplexer,
-        _count_skills,
-        _read_distribution_meta,
-        _wrapper_path,
-        find_alias_for_profile,
-        format_profile_label,
-        read_profile_meta,
+        get_profile_dir, profile_exists, _read_config_model, _check_gateway_running,
+        _served_by_running_multiplexer, _count_skills, _read_distribution_meta, _wrapper_path,
+        find_alias_for_profile, format_profile_label, read_profile_meta,
     )
 
     if not profile_exists(name):
@@ -381,13 +363,8 @@ def _profile_show(args):
 
 def _profile_alias(args):
     from hermes_cli.profiles import (
-        _get_wrapper_dir,
-        _is_wrapper_dir_in_path,
-        check_alias_collision,
-        create_wrapper_script,
-        profile_exists,
-        remove_wrapper_script,
-        validate_alias_name,
+        _get_wrapper_dir, _is_wrapper_dir_in_path, check_alias_collision, create_wrapper_script,
+        profile_exists, remove_wrapper_script, validate_alias_name,
     )
 
     name = args.profile_name
@@ -477,9 +454,7 @@ def _profile_install(args):
                 return
 
         plan = install_distribution(
-            args.source,
-            name=getattr(args, "install_name", None),
-            force=getattr(args, "force", False),
+            args.source, name=getattr(args, "install_name", None), force=getattr(args, "force", False),
             create_alias=getattr(args, "alias", False),
         )
         print(f"\n✓ Installed '{plan.manifest.name}' v{plan.manifest.version}")
