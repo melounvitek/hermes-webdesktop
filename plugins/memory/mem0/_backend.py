@@ -13,9 +13,7 @@ def _add_kwargs(user_id: str, agent_id: str, infer: bool, metadata: dict | None)
 
 def _unwrap_results(response: Any) -> list:
     """Normalize API response — extract results list from dict or pass through."""
-    if isinstance(response, dict):
-        return response.get("results", [])
-    return response if isinstance(response, list) else []
+    return response.get("results", []) if isinstance(response, dict) else response if isinstance(response, list) else []
 
 
 class Mem0Backend(ABC):
@@ -105,7 +103,6 @@ def _register_direct_openai_provider() -> None:
     """Register Hermes' OpenAI-only Mem0 LLM provider once per factory."""
     from mem0.configs.llms.openai import OpenAIConfig
     from mem0.utils.factory import LlmFactory
-
     provider_map = getattr(LlmFactory, "provider_to_class", None)
     register_provider = getattr(LlmFactory, "register_provider", None)
     if not isinstance(provider_map, dict) or not callable(register_provider):
@@ -143,7 +140,6 @@ class OSSBackend(Mem0Backend):
             vs_config["embedding_model_dims"] = dims
             self._recreate_collection_if_dims_changed(vector_store.get("provider", "qdrant"), vs_config, dims)
         vector_store["config"] = vs_config
-
         config = {"vector_store": vector_store, "llm": _provider_block("llm", LLM_PROVIDERS), "embedder": _provider_block("embedder", EMBEDDER_PROVIDERS), "version": "v1.1"}
         if str(config["llm"].get("provider") or "").strip().lower() == "openai":
             # mem0 validates LlmConfig.provider before its factory lookup: build the supported OpenAI config, then swap the provider.
