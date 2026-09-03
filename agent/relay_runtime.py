@@ -1025,11 +1025,9 @@ class RelaySessionCoordinator:
                 if host is not None:
                     self._close_turn_scope(host, turn, outcome=outcome)
             finally:
-                with contextlib.suppress(Exception):  # accounting must never block
-                    # Segment turn accounting (max_turns rotation trigger).
-                    if turn._active_registered and host is not None:
-                        with lease.session.lock:
-                            lease.session.segment_turns += 1
+                if turn._active_registered and host is not None:
+                    with contextlib.suppress(Exception), lease.session.lock:  # accounting never blocks
+                        lease.session.segment_turns += 1  # max_turns rotation trigger
                 try:
                     # Delegated agents own one turn: close their conversation while the
                     # active-turn guard is held so a parent timeout fallback cannot race it.
@@ -1132,17 +1130,19 @@ class RelaySessionCoordinator:
         with turn.logical_llm_lock:
             logical_calls = list(turn.logical_llm_calls.items())
             turn.logical_llm_calls.clear()
-        for index, (request_id, logical_handle) in reversed(list(enumerate(logical_calls))):
+        while logical_calls:
+            _request_id, logical_handle = logical_calls[-1]
             failure = host._close_scope_handle(
                 lease.session, logical_handle, output={"outcome": outcome},
                 failure_label="logical LLM scope close failed",
             )
             if failure is None:
+                logical_calls.pop()
                 continue
             with turn.logical_llm_lock:
                 # Stack-owned scopes: if the newest handle cannot close even after orphan
                 # drain, older ones cannot either — retain the unclosed prefix.
-                for pending_request_id, pending_handle in logical_calls[: index + 1]:
+                for pending_request_id, pending_handle in logical_calls:
                     turn.logical_llm_calls.setdefault(pending_request_id, pending_handle)
             logger.warning("Hermes Relay logical LLM finalization failed: %s", failure)
             break
