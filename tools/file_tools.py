@@ -28,62 +28,26 @@ from tools.file_operations import (
 from tools import file_state
 from agent.redact import redact_sensitive_text
 from tools.file_tools_paths import (  # noqa: F401  (re-exported)
-    _CONTAINER_PATH_BACKENDS_FALLBACK,
-    _TERMINAL_CWD_SENTINELS,
-    _authoritative_workspace_root,
-    _configured_terminal_cwd,
-    _expand_tilde,
-    _normalize_without_host_deref,
-    _path_resolution_warning,
-    _registered_task_cwd_override,
-    _resolve_base_dir,
-    _resolve_path,
-    _resolve_path_for_task,
-    _sentinel_free_abs_cwd,
-    _terminal_env_type_for_task,
+    _CONTAINER_PATH_BACKENDS_FALLBACK, _TERMINAL_CWD_SENTINELS, _authoritative_workspace_root,
+    _configured_terminal_cwd, _expand_tilde, _normalize_without_host_deref,
+    _path_resolution_warning, _registered_task_cwd_override, _resolve_base_dir, _resolve_path,
+    _resolve_path_for_task, _sentinel_free_abs_cwd, _terminal_env_type_for_task,
     _uses_container_paths)
 from tools.file_tools_write_guards import (  # noqa: F401  (re-exported)
-    _PROTECTED_INSTRUCTION_BASENAMES,
-    _READ_DEDUP_STATUS_MESSAGE,
-    _SENSITIVE_EXACT_PATHS,
-    _SENSITIVE_PATH_PREFIXES,
-    _check_approval_required_write,
-    _check_binary_document_write,
-    _check_cross_profile_path,
-    _check_protected_instruction_write,
-    _check_sensitive_path,
-    _get_container_mirror_prefix_for_task,
-    _get_hermes_config_resolved,
-    _get_real_hermes_home,
-    _is_internal_file_status_text,
-    _is_internal_file_tool_content,
-    _looks_like_read_file_line_numbered_content,
-    _protected_instruction_config,
-    _protected_instruction_reason,
-    _request_protected_instruction_approval)
+    _PROTECTED_INSTRUCTION_BASENAMES, _READ_DEDUP_STATUS_MESSAGE, _SENSITIVE_EXACT_PATHS,
+    _SENSITIVE_PATH_PREFIXES, _check_approval_required_write, _check_binary_document_write,
+    _check_cross_profile_path, _check_protected_instruction_write, _check_sensitive_path,
+    _get_container_mirror_prefix_for_task, _get_hermes_config_resolved, _get_real_hermes_home,
+    _is_internal_file_status_text, _is_internal_file_tool_content,
+    _looks_like_read_file_line_numbered_content, _protected_instruction_config,
+    _protected_instruction_reason, _request_protected_instruction_approval)
 from tools.file_tools_read_tracking import (  # noqa: F401  (re-exported)
-    _DEDUP_CAP,
-    _NOT_FOUND_CAP,
-    _NOT_FOUND_TTL_SECONDS,
-    _READ_HISTORY_CAP,
-    _READ_TIMESTAMPS_CAP,
-    _bump_consecutive,
-    _cap_read_tracker_data,
-    _check_file_staleness,
-    _check_not_found_cache,
-    _invalidate_dedup_for_path,
-    _mark_verification_stale,
-    _patch_failure_lock,
-    _patch_failure_tracker,
-    _read_tracker,
-    _read_tracker_lock,
-    _record_not_found,
-    _record_patch_failure,
-    _reset_patch_failures,
-    _task_data,
-    _update_read_timestamp,
-    notify_other_tool_call,
-    reset_file_dedup)
+    _DEDUP_CAP, _NOT_FOUND_CAP, _NOT_FOUND_TTL_SECONDS, _READ_HISTORY_CAP, _READ_TIMESTAMPS_CAP,
+    _bump_consecutive, _cap_read_tracker_data, _check_file_staleness, _check_not_found_cache,
+    _invalidate_dedup_for_path, _mark_verification_stale, _patch_failure_lock,
+    _patch_failure_tracker, _read_tracker, _read_tracker_lock, _record_not_found,
+    _record_patch_failure, _reset_patch_failures, _task_data, _update_read_timestamp,
+    notify_other_tool_call, reset_file_dedup)
 
 logger = logging.getLogger(__name__)
 
@@ -314,14 +278,8 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
     command uses the configured backend (docker, modal, ...) rather than local.
     """
     from tools.terminal_tool import (
-        _CONTAINER_BACKENDS,
-        _create_configured_env,
-        _get_env_config,
-        _is_unusable_container_cwd,
-        _resolve_task_host_cwd,
-        _select_image,
-        get_session_cwd,
-        resolve_task_overrides)
+        _CONTAINER_BACKENDS, _create_configured_env, _get_env_config, _is_unusable_container_cwd,
+        _resolve_task_host_cwd, _select_image, get_session_cwd, resolve_task_overrides)
 
     config = _get_env_config()
     env_type = config["env_type"]
@@ -460,12 +418,8 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
     BEFORE the binary-extension guard so Office files can render as text.
     """
     from tools.read_extract import (
-        ANYDOC_EXTENSIONS,
-        EXTRACTABLE_EXTENSIONS,
-        MAX_DOCUMENT_BYTES,
-        ExtractionError,
-        extract_document_bytes,
-        is_extractable_document)
+        ANYDOC_EXTENSIONS, EXTRACTABLE_EXTENSIONS, MAX_DOCUMENT_BYTES, ExtractionError,
+        extract_document_bytes, is_extractable_document)
 
     if not is_extractable_document(str(_resolved)):
         return None
