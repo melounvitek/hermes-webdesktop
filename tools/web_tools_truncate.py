@@ -3,11 +3,9 @@
 Pages at or under the char budget are returned whole; larger pages become a
 head+tail window plus a footer that says how much is shown, where the full text
 is stored (cache/web) and the exact read_file call that pages the omitted middle.
-Inline base64 images are replaced with ``[IMAGE: alt]`` placeholders.
-
-Extracted from tools/web_tools.py; the names are re-imported there so
-``tools.web_tools.MAX_STORED_TEXT_CHARS`` etc. keep working. Logs under the
-origin logger name for parity.
+Inline base64 images are replaced with ``[IMAGE: alt]`` placeholders. Names are
+re-imported by tools/web_tools.py (``tools.web_tools.MAX_STORED_TEXT_CHARS``); logs
+under the origin logger name for parity.
 """
 
 import logging
@@ -30,8 +28,7 @@ _CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
 def _clamp_char_limit(value: Any) -> int:
     """Clamp to [2k, 500k]; raises TypeError/ValueError for non-numeric input.
 
-    Floor: below 2k the truncation footer dominates. Ceiling: a config typo
-    must not blow up context.
+    Floor: below 2k the truncation footer dominates. Ceiling: a config typo must not blow up context.
     """
     return max(_CHAR_LIMIT_FLOOR, min(int(value), _CHAR_LIMIT_CEILING))
 
@@ -60,10 +57,7 @@ def convert_base64_images_to_links(text: str) -> str:
         alt = (m.group("alt") or "").strip()
         return f"[IMAGE: {alt}]" if alt else "[IMAGE]"
 
-    md_b64 = re.compile(
-        r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)"
-    )
-    out = md_b64.sub(_md_repl, text)
+    out = re.sub(r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", _md_repl, text)
     out = re.sub(r"\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", "[IMAGE]", out)
     out = re.sub(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+", "[IMAGE]", out)
     return out
@@ -72,9 +66,9 @@ def convert_base64_images_to_links(text: str) -> str:
 def _store_full_text(url: str, content: str) -> Optional[str]:
     """Write the full page to cache/web; absolute path or None.
 
-    cache/web is mounted read-only into remote backends (credential_files
-    _CACHE_DIRS) so read_file can page the complete text on any backend.
-    Best-effort: on failure the truncated content is still returned to the model.
+    cache/web is mounted read-only into remote backends (credential_files _CACHE_DIRS) so read_file
+    can page the complete text on any backend. Best-effort: on failure the truncated content is
+    still returned to the model.
     """
     try:
         import hashlib
@@ -94,9 +88,9 @@ def _store_full_text(url: str, content: str) -> Optional[str]:
             )
         from tools.spill_safety import write_text_exclusive
 
-        # Deterministic name in a well-known dir: refuse symlinks (lstat-unlink +
-        # exclusive create); same-URL re-extraction legitimately overwrites. Not
-        # private: cache/web is bind-mounted into remote backends' container UID.
+        # Deterministic name in a well-known dir: refuse symlinks (lstat-unlink + exclusive create);
+        # same-URL re-extraction legitimately overwrites. Not private: cache/web is bind-mounted
+        # into remote backends' container UID.
         write_text_exclusive(path, content, private=False, overwrite=True)
         return str(path)
     except Exception as exc:  # noqa: BLE001
@@ -104,16 +98,12 @@ def _store_full_text(url: str, content: str) -> Optional[str]:
         return None
 
 
-def _truncate_with_footer(
-    content: str,
-    url: str,
-    char_limit: int,
-) -> tuple[str, bool]:
+def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str, bool]:
     """Return (model_text, was_truncated).
 
-    Pages over ``char_limit`` become a ~75% head / ~25% tail window cut on line
-    boundaries, plus a footer saying how much is shown, where the full text is
-    stored, and the read_file call that pages the omitted middle. Deterministic.
+    Pages over ``char_limit`` become a ~75% head / ~25% tail window cut on line boundaries, plus a
+    footer saying how much is shown, where the full text is stored, and the read_file call that
+    pages the omitted middle. Deterministic.
     """
     if len(content) <= char_limit:
         return content, False
@@ -131,14 +121,12 @@ def _truncate_with_footer(
     if 0 <= nl < tail_budget * 0.5:
         tail = tail[nl + 1:]
 
-    total = len(content)
     stored_path = _store_full_text(url, content)
-
     footer_lines = [
         "",
         "─" * 8 + " [TRUNCATED] " + "─" * 8,
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
-        f"of {total:,} total clean characters.",
+        f"of {len(content):,} total clean characters.",
     ]
     if stored_path:
         # read_file is 1-indexed; +2 lands on the first line after the shown head.
@@ -155,10 +143,7 @@ def _truncate_with_footer(
             "specific URL or use browser_navigate for the complete page."
         )
     footer_lines.append("─" * 29)
-
-    model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail
-    model_text += "\n" + "\n".join(footer_lines)
-    return model_text, True
+    return head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n" + "\n".join(footer_lines), True
 
 
 def _effective_char_limit(char_limit: Optional[int]) -> int:
@@ -171,10 +156,8 @@ def _effective_char_limit(char_limit: Optional[int]) -> int:
 
 
 def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dict) -> None:
-    """In place: replace each successful entry's content with its base64-cleaned, budgeted text.
-
-    Records per-page truncation metrics into ``debug_call_data``.
-    """
+    """In place: replace each successful entry's content with its base64-cleaned, budgeted text;
+    per-page truncation metrics go into ``debug_call_data``."""
     for result in results:
         if result.get("error"):
             continue
@@ -187,11 +170,9 @@ def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dic
         result["content"] = model_text
         if truncated:
             debug_call_data["pages_truncated"] += 1
-            debug_call_data["truncation_metrics"].append({
-                "url": url,
-                "original_size": len(clean),
-                "sent_size": len(model_text),
-            })
+            debug_call_data["truncation_metrics"].append(
+                {"url": url, "original_size": len(clean), "sent_size": len(model_text)}
+            )
             logger.info("%s (truncated %d -> %d chars)", url, len(clean), len(model_text))
         else:
             logger.info("%s (%d chars, whole)", url, len(clean))

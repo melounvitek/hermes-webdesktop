@@ -3,11 +3,8 @@
 Stateless by design: a rescue routes THIS call through the free-tier ring
 (plugins/web/keyless_mcp.py); the next web_search/web_extract call attempts
 the chosen backend again. Callers must never cache a rescue-served response,
-or the one-shot rescue becomes sticky for a whole TTL.
-
-Extracted from tools/web_tools.py; the names are re-imported there so
-``tools.web_tools._rescue_eligible`` etc. keep working. Logs under the
-origin logger name for parity.
+or the one-shot rescue becomes sticky for a whole TTL. Names are re-imported by
+tools/web_tools.py (``tools.web_tools._rescue_eligible``); logs under the origin logger.
 """
 
 import logging
@@ -16,10 +13,7 @@ logger = logging.getLogger("tools.web_tools")
 
 # Ring vendor -> env var holding its paid key (keyed mode ⇒ eligible for rescue).
 _RING_KEY_VARS = {
-    "exa": "EXA_API_KEY",
-    "parallel": "PARALLEL_API_KEY",
-    "firecrawl": "FIRECRAWL_API_KEY",
-    "keenable": "KEENABLE_API_KEY",
+    "exa": "EXA_API_KEY", "parallel": "PARALLEL_API_KEY", "firecrawl": "FIRECRAWL_API_KEY", "keenable": "KEENABLE_API_KEY",
 }
 
 
@@ -41,9 +35,8 @@ def _keyless_rescue_enabled() -> bool:
 def _rescue_eligible(provider) -> bool:
     """True when a failed call on *provider* should get a one-shot rescue.
 
-    Eligible: a keyed/configured path — any non-ring backend, or a ring vendor
-    in keyed mode. A ring vendor already in keyless mode is NOT eligible: its
-    failure means the ring was already walked.
+    Eligible: a keyed/configured path — any non-ring backend, or a ring vendor in keyed mode. A ring
+    vendor already in keyless mode is NOT eligible: its failure means the ring was already walked.
     """
     if not _keyless_rescue_enabled() or provider is None:
         return False
@@ -67,10 +60,7 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
     """Rescue a failed search via the ring; annotate the result with the original failure."""
     from plugins.web.keyless_mcp import search_with_failover
 
-    logger.warning(
-        "web_search backend '%s' failed (%s); one-shot keyless rescue",
-        provider_name, (original_error or "")[:200],
-    )
+    logger.warning("web_search backend '%s' failed (%s); one-shot keyless rescue", provider_name, (original_error or "")[:200])
     rescued = search_with_failover(provider_name, query, limit)
     if rescued.get("success"):
         data = rescued.setdefault("data", {})
@@ -85,42 +75,31 @@ def _rescue_search(provider_name: str, original_error: str, query: str, limit: i
     # Ring also failed: the ORIGINAL error names the user's setup, so lead with it.
     return {
         "success": False,
-        "error": (
-            f"{original_error or 'search failed'} "
-            f"(keyless rescue also failed: {rescued.get('error', 'unknown')})"
-        ),
+        "error": f"{original_error or 'search failed'} (keyless rescue also failed: {rescued.get('error', 'unknown')})",
     }
 
 
 def _policy_blocked_result(result: dict) -> bool:
     """True for a website-policy refusal — intentional, never rescued (it would fetch blocked content)."""
-    if result.get("blocked_by_policy"):
-        return True
-    return "blocked by website policy" in str(result.get("error") or "").lower()
+    return bool(result.get("blocked_by_policy")) or "blocked by website policy" in str(result.get("error") or "").lower()
 
 
 def _rescue_extract(provider_name: str, urls: list, results: list) -> list:
     """Rescue a whole-batch extract failure via the ring.
 
-    Only genuine failures are re-fetched; policy-blocked entries are preserved
-    verbatim. If the provider broke url/result order parity, every entry is
-    treated as rescueable and the ring's list replaces the batch wholesale.
+    Only genuine failures are re-fetched; policy-blocked entries are preserved verbatim. If the
+    provider broke url/result order parity, every entry is treated as rescueable and the ring's
+    list replaces the batch wholesale.
     """
     from plugins.web.keyless_mcp import extract_with_failover
 
     parity = len(results) == len(urls)
-    if parity:
-        rescue_idx = [i for i, r in enumerate(results) if not _policy_blocked_result(r)]
-    else:
-        rescue_idx = list(range(len(results)))
+    rescue_idx = [i for i, r in enumerate(results) if not parity or not _policy_blocked_result(r)]
     if not rescue_idx:
         return results  # every failure is an intentional policy block
 
     rescue_urls = [urls[i] for i in rescue_idx] if parity else list(urls)
-    original_error = next(
-        (results[i].get("error") for i in rescue_idx if results[i].get("error")),
-        "extract failed",
-    )
+    original_error = next((results[i].get("error") for i in rescue_idx if results[i].get("error")), "extract failed")
     logger.warning(
         "web_extract backend '%s' failed all %d URL(s) (%s); one-shot keyless rescue",
         provider_name, len(rescue_urls), (original_error or "")[:200],
