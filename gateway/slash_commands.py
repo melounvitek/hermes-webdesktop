@@ -1,10 +1,8 @@
 """Gateway slash-command handlers for GatewayRunner.
 
-The in-session slash commands dispatched from ``_handle_message``, lifted out of ``gateway/run.py``
-into a mixin so every ``self._handle_*_command`` reference keeps working via the MRO. Cohesive
-clusters live in sibling mixins this class inherits (``slash_commands_model``, ``_session``,
-``_status``, ``_goals``); this module keeps the shared helpers plus the remaining one-off commands.
-run.py helpers are imported lazily inside handler bodies to avoid the import cycle.
+Lifted out of ``gateway/run.py`` into a mixin so ``self._handle_*_command`` keeps resolving via the
+MRO. Cohesive clusters live in the sibling mixins (``slash_commands_model/_session/_status/_goals``);
+this module keeps the shared helpers plus the one-off commands. run.py helpers are imported lazily.
 """
 
 from __future__ import annotations
@@ -126,31 +124,26 @@ def _execute(command: str, **ctx_kwargs):
 def _restart_notify_payload(event: MessageEvent) -> dict:
     """Requester routing info so the new gateway process can notify them once back online."""
     source = event.source
-    notify_data = {
-        "platform": source.platform.value if source.platform else None,
-        "chat_id": source.chat_id,
-        "chat_type": source.chat_type,
-    }
+    data = {"platform": source.platform.value if source.platform else None,
+            "chat_id": source.chat_id, "chat_type": source.chat_type}
     if source.delivered_via_upstream_relay is True:
-        notify_data["delivered_via_upstream_relay"] = True
-        notify_data.update({k: getattr(source, k) for k in ("user_id", "scope_id") if getattr(source, k)})
+        data["delivered_via_upstream_relay"] = True
+        data.update({k: getattr(source, k) for k in ("user_id", "scope_id") if getattr(source, k)})
     if source.thread_id:
-        notify_data["thread_id"] = source.thread_id
+        data["thread_id"] = source.thread_id
     if event.message_id:
-        notify_data["message_id"] = event.message_id
-    return notify_data
+        data["message_id"] = event.message_id
+    return data
 
 
 def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     """Spawn ``hermes update --gateway`` detached so it survives the gateway restart it may trigger.
 
     setsid is portable (works where ``systemd-run --user`` lacks a D-Bus session); ``--gateway``
-    enables file-based IPC for interactive prompts so the gateway forwards them instead of skipping;
-    PYTHONUNBUFFERED lets the gateway stream output in near-real-time. Windows has no setsid chain:
-    an inline Python helper runs the command, redirects both outputs to the same file and writes the
-    exit code. It invokes the updater as a module under this interpreter rather than through
-    hermes_cmd (venv\\Scripts\\hermes.exe): the shim launcher holds its own file open for the whole
-    run, and the update has to replace it.
+    enables file-based IPC so interactive prompts are forwarded; PYTHONUNBUFFERED lets the gateway
+    stream output live. Windows has no setsid: an inline helper runs the updater as a module under
+    this interpreter (not venv\\Scripts\\hermes.exe — that shim holds its own file open, and the
+    update must replace it), redirects both outputs to one file and writes the exit code.
     """
     import shutil
     import subprocess
@@ -334,10 +327,9 @@ class GatewaySlashCommandsMixin(
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show the profile serving this source and its home.
 
-        On a multiplexed gateway the process-level active profile is the multiplexer's own, so it
-        would read "default" in every chat. With ``multiplex_profiles`` on, report ``source.profile``
-        and resolve home under that profile's runtime scope (like the scoped /reset banner); when
-        off the stamp is ignored, mirroring ``_run_agent``.
+        On a multiplexed gateway the process-level profile is the multiplexer's own ("default" in
+        every chat), so with ``multiplex_profiles`` on report ``source.profile`` and resolve home under
+        that profile's runtime scope; when off the stamp is ignored, mirroring ``_run_agent``.
         """
         from hermes_constants import display_hermes_home
         source = getattr(event, "source", None)
@@ -393,20 +385,13 @@ class GatewaySlashCommandsMixin(
         if text.startswith("kanban"):
             text = text[len("kanban"):].lstrip()
 
-        tokens = shlex.split(text) if text else []
-        requested_board = None
-        action = None
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
+        requested_board = action = None
+        tokens = iter(shlex.split(text) if text else [])
+        for tok in tokens:  # leading --board/--board=<b> options, then the action verb
             if tok == "--board":
-                if i + 1 >= len(tokens):
-                    break
-                requested_board = tokens[i + 1]
-                i += 2
+                requested_board = next(tokens, requested_board)
             elif tok.startswith("--board="):
                 requested_board = tok.split("=", 1)[1]
-                i += 1
             else:
                 action = tok
                 break
@@ -477,10 +462,9 @@ class GatewaySlashCommandsMixin(
     async def _handle_stop_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /stop command - interrupt a running agent.
 
-        When an agent is truly hung (blocked thread that never checks _interrupt_requested), the
-        early intercept in _handle_message() handles /stop before this method is reached; this
-        handler fires only via normal dispatch (no running agent) or as a fallback, and force-cleans
-        the session lock in all cases. The session is preserved so the user can continue.
+        A truly hung agent (blocked thread never checking _interrupt_requested) is caught by the early
+        intercept in _handle_message(); this handler runs via normal dispatch or as a fallback, and
+        force-cleans the session lock in all cases. The session is preserved so the user can continue.
         """
         from gateway.run import _AGENT_PENDING_SENTINEL, _INTERRUPT_REASON_STOP
         source = event.source
@@ -541,17 +525,15 @@ class GatewaySlashCommandsMixin(
 
         failed = getattr(self, "_failed_platforms", {}) or {}
         if action == "list":
-            connected = sorted(p.value for p in self.adapters)
-            lines = ["**Gateway platforms**", "Connected: " + (", ".join(connected) if connected else "(none)")]
+            connected = ", ".join(sorted(p.value for p in self.adapters)) or "(none)"
+            lines = ["**Gateway platforms**", f"Connected: {connected}"]
             for p, info in failed.items():
                 if info.get("paused"):
                     reason = info.get("pause_reason") or "paused"
                     lines.append(f"  · {p.value} — PAUSED ({reason}). Resume with `/platform resume {p.value}`.")
                 else:
                     lines.append(f"  · {p.value} — retrying (attempt {info.get('attempts', 0)})")
-            if not failed:
-                lines.append("Failed/paused: (none)")
-            return "\n".join(lines)
+            return "\n".join(lines + ([] if failed else ["Failed/paused: (none)"]))
 
         if action not in {"pause", "resume"}:
             return _PLATFORM_USAGE
@@ -745,22 +727,17 @@ class GatewaySlashCommandsMixin(
         if args == "status":
             mode = self._voice_mode.get(voice_key, "off")
             label = t(f"gateway.voice.label_{mode}") if mode in ("off", "voice_only", "all") else mode
-            mode_line = t("gateway.voice.status_mode", label=label)
-            # Append voice channel info if connected
-            guild_id = self._get_guild_id(event)
+            lines = [t("gateway.voice.status_mode", label=label)]
+            guild_id = self._get_guild_id(event)  # append voice channel info if connected
             info = None
             if guild_id and hasattr(adapter, "get_voice_channel_info"):
                 info = adapter.get_voice_channel_info(guild_id)
-            if not info:
-                return mode_line
-            lines = [
-                mode_line,
-                t("gateway.voice.status_channel", channel=info['channel_name']),
-                t("gateway.voice.status_participants", count=info['member_count']),
-            ]
-            for m in info["members"]:
-                status = t("gateway.voice.speaking") if m.get("is_speaking") else ""
-                lines.append(t("gateway.voice.status_member", name=m['display_name'], status=status))
+            if info:
+                lines += [t("gateway.voice.status_channel", channel=info['channel_name']),
+                          t("gateway.voice.status_participants", count=info['member_count'])]
+                for m in info["members"]:
+                    status = t("gateway.voice.speaking") if m.get("is_speaking") else ""
+                    lines.append(t("gateway.voice.status_member", name=m['display_name'], status=status))
             return "\n".join(lines)
 
         # Toggle: off → on, on/all → off
@@ -916,16 +893,12 @@ class GatewaySlashCommandsMixin(
             return t("gateway.btw.no_history")
 
         try:
-            model, runtime_kwargs = self._resolve_session_agent_runtime(source=source)
+            model, rt = self._resolve_session_agent_runtime(source=source)
         except Exception:
-            model, runtime_kwargs = None, {}
-        if not runtime_kwargs.get("api_key"):
+            model, rt = None, {}
+        if not rt.get("api_key"):
             return t("gateway.btw.no_provider")
-
-        main_runtime = {"model": model}
-        main_runtime.update(
-            (k, runtime_kwargs.get(k)) for k in ("provider", "base_url", "api_key", "api_mode")
-        )
+        main_runtime = {"model": model, **{k: rt.get(k) for k in ("provider", "base_url", "api_key", "api_mode")}}
         history_snapshot = list(history)
         # Prefer the cache-parity fork when a live cached AIAgent exists: it replays the snapshot
         # against the warm provider prefix cache, giving FULL context at cache-read prices. With no
@@ -963,17 +936,15 @@ class GatewaySlashCommandsMixin(
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
         from tools.memory_tool import load_on_disk_store
-        args = event.get_command_args().strip().split()
         # Apply approved writes against a fresh on-disk store (the gateway has no long-lived agent;
         # the store persists to the same MEMORY/USER.md and honors the configured char limits).
         out = handle_pending_subcommand(
-            wa.MEMORY, args, memory_store=load_on_disk_store(),
+            wa.MEMORY, event.get_command_args().strip().split(), memory_store=load_on_disk_store(),
             set_mode_fn=self._write_approval_setter("memory", event),
         )
-        if out is None:
-            out = ("Unknown /memory subcommand. Use: pending, approve <id>, "
-                   "reject <id>, approval <on|off>.")
-        return out
+        return out if out is not None else (
+            "Unknown /memory subcommand. Use: pending, approve <id>, reject <id>, approval <on|off>."
+        )
 
     async def _handle_skills_command(self, event: MessageEvent) -> str:
         """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only).
@@ -1055,9 +1026,7 @@ class GatewaySlashCommandsMixin(
         from gateway.display_config import resolve_display_setting
         cycle = ["off", "new", "all", "verbose", "log"]
         current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
-        if current not in cycle:
-            current = "all"
-        new_mode = cycle[(cycle.index(current) + 1) % len(cycle)]
+        new_mode = cycle[(cycle.index(current if current in cycle else "all") + 1) % len(cycle)]
         description = t(f"gateway.verbose.mode_{new_mode}")
 
         try:
@@ -1138,12 +1107,9 @@ class GatewaySlashCommandsMixin(
             return t("gateway.footer.status", state=_state(effective["enabled"]), fields=fields,
                      platform=platform_key)
 
-        if arg == "":
-            new_state = not effective["enabled"]
-        elif arg in _FOOTER_STATE_BY_ARG:
-            new_state = _FOOTER_STATE_BY_ARG[arg]
-        else:
+        if arg and arg not in _FOOTER_STATE_BY_ARG:
             return t("gateway.footer.usage")
+        new_state = _FOOTER_STATE_BY_ARG[arg] if arg else not effective["enabled"]
 
         try:
             _nested_dict(user_config, "display", "runtime_footer")["enabled"] = new_state
@@ -1217,8 +1183,7 @@ class GatewaySlashCommandsMixin(
             # _run_in_executor_with_context, not a bare hop: the rescan walks
             # get_hermes_home()/skills, a contextvar override under multiplex.
             result = await self._run_in_executor_with_context(reload_skills)
-            added = result.get("added", [])      # [{"name", "description"}, ...]
-            removed = result.get("removed", [])  # [{"name", "description"}, ...]
+            added, removed = result.get("added", []), result.get("removed", [])  # [{"name", "description"}]
             total = result.get("total", 0)
 
             # Let adapters refresh platform-side state that cached the skill list at startup (today:
@@ -1327,16 +1292,13 @@ class GatewaySlashCommandsMixin(
         if stale:
             return stale
 
-        # Args: "all", "all session", "all always", "session", "always" (first modifier wins,
-        # "always" beats "session").
+        # Args: "all", "all session", "all always", "session", "always" ("always" beats "session").
         args = event.get_command_args().strip().lower().split()
         choices = {_APPROVE_CHOICE_BY_ARG[a] for a in args if a in _APPROVE_CHOICE_BY_ARG}
         choice = "always" if "always" in choices else "session" if "session" in choices else "once"
-
         count = resolve_gateway_approval(session_key, choice, resolve_all="all" in args)
         if not count:
             return t("gateway.approve.no_pending")
-
         plural = "plural" if count > 1 else "singular"
         confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
@@ -1355,18 +1317,15 @@ class GatewaySlashCommandsMixin(
         if stale:
             return stale
 
-        # A leading "all" token denies every pending command; anything after it (or the whole arg
-        # string when "all" is absent) is the optional deny reason relayed to the agent, capped to
-        # a sane one-liner.
+        # A leading "all" denies every pending command; the rest (or the whole arg string without
+        # "all") is the optional deny reason relayed to the agent, capped to a sane one-liner.
         raw_args = event.get_command_args().strip()
         tokens = raw_args.split()
         resolve_all = bool(tokens) and tokens[0].lower() == "all"
         reason = (raw_args[len(tokens[0]):].strip() if resolve_all else raw_args)[:280].strip()
-
         count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all, reason=reason or None)
         if not count:
             return t("gateway.deny.no_pending")
-
         logger.info(
             "User denied %d dangerous command(s) via /deny%s", count, " (with reason)" if reason else "",
         )
@@ -1393,18 +1352,12 @@ class GatewaySlashCommandsMixin(
                 urls = {"Report": upload_to_pastebin(report)}
             except Exception as exc:
                 return t("gateway.debug.upload_failed", error=exc)
-
-            # Schedule auto-deletion after 6 hours
-            _schedule_auto_delete(list(urls.values()))
-
+            _schedule_auto_delete(list(urls.values()))  # auto-deletion after 6 hours
             label_width = max(len(k) for k in urls)
             return "\n".join([
                 _GATEWAY_PRIVACY_NOTICE, "", t("gateway.debug.header"), "",
                 *(f"`{label:<{label_width}}`  {url}" for label, url in urls.items()),
-                "",
-                t("gateway.debug.auto_delete"),
-                t("gateway.debug.full_logs_hint"),
-                t("gateway.debug.share_hint"),
+                "", t("gateway.debug.auto_delete"), t("gateway.debug.full_logs_hint"), t("gateway.debug.share_hint"),
             ])
 
         # _run_in_executor_with_context, not a bare hop: this collects the profile's logs/config off
@@ -1452,10 +1405,7 @@ class GatewaySlashCommandsMixin(
             "user_id": src.user_id, "session_key": self._session_key_for_source(src),
             "timestamp": datetime.now().isoformat(),
         }
-        if src.thread_id:
-            pending["thread_id"] = src.thread_id
-        if event.message_id:
-            pending["message_id"] = event.message_id
+        pending.update({k: v for k, v in (("thread_id", src.thread_id), ("message_id", event.message_id)) if v})
         _tmp_pending = pending_path.with_suffix(".tmp")
         _tmp_pending.write_text(json.dumps(pending), encoding="utf-8")
         _tmp_pending.replace(pending_path)
