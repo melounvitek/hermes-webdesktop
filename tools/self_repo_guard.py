@@ -219,14 +219,11 @@ def _cd_target(executable: str, args: list[str], cwd: Path) -> Path | None:
 
 
 def _shell_script_arg(args: list[str]) -> str | None:
-    """Return the script string owned by a shell's ``-c``, if present.
-
-    approval.py's ``_bash_exec_payload`` parses bash's real option grammar
-    (``-o pipefail -c '<script>'`` hides ``-c`` behind an operand). When it finds
-    no ``-c``, fall back to a permissive positional scan: zsh/dash/ksh option
-    letters (``zsh -yc``) fall outside bash's alphabet and would otherwise make
-    this block-guard fail open.
-    """
+    """Return the script string owned by a shell's ``-c``, if present. approval.py's
+    ``_bash_exec_payload`` parses bash's real option grammar (``-o pipefail -c '<script>'``
+    hides ``-c`` behind an operand); when it finds no ``-c``, fall back to a permissive
+    positional scan, since zsh/dash/ksh option letters (``zsh -yc``) fall outside bash's
+    alphabet and would otherwise make this block-guard fail open."""
     has_c, payload = _bash_exec_payload(args)
     if has_c:
         return payload
@@ -305,9 +302,7 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
 
 def _mask_heredocs(command: str) -> tuple[str, list[str]]:
     """Blank heredoc bodies; return (masked command, bodies a bare shell would execute).
-
-    Unterminated heredocs run to end of input and are still reported.
-    """
+    Unterminated heredocs run to end of input and are still reported."""
     output: list[str] = []
     pending: list[_Heredoc] = []
     finished: list[_Heredoc] = []
@@ -553,13 +548,10 @@ def _find_mutation(command: str, cwd: Path, root: Path, depth: int = 0) -> str |
 
 
 def guard_active() -> bool:
-    """Whether the self-repo git guard applies on this platform.
-
-    Windows-only: NTFS locks loaded .py/.pyd files, so overwriting the live checkout
-    can corrupt the running process. On POSIX, open handles keep the old inode alive;
-    the mixed-module hazard is limited to later lazy imports — not worth blocking
-    every git workflow for.
-    """
+    """Whether the self-repo git guard applies on this platform. Windows-only: NTFS locks
+    loaded .py/.pyd files, so overwriting the live checkout can corrupt the running
+    process. On POSIX open handles keep the old inode alive; the mixed-module hazard is
+    limited to later lazy imports — not worth blocking every git workflow for."""
     return os.name == "nt"
 
 

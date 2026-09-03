@@ -39,11 +39,9 @@ def sanitize_property_key(key: str) -> str:
 
 
 def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
-    """Return {original_key: conforming_key} for one properties dict (identity entries omitted).
-
+    """{original_key: conforming_key} for one properties dict (identity entries omitted).
     Deterministic (insertion order, numeric suffixes on collision) so the model-visible
-    schema and the dispatch-time reverse map from the registry's original schema agree.
-    """
+    schema and the dispatch-time reverse map from the registry's original schema agree."""
     renames: dict[str, str] = {}
     taken = {k for k in props if _PROP_KEY_RE.match(k)}
     for key in props:
@@ -64,11 +62,8 @@ def _rename_property_keys(props: dict, path: str) -> dict[str, str]:
 
 
 def unrename_tool_args(params_schema: Any, args: Any) -> Any:
-    """Map sanitized property keys in model-emitted args back to wire names.
-
-    ``params_schema`` is the ORIGINAL (unsanitized) registry schema. Recurses into
-    object values and array items; unknown keys pass through untouched.
-    """
+    """Map sanitized property keys in model-emitted args back to wire names. ``params_schema``
+    is the ORIGINAL registry schema; recurses into objects/array items; unknown keys pass."""
     if not isinstance(params_schema, dict) or not isinstance(args, dict):
         return args
     props = params_schema.get("properties")
@@ -148,11 +143,9 @@ _TOP_LEVEL_FORBIDDEN_KEYS = ("allOf", "anyOf", "oneOf", "enum", "not")
 
 
 def _strip_top_level_combinators(params: dict, *, path: str = "<tool>") -> dict:
-    """Drop combinators from the TOP level only (Codex rejects them there).
-
-    They are usually conditional-required hints; dropping them does not change which
-    argument values are valid (handlers re-validate). Nested combinators are preserved.
-    """
+    """Drop combinators from the TOP level only (Codex rejects them there). They are usually
+    conditional-required hints, so validity is unchanged (handlers re-validate); nested
+    combinators are preserved."""
     if not isinstance(params, dict):
         return params
     out = dict(params)
@@ -220,11 +213,8 @@ _CONST_PRIMITIVE_TYPES: dict[type, str] = {
 
 
 def _const_branch_type(branch: Any) -> str | None:
-    """JSON-Schema primitive type of a pure ``const`` branch, else None.
-
-    Qualifies when the dict carries a primitive ``const`` and any declared ``type``
-    matches it; ``title``/``description`` are allowed, any other keyword disqualifies.
-    """
+    """JSON-Schema primitive type of a pure ``const`` branch, else None: a primitive ``const``
+    whose declared ``type`` (if any) matches; only ``title``/``description`` may accompany it."""
     if not isinstance(branch, dict) or "const" not in branch:
         return None
     if set(branch) - {"const", "type", "title", "description"}:
@@ -286,12 +276,10 @@ _NON_SCHEMA_LIST_KEYS = frozenset({"required", "enum", "examples", "dependentReq
 
 
 def _normalize_type_array(value: list, out: dict) -> None:
-    """Normalize a ``type: [...]`` array into *out* (llama.cpp and Gemini-via-OpenAI reject arrays).
-
-    Per the AI-SDK behavior: one non-null type → ``type: X`` (+ ``nullable`` if ``null``
-    present); several → ``anyOf`` of single-type schemas so EVERY branch survives; none →
-    ``null`` or the object fallback. Ported from anomalyco/opencode#31877.
-    """
+    """Normalize a ``type: [...]`` array into *out* (llama.cpp and Gemini-via-OpenAI reject
+    arrays). Per AI-SDK: one non-null type → ``type: X`` (+ ``nullable`` if ``null`` present);
+    several → ``anyOf`` of single-type schemas so EVERY branch survives; none → ``null`` or
+    the object fallback. Ported from anomalyco/opencode#31877."""
     has_null = "null" in value
     non_null = [t for t in value if isinstance(t, str) and t != "null"]
     if len(non_null) == 1:
@@ -383,11 +371,9 @@ _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 def _reactive_strip(
     tools: list[dict], strip_node: Callable[[dict], int], log_msg: str,
 ) -> tuple[list[dict], int]:
-    """Apply *strip_node* (returns keywords removed) to every dict node of each tool's parameters.
-
-    Handles OpenAI format (``{"function": {"parameters": ...}}``) and Responses format
-    (``{"name": ..., "parameters": ...}``). Returns ``(tools, stripped_count)`` — same list.
-    """
+    """Apply *strip_node* (returns keywords removed) to every dict node of each tool's
+    parameters, in place. Handles OpenAI (``{"function": {"parameters": ..}}``) and Responses
+    (``{"name": .., "parameters": ..}``) formats. Returns ``(tools, stripped_count)``."""
     if not tools:
         return tools, 0
     stripped = 0
@@ -440,12 +426,9 @@ def strip_pattern_and_format(tools: list[dict]) -> tuple[list[dict], int]:
 
 
 def strip_slash_enum(tools: list[dict]) -> tuple[list[dict], int]:
-    """Strip ``enum`` keywords whose string values contain ``/``, in place.
-
-    xAI's Responses/chat endpoints compile schemas to a grammar that rejects ``/`` in
-    enum values (HTTP 400 before any token) — typically MCP enums of HuggingFace model
-    IDs. The constraint is a prompting hint only; the model still sees the description.
-    """
+    """Strip ``enum`` keywords whose string values contain ``/``, in place. xAI compiles
+    schemas to a grammar that rejects ``/`` in enum values (HTTP 400 before any token) —
+    typically MCP enums of HuggingFace model IDs. The constraint is a prompting hint only."""
     def _strip(node: dict) -> int:
         enum_val = node.get("enum")
         if isinstance(enum_val, list) and any(isinstance(v, str) and "/" in v for v in enum_val):

@@ -42,11 +42,9 @@ def _bound_error_text(text: str) -> str:
 
 
 def _bound_json_error_result(result: str) -> str:
-    """Trim an oversized ``error`` field in a JSON string result.
-
-    Handlers that ``json.dumps({"error": str(exc)})`` directly bypass ``tool_error``'s
-    cap; applied at the dispatch boundary so no tool can stack unbounded errors across retries.
-    """
+    """Trim an oversized ``error`` field in a JSON string result: handlers that
+    ``json.dumps({"error": str(exc)})`` directly bypass ``tool_error``'s cap, so this runs
+    at the dispatch boundary to stop unbounded errors stacking across retries."""
     if len(result) <= _MAX_TOOL_ERROR_CHARS or '"error"' not in result:
         return result
     try:
@@ -212,9 +210,7 @@ _OVERRIDE_DENIED_MSG = (
     "without operator opt-in (allow_tool_override).")
 
 
-# ---------------------------------------------------------------------------
-# check_fn TTL cache
-#
+# ---- check_fn TTL cache ----------------------------------------------------
 # check_fns probe external state (Docker daemon, Modal SDK, playwright binary) that
 # changes on human timescales, so results are cached ~30 s: env-var flips via
 # ``hermes tools`` still propagate within a turn or two with no explicit invalidation.
@@ -226,7 +222,6 @@ _OVERRIDE_DENIED_MSG = (
 # grace window serves the last-good True WITHOUT caching the failure. A failure
 # persisting past the window is honored, so a backend that really went down stops
 # advertising its tools.
-# ---------------------------------------------------------------------------
 
 _CHECK_FN_TTL_SECONDS = 30.0
 # Grace window after a success in which a failure counts as a flake; kept short
@@ -394,11 +389,8 @@ def invalidate_check_fn_cache() -> None:
 
 
 def get_cached_check_fn_result(fn: Callable) -> Optional[bool]:
-    """Cached verdict for *fn* if its TTL is still valid, else None.
-
-    NEVER executes the probe: for read-only surfaces (dashboard status panels)
-    that must not trigger network / auth / SDK work inside a request path.
-    """
+    """Cached verdict for *fn* if its TTL is still valid, else None. NEVER runs the probe:
+    for read-only surfaces (dashboard panels) that must not do network/auth/SDK work."""
     now = time.monotonic()
     scope = check_fn_cache_scope()
     if scope == CHECK_FN_CACHE_BYPASS:
@@ -532,18 +524,13 @@ class ToolRegistry:
         with self._lock:
             return self._toolset_aliases.get(alias)
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
+    # ---- Registration ------------------------------------------------
 
     def register_plugin_override_policy(
         self, module_namespace: str, allowed: bool, *, scope: Optional[str] = None,
     ) -> _PluginOverridePolicy:
-        """Bind a plugin module namespace to its current operator opt-in.
-
-        The identity-bearing result lets plugin unload/reload revoke a stale
-        authorization without losing durable module-to-profile attribution.
-        """
+        """Bind a plugin module namespace to its current operator opt-in. The identity-bearing
+        result lets unload/reload revoke a stale authorization without losing attribution."""
         with self._lock:
             policy = _PluginOverridePolicy(allowed)
             self._plugin_override_policy[(scope, module_namespace)] = policy
@@ -659,11 +646,8 @@ class ToolRegistry:
     @staticmethod
     def _caller_module() -> str:
         """Best-effort module name of the registry method's caller (two frames up).
-
-        ``deregister()`` takes only a tool name — no handler to bind authorization
-        to via ``_plugin_owner_of`` — so frame inspection is the only way to know
-        who is asking.
-        """
+        ``deregister()`` takes only a tool name — no handler for ``_plugin_owner_of`` —
+        so frame inspection is the only way to know who is asking."""
         try:
             return sys._getframe(2).f_globals.get("__name__", "") or ""
         except Exception:
@@ -824,11 +808,9 @@ class ToolRegistry:
         scope: Optional[str] = None,
     ) -> bool:
         """Restore a host-owned registration if it is still current (plugin ownership ledger).
-
-        The identity check is deliberate: another plugin (or another ``PluginManager``
-        in a multi-profile process) may have registered a newer entry under the same
-        name, in which case unloading this entry must leave the newer one untouched.
-        """
+        The identity check is deliberate: another plugin (or ``PluginManager`` in a
+        multi-profile process) may have registered a newer entry under the same name, and
+        unloading this entry must leave that newer one untouched."""
         with self._lock:
             target = self._slot(scope, create=True)
             if target.get(name) is not current:
@@ -864,15 +846,11 @@ class ToolRegistry:
         logger.debug("Restored tool registration: %s", name)
         return True
 
-    # ------------------------------------------------------------------
-    # Schema retrieval
-    # ------------------------------------------------------------------
+    # ---- Schema retrieval --------------------------------------------
 
     def get_definitions(self, tool_names: Set[str], quiet: bool = False) -> List[dict]:
-        """OpenAI-format schemas for the requested tools whose ``check_fn`` passes (or is absent).
-
-        Probes go through the ~30 s TTL cache so ``hermes tools enable`` still lands quickly.
-        """
+        """OpenAI-format schemas for the requested tools whose ``check_fn`` passes (or is
+        absent). Probes use the ~30 s TTL cache so ``hermes tools enable`` lands quickly."""
         result = []
         check_results: Dict[Callable, bool] = {}
         entries_by_name = {entry.name: entry for entry in self._snapshot_entries()}
@@ -901,9 +879,7 @@ class ToolRegistry:
             result.append({"type": "function", "function": schema_with_name})
         return result
 
-    # ------------------------------------------------------------------
-    # Dispatch
-    # ------------------------------------------------------------------
+    # ---- Dispatch ----------------------------------------------------
 
     @staticmethod
     def _normalize_handler_result(name: str, result):
@@ -954,9 +930,7 @@ class ToolRegistry:
                 sanitized = raw  # defensive: never let the sanitizer block error propagation
             return tool_error(sanitized)
 
-    # ------------------------------------------------------------------
-    # Query helpers
-    # ------------------------------------------------------------------
+    # ---- Query helpers -----------------------------------------------
 
     def get_max_result_size(self, name: str, default: int | float | None = None) -> int | float:
         """Return per-tool max result size, or *default* (or global default)."""
