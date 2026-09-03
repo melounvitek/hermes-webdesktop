@@ -129,16 +129,19 @@ def _image_parts(uri: str, display: str, data: bytes, mime: str) -> list[dict[st
     ]
 
 
+def _attr(obj: Any, name: str) -> str | None:
+    """Stripped string attribute, ``None`` when missing/blank."""
+    return str(getattr(obj, name, "") or "").strip() or None
+
+
 def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]:
     """ACP resource_link -> OpenAI content parts: images become a text header + image_url,
     everything else a single text part with the inlined body (or a binary-omit note)."""
-    uri = str(getattr(block, "uri", "") or "").strip()
+    uri = _attr(block, "uri")
     if not uri:
         return []
 
-    name = str(getattr(block, "name", "") or "").strip() or None
-    title = str(getattr(block, "title", "") or "").strip() or None
-    mime_type = str(getattr(block, "mime_type", "") or "").strip() or None
+    name, title, mime_type = _attr(block, "name"), _attr(block, "title"), _attr(block, "mime_type")
     path = _path_from_file_uri(uri)
     ident = dict(uri=uri, name=name, title=title)
 
@@ -181,8 +184,8 @@ def _embedded_resource_to_parts(block: EmbeddedResourceContentBlock) -> list[dic
     if resource is None:
         return []
 
-    uri = str(getattr(resource, "uri", "") or "").strip()
-    mime_type = str(getattr(resource, "mime_type", "") or "").strip() or None
+    uri = _attr(resource, "uri") or ""
+    mime_type = _attr(resource, "mime_type")
 
     if isinstance(resource, TextResourceContents):
         return _text_parts(uri=uri, body=resource.text)
@@ -202,13 +205,11 @@ def _embedded_resource_to_parts(block: EmbeddedResourceContentBlock) -> list[dic
                 )
             return _image_parts(uri, _resource_display_name(uri), data, mime_type or "image/png")
 
-        text = _decode_text_bytes(data[:_MAX_ACP_RESOURCE_BYTES], mime_type)
-        if text is None:
+        body = _decode_text_bytes(data[:_MAX_ACP_RESOURCE_BYTES], mime_type)
+        if body is None:
             body = f"[Binary embedded file omitted: {len(data)} bytes, mime={mime_type or 'unknown'}]"
-        else:
-            body = text
-            if len(data) > _MAX_ACP_RESOURCE_BYTES:
-                body += f"\n\n[Truncated to {_MAX_ACP_RESOURCE_BYTES} of {len(data)} bytes]"
+        elif len(data) > _MAX_ACP_RESOURCE_BYTES:
+            body += f"\n\n[Truncated to {_MAX_ACP_RESOURCE_BYTES} of {len(data)} bytes]"
         return _text_parts(uri=uri, body=body)
 
     text = getattr(resource, "text", None)
@@ -224,17 +225,14 @@ def _extract_text(prompt: list[PromptBlock]) -> str:
 
 def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | None:
     """Convert an ACP image content block to OpenAI-style multimodal content."""
-    data = str(getattr(block, "data", "") or "").strip()
-    uri = str(getattr(block, "uri", "") or "").strip()
-    mime_type = str(getattr(block, "mime_type", "") or "image/png").strip() or "image/png"
-
+    data, uri = _attr(block, "data"), _attr(block, "uri")
+    mime_type = _attr(block, "mime_type") or "image/png"
     if data:
         url = data if data.startswith("data:") else f"data:{mime_type};base64,{data}"
     elif uri:
         url = uri
     else:
         return None
-
     return {"type": "image_url", "image_url": {"url": url}}
 
 
