@@ -93,8 +93,7 @@ def _delegation_model_not_found_notice(results) -> "list[str] | None":
 _TRUNCATED_SUMMARY_NOTE = (
     "[TRUNCATED — subagent hit its iteration cap; the summary below "
     "may be incomplete. Verify before relying on it, or re-dispatch "
-    "the unfinished part.]"
-)
+    "the unfinished part.]")
 
 
 def _is_truncated(entry: dict) -> bool:
@@ -138,8 +137,7 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
         "has finished. All ran in parallel and waited on each other; their "
         "consolidated results are below. You may have moved on since "
         "dispatching — act on these or re-dispatch if things have changed.",
-        completed_at,
-    )
+        completed_at)
     lines.extend(_task_source_lines(evt))
     lines.append(f"{_role_model(evt)}   Total duration: {total_dur}s")
     if error and not results:
@@ -203,8 +201,7 @@ def _format_async_delegation(evt: dict) -> str:
         "A background subagent you dispatched earlier has finished. You may "
         "have moved on since dispatching it; the full task source is below so "
         "you can act on the result or re-dispatch if things have changed.",
-        completed_at,
-    )
+        completed_at)
     lines.append(f"Original goal: {evt.get('goal', '') or ''}")
     lines.extend(_task_source_lines(evt))
     lines.append(_role_model(evt))
@@ -315,7 +312,6 @@ def format_process_notification(evt: dict) -> "str | None":
             _out = (
                 "...(output trimmed — subagent-owned process; see the "
                 "delegation's live transcript for full output)\n"
-                + _out[-600:]
-            )
+                + _out[-600:])
     text += f"Command: {_cmd}\nOutput:\n{_out}]"
     return text
