@@ -100,9 +100,9 @@ def _warn_if_gateway_not_running() -> None:
         return
 
     print(color("  ⚠  Gateway is not running — jobs won't fire automatically.", Colors.YELLOW))
-    print(color("     Start it with: hermes gateway install", Colors.DIM))
-    print(color("                    sudo hermes gateway install --system  # Linux servers", Colors.DIM))
-    print(color("     Check status:  hermes cron status", Colors.DIM))
+    print(color("     Start it with: hermes gateway install\n"
+                "                    sudo hermes gateway install --system  # Linux servers\n"
+                "     Check status:  hermes cron status", Colors.DIM))
 
 
 def _format_lateness(seconds: float) -> str:
@@ -143,19 +143,16 @@ def _dispatch_display(dispatch: dict) -> Optional[str]:
     if kind == "on_time":
         return color(f"on time (scheduled {scheduled})", Colors.DIM)
     label = "catch-up after missed fire" if kind == "catch_up" else "late"
-    return (
-        color(f"⚠ {label}: ", Colors.YELLOW)
-        + f"scheduled {scheduled}, ran {actual} "
-        + color(f"({lateness} late)", Colors.YELLOW)
-    )
+    return (color(f"⚠ {label}: ", Colors.YELLOW) + f"scheduled {scheduled}, ran {actual} "
+            + color(f"({lateness} late)", Colors.YELLOW))
 
 
 def _print_banner(title: str) -> None:
     """Boxed cyan section header shared by ``cron list`` and ``cron incidents``."""
     print()
-    print(color("┌" + "─" * 73 + "┐", Colors.CYAN))
-    print(color("│" + " " * 25 + title.ljust(48) + "│", Colors.CYAN))
-    print(color("└" + "─" * 73 + "┘", Colors.CYAN))
+    rule = "─" * 73
+    for line in (f"┌{rule}┐", "│" + " " * 25 + title.ljust(48) + "│", f"└{rule}┘"):
+        print(color(line, Colors.CYAN))
     print()
 
 
@@ -175,8 +172,8 @@ def cron_list(show_all: bool = False):
     jobs = list_jobs(include_disabled=show_all)
 
     if not jobs:
-        print(color("No scheduled jobs.", Colors.DIM))
-        print(color("Create one with 'hermes cron create ...' or the /cron command in chat.", Colors.DIM))
+        print(color("No scheduled jobs.\nCreate one with 'hermes cron create ...' "
+                    "or the /cron command in chat.", Colors.DIM))
         return
 
     _print_banner("Scheduled Jobs")
@@ -357,11 +354,8 @@ def cron_incidents(args) -> int:
         if inc.get("output_file"):
             print(f"    Output:     {inc['output_file']}")
         print()
-    print(color(
-        f"  {len(incidents)} incident(s)  |  ack one with: "
-        "hermes cron incidents ack <id>",
-        Colors.DIM,
-    ))
+    print(color(f"  {len(incidents)} incident(s)  |  ack one with: hermes cron incidents ack <id>",
+                Colors.DIM))
     return 0
 
 
@@ -401,22 +395,18 @@ def _print_ticker_health(pids: list) -> None:
         # No heartbeat file: ticker never started (non-cron profile, gateway started moments
         # ago, or a config issue blocking the ticker).
         _warn("⚠ Gateway is running but the cron ticker has not reported a heartbeat.")
-        print("  Cron jobs will NOT fire until the ticker writes its first heartbeat.")
-        print("  If the gateway just started, wait ~60s and re-run `hermes cron status`.")
-        print("  If heartbeat never appears, restart: hermes gateway restart")
+        print("  Cron jobs will NOT fire until the ticker writes its first heartbeat.\n"
+              "  If the gateway just started, wait ~60s and re-run `hermes cron status`.\n"
+              "  If heartbeat never appears, restart: hermes gateway restart")
     elif hb_age > STALE_AFTER:
         # No heartbeat at all → the ticker thread is gone.
-        _warn(
-            "⚠ Gateway is running but the cron ticker looks STALLED — "
-            f"no heartbeat for {int(hb_age)}s (expected every ~60s)."
-        )
+        _warn("⚠ Gateway is running but the cron ticker looks STALLED — "
+              f"no heartbeat for {int(hb_age)}s (expected every ~60s).")
         print("  Cron jobs may NOT be firing. Restart: hermes gateway restart")
     elif ok_age is not None and ok_age > STALE_AFTER:
         # Loop alive (fresh heartbeat) but no tick SUCCEEDED in a long time → every tick fails.
-        _warn(
-            "⚠ Gateway and cron ticker are running, but no tick has "
-            f"succeeded in {int(ok_age)}s — ticks may be failing."
-        )
+        _warn("⚠ Gateway and cron ticker are running, but no tick has "
+              f"succeeded in {int(ok_age)}s — ticks may be failing.")
         last_error = get_ticker_last_error()
         if last_error:
             # Show WHY ticks fail — e.g. a root-rewritten jobs.json (PermissionError) that
@@ -447,16 +437,10 @@ def cron_status():
         # An external provider (e.g. Chronos) arms one external one-shot per job, fired by a
         # NAS-mediated webhook: between fires there is intentionally NO ticker thread and NO
         # heartbeat file, so the ticker-liveness heuristics would always say "stalled".
-        print(color(
-            f"✓ Cron provider: {provider} — jobs fire via the managed scheduler, "
-            "not the in-process ticker.",
-            Colors.GREEN,
-        ))
-        print(color(
-            "  (No ticker heartbeat is expected for an external provider; "
-            "due jobs are delivered by an authenticated webhook.)",
-            Colors.DIM,
-        ))
+        print(color(f"✓ Cron provider: {provider} — jobs fire via the managed scheduler, "
+                    "not the in-process ticker.", Colors.GREEN))
+        print(color("  (No ticker heartbeat is expected for an external provider; "
+                    "due jobs are delivered by an authenticated webhook.)", Colors.DIM))
     else:
         pids = find_gateway_pids()
         gateway_alive_via_lock = False
@@ -476,11 +460,11 @@ def cron_status():
             _print_ticker_health(pids)
         else:
             print(color("✗ Gateway is not running — cron jobs will NOT fire", Colors.RED))
-            print()
-            print("  To enable automatic execution:")
-            print("    hermes gateway install    # Install as a user service")
-            print("    sudo hermes gateway install --system  # Linux servers: boot-time system service")
-            print("    hermes gateway            # Or run in foreground")
+            print("\n  To enable automatic execution:\n"
+                  "    hermes gateway install    # Install as a user service\n"
+                  "    sudo hermes gateway install --system  "
+                  "# Linux servers: boot-time system service\n"
+                  "    hermes gateway            # Or run in foreground")
 
     print()
     _print_active_jobs_summary(list_jobs(include_disabled=False))
@@ -509,12 +493,10 @@ def _print_active_jobs_summary(jobs) -> None:
                     Colors.YELLOW))
         for j in late:
             d = j["last_dispatch"]
-            print(
-                f"    {j.get('id', '?')}  {j.get('name', '(unnamed)')}: "
-                f"scheduled {d.get('scheduled_at', '?')}, "
-                f"ran {d.get('dispatched_at', '?')} "
-                + color(f"({_format_lateness(d.get('lateness_seconds', 0))} late)", Colors.YELLOW)
-            )
+            late_by = _format_lateness(d.get("lateness_seconds", 0))
+            print(f"    {j.get('id', '?')}  {j.get('name', '(unnamed)')}: "
+                  f"scheduled {d.get('scheduled_at', '?')}, ran {d.get('dispatched_at', '?')} "
+                  + color(f"({late_by} late)", Colors.YELLOW))
 
 
 def _scripts_dir_for_cron() -> Path:
@@ -679,8 +661,7 @@ def cron_create(args):
         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
     print(color(f"Created job: {result['job_id']}", Colors.GREEN))
-    print(f"  Name: {result['name']}")
-    print(f"  Schedule: {result['schedule']}")
+    print(f"  Name: {result['name']}\n  Schedule: {result['schedule']}")
     if result.get("skills"):
         print(f"  Skills: {', '.join(result['skills'])}")
     _print_job_details(result.get("job", {}))
@@ -727,12 +708,9 @@ def cron_edit(args):
 
     updated = result["job"]
     print(color(f"Updated job: {updated['job_id']}", Colors.GREEN))
-    print(f"  Name: {updated['name']}")
-    print(f"  Schedule: {updated['schedule']}")
-    if updated.get("skills"):
-        print(f"  Skills: {', '.join(updated['skills'])}")
-    else:
-        print("  Skills: none")
+    print(f"  Name: {updated['name']}\n  Schedule: {updated['schedule']}")
+    print(f"  Skills: {', '.join(updated['skills'])}" if updated.get("skills") else
+          "  Skills: none")
     _print_job_details(updated)
     return 0
 
@@ -854,8 +832,8 @@ def cron_notepad(args) -> int:
             print(color(f"Notepad for job {job_id} is empty.", Colors.DIM))
             return 0
         for note in notes:
-            print(f"  {color(note['key'], Colors.YELLOW)} = {note['value']}")
-            print(f"    {color('updated: ' + str(note['updated_at']), Colors.DIM)}")
+            print(f"  {color(note['key'], Colors.YELLOW)} = {note['value']}\n"
+                  f"    {color('updated: ' + str(note['updated_at']), Colors.DIM)}")
         return 0
     except ValueError as exc:
         print(color(f"Notepad error: {exc}", Colors.RED))
@@ -891,6 +869,6 @@ def cron_command(args):
     if handler is not None:
         return handler(args)
 
-    print(f"Unknown cron command: {subcmd}")
-    print("Usage: hermes cron [list|create|edit|pause|resume|run|remove|status|runs|doctor|tick]")
+    print(f"Unknown cron command: {subcmd}\n"
+          "Usage: hermes cron [list|create|edit|pause|resume|run|remove|status|runs|doctor|tick]")
     sys.exit(1)

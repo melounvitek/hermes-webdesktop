@@ -600,8 +600,7 @@ def run_debug_share(args):
     print(_PRIVACY_NOTICE)
     if not _confirm_upload(args):
         return
-    print("Collecting debug report...")
-    print("Uploading...")
+    print("Collecting debug report...\nUploading...")
 
     try:
         result = build_debug_share(log_lines=log_lines, expiry=expiry, redact=redact)
@@ -616,9 +615,9 @@ def run_debug_share(args):
         print(f"  {label:<{label_width}}  {url}")
     if result.failures:
         print(f"\n  (failed to upload: {', '.join(result.failures)})")
-    print(f"\n⏱  Pastes will auto-delete in {result.auto_delete_seconds // 3600} hours.")
-    print("To delete now:  hermes debug delete <url>")
-    print("\nShare these links with the Hermes team for support.")
+    print(f"\n⏱  Pastes will auto-delete in {result.auto_delete_seconds // 3600} hours.\n"
+          "To delete now:  hermes debug delete <url>\n"
+          "\nShare these links with the Hermes team for support.")
 
 
 _NOUS_PRIVACY_NOTICE = """\
@@ -675,24 +674,20 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
     print(f"\n⏱  Auto-deletes at {expires_at} (14-day retention)." if expires_at
           else "\n⏱  Auto-deletes after 14 days.")
 
-    print(
-        "\nShare this private link with the Nous team — only Nous staff "
-        "(via Google login) can open it."
-    )
-    print(
-        "\nPick up the discussion in:\n"
-        "  GitHub Issues        https://github.com/NousResearch/hermes-agent/issues\n"
-        "  Nous Portal Support  https://portal.nousresearch.com/help\n"
-        "  Discord              https://discord.gg/NousResearch"
-    )
+    print("\nShare this private link with the Nous team — only Nous staff "
+          "(via Google login) can open it.\n"
+          "\nPick up the discussion in:\n"
+          "  GitHub Issues        https://github.com/NousResearch/hermes-agent/issues\n"
+          "  Nous Portal Support  https://portal.nousresearch.com/help\n"
+          "  Discord              https://discord.gg/NousResearch")
 
 
 def run_debug_delete(args):
     """Delete one or more paste URLs uploaded by /debug."""
     urls = getattr(args, "urls", [])
     if not urls:
-        print("Usage: hermes debug delete <url> [<url> ...]")
-        print("  Deletes paste.rs pastes uploaded by 'hermes debug share'.")
+        print("Usage: hermes debug delete <url> [<url> ...]\n"
+              "  Deletes paste.rs pastes uploaded by 'hermes debug share'.")
         return
 
     for url in urls:

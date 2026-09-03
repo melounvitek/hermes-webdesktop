@@ -116,8 +116,7 @@ def _print_post_register_hint(
     """Print the success summary + the gate-engagement caveat."""
     from hermes_cli.config import get_env_path
 
-    print(f"\n  Wrote to {get_env_path()}:")
-    print("    HERMES_DASHBOARD_OAUTH_CLIENT_ID=" + str(client_id))
+    print(f"\n  Wrote to {get_env_path()}:\n    HERMES_DASHBOARD_OAUTH_CLIENT_ID={client_id}")
     if wrote_portal_url:
         print("    HERMES_DASHBOARD_PORTAL_URL=" + str(portal_base_url))
     if public_url:
