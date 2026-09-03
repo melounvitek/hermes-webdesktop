@@ -7,6 +7,7 @@ context before each model iteration.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -480,11 +481,9 @@ def _trim_messages_for_reference(
     if not isinstance(context_length, int) or context_length <= 0:
         return messages
 
-    reserve = (
-        int(reserve_output_tokens)
-        if isinstance(reserve_output_tokens, int) and reserve_output_tokens > 0
-        else _REFERENCE_DEFAULT_OUTPUT_RESERVE
-    )
+    if not (isinstance(reserve_output_tokens, int) and reserve_output_tokens > 0):
+        reserve_output_tokens = _REFERENCE_DEFAULT_OUTPUT_RESERVE
+    reserve = int(reserve_output_tokens)
     budget = int(context_length * (1.0 - _REFERENCE_TRIM_SAFETY_FRACTION)) - reserve
     if budget <= 0:
         return messages
@@ -647,6 +646,13 @@ def _field(obj: Any, name: str) -> Any:
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
 
 
+def _dumps_or_str(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
+
+
 def _render_tool_calls(tool_calls: Any) -> str:
     """Render an assistant turn's tool_calls as ``[called tool: name(args)]`` lines.
 
@@ -657,15 +663,7 @@ def _render_tool_calls(tool_calls: Any) -> str:
         fn = _field(tc, "function")
         name = _field(fn, "name") or _field(tc, "name") or "tool"
         fn_args = _field(fn, "arguments")
-        if isinstance(fn_args, str):
-            args_text = fn_args
-        elif fn_args is not None:
-            try:
-                args_text = json.dumps(fn_args, ensure_ascii=False)
-            except Exception:
-                args_text = str(fn_args)
-        else:
-            args_text = ""
+        args_text = fn_args if isinstance(fn_args, str) else "" if fn_args is None else _dumps_or_str(fn_args)
         lines.append(f"[called tool: {name}({args_text})]" if args_text else f"[called tool: {name}]")
     return "\n".join(lines)
 
@@ -733,10 +731,9 @@ def _reference_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if last_user_content is not None:
             return [{"role": "user", "content": last_user_content}]
         for msg in reversed(messages):
-            if msg.get("role") == "user":
-                fallback_text = flatten_message_text(msg.get("content"))
-                if fallback_text.strip():
-                    return [{"role": "user", "content": fallback_text}]
+            fallback_text = flatten_message_text(msg.get("content")) if msg.get("role") == "user" else ""
+            if fallback_text.strip():
+                return [{"role": "user", "content": fallback_text}]
     return rendered
 
 
@@ -934,9 +931,7 @@ def _completed_response_as_stream_chunk(response: Any) -> Any:
         ]
     delta = SimpleNamespace(
         content=getattr(message, "content", None), tool_calls=tool_call_deltas,
-        reasoning_content=getattr(message, "reasoning_content", None),
-        reasoning=getattr(message, "reasoning", None),
-        reasoning_details=getattr(message, "reasoning_details", None),
+        **{k: getattr(message, k, None) for k in ("reasoning_content", "reasoning", "reasoning_details")},
     )
     choice = SimpleNamespace(
         index=getattr(first_choice, "index", 0), delta=delta,
@@ -989,7 +984,7 @@ def peel_reference_guidance(messages: list[dict[str, Any]], guidance: Any) -> li
         last_part = content[-1]
         if isinstance(last_part, dict) and last_part.get("type", "text") == "text":
             text = last_part.get("text") or ""
-            if text == suffix or text == guidance_text:
+            if text in (suffix, guidance_text):
                 # Attach shape (b): guidance rode as its own trailing part. Guidance as
                 # the only content drops the whole message (mirrors shape c).
                 if len(content) == 1:
@@ -1014,8 +1009,7 @@ class MoAChatCompletions:
         self.preset_name = preset_name or "default"
         self.reference_callback = reference_callback
         self._agent = agent
-        # Reference cache keyed on the advisory-view signature: new state = MISS
-        # (references re-run), identical state = HIT (no re-run, no re-emit).
+        # Reference cache keyed on the advisory-view signature (HIT = no re-run, no re-emit).
         self._ref_cache_key: tuple | None = None
         self._ref_cache_outputs: list[tuple[str, str, Any]] = []
         # Fan-out spend awaiting consume_reference_usage (nothing deposited on a HIT so
@@ -1034,8 +1028,7 @@ class MoAChatCompletions:
         self._fanout_iteration_count = 0
         self._fanout_turn_sig: str | None = None
         self._fanout_last_state_sig: str | None = None
-        # Normalized moa.privacy_filter mode ('' | 'display' | 'full'), refreshed per create().
-        self._privacy_mode: str = ""
+        self._privacy_mode: str = ""  # normalized moa.privacy_filter, refreshed per create()
 
     def consume_reference_usage(self) -> tuple[Any, Any]:
         """Pop pending fan-out ``(CanonicalUsage, cost_usd_or_None)`` and reset both
@@ -1214,10 +1207,8 @@ class MoAChatCompletions:
             self._pending_trace["aggregator_streamed"] = stream
             output = None
             if not stream:
-                try:
+                with contextlib.suppress(Exception):  # pragma: no cover - defensive
                     output = _extract_text(agg_response)
-                except Exception:  # pragma: no cover - defensive
-                    output = None
             self._pending_trace["aggregator_output"] = output
         if stream and hasattr(agg_response, "choices"):
             # Some adapters (openai-codex Responses) return a completed response even
@@ -1239,10 +1230,8 @@ class MoAChatCompletions:
         fanout_mode = str(preset.get("fanout") or "user_turn").strip().lower()
         every_n = 0
         if fanout_mode.startswith("every_n:"):
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 every_n = int(fanout_mode.split(":", 1)[1])
-            except (TypeError, ValueError):
-                every_n = 0
             if every_n < 2:
                 # every_n:1 IS per-iteration (mirrors _coerce_fanout).
                 fanout_mode = "per_iteration"
@@ -1317,13 +1306,10 @@ class MoAChatCompletions:
         # Stash the fan-out for trace persistence (aggregator parts filled in later).
         # Traces are persisted, so ANY active privacy mode redacts them.
         privacy_mode = self._privacy_mode
-        if privacy_mode:
-            trace_refs = [
-                (label, _redact_reference_text(text), _redact_trace_accounting(acct))
-                for label, text, acct in reference_outputs
-            ]
-        else:
-            trace_refs = list(reference_outputs)
+        trace_refs = [
+            (label, _redact_reference_text(text), _redact_trace_accounting(acct))
+            for label, text, acct in reference_outputs
+        ] if privacy_mode else list(reference_outputs)
         self._pending_trace = {
             "preset": self.preset_name, "reference_outputs": trace_refs,
             "aggregator_slot": aggregator, "aggregator_temperature": aggregator_temperature,
@@ -1500,14 +1486,12 @@ def build_moa_facade(agent, preset_name: Any = None) -> MoAClient:
         if cb is None or spec is None:
             return
         primary, secondary, extra_map = spec
-        try:
+        with contextlib.suppress(Exception):
             cb(
                 event, str(kwargs.get(primary) or ""),
                 str(kwargs.get(secondary) or "") if secondary else None, None,
                 **{out: kwargs.get(src) for out, src in extra_map.items()},
             )
-        except Exception:
-            pass
 
     resolved_preset = preset_name
     if resolved_preset is None and getattr(agent, "provider", None) == "moa":

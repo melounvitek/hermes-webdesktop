@@ -393,26 +393,28 @@ def _extract_usage(response: Any) -> PluginLlmUsage:
     """Token usage from an OpenAI-shaped response, tolerating provider naming
     (``prompt_tokens``/``completion_tokens`` vs ``input_tokens``/``output_tokens``,
     ``cache_read_input_tokens`` vs ``cache_read_tokens``)."""
-    usage = PluginLlmUsage()
     raw = getattr(response, "usage", None)
     if raw is None:
-        return usage
+        return PluginLlmUsage()
 
-    def _g(name: str) -> int:
-        v = getattr(raw, name, None)
-        if v is None and isinstance(raw, dict):
-            v = raw.get(name)
-        try:
-            return int(v) if v is not None else 0
-        except (TypeError, ValueError):
-            return 0
+    def _g(*names: str) -> int:
+        for name in names:
+            v = getattr(raw, name, None)
+            if v is None and isinstance(raw, dict):
+                v = raw.get(name)
+            try:
+                if v is not None and int(v):
+                    return int(v)
+            except (TypeError, ValueError):
+                pass
+        return 0
 
-    usage.input_tokens = _g("prompt_tokens") or _g("input_tokens")
-    usage.output_tokens = _g("completion_tokens") or _g("output_tokens")
-    usage.total_tokens = _g("total_tokens") or (usage.input_tokens + usage.output_tokens)
-    usage.cache_read_tokens = _g("cache_read_input_tokens") or _g("cache_read_tokens")
-    usage.cache_write_tokens = _g("cache_creation_input_tokens") or _g("cache_write_tokens")
-    return usage
+    inp, out = _g("prompt_tokens", "input_tokens"), _g("completion_tokens", "output_tokens")
+    return PluginLlmUsage(
+        input_tokens=inp, output_tokens=out, total_tokens=_g("total_tokens") or (inp + out),
+        cache_read_tokens=_g("cache_read_input_tokens", "cache_read_tokens"),
+        cache_write_tokens=_g("cache_creation_input_tokens", "cache_write_tokens"),
+    )
 
 
 def _extract_text(response: Any) -> str:
