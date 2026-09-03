@@ -494,15 +494,18 @@ def _extra_csv_set(config, key: str, env_name: str) -> Set[str]:
     return _csv_set(raw)
 
 
+def _recovery_key_output_path() -> Optional[Path]:
+    output_file = os.getenv("MATRIX_RECOVERY_KEY_OUTPUT_FILE", "").strip()
+    return Path(output_file).expanduser() if output_file else None
+
+
 def _write_matrix_recovery_key_output_file(recovery_key: str) -> Optional[Path]:
     """Write a generated recovery key to MATRIX_RECOVERY_KEY_OUTPUT_FILE (0600, never overwritten)."""
-    output_file = os.getenv("MATRIX_RECOVERY_KEY_OUTPUT_FILE", "").strip()
-    if not output_file:
+    path = _recovery_key_output_path()
+    if path is None:
         return None
-    path = Path(output_file).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(path, flags, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(recovery_key)
@@ -516,10 +519,9 @@ def _write_matrix_recovery_key_output_file(recovery_key: str) -> Optional[Path]:
 
 def _get_matrix_recovery_key_output_target() -> tuple[Optional[Path], str]:
     """Return a usable one-time recovery-key output path, or a redacted reason."""
-    output_file = os.getenv("MATRIX_RECOVERY_KEY_OUTPUT_FILE", "").strip()
-    if not output_file:
+    path = _recovery_key_output_path()
+    if path is None:
         return None, "not_configured"
-    path = Path(output_file).expanduser()
     if path.exists():
         return None, "exists"
     try:
@@ -913,11 +915,10 @@ class MatrixAdapter(BasePlatformAdapter):
         for legacy_key in (f"{acct_id}:default", acct_id):
             if legacy_key == pickle_key:
                 continue
-            legacy_store = PgCryptoStore(account_id=acct_id, pickle_key=legacy_key, db=crypto_db)
             try:
-                account = await legacy_store.get_account()
+                account = await PgCryptoStore(account_id=acct_id, pickle_key=legacy_key, db=crypto_db).get_account()
             except Exception:
-                continue
+                account = None
             if account is None:
                 continue
             # Sessions first, account last: the account is the commit marker (the fast path
@@ -977,36 +978,34 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.error("Matrix: cannot verify device keys on server: %s — refusing E2EE", exc, exc_info=True)
             return False
         local_ed25519 = olm.account.identity_keys.get("ed25519")
+
+        async def _reupload(error_fmt: str, *error_args) -> bool:
+            try:
+                await olm.share_keys()
+            except Exception as exc:
+                logger.error(error_fmt, *error_args, exc, exc_info=True)
+                return False
+            return await self._reverify_keys_after_upload(client, local_ed25519)
         if not our_keys:
             logger.warning("Matrix: device keys missing from server — re-uploading")
             olm.account.shared = False
-            try:
-                await olm.share_keys()
-            except Exception as exc:
-                logger.error("Matrix: failed to re-upload device keys: %s", exc, exc_info=True)
-                return False
-            return await self._reverify_keys_after_upload(client, local_ed25519)
-        if self._extract_server_ed25519(our_keys) != local_ed25519:
-            if olm.account.shared:
-                logger.error(
-                    "Matrix: server has different identity keys for device %s — local crypto state is "
-                    "stale. Delete %s and restart.", client.device_id, str(self._crypto_db_path))
-                return False
-            logger.warning("Matrix: server has stale keys for device %s — attempting re-upload", client.device_id)
-            with suppress(Exception):
-                await client.api.request(
-                    client.api.Method.DELETE if hasattr(client.api, "Method") else "DELETE",
-                    f"/_matrix/client/v3/devices/{client.device_id}")
-                logger.info("Matrix: deleted stale device %s from server", client.device_id)
-            try:
-                await olm.share_keys()
-            except Exception as exc:
-                logger.error(
-                    "Matrix: cannot upload device keys for %s: %s. Try generating a new access token "
-                    "to get a fresh device.", client.device_id, exc, exc_info=True)
-                return False
-            return await self._reverify_keys_after_upload(client, local_ed25519)
-        return True
+            return await _reupload("Matrix: failed to re-upload device keys: %s")
+        if self._extract_server_ed25519(our_keys) == local_ed25519:
+            return True
+        if olm.account.shared:
+            logger.error(
+                "Matrix: server has different identity keys for device %s — local crypto state is "
+                "stale. Delete %s and restart.", client.device_id, str(self._crypto_db_path))
+            return False
+        logger.warning("Matrix: server has stale keys for device %s — attempting re-upload", client.device_id)
+        with suppress(Exception):
+            await client.api.request(
+                client.api.Method.DELETE if hasattr(client.api, "Method") else "DELETE",
+                f"/_matrix/client/v3/devices/{client.device_id}")
+            logger.info("Matrix: deleted stale device %s from server", client.device_id)
+        return await _reupload(
+            "Matrix: cannot upload device keys for %s: %s. Try generating a new access token to get a fresh device.",
+            client.device_id)
 
     @staticmethod
     async def _abort_connect(api: Any, crypto_db: Any = None) -> bool:
@@ -1093,63 +1092,60 @@ class MatrixAdapter(BasePlatformAdapter):
                     "Matrix: E2EE is required but dependencies are missing. %s. Refusing to connect — "
                     "encrypted rooms would silently fail.", _E2EE_INSTALL_HINT)
                 return await self._abort_connect(api)
-        if self._encryption:
+        if not self._encryption:
+            return True
+        phase = "import"
+        try:
+            from mautrix.crypto import OlmMachine
+            from mautrix.crypto.store.asyncpg import PgCryptoStore
+            from mautrix.util.async_db import Database
+            self._store_dir.mkdir(parents=True, exist_ok=True)
+            phase = "create"
+            if (self._store_dir / "crypto_store.pickle").exists():  # pre-SQLite era
+                logger.info("Matrix: removing legacy crypto_store.pickle (migrated to SQLite)")
+                (self._store_dir / "crypto_store.pickle").unlink()
+            crypto_db = Database.create(
+                f"sqlite:///{self._crypto_db_path}", upgrade_table=PgCryptoStore.upgrade_table)
+            await crypto_db.start()
+            self._crypto_db = crypto_db
+            _acct_id = self._user_id or "hermes"
+            # Key on the RESOLVED client.device_id (token's real device), not the configured
+            # one, or the Olm account is stored under a key that can never be looked up.
+            _pickle_key = f"{_acct_id}:{client.device_id or self._device_id or 'default'}"
+            crypto_store = PgCryptoStore(account_id=_acct_id, pickle_key=_pickle_key, db=crypto_db)
+            await crypto_store.open()
+            _store_was_reset = False
+            if client.device_id:
+                _store_was_reset = await self._reset_crypto_store_if_device_changed(crypto_store, client.device_id)
+                await crypto_store.put_device_id(client.device_id)
+            # A just-deleted store has no account to migrate.
+            if not _store_was_reset and not await self._migrate_legacy_crypto_pickle(
+                    crypto_store, crypto_db, _acct_id, _pickle_key):
+                logger.warning("Matrix: crypto pickle migration failed — E2EE may not work correctly")
+            crypto_state = _CryptoStateStore(state_store, self._joined_rooms, client)
+            olm = OlmMachine(client, crypto_store, crypto_state)
+            olm.share_keys_min_trust = TrustState.UNVERIFIED
+            olm.send_keys_min_trust = TrustState.UNVERIFIED
+            await olm.load()
+            if not await self._verify_device_keys_on_server(client, olm):
+                return await self._abort_connect(api, crypto_db)
             try:
-                from mautrix.crypto import OlmMachine
-                from mautrix.crypto.store.asyncpg import PgCryptoStore
-                from mautrix.util.async_db import Database
-                self._store_dir.mkdir(parents=True, exist_ok=True)
+                await olm.share_keys()
             except Exception as exc:
-                if not await self._e2ee_setup_failed("import", exc, api):
-                    return False
-        if self._encryption:
-            try:
-                if (self._store_dir / "crypto_store.pickle").exists():  # pre-SQLite era
-                    logger.info("Matrix: removing legacy crypto_store.pickle (migrated to SQLite)")
-                    (self._store_dir / "crypto_store.pickle").unlink()
-                crypto_db = Database.create(
-                    f"sqlite:///{self._crypto_db_path}", upgrade_table=PgCryptoStore.upgrade_table)
-                await crypto_db.start()
-                self._crypto_db = crypto_db
-                _acct_id = self._user_id or "hermes"
-                # Key on the RESOLVED client.device_id (token's real device), not the configured
-                # one, or the Olm account is stored under a key that can never be looked up.
-                _pickle_key = f"{_acct_id}:{client.device_id or self._device_id or 'default'}"
-                crypto_store = PgCryptoStore(account_id=_acct_id, pickle_key=_pickle_key, db=crypto_db)
-                await crypto_store.open()
-                _store_was_reset = False
-                if client.device_id:
-                    _store_was_reset = await self._reset_crypto_store_if_device_changed(crypto_store, client.device_id)
-                    await crypto_store.put_device_id(client.device_id)
-                # A just-deleted store has no account to migrate.
-                if not _store_was_reset and not await self._migrate_legacy_crypto_pickle(
-                        crypto_store, crypto_db, _acct_id, _pickle_key):
-                    logger.warning("Matrix: crypto pickle migration failed — E2EE may not work correctly")
-                crypto_state = _CryptoStateStore(state_store, self._joined_rooms, client)
-                olm = OlmMachine(client, crypto_store, crypto_state)
-                olm.share_keys_min_trust = TrustState.UNVERIFIED
-                olm.send_keys_min_trust = TrustState.UNVERIFIED
-                await olm.load()
-                if not await self._verify_device_keys_on_server(client, olm):
+                if "already exists" in str(exc):
+                    logger.error(
+                        "Matrix: device %s has stale one-time keys on the server signed with a "
+                        "previous identity key. Delete the device from the homeserver and restart, "
+                        "or generate a new access token to get a fresh device ID.", client.device_id)
                     return await self._abort_connect(api, crypto_db)
-                try:
-                    await olm.share_keys()
-                except Exception as exc:
-                    if "already exists" in str(exc):
-                        logger.error(
-                            "Matrix: device %s has stale one-time keys on the server signed with a "
-                            "previous identity key. Delete the device from the homeserver and restart, "
-                            "or generate a new access token to get a fresh device ID.", client.device_id)
-                        return await self._abort_connect(api, crypto_db)
-                    logger.warning("Matrix: share_keys() warning during startup: %s", exc)
-                await self._verify_or_bootstrap_cross_signing(olm, client)
-                client.crypto = olm
-                logger.info(
-                    "Matrix: E2EE enabled (store: %s%s)", str(self._crypto_db_path),
-                    f", device_id={client.device_id}" if client.device_id else "")
-            except Exception as exc:
-                if not await self._e2ee_setup_failed("create", exc, api):
-                    return False
+                logger.warning("Matrix: share_keys() warning during startup: %s", exc)
+            await self._verify_or_bootstrap_cross_signing(olm, client)
+            client.crypto = olm
+            logger.info(
+                "Matrix: E2EE enabled (store: %s%s)", str(self._crypto_db_path),
+                f", device_id={client.device_id}" if client.device_id else "")
+        except Exception as exc:
+            return await self._e2ee_setup_failed(phase, exc, api)
         return True
 
     async def _e2ee_setup_failed(self, what: str, exc: Exception, api: Any) -> bool:
@@ -1422,14 +1418,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 raise ValueError("external media is not an image")
             return b"".join(parts), content_type
         fname = url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
-
-        def _safe_redirect_target(current_url: str, location: str) -> str:
-            """Re-validate EVERY redirect hop: a public URL can 302 toward loopback/metadata
-            endpoints, and checking only the final URL is too late (the hop already connected)."""
-            next_url = urljoin(current_url, location)
-            if not is_safe_url(next_url):
-                raise ValueError("blocked unsafe redirect URL")
-            return next_url
         try:
             import aiohttp as _aiohttp
             _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(self._proxy_url)
@@ -1442,7 +1430,11 @@ class MatrixAdapter(BasePlatformAdapter):
                             location = resp.headers.get("Location")
                             if not location:
                                 raise ValueError("redirect missing Location")
-                            fetch_url = _safe_redirect_target(fetch_url, location)
+                            # Re-validate EVERY hop: a public URL can 302 toward loopback/metadata endpoints,
+                            # and checking only the final URL is too late (the hop already connected).
+                            fetch_url = urljoin(fetch_url, location)
+                            if not is_safe_url(fetch_url):
+                                raise ValueError("blocked unsafe redirect URL")
                             continue
                         resp.raise_for_status()
                         data, ct = await _read_capped(
@@ -1881,14 +1873,11 @@ class MatrixAdapter(BasePlatformAdapter):
         content = getattr(event, "content", None)
         if content is None:
             return
-        if hasattr(content, "msgtype"):
-            msgtype = str(content.msgtype)
-        else:
-            msgtype = content.get("msgtype", "") if isinstance(content, dict) else ""
         if isinstance(content, dict):
-            source_content = content
+            source_content, msgtype = content, content.get("msgtype", "")
         else:
             source_content = content.serialize() if hasattr(content, "serialize") else {}
+            msgtype = str(content.msgtype) if hasattr(content, "msgtype") else ""
         relates_to = source_content.get("m.relates_to", {})
         if relates_to.get("rel_type") == "m.replace":  # skip edits
             return
@@ -1934,29 +1923,25 @@ class MatrixAdapter(BasePlatformAdapter):
                     "Matrix: ignoring message %s in thread %s — no @mention (thread_require_mention=true)",
                     event_id, thread_id)
                 return None
-        if is_dm and not thread_id and self._dm_mention_threads and is_mentioned:
-            thread_id = event_id
-            self._threads.mark(thread_id)
         if is_mentioned and self._require_mention:
             body = self._strip_mention(body)
-        # Real thread roots are preserved above; synthetic roots follow session-scope policy.
+        # Real thread roots are preserved above; synthetic roots (this event) follow policy: DM
+        # @mention threads / DM auto-thread, or room auto-thread unless session_scope pins the room.
         if not thread_id:
             if is_dm:
-                if self._dm_auto_thread:
-                    thread_id = event_id
-                    self._threads.mark(thread_id)
-            elif self._matrix_session_scope == "room":
-                thread_id = None
-            elif self._matrix_session_scope == "thread" or self._auto_thread:
+                synthetic = (self._dm_mention_threads and is_mentioned) or self._dm_auto_thread
+            else:
+                synthetic = self._matrix_session_scope == "thread" or (
+                    self._matrix_session_scope != "room" and self._auto_thread)
+            if synthetic:
                 thread_id = event_id
-                self._threads.mark(thread_id)
         display_name = await self._get_display_name(room_id, sender)
         source = self.build_source(
             chat_id=room_id, chat_name=identity.display_name, chat_type=chat_type, user_id=sender,
             user_name=display_name, thread_id=thread_id, chat_topic=identity.room_topic,
             guild_id=identity.server_name, parent_chat_id=room_id if thread_id else None, message_id=event_id)
         if thread_id:
-            self._threads.mark(thread_id)
+            self._threads.mark(thread_id)  # covers real roots and synthetic ones alike
         self._background_read_receipt(room_id, event_id)
         return body, is_dm, chat_type, thread_id, display_name, source
 
