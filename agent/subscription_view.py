@@ -22,11 +22,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CurrentSubscription:
-    """The user's active subscription. ``None`` (not this object) = no plan.
-
-    NAS guarantees a present ``current`` has ``tier_id`` / ``tier_name`` /
-    ``monthly_credits`` / ``cycle_ends_at`` set; the rest are optional.
-    """
+    """Active subscription (``None``, not this object, = no plan). NAS guarantees ``tier_id`` /
+    ``tier_name`` / ``monthly_credits`` / ``cycle_ends_at`` are set; the rest are optional."""
 
     tier_id: Optional[str] = None
     tier_name: Optional[str] = None
@@ -41,12 +38,9 @@ class CurrentSubscription:
 
 @dataclass(frozen=True)
 class SubscriptionTier:
-    """One row of the tier picker (mirrors NAS ``SubscriptionTierOption``).
-
-    ``is_current`` = active plan (shown, not selectable); ``is_enabled=False`` = a
-    grandfathered tier the user is on but can no longer select. ``tier_order`` sorts
-    the picker and drives the upgrade-vs-downgrade hint.
-    """
+    """Tier-picker row (NAS ``SubscriptionTierOption``). ``is_current`` = active plan (shown, not
+    selectable); ``is_enabled=False`` = grandfathered, no longer selectable; ``tier_order`` sorts
+    the picker and drives the upgrade-vs-downgrade hint."""
 
     tier_id: str
     name: str
@@ -59,12 +53,9 @@ class SubscriptionTier:
 
 @dataclass(frozen=True)
 class SubscriptionChangePreview:
-    """Parsed ``POST /api/billing/subscription/preview``.
-
-    ``effect``: ``charge_now`` (upgrade; ``amount_due_now_cents`` is the prorated
-    charge) · ``scheduled`` (downgrade / same-price change at ``effective_at``) ·
-    ``no_op`` (already on target) · ``blocked`` (commit refused; ``reason`` says why).
-    """
+    """Parsed ``POST /api/billing/subscription/preview``. ``effect``: ``charge_now`` (upgrade; prorated
+    ``amount_due_now_cents``) · ``scheduled`` (downgrade / same-price change at ``effective_at``) ·
+    ``no_op`` (already on target) · ``blocked`` (commit refused; ``reason`` says why)."""
 
     effect: str
     reason: Optional[str] = None
@@ -99,9 +90,7 @@ class SubscriptionState(OrgRoleCapability):
 
 def _tier_id(raw: Any) -> Optional[str]:
     """Real tier id of a NAS dict, else None ("no plan" is ``current: null``; junk is skipped)."""
-    if not isinstance(raw, dict):
-        return None
-    return raw.get("tierId") or raw.get("id") or None
+    return (raw.get("tierId") or raw.get("id") or None) if isinstance(raw, dict) else None
 
 
 def _parse_current(raw: Any) -> Optional[CurrentSubscription]:
@@ -122,8 +111,7 @@ def _parse_current(raw: Any) -> Optional[CurrentSubscription]:
 
 
 def _coalesce(*vals: Any) -> Any:
-    """First non-``None`` value. NAS sends ``0`` for the free tier's ``tierOrder`` /
-    ``dollarsPerMonth``, which a plain ``x or default`` would drop."""
+    """First non-``None`` value (NAS sends ``0`` for the free tier, which ``x or default`` would drop)."""
     return next((v for v in vals if v is not None), None)
 
 
@@ -186,9 +174,7 @@ def subscription_state_from_payload(
 
 def build_subscription_state(*, timeout: float = 15.0) -> SubscriptionState:
     """Fetch + parse ``GET /api/billing/subscription``; fail-open like ``fetch_portal_state``.
-
-    ``HERMES_DEV_SUBSCRIPTION_FIXTURE`` short-circuits to a fixture so every state is testable offline.
-    """
+    ``HERMES_DEV_SUBSCRIPTION_FIXTURE`` short-circuits to a fixture so every state is testable offline."""
     fixture = dev_fixture_subscription_state()
     if fixture is not None:
         return fixture
@@ -204,20 +190,17 @@ def build_subscription_state(*, timeout: float = 15.0) -> SubscriptionState:
 
 
 def subscription_manage_url(state: SubscriptionState, tier_id: Optional[str] = None) -> Optional[str]:
-    """Build ``{portal_origin}/manage-subscription?org_id=<id>[&plan=<tier_id>]``.
+    """Build ``{portal_origin}/manage-subscription?org_id=<id>[&plan=<tier_id>]`` (None if unresolvable).
 
-    Mirrors the TUI's ``buildManageUrl``: the target is NAS's OWN ``/manage-subscription``
-    page (NOT the Stripe Billing Portal), which routes upgrade→Checkout / downgrade→scheduled.
-    ``org_id`` pins the account in multi-org situations; ``tier_id`` (the stable ``tiers[]``
-    id, never a name/slug) preselects the plan — the portal ignores an unknown tier, so it's
-    appended unconditionally. None when no portal URL is resolvable.
+    Mirrors the TUI's ``buildManageUrl``: the target is NAS's OWN ``/manage-subscription`` page
+    (NOT the Stripe Billing Portal). ``org_id`` pins the account in multi-org situations; ``tier_id``
+    (the stable ``tiers[]`` id, never a name/slug) preselects the plan — the portal ignores an
+    unknown tier, so it's appended unconditionally.
     """
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-    if not state.portal_url:
-        return None
     try:
-        parts = urlsplit(state.portal_url)
+        parts = urlsplit(state.portal_url or "")
     except Exception:
         return None
     if parts.scheme not in ("http", "https") or not parts.netloc:
@@ -239,8 +222,7 @@ def subscription_manage_url(state: SubscriptionState, tier_id: Optional[str] = N
 
 
 def selectable_tiers(state: SubscriptionState) -> list[SubscriptionTier]:
-    """Enabled paid tiers other than the current plan, cheapest first (``tier_order > 0``
-    — dropping to free is a cancellation, not a plan pick)."""
+    """Enabled paid tiers other than the current plan, cheapest first (dropping to free is a cancellation)."""
     return sorted(
         (t for t in (state.tiers or ()) if t.is_enabled and not t.is_current and (t.tier_order or 0) > 0),
         key=lambda t: t.tier_order or 0,
@@ -248,8 +230,7 @@ def selectable_tiers(state: SubscriptionState) -> list[SubscriptionTier]:
 
 
 def format_tier_row(tier: SubscriptionTier) -> str:
-    """``name · $X/mo[ · $Y credits/mo]`` — thousands-grouped money (mirrors the TUI
-    Free rows); the credits suffix appears ONLY when monthly credits are present and > 0."""
+    """``name · $X/mo[ · $Y credits/mo]`` (grouped money, like the TUI); credits suffix only when > 0."""
     row = f"{tier.name} · {format_money(tier.dollars_per_month, grouped=True)}/mo"
     mc = tier.monthly_credits
     if mc is not None and mc > 0:
@@ -263,10 +244,7 @@ def is_upgrade(state: SubscriptionState, tier_id: str) -> bool:
     tiers = state.tiers or ()
     orders = {t.tier_id: (t.tier_order or 0) for t in tiers}
     cur_id = state.current.tier_id if state.current else None
-    if cur_id is not None and cur_id in orders:
-        cur_order = orders[cur_id]
-    else:
-        cur_order = next((t.tier_order or 0 for t in tiers if t.is_current), 0)
+    cur_order = orders[cur_id] if cur_id in orders else next((t.tier_order or 0 for t in tiers if t.is_current), 0)
     return orders.get(tier_id, 0) > cur_order
 
 
@@ -280,10 +258,7 @@ _DEV_FIXTURE_ALIASES = {"logged_out": "logged-out", "loggedout": "logged-out", "
 
 
 def _dev_current(**over: Any) -> CurrentSubscription:
-    base: dict[str, Any] = dict(
-        tier_id="plus", tier_name="Plus", monthly_credits=Decimal("1000"),
-        credits_remaining=Decimal("420"), cycle_ends_at="2026-07-01",
-    )
+    base = dict(tier_id="plus", tier_name="Plus", monthly_credits=Decimal("1000"), credits_remaining=Decimal("420"), cycle_ends_at="2026-07-01")
     return CurrentSubscription(**{**base, **over})
 
 
@@ -299,11 +274,8 @@ def _dev_tiers(current_id: Optional[str]) -> tuple[SubscriptionTier, ...]:
 
 
 def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
-    """``HERMES_DEV_SUBSCRIPTION_FIXTURE`` -> fixture :class:`SubscriptionState`; None when unset.
-
-    ``free | mid | top | not-admin | downgrade | cancel | team | logged-out``. Unknown
-    name → logged-out with ``error`` so the misconfiguration is visible.
-    """
+    """``HERMES_DEV_SUBSCRIPTION_FIXTURE`` (``free | mid | top | not-admin | downgrade | cancel | team |
+    logged-out``) -> fixture state; None when unset; unknown name → logged-out with ``error`` set."""
     name = (os.getenv("HERMES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
     if not name:
         return None
