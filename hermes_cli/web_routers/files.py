@@ -1,30 +1,34 @@
 """Managed-files, chat image upload, /api/media and /api/fs dashboard routes.
 
-Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+Helpers/state that tests monkeypatch on ``web_server`` stay there and are
+reached through the late-binding seam (cycle-safe).
 """
 
+import asyncio
 import base64
 import binascii
+import contextlib
 import mimetypes
 import os
 import re
-import stat
-import tempfile
-import asyncio
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
-from fastapi import APIRouter
-from hermes_cli.web_deps import late
-from fastapi import File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
-from hermes_cli._subprocess_compat import windows_hide_flags
-from hermes_cli.web_models import ManagedFileUpload, ChatImageUpload, ManagedDirectoryCreate, ManagedFileDelete, FsWriteText
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+
+from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli.web_deps import late
+from hermes_cli.web_models import (
+    ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
+)
 
 router = APIRouter()
 
@@ -38,114 +42,48 @@ get_hermes_home = late("get_hermes_home")
 load_config = late("load_config")
 
 
-# Image MIME types this endpoint will serve. Extension-allowlisted so an
-# authenticated caller can't pull non-image files through it.
+# Image types GET /api/media serves — extension-allowlisted so an authenticated
+# caller can't pull non-image files through it.
 _MEDIA_CONTENT_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-    ".bmp": "image/bmp",
-    ".ico": "image/x-icon",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
 }
-
-
 _MEDIA_MAX_BYTES = 25 * 1024 * 1024
 
-
-_STREAMABLE_MEDIA_EXTENSIONS = frozenset(
-    {
-        ".avi",
-        ".flac",
-        ".m4a",
-        ".mkv",
-        ".mov",
-        ".mp3",
-        ".mp4",
-        ".ogg",
-        ".opus",
-        ".wav",
-        ".webm",
-    }
-)
-
+_STREAMABLE_MEDIA_EXTENSIONS = frozenset({
+    ".avi", ".flac", ".m4a", ".mkv", ".mov", ".mp3", ".mp4", ".ogg", ".opus", ".wav", ".webm",
+})
 
 _FS_READDIR_HIDDEN = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".cache",
-    ".next",
-    ".turbo",
-    ".venv",
-    "__pycache__",
-    "build",
-    "dist",
-    "node_modules",
-    "target",
-    "venv",
+    ".git", ".hg", ".svn", ".cache", ".next", ".turbo", ".venv", "__pycache__",
+    "build", "dist", "node_modules", "target", "venv",
 }
 
-
-# Filenames that must never be listed, read, or downloaded through the
-# managed-files API.  These typically contain credentials (API keys, tokens)
-# and exposing them through the dashboard file browser is a security leak —
-# see issue #57505. The set mirrors the credential-file basenames of the two
-# canonical credential guards elsewhere in the codebase
-# (agent.file_safety.get_read_block_error and
-# gateway.platforms.base._ROOT_CREDENTIAL_FILES) so the dashboard Files tab
-# doesn't lag behind them — an operator can point the managed root at
-# HERMES_HOME itself, at which point every one of these basenames is a live
-# secret store sitting in the browsable tree.
+# Basenames the managed-files API must never list, read or download: credential
+# stores that become live secrets in the browsable tree the moment an operator
+# points the managed root at HERMES_HOME. Mirrors the two canonical guards
+# (agent.file_safety.get_read_block_error, gateway.platforms.base
+# ._ROOT_CREDENTIAL_FILES) so the Files tab never lags behind them.
 _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
-    "auth.json",
-    "auth.lock",
-    "credentials",
-    "config.yaml",
-    ".anthropic_oauth.json",
-    "google_token.json",
-    "google_oauth_pending.json",
-    "google_oauth.json",
-    "webhook_subscriptions.json",
-    "bws_cache.json",
-    "bws_cache.enc.json",
-    # git's credential-store helper cache (agent.file_safety blocks this too).
-    ".git-credentials",
+    "auth.json", "auth.lock", "credentials", "config.yaml", ".anthropic_oauth.json",
+    "google_token.json", "google_oauth_pending.json", "google_oauth.json",
+    "webhook_subscriptions.json", "bws_cache.json", "bws_cache.enc.json",
+    ".git-credentials",  # git's credential-store cache (file_safety blocks it too)
 })
 
-
-# Directory names whose entire subtree is credential material. Both canonical
-# guards deny these as directory trees, not basenames:
-#   * gateway.platforms.base._ROOT_CREDENTIAL_DIRS = {"pairing", "mcp-tokens"}
-#   * agent.file_safety.get_read_block_error (mcp-tokens/ prefix match)
-# The managed-files API lets the browser descend into subdirs, so a
-# basename-only guard would still expose e.g. ``mcp-tokens/<server>.json``
-# (live MCP OAuth tokens) and ``pairing/<x>``. We match on ANY path component
-# so these trees are blocked wherever they appear under the browsable root,
-# without needing to resolve them relative to HERMES_HOME.
-_SENSITIVE_MANAGED_DIR_NAMES = frozenset({
-    "mcp-tokens",
-    "pairing",
-})
+# Directory names whose whole subtree is credential material (the canonical
+# guards deny these as trees: _ROOT_CREDENTIAL_DIRS and the mcp-tokens/ prefix
+# match). The browser can descend into subdirs, so a basename-only guard would
+# still expose ``mcp-tokens/<server>.json``; match on ANY path component so the
+# trees are blocked wherever they sit under the root, no HERMES_HOME resolution.
+_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
 
 
 def _is_sensitive_filename(name: str) -> bool:
-    """Return True for a basename the managed-files API must never expose.
-
-    Covers ``.env`` / ``.env.<suffix>`` / ``.envrc`` variants plus the
-    canonical Hermes credential-store basenames (see
-    ``_SENSITIVE_MANAGED_FILE_BASENAMES`` above).
-
-    Case-insensitive so ``.ENV`` / ``.Env.local`` / ``Auth.JSON`` on
-    case-insensitive filesystems (macOS/Windows mounts) can't slip past
-    the guard.
-
-    Basename-only: for the directory-tree credential stores
-    (``mcp-tokens/``, ``pairing/``) that the canonical guards also deny,
-    use :func:`_is_sensitive_path`, which the API call sites route through.
-    """
+    """Basename denylist: ``.env`` / ``.env.<suffix>`` / ``.envrc`` plus the
+    credential-store basenames. Case-insensitive so ``.ENV`` / ``Auth.JSON``
+    on case-insensitive mounts can't slip past. Basename-only — call sites use
+    :func:`_is_sensitive_path`, which adds the credential-directory check."""
     lowered = name.lower()
     if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
         return True
@@ -153,94 +91,35 @@ def _is_sensitive_filename(name: str) -> bool:
 
 
 def _is_sensitive_path(path: Path) -> bool:
-    """Return True for any path the managed-files API must never expose.
-
-    Combines the basename denylist (:func:`_is_sensitive_filename`) with a
-    credential-directory-tree check: a path is sensitive if its own basename
-    is sensitive OR any of its path components is a credential directory
-    (``mcp-tokens`` / ``pairing``). The component match is case-insensitive
-    and needs no HERMES_HOME resolution, so it blocks these trees wherever
-    they sit under the operator-configured managed root — closing the gap
-    the canonical guards cover as directory trees but a basename-only check
-    would miss.
-
-    Read-side only: this guards list/read/download (the #57505 exfil surface).
-    The write endpoints (upload/mkdir/delete) are a separate threat class
-    handled by the write-path checks; extending this guard to them is out of
-    scope for this fix.
-    """
+    """True when the basename is sensitive OR any path component (case-
+    insensitive) is a credential directory. Read-side guard (list/read/
+    download); the write endpoints are a separate threat class."""
     if _is_sensitive_filename(path.name):
         return True
     return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)
 
 
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
-
-
 _FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
-
-
-# Upper bound for the in-app spot editor's save. The editor only opens
-# non-truncated text (<= the preview cap), so this is a safety ceiling against
-# a pasted-in megablob, not the expected payload size.
+# Spot-editor save ceiling: the editor only opens non-truncated text (<= the
+# preview cap), so this guards against a pasted megablob, not expected payloads.
 _FS_TEXT_WRITE_MAX_BYTES = 8 * 1024 * 1024
 
-
 _FS_PREVIEW_LANGUAGE_BY_EXT = {
-    ".c": "c",
-    ".conf": "ini",
-    ".cpp": "cpp",
-    ".css": "css",
-    ".csv": "csv",
-    ".go": "go",
-    ".graphql": "graphql",
-    ".h": "c",
-    ".hpp": "cpp",
-    ".html": "html",
-    ".java": "java",
-    ".js": "javascript",
-    ".json": "json",
-    ".jsx": "jsx",
-    ".kt": "kotlin",
-    ".lua": "lua",
-    ".md": "markdown",
-    ".mjs": "javascript",
-    ".py": "python",
-    ".rb": "ruby",
-    ".rs": "rust",
-    ".sh": "shell",
-    ".sql": "sql",
-    ".svg": "xml",
-    ".toml": "toml",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".txt": "text",
-    ".xml": "xml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".zsh": "shell",
+    ".c": "c", ".conf": "ini", ".cpp": "cpp", ".css": "css", ".csv": "csv", ".go": "go",
+    ".graphql": "graphql", ".h": "c", ".hpp": "cpp", ".html": "html", ".java": "java",
+    ".js": "javascript", ".json": "json", ".jsx": "jsx", ".kt": "kotlin", ".lua": "lua",
+    ".md": "markdown", ".mjs": "javascript", ".py": "python", ".rb": "ruby", ".rs": "rust",
+    ".sh": "shell", ".sql": "sql", ".svg": "xml", ".toml": "toml", ".ts": "typescript",
+    ".tsx": "tsx", ".txt": "text", ".xml": "xml", ".yaml": "yaml", ".yml": "yaml", ".zsh": "shell",
 }
 
-
 _FS_MIME_TYPES = {
-    ".avi": "video/x-msvideo",
-    ".bmp": "image/bmp",
-    ".flac": "audio/flac",
-    ".gif": "image/gif",
-    ".jpeg": "image/jpeg",
-    ".jpg": "image/jpeg",
-    ".m4a": "audio/mp4",
-    ".mkv": "video/x-matroska",
-    ".mov": "video/quicktime",
-    ".mp3": "audio/mpeg",
-    ".mp4": "video/mp4",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg; codecs=opus",
-    ".png": "image/png",
-    ".svg": "image/svg+xml",
-    ".wav": "audio/wav",
-    ".webm": "video/webm",
-    ".webp": "image/webp",
+    ".avi": "video/x-msvideo", ".bmp": "image/bmp", ".flac": "audio/flac", ".gif": "image/gif",
+    ".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".m4a": "audio/mp4", ".mkv": "video/x-matroska",
+    ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".ogg": "audio/ogg",
+    ".opus": "audio/ogg; codecs=opus", ".png": "image/png", ".svg": "image/svg+xml",
+    ".wav": "audio/wav", ".webm": "video/webm", ".webp": "image/webp",
 }
 
 
@@ -261,13 +140,22 @@ def _fs_looks_binary(data: bytes) -> bool:
     return suspicious / len(data) > 0.12
 
 
+@contextlib.contextmanager
+def _io_errors(denied: str, failed: str):
+    """PermissionError -> 403 ``denied``; other OSError -> 500 ``"<failed>: <exc>"``."""
+    try:
+        yield
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=denied)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"{failed}: {exc}")
+
+
 def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
     target = _fs_path(str(path))
     try:
         st = target.stat()
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found")
-    except NotADirectoryError:
+    except (FileNotFoundError, NotADirectoryError):
         raise HTTPException(status_code=404, detail="File not found")
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not readable")
@@ -278,6 +166,19 @@ def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
     if not stat.S_ISREG(st.st_mode):
         raise HTTPException(status_code=400, detail="Only regular files can be read")
     return target, st
+
+
+def _fs_read_bytes(target: Path, limit: Optional[int] = None) -> bytes:
+    """Read (a prefix of) ``target``; 403/400 on failure."""
+    try:
+        if limit is None:
+            return target.read_bytes()
+        with target.open("rb") as handle:
+            return handle.read(limit)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="File is not readable")
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "File read failed")
 
 
 def _fs_find_git_root(start: Path) -> str | None:
@@ -310,36 +211,22 @@ def _fs_default_cwd() -> str:
 
 def _fs_git_branch(cwd: str) -> str:
     try:
-        run_kwargs: Dict[str, Any] = {
-            "capture_output": True,
-            "text": True,
-            "timeout": 2,
-            "check": False,
-        }
+        run_kwargs: Dict[str, Any] = {"capture_output": True, "text": True, "timeout": 2, "check": False}
         if sys.platform == "win32":
             run_kwargs["creationflags"] = windows_hide_flags()
-        result = subprocess.run(
-            ["git", "-C", cwd, "branch", "--show-current"],
-            **run_kwargs,
-        )
+        result = subprocess.run(["git", "-C", cwd, "branch", "--show-current"], **run_kwargs)
         return result.stdout.strip() if result.returncode == 0 else ""
     except Exception:
         return ""
 
 
 def _media_serve_roots() -> list[Path]:
-    """Directories ``GET /api/media`` is allowed to read from.
-
-    Confined to where the agent and attach pipeline actually write media on the
-    gateway host — its images dir and cache subtree. This stops an authenticated
-    client from reading image-extension files anywhere on disk (e.g. a renamed
-    key or a screenshot outside the cache) merely because the suffix passes the
-    allowlist.
-    """
+    """Directories GET /api/media may read: where the agent and attach pipeline
+    actually write media (images, screenshots, cache). Stops an authenticated
+    client reading image-suffixed files anywhere else on disk."""
     home = get_hermes_home()
-    roots = [home / "images", home / "screenshots", home / "cache"]
     out: list[Path] = []
-    for root in roots:
+    for root in (home / "images", home / "screenshots", home / "cache"):
         try:
             out.append(root.resolve())
         except (OSError, RuntimeError):
@@ -349,16 +236,9 @@ def _media_serve_roots() -> list[Path]:
 
 @router.get("/api/media")
 async def get_media(path: str):
-    """Return a gateway-local image file as a base64 data URL.
-
-    Lets remote clients (the desktop app over the network, or the web dashboard
-    in a browser) display images the agent wrote to *this* machine's filesystem
-    — they can't read the gateway's local disk directly.
-
-    Auth-gated by the session token like every other /api route. Restricted to
-    an image-extension allowlist, a size cap, AND the gateway's own media roots
-    (resolved, symlink-safe) so it can't be used to read arbitrary files.
-    """
+    """Return a gateway-local image as a base64 data URL for remote clients
+    that can't read this machine's disk. Auth-gated; restricted to the image
+    allowlist, a size cap AND the resolved (symlink-safe) media roots."""
     try:
         target = Path(path).expanduser().resolve()
     except (OSError, RuntimeError):
@@ -366,11 +246,9 @@ async def get_media(path: str):
 
     if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported media type")
-
     roots = _media_serve_roots()
     if not any(target == root or root in target.parents for root in roots):
         raise HTTPException(status_code=403, detail="Path outside media roots")
-
     if not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     if target.stat().st_size > _MEDIA_MAX_BYTES:
@@ -378,15 +256,6 @@ async def get_media(path: str):
 
     encoded = base64.b64encode(target.read_bytes()).decode("ascii")
     return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
-
-
-def _local_dashboard_request(request: Request) -> bool:
-    if getattr(request.app.state, "auth_required", False):
-        return False
-    host = (request.url.hostname or "").lower()
-    client_host = (request.client.host if request.client else "").lower()
-    local_hosts = {"", "localhost", "127.0.0.1", "::1", "testserver", "testclient"}
-    return host in local_hosts or client_host in local_hosts
 
 
 def _decode_data_url(data_url: str) -> tuple[bytes, str]:
@@ -408,25 +277,17 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
 
 
 _CHAT_IMAGE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
-
-
 _CHAT_IMAGE_ALLOWED_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
-
-
 _CHAT_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"),
-    (b"BM", ".bmp"),
+    (b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"), (b"GIF89a", ".gif"), (b"BM", ".bmp"),
 )
 
 
 def _sanitize_chat_image_filename(filename: str | None) -> str:
     candidate = Path(str(filename or "").strip()).name
     candidate = re.sub(r"[\x00-\x1f]+", "_", candidate)
-    candidate = candidate.strip().strip(".")
-    return candidate or "pasted-image"
+    return candidate.strip().strip(".") or "pasted-image"
 
 
 def _chat_image_extension(data: bytes) -> str | None:
@@ -446,7 +307,6 @@ def _decode_chat_image_upload(payload: ChatImageUpload) -> tuple[bytes, str, str
     if len(data) > _CHAT_IMAGE_UPLOAD_MAX_BYTES:
         mb = _CHAT_IMAGE_UPLOAD_MAX_BYTES // (1024 * 1024)
         raise HTTPException(status_code=413, detail=f"Image is too large; cap is {mb} MB")
-
     ext = _chat_image_extension(data)
     if ext not in _CHAT_IMAGE_ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported image type")
@@ -455,38 +315,26 @@ def _decode_chat_image_upload(payload: ChatImageUpload) -> tuple[bytes, str, str
 
 @router.post("/api/chat/image-upload")
 async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = None):
-    """Persist a browser-provided chat image where the embedded TUI can read it.
+    """Persist a browser clipboard image where the embedded TUI can read it.
 
-    The dashboard /chat page runs Hermes inside an xterm.js PTY. Browser
-    clipboard image bytes are not visible to the server-side clipboard, so the
-    page uploads them here, then drives the TUI's ``/image <path>`` command
-    with the returned gateway-visible path. Files land under
-    ``HERMES_HOME/images/`` — the same directory ``clipboard.paste`` /
-    ``image.attach`` already use.
+    Browser clipboard bytes aren't visible to the server-side clipboard, so the
+    /chat page uploads them here and drives the TUI's ``/image <path>`` with
+    the returned gateway-visible path under ``HERMES_HOME/images/`` (the same
+    dir ``clipboard.paste`` / ``image.attach`` use).
     """
     def _run():
         data, mime_type, ext = _decode_chat_image_upload(payload)
         with _profile_scope(profile) as scoped_home:
-            home = scoped_home or get_hermes_home()
-            img_dir = Path(home) / "images"
-            try:
+            img_dir = Path(scoped_home or get_hermes_home()) / "images"
+            with _io_errors("Image directory is not writable", "Could not create image directory"):
                 img_dir.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Image directory is not writable")
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not create image directory: {exc}")
 
             stem = Path(_sanitize_chat_image_filename(payload.filename)).stem or "pasted-image"
             stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-") or "pasted-image"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             target = img_dir / f"dashboard_{ts}_{secrets.token_hex(4)}_{stem}{ext}"
-
-            try:
+            with _io_errors("Image directory is not writable", "Could not write image"):
                 target.write_bytes(data)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Image directory is not writable")
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not write image: {exc}")
 
         return {
             "ok": True,
@@ -496,9 +344,9 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
             "mime_type": mime_type,
         }
 
-    # _profile_scope acquires _SKILLS_PROFILE_LOCK and the body does file I/O —
-    # keep both off the event loop (asyncio.to_thread copies the contextvar
-    # context, so the profile override stays scoped to the worker thread).
+    # _profile_scope takes _SKILLS_PROFILE_LOCK and the body does file I/O — both
+    # off the loop; to_thread copies the contextvar context so the override
+    # stays scoped to the worker thread.
     return await asyncio.to_thread(_run)
 
 
@@ -510,33 +358,25 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
-    try:
-        with os.scandir(target) as scan:
-            entries = [
-                _managed_file_entry(policy, Path(entry.path))
-                for entry in scan
-                if not _is_sensitive_path(Path(entry.path))
-            ]
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Directory is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read directory: {exc}")
+    with _io_errors("Directory is not readable", "Could not read directory"), os.scandir(target) as scan:
+        entries = [
+            _managed_file_entry(policy, Path(entry.path))
+            for entry in scan
+            if not _is_sensitive_path(Path(entry.path))
+        ]
 
     entries.sort(key=lambda item: (not item["is_directory"], str(item["name"]).lower()))
     locked_root = policy.locked_root
     parent = None
     if target.parent != target and (locked_root is None or target != locked_root):
         parent = str(target.parent)
-    return {
-        "path": display_path,
-        "parent": parent,
-        "entries": entries,
-        **_managed_response_meta(policy),
-    }
+    return {"path": display_path, "parent": parent, "entries": entries, **_managed_response_meta(policy)}
 
 
-@router.get("/api/files/read")
-async def read_managed_file(request: Request, path: str):
+def _managed_readable_file(request: Request, path: str) -> tuple[Any, Path, str, int, str]:
+    """Resolve + guard a managed file for reading: existence, regular file,
+    sensitive-path denylist, size cap. Returns (policy, target, display_path,
+    size, mime_type)."""
     from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
     policy, target, display_path = _resolve_managed_path(path, request)
     if not target.exists():
@@ -545,22 +385,26 @@ async def read_managed_file(request: Request, path: str):
         raise HTTPException(status_code=400, detail="Path is not a file")
     if _is_sensitive_path(target):
         raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return policy, target, display_path, _MANAGED_FILE_MAX_BYTES, mime_type
 
+
+def _managed_file_size(target: Path, max_bytes: int) -> int:
     try:
         size = target.stat().st_size
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
-    if size > _MANAGED_FILE_MAX_BYTES:
+    if size > max_bytes:
         raise HTTPException(status_code=413, detail="File is too large")
+    return size
 
-    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    try:
+
+@router.get("/api/files/read")
+async def read_managed_file(request: Request, path: str):
+    policy, target, display_path, max_bytes, mime_type = _managed_readable_file(request, path)
+    size = _managed_file_size(target, max_bytes)
+    with _io_errors("File is not readable", "Could not read file"):
         encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
-
     return {
         "name": target.name,
         "path": display_path,
@@ -578,27 +422,11 @@ def _managed_file_response(
     content_disposition_type: str,
     media_only: bool = False,
 ) -> FileResponse:
-    """Build a range-aware response after applying managed-file policy."""
-    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES
-    policy, target, _display_path = _resolve_managed_path(path, request)
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    if not target.is_file():
-        raise HTTPException(status_code=400, detail="Path is not a file")
-    if _is_sensitive_path(target):
-        raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
+    """Range-aware response after applying managed-file policy."""
+    _policy, target, _display_path, max_bytes, mime_type = _managed_readable_file(request, path)
     if media_only and target.suffix.lower() not in _STREAMABLE_MEDIA_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Unsupported media type")
-
-    try:
-        size = target.stat().st_size
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
-    if size > _MANAGED_FILE_MAX_BYTES:
-        raise HTTPException(status_code=413, detail="File is too large")
-
-    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-
+    _managed_file_size(target, max_bytes)
     return FileResponse(
         path=str(target),
         media_type=mime_type,
@@ -612,16 +440,11 @@ def _managed_file_response(
 async def download_managed_file(request: Request, path: str):
     """Stream a managed file as an attachment download.
 
-    Remote clients (desktop app, browser dashboard) open agent-written files
-    that live on *this* gateway's disk, not theirs. Auth-gated like every other
-    managed-files route — ``auth_middleware`` additionally accepts the session
-    token as a ``?token=`` query param here so a shell/browser-opened download
-    (which can't set the session header) still authenticates. See ``/api/pty``
-    for the same query-token precedent. Chromium identifies ``<audio>`` and
-    ``<video>`` subresource requests through ``Sec-Fetch-Dest``; serve those
-    inline for compatibility with Desktop builds that still use this route as
-    their player source, while preserving attachment semantics for ordinary
-    link/document requests.
+    ``auth_middleware`` also accepts the session token as ``?token=`` here so a
+    shell/browser-opened download (no session header) still authenticates.
+    Chromium marks ``<audio>``/``<video>`` subresource requests via
+    ``Sec-Fetch-Dest``; those are served inline for Desktop builds that still
+    use this route as their player source, attachment semantics otherwise.
     """
     fetch_destination = request.headers.get("sec-fetch-dest", "").lower()
     is_media_subresource = fetch_destination in {"audio", "video"}
@@ -636,39 +459,23 @@ async def download_managed_file(request: Request, path: str):
 @router.get("/api/files/stream")
 @router.head("/api/files/stream")
 async def stream_managed_file(request: Request, path: str):
-    """Stream managed audio/video inline with HTTP Range support.
-
-    Electron's Chromium media pipeline may reject an attachment response used
-    as an ``<audio>`` or ``<video>`` source. This route shares the download
-    endpoint's authentication, size cap, sensitive-file guard, MIME detection,
-    and Starlette ``FileResponse`` range handling, but explicitly marks the
-    response inline so metadata loading, playback, and seeking work remotely.
-    """
-    return _managed_file_response(
-        request,
-        path,
-        content_disposition_type="inline",
-        media_only=True,
-    )
+    """Stream managed audio/video inline with HTTP Range support — Electron's
+    media pipeline may reject an attachment response as an ``<audio>``/
+    ``<video>`` source. Same auth, size cap, sensitive guard and MIME detection
+    as download."""
+    return _managed_file_response(request, path, content_disposition_type="inline", media_only=True)
 
 
-@router.post("/api/files/upload")
-async def upload_managed_file(payload: ManagedFileUpload, request: Request):
-    policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
+def _managed_write_target(path: str, request: Request, overwrite: bool):
+    policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
     if target.exists() and target.is_dir():
         raise HTTPException(status_code=409, detail="A directory already exists at that path")
-    if target.exists() and not payload.overwrite:
+    if target.exists() and not overwrite:
         raise HTTPException(status_code=409, detail="File already exists")
+    return policy, target, display_path
 
-    data, _mime_type = _decode_data_url(payload.data_url)
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
 
+def _managed_write_result(policy, target: Path, display_path: str) -> dict:
     return {
         "ok": True,
         "entry": _managed_file_entry(policy, target),
@@ -677,32 +484,34 @@ async def upload_managed_file(payload: ManagedFileUpload, request: Request):
     }
 
 
-@router.post("/api/files/upload-stream")
-async def upload_managed_file_stream(
-    request: Request,
-    file: UploadFile = File(...),
-    path: str = Form(...),
-    overwrite: bool = Form(True),
-):
-    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
-    policy, target, display_path = _resolve_managed_path(path, request, for_write=True)
-    if target.exists() and target.is_dir():
-        raise HTTPException(status_code=409, detail="A directory already exists at that path")
-    if target.exists() and not overwrite:
-        raise HTTPException(status_code=409, detail="File already exists")
-
-    try:
+@router.post("/api/files/upload")
+async def upload_managed_file(payload: ManagedFileUpload, request: Request):
+    policy, target, display_path = _managed_write_target(payload.path, request, payload.overwrite)
+    data, _mime_type = _decode_data_url(payload.data_url)
+    with _io_errors("File is not writable", "Could not write file"):
         target.parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create parent directory: {exc}")
+        target.write_bytes(data)
+    return _managed_write_result(policy, target, display_path)
 
-    # Write to a sibling temp file first so a partial/aborted upload never
-    # clobbers an existing file, then atomically rename into place.
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{target.name}.", suffix=".upload", dir=str(target.parent)
-    )
+
+async def stream_upload_to_path(
+    file: UploadFile,
+    target: Path,
+    *,
+    too_large: str,
+    not_writable: str,
+    write_failed: str,
+) -> int:
+    """Stream a multipart upload to ``target`` in chunks; returns bytes written.
+
+    Writes a sibling temp file first so a partial/aborted upload never clobbers
+    an existing file, enforces ``_MANAGED_FILE_MAX_BYTES`` as it goes (413
+    ``too_large``), then atomically renames into place. The temp file is
+    removed on EVERY non-success exit — including asyncio.CancelledError when a
+    browser aborts a large upload mid-stream.
+    """
+    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".upload", dir=str(target.parent))
     tmp_path = Path(tmp_name)
     total = 0
     renamed = False
@@ -714,32 +523,40 @@ async def upload_managed_file_stream(
                     break
                 total += len(chunk)
                 if total > _MANAGED_FILE_MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="File is too large")
+                    raise HTTPException(status_code=413, detail=too_large)
                 out.write(chunk)
         os.replace(tmp_path, target)
         renamed = True
-    except HTTPException:
-        raise
     except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not writable")
+        raise HTTPException(status_code=403, detail=not_writable)
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
+        raise HTTPException(status_code=500, detail=f"{write_failed}: {exc}")
     finally:
-        # Clean up the temp file on every non-success exit, including
-        # BaseException paths the `except` clauses above don't catch — most
-        # importantly asyncio.CancelledError when a browser aborts a large
-        # upload mid-stream (the exact NS-501 scenario). os.replace clears
-        # tmp_path on success, so only unlink when the rename didn't happen.
         if not renamed:
             tmp_path.unlink(missing_ok=True)
         await file.close()
+    return total
 
-    return {
-        "ok": True,
-        "entry": _managed_file_entry(policy, target),
-        "path": display_path,
-        **_managed_response_meta(policy),
-    }
+
+@router.post("/api/files/upload-stream")
+async def upload_managed_file_stream(
+    request: Request,
+    file: UploadFile = File(...),
+    path: str = Form(...),
+    overwrite: bool = Form(True),
+):
+    """Chunked multipart upload: constant memory and no base64 inflation, unlike
+    the JSON data-URL endpoint that trips proxy body-size limits on large archives."""
+    policy, target, display_path = _managed_write_target(path, request, overwrite)
+    with _io_errors("File is not writable", "Could not create parent directory"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+    await stream_upload_to_path(
+        file, target,
+        too_large="File is too large",
+        not_writable="File is not writable",
+        write_failed="Could not write file",
+    )
+    return _managed_write_result(policy, target, display_path)
 
 
 @router.post("/api/files/mkdir")
@@ -747,20 +564,9 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
     policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
     if target.exists() and not target.is_dir():
         raise HTTPException(status_code=409, detail="A file already exists at that path")
-
-    try:
+    with _io_errors("Directory is not writable", "Could not create directory"):
         target.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Directory is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create directory: {exc}")
-
-    return {
-        "ok": True,
-        "entry": _managed_file_entry(policy, target),
-        "path": display_path,
-        **_managed_response_meta(policy),
-    }
+    return _managed_write_result(policy, target, display_path)
 
 
 @router.delete("/api/files")
@@ -784,8 +590,14 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
     except OSError as exc:
         status_code = 409 if target.is_dir() and not payload.recursive else 500
         raise HTTPException(status_code=status_code, detail=f"Could not delete path: {exc}")
-
     return {"ok": True, "path": display_path, **_managed_response_meta(policy)}
+
+
+_FS_LIST_ERRNO = (
+    (FileNotFoundError, "ENOENT"),
+    (NotADirectoryError, "ENOTDIR"),
+    (PermissionError, "EACCES"),
+)
 
 
 @router.get("/api/fs/list")
@@ -804,13 +616,10 @@ async def fs_list(path: str):
                 })
         entries.sort(key=lambda item: (not item["isDirectory"], item["name"].lower(), item["name"]))
         return {"entries": entries}
-    except FileNotFoundError:
-        return {"entries": [], "error": "ENOENT"}
-    except NotADirectoryError:
-        return {"entries": [], "error": "ENOTDIR"}
-    except PermissionError:
-        return {"entries": [], "error": "EACCES"}
     except OSError as exc:
+        for exc_type, code in _FS_LIST_ERRNO:
+            if isinstance(exc, exc_type):
+                return {"entries": [], "error": code}
         return {"entries": [], "error": getattr(exc, "strerror", None) or "read-error"}
 
 
@@ -819,14 +628,7 @@ async def fs_read_text(path: str):
     target, st = _fs_regular_file(_fs_path(path))
     if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
-    bytes_to_read = min(st.st_size, _FS_TEXT_PREVIEW_MAX_BYTES)
-    try:
-        with target.open("rb") as handle:
-            data = handle.read(bytes_to_read)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail=str(exc) or "File read failed")
+    data = _fs_read_bytes(target, min(st.st_size, _FS_TEXT_PREVIEW_MAX_BYTES))
     return {
         "binary": _fs_looks_binary(data[:4096]),
         "byteSize": st.st_size,
@@ -842,13 +644,11 @@ async def fs_read_text(path: str):
 async def fs_write_text(payload: FsWriteText):
     """Overwrite (or create) a UTF-8 text file for the in-app spot editor.
 
-    Mirrors the local Electron ``hermes:fs:writeText`` hardening: the path is
-    resolved + validated by ``_fs_path``, the parent directory must already
-    exist (we never build directory trees), only regular files may be replaced,
-    and the payload is size-capped. The write is staged to a sibling temp file
-    and ``os.replace``-d into place so a crash mid-write can't truncate the
-    original. Stale-on-disk detection is the client's job (re-read before save),
-    so both transports behave identically.
+    Mirrors the Electron ``hermes:fs:writeText`` hardening: path validated by
+    ``_fs_path``, the parent must already exist (never build trees), only
+    regular files may be replaced, payload size-capped, staged to a sibling
+    temp file and ``os.replace``-d so a crash can't truncate the original.
+    Stale-on-disk detection is the client's job (re-read before save).
     """
     target = _fs_path(payload.path)
     text = payload.content or ""
@@ -881,7 +681,6 @@ async def fs_write_text(payload: FsWriteText):
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
-
     return {"ok": True, "path": str(target), "byteSize": len(text.encode("utf-8"))}
 
 
@@ -891,12 +690,7 @@ async def fs_read_data_url(path: str):
     target, st = _fs_regular_file(_fs_path(path))
     if st.st_size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
-    try:
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=400, detail=str(exc) or "File read failed")
+    encoded = base64.b64encode(_fs_read_bytes(target)).decode("ascii")
     return {"dataUrl": f"data:{_fs_mime_type(target)};base64,{encoded}"}
 
 

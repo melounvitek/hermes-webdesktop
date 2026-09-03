@@ -1,26 +1,33 @@
-"""Pairing, webhooks, gateway lifecycle, credential pool, memory provider and operations (doctor/backup/import/hooks/checkpoints) dashboard routes.
+"""Pairing, webhooks, gateway lifecycle, credential pool, memory provider and
+operations (doctor/backup/import/hooks/checkpoints) dashboard routes.
 
-Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+Helpers/state that tests monkeypatch on ``web_server`` stay there and are
+reached through the late-binding seam (cycle-safe).
 """
 
-import logging
-import re
-import tempfile
-import zipfile
 import asyncio
+import contextlib
+import logging
 import os
+import re
 import secrets
+import time
+import zipfile
 from datetime import datetime, timezone
-from fastapi import APIRouter
-from hermes_cli.web_routers._common import http_failure
-from hermes_cli.web_deps import late
-from fastapi import File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-from hermes_cli.config import redact_key
-from hermes_cli.web_models import PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle, CredentialPoolAdd, MemoryProviderSelect, MemoryReset, BackupRequest, ImportRequest, HookCreate, HookDelete
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+from hermes_cli.config import redact_key
+from hermes_cli.web_deps import late
+from hermes_cli.web_models import (
+    BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
+    MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
+)
+from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK, http_failure, spawn_profile_action
+from hermes_cli.web_routers.files import stream_upload_to_path
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
@@ -40,84 +47,61 @@ save_config = late("save_config")
 _restart_gateway_after = late("_restart_gateway_after")
 
 
-def _restart_gateway_after_webhook_enable(profile: Optional[str] = None) -> dict[str, Any]:
-    return _restart_gateway_after(profile, what="enabling webhooks", label="Webhook enable")
+def _spawn_action(argv: List[str], name: str, *, log_msg: str, prefix: str) -> dict:
+    """Spawn a dashboard-profile ``hermes <argv>`` action; spawn failure -> 500."""
+    return spawn_profile_action(None, argv, name, log_msg=log_msg, prefix=prefix)
 
 
-# ---------------------------------------------------------------------------
-# Pairing endpoints — approve / revoke / list messaging pairing codes.
-#
-# These are how a remote admin onboards messaging users (Telegram, Discord, …)
-# without shell access.  Wraps gateway.pairing.PairingStore directly.
-# ---------------------------------------------------------------------------
+# --- Pairing: how a remote admin onboards messaging users without shell access.
 
 
 def _pairing_store(profile: Optional[str] = None):
     """Pairing store for ``profile`` — the dashboard's own when unspecified.
 
-    Every other admin endpoint scopes by profile, and the gateway already
-    keeps one store per served profile (``gateway/run.py``). Without this the
-    dashboard and desktop always read the global store, so an operator on a
-    named profile approves into a whitelist their gateway never consults.
-
-    ``PairingStore`` resolves the profile's home itself (``default`` maps back
-    to the global store), so this only needs to validate the name — no
-    ``_profile_scope`` needed, and nothing process-global is swapped across
-    the ``await`` boundary.
+    The gateway keeps one store per served profile, so without scoping an
+    operator on a named profile would approve into a whitelist their gateway
+    never consults. ``PairingStore`` resolves the profile home itself
+    (``default`` maps to the global store); only the name is validated here,
+    so nothing process-global is swapped across the ``await`` boundary.
     """
     from gateway.pairing import PairingStore
 
     requested = (profile or "").strip()
     if not requested or requested.lower() == "current":
         return PairingStore()
-
     _resolve_profile_dir(requested)  # 400/404 on an unknown profile
-
     return PairingStore(profile=requested)
 
 
 @router.get("/api/pairing")
 async def list_pairing(profile: Optional[str] = None):
     store = _pairing_store(profile)
-    return {
-        "pending": store.list_pending(),
-        "approved": store.list_approved(),
-    }
+    return {"pending": store.list_pending(), "approved": store.list_approved()}
 
 
 @router.post("/api/pairing/approve")
 async def approve_pairing(body: PairingApprove):
     store = _pairing_store(body.profile)
     platform = (body.platform or "").lower().strip()
-    # `request_id` is what an admin surface sends after listing pending
-    # requests; `code` is the one-time code the user relays from their DM.
-    # A GUI that only knows the older field name still works — a value with
-    # request-id shape routes to the request path either way.
+    # `request_id` is what an admin surface sends after listing pending requests;
+    # `code` is the one-time code the user relays. A request-id-shaped value in
+    # the older `code` field still routes to the request path.
     target = (body.request_id or body.code or "").strip()
     if not platform or not target:
-        raise HTTPException(
-            status_code=400, detail="platform and request_id or code are required"
-        )
+        raise HTTPException(status_code=400, detail="platform and request_id or code are required")
 
     by_request_id = bool(body.request_id) or store.looks_like_request_id(target)
-    if by_request_id:
-        result = store.approve_request(platform, target)
-    else:
-        result = store.approve_code(platform, target.upper())
-
+    result = store.approve_request(platform, target) if by_request_id else store.approve_code(platform, target.upper())
     if result:
         return {"ok": True, "user": result}
-    # Lockout only gates the code path, so only report it there — otherwise a
-    # stale request id would surface as a bogus 429 while the platform sat
-    # locked out for an unrelated reason.
+    # Lockout only gates the code path — a stale request id must not surface
+    # as a bogus 429 while the platform is locked out for an unrelated reason.
     if not by_request_id and store._is_locked_out(platform):
         raise HTTPException(
-            status_code=429,
-            detail=f"Platform '{platform}' is locked out after too many failed approvals.",
+            status_code=429, detail=f"Platform '{platform}' is locked out after too many failed approvals.",
         )
     raise HTTPException(
-        status_code=404,
-        detail=f"Pairing request or code not found or expired for platform '{platform}'.",
+        status_code=404, detail=f"Pairing request or code not found or expired for platform '{platform}'.",
     )
 
 
@@ -129,26 +113,16 @@ async def revoke_pairing(body: PairingRevoke):
         raise HTTPException(status_code=400, detail="platform and user_id are required")
     if store.revoke(platform, body.user_id):
         return {"ok": True}
-    raise HTTPException(
-        status_code=404,
-        detail=f"User {body.user_id} not found in approved list for {platform}.",
-    )
+    raise HTTPException(status_code=404, detail=f"User {body.user_id} not found in approved list for {platform}.")
 
 
 @router.post("/api/pairing/clear-pending")
 async def clear_pending_pairing(profile: Optional[str] = None):
-    store = _pairing_store(profile)
-    count = store.clear_pending()
-    return {"ok": True, "cleared": count}
+    return {"ok": True, "cleared": _pairing_store(profile).clear_pending()}
 
 
-# ---------------------------------------------------------------------------
-# Webhook subscription endpoints — list / subscribe / remove.
-#
-# Wraps the same JSON store the CLI uses (hermes_cli.webhook); the webhook
-# adapter hot-reloads it without a gateway restart.  Per-route HMAC secrets
-# are redacted on read and surfaced once on create.
-# ---------------------------------------------------------------------------
+# --- Webhooks: same JSON store as the CLI (hermes_cli.webhook); the adapter
+# hot-reloads it. Per-route HMAC secrets are redacted on read, surfaced once on create.
 
 
 def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> Dict[str, Any]:
@@ -163,7 +137,6 @@ def _webhook_route_summary(name: str, route: Dict[str, Any], base_url: str) -> D
         "skills": list(route.get("skills") or []),
         "created_at": route.get("created_at"),
         "url": f"{base_url}/webhooks/{name}",
-        # Secret is masked on read; full value only returned on create.
         "secret_set": bool(route.get("secret")),
         # Default-enabled; only an explicit enabled:false turns a route off.
         "enabled": route.get("enabled", True) is not False,
@@ -175,29 +148,21 @@ async def list_webhooks():
     import hermes_cli.webhook as wh
 
     base_url = wh._get_webhook_base_url()
-    subs = wh._load_subscriptions()
     return {
         "enabled": wh._is_webhook_enabled(),
         "base_url": base_url,
         "subscriptions": [
             _webhook_route_summary(name, route, base_url)
-            for name, route in subs.items()
+            for name, route in wh._load_subscriptions().items()
         ],
     }
 
 
 @router.post("/api/webhooks/enable")
 async def enable_webhooks():
-    try:
+    with http_failure("Failed to enable webhook platform from dashboard", 500, detail="Failed to enable webhook platform."):
         _write_platform_enabled("webhook", True)
-    except Exception as exc:
-        _log.exception("Failed to enable webhook platform from dashboard")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to enable webhook platform.",
-        ) from exc
-
-    restart_result = _restart_gateway_after_webhook_enable()
+    restart_result = _restart_gateway_after(None, what="enabling webhooks", label="Webhook enable")
     return {
         "ok": True,
         "platform": "webhook",
@@ -209,31 +174,23 @@ async def enable_webhooks():
 
 @router.post("/api/webhooks")
 async def create_webhook(body: WebhookCreate):
-    import re as _re
-    import secrets as _secrets
-    import time as _time
     import hermes_cli.webhook as wh
 
     if not wh._is_webhook_enabled():
         raise HTTPException(
-            status_code=400,
-            detail="Webhook platform is not enabled. Enable it from the Webhooks page first.",
+            status_code=400, detail="Webhook platform is not enabled. Enable it from the Webhooks page first.",
         )
-
     name = (body.name or "").strip().lower().replace(" ", "-")
-    if not _re.match(r"^[a-z0-9][a-z0-9_-]*$", name):
+    if not re.match(r"^[a-z0-9][a-z0-9_-]*$", name):
         raise HTTPException(
-            status_code=400,
-            detail="Invalid name. Use lowercase alphanumeric with hyphens/underscores.",
+            status_code=400, detail="Invalid name. Use lowercase alphanumeric with hyphens/underscores.",
         )
-
     if body.deliver_only and body.deliver == "log":
         raise HTTPException(
-            status_code=400,
-            detail="Direct delivery requires a real target (telegram, discord, …), not 'log'.",
+            status_code=400, detail="Direct delivery requires a real target (telegram, discord, …), not 'log'.",
         )
 
-    secret = body.secret or _secrets.token_urlsafe(32)
+    secret = body.secret or secrets.token_urlsafe(32)
     route: Dict[str, Any] = {
         "description": body.description or f"Dashboard-created subscription: {name}",
         "events": [e.strip() for e in body.events if e.strip()],
@@ -241,7 +198,7 @@ async def create_webhook(body: WebhookCreate):
         "prompt": body.prompt or "",
         "skills": [s.strip() for s in body.skills if s.strip()],
         "deliver": body.deliver or "log",
-        "created_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if body.script and body.script.strip():
         route["script"] = body.script.strip()
@@ -254,21 +211,25 @@ async def create_webhook(body: WebhookCreate):
     subs[name] = route
     wh._save_subscriptions(subs)
 
-    base_url = wh._get_webhook_base_url()
-    summary = _webhook_route_summary(name, route, base_url)
-    # Surface the secret exactly once, on create.
-    summary["secret"] = secret
+    summary = _webhook_route_summary(name, route, wh._get_webhook_base_url())
+    summary["secret"] = secret  # surfaced exactly once, on create
     return summary
 
 
-@router.delete("/api/webhooks/{name}")
-async def delete_webhook(name: str):
+def _webhook_subs_with(name: str):
+    """(module, subscriptions, key) for an existing route; 404 otherwise."""
     import hermes_cli.webhook as wh
 
     key = (name or "").strip().lower()
     subs = wh._load_subscriptions()
     if key not in subs:
         raise HTTPException(status_code=404, detail=f"No subscription named '{key}'")
+    return wh, subs, key
+
+
+@router.delete("/api/webhooks/{name}")
+async def delete_webhook(name: str):
+    wh, subs, key = _webhook_subs_with(name)
     del subs[key]
     wh._save_subscriptions(subs)
     return {"ok": True}
@@ -276,32 +237,16 @@ async def delete_webhook(name: str):
 
 @router.put("/api/webhooks/{name}/enabled")
 async def set_webhook_enabled(name: str, body: WebhookEnabledToggle):
-    """Enable or disable a webhook route.
-
-    Disabled routes stay in the subscriptions file (so they can be
-    re-enabled) but the gateway rejects incoming events with 403.  The
-    gateway hot-reloads the subscriptions file, so this takes effect on the
-    next event without a restart.
-    """
-    import hermes_cli.webhook as wh
-
-    key = (name or "").strip().lower()
-    subs = wh._load_subscriptions()
-    if key not in subs:
-        raise HTTPException(status_code=404, detail=f"No subscription named '{key}'")
+    """Disabled routes stay on disk (re-enable later) but the gateway rejects
+    their events with 403; it hot-reloads the file, so no restart is needed."""
+    wh, subs, key = _webhook_subs_with(name)
     subs[key]["enabled"] = bool(body.enabled)
     wh._save_subscriptions(subs)
     return {"ok": True, "name": key, "enabled": bool(body.enabled)}
 
 
-# ---------------------------------------------------------------------------
-# Gateway lifecycle endpoints — start / stop.
-#
-# restart + update already exist above; these complete the lifecycle so a
-# remote admin can bring the gateway up or down without shell access.  Both
-# spawn the real `hermes gateway <verb>` so behaviour matches the CLI exactly.
-# Status is already surfaced by /api/status (gateway_running/state/platforms).
-# ---------------------------------------------------------------------------
+# --- Gateway lifecycle: spawn the real `hermes gateway <verb>` so behaviour
+# matches the CLI exactly (status is surfaced by /api/status).
 
 
 @router.post("/api/gateway/start")
@@ -318,32 +263,29 @@ async def stop_gateway(profile: Optional[str] = None):
     return {"ok": True, "pid": proc.pid, "name": "gateway-stop"}
 
 
-# ---------------------------------------------------------------------------
-# Credential pool endpoints — list / add / remove rotation keys.
+# --- Credential pool (auth.json -> credential_pool.<provider>[]): secrets are
+# redacted on read; only the agent sees raw values at session start.
 #
-# The credential pool (auth.json -> credential_pool.<provider>[]) holds the
-# rotating API keys the agent round-robins through.  Secrets are redacted on
-# read; only the agent ever sees the raw values at session start.
-# ---------------------------------------------------------------------------
+# load_pool() may hit the network synchronously (Copilot token exchange over raw
+# urllib, whose timeout does NOT bound DNS resolution) — on a networkless host it
+# once froze the uvicorn loop for 17 minutes. Every pool load below runs off-loop.
 
 
 def _pool_entry_summary(entry: Any, index: int) -> Dict[str, Any]:
-    """Redacted, display-safe view of one PooledCredential.
-
-    ``index`` is 1-based to match CredentialPool.remove_index().
-    """
-    token = getattr(entry, "access_token", "") or ""
+    """Redacted view of one PooledCredential; ``index`` is 1-based to match
+    CredentialPool.remove_index()."""
+    token = entry.access_token or ""
     return {
         "index": index,
-        "id": getattr(entry, "id", None),
-        "label": getattr(entry, "label", None),
-        "auth_type": getattr(entry, "auth_type", None),
-        "source": getattr(entry, "source", None),
-        "priority": getattr(entry, "priority", 0),
-        "last_status": getattr(entry, "last_status", None),
-        "request_count": getattr(entry, "request_count", 0),
+        "id": entry.id,
+        "label": entry.label,
+        "auth_type": entry.auth_type,
+        "source": entry.source,
+        "priority": entry.priority,
+        "last_status": entry.last_status,
+        "request_count": entry.request_count,
         "token_preview": redact_key(token) if token else "",
-        "has_refresh": bool(getattr(entry, "refresh_token", None)),
+        "has_refresh": bool(entry.refresh_token),
     }
 
 
@@ -352,32 +294,22 @@ async def list_credential_pool():
     from agent.credential_pool import load_pool
     from hermes_cli.auth import read_credential_pool
 
-    # load_pool() may hit the network synchronously (Copilot token exchange
-    # over raw urllib). urllib's timeout does NOT bound DNS resolution
-    # (getaddrinfo blocks in C), so on a networkless Windows host this froze
-    # the uvicorn event loop for 17 minutes (2026-08-22 00:03-00:20 stall).
-    # Keep every provider load off the loop - same pattern as
-    # get_memory_status below.
     def _run():
         providers = []
-        # read_credential_pool(None) lists every provider that has pooled entries;
-        # load_pool() then gives us the rich PooledCredential objects per provider.
-        raw_pool = read_credential_pool()
-        for provider_id in sorted(raw_pool.keys()):
+        # read_credential_pool(None) lists every provider with pooled entries;
+        # load_pool() gives the rich PooledCredential objects per provider.
+        for provider_id in sorted(read_credential_pool().keys()):
             try:
                 pool = load_pool(provider_id)
             except Exception:
                 _log.exception("load_pool(%s) failed", provider_id)
                 continue
             entries = pool.entries()
-            if not entries:
-                continue
-            providers.append({
-                "provider": provider_id,
-                "entries": [
-                    _pool_entry_summary(e, i) for i, e in enumerate(entries, start=1)
-                ],
-            })
+            if entries:
+                providers.append({
+                    "provider": provider_id,
+                    "entries": [_pool_entry_summary(e, i) for i, e in enumerate(entries, start=1)],
+                })
         return {"providers": providers}
 
     return await asyncio.to_thread(_run)
@@ -385,13 +317,13 @@ async def list_credential_pool():
 
 @router.post("/api/credentials/pool")
 async def add_credential_pool_entry(body: CredentialPoolAdd):
-    import uuid as _uuid
+    import uuid
     from agent.credential_pool import (
-        load_pool,
-        PooledCredential,
         AUTH_TYPE_API_KEY,
         CUSTOM_POOL_PREFIX,
         SOURCE_MANUAL,
+        PooledCredential,
+        load_pool,
     )
 
     provider = (body.provider or "").strip().lower()
@@ -399,33 +331,26 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
     if not provider or not api_key:
         raise HTTPException(status_code=400, detail="provider and api_key are required")
 
-    # load_pool() may run synchronous OAuth token exchanges (network I/O);
-    # keep it off the event loop - see list_credential_pool (2026-08-22
-    # 17-minute stall fix).
     def _run():
         try:
             pool = load_pool(provider)
             label = (body.label or "").strip() or f"key #{len(pool.entries()) + 1}"
-            entry = PooledCredential(
+            pool.add_entry(PooledCredential(
                 provider=provider,
-                id=_uuid.uuid4().hex[:6],
+                id=uuid.uuid4().hex[:6],
                 label=label,
                 auth_type=AUTH_TYPE_API_KEY,
                 priority=0,
                 source=SOURCE_MANUAL,
                 access_token=api_key,
-            )
-            pool.add_entry(entry)
-            # Re-adding a credential is an explicit re-engagement signal: lift
-            # every suppression for this provider so a source deleted earlier
-            # (via DELETE below or `hermes auth add`) can seed again.
-            # Mirrors the `hermes auth add` behaviour in auth_commands.py.
+            ))
+            # Re-adding is an explicit re-engagement signal: lift every suppression
+            # for this provider so a source deleted earlier can seed again
+            # (mirrors `hermes auth add`).
             if not provider.startswith(CUSTOM_POOL_PREFIX):
                 try:
-                    from hermes_cli.auth import (
-                        _load_auth_store,
-                        unsuppress_credential_source,
-                    )
+                    from hermes_cli.auth import _load_auth_store, unsuppress_credential_source
+
                     suppressed = _load_auth_store().get("suppressed_sources", {})
                     for src in list(suppressed.get(provider, []) or []):
                         unsuppress_credential_source(provider, src)
@@ -443,25 +368,21 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
 
 @router.delete("/api/credentials/pool/{provider}/{index}")
 async def remove_credential_pool_entry(provider: str, index: int):
-    """Remove a pool entry.  ``index`` is 1-based (matches the list response).
+    """Remove a pool entry (``index`` is 1-based, as listed).
 
-    Removal must be sticky (#55217): ``load_pool()`` re-seeds entries from
-    their backing source (.env var, OAuth singleton file, custom-provider
-    config) on every call, so deleting only the pool row silently reverts on
-    the next dashboard refresh.  We dispatch through the same RemovalStep
-    registry the CLI ``hermes auth remove`` uses: each source cleans up its
-    external state and suppresses ``(provider, source)`` so the seeders skip
-    it.  Manual entries have no registered step — nothing external to clean,
-    no suppression needed (they aren't re-seeded).
+    Removal must be sticky: ``load_pool()`` re-seeds entries from their backing
+    source (.env var, OAuth file, custom-provider config) on every call, so
+    deleting only the row silently reverts on the next refresh. Dispatch through
+    the same RemovalStep registry as ``hermes auth remove``: each source cleans
+    its external state and suppresses ``(provider, source)`` so seeders skip it.
+    Manual entries have no step — nothing external, and they aren't re-seeded.
     """
     from agent.credential_pool import load_pool
     from agent.credential_sources import find_removal_step
     from hermes_cli.auth import suppress_credential_source
 
     provider = (provider or "").strip().lower()
-    # load_pool() may run synchronous token exchanges and the removal steps do
-    # blocking disk writes - keep them off the event loop (see
-    # list_credential_pool; 2026-08-22 17-minute stall fix).
+
     def _run():
         try:
             pool = load_pool(provider)
@@ -483,72 +404,47 @@ async def remove_credential_pool_entry(provider: str, index: int):
                 if result.suppress:
                     suppress_credential_source(provider, removed.source)
             except Exception:
-                # Cleanup is best-effort, but suppression is the actual bug fix -
-                # without it the entry resurrects on the next load_pool(). Apply
-                # it even when source-specific cleanup blew up.
-                _log.exception(
-                    "credential source cleanup failed for %s/%s; suppressing anyway",
-                    provider, removed.source,
-                )
+                # Cleanup is best-effort, but suppression is the actual fix —
+                # without it the entry resurrects on the next load_pool().
+                _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
                 try:
                     suppress_credential_source(provider, removed.source)
                 except Exception:
                     _log.exception("suppress_credential_source failed")
-        return {
-            "ok": True,
-            "provider": provider,
-            "count": len(pool.entries()),
-            "cleaned": cleaned,
-            "hints": hints,
-        }
+        return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
 
     return await asyncio.to_thread(_run)
 
 
-# ---------------------------------------------------------------------------
-# Memory provider endpoints — status / list providers / select / disable / reset.
-#
-# Provider setup is dashboard-native when a provider exposes get_config_schema().
-# The dashboard never runs interactive provider setup hooks; activation is only
-# allowed once the provider is discoverable, available, and has required config.
-# ---------------------------------------------------------------------------
+# --- Memory provider: setup is dashboard-native only via get_config_schema();
+# interactive setup hooks never run here, and activation requires the provider
+# to be discoverable, available and fully configured.
+
+_MEMORY_FILES = (("MEMORY.md", "memory"), ("USER.md", "user"))
 
 
 @router.get("/api/memory")
 async def get_memory_status():
-    # load_config(), file stats and provider discovery are disk reads — keep
-    # them off the event loop.
-    def _run():
+    def _run():  # load_config(), stats and discovery are disk reads — off-loop
         cfg = load_config()
-        active = ""
         mem = cfg.get("memory")
-        if isinstance(mem, dict):
-            active = _normalize_memory_provider_name(mem.get("provider"))
-
-        # Built-in memory file sizes (so the UI can show what a reset would erase).
+        active = _normalize_memory_provider_name(mem.get("provider")) if isinstance(mem, dict) else ""
         mem_dir = get_hermes_home() / "memories"
-        files = {}
-        for fname, key in (("MEMORY.md", "memory"), ("USER.md", "user")):
+        files = {}  # sizes so the UI can show what a reset would erase
+        for fname, key in _MEMORY_FILES:
             path = mem_dir / fname
             files[key] = path.stat().st_size if path.exists() else 0
-
-        return {
-            "active": active,
-            "providers": _discover_memory_provider_statuses(),
-            "builtin_files": files,
-        }
+        return {"active": active, "providers": _discover_memory_provider_statuses(), "builtin_files": files}
 
     return await asyncio.to_thread(_run)
 
 
 @router.put("/api/memory/provider")
 async def set_memory_provider(body: MemoryProviderSelect):
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     provider = _normalize_memory_provider_name(body.provider)
 
     def _run():
         _require_memory_provider_ready(provider)
-
         with _CONFIG_MUTATION_LOCK:
             cfg = load_config()
             if not isinstance(cfg.get("memory"), dict):
@@ -568,14 +464,9 @@ async def reset_memory(body: MemoryReset):
 
     mem_dir = get_hermes_home() / "memories"
     deleted = []
-    targets = []
-    if target in {"all", "memory"}:
-        targets.append("MEMORY.md")
-    if target in {"all", "user"}:
-        targets.append("USER.md")
-    for fname in targets:
+    for fname, key in _MEMORY_FILES:
         path = mem_dir / fname
-        if path.exists():
+        if target in {"all", key} and path.exists():
             try:
                 path.unlink()
                 deleted.append(fname)
@@ -584,71 +475,41 @@ async def reset_memory(body: MemoryReset):
     return {"ok": True, "deleted": deleted}
 
 
-# ---------------------------------------------------------------------------
-# Operations endpoints — doctor / security audit / backup / import /
-# checkpoints / hooks.
-#
-# Diagnostic and maintenance commands.  The long-running / text-output ones
-# (doctor, security audit, backup, import, skills install) are spawned as
-# background actions whose logs the dashboard tails via
-# /api/actions/{name}/status — same pattern as gateway restart and update.
-# The cheap, structured reads (hooks list, checkpoints list) return JSON
-# directly.
-# ---------------------------------------------------------------------------
+# --- Operations: long-running text-output commands (doctor, audit, backup,
+# import) are spawned as background actions whose logs the dashboard tails via
+# /api/actions/{name}/status; cheap structured reads return JSON directly.
 
 
 @router.post("/api/ops/doctor")
 async def run_doctor():
-    try:
-        proc = _spawn_hermes_action(["doctor"], "doctor")
-    except Exception as exc:
-        _log.exception("Failed to spawn doctor")
-        raise HTTPException(status_code=500, detail=f"Failed to run doctor: {exc}")
-    return {"ok": True, "pid": proc.pid, "name": "doctor"}
+    return _spawn_action(["doctor"], "doctor", log_msg="Failed to spawn doctor", prefix="Failed to run doctor")
 
 
 @router.post("/api/ops/security-audit")
 async def run_security_audit():
-    try:
-        proc = _spawn_hermes_action(["security", "audit"], "security-audit")
-    except Exception as exc:
-        _log.exception("Failed to spawn security audit")
-        raise HTTPException(status_code=500, detail=f"Failed to run security audit: {exc}")
-    return {"ok": True, "pid": proc.pid, "name": "security-audit"}
+    return _spawn_action(
+        ["security", "audit"], "security-audit",
+        log_msg="Failed to spawn security audit", prefix="Failed to run security audit",
+    )
 
 
 def _dashboard_backup_dir() -> Path:
     return get_hermes_home() / "backups"
 
 
-def _new_dashboard_backup_path() -> Path:
-    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-    return _dashboard_backup_dir() / f"hermes-backup-{stamp}-{secrets.token_hex(4)}.zip"
-
-
 @router.post("/api/ops/backup")
 async def run_backup(body: BackupRequest):
-    args = ["backup"]
     archive: Optional[Path] = None
     output = (body.output or "").strip()
-    if output:
-        args.extend(["-o", output])
-    else:
-        archive = _new_dashboard_backup_path()
+    if not output:
+        stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        archive = _dashboard_backup_dir() / f"hermes-backup-{stamp}-{secrets.token_hex(4)}.zip"
         try:
             archive.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Could not create backup directory: {exc}",
-            )
-        args.extend(["-o", str(archive)])
-    try:
-        proc = _spawn_hermes_action(args, "backup")
-    except Exception as exc:
-        _log.exception("Failed to spawn backup")
-        raise HTTPException(status_code=500, detail=f"Failed to run backup: {exc}")
-    response = {"ok": True, "pid": proc.pid, "name": "backup"}
+            raise HTTPException(status_code=500, detail=f"Could not create backup directory: {exc}")
+        output = str(archive)
+    response = _spawn_action(["backup", "-o", output], "backup", log_msg="Failed to spawn backup", prefix="Failed to run backup")
     if archive is not None:
         response["archive"] = str(archive)
     return response
@@ -668,13 +529,16 @@ async def download_dashboard_backup(archive: str):
         raise HTTPException(status_code=403, detail="Backup is outside the dashboard backup directory")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Backup not found")
-
     return FileResponse(
-        path=str(target),
-        media_type="application/zip",
-        filename=target.name,
-        content_disposition_type="attachment",
+        path=str(target), media_type="application/zip", filename=target.name, content_disposition_type="attachment",
     )
+
+
+def _spawn_import(archive: str, force: bool) -> dict:
+    args = ["import", archive]
+    if force:
+        args.append("--force")
+    return _spawn_action(args, "import", log_msg="Failed to spawn import", prefix="Failed to run import")
 
 
 @router.post("/api/ops/import")
@@ -684,22 +548,12 @@ async def run_import(body: ImportRequest):
         raise HTTPException(status_code=400, detail="archive path is required")
     if not os.path.isfile(archive):
         raise HTTPException(status_code=404, detail=f"Archive not found: {archive}")
-    args = ["import", archive]
-    if body.force:
-        args.append("--force")
-    try:
-        proc = _spawn_hermes_action(args, "import")
-    except Exception as exc:
-        _log.exception("Failed to spawn import")
-        raise HTTPException(status_code=500, detail=f"Failed to run import: {exc}")
-    return {"ok": True, "pid": proc.pid, "name": "import"}
+    return _spawn_import(archive, body.force)
 
 
 def _safe_backup_upload_name(filename: str | None) -> str:
     name = Path(filename or "backup.zip").name.strip()
-    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-")
-    if not name:
-        name = "backup.zip"
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip(".-") or "backup.zip"
     if not name.lower().endswith(".zip"):
         name = f"{name}.zip"
     return name
@@ -710,97 +564,36 @@ async def run_import_upload(
     file: UploadFile = File(...),
     force: bool = Form(False),
 ):
-    from hermes_cli.web_server import _MANAGED_FILE_MAX_BYTES, _UPLOAD_CHUNK_BYTES
     staging_dir = _dashboard_backup_dir()
     try:
         staging_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not create import staging directory: {exc}",
-        )
+        raise HTTPException(status_code=500, detail=f"Could not create import staging directory: {exc}")
 
-    safe_name = _safe_backup_upload_name(file.filename)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    target = staging_dir / f"dashboard-import-{stamp}-{secrets.token_hex(4)}-{safe_name}"
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{target.name}.",
-        suffix=".upload",
-        dir=str(staging_dir),
+    target = staging_dir / f"dashboard-import-{stamp}-{secrets.token_hex(4)}-{_safe_backup_upload_name(file.filename)}"
+    total = await stream_upload_to_path(
+        file, target, too_large="Archive is too large",
+        not_writable="Import staging directory is not writable", write_failed="Could not write uploaded archive",
     )
-    tmp_path = Path(tmp_name)
-    total = 0
-    renamed = False
-    try:
-        with os.fdopen(tmp_fd, "wb") as out:
-            while True:
-                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > _MANAGED_FILE_MAX_BYTES:
-                    raise HTTPException(status_code=413, detail="Archive is too large")
-                out.write(chunk)
-        os.replace(tmp_path, target)
-        renamed = True
-    except HTTPException:
-        raise
-    except PermissionError:
-        raise HTTPException(
-            status_code=403,
-            detail="Import staging directory is not writable",
-        )
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not write uploaded archive: {exc}",
-        )
-    finally:
-        if not renamed:
-            tmp_path.unlink(missing_ok=True)
-        await file.close()
-
     if not zipfile.is_zipfile(target):
         target.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded archive is not a valid zip file",
-        )
-
-    args = ["import", str(target)]
-    if force:
-        args.append("--force")
-    try:
-        proc = _spawn_hermes_action(args, "import")
-    except Exception as exc:
-        _log.exception("Failed to spawn import")
-        raise HTTPException(status_code=500, detail=f"Failed to run import: {exc}")
-    return {
-        "ok": True,
-        "pid": proc.pid,
-        "name": "import",
-        "archive": str(target),
-        "uploaded_bytes": total,
-    }
+        raise HTTPException(status_code=400, detail="Uploaded archive is not a valid zip file")
+    return {**_spawn_import(str(target), force), "archive": str(target), "uploaded_bytes": total}
 
 
 @router.get("/api/ops/hooks")
 async def list_hooks():
-    """List configured shell hooks from config.yaml with consent + health.
-
-    Reports each hook's allowlist (consent) status and whether the script is
-    currently executable, plus the set of valid hook events so the create
-    form can offer them.
-    """
+    """Configured shell hooks with consent (allowlist) status, whether the
+    script is currently executable, and the valid hook events for the form."""
     def _run():
         from hermes_cli.config import load_config as _load_config
         from agent import shell_hooks
 
-        try:
+        valid_events = []
+        with contextlib.suppress(Exception):
             from hermes_cli.plugins import VALID_HOOKS
             valid_events = sorted(VALID_HOOKS)
-        except Exception:
-            valid_events = []
 
         specs = []
         try:
@@ -811,15 +604,11 @@ async def list_hooks():
         out = []
         for spec in specs:
             entry = None
-            try:
-                entry = shell_hooks.allowlist_entry_for(spec.event, spec.command)
-            except Exception:
-                pass
             executable = False
-            try:
+            with contextlib.suppress(Exception):
+                entry = shell_hooks.allowlist_entry_for(spec.event, spec.command)
+            with contextlib.suppress(Exception):
                 executable = shell_hooks.script_is_executable(spec.command)
-            except Exception:
-                pass
             out.append({
                 "event": spec.event,
                 "matcher": spec.matcher,
@@ -829,53 +618,45 @@ async def list_hooks():
                 "approved_at": (entry or {}).get("approved_at"),
                 "executable": executable,
             })
-
         return {"hooks": out, "valid_events": valid_events}
 
     return await asyncio.to_thread(_run)
 
 
-@router.post("/api/ops/hooks")
-async def create_hook(body: HookCreate):
-    """Add a shell hook to config.yaml (and optionally approve it).
-
-    Shell hooks run arbitrary commands, so this is a privileged action: it
-    writes to the ``hooks:`` config block and, when ``approve`` is set, records
-    consent in the allowlist so the hook actually fires.  Takes effect on the
-    next session / gateway restart.
-    """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
-    from agent import shell_hooks
-
+def _hook_body_fields(body) -> tuple[str, str]:
     event = (body.event or "").strip()
     command = (body.command or "").strip()
     if not event or not command:
         raise HTTPException(status_code=400, detail="event and command are required")
+    return event, command
 
-    try:
-        from hermes_cli.plugins import VALID_HOOKS
-        if event not in VALID_HOOKS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown event '{event}'. Valid: {', '.join(sorted(VALID_HOOKS))}",
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+
+@router.post("/api/ops/hooks")
+async def create_hook(body: HookCreate):
+    """Add a shell hook to config.yaml and optionally record consent.
+
+    Shell hooks run arbitrary commands, so this is privileged: it writes the
+    ``hooks:`` block and, with ``approve``, records the allowlist entry so the
+    hook actually fires. Takes effect on the next session / gateway restart.
+    """
+    from agent import shell_hooks
+
+    event, command = _hook_body_fields(body)
+    valid_hooks = None
+    with contextlib.suppress(Exception):
+        from hermes_cli.plugins import VALID_HOOKS as valid_hooks
+    if valid_hooks is not None and event not in valid_hooks:
+        raise HTTPException(status_code=400, detail=f"Unknown event '{event}'. Valid: {', '.join(sorted(valid_hooks))}")
 
     def _run():
         with _CONFIG_MUTATION_LOCK:
             cfg = load_config()
             hooks_cfg = cfg.get("hooks")
             if not isinstance(hooks_cfg, dict):
-                hooks_cfg = {}
-                cfg["hooks"] = hooks_cfg
+                hooks_cfg = cfg["hooks"] = {}
             entries = hooks_cfg.get(event)
             if not isinstance(entries, list):
-                entries = []
-                hooks_cfg[event] = entries
-
+                entries = hooks_cfg[event] = []
             new_entry: Dict[str, Any] = {"command": command}
             if body.matcher:
                 new_entry["matcher"] = body.matcher
@@ -891,7 +672,6 @@ async def create_hook(body: HookCreate):
                 approved = True
             except Exception:
                 _log.exception("hook consent record failed")
-
         return {"ok": True, "event": event, "command": command, "approved": approved}
 
     return await asyncio.to_thread(_run)
@@ -900,13 +680,9 @@ async def create_hook(body: HookCreate):
 @router.delete("/api/ops/hooks")
 async def delete_hook(body: HookDelete):
     """Remove a hook from config.yaml and revoke its consent allowlist entry."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     from agent import shell_hooks
 
-    event = (body.event or "").strip()
-    command = (body.command or "").strip()
-    if not event or not command:
-        raise HTTPException(status_code=400, detail="event and command are required")
+    event, command = _hook_body_fields(body)
 
     def _run():
         removed = False
@@ -925,28 +701,21 @@ async def delete_hook(body: HookDelete):
                 if not hooks_cfg:
                     cfg.pop("hooks", None)
                 save_config(cfg)
-
         # Revoke consent regardless so a re-add re-prompts.
-        try:
+        with contextlib.suppress(Exception):
             shell_hooks.revoke(command)
-        except Exception:
-            pass
         return removed
 
-    removed = await asyncio.to_thread(_run)
-
-    if not removed:
+    if not await asyncio.to_thread(_run):
         raise HTTPException(status_code=404, detail="No matching hook found")
     return {"ok": True}
 
 
 @router.get("/api/ops/checkpoints")
 async def list_checkpoints():
-    """List the /rollback shadow store checkpoints (read-only)."""
-    # Checkpoints live under <hermes_home>/checkpoints/.  Surface a count +
-    # total size so the dashboard can show what a prune would reclaim; the
-    # actual prune is a spawned action so confirmation/pruning logic stays
-    # in one place (the CLI).
+    """/rollback shadow-store checkpoints (read-only): count + size per session
+    so the UI can show what a prune reclaims; pruning itself is a spawned CLI
+    action so the confirmation logic stays in one place."""
     cp_dir = get_hermes_home() / "checkpoints"
     sessions = []
     total_bytes = 0
@@ -956,8 +725,7 @@ async def list_checkpoints():
         for child in children:
             if not child.is_dir():
                 continue
-            size = 0
-            count = 0
+            size = count = 0
             for f in child.rglob("*"):
                 if f.is_file():
                     try:
@@ -966,19 +734,13 @@ async def list_checkpoints():
                     except OSError:
                         pass
             total_bytes += size
-            sessions.append({
-                "session": child.name,
-                "files": count,
-                "bytes": size,
-            })
+            sessions.append({"session": child.name, "files": count, "bytes": size})
     return {"sessions": sessions, "total_bytes": total_bytes}
 
 
 @router.post("/api/ops/checkpoints/prune")
 async def prune_checkpoints():
-    try:
-        proc = _spawn_hermes_action(["checkpoints", "prune"], "checkpoints-prune")
-    except Exception as exc:
-        _log.exception("Failed to spawn checkpoints prune")
-        raise HTTPException(status_code=500, detail=f"Failed to prune checkpoints: {exc}")
-    return {"ok": True, "pid": proc.pid, "name": "checkpoints-prune"}
+    return _spawn_action(
+        ["checkpoints", "prune"], "checkpoints-prune",
+        log_msg="Failed to spawn checkpoints prune", prefix="Failed to prune checkpoints",
+    )
