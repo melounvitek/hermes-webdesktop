@@ -334,10 +334,6 @@ class _ProcessRelayPluginConfiguration:
         self._state = state
         return state
 
-    def _reset_if_cleared(self) -> None:
-        if self._clear_active():
-            self._state = _RelayPluginConfigurationState.UNINITIALIZED
-
     def release(self, owner: Any) -> None:
         """Release one host and clear Relay after the final host exits."""
         with self._lock:
@@ -350,13 +346,13 @@ class _ProcessRelayPluginConfiguration:
         """Clear process-global state left by directly constructed test hosts."""
         with self._lock:
             self._owners.clear()
-            self._reset_if_cleared()
+            self.retry_pending_cleanup()
 
     def retry_pending_cleanup(self) -> None:
         """Retry a failed final cleanup without disrupting live owners."""
         with self._lock:
-            if not self._owners:
-                self._reset_if_cleared()
+            if not self._owners and self._clear_active():
+                self._state = _RelayPluginConfigurationState.UNINITIALIZED
 
     def _clear_active(self) -> bool:
         relay = self._relay
@@ -983,9 +979,8 @@ class ConversationLease:
 
     def live_runtime(self) -> RelayRuntime | None:
         """Return the real Relay host when this lease owns an open session."""
-        if isinstance(self.host, RelayRuntime) and self.session is not None:
-            return self.host
-        return None
+        host = self.host
+        return host if isinstance(host, RelayRuntime) and self.session is not None else None
 
 
 @dataclass
@@ -1035,6 +1030,15 @@ class managed_callback_guard:
         _MANAGED_CALLBACK_DEPTH.reset(self._token)
 
 
+def _warn_on_error(what: str, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run fail-open telemetry work: log ``Hermes Relay <what> failed`` and return None on error."""
+    try:
+        return callback(*args, **kwargs)
+    except Exception:
+        logger.warning("Hermes Relay %s failed", what, exc_info=True)
+        return None
+
+
 def _flag_open_session(session: RelaySession, flag: str) -> None:
     """Set a pending-rotation/close flag unless the session is already closing."""
     with session.lock:
@@ -1077,25 +1081,31 @@ class RelaySessionCoordinator:
         )
         session = None
         if isinstance(host, RelayRuntime):
-            try:
-                self._prepare_session(host, {
-                    "profile_key": profile_key, "session_id": session_id, "platform": platform,
-                    "parent_session_id": parent_session_id, "model": model,
-                })
-                metadata = {"hermes.execution_surface": platform or "unknown"}
-                if parent_session_id and parent_session_id != session_id:
-                    session = host.register_subagent(
-                        {"parent_session_id": parent_session_id, "child_session_id": session_id},
-                        metadata=metadata,
-                    )
-                else:
-                    session = host.ensure_session({"session_id": session_id}, metadata=metadata)
-            except Exception:
-                logger.warning("Hermes Relay conversation initialization failed", exc_info=True)
+            session = _warn_on_error(
+                "conversation initialization", self._open_conversation_session, host,
+                profile_key=profile_key, session_id=session_id, platform=platform,
+                parent_session_id=parent_session_id, model=model,
+            )
         return ConversationLease(
             profile_key=profile_key, session_id=session_id, platform=platform, host=host,
             session=session, parent_session_id=parent_session_id,
         )
+
+    def _open_conversation_session(
+        self, host: RelayRuntime, *, profile_key: str, session_id: str, platform: str,
+        parent_session_id: str, model: str,
+    ) -> RelaySession | None:
+        self._prepare_session(host, {
+            "profile_key": profile_key, "session_id": session_id, "platform": platform,
+            "parent_session_id": parent_session_id, "model": model,
+        })
+        metadata = {"hermes.execution_surface": platform or "unknown"}
+        if parent_session_id and parent_session_id != session_id:
+            return host.register_subagent(
+                {"parent_session_id": parent_session_id, "child_session_id": session_id},
+                metadata=metadata,
+            )
+        return host.ensure_session({"session_id": session_id}, metadata=metadata)
 
     def begin_turn(
         self, lease: ConversationLease, *, turn_id: str, task_id: str
@@ -1110,7 +1120,7 @@ class RelaySessionCoordinator:
                 # sibling scopes whose completion order is not LIFO.
                 turn.relay_enabled = False
                 logger.warning(
-                    "Skipping Relay instrumentation for concurrent Hermes turn " "%s in session %s",
+                    "Skipping Relay instrumentation for concurrent Hermes turn %s in session %s",
                     turn_id, lease.session_id,
                 )
             else:
@@ -1120,25 +1130,15 @@ class RelaySessionCoordinator:
         if host is not None:
             # Segment rotation happens HERE — the only point with no live turn scope on
             # the stack, so the session scope can close/reopen without breaking LIFO.
-            try:
-                self._maybe_rotate_segment(host, lease.session)
-            except Exception:
-                logger.warning("Hermes Relay segment rotation failed", exc_info=True)
-            try:
-                turn.handle = host.run_in_session(
-                    lease.session,
-                    host.relay.scope.push,
-                    TURN_SCOPE,
-                    host.relay.ScopeType.Function,
-                    handle=lease.session.handle,
-                    input={},
-                    metadata=runtime_metadata(
-                        host.runtime_id, **{"hermes.execution_surface": lease.platform or "unknown"}
-                    ),
-                    timeout=_SCOPE_OP_TIMEOUT,
-                )
-            except Exception:
-                logger.warning("Hermes Relay turn initialization failed", exc_info=True)
+            _warn_on_error("segment rotation", self._maybe_rotate_segment, host, lease.session)
+            turn.handle = _warn_on_error(
+                "turn initialization", host.run_in_session, lease.session, host.relay.scope.push,
+                TURN_SCOPE, host.relay.ScopeType.Function, handle=lease.session.handle, input={},
+                metadata=runtime_metadata(
+                    host.runtime_id, **{"hermes.execution_surface": lease.platform or "unknown"}
+                ),
+                timeout=_SCOPE_OP_TIMEOUT,
+            )
         turn._previous_turn = _CURRENT_TURN.get()
         _CURRENT_TURN.set(turn)
         return turn
@@ -1175,11 +1175,10 @@ class RelaySessionCoordinator:
                     # Delegated agents own one turn: close their conversation while the
                     # active-turn guard is held so a parent timeout fallback cannot race it.
                     if lease.parent_session_id and isinstance(lease.host, RelayRuntime):
-                        lease.host.unregister_subagent({"child_session_id": lease.session_id})
-                except Exception:
-                    logger.warning(
-                        "Hermes Relay child conversation finalization failed", exc_info=True
-                    )
+                        _warn_on_error(
+                            "child conversation finalization", lease.host.unregister_subagent,
+                            {"child_session_id": lease.session_id},
+                        )
                 finally:
                     self._unregister_active_turn(turn)
                     self._reset_turn_context(turn)
@@ -1206,18 +1205,19 @@ class RelaySessionCoordinator:
         turn (closing then breaks LIFO). The last live turn consumes it here after its own
         scope popped and it left the active-turn table.
         """
-        try:
-            host = lease.live_runtime()
-            if host is None:
-                return
-            with lease.session.lock:
-                pending = lease.session.close_pending and not lease.session.closing
-            if pending and not self.has_active_turn(
-                profile_key=lease.profile_key, session_id=lease.session_id
-            ):
-                host.close_session({"session_id": lease.session_id})
-        except Exception:  # noqa: BLE001 - telemetry must never block end_turn
-            logger.warning("Hermes Relay deferred session close failed", exc_info=True)
+        # Telemetry must never block end_turn.
+        _warn_on_error("deferred session close", self._consume_deferred_close_unguarded, lease)
+
+    def _consume_deferred_close_unguarded(self, lease: ConversationLease) -> None:
+        host = lease.live_runtime()
+        if host is None:
+            return
+        with lease.session.lock:
+            pending = lease.session.close_pending and not lease.session.closing
+        if pending and not self.has_active_turn(
+            profile_key=lease.profile_key, session_id=lease.session_id
+        ):
+            host.close_session({"session_id": lease.session_id})
 
     def notify_session_compacted(
         self, *, profile_key: str, session_id: str, old_session_id: str = ""
@@ -1230,29 +1230,35 @@ class RelaySessionCoordinator:
         the OLD session now or its scope stays an unexported orphan. Unknown sessions and
         disabled config are silent no-ops.
         """
-        try:
-            if not _segments_config()["on_compaction"]:
-                return
-            host = self.registry.for_profile(profile_key)
-            if not isinstance(host, RelayRuntime):
-                return
-            if old_session_id and old_session_id != session_id:
-                # A LIVE turn on the old session: closing now would pop under it (LIFO).
-                with host._sessions_lock:
-                    old_session = host._sessions.get(old_session_id)
-                if old_session is not None and self.has_active_turn(
-                    profile_key=profile_key, session_id=old_session_id
-                ):
-                    _flag_open_session(old_session, "close_pending")
-                else:
-                    host.close_session({"session_id": old_session_id})
-                return
+        # Telemetry must never block compaction.
+        _warn_on_error(
+            "compaction notification", self._notify_session_compacted_unguarded,
+            profile_key, session_id, old_session_id,
+        )
+
+    def _notify_session_compacted_unguarded(
+        self, profile_key: str, session_id: str, old_session_id: str
+    ) -> None:
+        if not _segments_config()["on_compaction"]:
+            return
+        host = self.registry.for_profile(profile_key)
+        if not isinstance(host, RelayRuntime):
+            return
+        if old_session_id and old_session_id != session_id:
+            # A LIVE turn on the old session: closing now would pop under it (LIFO).
             with host._sessions_lock:
-                session = host._sessions.get(session_id)
-            if session is not None:
-                _flag_open_session(session, "rotate_pending")
-        except Exception:  # noqa: BLE001 - telemetry must never block compaction
-            logger.warning("Hermes Relay compaction notification failed", exc_info=True)
+                old_session = host._sessions.get(old_session_id)
+            if old_session is not None and self.has_active_turn(
+                profile_key=profile_key, session_id=old_session_id
+            ):
+                _flag_open_session(old_session, "close_pending")
+            else:
+                host.close_session({"session_id": old_session_id})
+            return
+        with host._sessions_lock:
+            session = host._sessions.get(session_id)
+        if session is not None:
+            _flag_open_session(session, "rotate_pending")
 
     def has_active_turn(self, *, profile_key: str, session_id: str) -> bool:
         """Return whether a turn is still running for one profile/session."""

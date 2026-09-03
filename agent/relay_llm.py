@@ -8,6 +8,7 @@ import inspect
 import json
 import logging
 from collections.abc import Callable, Iterator
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -51,10 +52,12 @@ class _ManagedAttempt:
 
     @classmethod
     def resolve(
-        cls, session_id: str, request: dict[str, Any], metadata: dict[str, Any] | None, *,
-        name: str, model_name: str,
+        cls, session_id: str | None, request: dict[str, Any], metadata: dict[str, Any] | None,
+        *, name: str, model_name: str,
     ) -> "_ManagedAttempt | None":
         """Return the managed attempt for ``session_id``, or None to run unmanaged."""
+        if session_id is None:
+            return None
         runtime, session, parent = relay_runtime.resolve_execution_context(session_id)
         if runtime is None or session is None or not runtime.managed_execution_enabled():
             return None
@@ -184,9 +187,7 @@ def execute(
     if attempt is None:
         return callback(request)
 
-    def invoke(next_request: Any) -> Any:
-        return attempt.invoke(callback, next_request)
-
+    invoke = partial(attempt.invoke, callback)
     try:
         managed = _run_awaitable(attempt.run_managed(attempt.runtime.relay.llm.execute, invoke))
     except BaseException as exc:
@@ -206,9 +207,7 @@ async def execute_async(
     if attempt is None:
         return await callback(request)
 
-    async def invoke(next_request: Any) -> Any:
-        return await attempt.invoke_async(callback, next_request)
-
+    invoke = partial(attempt.invoke_async, callback)
     try:
         managed = await attempt.run_managed(attempt.runtime.relay.llm.execute, invoke)
     except BaseException as exc:
@@ -227,11 +226,8 @@ def execute_current(
     model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
     """Run a provider attempt under the inherited Hermes turn when present."""
-    session_id = _current_session_id()
-    if session_id is None:
-        return callback(request)
     return execute(
-        request, callback, session_id=session_id, name=name, model_name=model_name,
+        request, callback, session_id=_current_session_id(), name=name, model_name=model_name,
         metadata=metadata, defer_logical_completion=defer_logical_completion,
     )
 
@@ -241,11 +237,8 @@ async def execute_current_async(
     model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
     """Run an async provider attempt under the inherited turn when present."""
-    session_id = _current_session_id()
-    if session_id is None:
-        return await callback(request)
     return await execute_async(
-        request, callback, session_id=session_id, name=name, model_name=model_name,
+        request, callback, session_id=_current_session_id(), name=name, model_name=model_name,
         metadata=metadata, defer_logical_completion=defer_logical_completion,
     )
 
