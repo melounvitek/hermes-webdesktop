@@ -196,6 +196,46 @@ def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_que
 
 
 
+def _prepend_corruption_marker(tool_msg: dict, marker: str) -> None:
+    existing = tool_msg.get("content")
+    if isinstance(existing, str):
+        if not existing:
+            tool_msg["content"] = marker
+        elif not existing.startswith(marker):
+            tool_msg["content"] = f"{marker}\n{existing}"
+        return
+    if existing is None:
+        tool_msg["content"] = marker
+        return
+    try:
+        existing_text = json.dumps(existing)
+    except TypeError:
+        existing_text = str(existing)
+    tool_msg["content"] = f"{marker}\n{existing_text}"
+
+
+def _find_tool_result(messages: list, start: int, tool_call: dict) -> Optional[dict]:
+    """The tool result answering ``tool_call`` in the run starting at ``start``, if any."""
+    for candidate in messages[start:]:
+        if not isinstance(candidate, dict) or candidate.get("role") != "tool":
+            return None
+        if tool_result_id_variants(candidate.get("tool_call_id")) & tool_call_id_variants(tool_call):
+            return candidate
+    return None
+
+
+def _cursor_skip_prefix(messages: list, cursor: Optional[dict]) -> int:
+    """Length of the ``is``-identical prefix already validated on the previous call."""
+    start = 0
+    if cursor is not None:
+        prev_prefix = cursor.get("prefix")
+        if isinstance(prev_prefix, list):
+            limit = min(len(prev_prefix), len(messages))
+            while start < limit and messages[start] is prev_prefix[start]:
+                start += 1
+    return start
+
+
 def sanitize_tool_call_arguments(
     messages: list,
     *,
@@ -205,134 +245,73 @@ def sanitize_tool_call_arguments(
 ) -> int:
     """Repair corrupted assistant tool-call argument JSON in-place.
 
-    ``cursor`` (optional caller-owned dict) stores under ``"prefix"`` strong
-    references to the message objects validated last call; the longest
-    ``is``-identical prefix is skipped on the next call. Skipping is safe
-    because only the surrogate/non-ASCII sanitizers mutate arguments on live
-    dicts (inside JSON string values), and every other path replaces or
-    reorders dicts, breaking identity. Strong refs (not ``id()``) rule out
-    address-reuse aliasing (#50372).
+    ``cursor`` (optional caller-owned dict) stores under ``"prefix"`` strong references to
+    the message objects validated last call; the longest ``is``-identical prefix is skipped
+    on the next call. Skipping is safe because only the surrogate/non-ASCII sanitizers
+    mutate arguments on live dicts (inside JSON string values), and every other path
+    replaces or reorders dicts, breaking identity. Strong refs (not ``id()``) rule out
+    address-reuse aliasing.
     """
     log = logger or logging.getLogger(__name__)
     if not isinstance(messages, list):
         return 0
-
-    start_index = 0
-    if cursor is not None:
-        prev_prefix = cursor.get("prefix")
-        if isinstance(prev_prefix, list):
-            limit = min(len(prev_prefix), len(messages))
-            while start_index < limit and messages[start_index] is prev_prefix[start_index]:
-                start_index += 1
-
     repaired = 0
     marker = _ra().AIAgent._TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER
-
-    def _prepend_marker(tool_msg: dict) -> None:
-        existing = tool_msg.get("content")
-        if isinstance(existing, str):
-            if not existing:
-                tool_msg["content"] = marker
-            elif not existing.startswith(marker):
-                tool_msg["content"] = f"{marker}\n{existing}"
-            return
-        if existing is None:
-            tool_msg["content"] = marker
-            return
-        try:
-            existing_text = json.dumps(existing)
-        except TypeError:
-            existing_text = str(existing)
-        tool_msg["content"] = f"{marker}\n{existing_text}"
-
-    message_index = start_index
+    message_index = _cursor_skip_prefix(messages, cursor)
     while message_index < len(messages):
         msg = messages[message_index]
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            message_index += 1
-            continue
-
-        tool_calls = msg.get("tool_calls")
+        tool_calls = msg.get("tool_calls") if isinstance(msg, dict) and msg.get("role") == "assistant" else None
         if not isinstance(tool_calls, list) or not tool_calls:
             message_index += 1
             continue
-
         insert_at = message_index + 1
         for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            function = tool_call.get("function")
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
             if not isinstance(function, dict):
                 continue
-
             arguments = function.get("arguments")
-            if arguments is None or arguments == "":
-                function["arguments"] = "{}"
-                continue
-            if isinstance(arguments, str) and not arguments.strip():
+            if arguments is None or (isinstance(arguments, str) and not arguments.strip()):
                 function["arguments"] = "{}"
                 continue
             if not isinstance(arguments, str):
                 continue
-
             try:
                 json.loads(arguments)
+                continue
             except json.JSONDecodeError:
-                # Use canonical ``call_id || id`` precedence so scan and stub share the id
-                # the pipeline uses; bare ``id`` misses Codex call_id results and orphans a stub (#58168).
-                tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
-                function_name = function.get("name", "?")
-                # Log the FULL (bounded) argument string: we are about to overwrite the only
-                # copy, which may hold real user content from a truncated write_file/patch (#80498).
-                preview = arguments[:_FULL_ARGS_LOG_BOUND]
-                log.warning(
-                    "Corrupted tool_call arguments repaired before request "
-                    "(session=%s, message_index=%s, tool_call_id=%s, function=%s, "
-                    "original_arguments=%r)",
-                    session_id or "-",
-                    message_index,
-                    tool_call_id or "-",
-                    function_name,
-                    preview,
+                pass
+            # Canonical ``call_id || id`` precedence so scan and stub share the id the
+            # pipeline uses; bare ``id`` misses Codex call_id results and orphans a stub.
+            tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
+            function_name = function.get("name", "?")
+            # Log the FULL (bounded) argument string: we are about to overwrite the only
+            # copy, which may hold real user content from a truncated write_file/patch.
+            log.warning(
+                "Corrupted tool_call arguments repaired before request "
+                "(session=%s, message_index=%s, tool_call_id=%s, function=%s, "
+                "original_arguments=%r)",
+                session_id or "-",
+                message_index,
+                tool_call_id or "-",
+                function_name,
+                arguments[:_FULL_ARGS_LOG_BOUND],
+            )
+            function["arguments"] = "{}"
+            existing_tool_msg = _find_tool_result(messages, message_index + 1, tool_call)
+            if existing_tool_msg is None:
+                messages.insert(
+                    insert_at,
+                    make_tool_result_message(function_name if function_name != "?" else "", marker, tool_call_id),
                 )
-                function["arguments"] = "{}"
-
-                existing_tool_msg = None
-                scan_index = message_index + 1
-                while scan_index < len(messages):
-                    candidate = messages[scan_index]
-                    if not isinstance(candidate, dict) or candidate.get("role") != "tool":
-                        break
-                    if (
-                        tool_result_id_variants(candidate.get("tool_call_id"))
-                        & tool_call_id_variants(tool_call)
-                    ):
-                        existing_tool_msg = candidate
-                        break
-                    scan_index += 1
-
-                if existing_tool_msg is None:
-                    messages.insert(
-                        insert_at,
-                        make_tool_result_message(
-                            function_name if function_name != "?" else "",
-                            marker,
-                            tool_call_id,
-                        ),
-                    )
-                    insert_at += 1
-                else:
-                    _prepend_marker(existing_tool_msg)
-
-                repaired += 1
-
+                insert_at += 1
+            else:
+                _prepend_corruption_marker(existing_tool_msg, marker)
+            repaired += 1
         message_index += 1
-
     if cursor is not None:
-        # Strong refs to the objects validated this call; any divergence
-        # (compression, undo, repair, steer) forces a re-scan from that index.
+        # Strong refs to the objects validated this call; any divergence (compression,
+        # undo, repair, steer) forces a re-scan from that index.
         cursor["prefix"] = messages[:]
-
     return repaired
 
 
@@ -367,19 +346,18 @@ def note_turn_start(agent, turn_id: str):
             getattr(agent, "session_id", None) or "-",
         )
         overlap = prev
-
-    # Cross-agent leg: same session_id in flight under another agent object
-    # (busy guard is keyed by routing key and cannot see it). Persist-disabled
-    # forks share the parent's session_id but never write, so they must not
-    # register or pop here (note_turn_persisted skips them symmetrically).
+    # Cross-agent leg: same session_id in flight under another agent object (busy guard is
+    # keyed by routing key and cannot see it). Persist-disabled forks share the parent's
+    # session_id but never write, so they must not register or pop here
+    # (note_turn_persisted skips them symmetrically).
     session_id = getattr(agent, "session_id", None)
     if session_id and not getattr(agent, "_persist_disabled", False):
         now = time.time()
         with _INFLIGHT_TURNS_LOCK:
             entry = _INFLIGHT_TURNS_BY_SESSION.get(session_id)
             _INFLIGHT_TURNS_BY_SESSION[session_id] = (turn_id, now)
-        # Record the session id registered under: compression can rotate
-        # agent.session_id mid-turn and persist must pop the slot actually held.
+        # Record the session id registered under: compression can rotate agent.session_id
+        # mid-turn and persist must pop the slot actually held.
         agent._inflight_turn_session_id = session_id
         if entry and entry[0] not in (turn_id, prev):
             logger.warning(
@@ -1089,6 +1067,25 @@ def try_recover_primary_transport(
 
 
 
+def _merge_user_content(prev_content: Any, cur_content: Any) -> Any:
+    """Merged content for two adjacent user messages; ``_UNMERGEABLE`` for unknown shapes.
+
+    String+string joins with a blank line; list sides append as separate blocks.
+    """
+    if isinstance(prev_content, str) and isinstance(cur_content, str):
+        return prev_content + ("\n\n" if prev_content and cur_content else "") + cur_content
+    if isinstance(prev_content, list) and isinstance(cur_content, list):
+        return list(prev_content) + list(cur_content)
+    if isinstance(prev_content, list) and isinstance(cur_content, str):
+        return list(prev_content) + ([{"type": "text", "text": cur_content}] if cur_content else [])
+    if isinstance(prev_content, str) and isinstance(cur_content, list):
+        return ([{"type": "text", "text": prev_content}] if prev_content else []) + list(cur_content)
+    return _UNMERGEABLE
+
+
+_UNMERGEABLE = object()
+
+
 def drop_thinking_only_and_merge_users(
     messages: List[Dict[str, Any]],
     *,
@@ -1102,63 +1099,27 @@ def drop_thinking_only_and_merge_users(
     """
     if not messages:
         return messages
-
-    # Pass 1: drop thinking-only assistant turns.
     kept = [
         m for m in messages
-        if not _ra().AIAgent._is_thinking_only_assistant(
-            m,
-            drop_codex_reasoning_items=drop_codex_reasoning_items,
-        )
+        if not _ra().AIAgent._is_thinking_only_assistant(m, drop_codex_reasoning_items=drop_codex_reasoning_items)
     ]
     dropped = len(messages) - len(kept)
-
-    # Pass 2: merge any newly-adjacent user messages.
     merged: List[Dict[str, Any]] = []
     merges = 0
     for m in kept:
         prev = merged[-1] if merged else None
-        if (
-            prev is not None
-            and prev.get("role") == "user"
-            and m.get("role") == "user"
-        ):
-            prev_content = prev.get("content", "")
-            cur_content = m.get("content", "")
-            # Copy ``prev`` so caller dicts are never mutated (safe from tests/other loops).
-            prev_copy = dict(prev)
-            # Only string+string content merges; list (multimodal) sides append as separate blocks.
-            if isinstance(prev_content, str) and isinstance(cur_content, str):
-                sep = "\n\n" if prev_content and cur_content else ""
-                prev_copy["content"] = prev_content + sep + cur_content
-            elif isinstance(prev_content, list) and isinstance(cur_content, list):
-                prev_copy["content"] = list(prev_content) + list(cur_content)
-            elif isinstance(prev_content, list) and isinstance(cur_content, str):
-                if cur_content:
-                    prev_copy["content"] = list(prev_content) + [
-                        {"type": "text", "text": cur_content}
-                    ]
-                else:
-                    prev_copy["content"] = list(prev_content)
-            elif isinstance(prev_content, str) and isinstance(cur_content, list):
-                new_blocks: List[Dict[str, Any]] = []
-                if prev_content:
-                    new_blocks.append({"type": "text", "text": prev_content})
-                new_blocks.extend(cur_content)
-                prev_copy["content"] = new_blocks
-            else:
-                # Unknown content shape — fall back to appending separately
-                # (violates alternation, but safer than raising in a hot path).
-                merged.append(m)
+        if prev is not None and prev.get("role") == "user" and m.get("role") == "user":
+            content = _merge_user_content(prev.get("content", ""), m.get("content", ""))
+            if content is not _UNMERGEABLE:
+                # Copy ``prev`` so caller dicts are never mutated.
+                merged[-1] = {**prev, "content": content}
+                merges += 1
                 continue
-            merged[-1] = prev_copy
-            merges += 1
-        else:
-            merged.append(m)
-
+            # Unknown content shape: append separately (violates alternation, but safer
+            # than raising in a hot path).
+        merged.append(m)
     if dropped == 0 and merges == 0:
         return messages
-
     _ra().logger.debug(
         "Pre-call sanitizer: dropped %d thinking-only assistant turn(s), "
         "merged %d adjacent user message(s)",
@@ -2712,26 +2673,25 @@ def _msg_has_payload(msg: Dict[str, Any]) -> bool:
         for block in content:
             if isinstance(block, dict):
                 # any typed block counts, as long as a text block is not itself blank
-                if block.get("type") == "text":
-                    if isinstance(block.get("text"), str) and block["text"].strip():
-                        return True
-                    continue
-                return True
+                if block.get("type") != "text":
+                    return True
+                if isinstance(block.get("text"), str) and block["text"].strip():
+                    return True
             elif block:
                 return True
     elif content not in (None, ""):
         return True
-    # Structural payloads that make an "empty-content" message still valid.
-    if msg.get("tool_calls"):
-        return True
-    if isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"].strip():
-        return True
-    if msg.get("reasoning") or msg.get("reasoning_details"):
-        return True
-    # Codex Responses item carriers persist with content:"" by design (text lives in
-    # codex_message_items / codex_reasoning_items and is replayed); treat as payload so
-    # the repair never rewrites a designed-empty codex turn.
-    return bool(msg.get("codex_message_items") or msg.get("codex_reasoning_items"))
+    # Structural payloads that make an "empty-content" message still valid. Codex Responses
+    # item carriers persist with content:"" by design (text lives in codex_*_items and is
+    # replayed); treating them as payload keeps the repair from rewriting a designed-empty turn.
+    return bool(
+        msg.get("tool_calls")
+        or (isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"].strip())
+        or msg.get("reasoning")
+        or msg.get("reasoning_details")
+        or msg.get("codex_message_items")
+        or msg.get("codex_reasoning_items")
+    )
 
 
 def fill_empty_non_final_wire_payload(
@@ -2805,7 +2765,7 @@ def get_sanitizer_heal_stats() -> Dict[str, Dict[str, Any]]:
 
 
 def _log_empty_non_final_heal(healed: int) -> None:
-    """WARNING on the first heals in a window, one ERROR at the threshold, then silent (#96870).
+    """WARNING on the first heals in a window, one ERROR at the threshold, then silent.
 
     The threshold also queues a ONE-TIME out-of-band user notice (drained by
     ``consume_pending_sanitizer_heal_notice``); never re-armed by a new window.
@@ -2816,14 +2776,12 @@ def _log_empty_non_final_heal(healed: int) -> None:
     with _empty_heal_log_lock:
         state = _empty_heal_log_state.get(key)
         if state is None or (now - state["window_start"]) > _EMPTY_HEAL_WINDOW_S:
-            prior_events = state.get("total_events", 0) if state else 0
-            prior_healed = state.get("total_healed", 0) if state else 0
             state = {
                 "count": 0,
                 "window_start": now,
                 "escalated": False,
-                "total_events": prior_events,
-                "total_healed": prior_healed,
+                "total_events": state.get("total_events", 0) if state else 0,
+                "total_healed": state.get("total_healed", 0) if state else 0,
             }
             _empty_heal_log_state[key] = state
         state["count"] += 1
@@ -2832,9 +2790,11 @@ def _log_empty_non_final_heal(healed: int) -> None:
         count = state["count"]
         total_events = state["total_events"]
         total_healed = state["total_healed"]
-        if threshold > 0 and count >= threshold and not state["escalated"]:
+        if state["escalated"]:
+            return
+        escalate = threshold > 0 and count >= threshold
+        if escalate:
             state["escalated"] = True
-            level = "error"
             if key not in _empty_heal_user_notified:
                 _empty_heal_user_notified.add(key)
                 _empty_heal_pending_notice[key] = (
@@ -2845,14 +2805,7 @@ def _log_empty_non_final_heal(healed: int) -> None:
                     "doctor` to capture diagnostics, or /new to start a "
                     "clean session."
                 )
-        elif state["escalated"]:
-            level = "silent"
-        else:
-            level = "warning"
-
-    if level == "silent":
-        return
-    if level == "error":
+    if escalate:
         _ra().logger.error(
             "Pre-call sanitizer: repeated-heal escalation for session %s — "
             "healed %d empty non-final message(s) this send; heal pattern: "
@@ -3449,26 +3402,48 @@ def _connection_candidates(conn: Any):
             stack.append(inner)
 
 
+def _socket_from_stream(stream: Any):
+    """Raw socket behind an httpcore network stream (several backends), or None."""
+    sock = getattr(stream, "_sock", None)
+    if sock is None:
+        get_extra_info = getattr(stream, "get_extra_info", None)
+        if callable(get_extra_info):
+            try:
+                sock = get_extra_info("socket")
+            except Exception:
+                sock = None
+    if sock is None:
+        wrapped = getattr(stream, "stream", None)
+        if wrapped is not None:
+            sock = getattr(wrapped, "_sock", None)
+    if sock is None:
+        # anyio-backed streams expose the raw socket through SocketAttribute.raw_socket.
+        extra = getattr(getattr(stream, "_stream", None), "extra", None)
+        if callable(extra):
+            try:
+                from anyio.abc import SocketAttribute
+                sock = extra(SocketAttribute.raw_socket)
+            except Exception:
+                sock = None
+    return sock
+
+
 def _iter_pool_sockets(client: Any):
     """Yield raw sockets reachable from an OpenAI/httpx client pool.
 
     Traversal is defensive over private httpcore internals (``conn._connection``,
     proxy tunnel wrappers) that vary by release. Also walks mount transports and
-    in-flight ``PoolRequest.connection`` objects, reachable when
-    ``_connections`` is empty during checkout (#85252).
+    in-flight ``PoolRequest.connection`` objects, reachable when ``_connections``
+    is empty during checkout.
     """
     try:
+        # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
         http_client = getattr(client, "_client", None)
         if http_client is None:
-            # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
             http_client = client
         pools = list(_iter_httpx_pool_objects(http_client))
     except Exception:
         return
-
-    if not pools:
-        return
-
     seen: set[int] = set()
     for pool in pools:
         # ``is None``, not falsiness: an empty ``_connections`` must still let us walk in-flight ``_requests``.
@@ -3482,41 +3457,11 @@ def _iter_pool_sockets(client: Any):
                 connections.append(conn)
         for conn in connections:
             for candidate in _connection_candidates(conn):
-                stream = (
-                    getattr(candidate, "_network_stream", None)
-                    or getattr(candidate, "_stream", None)
-                )
-                if stream is None:
+                stream = getattr(candidate, "_network_stream", None) or getattr(candidate, "_stream", None)
+                sock = _socket_from_stream(stream) if stream is not None else None
+                if sock is None or id(sock) in seen:
                     continue
-                sock = getattr(stream, "_sock", None)
-                if sock is None:
-                    get_extra_info = getattr(stream, "get_extra_info", None)
-                    if callable(get_extra_info):
-                        try:
-                            sock = get_extra_info("socket")
-                        except Exception:
-                            sock = None
-                if sock is None:
-                    wrapped = getattr(stream, "stream", None)
-                    if wrapped is not None:
-                        sock = getattr(wrapped, "_sock", None)
-                if sock is None:
-                    # anyio-backed streams expose the raw socket through
-                    # SocketAttribute.raw_socket when available.
-                    wrapped = getattr(stream, "_stream", None)
-                    extra = getattr(wrapped, "extra", None)
-                    if callable(extra):
-                        try:
-                            from anyio.abc import SocketAttribute
-                            sock = extra(SocketAttribute.raw_socket)
-                        except Exception:
-                            sock = None
-                if sock is None:
-                    continue
-                marker = id(sock)
-                if marker in seen:
-                    continue
-                seen.add(marker)
+                seen.add(id(sock))
                 yield sock
 
 
@@ -3557,10 +3502,42 @@ def cleanup_dead_connections(agent) -> bool:
 
 
 
+_QUOTA_RESET_DELAY_RE = re.compile(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", re.IGNORECASE)
+_RESETS_IN_RE = re.compile(
+    r"resets?\s+in\s+"
+    r"(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b\s*)?"
+    r"(?:(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes)\b\s*)?"
+    r"(?:(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b)?",
+    re.IGNORECASE,
+)
+_RETRY_AFTER_SECONDS_RE = re.compile(r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)", re.IGNORECASE)
+
+
+def _reset_delay_from_message(message: str) -> Optional[float]:
+    """Seconds-until-reset parsed from free-text provider messages, or None."""
+    m = _QUOTA_RESET_DELAY_RE.search(message)
+    if m:
+        value = float(m.group(1))
+        return value / 1000.0 if m.group(2).lower() == "ms" else value
+    m = _RESETS_IN_RE.search(message)
+    if m and any(m.groups()):
+        return float(m.group(1) or 0) * 3600 + float(m.group(2) or 0) * 60 + float(m.group(3) or 0)
+    m = _RETRY_AFTER_SECONDS_RE.search(message)
+    return float(m.group(1)) if m else None
+
+
+def _set_reset_from_retry_after(context: Dict[str, Any], retry_after: Any) -> None:
+    if retry_after in {None, ""} or "reset_at" in context:
+        return
+    try:
+        context["reset_at"] = time.time() + float(retry_after)
+    except (TypeError, ValueError):
+        pass
+
+
 def extract_api_error_context(error: Exception) -> Dict[str, Any]:
     """Extract structured rate-limit details from provider errors."""
     context: Dict[str, Any] = {}
-
     body = getattr(error, "body", None)
     payload = None
     if isinstance(body, dict):
@@ -3571,8 +3548,7 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
             context["reason"] = reason.strip()
         message = payload.get("message") or payload.get("error_description")
         if not message and isinstance(payload.get("error"), str):
-            # xAI uses a top-level string ``error`` beside a structured
-            # ``code`` (for example personal-team-blocked:spending-limit).
+            # xAI uses a top-level string ``error`` beside a structured ``code``.
             message = payload.get("error")
         if isinstance(message, str) and message.strip():
             context["message"] = message.strip()
@@ -3581,62 +3557,23 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
             if value not in {None, ""}:
                 context["reset_at"] = value
                 break
-        retry_after = payload.get("retry_after")
-        if retry_after not in {None, ""} and "reset_at" not in context:
-            try:
-                context["reset_at"] = time.time() + float(retry_after)
-            except (TypeError, ValueError):
-                pass
-
-    response = getattr(error, "response", None)
-    headers = getattr(response, "headers", None)
+        _set_reset_from_retry_after(context, payload.get("retry_after"))
+    headers = getattr(getattr(error, "response", None), "headers", None)
     if headers:
-        retry_after = headers.get("retry-after") or headers.get("Retry-After")
-        if retry_after and "reset_at" not in context:
-            try:
-                context["reset_at"] = time.time() + float(retry_after)
-            except (TypeError, ValueError):
-                pass
+        _set_reset_from_retry_after(context, headers.get("retry-after") or headers.get("Retry-After") or None)
         ratelimit_reset = headers.get("x-ratelimit-reset")
         if ratelimit_reset and "reset_at" not in context:
             context["reset_at"] = ratelimit_reset
-
     if "message" not in context:
         raw_message = str(error).strip()
         if raw_message:
             context["message"] = raw_message[:500]
-
     if "reset_at" not in context:
         message = context.get("message") or ""
         if isinstance(message, str):
-            delay_match = re.search(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", message, re.IGNORECASE)
-            if delay_match:
-                value = float(delay_match.group(1))
-                seconds = value / 1000.0 if delay_match.group(2).lower() == "ms" else value
-                context["reset_at"] = time.time() + seconds
-            else:
-                resets_in_match = re.search(
-                    r"resets?\s+in\s+"
-                    r"(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours)\b\s*)?"
-                    r"(?:(\d+(?:\.\d+)?)\s*(?:m|min|mins|minute|minutes)\b\s*)?"
-                    r"(?:(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b)?",
-                    message,
-                    re.IGNORECASE,
-                )
-                if resets_in_match and any(resets_in_match.groups()):
-                    hours = float(resets_in_match.group(1) or 0)
-                    minutes = float(resets_in_match.group(2) or 0)
-                    seconds = float(resets_in_match.group(3) or 0)
-                    context["reset_at"] = time.time() + (hours * 3600) + (minutes * 60) + seconds
-                else:
-                    sec_match = re.search(
-                        r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)",
-                        message,
-                        re.IGNORECASE,
-                    )
-                    if sec_match:
-                        context["reset_at"] = time.time() + float(sec_match.group(1))
-
+            delay = _reset_delay_from_message(message)
+            if delay is not None:
+                context["reset_at"] = time.time() + delay
     return context
 
 
