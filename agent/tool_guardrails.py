@@ -204,11 +204,8 @@ def canonical_tool_args(args: Mapping[str, Any]) -> str:
 
 
 def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
-    """Fallback classifier used only when callers don't pass ``failed``.
-
-    Mirrors ``agent.display._detect_tool_failure`` so the guardrail never
-    disagrees with the CLI's user-visible ``[error]`` tag.
-    """
+    """Fallback classifier used only when callers don't pass ``failed``; mirrors
+    ``agent.display._detect_tool_failure`` so the guardrail never disagrees with the CLI's ``[error]`` tag."""
     if result is None or file_mutation_result_landed(tool_name, result):
         return False, ""
 
@@ -221,11 +218,8 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
         data = safe_json_loads(result)
         if isinstance(data, dict) and data.get("success") is False and "exceed the limit" in data.get("error", ""):
             return True, " [full]"
-
     lower = result[:500].lower()
-    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
-        return True, " [error]"
-    return False, ""
+    return (True, " [error]") if '"error"' in lower or '"failed"' in lower or result.startswith("Error") else (False, "")
 
 
 # Guardrail verdict text injected into the conversation, keyed by decision code.
@@ -286,9 +280,8 @@ class ToolCallGuardrailController:
         self._progress_since_failure: dict[ToolCallSignature, bool] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
-        # Identical-call streak: CONSECUTIVE identical (tool, args) calls with identical
-        # results. Any different call or result resets it, so re-reads after edits and
-        # varied polling are never flagged. first_call_id lets a stub point at the full payload.
+        # Identical-call streak: CONSECUTIVE identical (tool, args, result) calls; any different call or
+        # result resets it, so re-reads after edits and varied polling are never flagged.
         self._identical_streak_sig: ToolCallSignature | None = None
         self._identical_streak_result_hash: str = ""
         self._identical_streak_count: int = 0
@@ -543,23 +536,17 @@ def _coerce_args(args: Mapping[str, Any] | None) -> Mapping[str, Any]:
 
 def _result_hash(result: str | None) -> str:
     parsed = safe_json_loads(result or "")
-    canonical = _canonical_json(parsed) if parsed is not None else (result or "")
-    return _sha256(canonical)
+    return _sha256(_canonical_json(parsed) if parsed is not None else (result or ""))
 
 
-_TRUE_WORDS = frozenset({"1", "true", "yes", "on", "enabled"})
-_FALSE_WORDS = frozenset({"0", "false", "no", "off", "disabled"})
+_BOOL_WORDS = {w: True for w in ("1", "true", "yes", "on", "enabled")} | {w: False for w in ("0", "false", "no", "off", "disabled")}
 
 
 def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, (bool, int, float)):
         return bool(value)
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in _TRUE_WORDS:
-            return True
-        if lowered in _FALSE_WORDS:
-            return False
+        return _BOOL_WORDS.get(value.strip().lower(), default)
     return default
 
 
@@ -573,8 +560,7 @@ def _int_at_least(value: Any, default: int, minimum: int) -> int:
 
 
 def _subagent_spawn_count(args: Mapping[str, Any]) -> int:
-    """Subagents one delegate_task call spawns: ``len(tasks)`` for a non-empty batch,
-    else 1; control actions (list/steer/stop) spawn 0."""
+    """Subagents one delegate_task call spawns: ``len(tasks)`` for a non-empty batch, else 1; control actions 0."""
     if str(args.get("action") or "").strip().lower() in ("list", "steer", "stop"):
         return 0
     tasks = args.get("tasks")
