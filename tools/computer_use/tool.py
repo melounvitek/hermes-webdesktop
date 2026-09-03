@@ -162,9 +162,8 @@ def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[thr
     _backend_permission_modes.pop(sid, None)
     backend, call_lock = _backends.pop(sid, None), _backend_call_locks.pop(sid, None)
     if sid == "":
-        backend = backend if backend is not None else _backend
-        if _backend is backend:
-            _backend = None
+        backend = _backend if backend is None else backend
+        _backend = None if _backend is backend else _backend
     return backend, call_lock
 
 def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock]) -> None:
@@ -225,11 +224,9 @@ def _shutdown_backend_atexit() -> None:
         if _backend is not None:
             unique.setdefault(id(_backend), (_backend, _backend_call_locks.get("")))
         _backend = None
-        for cache in (_backends, _backend_call_locks, _backend_permission_modes):
-            cache.clear()
+        _backends.clear(), _backend_call_locks.clear(), _backend_permission_modes.clear()
     with _approval_lock:
-        for cache in (_session_auto_approve, _always_allow, _escalation_warned):
-            cache.clear()
+        _session_auto_approve.clear(), _always_allow.clear(), _escalation_warned.clear()
     for backend, call_lock in unique.values():
         try:
             _stop_backend(backend, call_lock)
@@ -323,13 +320,12 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
     except Exception as e:
         logger.warning("approval callback failed: %s", e)
         verdict = "deny"
-    if verdict == "approve_once":
-        return None
     if verdict in ("approve_session", "always_approve"):
         with _approval_lock:
             _always_allow.setdefault(session_id, set()).add(scope_key)
             if verdict == "always_approve":
                 _session_auto_approve[session_id] = True
+    if verdict in ("approve_once", "approve_session", "always_approve"):
         return None
     if verdict == "timeout":
         return json.dumps({"error": ("approval prompt timed out — the user did not respond. Silence is not "
@@ -351,13 +347,16 @@ _ACTION_SUMMARIES: Dict[str, Callable[[str, Dict[str, Any], str], str]] = {
     "drag": lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
                                  f"{args.get('to_element') or args.get('to_coordinate')}{fg}"),
     "scroll": lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}",
-    "type": lambda a, args, fg: f"type {args.get('text', '')[:60]!r}" + ("..." if len(args.get("text", "")) > 60 else "") + fg,
+    "type": lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
+                                 + ("..." if len(args.get("text", "")) > 60 else "") + fg),
     "key": lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}",
-    "focus_app": lambda a, args, fg: f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""),
+    "focus_app": lambda a, args, fg: (f"focus {args.get('app', '')!r}"
+                                      + (" (raise)" if args.get("raise_window") else "")),
 }
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
-    fg = " [FOREGROUND — briefly raises the window / changes focus]" if args.get("delivery_mode") == "foreground" else ""
+    foreground = args.get("delivery_mode") == "foreground"
+    fg = " [FOREGROUND — briefly raises the window / changes focus]" if foreground else ""
     return _ACTION_SUMMARIES.get(action, lambda a, args, fg: a + fg)(action, args, fg)
 
 # --- read-only / focus actions: (backend, args) -> final tool result ---------
@@ -398,18 +397,16 @@ def _xy(args: Dict[str, Any]) -> Tuple[Any, Any]:
 def _do_click(backend, action, args, **delivery):
     forced_button, click_count = _CLICK_VARIANTS[action]
     x, y = _xy(args)
-    return backend.click(element=args.get("element"), x=x, y=y, click_count=click_count,
-                         button=forced_button or args.get("button") or "left", modifiers=args.get("modifiers"), **delivery)
+    return backend.click(element=args.get("element"), x=x, y=y, button=forced_button or args.get("button") or "left",
+                         click_count=click_count, modifiers=args.get("modifiers"), **delivery)
 
 def _do_drag(backend, action, args, **delivery):
-    has_elements = args.get("from_element") is not None and args.get("to_element") is not None
-    if not has_elements and not (args.get("from_coordinate") and args.get("to_coordinate")):
+    src, dst = args.get("from_coordinate"), args.get("to_coordinate")
+    if (args.get("from_element") is None or args.get("to_element") is None) and not (src and dst):
         return json.dumps({"error": "drag requires from_coordinate/to_coordinate or from_element/to_element"})
-    return backend.drag(
-        from_element=args.get("from_element"), to_element=args.get("to_element"),
-        from_xy=tuple(args["from_coordinate"]) if args.get("from_coordinate") else None,
-        to_xy=tuple(args["to_coordinate"]) if args.get("to_coordinate") else None,
-        button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
+    return backend.drag(from_element=args.get("from_element"), to_element=args.get("to_element"),
+                        from_xy=tuple(src) if src else None, to_xy=tuple(dst) if dst else None,
+                        button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
 
 def _do_scroll(backend, action, args, **delivery):
     x, y = _xy(args)
@@ -563,7 +560,8 @@ def _bounds_divergence(elements: List[UIElement], image_width: int, image_height
         max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
     return None if max_x <= image_width * 1.05 and max_y <= image_height * 1.05 else (max_x, max_y)
 
-def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int) -> Tuple[Optional[float], Optional[str]]:
+def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
+                  ) -> Tuple[Optional[float], Optional[str]]:
     """(scale, note) when element bounds live in a different coordinate space than the screenshot, else
     (None, None). On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate=
     clicks read off the screenshot miss by the scale factor. Scale heuristic: larger axis ratio wins."""
@@ -810,7 +808,8 @@ def _should_route_through_aux_vision() -> bool:
         if (cached := _AUX_VISION_ROUTE_CACHE.get(cache_key)) is not None:
             return cached
         stage = "decision"
-        decision = _AUX_VISION_ROUTE_CACHE[cache_key] = bool(should_route_capture_to_aux_vision(provider, model, load_config()))
+        decision = bool(should_route_capture_to_aux_vision(provider, model, load_config()))
+        _AUX_VISION_ROUTE_CACHE[cache_key] = decision
         return decision
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("computer_use: aux-vision routing %s failed: %s", stage, exc)
