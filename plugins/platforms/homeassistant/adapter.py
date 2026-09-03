@@ -157,12 +157,15 @@ class HomeAssistantAdapter(BasePlatformAdapter):
             return False
         return True
 
+    @staticmethod
+    async def _close(obj) -> None:
+        if obj and not obj.closed:
+            await obj.close()
+
     async def _cleanup_ws(self) -> None:
-        if self._ws and not self._ws.closed:
-            await self._ws.close()
+        await self._close(self._ws)
         self._ws = None
-        if self._session and not self._session.closed:
-            await self._session.close()
+        await self._close(self._session)
         self._session = None
 
     async def disconnect(self) -> None:
@@ -175,8 +178,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
                 pass
             self._listen_task = None
         await self._cleanup_ws()
-        if self._rest_session and not self._rest_session.closed:
-            await self._rest_session.close()
+        await self._close(self._rest_session)
         self._rest_session = None
         logger.info("[%s] Disconnected", self.name)
 
