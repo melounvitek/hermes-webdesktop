@@ -18,10 +18,9 @@ import os
 from typing import Any, Dict, List, Optional
 
 from agent.secret_scope import get_secret
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, success_response
 from plugins.image_gen._common import (
-    StaticImageGenProvider, error_factory, import_openai, load_image_gen_config,
+    StaticImageGenProvider, error_factory, import_openai, load_image_gen_config, materialize_image,
     prompt_required_error, size_for)
 
 logger = logging.getLogger(__name__)
@@ -40,13 +39,10 @@ def _live_models() -> Optional[List[Dict[str, Any]]]:
 def _format_catalog_row(item: Dict[str, Any]) -> Dict[str, Any]:
     """Picker row for a catalog item."""
     mid = item.get("id", "")
-    metadata = item.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
+    metadata = item.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
     row: Dict[str, Any] = {
-        "id": mid,
-        "display": mid.split("/", 1)[-1] if "/" in mid else mid,
-        "strengths": metadata.get("description", ""),
+        "id": mid, "display": mid.split("/", 1)[-1], "strengths": metadata.get("description", ""),
     }
     pricing = metadata.get("pricing")
     if isinstance(pricing, dict) and pricing.get("per_image_unit") is not None:
@@ -147,25 +143,17 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
         if not data:
             return fail("DeepInfra returned no image data", "empty_response")
         first = data[0]
-        b64 = getattr(first, "b64_json", None)
-        url = getattr(first, "url", None)
         # Drop the ``vendor/`` prefix and any colons so the saved filename
-        # stays a single path component on every OS.
-        prefix = f"deepinfra_{model_id.split('/', 1)[-1].replace(':', '_')}"
-        if b64:
-            try:
-                image_ref = str(save_b64_image(b64, prefix=prefix))
-            except Exception as exc:
-                return fail(f"Could not save image to cache: {exc}", "io_error")
-        elif url:
-            # Delivery URLs are often short-lived; materialise locally, best-effort.
-            try:
-                image_ref = str(save_url_image(url, prefix=prefix))
-            except Exception as exc:
-                logger.debug("DeepInfra: caching delivery URL failed (%s); returning URL", exc)
-                image_ref = url
-        else:
-            return fail("DeepInfra response contained neither b64_json nor URL", "empty_response")
+        # stays a single path component on every OS. Delivery URLs are often
+        # short-lived; materialise locally, best-effort.
+        image_ref, err = materialize_image(
+            getattr(first, "b64_json", None), getattr(first, "url", None),
+            prefix=f"deepinfra_{model_id.split('/', 1)[-1].replace(':', '_')}", label="DeepInfra",
+            provider="deepinfra", model=model_id, prompt=prompt, aspect=aspect,
+            on_url_fail=lambda exc: logger.debug("DeepInfra: caching delivery URL failed (%s); returning URL", exc),
+        )
+        if err:
+            return err
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="deepinfra",
             extra={"size": size})

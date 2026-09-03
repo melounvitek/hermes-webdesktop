@@ -203,7 +203,7 @@ def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, A
 
 def materialize_image(
     b64: Optional[str], url: Optional[str], *, prefix: str, label: str, provider: str, model: str,
-    prompt: str, aspect: str, log: logging.Logger = logger,
+    prompt: str, aspect: str, log: logging.Logger = logger, on_url_fail: Optional[Callable[[Exception], None]] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """``(image_ref, None)`` or ``(None, error_dict)`` for a ``(b64_json, url)`` pair.
 
@@ -218,16 +218,22 @@ def materialize_image(
         except Exception as exc:  # noqa: BLE001
             return None, fail(f"Could not save image to cache: {exc}", "io_error")
     if url:
-        return cache_url_best_effort(url, prefix=prefix, label=label, log=log), None
+        return cache_url_best_effort(url, prefix=prefix, label=label, log=log, on_fail=on_url_fail), None
     return None, fail(f"{label} response contained neither b64_json nor URL", "empty_response")
 
 
-def cache_url_best_effort(url: str, *, prefix: str, label: str, log: logging.Logger = logger) -> str:
-    """Cache ``url`` locally; on failure warn and return the bare URL."""
+def cache_url_best_effort(
+    url: str, *, prefix: str, label: str, log: logging.Logger = logger,
+    on_fail: Optional[Callable[[Exception], None]] = None,
+) -> str:
+    """Cache ``url`` locally; on failure warn (or call ``on_fail``) and return the bare URL."""
     try:
         return str(save_url_image(url, prefix=prefix))
     except Exception as exc:  # noqa: BLE001
-        log.warning("%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc)
+        if on_fail is not None:
+            on_fail(exc)
+        else:
+            log.warning("%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc)
         return url
 
 
