@@ -781,6 +781,141 @@ def sync_credential_pool_entry_id(agent) -> None:
         agent._credential_pool_entry_id = None
 
 
+_STATUS_TO_FAILOVER_REASON = {
+    402: FailoverReason.billing,
+    429: FailoverReason.rate_limit,
+    401: FailoverReason.auth,
+    403: FailoverReason.auth,
+}
+
+_USAGE_LIMIT_REASON_TOKENS = ("usage_limit_reached", "gousagelimit")
+_USAGE_LIMIT_MESSAGE_TOKENS = ("usage limit reached", "usage limit has been reached")
+
+
+def _failed_credential_identity(agent, pool) -> Tuple[Optional[str], Optional[str]]:
+    """``(api_key_hint, credential_id)`` of the key actually dispatched, not ``pool.current()``.
+
+    The shared pointer often points at a different healthy entry, and marking it
+    exhausted can take the whole pool offline from one 429.
+    """
+    api_key_hint = getattr(agent, "api_key", None) or None
+    raw_id = getattr(agent, "_credential_pool_entry_id", None)
+    credential_id = raw_id if isinstance(raw_id, str) and raw_id else None
+    if not api_key_hint:
+        cur = pool.current()
+        if cur:
+            api_key_hint = getattr(cur, "runtime_api_key", None)
+            if not credential_id:
+                current_id = getattr(cur, "id", None)
+                if isinstance(current_id, str) and current_id:
+                    credential_id = current_id
+    return api_key_hint, credential_id
+
+
+def _is_entitlement_403(agent, status_code, error_context) -> bool:
+    """Entitlement 403s look like auth failures but refresh cannot fix them.
+
+    Any xai-oauth 403 is treated as entitlement EXCEPT xAI's stale-token signals
+    (``[WKE=unauthenticated:...]``, "could not be validated"), which must stay refreshable.
+    """
+    if agent._is_entitlement_failure(error_context, status_code):
+        return True
+    if status_code != 403:
+        return False
+    haystack = " ".join(
+        str(error_context.get(k) or "").lower()
+        for k in ("message", "reason", "code", "error")
+        if isinstance(error_context, dict)
+    )
+    if "oauth authentication is currently not allowed for this organization" in haystack:
+        return True
+    provider = agent.provider or ""
+    if provider == "anthropic" and getattr(agent, "api_mode", "") == "anthropic_messages":
+        return True
+    if provider == "xai-oauth":
+        return not (
+            "[wke=unauthenticated:" in haystack
+            or "oauth2 access token could not be validated" in haystack
+        )
+    return False
+
+
+def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap):
+    if _is_entitlement_403(agent, status_code, error_context):
+        _ra().logger.info(
+            "Credential %s — entitlement-shaped 403 from %s; "
+            "skipping pool refresh (account lacks subscription, "
+            "not a transient auth failure).",
+            status_code if status_code is not None else "auth",
+            agent.provider or "provider",
+        )
+        return False, has_retried_429
+    # Refresh the entry that supplied the failing key, not current(): refreshing a
+    # healthy entry burns its single-use refresh token for a failure it never had.
+    refresh_kwargs = {"api_key_hint": api_key_hint}
+    if credential_id:
+        refresh_kwargs["credential_id"] = credential_id
+    refreshed = pool.try_refresh_matching(**refresh_kwargs)
+    if refreshed is not None:
+        # try_refresh_matching() reports success even when upstream keeps rejecting;
+        # cap same-entry refreshes so a single-entry pool falls through to fallback.
+        refreshed_id = getattr(refreshed, "id", None)
+        if refreshed_id is not None:
+            refresh_counts = getattr(agent, "_auth_pool_refresh_counts", None)
+            if refresh_counts is None:
+                refresh_counts = {}
+                agent._auth_pool_refresh_counts = refresh_counts
+            refresh_key = (agent.provider, refreshed_id)
+            refresh_counts[refresh_key] = refresh_counts.get(refresh_key, 0) + 1
+            if refresh_counts[refresh_key] > _MAX_AUTH_REFRESH_ATTEMPTS:
+                _ra().logger.warning(
+                    "Credential auth failure persists after %s refreshes for "
+                    "pool entry %s — treating as unrecoverable and allowing "
+                    "fallback to activate.",
+                    refresh_counts[refresh_key] - 1,
+                    refreshed_id,
+                )
+                return False, has_retried_429
+        _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
+        agent._swap_credential(refreshed)
+        return True, has_retried_429
+    # Refresh failed; rotate (the failed entry is already marked exhausted).
+    if rotate_and_swap(401, "auth refresh failed"):
+        return True, False
+    return False, has_retried_429
+
+
+def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap):
+    # Already-exhausted credential: rotate immediately. Avoids the "cancel-between-429s"
+    # trap where the local has_retried_429 resets per prompt and retries forever.
+    current_entry = None
+    if credential_id:
+        current_entry = next((e for e in pool.entries() if e.id == credential_id), None)
+    if api_key_hint:
+        current_entry = current_entry or next(
+            (e for e in pool.entries() if e.runtime_api_key == api_key_hint), None
+        )
+    if current_entry is None:
+        current_entry = pool.current()
+    current_last_status = getattr(current_entry, "last_status", None) if current_entry else None
+    if current_last_status == STATUS_EXHAUSTED:
+        _ra().logger.info(
+            "Credential already exhausted (last_status=%s) — rotating immediately instead of retrying",
+            current_last_status,
+        )
+        return (True, False) if rotate_and_swap(429, "rate limit, pre-exhausted") else (False, True)
+    usage_limit_reached = False
+    if error_context:
+        context_reason = str(error_context.get("reason") or "").lower()
+        context_message = str(error_context.get("message") or "").lower()
+        usage_limit_reached = any(t in context_reason for t in _USAGE_LIMIT_REASON_TOKENS) or any(
+            t in context_message for t in _USAGE_LIMIT_MESSAGE_TOKENS
+        )
+    if not has_retried_429 and not usage_limit_reached:
+        return False, True
+    return (True, False) if rotate_and_swap(429, "rate limit") else (False, True)
+
+
 def recover_with_credential_pool(
     agent,
     *,
@@ -795,96 +930,62 @@ def recover_with_credential_pool(
     Returns (recovered, has_retried_429). Rate limits: retry once, then rotate.
     Billing exhaustion: rotate immediately. Auth failures: refresh before rotating.
     ``classified_reason`` honors the structured classifier over raw HTTP codes
-    (e.g. Anthropic 400 for "out of extra usage"). ``billing_unverified`` (#82154)
-    persists an ambiguous billing verdict so the entry gets a short cooldown, not
-    the one-hour bench.
+    (e.g. Anthropic 400 for "out of extra usage"). ``billing_unverified`` persists an
+    ambiguous billing verdict so the entry gets a short cooldown, not the one-hour bench.
     """
     pool = agent._credential_pool
     if pool is None:
         return False, has_retried_429
 
-    # The pool belongs to the PRIMARY provider: acting on fallback errors would
-    # corrupt its state (#33088) and reset base_url to the primary endpoint (#33163).
+    # The pool belongs to the PRIMARY provider: acting on fallback errors would corrupt
+    # its state and reset base_url to the primary endpoint. Empty pool provider means
+    # unscoped; empty agent provider is a mismatch (swap would leave provider="" model="").
     current_provider = (getattr(agent, "provider", "") or "").strip().lower()
     pool_provider = (getattr(pool, "provider", "") or "").strip().lower()
-    # Skip recovery when the pool is scoped to another provider. Empty pool provider
-    # means unscoped; empty agent provider is a mismatch (swap would leave provider="" model="").
-    if pool_provider:
-        # Same fail-closed boundary predicate as runtime binding (named-custom
-        # aliases, endpoint validation, fallback isolation).
-        if not credential_pool_matches_provider(
-            pool,
-            current_provider,
-            base_url=getattr(agent, "base_url", None),
-        ):
-            _ra().logger.warning(
-                "Credential pool provider mismatch: pool=%s, agent=%s — "
-                "skipping pool mutation to avoid cross-provider contamination",
-                pool_provider, current_provider,
-            )
-            return False, has_retried_429
+    if pool_provider and not credential_pool_matches_provider(
+        pool, current_provider, base_url=getattr(agent, "base_url", None)
+    ):
+        # Same fail-closed boundary predicate as runtime binding.
+        _ra().logger.warning(
+            "Credential pool provider mismatch: pool=%s, agent=%s — "
+            "skipping pool mutation to avoid cross-provider contamination",
+            pool_provider, current_provider,
+        )
+        return False, has_retried_429
 
-    # Attribute the failure to the key actually dispatched, not pool.current():
-    # the shared pointer often points at a different healthy entry, and marking
-    # it exhausted can take the whole pool offline from one 429 (#43747).
-    _api_key_hint = getattr(agent, "api_key", None) or None
-    _raw_credential_id = getattr(agent, "_credential_pool_entry_id", None)
-    _credential_id = (
-        _raw_credential_id
-        if isinstance(_raw_credential_id, str) and _raw_credential_id
-        else None
-    )
-    if not _api_key_hint:
-        _cur = pool.current()
-        if _cur:
-            _api_key_hint = getattr(_cur, "runtime_api_key", None)
-            if not _credential_id:
-                _current_id = getattr(_cur, "id", None)
-                if isinstance(_current_id, str) and _current_id:
-                    _credential_id = _current_id
-
-    def _rotate_failed_credential(rotate_status: int):
-        kwargs = {
-            "status_code": rotate_status,
-            "error_context": error_context,
-            "api_key_hint": _api_key_hint,
-        }
-        if _credential_id:
-            kwargs["credential_id"] = _credential_id
-        # Pass classified semantics, not just the status: a billing 403 and an
-        # edge-throttle 403 need opposite cooldowns. ``effective_reason`` is resolved below.
-        if effective_reason is not None:
-            _failure_reason = effective_reason.value
-            if effective_reason == FailoverReason.billing and billing_unverified:
-                # Ambiguous billing body (#82154): size the cooldown as transient, not a 1-hour bench.
-                from agent.credential_pool import FAILURE_REASON_BILLING_UNVERIFIED
-                _failure_reason = FAILURE_REASON_BILLING_UNVERIFIED
-            kwargs["failure_reason"] = _failure_reason
-        return pool.mark_exhausted_and_rotate(**kwargs)
+    api_key_hint, credential_id = _failed_credential_identity(agent, pool)
+    effective_reason = classified_reason
+    if effective_reason is None:
+        effective_reason = _STATUS_TO_FAILOVER_REASON.get(status_code)
 
     def _rotate_and_swap(default_status: int, label: str) -> bool:
         """Rotate away from the failed credential; True when a new entry was swapped in."""
         rotate_status = status_code if status_code is not None else default_status
-        next_entry = _rotate_failed_credential(rotate_status)
+        kwargs = {
+            "status_code": rotate_status,
+            "error_context": error_context,
+            "api_key_hint": api_key_hint,
+        }
+        if credential_id:
+            kwargs["credential_id"] = credential_id
+        # Pass classified semantics, not just the status: a billing 403 and an
+        # edge-throttle 403 need opposite cooldowns.
+        if effective_reason is not None:
+            failure_reason = effective_reason.value
+            if effective_reason == FailoverReason.billing and billing_unverified:
+                # Ambiguous billing body: size the cooldown as transient, not a 1-hour bench.
+                from agent.credential_pool import FAILURE_REASON_BILLING_UNVERIFIED
+                failure_reason = FAILURE_REASON_BILLING_UNVERIFIED
+            kwargs["failure_reason"] = failure_reason
+        next_entry = pool.mark_exhausted_and_rotate(**kwargs)
         if next_entry is None:
             return False
         _ra().logger.info(
             "Credential %s (%s) — rotated to pool entry %s",
-            rotate_status,
-            label,
-            getattr(next_entry, "id", "?"),
+            rotate_status, label, getattr(next_entry, "id", "?"),
         )
         agent._swap_credential(next_entry)
         return True
-
-    effective_reason = classified_reason
-    if effective_reason is None:
-        if status_code == 402:
-            effective_reason = FailoverReason.billing
-        elif status_code == 429:
-            effective_reason = FailoverReason.rate_limit
-        elif status_code in {401, 403}:
-            effective_reason = FailoverReason.auth
 
     if effective_reason == FailoverReason.upstream_rate_limit:
         # Upstream (e.g. DeepSeek behind OpenRouter) is throttling the aggregator; the
@@ -902,129 +1003,21 @@ def recover_with_credential_pool(
                 "credential rotation, deferring to fallback chain"
             )
         return False, has_retried_429
-
     if effective_reason == FailoverReason.billing:
         # A separate pool instance may have resolved runtime credentials, leaving
         # no ``current_id``; match the key that failed, not a different account.
-        if _rotate_and_swap(402, "billing"):
-            return True, False
-        return False, has_retried_429
-
+        return (True, False) if _rotate_and_swap(402, "billing") else (False, has_retried_429)
     if effective_reason == FailoverReason.rate_limit:
-        # Already-exhausted credential: rotate immediately. Avoids the "cancel-between-429s"
-        # trap where the local has_retried_429 resets per prompt and retries forever.
-        current_entry = None
-        if _credential_id:
-            current_entry = next(
-                (e for e in pool.entries() if e.id == _credential_id),
-                None,
-            )
-        if _api_key_hint:
-            current_entry = current_entry or next(
-                (e for e in pool.entries() if e.runtime_api_key == _api_key_hint),
-                None,
-            )
-        if current_entry is None:
-            current_entry = pool.current()
-        current_last_status = getattr(current_entry, "last_status", None) if current_entry else None
-        if current_last_status == STATUS_EXHAUSTED:
-            _ra().logger.info(
-                "Credential already exhausted (last_status=%s) — rotating immediately instead of retrying",
-                current_last_status,
-            )
-            if _rotate_and_swap(429, "rate limit, pre-exhausted"):
-                return True, False
-            return False, True
-
-        usage_limit_reached = False
-        if error_context:
-            context_reason = str(error_context.get("reason") or "").lower()
-            context_message = str(error_context.get("message") or "").lower()
-            usage_limit_reached = (
-                "usage_limit_reached" in context_reason
-                or "gousagelimit" in context_reason
-                or "usage limit reached" in context_message
-                or "usage limit has been reached" in context_message
-            )
-        if not has_retried_429 and not usage_limit_reached:
-            return False, True
-        if _rotate_and_swap(429, "rate limit"):
-            return True, False
-        return False, True
-
-    if effective_reason == FailoverReason.auth:
-        # Entitlement 403s look like auth failures but refresh cannot fix them; any
-        # xai-oauth 403 is treated as entitlement (#26847) EXCEPT xAI's stale-token
-        # signals (``[WKE=unauthenticated:...]``, "could not be validated"), which must
-        # stay refreshable (#29344).
-        is_entitlement = agent._is_entitlement_failure(error_context, status_code)
-        _auth_haystack = " ".join(
-            str(error_context.get(k) or "").lower()
-            for k in ("message", "reason", "code", "error")
-            if isinstance(error_context, dict)
+        return _recover_rate_limit(
+            pool, has_retried_429=has_retried_429, error_context=error_context,
+            api_key_hint=api_key_hint, credential_id=credential_id, rotate_and_swap=_rotate_and_swap,
         )
-        if (
-            not is_entitlement
-            and status_code == 403
-            and "oauth authentication is currently not allowed for this organization" in _auth_haystack
-        ):
-            is_entitlement = True
-        if (
-            not is_entitlement
-            and status_code == 403
-            and (agent.provider or "") == "anthropic"
-            and getattr(agent, "api_mode", "") == "anthropic_messages"
-        ):
-            is_entitlement = True
-        if not is_entitlement and status_code == 403 and (agent.provider or "") == "xai-oauth":
-            _is_xai_auth_failure = (
-                "[wke=unauthenticated:" in _auth_haystack
-                or "oauth2 access token could not be validated" in _auth_haystack
-            )
-            if not _is_xai_auth_failure:
-                is_entitlement = True
-        if is_entitlement:
-            _ra().logger.info(
-                "Credential %s — entitlement-shaped 403 from %s; "
-                "skipping pool refresh (account lacks subscription, "
-                "not a transient auth failure).",
-                status_code if status_code is not None else "auth",
-                agent.provider or "provider",
-            )
-            return False, has_retried_429
-        # Refresh the entry that supplied the failing key, not current(): refreshing a
-        # healthy entry burns its single-use refresh token for a failure it never had.
-        refresh_kwargs = {"api_key_hint": _api_key_hint}
-        if _credential_id:
-            refresh_kwargs["credential_id"] = _credential_id
-        refreshed = pool.try_refresh_matching(**refresh_kwargs)
-        if refreshed is not None:
-            # try_refresh_matching() reports success even when upstream keeps rejecting;
-            # cap same-entry refreshes so a single-entry pool falls through to fallback (#26080).
-            refreshed_id = getattr(refreshed, "id", None)
-            if refreshed_id is not None:
-                refresh_counts = getattr(agent, "_auth_pool_refresh_counts", None)
-                if refresh_counts is None:
-                    refresh_counts = {}
-                    agent._auth_pool_refresh_counts = refresh_counts
-                refresh_key = (agent.provider, refreshed_id)
-                refresh_counts[refresh_key] = refresh_counts.get(refresh_key, 0) + 1
-                if refresh_counts[refresh_key] > _MAX_AUTH_REFRESH_ATTEMPTS:
-                    _ra().logger.warning(
-                        "Credential auth failure persists after %s refreshes for "
-                        "pool entry %s — treating as unrecoverable and allowing "
-                        "fallback to activate.",
-                        refresh_counts[refresh_key] - 1,
-                        refreshed_id,
-                    )
-                    return False, has_retried_429
-            _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
-            agent._swap_credential(refreshed)
-            return True, has_retried_429
-        # Refresh failed; rotate (the failed entry is already marked exhausted).
-        if _rotate_and_swap(401, "auth refresh failed"):
-            return True, False
-
+    if effective_reason == FailoverReason.auth:
+        return _recover_auth_failure(
+            agent, pool, status_code=status_code, has_retried_429=has_retried_429,
+            error_context=error_context, api_key_hint=api_key_hint, credential_id=credential_id,
+            rotate_and_swap=_rotate_and_swap,
+        )
     return False, has_retried_429
 
 
