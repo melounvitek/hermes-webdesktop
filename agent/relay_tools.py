@@ -26,17 +26,16 @@ def execute(
     callback_error: BaseException | None = None
     callback_context = contextvars.copy_context()
 
+    def guarded(final_args: dict[str, Any]) -> Any:
+        # Everything the tool transitively calls (incl. auxiliary LLM calls on worker
+        # threads) must bypass managed Relay: the pipeline's Futures bind to THIS loop,
+        # which is blocked until the tool returns.
+        with relay_runtime.managed_callback_guard():
+            return callback(final_args)
+
     def invoke(next_args: Any) -> Any:
         nonlocal callback_error, observed_args
         observed_args = next_args if isinstance(next_args, dict) else args
-
-        def guarded(final_args: dict[str, Any]) -> Any:
-            # Everything the tool transitively calls (incl. auxiliary LLM calls on worker
-            # threads) must bypass managed Relay: the pipeline's Futures bind to THIS loop,
-            # which is blocked until the tool returns.
-            with relay_runtime.managed_callback_guard():
-                return callback(final_args)
-
         try:
             result = callback_context.copy().run(guarded, observed_args)
         except BaseException as exc:
@@ -65,9 +64,7 @@ def execute(
         raise
     if "value" in raw_result and _json_equal(managed, raw_result["json"]):
         return raw_result["value"], observed_args
-    if isinstance(managed, str):
-        return managed, observed_args
-    return json.dumps(_jsonable(managed), ensure_ascii=False), observed_args
+    return (managed if isinstance(managed, str) else json.dumps(_jsonable(managed), ensure_ascii=False)), observed_args
 
 
 def _jsonable(value: Any) -> Any:

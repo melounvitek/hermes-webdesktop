@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import json
@@ -407,12 +408,9 @@ class ManagedLlmStream(Iterator[Any]):
 
     def _prime_completed_response(self) -> None:
         """Advance once while preserving a genuine first chunk."""
-        if self._closed or self._prefetched_chunks:
-            return
-        try:
-            self._prefetched_chunks.append(next(self))
-        except StopIteration:
-            pass
+        if not self._closed and not self._prefetched_chunks:
+            with contextlib.suppress(StopIteration):
+                self._prefetched_chunks.append(next(self))
 
     def _recoverable_relay_failure(self, exc: BaseException) -> bool:
         """Relay post-processing failed after the provider already succeeded."""
@@ -484,8 +482,7 @@ class ManagedLlmStream(Iterator[Any]):
     def close(self) -> None:
         """Close an explicitly abandoned stream and cancel its logical call."""
         self._close(logical_outcome="cancelled")
-        close_error = self._close_error
-        self._close_error = None
+        close_error, self._close_error = self._close_error, None
         if close_error is not None:
             raise close_error
 
@@ -547,8 +544,7 @@ class ManagedLlmStream(Iterator[Any]):
             self._release_runtime_lease()
 
     def _release_runtime_lease(self) -> None:
-        lease = self._runtime_lease
-        self._runtime_lease = None
+        lease, self._runtime_lease = self._runtime_lease, None
         if lease is not None:
             lease.release()
 
