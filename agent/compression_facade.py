@@ -19,11 +19,9 @@ logger = logging.getLogger("run_agent")
 def _timeout_fallback_prompt(agent, system_message: str) -> str:
     """Cached prompt, else a fresh build, else the raw ``system_message`` (never raises).
 
-    Resolved lazily by the timeout wrapper: an eager rebuild would raise before
-    compress_context runs when ``_cached_system_prompt`` is unset and the builder fails.
-    """
-    cached = getattr(agent, "_cached_system_prompt", None)
-    if cached:
+    Resolved lazily by the timeout wrapper: an eager rebuild would raise before compress_context runs when
+    ``_cached_system_prompt`` is unset and the builder fails."""
+    if cached := getattr(agent, "_cached_system_prompt", None):
         return cached
     try:
         return agent._build_system_prompt(system_message)
@@ -33,13 +31,7 @@ def _timeout_fallback_prompt(agent, system_message: str) -> str:
 
 
 def _report_compression_timeout(
-    agent,
-    *,
-    idle: float,
-    waited: float,
-    since_progress: float,
-    total_ceiling: float,
-    total_exhausted: bool,
+    agent, *, idle: float, waited: float, since_progress: float, total_ceiling: float, total_exhausted: bool,
     progress_observed: bool,
 ) -> None:
     """Host-side timeout bookkeeping: log, activity stamp, cooldown ladder, user warning."""
@@ -62,18 +54,13 @@ def _report_compression_timeout(
         except Exception:
             logger.debug("compress_context timeout activity touch failed", exc_info=True)
     # Same timeout cooldown ladder as summary-LLM timeouts: avoid re-burning the full idle budget every turn.
-    compressor = getattr(agent, "context_compressor", None)
-    record = getattr(compressor, "record_timeout_failure", None) if compressor is not None else None
+    record = getattr(getattr(agent, "context_compressor", None), "record_timeout_failure", None)
     if callable(record):
         try:
-            record(
-                (
-                    "host compress_context total ceiling exhausted"
-                    if total_exhausted
-                    else "host compress_context timeout (no summary progress)"
-                ),
-                failure_kind="ceiling_exhausted" if total_exhausted else "stalled",
-            )
+            if total_exhausted:
+                record("host compress_context total ceiling exhausted", failure_kind="ceiling_exhausted")
+            else:
+                record("host compress_context timeout (no summary progress)", failure_kind="stalled")
         except Exception:
             logger.debug("failed to record compress_context timeout cooldown", exc_info=True)
     emit = getattr(agent, "_emit_warning", None)
@@ -88,8 +75,7 @@ def _report_compression_timeout(
         )
     else:
         emit(
-            "⚠ Context compression timed out "
-            f"after {idle:.1f}s with no output from the summary "
+            f"⚠ Context compression timed out after {idle:.1f}s with no output from the summary "
             "model. No messages were dropped — continuing without compression. Run /compress to retry, /new "
             "for a clean session, or check auxiliary.compression."
         )
@@ -100,8 +86,7 @@ def _warn_commit_overrun(agent, waited: float, ceiling: float) -> None:
     emit = getattr(agent, "_emit_warning", None)
     if callable(emit):
         emit(
-            "⚠ Context compression commit is taking unusually "
-            f"long ({waited:.0f}s, ceiling {ceiling:.0f}s). "
+            f"⚠ Context compression commit is taking unusually long ({waited:.0f}s, ceiling {ceiling:.0f}s). "
             "Waiting for it to finish safely — if this persists, check SessionDB health (disk / lock contention)."
         )
 
@@ -109,10 +94,9 @@ def _warn_commit_overrun(agent, waited: float, ceiling: float) -> None:
 def _sync_persisted_markers(target_messages, source_messages) -> None:
     """Mirror ``_DB_PERSISTED_MARKER`` stamps from the worker's snapshot onto a live list.
 
-    Matched by scoped identity; timestamp-less repeated content is ambiguous, so every
-    scoped match is stamped. Imported UNCONDITIONALLY: a silent fallback literal would
-    split the stamping key from the flush's and resurrect the duplicate-row bug.
-    """
+    Matched by scoped identity; timestamp-less repeated content is ambiguous, so every scoped match is
+    stamped. Imported UNCONDITIONALLY: a silent fallback literal would split the stamping key from the flush's
+    and resurrect the duplicate-row bug."""
     from agent.context_compressor import _DB_PERSISTED_MARKER
     from agent.conversation_compression import _stamp_scoped_twins
     if not isinstance(target_messages, list) or not isinstance(source_messages, list):
@@ -127,23 +111,19 @@ def _run_under_progress_timeout(
 ):
     """Run ``run(fence, target_messages=snapshot)`` on the pool under the progress-aware timeout.
 
-    The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could rewrite
-    it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort returns the snapshot
-    unchanged, so the ORIGINAL list is handed back to keep identity semantics.
-    """
+    The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could
+    rewrite it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort
+    returns the snapshot unchanged, so the ORIGINAL list is handed back to keep identity semantics."""
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
     def _snapshot_worker(fence=None):
         snapshot = copy.deepcopy(messages)
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
-        if result_msgs is snapshot:
-            return messages, result_prompt
-        return result_msgs, result_prompt
+        return (messages if result_msgs is snapshot else result_msgs), result_prompt
 
     timeout_cause = {"total_exhausted": False, "progress_observed": False}
 
     def _on_timeout_cause(total_exhausted, progress_observed):
-        timeout_cause["total_exhausted"] = total_exhausted
-        timeout_cause["progress_observed"] = progress_observed
+        timeout_cause.update(total_exhausted=total_exhausted, progress_observed=progress_observed)
 
     def _on_timeout(idle, waited, since_progress):
         _report_compression_timeout(
@@ -185,9 +165,8 @@ def _mirror_result_onto_live_lists(agent, result, messages, *, direct_path: bool
 def _rebind_caller_session_context(agent) -> None:
     """Propagate a rotated session id to the CALLER's thread/ContextVar (idempotent otherwise).
 
-    The worker thread rotated hermes_logging's thread-local id; post-compression tools must
-    resolve HERMES_SESSION_ID to the child id.
-    """
+    The worker thread rotated hermes_logging's thread-local id; post-compression tools must resolve
+    HERMES_SESSION_ID to the child id."""
     with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
         set_session_context(agent.session_id)
@@ -203,39 +182,24 @@ class CompressionFacadeMixin:
     """``_compress_context`` (see module docstring)."""
 
     def _compress_context(
-        self,
-        messages: list,
-        system_message: str,
-        *,
-        approx_tokens: int = None,
-        task_id: str = "default",
-        focus_topic: str = None,
-        force: bool = False,
-        bypass_cooldown: bool = False,
-        defer_context_engine_notification: bool = False,
-        commit_fence=None,
+        self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default",
+        focus_topic: str = None, force: bool = False, bypass_cooldown: bool = False,
+        defer_context_engine_notification: bool = False, commit_fence=None,
     ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
         ``force=True`` (manual /compress) bypasses the summary-failure cooldown; ``bypass_cooldown=True``
-        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed.
-        """
+        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed."""
         # Per-attempt timeout signal for turn-start preflight and in-loop consumers: a stalled
         # compression must not be mistaken for a structural no-op. Thread-local + per-agent lock.
         from agent.conversation_compression import (
-            CompressionCommitFence,
-            compress_context,
-            reset_context_compression_timeout_outcome,
+            CompressionCommitFence, compress_context, reset_context_compression_timeout_outcome,
             resolve_context_compression_timeouts,
         )
         reset_context_compression_timeout_outcome(self)
         from agent.portal_tags import (
-            get_affinity_scope,
-            get_conversation_context,
-            reset_affinity_scope,
-            reset_conversation_context,
-            set_affinity_scope,
-            set_conversation_context,
+            get_affinity_scope, get_conversation_context, reset_affinity_scope, reset_conversation_context,
+            set_affinity_scope, set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
         # Out-of-turn compaction (/compact, gateway /compress, partial head compression) runs outside
@@ -273,12 +237,9 @@ class CompressionFacadeMixin:
             # Callers that already own a progress-aware wait (gateway session
             # hygiene) pass commit_fence and must not be double-wrapped.
             direct_path = commit_fence is not None
-            idle_timeout = total_ceiling = None
             if not direct_path:
                 idle_timeout, total_ceiling = resolve_context_compression_timeouts()
-                if idle_timeout <= 0:
-                    direct_path = True
-
+                direct_path = idle_timeout <= 0
             if direct_path:
                 result = _run(active_fence)
             else:
