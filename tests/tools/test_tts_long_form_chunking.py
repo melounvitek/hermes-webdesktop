@@ -12,13 +12,12 @@ from unittest.mock import patch
 
 import pytest
 
-from tools.tts_tool import (
+from tools.tts_tool import _build_audio_delivery_files, _split_text_for_tts
+from tools.tts_tool_delivery import (
     AudioDeliveryProfile,
-    _build_audio_delivery_files,
     _concat_audio_files,
     _pack_audio_files_for_delivery,
     _split_oversized_sentence,
-    _split_text_for_tts,
 )
 
 

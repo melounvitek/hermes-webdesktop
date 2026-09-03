@@ -803,7 +803,7 @@ class CLIVoiceMixin:
 
         def _run():
             try:
-                from tools.tts_tool import acquire_tts_lease, release_tts_lease
+                from tools.tts_tool_lifecycle import acquire_tts_lease, release_tts_lease
                 if active:
                     acquire_tts_lease("cli:voice-tts")
                 else:

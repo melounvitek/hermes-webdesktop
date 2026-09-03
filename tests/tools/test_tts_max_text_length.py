@@ -8,11 +8,8 @@ separately and the results are combined or delivered as multiple files.
 import json
 
 
-from tools.tts_tool import (
-    FALLBACK_MAX_TEXT_LENGTH,
-    PROVIDER_MAX_TEXT_LENGTH,
-    _resolve_max_text_length,
-)
+from tools.tts_tool import _resolve_max_text_length
+from tools.tts_tool_delivery import FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH
 
 
 class TestResolveMaxTextLength:

@@ -14,16 +14,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools import tts_tool
+from tools import tts_tool, tts_tool_local
 from tools.tts_tool import (
     BUILTIN_TTS_PROVIDERS,
-    DEFAULT_PIPER_VOICE,
-    PROVIDER_MAX_TEXT_LENGTH,
     _check_piper_available,
-    _resolve_piper_voice_path,
     check_tts_requirements,
     text_to_speech_tool,
 )
+from tools.tts_tool_delivery import PROVIDER_MAX_TEXT_LENGTH
+from tools.tts_tool_local import DEFAULT_PIPER_VOICE, _resolve_piper_voice_path
 
 
 # ---------------------------------------------------------------------------
@@ -100,11 +99,11 @@ class _StubPiperVoice:
 @pytest.fixture(autouse=True)
 def _reset_piper_cache():
     """Clear the module-level voice cache between tests."""
-    tts_tool._piper_voice_cache.clear()
+    tts_tool_local._piper_voice_cache.clear()
     _StubPiperVoice.loaded = []
     _StubPiperVoice.calls = []
     yield
-    tts_tool._piper_voice_cache.clear()
+    tts_tool_local._piper_voice_cache.clear()
 
 
 class TestGeneratePiperTts:

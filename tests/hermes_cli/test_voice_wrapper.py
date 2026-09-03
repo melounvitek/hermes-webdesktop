@@ -467,7 +467,7 @@ class TestSpeakTextStreamingDispatch:
     def test_streaming_provider_routes_through_dispatcher(self, monkeypatch):
         import hermes_cli.voice as voice
         import tools.tts_streaming as ts
-        from tools import tts_tool
+        from tools import tts_tool, tts_tool_speaker
 
         streamed = []
 
@@ -482,7 +482,7 @@ class TestSpeakTextStreamingDispatch:
         monkeypatch.setattr(
             ts, "resolve_streaming_provider", lambda cfg, preferred=None: object()
         )
-        monkeypatch.setattr(tts_tool, "stream_tts_to_speaker", fake_stream)
+        monkeypatch.setattr(tts_tool_speaker, "stream_tts_to_speaker", fake_stream)
 
         synced = []
         monkeypatch.setattr(

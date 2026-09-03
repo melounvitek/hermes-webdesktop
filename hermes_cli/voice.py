@@ -577,7 +577,8 @@ def _speak_streaming(text: str, stop_event: Optional[threading.Event]) -> bool:
     # stream_tts_to_speaker pipeline the CLI voice mode uses — audio starts on sentence one instead of after
     # full synthesis. Falls through to the legacy whole-file path when no streamer resolves.
     from tools.tts_streaming import resolve_streaming_provider
-    from tools.tts_tool import _load_tts_config, stream_tts_to_speaker
+    from tools.tts_tool import _load_tts_config
+    from tools.tts_tool_speaker import stream_tts_to_speaker
 
     if resolve_streaming_provider(_load_tts_config()) is None:
         return False

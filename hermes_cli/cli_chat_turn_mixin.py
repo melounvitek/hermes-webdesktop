@@ -220,9 +220,8 @@ class CLIChatTurnMixin:
         # Streaming TTS: any working provider speaks sentence-by-sentence as tokens arrive.
         if self._voice_tts:
             try:
-                from tools.tts_tool import (
-                    _import_sounddevice, check_tts_requirements, stream_tts_to_speaker,
-                )
+                from tools.tts_tool import _import_sounddevice, check_tts_requirements
+                from tools.tts_tool_speaker import stream_tts_to_speaker
                 _import_sounddevice()
                 turn.use_streaming_tts = check_tts_requirements()
             except Exception:

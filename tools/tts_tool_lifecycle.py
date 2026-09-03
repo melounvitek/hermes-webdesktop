@@ -4,7 +4,8 @@ Local engines load lazily on first synthesis (dead air on the first spoken reply
 resident. Every surface that flips speech output on holds a *lease* here (warming the configured
 engine); when the last lease is released the local model caches are dropped, so one surface's
 "off" can't unload a model another surface still needs. Cloud providers have nothing resident;
-warming only ensures the SDK imports. Origin seams are resolved through :func:`_origin` per call.
+warming only ensures the SDK imports. Origin seams (``_load_tts_config``, ``_get_provider``) are
+resolved through :func:`_origin` per call.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+from tools import tts_command_provider
 from tools.tts_command_provider import (
     BUILTIN_TTS_PROVIDERS, _get_command_tts_timeout, _get_named_provider_config,
     _is_command_provider_config, command_env_passthrough as _command_provider_env_passthrough,
@@ -60,7 +62,7 @@ def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) 
 
             def _run() -> None:
                 try:
-                    _origin()._run_command_tts(
+                    tts_command_provider.run_command_provider(
                         command, _get_command_tts_timeout(cfg),
                         env_passthrough=_command_provider_env_passthrough(cfg))
                 except Exception as exc:  # noqa: BLE001 — best-effort hook
@@ -144,7 +146,7 @@ def acquire_tts_lease(lease: str, tts_config: Optional[Dict[str, Any]] = None) -
     with _tts_lease_lock:
         _tts_leases.add(lease)
         holders = len(_tts_leases)
-    return {**_origin().warm_tts_provider(tts_config), "leases": holders}
+    return {**warm_tts_provider(tts_config), "leases": holders}
 
 
 def release_tts_lease(lease: str) -> Dict[str, Any]:

@@ -4,9 +4,8 @@
 Built-ins: Edge (free default), ElevenLabs, OpenAI, DeepInfra, MiniMax, Mistral, Gemini, xAI,
 local NeuTTS / KittenTTS / Piper; plus ``type: command`` providers under ``tts.providers.<name>``
 and plugin-registered ones. Output is Opus (.ogg) on voice-bubble platforms, MP3 elsewhere.
-Sibling ``tts_tool_*`` modules hold backends/delivery/lifecycle; their names are re-imported
-here so ``tools.tts_tool.<name>`` resolves and test patches on this module still apply
-(siblings read those seams through ``_origin()`` at call time).
+Sibling ``tts_tool_*`` modules hold backends/delivery/lifecycle; they read the seams defined
+here (config, provider resolution, lazy SDK importers) through ``_origin()`` at call time.
 """
 
 import asyncio
@@ -16,7 +15,7 @@ import importlib.util
 import json
 import logging
 import os
-import tempfile  # noqa: F401 — tests/gateway patch ``tts_tool.tempfile.NamedTemporaryFile``
+import tempfile
 from pathlib import Path
 from typing import Callable, Dict, Any, List, Optional
 
@@ -44,47 +43,21 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
     return resolve_provider_secret(env_var, provider_id, env_getter=get_env_value)
 
 
-from tools.managed_tool_gateway import resolve_managed_tool_gateway  # noqa: F401 — seam patched by tests
-from tools.tts_command_provider import (  # noqa: F401 — historical names re-exported
-    BUILTIN_TTS_PROVIDERS, COMMAND_TTS_OUTPUT_FORMATS, DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
-    DEFAULT_COMMAND_TTS_OUTPUT_FORMAT, DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS,
-    _configured_command_tts_output_path, _generate_command_tts, _get_command_tts_output_format,
-    _get_command_tts_timeout, _get_named_provider_config, _is_command_provider_config,
-    _is_command_tts_voice_compatible, _iter_command_providers, _resolve_command_provider_config,
-    command_env_passthrough as _command_provider_env_passthrough,
-    render_command_template as _render_command_tts_template,
-    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context)
-from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by tests, resolved via tts_tool_openai._origin()
-    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key)
-from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
-    FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
-    AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
-    _pack_audio_files_for_delivery, _remove_quietly, _repair_ogg_container,
-    _resolve_audio_delivery_profile, _sniff_audio_container, _split_oversized_sentence,
-    _split_text_for_tts, _wrap_pcm_as_wav)
-from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
-    DEFAULT_ELEVENLABS_MODEL_ID, DEFAULT_ELEVENLABS_VOICE_ID, DEFAULT_GEMINI_TTS_MODEL,
-    DEFAULT_GEMINI_TTS_VOICE, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_CN_BASE_URL,
-    TTS_RESPONSE_BODY_LIMIT_BYTES, _XAI_FIRST_SENTENCE_RE, _XAI_INLINE_SPEECH_TAGS,
-    _XAI_WRAPPING_SPEECH_TAGS, _apply_xai_auto_speech_tags, _elevenlabs_environment_kwargs,
+from tools.tts_command_provider import (
+    BUILTIN_TTS_PROVIDERS, _configured_command_tts_output_path, _generate_command_tts,
+    _get_command_tts_output_format, _is_command_tts_voice_compatible, _resolve_command_provider_config)
+from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER
+from tools.tts_tool_delivery import (
+    _resolve_max_text_length, _build_audio_delivery_files, _convert_to_opus, _remove_quietly,
+    _repair_ogg_container, _resolve_audio_delivery_profile, _split_text_for_tts)
+from tools.tts_tool_providers import (
     _generate_edge_tts, _generate_elevenlabs, _generate_gemini_tts, _generate_minimax_tts,
     _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime)
-from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
-    DEFAULT_PIPER_VOICE, _LOCAL_TTS_MODEL_CACHES, _TTS_MODEL_CACHE_MAX, _generate_kittentts,
-    _generate_neutts, _generate_piper_tts, _kittentts_model_cache, _piper_voice_cache,
-    _resolve_piper_voice_path, _tts_cache_get_or_load)
-from tools.tts_tool_speaker import stream_tts_to_speaker  # noqa: F401 — historical name re-exported
-from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
-from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-exported
+from tools.tts_tool_local import _generate_kittentts, _generate_neutts, _generate_piper_tts
+from tools.tts_tool_plugins import (
     _dispatch_to_plugin_provider, _plugin_provider_is_available,
     _plugin_provider_is_voice_compatible)
-from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
-    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_VOICE, MANAGED_OPENAI_TTS_MODELS,
-    _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend,
-    _resolve_openai_audio_client_config)
-from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
-    _local_tts_warmers, _reset_tts_leases_for_tests, acquire_tts_lease, release_tts_lease,
-    release_tts_provider, tts_lease_holders, warm_tts_provider)
+from tools.tts_tool_openai import _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend
 
 
 # --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---

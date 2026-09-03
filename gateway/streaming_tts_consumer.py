@@ -178,7 +178,7 @@ class StreamingTTSConsumer:
             return
         if self._strip_markdown is None:  # lazy import: tools.tts_tool would cycle at module load
             try:
-                from tools.tts_tool import _strip_markdown_for_tts as _strip
+                from tools.tts_text_normalize import _strip_markdown_for_tts as _strip
                 self._strip_markdown = _strip
             except ImportError:
                 self._strip_markdown = lambda t: t  # noqa: E731

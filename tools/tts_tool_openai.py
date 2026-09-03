@@ -1,10 +1,9 @@
 """OpenAI-compatible TTS backends for ``tools.tts_tool``: OpenAI and DeepInfra.
 
 Also owns the managed-gateway (Nous portal ``openai-audio`` proxy) route selection that
-decides where the OpenAI client points. Seams tests monkeypatch on the origin module
-(``_load_tts_config``, ``read_selection``, ``resolve_openai_audio_api_key``,
-``resolve_managed_tool_gateway``, ``_import_openai_client``, ``_resolve_provider_key``,
-``_generate_openai_tts``, ...) are resolved through :func:`_origin` at call time.
+decides where the OpenAI client points. Seams defined on the origin module (``_load_tts_config``,
+``_import_openai_client``, ``_resolve_provider_key``, ``_generate_openai_tts``) are resolved
+through :func:`_origin` at call time.
 """
 
 from __future__ import annotations
@@ -14,8 +13,10 @@ import uuid
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
+from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import (
-    NOUS_MANAGED_PROVIDER, nous_tool_gateway_unavailable_message, selection_error)
+    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
+    read_selection, resolve_openai_audio_api_key, selection_error)
 from tools.tts_tool_delivery import _origin, _section
 from tools.tts_tool_providers import _tts_response_format_from_path
 
@@ -31,7 +32,7 @@ DEFAULT_DEEPINFRA_TTS_VOICE = "default"
 
 
 def _managed_openai_audio_route() -> Optional[tuple]:
-    gateway = _origin().resolve_managed_tool_gateway("openai-audio")
+    gateway = resolve_managed_tool_gateway("openai-audio")
     if gateway is None:
         return None
     return gateway.nous_user_token, urljoin(f"{gateway.gateway_origin.rstrip('/')}/", "v1"), True
@@ -44,7 +45,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
     then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``); unset → config key → env key → managed."""
     origin = _origin()
     openai_cfg = _section(origin._load_tts_config(), "openai")
-    selected = origin.read_selection("tts")
+    selected = read_selection("tts")
     if selected == NOUS_MANAGED_PROVIDER:
         route = _managed_openai_audio_route()
         if route is None:
@@ -52,7 +53,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
                 "tts", NOUS_MANAGED_PROVIDER,
                 "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         return route
-    direct_api_key = openai_cfg.get("api_key") or origin.resolve_openai_audio_api_key()
+    direct_api_key = openai_cfg.get("api_key") or resolve_openai_audio_api_key()
     if direct_api_key:
         return direct_api_key, openai_cfg.get("base_url") or DEFAULT_OPENAI_BASE_URL, False
     if selected is not None:
@@ -63,7 +64,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
     route = _managed_openai_audio_route()
     if route is None:
         message = "Neither tts.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"
-        if origin.managed_nous_tools_enabled():
+        if managed_nous_tools_enabled():
             message += ". " + nous_tool_gateway_unavailable_message("managed OpenAI audio for TTS")
         raise ValueError(message)
     return route
@@ -72,7 +73,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
 def _has_openai_audio_backend() -> bool:
     """Return True when the selected OpenAI audio route is usable."""
     try:
-        _origin()._resolve_openai_audio_client_config()
+        _resolve_openai_audio_client_config()
         return True
     except ValueError:
         return False
@@ -92,7 +93,7 @@ def _generate_openai_tts(
     is_managed = False
     explicit_base_url = base_url is not None
     if api_key is None:
-        api_key, fallback_base, is_managed = _origin()._resolve_openai_audio_client_config()
+        api_key, fallback_base, is_managed = _resolve_openai_audio_client_config()
     oai_config = _section(tts_config, "openai")
     if model is None:
         model = oai_config.get("model", DEFAULT_OPENAI_MODEL)

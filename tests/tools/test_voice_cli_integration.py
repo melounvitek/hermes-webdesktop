@@ -46,7 +46,7 @@ def _make_voice_cli(**overrides):
 # Markdown stripping — import real function from tts_tool
 # ============================================================================
 
-from tools.tts_tool import _strip_markdown_for_tts
+from tools.tts_text_normalize import _strip_markdown_for_tts
 
 
 class TestMarkdownStripping:

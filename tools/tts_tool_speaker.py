@@ -1,4 +1,4 @@
-"""Speaker-side streaming pipeline for ``tools.tts_tool.stream_tts_to_speaker``.
+"""Speaker-side streaming pipeline: ``stream_tts_to_speaker``.
 
 Turns a queue of LLM text deltas into audio the moment each sentence is complete. Two paths
 share the sentence cutter (``tools.tts_streaming``): :class:`_StreamerPlayback` for a registered
@@ -20,6 +20,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Iterable, Iterator, List, Optional
 
+from tools.tts_text_normalize import _strip_markdown_for_tts
 from tools.tts_tool_delivery import _origin, _remove_quietly as _unlink_quietly
 
 logger = logging.getLogger("tools.tts_tool")
@@ -307,7 +308,7 @@ def stream_tts_to_speaker(
         def _speak_sentence(sentence: str) -> None:
             if stop_event.is_set():
                 return
-            cleaned = origin._strip_markdown_for_tts(sentence).strip()
+            cleaned = _strip_markdown_for_tts(sentence).strip()
             if not cleaned:
                 return
             cleaned_lower = cleaned.lower().rstrip(".!,")

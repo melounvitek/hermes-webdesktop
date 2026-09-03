@@ -321,7 +321,7 @@ async def tts_lease(payload: TTSLeaseRequest, profile: Optional[str] = None):
         raise HTTPException(status_code=400, detail="lease is required")
 
     def _apply():
-        from tools.tts_tool import acquire_tts_lease, release_tts_lease
+        from tools.tts_tool_lifecycle import acquire_tts_lease, release_tts_lease
         if payload.active:
             with _config_profile_scope(profile):
                 return acquire_tts_lease(lease)
@@ -401,7 +401,7 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
 
     def _produce():
         from tools.tts_streaming import SentenceChunker
-        from tools.tts_tool import _strip_markdown_for_tts
+        from tools.tts_text_normalize import _strip_markdown_for_tts
 
         chunker = SentenceChunker()
 

@@ -65,7 +65,7 @@ def _tts_lease_async(lease: str, active: bool) -> None:
     block the toggle's reply). Best-effort."""
     def _run():
         try:
-            from tools.tts_tool import acquire_tts_lease, release_tts_lease
+            from tools.tts_tool_lifecycle import acquire_tts_lease, release_tts_lease
             (acquire_tts_lease if active else release_tts_lease)(lease)
         except Exception as e:
             logger.debug("voice: tts lease %s active=%s failed: %s", lease, active, e)
@@ -97,7 +97,8 @@ def _tts_stream_begin() -> Optional[queue.Queue]:
     if not _voice_tts_enabled():
         return None
     try:
-        from tools.tts_tool import check_tts_requirements, stream_tts_to_speaker
+        from tools.tts_tool import check_tts_requirements
+        from tools.tts_tool_speaker import stream_tts_to_speaker
         if not check_tts_requirements():
             return None
     except Exception:

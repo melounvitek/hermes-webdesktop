@@ -330,9 +330,7 @@ def _generate_command_tts(
         }
         command = render_command_template(command_template, placeholders)
         try:
-            # Resolved through the origin so tests patching ``tools.tts_tool._run_command_tts`` still intercept.
-            from tools.tts_tool import _run_command_tts
-            _run_command_tts(command, timeout, env_passthrough=command_env_passthrough(config))
+            run_command_provider(command, timeout, env_passthrough=command_env_passthrough(config))
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"TTS provider '{provider_name}' timed out after {timeout:g}s") from exc
         except subprocess.CalledProcessError as exc:

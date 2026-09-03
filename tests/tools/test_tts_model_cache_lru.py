@@ -7,7 +7,7 @@ loads on a miss and evicts the least-recently-used entry beyond the cap.
 """
 from __future__ import annotations
 
-import tools.tts_tool as tts
+import tools.tts_tool_local as tts
 
 
 def test_loads_on_miss_and_serves_from_cache_on_hit():
