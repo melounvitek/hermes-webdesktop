@@ -36,9 +36,7 @@ def _sub_key(task_id: str, platform: str, chat_id: str, thread_id: Optional[str]
     return (task_id, platform, chat_id, thread_id or "")
 
 
-def _encode_notify_delivery_metadata(
-    metadata: Optional[Mapping[str, Any]],
-) -> Optional[str]:
+def _encode_notify_delivery_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Serialize platform send metadata stored on notification subscriptions."""
     if not isinstance(metadata, Mapping):
         return None
@@ -267,11 +265,7 @@ def remove_notify_sub(
     return cur.rowcount > 0
 
 
-def purge_stale_done_notify_subs(
-    conn: sqlite3.Connection,
-    *,
-    max_age_days: int = 30,
-) -> int:
+def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
     """Delete notify subs whose task has sat in ``done``/``blocked`` untouched
     for longer than ``max_age_days``.
 

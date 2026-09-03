@@ -7,7 +7,6 @@ origin-resident helpers are reached late-bound via ``_kb`` so monkeypatching
 
 from __future__ import annotations
 
-import logging
 import os
 import shutil
 import sqlite3
@@ -19,9 +18,6 @@ import contextlib
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
-
-# Log-record parity with the origin module.
-_log = logging.getLogger("hermes_cli.kanban_db")
 
 _REMOVABLE_KINDS = ("scratch", "worktree")
 
@@ -237,9 +233,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ):
                 continue
             if row["workspace_kind"] == "worktree":
-                _cleanup_worktree_workspace(
-                    parent_id, row["workspace_path"], row["branch_name"]
-                )
+                _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])
                 continue
             wp = Path(row["workspace_path"])
             if wp.is_dir() and _is_managed_scratch_path(wp):
@@ -264,10 +258,7 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
         )
         if out.stdout.strip() == "1":
-            subprocess.run(
-                ["tmux", "kill-session", "-t", session],
-                capture_output=True, timeout=5,
-            )
+            subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True, timeout=5)
             _kb._log.debug("Killed stale tmux session: %s", session)
     except Exception:
         pass  # best-effort — never block completion
@@ -422,9 +413,7 @@ def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple
     return target, branch_name
 
 
-def _resolve_worktree_workspace(
-    task: Task, *, board: Optional[str] = None
-) -> tuple[Path, str]:
+def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
@@ -529,9 +518,7 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
             )
     elif kind == "dir":
         if not task.workspace_path:
-            raise ValueError(
-                f"task {task.id} has workspace_kind=dir but no workspace_path"
-            )
+            raise ValueError(f"task {task.id} has workspace_kind=dir but no workspace_path")
         p = Path(task.workspace_path).expanduser()
         if not p.is_absolute():
             raise ValueError(
@@ -550,15 +537,11 @@ def _set_task_column(conn: sqlite3.Connection, task_id: str, column: str, value:
         conn.execute(f"UPDATE tasks SET {column} = ? WHERE id = ?", (value, task_id))
 
 
-def set_workspace_path(
-    conn: sqlite3.Connection, task_id: str, path: Path | str
-) -> None:
+def set_workspace_path(conn: sqlite3.Connection, task_id: str, path: Path | str) -> None:
     _set_task_column(conn, task_id, "workspace_path", str(path))
 
 
-def set_branch_name(
-    conn: sqlite3.Connection, task_id: str, branch_name: str
-) -> None:
+def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) -> None:
     _set_task_column(conn, task_id, "branch_name", str(branch_name))
 
 
