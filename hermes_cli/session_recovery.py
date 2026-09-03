@@ -511,26 +511,31 @@ def _copy_table(
     destination: sqlite3.Connection,
     table: str,
     *,
+    salvage: bool,
     chunk_size: int,
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "source_rows": source_rows,
-        "copied_rows": 0,
-    }
+    """Copy one canonical table: straight chunked copy, or rowid-range salvage when ``salvage``."""
+    if table == "state_meta":
+        return _copy_state_meta(
+            source, destination, salvage=salvage, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows
+        )
+    if salvage:
+        return _copy_table_salvage(
+            source, destination, table, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows
+        )
+    result: dict[str, Any] = {"source_rows": source_rows, "copied_rows": 0}
     columns = _compatible_columns(source, destination, table, result)
     if columns is None:
         return result
-
     quoted, placeholders = _quoted_columns(columns)
-    insert_prefix = "INSERT OR REPLACE" if table == "state_meta" else "INSERT"
     return _copy_rows(
         source,
         destination,
         f'SELECT {quoted} FROM "{table}"',
         (),
-        f'{insert_prefix} INTO "{table}" ({quoted}) VALUES ({placeholders})',
+        f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})',
         table=table,
         chunk_size=chunk_size,
         progress_cb=progress_cb,
@@ -863,13 +868,33 @@ def _copy_state_meta(
     source: sqlite3.Connection,
     destination: sqlite3.Connection,
     *,
+    salvage: bool,
     chunk_size: int,
     progress_cb: Optional[ProgressCallback],
     source_rows: Optional[int],
 ) -> dict[str, Any]:
-    problem = _state_meta_precheck(source, destination, source_rows, salvage=False)
+    """Copy user metadata rows; derived FTS/topic keys (``_GENERATED_META_KEYS``) are regenerated, not copied."""
+    problem = _state_meta_precheck(source, destination, source_rows, salvage=salvage)
     if problem is not None:
         return problem
+
+    if salvage:
+        def keep_user_meta(row: tuple[Any, ...], columns: tuple[str, ...]) -> bool:
+            return str(row[columns.index("key")]) not in _GENERATED_META_KEYS
+
+        result = _copy_table_salvage(
+            source,
+            destination,
+            "state_meta",
+            chunk_size=chunk_size,
+            progress_cb=progress_cb,
+            source_rows=source_rows,
+            insert_prefix="INSERT OR REPLACE",
+            row_filter=keep_user_meta,
+        )
+        result["source_meta_rows"] = result.pop("source_rows")
+        result["excluded_keys"] = sorted(_GENERATED_META_KEYS)
+        return result
 
     placeholders = ", ".join("?" for _ in _GENERATED_META_KEYS)
     params = tuple(_GENERATED_META_KEYS)
@@ -882,8 +907,7 @@ def _copy_state_meta(
             ).fetchone()[0]
         )
     except sqlite3.DatabaseError:
-        # The copy loop below will return the concrete read error.
-        pass
+        pass  # the copy loop below will return the concrete read error
 
     return _copy_rows(
         source,
@@ -897,37 +921,6 @@ def _copy_state_meta(
         expected_rows=filtered_source_rows,
         result=_state_meta_result(source_rows),
     )
-
-
-def _copy_state_meta_salvage(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    *,
-    chunk_size: int,
-    progress_cb: Optional[ProgressCallback],
-    source_rows: Optional[int],
-) -> dict[str, Any]:
-    """Salvage readable user metadata while regenerating derived FTS state."""
-    problem = _state_meta_precheck(source, destination, source_rows, salvage=True)
-    if problem is not None:
-        return problem
-
-    def keep_user_meta(row: tuple[Any, ...], columns: tuple[str, ...]) -> bool:
-        return str(row[columns.index("key")]) not in _GENERATED_META_KEYS
-
-    result = _copy_table_salvage(
-        source,
-        destination,
-        "state_meta",
-        chunk_size=chunk_size,
-        progress_cb=progress_cb,
-        source_rows=source_rows,
-        insert_prefix="INSERT OR REPLACE",
-        row_filter=keep_user_meta,
-    )
-    result["source_meta_rows"] = result.pop("source_rows")
-    result["excluded_keys"] = sorted(_GENERATED_META_KEYS)
-    return result
 
 
 def _reconstruct_missing_sessions(
@@ -1453,9 +1446,6 @@ def recover_session_database(
                 topic_tables=any(inspection["tables"][table].get("available") for table in _TOPIC_TABLES),
             )
 
-            copy_meta, copy_rows = (
-                (_copy_state_meta_salvage, _copy_table_salvage) if allow_partial else (_copy_state_meta, _copy_table)
-            )
             copy_report: dict[str, dict[str, Any]] = {}
             for table in (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES):
                 if table not in _CANONICAL_TABLES and not inspection["tables"][table].get("available"):
@@ -1463,11 +1453,11 @@ def recover_session_database(
                     continue
                 if table in _AUXILIARY_TABLES:
                     _ensure_auxiliary_destination_schema(destination_conn, table)
-                copy_function, args = (copy_meta, ()) if table == "state_meta" else (copy_rows, (table,))
-                copy_report[table] = copy_function(
+                copy_report[table] = _copy_table(
                     source_conn,
                     destination_conn,
-                    *args,
+                    table,
+                    salvage=allow_partial,
                     chunk_size=chunk_size,
                     progress_cb=progress_cb,
                     source_rows=inspection["tables"][table].get("rows"),
