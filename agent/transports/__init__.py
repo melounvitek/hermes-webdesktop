@@ -4,6 +4,8 @@
     result = transport.normalize_response(raw_response)
 """
 
+import importlib
+
 from agent.transports.types import (  # noqa: F401
     NormalizedResponse,
     ToolCall,
@@ -28,8 +30,7 @@ def get_transport(api_mode: str):
         _discover_transports()
     cls = _REGISTRY.get(api_mode)
     if cls is None:
-        # A directly-imported transport module leaves the registry partially
-        # populated; discover on misses so import order can't hide a valid api_mode.
+        # A directly-imported transport leaves the registry partial; rediscover on misses.
         _discover_transports()
         cls = _REGISTRY.get(api_mode)
     return None if cls is None else cls()
@@ -39,8 +40,6 @@ def _discover_transports() -> None:
     """Import all transport modules to trigger auto-registration."""
     global _discovered
     _discovered = True
-    import importlib
-
     for name in _TRANSPORT_MODULES:
         try:
             importlib.import_module(f"agent.transports.{name}")

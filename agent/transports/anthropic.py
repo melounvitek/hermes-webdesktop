@@ -1,8 +1,4 @@
-"""Anthropic Messages API transport.
-
-Delegates format conversion to agent/anthropic_adapter.py; owns normalization,
-not client lifecycle.
-"""
+"""Anthropic Messages API transport: conversion via agent/anthropic_adapter.py, normalization here."""
 
 from typing import Any, Dict, List, Optional
 
@@ -15,11 +11,9 @@ _MCP_PREFIX = "mcp__"
 def _unprefix_oauth_tool_name(name: str) -> str:
     """Reverse the OAuth-wire ``mcp__`` prefix back to the registered tool name.
 
-    Two originals map onto one wire name (``mcp__read_file`` <- ``read_file``;
-    ``mcp__linear_get_issue`` <- ``mcp_linear_get_issue``), so resolve by registry
-    lookup, never rewriting a name that already resolves natively (GH-25255).
-    OAuth wire aliases (e.g. chat_history_lookup -> session_search) are checked
-    LAST so a real tool registered under the wire name still wins.
+    Two originals map onto one wire name (``read_file`` / ``mcp_linear_get_issue``), so
+    resolve by registry lookup, never rewriting a name that already resolves natively.
+    OAuth wire aliases are checked LAST so a real tool under the wire name still wins.
     """
     from agent.anthropic_adapter import _OAUTH_TOOL_NAME_REVERSE_ALIASES
     from tools.registry import registry as _tool_registry
@@ -80,18 +74,15 @@ class AnthropicTransport(ProviderTransport):
 
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
         text_parts, reasoning_parts, reasoning_details, tool_calls = [], [], [], []
-        # Anthropic signs each thinking block against the blocks that PRECEDE it.
-        # When thinking interleaves with tool_use, the parallel reasoning_details +
-        # tool_calls lists lose that ordering and replay -> HTTP 400 "thinking ...
-        # blocks cannot be modified". Keep the exact sequence for the adapter.
+        # Anthropic signs each thinking block against the blocks PRECEDING it; when thinking
+        # interleaves with tool_use the parallel lists lose that order and replay -> HTTP 400.
         ordered_blocks = []
 
         for block in response.content:
             block_dict = _to_plain_data(block)
             clean_block = None
             if isinstance(block_dict, dict):
-                # Sanitize at capture so output-only SDK fields never persist to
-                # state.db and leak back as request input on replay (HTTP 400).
+                # Sanitize at capture so output-only SDK fields never persist and replay (400).
                 clean_block = _sanitize_replay_block(block_dict)
                 if clean_block is not None:
                     ordered_blocks.append(clean_block)
@@ -100,7 +91,7 @@ class AnthropicTransport(ProviderTransport):
             elif block.type in ("thinking", "redacted_thinking"):
                 if block.type == "thinking":
                     reasoning_parts.append(block.thinking)
-                # Prefer the sanitized block (replayed on the non-ordered path); raw only if sanitize dropped it.
+                # Sanitized block preferred; raw only if sanitize dropped it.
                 if isinstance(clean_block, dict):
                     reasoning_details.append(clean_block)
                 elif isinstance(block_dict, dict):
@@ -114,8 +105,7 @@ class AnthropicTransport(ProviderTransport):
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
-        # Carry the ordered channel only for the one shape the parallel lists
-        # reconstruct wrongly: signed thinking interleaved with tool_use.
+        # Ordered channel only for the shape the parallel lists reconstruct wrongly.
         _has_signed_thinking = any(
             isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking") and (b.get("signature") or b.get("data"))
             for b in ordered_blocks
@@ -131,9 +121,8 @@ class AnthropicTransport(ProviderTransport):
         )
 
     def validate_response(self, response: Any) -> bool:
-        """Structural check. An empty content list is legitimate for ``end_turn`` (nothing to add
-        after a tool turn) and ``refusal`` (Claude 4.5+ declines with empty content); treating
-        either as invalid would retry a completed/deterministic response forever."""
+        """Structural check; empty content is legitimate for ``end_turn``/``refusal`` (retrying
+        either would loop forever)."""
         content_blocks = getattr(response, "content", None) if response is not None else None
         if not isinstance(content_blocks, list):
             return False

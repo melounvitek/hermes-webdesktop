@@ -32,10 +32,9 @@ def execute(
         observed_args = next_args if isinstance(next_args, dict) else args
 
         def guarded(final_args: dict[str, Any]) -> Any:
-            # Everything the tool transitively calls (including auxiliary LLM
-            # calls it forwards to worker threads) must bypass managed Relay
-            # execution — the native pipeline's Futures bind to THIS loop,
-            # which is blocked until the tool returns (#77244).
+            # Everything the tool transitively calls (incl. auxiliary LLM calls on worker
+            # threads) must bypass managed Relay: the pipeline's Futures bind to THIS loop,
+            # which is blocked until the tool returns.
             with relay_runtime.managed_callback_guard():
                 return callback(final_args)
 
@@ -87,8 +86,7 @@ def _jsonable(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
-            # warnings=False: suppress pydantic's serializer UserWarnings on
-            # generic-union SDK models; they would leak to the CLI mid-turn.
+            # warnings=False: pydantic's generic-union warning would leak to the CLI mid-turn.
             try:
                 return _jsonable(model_dump(mode="json", warnings=False))
             except TypeError:

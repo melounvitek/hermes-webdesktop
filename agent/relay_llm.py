@@ -94,9 +94,8 @@ class _ManagedAttempt:
     def run_callback(self, callback: Callable[..., Any], *args: Any) -> Any:
         """Run a Hermes callback in a fresh copy of the captured context.
 
-        Relay can invoke callbacks while another one still owns the captured
-        Context, hence the copy. Nested relay calls inside a managed provider
-        callback must run unmanaged — see relay_runtime.managed_callback_guard.
+        Relay can invoke callbacks while another still owns the captured Context (hence the
+        copy); nested relay calls run unmanaged — see relay_runtime.managed_callback_guard.
         """
         def guarded() -> Any:
             with relay_runtime.managed_callback_guard():
@@ -123,8 +122,7 @@ class _ManagedAttempt:
             final_request = self.provider_request(next_request)
 
             async def call_provider() -> Any:
-                # Nested relay calls inside a managed provider callback must
-                # run unmanaged — see relay_runtime.managed_callback_guard.
+                # Nested relay calls run unmanaged — see relay_runtime.managed_callback_guard.
                 with relay_runtime.managed_callback_guard():
                     return await callback(final_request)
 
@@ -153,8 +151,7 @@ class _ManagedAttempt:
         ):
             raise callback_error
         if (
-            not isinstance(exc, Exception)
-            or callback_error is not None
+            not isinstance(exc, Exception) or callback_error is not None
             or "value" not in self.raw_response
         ):
             raise
@@ -269,22 +266,19 @@ def stream_current(
 ) -> Any:
     """Run a provider stream under the inherited Hermes turn when present.
 
-    With ``completed_response_predicate`` set, a factory that ignores
-    ``stream=True`` and returns a complete response is unwrapped and returned
-    directly (pre-Relay ``call_llm(stream=True)`` behavior); otherwise it
-    would stay trapped as ``final_response`` on the inner ManagedLlmStream.
-    Detecting that shape starts the lazy managed pipeline: a genuine first
-    chunk is buffered, but provider latency and pre-first-yield errors may
-    surface before this function returns.
+    With ``completed_response_predicate`` set, a factory that ignores ``stream=True`` and
+    returns a complete response is unwrapped and returned directly (pre-Relay behavior)
+    instead of staying trapped as ``final_response``. Detecting that primes the lazy
+    pipeline: a genuine first chunk is buffered, but provider latency and pre-first-yield
+    errors may surface before this returns.
     """
     session_id = _current_session_id()
     if session_id is None:
         return stream_factory(request)
     if _has_running_event_loop():
-        # Managed provider callbacks run on the Relay session's event loop; a
-        # nested ManagedLlmStream would be iterated synchronously on that same
-        # loop thread, which asyncio forbids. The outer managed stream already
-        # tracks the enclosing attempt and traps a completed response itself.
+        # We are on the Relay session's loop (inside a managed callback): a nested
+        # ManagedLlmStream would be iterated synchronously on that loop, which asyncio
+        # forbids. The outer managed stream already tracks this attempt.
         return stream_factory(request)
     managed = stream(
         request, stream_factory, session_id=session_id, name=name, model_name=model_name,
@@ -292,12 +286,11 @@ def stream_current(
         completed_response_predicate=completed_response_predicate,
     )
     if completed_response_predicate is not None:
-        # Relay may defer the provider callback until the first pull; prime
-        # once so a completed response surfaces. A real first chunk is buffered.
+        # Relay may defer the provider callback until the first pull; prime once so a
+        # completed response surfaces (a real first chunk is buffered).
         managed._prime_completed_response()
-        completed = getattr(managed, "final_response", None)
-        if completed is not None:
-            return completed
+        if managed.final_response is not None:
+            return managed.final_response
     return managed
 
 
@@ -429,9 +422,8 @@ class ManagedLlmStream(Iterator[Any]):
                 run_callback(self._on_chunk, _jsonable(chunk))
 
         def relay_finalizer() -> Any:
-            # Relay can invoke the finalizer while unwinding a provider-stream
-            # failure; keep that original error instead of a secondary
-            # "missing terminal response" error.
+            # Relay may call this while unwinding a provider-stream failure; keep the
+            # original error instead of a secondary "missing terminal response".
             if self._callback_error is not None:
                 return None
             try:
@@ -793,8 +785,8 @@ def _complete_logical(
                 output=output, metadata=relay_runtime.runtime_metadata(lease.host.runtime_id),
             )
         except Exception:
-            # The provider result is authoritative. Retain the handle so turn
-            # finalization can retry cleanup without changing that result.
+            # Provider result is authoritative; retain the handle so turn finalization
+            # can retry cleanup.
             logger.warning("Hermes Relay logical LLM finalization failed", exc_info=True)
             return
         with turn.logical_llm_lock:
@@ -840,9 +832,9 @@ def _provider_request(
     if codec_baseline_body is not None and not _json_equal(content, relay_request_body):
         baseline = codec_baseline_body
         intercepted = _provider_request_body(content, metadata)
-        # Typed codecs may not represent provider-specific fields. Overlay only
-        # values that changed from the codec-facing baseline so unrelated
-        # intercepts cannot delete or normalize unknown provider arguments.
+        # Typed codecs may not represent provider-specific fields: overlay only values
+        # that changed from the codec-facing baseline so unrelated intercepts cannot
+        # delete or normalize unknown provider arguments.
         for key in baseline.keys() | intercepted.keys():
             if key not in intercepted:
                 final.pop(key, None)
@@ -863,9 +855,8 @@ def _provider_request(
 
 
 def _codex_codec_tools(body: dict[str, Any]) -> None:
-    # The Responses SDK accepts ``tools=None`` as "no tools" while Relay's
-    # typed codec expects an array or an absent field; normalize only the
-    # codec-facing copy (the original request is restored when unchanged).
+    # The Responses SDK accepts ``tools=None`` as "no tools" while Relay's typed codec
+    # wants an array or an absent field; only the codec-facing copy is normalized.
     if body.get("tools") is None:
         body.pop("tools", None)
     elif isinstance(body.get("tools"), list):
@@ -885,8 +876,7 @@ def _chat_codec_tools(body: dict[str, Any]) -> None:
     if isinstance(tools, list):
         body["tools"] = [
             {"type": "function", **tool}
-            if isinstance(tool, dict) and "function" in tool and "type" not in tool
-            else tool
+            if isinstance(tool, dict) and "function" in tool and "type" not in tool else tool
             for tool in tools
         ]
 
@@ -899,8 +889,7 @@ _CODEC_TOOL_NORMALIZERS = {
 
 def _relay_request_body(request: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
     body = _jsonable_dict(request)
-    # ``timeout`` configures the provider SDK client, not a wire protocol:
-    # keep it on the original callback request, never on Relay intercepts.
+    # ``timeout`` configures the SDK client, not the wire: never expose it to intercepts.
     body.pop("timeout", None)
     normalize = _CODEC_TOOL_NORMALIZERS.get(_api_mode(metadata))
     if normalize is not None:
@@ -924,10 +913,8 @@ def _restore_provider_message_extensions(
         original_message, final_message, baseline_message, intercepted_message = messages
         for key in _PROVIDER_MESSAGE_EXTENSION_KEYS:
             if (
-                key in original_message
-                and key not in baseline_message
-                and key not in intercepted_message
-                and key not in final_message
+                key in original_message and key not in baseline_message
+                and key not in intercepted_message and key not in final_message
             ):
                 final_message[key] = original_message[key]
 
@@ -969,8 +956,7 @@ def _provider_request_body(
     body["tools"] = [
         {"type": "function", **dict(tool["function"])}
         if isinstance(tool, dict)
-        and tool.get("type") == "function"
-        and isinstance(tool.get("function"), dict)
+        and tool.get("type") == "function" and isinstance(tool.get("function"), dict)
         else tool
         for tool in tools
     ]
@@ -996,12 +982,11 @@ def _jsonable(value: Any) -> Any:
     model_dump = getattr(type(value), "model_dump", None)
     if callable(model_dump):
         try:
-            # warnings=False: pydantic warns on generic-union SDK stream events
-            # and that warning would leak to the user's terminal mid-response.
+            # warnings=False: pydantic's generic-union warning would leak to the terminal
+            # mid-response; TypeError = duck-typed model_dump without pydantic's signature.
             try:
                 return _jsonable(value.model_dump(mode="json", warnings=False))
             except TypeError:
-                # Duck-typed model_dump without pydantic's signature.
                 return _jsonable(value.model_dump())
         except Exception:
             pass
