@@ -113,7 +113,8 @@ def _latest_event_ts(events: Iterable[Any], kinds: set[str]) -> int:
 
 
 def _cli_hint(label: str, command: str, *, suggested: bool = False) -> DiagnosticAction:
-    return DiagnosticAction(kind="cli_hint", label=label, payload={"command": command}, suggested=suggested)
+    return DiagnosticAction(kind="cli_hint", label=label, payload={"command": command},
+                            suggested=suggested)
 
 
 def _log_hint_action(task_id: str) -> DiagnosticAction:
@@ -200,7 +201,9 @@ def _main_model_visible(raw_config: Any) -> bool:
     model_cfg = raw_config.get("model")
     if isinstance(model_cfg, dict):
         provider = str(model_cfg.get("provider") or "").strip()
-        model = str(model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "").strip()
+        model = str(
+            model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or ""
+        ).strip()
         return bool(provider and model)
     return bool(str(model_cfg or "").strip())
 
@@ -244,17 +247,16 @@ def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
     hits = _active_hallucination_events(events, "completion_blocked_hallucination")
     if not hits:
         return []
-    actions = [DiagnosticAction(kind="comment", label="Add a comment explaining what to do", suggested=False)]
+    actions = [DiagnosticAction(kind="comment", label="Add a comment explaining what to do",
+                                suggested=False)]
     actions += _generic_recovery_actions(task, running=_is_running(task))
     return [Diagnostic(
         kind="hallucinated_cards", severity="error",
         title="Worker claimed cards that don't exist",
-        detail=(
-            "The completing worker declared created_cards that either didn't exist or weren't "
-            "created by its profile. The completion was blocked and the task stayed in its prior "
-            "state. Usually means the worker hallucinated ids instead of capturing return values "
-            "from kanban_create."
-        ),
+        detail="The completing worker declared created_cards that either didn't exist or weren't "
+               "created by its profile. The completion was blocked and the task stayed in its prior "
+               "state. Usually means the worker hallucinated ids instead of capturing return values "
+               "from kanban_create.",
         actions=actions,
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
         data={"phantom_ids": _unique_payload_ids(hits, "phantom_cards")},
@@ -289,7 +291,8 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
     if status is None:
         return []
 
-    auto_decompose, main_visible = bool(status.get("auto_decompose")), bool(status.get("main_model_visible"))
+    auto_decompose = bool(status.get("auto_decompose"))
+    main_visible = bool(status.get("main_model_visible"))
     decomposer_explicit = bool(status.get("decomposer_explicit"))
     specifier_explicit = bool(status.get("specifier_explicit"))
     primary_slot, fallback_slot, primary_desc, detail_path = _TRIAGE_SLOTS[auto_decompose]
@@ -315,12 +318,10 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
     return [Diagnostic(
         kind="triage_aux_unavailable", severity="warning",
         title=f"Triage {primary_desc} has no usable model",
-        detail=(
-            f"This task is still in triage and no working auxiliary model is visible to the "
-            f"dispatcher. {detail_path} The default slot uses `provider: auto` which falls back to "
-            f"the main model, but no main model is configured either. Configure the slot directly "
-            f"or set a main model so the auto fallback can take over."
-        ),
+        detail=f"This task is still in triage and no working auxiliary model is visible to the "
+               f"dispatcher. {detail_path} The default slot uses `provider: auto` which falls back to "
+               f"the main model, but no main model is configured either. Configure the slot directly "
+               f"or set a main model so the auto fallback can take over.",
         actions=actions,
         first_seen_at=now, last_seen_at=now, count=1,
         data={"task_id": task_id, "auto_decompose": auto_decompose,
@@ -337,11 +338,9 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
     return [Diagnostic(
         kind="prose_phantom_refs", severity="warning",
         title="Completion summary references unknown task ids",
-        detail=(
-            "The completion summary mentions task ids that don't resolve in this board's database. "
-            "The completion itself succeeded, but downstream consumers parsing the summary may be "
-            "pointed at cards that never existed."
-        ),
+        detail="The completion summary mentions task ids that don't resolve in this board's database. "
+               "The completion itself succeeded, but downstream consumers parsing the summary may be "
+               "pointed at cards that never existed.",
         actions=_generic_recovery_actions(task, running=_is_running(task)),
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
         data={"phantom_refs": _unique_payload_ids(hits, "phantom_refs")},
@@ -512,7 +511,8 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
     actions: list[DiagnosticAction] = []
     if task_id:
         actions.append(_cli_hint(
-            "Complete the finished implementation phase", f"hermes kanban complete {task_id}", suggested=True,
+            "Complete the finished implementation phase", f"hermes kanban complete {task_id}",
+            suggested=True,
         ))
     if task_id and child_ids:
         actions.append(_cli_hint(
@@ -523,12 +523,10 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
     return [Diagnostic(
         kind="review_dependency_deadlock", severity="error",
         title=f"Review handoff blocks {len(child_ids)} dependent task(s)",
-        detail=(
-            "This implementation is sticky-blocked for review while its downstream task(s) require "
-            "the implementation to be done or archived before they can run. Complete the finished "
-            "phase, unlink the incorrect dependency, or migrate this workflow to the first-class "
-            "review lifecycle."
-        ),
+        detail="This implementation is sticky-blocked for review while its downstream task(s) require "
+               "the implementation to be done or archived before they can run. Complete the finished "
+               "phase, unlink the incorrect dependency, or migrate this workflow to the first-class "
+               "review lifecycle.",
         actions=actions,
         first_seen_at=blocked_at, last_seen_at=blocked_at, count=len(child_ids),
         data={"blocked_parent_id": task_id, "waiting_child_ids": child_ids, "block_reason": reason},
@@ -554,12 +552,11 @@ def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
     return [Diagnostic(
         kind="stuck_in_blocked", severity="warning",
         title=f"Task has been blocked for {int(age_hours)}h",
-        detail=(
-            f"This task transitioned to blocked {int(age_hours)}h ago and has had no comments or "
-            f"unblock attempts since. Blocked tasks are waiting for human input — check the block "
-            f"reason and either unblock with feedback or answer with a comment."
-        ),
-        actions=[DiagnosticAction(kind="comment", label="Add a comment / unblock the task", suggested=True)],
+        detail=f"This task transitioned to blocked {int(age_hours)}h ago and has had no comments or "
+               f"unblock attempts since. Blocked tasks are waiting for human input — check the block "
+               f"reason and either unblock with feedback or answer with a comment.",
+        actions=[DiagnosticAction(kind="comment", label="Add a comment / unblock the task",
+                                  suggested=True)],
         first_seen_at=last_blocked_ts, last_seen_at=last_blocked_ts, count=1,
         data={"blocked_at": last_blocked_ts, "age_hours": round(age_hours, 1)},
     )]
@@ -607,12 +604,10 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     return [Diagnostic(
         kind="block_unblock_cycling", severity="warning",
         title=f"Task block→unblock cycled {cycles}x in {int(window_seconds/3600)}h",
-        detail=(
-            f"This task has been blocked {cycles} times after being unblocked, suggesting the "
-            f"unblock is not addressing the root cause and the worker keeps hitting the same wall. "
-            f"Review the block reasons in the event history; a different intervention (reassign, "
-            f"change scope, archive) may be needed."
-        ),
+        detail=f"This task has been blocked {cycles} times after being unblocked, suggesting the "
+               f"unblock is not addressing the root cause and the worker keeps hitting the same wall. "
+               f"Review the block reasons in the event history; a different intervention (reassign, "
+               f"change scope, archive) may be needed.",
         actions=actions,
         first_seen_at=int(initial_blocked_ts) if initial_blocked_ts else int(now),
         last_seen_at=int(last_cycle_blocked_ts) if last_cycle_blocked_ts else int(now),
@@ -667,12 +662,10 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     return [Diagnostic(
         kind="stranded_in_ready", severity=severity,
         title=f"Ready for {age_str} with no worker",
-        detail=(
-            f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
-            f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
-            f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
-            f"actually polling for it."
-        ),
+        detail=f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
+               f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
+               f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
+               f"actually polling for it.",
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
         data={"ready_since": last_ready_ts, "age_seconds": int(age_seconds),
@@ -718,7 +711,9 @@ def config_from_kanban_config(kanban_cfg: Optional[dict]) -> dict:
     ``kanban.failure_limit`` so diagnostics match the dispatcher's breaker."""
     kanban_cfg = kanban_cfg or {}
     diag_cfg = dict(kanban_cfg.get("diagnostics") or {})
-    diag_cfg.setdefault("failure_limit", kanban_cfg.get("failure_limit", DEFAULT_CONFIG["failure_threshold"]))
+    diag_cfg.setdefault(
+        "failure_limit", kanban_cfg.get("failure_limit", DEFAULT_CONFIG["failure_threshold"]),
+    )
     if not _has_explicit_threshold(diag_cfg):
         diag_cfg["failure_threshold"] = diag_cfg["failure_limit"]
     return diag_cfg

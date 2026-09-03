@@ -63,14 +63,18 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         _cfg = load_config()
         _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
         default_assignee = (_kanban_cfg.get("default_assignee") or "").strip() or None
-        max_in_progress_per_profile = kb._positive_int(_kanban_cfg.get("max_in_progress_per_profile"), None)
+        max_in_progress_per_profile = kb._positive_int(
+            _kanban_cfg.get("max_in_progress_per_profile"), None
+        )
         # Memory-derived default when unset — same fallback the gateway applies.
         max_in_progress = kb.resolve_max_in_progress(
             kb._positive_int(_kanban_cfg.get("max_in_progress"), None)
         )
         # CLI --max is the more explicit signal, so it wins over kanban.max_spawn.
         cli_max = getattr(args, "max", None)
-        max_spawn = cli_max if cli_max is not None else kb._positive_int(_kanban_cfg.get("max_spawn"), None)
+        max_spawn = (
+            cli_max if cli_max is not None else kb._positive_int(_kanban_cfg.get("max_spawn"), None)
+        )
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
@@ -88,7 +92,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         _print_json({
             **{k: getattr(res, k)
                for k in ("reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted")},
-            "spawned": [{"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned],
+            "spawned": [
+                {"task_id": tid, "assignee": who, "workspace": ws} for (tid, who, ws) in res.spawned
+            ],
             "skipped_unassigned": res.skipped_unassigned,
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "skipped_per_profile_capped": [
@@ -131,22 +137,14 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
 
 
 _DAEMON_DEPRECATED = (
-    "hermes kanban daemon: DEPRECATED — the dispatcher now runs\n"
-    "inside the gateway. To use kanban:\n"
-    "\n"
-    "    hermes gateway start       # starts the gateway + embedded dispatcher\n"
-    "\n"
-    "Ready tasks will be picked up on the next dispatcher tick\n"
-    "(default: every 60 seconds). Configure via config.yaml:\n"
-    "\n"
-    "    kanban:\n"
-    "      dispatch_in_gateway: true      # default\n"
-    "      dispatch_interval_seconds: 60\n"
-    "      failure_limit: 2              # consecutive non-success attempts before auto-block\n"
-    "\n"
-    "Running both the gateway AND this standalone daemon will\n"
-    "race for claims. If you truly need the old standalone\n"
-    "daemon (no gateway available), rerun with --force."
+    "hermes kanban daemon: DEPRECATED — the dispatcher now runs\ninside the gateway. To use "
+    "kanban:\n\n    hermes gateway start       # starts the gateway + embedded dispatcher\n\nReady "
+    "tasks will be picked up on the next dispatcher tick\n(default: every 60 seconds). Configure "
+    "via config.yaml:\n\n    kanban:\n      dispatch_in_gateway: true      # default\n      "
+    "dispatch_interval_seconds: 60\n      failure_limit: 2              # consecutive non-success "
+    "attempts before auto-block\n\nRunning both the gateway AND this standalone daemon will\nrace "
+    "for claims. If you truly need the old standalone\ndaemon (no gateway available), rerun with "
+    "--force."
 )
 
 
@@ -196,7 +194,10 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     def _on_tick(res):
         ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        health_state["bad_ticks"] = health_state["bad_ticks"] + 1 if ready_pending and not res.spawned else 0
+        if ready_pending and not res.spawned:
+            health_state["bad_ticks"] += 1
+        else:
+            health_state["bad_ticks"] = 0
         # Warn once per HEALTH_WINDOW bad ticks, at most every 5 minutes.
         if health_state["bad_ticks"] >= HEALTH_WINDOW:
             now = int(time.time())
@@ -254,10 +255,9 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         nonlocal cursor
         with kb.connect_closing() as conn:
             rows = conn.execute(
-                "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at, "
-                "       t.assignee, t.tenant "
-                "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
-                "WHERE e.id > ? ORDER BY e.id ASC LIMIT 200",
+                "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at,        t.assignee, "
+                "t.tenant FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id WHERE e.id > ? "
+                "ORDER BY e.id ASC LIMIT 200",
                 (cursor,),
             ).fetchall()
         for r in rows:

@@ -208,11 +208,9 @@ def _create_swarm_uncommitted(
     root = kb.create_task(
         conn,
         title=root_title or f"Swarm: {goal.splitlines()[0][:80]}",
-        body=(
-            "Kanban Swarm v1 planning/root card. This card is completed "
-            "immediately so parallel workers can start while it remains the "
-            f"shared blackboard and audit anchor.\n\nGoal:\n{goal}"
-        ),
+        body="Kanban Swarm v1 planning/root card. This card is completed "
+             "immediately so parallel workers can start while it remains the "
+             f"shared blackboard and audit anchor.\n\nGoal:\n{goal}",
         assignee=created_by,
         priority=priority,
         idempotency_key=idempotency_key,
