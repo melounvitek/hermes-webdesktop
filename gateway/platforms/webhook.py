@@ -538,7 +538,8 @@ class WebhookAdapter(BasePlatformAdapter):
                       or payload.get("event_type", "") or payload.get("type", "") or "unknown")
         allowed_events = route_config.get("events", [])
         if allowed_events and event_type not in allowed_events:
-            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)", event_type, route_name, allowed_events)
+            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)", event_type, route_name,
+                         allowed_events)
             return web.json_response({"status": "ignored", "event": event_type})
         if not self._route_processor.route_filters_match(route_config, payload, event_type, request.headers):
             logger.info("[webhook] filtered event=%s route=%s", event_type, route_name)
@@ -550,7 +551,8 @@ class WebhookAdapter(BasePlatformAdapter):
             if script:
                 # Shells out (up to its timeout) — worker thread so the loop isn't blocked; to_thread
                 # copies contextvars so the profile scope follows.
-                keep, transformed_payload = await asyncio.to_thread(self._route_processor.run_route_script, script, payload)
+                keep, transformed_payload = await asyncio.to_thread(
+                    self._route_processor.run_route_script, script, payload)
                 if not keep:
                     logger.info("[webhook] script ignored event=%s route=%s", event_type, route_name)
                     return web.json_response({"status": "ignored", "reason": "script", "route": route_name})
@@ -658,8 +660,8 @@ class WebhookAdapter(BasePlatformAdapter):
                 logger.warning("[webhook] Route '%s' sent X-Webhook-Signature-V2 with no X-Webhook-Timestamp — "
                                "rejecting rather than falling back to legacy V1", route_name)
                 return False
-            if not _timestamp_fresh(v2_timestamp, "[webhook] Route '%s' generic HMAC V2 timestamp outside replay window",
-                                    route_name):
+            if not _timestamp_fresh(
+                    v2_timestamp, "[webhook] Route '%s' generic HMAC V2 timestamp outside replay window", route_name):
                 return False
             return _hmac_str_equal(v2_sig, _hex_hmac(secret, v2_timestamp.encode() + b"." + body))
         # Generic V1 (legacy, deprecated): body-only HMAC → replays indefinitely.

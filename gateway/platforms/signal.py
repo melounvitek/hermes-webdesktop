@@ -956,7 +956,8 @@ class SignalAdapter(BasePlatformAdapter):
     async def send_reaction(self, chat_id: str, emoji: str, target_author: str, target_timestamp: int) -> bool:
         """React to the message (author number/UUID, Signal ms timestamp) via signal-cli RPC."""
         ok = await self._send_reaction_rpc(chat_id, {
-            "account": self.account, "emoji": emoji, "targetAuthor": target_author, "targetTimestamp": target_timestamp})
+            "account": self.account, "emoji": emoji, "targetAuthor": target_author,
+            "targetTimestamp": target_timestamp})
         if not ok:
             logger.debug("Signal: sendReaction failed (chat=%s, emoji=%s)", chat_id[:20], emoji)
         return ok
