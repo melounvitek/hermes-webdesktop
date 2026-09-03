@@ -25,9 +25,9 @@ def _estimate_tokens(agent: Any, messages: Optional[List[dict]]) -> Optional[int
         return None
 
     if messages is not None:
-        protect = int(getattr(cc, "protect_first_n", 3)) + int(
-            getattr(cc, "protect_last_n", 20)
-        ) + 1
+        protect = (
+            int(getattr(cc, "protect_first_n", 3)) + int(getattr(cc, "protect_last_n", 20)) + 1
+        )
         if len(messages) <= protect:
             return None
         try:
@@ -37,9 +37,7 @@ def _estimate_tokens(agent: Any, messages: Optional[List[dict]]) -> Optional[int
             tools = getattr(agent, "tools", None)
             return int(
                 estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=system_prompt,
-                    tools=tools or None,
+                    messages, system_prompt=system_prompt, tools=tools or None
                 )
             )
         except Exception:
@@ -73,12 +71,13 @@ def merge_preflight_compression_warning(
     if cc is None:
         return
 
-    # Classic CLI historically omitted custom_providers here while the /model
-    # confirmation display threaded agent._custom_providers — so the shrink
-    # warning fell through to the hardcoded catalog (e.g. "qwen" → 131072)
-    # even when custom_providers[].models.<id>.context_length was 1M.
+    # Fall back to the agent's custom providers: without them the shrink warning used the
+    # hardcoded catalog (e.g. "qwen" → 131072) even when the provider declared 1M.
     if custom_providers is None:
         custom_providers = getattr(agent, "_custom_providers", None)
+
+    def _or_agent(value, attr):
+        return value if value is not None else getattr(agent, attr, None)
 
     old_ctx = int(getattr(cc, "context_length", 0) or 0)
     new_ctx = resolve_display_context_length(
@@ -89,21 +88,9 @@ def merge_preflight_compression_warning(
         model_info=result.model_info,
         custom_providers=custom_providers,
         config_context_length=config_context_length,
-        configured_model=(
-            configured_model
-            if configured_model is not None
-            else getattr(agent, "model", None)
-        ),
-        configured_provider=(
-            configured_provider
-            if configured_provider is not None
-            else getattr(agent, "provider", None)
-        ),
-        configured_base_url=(
-            configured_base_url
-            if configured_base_url is not None
-            else getattr(agent, "base_url", None)
-        ),
+        configured_model=_or_agent(configured_model, "model"),
+        configured_provider=_or_agent(configured_provider, "provider"),
+        configured_base_url=_or_agent(configured_base_url, "base_url"),
     )
     if not new_ctx:
         return
@@ -112,8 +99,7 @@ def merge_preflight_compression_warning(
     if estimate is None:
         return
 
-    pct = float(getattr(cc, "threshold_percent", 0.5))
-    new_threshold = _threshold_tokens(new_ctx, pct)
+    new_threshold = _threshold_tokens(new_ctx, float(getattr(cc, "threshold_percent", 0.5)))
     if estimate < new_threshold:
         return
 
@@ -122,9 +108,7 @@ def merge_preflight_compression_warning(
 
     parts: list[str] = []
     if old_ctx and new_ctx < old_ctx:
-        parts.append(
-            f"Context window shrinks ({old_ctx:,} → {new_ctx:,}). "
-        )
+        parts.append(f"Context window shrinks ({old_ctx:,} → {new_ctx:,}). ")
     parts.append(
         f"Session is ~{estimate:,} tokens; "
         f"{result.new_model} allows {new_ctx:,} "

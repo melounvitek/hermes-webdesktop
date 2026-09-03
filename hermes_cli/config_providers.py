@@ -58,7 +58,7 @@ _TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
 
 
 def _canonical_api_mode(api_mode: str) -> str:
-    """Map alias ``api_mode`` spellings to canonical transport names; unknown values pass through."""
+    """Map alias ``api_mode`` spellings to canonical transport names (unknown pass through)."""
     cleaned = api_mode.strip()
     return _API_MODE_ALIASES.get(cleaned.lower(), cleaned)
 
@@ -87,7 +87,7 @@ def stringify_provider_map(providers: Any) -> dict:
 
 
 def find_provider_entry(providers: Any, key: Any) -> Tuple[Any, Optional[Dict[str, Any]]]:
-    """Return ``(stored_key, entry)`` matching *key* by string identity (exact hit first, then scan)."""
+    """Return ``(stored_key, entry)`` matching *key* by string identity (exact hit, then scan)."""
     if not isinstance(providers, dict):
         return None, None
     want = coerce_provider_id(key)
@@ -180,7 +180,9 @@ def _normalize_provider_models(models: Any) -> Tuple[Dict[str, Any], bool]:
                 model_id = item.get("name")
             if not isinstance(model_id, str) or not model_id.strip():
                 continue
-            normalized_models[model_id.strip()] = {k: v for k, v in item.items() if k not in {"id", "name"}}
+            normalized_models[model_id.strip()] = {
+                k: v for k, v in item.items() if k not in {"id", "name"}
+            }
         return normalized_models, discovered
     return {}, discovered
 
@@ -348,7 +350,7 @@ def providers_dict_to_custom_providers(providers_dict: Any) -> List[Dict[str, An
 def get_compatible_custom_providers(
     config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return a deduplicated list-shaped view over legacy ``custom_providers`` and v12+ ``providers``.
+    """Deduplicated list-shaped view over legacy ``custom_providers`` and v12+ ``providers``.
 
     Runtime and picker flows need one list; the compatibility layer is never materialised back
     into config.yaml because it duplicates entries in UIs.

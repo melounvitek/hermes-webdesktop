@@ -202,7 +202,9 @@ def _migrate_to_14(results: Dict[str, Any], quiet: bool) -> None:
     else:
         _place(provider)
     config["stt"] = stt
-    _commit(config, results, quiet, None, "  ✓ Migrated legacy stt.model to provider-specific config")
+    _commit(
+        config, results, quiet, None, "  ✓ Migrated legacy stt.model to provider-specific config"
+    )
 
 
 def _migrate_to_16(results: Dict[str, Any], quiet: bool) -> None:
@@ -249,7 +251,8 @@ def _migrate_to_17(results: Dict[str, Any], quiet: bool) -> None:
     if migrated_keys or any(v is not None for v in legacy.values()):
         config["compression"] = comp
         message = (
-            f"  ✓ Migrated compression.summary_* → auxiliary.compression: {', '.join(migrated_keys)}"
+            "  ✓ Migrated compression.summary_* → auxiliary.compression: "
+            f"{', '.join(migrated_keys)}"
             if migrated_keys else "  ✓ Removed unused compression.summary_* keys"
         )
         _commit(config, results, quiet, None, message)
@@ -295,7 +298,8 @@ def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
     plugins_cfg["enabled"] = grandfathered
     config["plugins"] = plugins_cfg
     message = (
-        f"  ✓ Plugins now opt-in: grandfathered {len(grandfathered)} existing plugin(s) into plugins.enabled"
+        f"  ✓ Plugins now opt-in: grandfathered "
+        f"{len(grandfathered)} existing plugin(s) into plugins.enabled"
         if grandfathered else
         "  ✓ Plugins now opt-in: no existing plugins to grandfather. "
         "Use `hermes plugins enable <name>` to activate."
@@ -334,7 +338,9 @@ def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
 
     raw_aux = _dict_at(config, "auxiliary")
     raw_aux_curator = _dict_at(raw_aux, "curator")
-    added_aux = _seed_missing(raw_aux_curator, DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {}))
+    added_aux = _seed_missing(
+        raw_aux_curator, DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {})
+    )
     if added_aux:
         raw_aux["curator"] = raw_aux_curator
         config["auxiliary"] = raw_aux
@@ -362,8 +368,8 @@ def _migrate_to_25(results: Dict[str, Any], quiet: bool) -> None:
 
 
 def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
-    # 28 → 29: memory/skills tri-state write_mode (on|off|approve) → boolean write_approval. Only
-    # "approve" carried gating intent → true; the old "off = block writes" mode is dropped
+    # 28 → 29: memory/skills tri-state write_mode (on|off|approve) → boolean write_approval.
+    # Only "approve" carried gating intent → true; the old "off = block writes" mode is dropped
     # (memory_enabled: false disables memory). Only a persisted key is rewritten.
     config = read_raw_config()
     touched = False
@@ -376,9 +382,14 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
         sub["write_approval"] = (old_norm == "approve")
         config[subsystem] = sub
         touched = True
-        results["config_added"].append(f"{subsystem}.write_mode → write_approval={sub['write_approval']}")
+        results["config_added"].append(
+            f"{subsystem}.write_mode → write_approval={sub['write_approval']}"
+        )
     if touched:
-        _commit(config, results, quiet, None, "  ✓ Renamed write_mode → write_approval (boolean gate)")
+        _commit(
+            config, results, quiet, None,
+            "  ✓ Renamed write_mode → write_approval (boolean gate)",
+        )
 
 
 # 29 → 30 (curator.consolidate defaults to false) is schema-default-only: deep-merge supplies it
@@ -387,7 +398,7 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
 
 def _migrate_to_31(results: Dict[str, Any], quiet: bool) -> None:
     # 30 → 31: verify_on_stop OFF (one-time). The "auto" sentinel was more noise than signal.
-    # Rewrite only when missing or still "auto" — an explicit true/false the user set is preserved.
+    # Rewrite only when missing or still "auto" — an explicit user true/false is preserved.
     config = read_raw_config()
     raw_agent = _dict_at(config, "agent")
     cur = raw_agent.get("verify_on_stop")
@@ -482,7 +493,10 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
     if isinstance(raw_agent, dict):
         manual = prompt_text(raw_agent.get("system_prompt", ""))
         if manual:
-            rendered = {render_personality_prompt(defn) for defn in available_personalities(config).values()}
+            rendered = {
+                render_personality_prompt(defn)
+                for defn in available_personalities(config).values()
+            }
             if manual in rendered:
                 raw_agent["system_prompt"] = ""
                 config["agent"] = raw_agent
@@ -546,7 +560,7 @@ def _migrate_to_36(results: Dict[str, Any], quiet: bool) -> None:
 
 
 def _migrate_to_37(results: Dict[str, Any], quiet: bool) -> None:
-    # 36 → 37: delegation concurrency 3 → 10 (10 stays at/below the high-cost warning threshold).
+    # 36 → 37: delegation concurrency 3 → 10 (stays at/below the high-cost warning threshold).
     _rewrite_stale_default(
         results, quiet, section="delegation", key="max_concurrent_children", old=3, new=10,
         added="delegation.max_concurrent_children=10 (was: 3)",
