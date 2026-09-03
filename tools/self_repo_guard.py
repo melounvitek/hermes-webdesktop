@@ -458,11 +458,7 @@ def _read_git_alias(executable: str, target: Path, alias: str) -> str | None:
 
 
 def _inspect_git(
-    executable: str,
-    args: list[str],
-    current_dir: Path,
-    env: dict[str, str],
-    root: Path,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
     depth: int,
 ) -> str | None:
     target, subcommand, sub_args, inline_aliases = _git_target_and_subcommand(
@@ -495,11 +491,7 @@ def _inspect_git(
 
 
 def _inspect_github_cli(
-    executable: str,
-    args: list[str],
-    current_dir: Path,
-    env: dict[str, str],
-    root: Path,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
     depth: int,
 ) -> str | None:
     if not _is_within(current_dir, root):
@@ -511,11 +503,7 @@ def _inspect_github_cli(
 
 
 def _inspect_shell(
-    executable: str,
-    args: list[str],
-    current_dir: Path,
-    env: dict[str, str],
-    root: Path,
+    executable: str, args: list[str], current_dir: Path, env: dict[str, str], root: Path,
     depth: int,
 ) -> str | None:
     script = _shell_script_arg(args)

@@ -825,11 +825,7 @@ class ToolRegistry:
         logger.debug("Deregistered tool: %s", name)
 
     def restore_registration(
-        self,
-        name: str,
-        current: ToolEntry,
-        previous: Optional[ToolEntry],
-        *,
+        self, name: str, current: ToolEntry, previous: Optional[ToolEntry], *,
         scope: Optional[str] = None,
     ) -> bool:
         """Restore a host-owned registration if it is still current (plugin ownership ledger).

@@ -17,11 +17,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 from tools.skills_guard import (
-    Finding,
-    ScanResult,
-    SUSPICIOUS_BINARY_EXTENSIONS,
-    _determine_verdict,
-    format_scan_report,
+    Finding, ScanResult, SUSPICIOUS_BINARY_EXTENSIONS, _determine_verdict, format_scan_report,
     scan_file,
 )
 
@@ -171,12 +167,8 @@ def scan_plugin(plugin_dir: Path, source: str = "") -> ScanResult:
     else:
         summary = f"{plugin_dir.name}: clean scan, no threats detected"
     result = ScanResult(
-        skill_name=plugin_dir.name,
-        source=source or plugin_dir.name,
-        trust_level="community",
-        verdict=verdict,
-        findings=all_findings,
-        scanned_at=datetime.now(timezone.utc).isoformat(),
+        skill_name=plugin_dir.name, source=source or plugin_dir.name, trust_level="community",
+        verdict=verdict, findings=all_findings, scanned_at=datetime.now(timezone.utc).isoformat(),
         summary=summary,
     )
     result.scan_provenance = {
