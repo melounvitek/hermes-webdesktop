@@ -128,18 +128,15 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         return _SUCCESS_EXIT
 
     for plat_name in sorted(platforms):
-        channels = platforms[plat_name]
         print(f"{plat_name}:")
-        if not channels:
+        if not platforms[plat_name]:
             print("  (no channels discovered yet)")
             continue
-        for ch in channels:
+        for ch in platforms[plat_name]:
             name = ch.get("name", "?")
             chat_id = ch.get("id") or ch.get("chat_id") or ""
-            suffix = f"  [{chat_id}]" if chat_id and chat_id != name else ""
-            print(f"  {plat_name}:{name}{suffix}")
+            print(f"  {plat_name}:{name}" + (f"  [{chat_id}]" if chat_id and chat_id != name else ""))
         print()
-
     return _SUCCESS_EXIT
 
 
@@ -253,30 +250,18 @@ def cmd_send(args: argparse.Namespace) -> None:
 
 # (flags, add_argument kwargs) in --help order.
 _SEND_ARGUMENTS = (
-    (("-t", "--to"), dict(
-        metavar="TARGET",
-        default=None,
-        help=(
-            "Delivery target. Format: 'platform' (home channel), "
-            "'platform:chat_id', 'platform:chat_id:thread_id', or "
-            "'platform:#channel-name'. Examples: telegram, "
-            "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, signal:+15551234567."
-        ),
-    )),
+    (("-t", "--to"), dict(metavar="TARGET", default=None, help=(
+        "Delivery target. Format: 'platform' (home channel), "
+        "'platform:chat_id', 'platform:chat_id:thread_id', or "
+        "'platform:#channel-name'. Examples: telegram, "
+        "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, signal:+15551234567."))),
     (("message",), dict(nargs="?", default=None, help="Message text. If omitted, read from --file or stdin.")),
-    (("-f", "--file"), dict(
-        metavar="PATH",
-        default=None,
-        help=(
-            "Read message body from PATH (text only). Use '-' to force stdin. "
-            "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."
-        ),
-    )),
+    (("-f", "--file"), dict(metavar="PATH", default=None, help=(
+        "Read message body from PATH (text only). Use '-' to force stdin. "
+        "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."))),
     (("-s", "--subject"), dict(metavar="LINE", default=None, help="Prepend a subject/header line before the message body.")),
-    (("-l", "--list"), dict(
-        dest="list_targets", action="store_true", default=False,
-        help="List available targets. Optional positional filter: `hermes send --list telegram`.",
-    )),
+    (("-l", "--list"), dict(dest="list_targets", action="store_true", default=False,
+                            help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),
     (("--json",), dict(action="store_true", default=False, help="Emit raw JSON result instead of human-readable output.")),
 )

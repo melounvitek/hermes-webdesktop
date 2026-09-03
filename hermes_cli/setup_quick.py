@@ -371,11 +371,8 @@ def _run_quick_setup(config: dict, hermes_home):
 
     if missing_tools:  # checklist, then the API-key screen for each pick
         print_header("Tool API Keys", gap=True)
-        labels = []
-        for var in missing_tools:
-            tools = var.get("tools", [])
-            tools_str = f" → {', '.join(tools[:2])}" if tools else ""
-            labels.append(f"{var.get('description', var['name'])}{tools_str}")
+        labels = [var.get("description", var["name"]) + (f" → {', '.join(var['tools'][:2])}" if var.get("tools") else "")
+                  for var in missing_tools]
         for idx in prompt_checklist("Which tools would you like to configure?", labels):
             _prompt_api_key(missing_tools[idx])
 
@@ -387,11 +384,10 @@ def _run_quick_setup(config: dict, hermes_home):
         grouped: dict[str, list] = {}
         emojis = {}
         for var in missing_messaging:
-            for needle, plat, emoji in _MESSAGING_PLATFORMS:
-                if needle in var["name"]:
-                    grouped.setdefault(plat, []).append(var)
-                    emojis[plat] = emoji
-                    break
+            match = next(((plat, emoji) for needle, plat, emoji in _MESSAGING_PLATFORMS if needle in var["name"]), None)
+            if match:
+                grouped.setdefault(match[0], []).append(var)
+                emojis[match[0]] = match[1]
         platform_order = list(grouped)
         labels = [f"{emojis[p]} {p}" for p in platform_order]
         for idx in prompt_checklist("Which platforms would you like to set up?", labels):

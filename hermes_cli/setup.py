@@ -718,13 +718,13 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
         _step("tools", "Tools", lambda: setup_tools(config, first_install=not is_existing))])
 
 
-# First-time mode picker: (menu label, runner) — a None runner falls through to Full Setup.
+# First-time mode picker: (menu label, runner name on this module) — None falls through to Full
+# Setup; runners resolve at call time so test patches on hermes_cli.setup apply.
 _FIRST_TIME_MODES = (
     ("Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
-     lambda *a: _run_first_time_quick_setup(*a)),
+     "_run_first_time_quick_setup"),
     ("Full setup — configure every provider, tool & option yourself (bring your own keys)", None),
-    ("Blank Slate — everything off except the bare minimum; opt in to each capability",
-     lambda *a: _run_blank_slate_setup(*a)),
+    ("Blank Slate — everything off except the bare minimum; opt in to each capability", "_run_blank_slate_setup"),
 )
 
 
@@ -794,7 +794,7 @@ def _run_setup_wizard_impl(args):
         setup_mode = prompt_choice("How would you like to set up Hermes?", [label for label, _ in _FIRST_TIME_MODES], 0)
         label, runner = _FIRST_TIME_MODES[setup_mode]
         if runner is not None:
-            _run_setup_steps([(label, lambda: runner(config, hermes_home, is_existing))])
+            _run_setup_steps([(label, lambda: globals()[runner](config, hermes_home, is_existing))])
             return
 
     _run_full_setup(config, hermes_home, is_existing=is_existing, migration_ran=migration_ran)

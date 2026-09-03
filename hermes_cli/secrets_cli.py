@@ -59,9 +59,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-# ---------------------------------------------------------------------------
-# Argparse wiring — called from hermes_cli.main
-# ---------------------------------------------------------------------------
+# ── Argparse wiring — called from hermes_cli.main ──
 
 
 def register_cli(parent_parser: argparse.ArgumentParser) -> None:
@@ -92,9 +90,7 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
     ))
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
+# ── Handlers ──
 
 
 def _step(console: Console, n: int, title: str) -> None:
@@ -422,9 +418,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ──
 
 
 def _token_validation_status(
