@@ -84,10 +84,8 @@ def _handle_react(args, remove=False):
     emoji = (args.get("emoji") or "").strip()
     message_id = (args.get("message_id") or "").strip() or None
     if not target or (not remove and not emoji):
-        return tool_error(
-            "Both 'target' and 'emoji' are required when action='react'"
-            if not remove
-            else "'target' is required when action='unreact'")
+        return tool_error("'target' is required when action='unreact'" if remove
+                          else "Both 'target' and 'emoji' are required when action='react'")
 
     # Platform-native ids (e.g. photon GUIDs) match no parser/directory entry; hand
     # them to the adapter unchanged and let it validate.
@@ -130,9 +128,7 @@ def _handle_react(args, remove=False):
         result = _run_async(react_fn(**kwargs))
     except Exception as e:
         return json.dumps(_error(f"Reaction failed: {e}"))
-    if isinstance(result, dict):
-        return json.dumps(result)
-    return json.dumps({"success": bool(result)})
+    return json.dumps(result if isinstance(result, dict) else {"success": bool(result)})
 
 
 def _handle_send(args):
@@ -188,16 +184,13 @@ def _handle_send(args):
 
     try:
         from model_tools import _run_async
-        send_kwargs = {
-            "thread_id": thread_id,
-            "media_files": media_files,
-            "force_document": force_document_attachments}
+        send_kwargs = {"thread_id": thread_id, "media_files": media_files,
+                       "force_document": force_document_attachments}
         # Only custom plugin handlers receive the complete typed request; the
         # built-in call contract stays exact.
         if entry is not None and entry.send_message_handler is not None:
             send_kwargs["args"] = args
-        result = _run_async(
-            _send_to_platform(platform, pconfig, chat_id, cleaned_message, **send_kwargs))
+        result = _run_async(_send_to_platform(platform, pconfig, chat_id, cleaned_message, **send_kwargs))
         if isinstance(result, dict) and result.get("success"):
             if used_home_channel:
                 result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
@@ -292,13 +285,10 @@ def _weixin_env_pconfig():
     if not (wx_token and wx_account):
         return None
     from gateway.config import PlatformConfig
-    return PlatformConfig(
-        enabled=True,
-        token=wx_token,
-        extra={
-            "account_id": wx_account,
-            "base_url": get_secret("WEIXIN_BASE_URL", "").strip(),
-            "cdn_base_url": get_secret("WEIXIN_CDN_BASE_URL", "").strip()})
+    return PlatformConfig(enabled=True, token=wx_token, extra={
+        "account_id": wx_account,
+        "base_url": get_secret("WEIXIN_BASE_URL", "").strip(),
+        "cdn_base_url": get_secret("WEIXIN_CDN_BASE_URL", "").strip()})
 
 
 def _describe_media_for_mirror(media_files):
@@ -331,11 +321,8 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     target_label = f"{platform_name}:{chat_id}"
     if thread_id is not None:
         target_label += f":{thread_id}"
-
     return {
-        "success": True,
-        "skipped": True,
-        "reason": "cron_auto_delivery_duplicate_target",
+        "success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target",
         "target": target_label,
         "note": (
             f"Skipped send_message to {target_label}. This cron job will already auto-deliver "
@@ -347,9 +334,7 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
 def _bounded_send_error(detail, max_chars=900):
     """Bound untrusted adapter/plugin error detail returned by send_message."""
     text = str(detail or "send failed")
-    if len(text) <= max_chars:
-        return text
-    return f"{text[: max_chars - 3]}..."
+    return text if len(text) <= max_chars else f"{text[: max_chars - 3]}..."
 
 
 def _live_media_method(ext, is_voice, force_document):
@@ -483,34 +468,29 @@ async def _send_via_adapter(
         entry = platform_registry.get(platform_name)
     except Exception:
         entry = None
-
-    if entry is not None and entry.standalone_sender_fn is not None:
-        try:
-            result = await entry.standalone_sender_fn(
-                pconfig, chat_id, chunk,
-                thread_id=thread_id, media_files=media_files, force_document=force_document)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.debug("Plugin standalone send for %s raised", platform_name, exc_info=True)
-            return {"error": f"Plugin standalone send failed: {_bounded_send_error(e)}"}
-
-        if isinstance(result, dict) and (result.get("success") or result.get("error")):
-            if result.get("error"):
-                return {**result, "error": _bounded_send_error(result["error"])}
-            return result
-        return {
-            "error": (
-                f"Plugin standalone send for '{platform_name}' returned an "
-                f"invalid result: expected a dict with 'success' or 'error' "
-                f"keys, got {type(result).__name__}")}
-
-    return {
-        "error": (
+    if entry is None or entry.standalone_sender_fn is None:
+        return {"error": (
             f"No live adapter for platform '{platform_name}'. Is the gateway "
             f"running with this platform connected? For out-of-process delivery "
             f"(e.g. cron in a separate process), the platform plugin must "
             f"register a standalone_sender_fn on its PlatformEntry.")}
+    try:
+        result = await entry.standalone_sender_fn(
+            pconfig, chat_id, chunk,
+            thread_id=thread_id, media_files=media_files, force_document=force_document)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug("Plugin standalone send for %s raised", platform_name, exc_info=True)
+        return {"error": f"Plugin standalone send failed: {_bounded_send_error(e)}"}
+    if isinstance(result, dict) and (result.get("success") or result.get("error")):
+        if result.get("error"):
+            return {**result, "error": _bounded_send_error(result["error"])}
+        return result
+    return {"error": (
+        f"Plugin standalone send for '{platform_name}' returned an "
+        f"invalid result: expected a dict with 'success' or 'error' "
+        f"keys, got {type(result).__name__}")}
 
 
 async def _send_chunks(chunks, send_one):
@@ -600,6 +580,10 @@ async def _send_plugin_standalone(
 #   path may only have a token list — else the plugin's standalone sender.
 # WeCom: native media only through the live gateway adapter.
 # Names resolve at call time so tests can monkeypatch e.g. ``_send_signal``.
+def _via_adapter_route(p, pc, cid, chunk, media, tid, fd):
+    return _send_via_adapter(p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)
+
+
 _CHUNKED_ROUTES = {
     "matrix": (False, [], lambda p, pc, cid, chunk, media, tid, fd: _send_matrix_via_adapter(
         pc, cid, chunk, media_files=media, thread_id=tid)),
@@ -607,10 +591,8 @@ _CHUNKED_ROUTES = {
         pc.extra, cid, chunk, media_files=media)),
     "yuanbao": (True, None, lambda p, pc, cid, chunk, media, tid, fd: _send_yuanbao(
         cid, chunk, media_files=media)),
-    "slack": (False, [], lambda p, pc, cid, chunk, media, tid, fd: _send_via_adapter(
-        p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)),
-    "wecom": (True, None, lambda p, pc, cid, chunk, media, tid, fd: _send_via_adapter(
-        p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd))}
+    "slack": (False, [], _via_adapter_route),
+    "wecom": (True, None, _via_adapter_route)}
 
 
 def _registry_text_sender(name):
@@ -678,14 +660,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     warning = None
     if media_files and platform_name != "buzz":
         if not message.strip():
-            return {
-                "error": (
-                    f"send_message MEDIA delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}; "
-                    f"target {platform_name} had only media attachments")}
+            return {"error": (
+                f"send_message MEDIA delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}; "
+                f"target {platform_name} had only media attachments")}
         warning = (
             f"MEDIA attachments were omitted for {platform_name}; "
-            f"native send_message media delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}"
-        )
+            f"native send_message media delivery is currently only supported for {_MEDIA_PLATFORMS_NOTE}")
 
     text_sender = _TEXT_SENDERS.get(platform_name)
     if text_sender is not None:
@@ -707,15 +687,11 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             except Exception as e:
                 return {"error": f"Plugin send_message handler failed: {e}"}
         # Plugin platform: live gateway adapter if available, else standalone_sender_fn.
-        send_one = lambda chunk, is_last: _send_via_adapter(  # noqa: E731
-            platform, pconfig, chat_id, chunk, thread_id=thread_id,
-            media_files=media_files if is_last else [], force_document=force_document)
+        send_one = lambda chunk, is_last: _via_adapter_route(  # noqa: E731
+            platform, pconfig, chat_id, chunk, media_files if is_last else [], thread_id, force_document)
 
     last_result = await _send_chunks(chunks, send_one)
-    if (
-        warning
-        and isinstance(last_result, dict)
-        and last_result.get("success")
-        and not last_result.get("media_delivered")):
+    if (warning and isinstance(last_result, dict) and last_result.get("success")
+            and not last_result.get("media_delivered")):
         last_result["warnings"] = [*last_result.get("warnings", []), warning]
     return last_result
