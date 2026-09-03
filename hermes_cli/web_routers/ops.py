@@ -23,17 +23,8 @@ from fastapi.responses import FileResponse
 from hermes_cli.config import redact_key
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
-    BackupRequest,
-    CredentialPoolAdd,
-    HookCreate,
-    HookDelete,
-    ImportRequest,
-    MemoryProviderSelect,
-    MemoryReset,
-    PairingApprove,
-    PairingRevoke,
-    WebhookCreate,
-    WebhookEnabledToggle,
+    BackupRequest, CredentialPoolAdd, HookCreate, HookDelete, ImportRequest, MemoryProviderSelect,
+    MemoryReset, PairingApprove, PairingRevoke, WebhookCreate, WebhookEnabledToggle,
 )
 from hermes_cli.web_routers._common import _CONFIG_MUTATION_LOCK, http_failure, spawn_profile_action
 from hermes_cli.web_routers.files import stream_upload_to_path
@@ -107,12 +98,10 @@ async def approve_pairing(body: PairingApprove):
     # as a bogus 429 while the platform is locked out for an unrelated reason.
     if not by_request_id and store._is_locked_out(platform):
         raise HTTPException(
-            status_code=429,
-            detail=f"Platform '{platform}' is locked out after too many failed approvals.",
+            status_code=429, detail=f"Platform '{platform}' is locked out after too many failed approvals.",
         )
     raise HTTPException(
-        status_code=404,
-        detail=f"Pairing request or code not found or expired for platform '{platform}'.",
+        status_code=404, detail=f"Pairing request or code not found or expired for platform '{platform}'.",
     )
 
 
@@ -124,10 +113,7 @@ async def revoke_pairing(body: PairingRevoke):
         raise HTTPException(status_code=400, detail="platform and user_id are required")
     if store.revoke(platform, body.user_id):
         return {"ok": True}
-    raise HTTPException(
-        status_code=404,
-        detail=f"User {body.user_id} not found in approved list for {platform}.",
-    )
+    raise HTTPException(status_code=404, detail=f"User {body.user_id} not found in approved list for {platform}.")
 
 
 @router.post("/api/pairing/clear-pending")
@@ -174,10 +160,7 @@ async def list_webhooks():
 
 @router.post("/api/webhooks/enable")
 async def enable_webhooks():
-    with http_failure(
-        "Failed to enable webhook platform from dashboard", 500,
-        detail="Failed to enable webhook platform.",
-    ):
+    with http_failure("Failed to enable webhook platform from dashboard", 500, detail="Failed to enable webhook platform."):
         _write_platform_enabled("webhook", True)
     restart_result = _restart_gateway_after(None, what="enabling webhooks", label="Webhook enable")
     return {
@@ -195,19 +178,16 @@ async def create_webhook(body: WebhookCreate):
 
     if not wh._is_webhook_enabled():
         raise HTTPException(
-            status_code=400,
-            detail="Webhook platform is not enabled. Enable it from the Webhooks page first.",
+            status_code=400, detail="Webhook platform is not enabled. Enable it from the Webhooks page first.",
         )
     name = (body.name or "").strip().lower().replace(" ", "-")
     if not re.match(r"^[a-z0-9][a-z0-9_-]*$", name):
         raise HTTPException(
-            status_code=400,
-            detail="Invalid name. Use lowercase alphanumeric with hyphens/underscores.",
+            status_code=400, detail="Invalid name. Use lowercase alphanumeric with hyphens/underscores.",
         )
     if body.deliver_only and body.deliver == "log":
         raise HTTPException(
-            status_code=400,
-            detail="Direct delivery requires a real target (telegram, discord, …), not 'log'.",
+            status_code=400, detail="Direct delivery requires a real target (telegram, discord, …), not 'log'.",
         )
 
     secret = body.secret or secrets.token_urlsafe(32)
@@ -426,21 +406,12 @@ async def remove_credential_pool_entry(provider: str, index: int):
             except Exception:
                 # Cleanup is best-effort, but suppression is the actual fix —
                 # without it the entry resurrects on the next load_pool().
-                _log.exception(
-                    "credential source cleanup failed for %s/%s; suppressing anyway",
-                    provider, removed.source,
-                )
+                _log.exception("credential source cleanup failed for %s/%s; suppressing anyway", provider, removed.source)
                 try:
                     suppress_credential_source(provider, removed.source)
                 except Exception:
                     _log.exception("suppress_credential_source failed")
-        return {
-            "ok": True,
-            "provider": provider,
-            "count": len(pool.entries()),
-            "cleaned": cleaned,
-            "hints": hints,
-        }
+        return {"ok": True, "provider": provider, "count": len(pool.entries()), "cleaned": cleaned, "hints": hints}
 
     return await asyncio.to_thread(_run)
 
@@ -463,11 +434,7 @@ async def get_memory_status():
         for fname, key in _MEMORY_FILES:
             path = mem_dir / fname
             files[key] = path.stat().st_size if path.exists() else 0
-        return {
-            "active": active,
-            "providers": _discover_memory_provider_statuses(),
-            "builtin_files": files,
-        }
+        return {"active": active, "providers": _discover_memory_provider_statuses(), "builtin_files": files}
 
     return await asyncio.to_thread(_run)
 
@@ -542,9 +509,7 @@ async def run_backup(body: BackupRequest):
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Could not create backup directory: {exc}")
         output = str(archive)
-    response = _spawn_action(
-        ["backup", "-o", output], "backup", log_msg="Failed to spawn backup", prefix="Failed to run backup",
-    )
+    response = _spawn_action(["backup", "-o", output], "backup", log_msg="Failed to spawn backup", prefix="Failed to run backup")
     if archive is not None:
         response["archive"] = str(archive)
     return response
@@ -565,10 +530,7 @@ async def download_dashboard_backup(archive: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Backup not found")
     return FileResponse(
-        path=str(target),
-        media_type="application/zip",
-        filename=target.name,
-        content_disposition_type="attachment",
+        path=str(target), media_type="application/zip", filename=target.name, content_disposition_type="attachment",
     )
 
 
@@ -611,10 +573,8 @@ async def run_import_upload(
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     target = staging_dir / f"dashboard-import-{stamp}-{secrets.token_hex(4)}-{_safe_backup_upload_name(file.filename)}"
     total = await stream_upload_to_path(
-        file, target,
-        too_large="Archive is too large",
-        not_writable="Import staging directory is not writable",
-        write_failed="Could not write uploaded archive",
+        file, target, too_large="Archive is too large",
+        not_writable="Import staging directory is not writable", write_failed="Could not write uploaded archive",
     )
     if not zipfile.is_zipfile(target):
         target.unlink(missing_ok=True)
@@ -686,10 +646,7 @@ async def create_hook(body: HookCreate):
     with contextlib.suppress(Exception):
         from hermes_cli.plugins import VALID_HOOKS as valid_hooks
     if valid_hooks is not None and event not in valid_hooks:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown event '{event}'. Valid: {', '.join(sorted(valid_hooks))}",
-        )
+        raise HTTPException(status_code=400, detail=f"Unknown event '{event}'. Valid: {', '.join(sorted(valid_hooks))}")
 
     def _run():
         with _CONFIG_MUTATION_LOCK:

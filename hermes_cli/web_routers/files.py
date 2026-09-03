@@ -7,6 +7,7 @@ reached through the late-binding seam (cycle-safe).
 import asyncio
 import base64
 import binascii
+import contextlib
 import mimetypes
 import os
 import re
@@ -26,11 +27,7 @@ from fastapi.responses import FileResponse
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
-    ChatImageUpload,
-    FsWriteText,
-    ManagedDirectoryCreate,
-    ManagedFileDelete,
-    ManagedFileUpload,
+    ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
 )
 
 router = APIRouter()
@@ -48,14 +45,8 @@ load_config = late("load_config")
 # Image types GET /api/media serves — extension-allowlisted so an authenticated
 # caller can't pull non-image files through it.
 _MEDIA_CONTENT_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-    ".bmp": "image/bmp",
-    ".ico": "image/x-icon",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".svg": "image/svg+xml", ".bmp": "image/bmp", ".ico": "image/x-icon",
 }
 _MEDIA_MAX_BYTES = 25 * 1024 * 1024
 
@@ -74,17 +65,9 @@ _FS_READDIR_HIDDEN = {
 # (agent.file_safety.get_read_block_error, gateway.platforms.base
 # ._ROOT_CREDENTIAL_FILES) so the Files tab never lags behind them.
 _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
-    "auth.json",
-    "auth.lock",
-    "credentials",
-    "config.yaml",
-    ".anthropic_oauth.json",
-    "google_token.json",
-    "google_oauth_pending.json",
-    "google_oauth.json",
-    "webhook_subscriptions.json",
-    "bws_cache.json",
-    "bws_cache.enc.json",
+    "auth.json", "auth.lock", "credentials", "config.yaml", ".anthropic_oauth.json",
+    "google_token.json", "google_oauth_pending.json", "google_oauth.json",
+    "webhook_subscriptions.json", "bws_cache.json", "bws_cache.enc.json",
     ".git-credentials",  # git's credential-store cache (file_safety blocks it too)
 })
 
@@ -132,24 +115,11 @@ _FS_PREVIEW_LANGUAGE_BY_EXT = {
 }
 
 _FS_MIME_TYPES = {
-    ".avi": "video/x-msvideo",
-    ".bmp": "image/bmp",
-    ".flac": "audio/flac",
-    ".gif": "image/gif",
-    ".jpeg": "image/jpeg",
-    ".jpg": "image/jpeg",
-    ".m4a": "audio/mp4",
-    ".mkv": "video/x-matroska",
-    ".mov": "video/quicktime",
-    ".mp3": "audio/mpeg",
-    ".mp4": "video/mp4",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg; codecs=opus",
-    ".png": "image/png",
-    ".svg": "image/svg+xml",
-    ".wav": "audio/wav",
-    ".webm": "video/webm",
-    ".webp": "image/webp",
+    ".avi": "video/x-msvideo", ".bmp": "image/bmp", ".flac": "audio/flac", ".gif": "image/gif",
+    ".jpeg": "image/jpeg", ".jpg": "image/jpeg", ".m4a": "audio/mp4", ".mkv": "video/x-matroska",
+    ".mov": "video/quicktime", ".mp3": "audio/mpeg", ".mp4": "video/mp4", ".ogg": "audio/ogg",
+    ".opus": "audio/ogg; codecs=opus", ".png": "image/png", ".svg": "image/svg+xml",
+    ".wav": "audio/wav", ".webm": "video/webm", ".webp": "image/webp",
 }
 
 
@@ -168,6 +138,17 @@ def _fs_looks_binary(data: bytes) -> bool:
         return True
     suspicious = sum(1 for byte in data if byte < 32 and byte not in {9, 10, 13})
     return suspicious / len(data) > 0.12
+
+
+@contextlib.contextmanager
+def _io_errors(denied: str, failed: str):
+    """PermissionError -> 403 ``denied``; other OSError -> 500 ``"<failed>: <exc>"``."""
+    try:
+        yield
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=denied)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"{failed}: {exc}")
 
 
 def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
@@ -298,11 +279,8 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
 _CHAT_IMAGE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 _CHAT_IMAGE_ALLOWED_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 _CHAT_IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"),
-    (b"BM", ".bmp"),
+    (b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"),
+    (b"GIF87a", ".gif"), (b"GIF89a", ".gif"), (b"BM", ".bmp"),
 )
 
 
@@ -348,23 +326,15 @@ async def upload_chat_image(payload: ChatImageUpload, profile: Optional[str] = N
         data, mime_type, ext = _decode_chat_image_upload(payload)
         with _profile_scope(profile) as scoped_home:
             img_dir = Path(scoped_home or get_hermes_home()) / "images"
-            try:
+            with _io_errors("Image directory is not writable", "Could not create image directory"):
                 img_dir.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Image directory is not writable")
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not create image directory: {exc}")
 
             stem = Path(_sanitize_chat_image_filename(payload.filename)).stem or "pasted-image"
             stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-") or "pasted-image"
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             target = img_dir / f"dashboard_{ts}_{secrets.token_hex(4)}_{stem}{ext}"
-            try:
+            with _io_errors("Image directory is not writable", "Could not write image"):
                 target.write_bytes(data)
-            except PermissionError:
-                raise HTTPException(status_code=403, detail="Image directory is not writable")
-            except OSError as exc:
-                raise HTTPException(status_code=500, detail=f"Could not write image: {exc}")
 
         return {
             "ok": True,
@@ -388,17 +358,12 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
-    try:
-        with os.scandir(target) as scan:
-            entries = [
-                _managed_file_entry(policy, Path(entry.path))
-                for entry in scan
-                if not _is_sensitive_path(Path(entry.path))
-            ]
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Directory is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read directory: {exc}")
+    with _io_errors("Directory is not readable", "Could not read directory"), os.scandir(target) as scan:
+        entries = [
+            _managed_file_entry(policy, Path(entry.path))
+            for entry in scan
+            if not _is_sensitive_path(Path(entry.path))
+        ]
 
     entries.sort(key=lambda item: (not item["is_directory"], str(item["name"]).lower()))
     locked_root = policy.locked_root
@@ -420,7 +385,8 @@ def _managed_readable_file(request: Request, path: str) -> tuple[Any, Path, str,
         raise HTTPException(status_code=400, detail="Path is not a file")
     if _is_sensitive_path(target):
         raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
-    return policy, target, display_path, _MANAGED_FILE_MAX_BYTES, mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return policy, target, display_path, _MANAGED_FILE_MAX_BYTES, mime_type
 
 
 def _managed_file_size(target: Path, max_bytes: int) -> int:
@@ -437,12 +403,8 @@ def _managed_file_size(target: Path, max_bytes: int) -> int:
 async def read_managed_file(request: Request, path: str):
     policy, target, display_path, max_bytes, mime_type = _managed_readable_file(request, path)
     size = _managed_file_size(target, max_bytes)
-    try:
+    with _io_errors("File is not readable", "Could not read file"):
         encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not readable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
     return {
         "name": target.name,
         "path": display_path,
@@ -526,13 +488,9 @@ def _managed_write_result(policy, target: Path, display_path: str) -> dict:
 async def upload_managed_file(payload: ManagedFileUpload, request: Request):
     policy, target, display_path = _managed_write_target(payload.path, request, payload.overwrite)
     data, _mime_type = _decode_data_url(payload.data_url)
-    try:
+    with _io_errors("File is not writable", "Could not write file"):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not write file: {exc}")
     return _managed_write_result(policy, target, display_path)
 
 
@@ -569,8 +527,6 @@ async def stream_upload_to_path(
                 out.write(chunk)
         os.replace(tmp_path, target)
         renamed = True
-    except HTTPException:
-        raise
     except PermissionError:
         raise HTTPException(status_code=403, detail=not_writable)
     except OSError as exc:
@@ -592,12 +548,8 @@ async def upload_managed_file_stream(
     """Chunked multipart upload: constant memory and no base64 inflation, unlike
     the JSON data-URL endpoint that trips proxy body-size limits on large archives."""
     policy, target, display_path = _managed_write_target(path, request, overwrite)
-    try:
+    with _io_errors("File is not writable", "Could not create parent directory"):
         target.parent.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="File is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create parent directory: {exc}")
     await stream_upload_to_path(
         file, target,
         too_large="File is too large",
@@ -612,12 +564,8 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
     policy, target, display_path = _resolve_managed_path(payload.path, request, for_write=True)
     if target.exists() and not target.is_dir():
         raise HTTPException(status_code=409, detail="A file already exists at that path")
-    try:
+    with _io_errors("Directory is not writable", "Could not create directory"):
         target.mkdir(parents=True, exist_ok=True)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="Directory is not writable")
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create directory: {exc}")
     return _managed_write_result(policy, target, display_path)
 
 

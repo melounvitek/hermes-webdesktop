@@ -17,20 +17,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from hermes_cli.web_deps import LateState, late
-from hermes_cli.web_models import (
-    MCPCatalogInstall,
-    MCPEnabledToggle,
-    MCPServerCreate,
-    MCPServersReplace,
-)
+from hermes_cli.web_models import MCPCatalogInstall, MCPEnabledToggle, MCPServerCreate, MCPServersReplace
 from hermes_cli.web_routers._common import (
-    _profile_cli_args,
-    _profile_scope,
-    _spawn_hermes_action,
-    config_write_scope,
-    http_failure,
-    log as _log,
-    scoped_to_thread,
+    _profile_cli_args, _profile_scope, _spawn_hermes_action, config_write_scope, http_failure,
+    log as _log, scoped_to_thread,
 )
 
 router = APIRouter()
@@ -113,8 +103,7 @@ async def add_mcp_server(body: MCPServerCreate, profile: Optional[str] = None):
                 server_config["headers"] = _save_bearer_auth_token(name, bearer_token)
             if not _save_mcp_server(name, server_config):
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Server '{name}' rejected: suspicious command/args configuration",
+                    status_code=400, detail=f"Server '{name}' rejected: suspicious command/args configuration",
                 )
 
     try:
@@ -249,9 +238,7 @@ async def auth_mcp_server(name: str, request: Request, profile: Optional[str] = 
         if any(f.server_name == name and f.hermes_home == flow_home for f in live):
             raise HTTPException(status_code=409, detail=f"MCP OAuth for '{name}' is already in progress")
         _mcp_oauth_flows[flow_id] = flow
-    threading.Thread(
-        target=_run_dashboard_mcp_oauth, args=(flow, cfg), daemon=True, name=f"mcp-oauth-{name}",
-    ).start()
+    threading.Thread(target=_run_dashboard_mcp_oauth, args=(flow, cfg), daemon=True, name=f"mcp-oauth-{name}").start()
     try:
         await flow.wait_for_authorization_url(timeout=30)
     except Exception as exc:
@@ -299,10 +286,8 @@ async def mcp_oauth_callback(
             if flow.server_name == server_name and flow.status == "authorization_required"
         ]
     flow = next(
-        (
-            c for c in candidates
-            if c.expected_state is not None and state is not None and secrets.compare_digest(c.expected_state, state)
-        ),
+        (c for c in candidates
+         if c.expected_state is not None and state is not None and secrets.compare_digest(c.expected_state, state)),
         None,
     )
     if flow is None:

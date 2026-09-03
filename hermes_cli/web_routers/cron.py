@@ -15,11 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from hermes_cli.web_deps import late
-from hermes_cli.web_models import (
-    AutomationBlueprintInstantiate,
-    CronJobCreate,
-    CronJobUpdate,
-)
+from hermes_cli.web_models import AutomationBlueprintInstantiate, CronJobCreate, CronJobUpdate
 from hermes_cli.web_routers._common import log as _log
 
 router = APIRouter()
@@ -138,10 +134,7 @@ def _list_cron_job_runs_sync(job_id: str, profile: Optional[str] = None, limit: 
         runs = db.list_cron_job_runs(canonical, limit=limit_n, offset=0)
         now = time.time()
         for s in runs:
-            s["is_active"] = (
-                s.get("ended_at") is None
-                and (now - s.get("last_active", s.get("started_at", 0))) < 300
-            )
+            s["is_active"] = s.get("ended_at") is None and (now - s.get("last_active", s.get("started_at", 0))) < 300
             s["archived"] = bool(s.get("archived"))
             if selected:
                 s["profile"] = selected
@@ -195,10 +188,7 @@ def _trigger_cron_job_sync(job_id: str, profile: Optional[str] = None):
     if refreshed and refreshed.get("last_run_at") != job.get("last_run_at"):
         return refreshed
     if not ran:
-        raise HTTPException(
-            status_code=409,
-            detail="Job is already running or was claimed by another scheduler",
-        )
+        raise HTTPException(status_code=409, detail="Job is already running or was claimed by another scheduler")
     if refreshed:
         return refreshed
     # A one-shot may remove itself after exhausting repeat=1: keep the response
@@ -356,8 +346,7 @@ async def cron_fire_webhook(request: Request):
             return JSONResponse(
                 {
                     "status": "gateway_stopped",
-                    "detail": "gateway deliberately stopped; fire dropped, "
-                              "jobs re-arm on next gateway start",
+                    "detail": "gateway deliberately stopped; fire dropped, jobs re-arm on next gateway start",
                     "job_id": job_id,
                     "profile": profile,
                 },
