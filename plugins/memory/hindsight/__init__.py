@@ -776,83 +776,15 @@ class HindsightMemoryProvider(MemoryProvider):
                 )
                 self._mode = "disabled"
                 return
-        self._api_key = _cloud_api_key(cfg)
-        default_url = _DEFAULT_LOCAL_URL if self._mode in {"local_embedded", "local_external"} else _DEFAULT_API_URL
-        self._api_url = cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", default_url)
-        self._llm_base_url = cfg.get("llm_base_url", "")
+        self._apply_connection_settings(cfg)
+        self._apply_retain_settings(cfg)
+        self._apply_recall_settings(cfg)
 
-        banks = cfg_get(cfg, "banks", "hermes", default={})
-        self._bank_id_template = cfg.get("bank_id_template", "") or ""
-        self._bank_id = _resolve_bank_id_template(
-            self._bank_id_template,
-            fallback=cfg.get("bank_id") or banks.get("bankId", "hermes"),
-            profile=self._agent_identity,
-            workspace=self._agent_workspace,
-            platform=self._platform,
-            user=self._user_id,
-            session=self._session_id,
-        )
-        budget = cfg.get("recall_budget") or cfg.get("budget") or banks.get("budget", "mid")
-        self._budget = budget if budget in _VALID_BUDGETS else "mid"
-        memory_mode = cfg.get("memory_mode", "hybrid")
-        self._memory_mode = memory_mode if memory_mode in _SYSTEM_PROMPT_TAILS else "hybrid"
-        prefetch_method = cfg.get("recall_prefetch_method") or cfg.get("prefetch_method", "recall")
-        self._prefetch_method = prefetch_method if prefetch_method in {"recall", "reflect"} else "recall"
-
-        self._bank_mission = cfg.get("bank_mission", "")
-        self._bank_retain_mission = cfg.get("bank_retain_mission") or None
-
-        self._retain_tags = _normalize_retain_tags(
-            cfg.get("retain_tags") or os.environ.get("HINDSIGHT_RETAIN_TAGS", "")
-        )
-        self._tags = self._retain_tags or None
-        self._observation_scopes = _normalize_observation_scopes(
-            cfg.get("observation_scopes") or os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "")
-        )
-        self._recall_tags = cfg.get("recall_tags") or None
-        self._recall_tags_match = cfg.get("recall_tags_match", "any")
-        self._retain_source = str(
-            cfg.get("retain_source") or os.environ.get("HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE)
-        ).strip()
-        self._retain_user_prefix = str(
-            cfg.get("retain_user_prefix") or os.environ.get("HINDSIGHT_RETAIN_USER_PREFIX", "User")
-        ).strip() or "User"
-        self._retain_assistant_prefix = str(
-            cfg.get("retain_assistant_prefix") or os.environ.get("HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant")
-        ).strip() or "Assistant"
-
-        self._auto_retain = cfg.get("auto_retain", True)
-        self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
-        self._retain_context = cfg.get("retain_context", _RETAIN_CONTEXT_DEFAULT)
-
-        self._auto_recall = cfg.get("auto_recall", True)
-        self._recall_sync = bool(cfg.get("recall_sync", False))
-        self._recall_max_tokens = int(cfg.get("recall_max_tokens", 4096))
-        # None -> observation-only; a comma-separated string is accepted for
-        # parity with recall_tags; an explicit list broadens or disables the filter.
-        configured_types = cfg.get("recall_types")
-        if configured_types is None:
-            self._recall_types = ["observation"]
-        elif isinstance(configured_types, str):
-            self._recall_types = [t.strip() for t in configured_types.split(",") if t.strip()]
-        else:
-            self._recall_types = list(configured_types) or ["observation"]
-        self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
-        # On by default so the user SEES memory working regardless of whether the
-        # model mentions it; off switch for customer-facing agents.
-        self._recall_indicator = bool(cfg.get("recall_indicator", True))
-        self._retain_indicator = bool(cfg.get("retain_indicator", True))
-        self._recall_max_input_chars = int(cfg.get("recall_max_input_chars", 800))
-        self._retain_async = cfg.get("retain_async", True)
-        self._prefetch_waits_for_retain = cfg.get("prefetch_waits_for_retain", True)
-        self._prefetch_retain_drain_timeout = float(cfg.get("prefetch_retain_drain_timeout", 10.0))
-
-        client_version = "unknown"
         try:
             from importlib.metadata import version as pkg_version
             client_version = pkg_version("hindsight-client")
         except Exception:
-            pass
+            client_version = "unknown"
         logger.info("Hindsight initialized: mode=%s, api_url=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
                     self._mode, self._api_url, self._bank_id, self._budget, self._memory_mode, self._prefetch_method, client_version)
         if self._bank_id_template:
@@ -868,13 +800,80 @@ class HindsightMemoryProvider(MemoryProvider):
         if self._mode == "local_embedded":
             self._start_embedded_daemon()
 
+    def _apply_connection_settings(self, cfg: dict) -> None:
+        """Endpoint, bank and mode selectors from *cfg* (env fallbacks where documented)."""
+        self._api_key = _cloud_api_key(cfg)
+        default_url = _DEFAULT_LOCAL_URL if self._mode in {"local_embedded", "local_external"} else _DEFAULT_API_URL
+        self._api_url = cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", default_url)
+        self._llm_base_url = cfg.get("llm_base_url", "")
+
+        banks = cfg_get(cfg, "banks", "hermes", default={})
+        self._bank_id_template = cfg.get("bank_id_template", "") or ""
+        self._bank_id = _resolve_bank_id_template(
+            self._bank_id_template,
+            fallback=cfg.get("bank_id") or banks.get("bankId", "hermes"),
+            profile=self._agent_identity, workspace=self._agent_workspace,
+            platform=self._platform, user=self._user_id, session=self._session_id,
+        )
+        budget = cfg.get("recall_budget") or cfg.get("budget") or banks.get("budget", "mid")
+        self._budget = budget if budget in _VALID_BUDGETS else "mid"
+        memory_mode = cfg.get("memory_mode", "hybrid")
+        self._memory_mode = memory_mode if memory_mode in _SYSTEM_PROMPT_TAILS else "hybrid"
+        prefetch_method = cfg.get("recall_prefetch_method") or cfg.get("prefetch_method", "recall")
+        self._prefetch_method = prefetch_method if prefetch_method in {"recall", "reflect"} else "recall"
+        self._bank_mission = cfg.get("bank_mission", "")
+        self._bank_retain_mission = cfg.get("bank_retain_mission") or None
+
+    def _apply_retain_settings(self, cfg: dict) -> None:
+        def _text(key: str, env_var: str, default: str) -> str:
+            return str(cfg.get(key) or os.environ.get(env_var, default)).strip()
+
+        self._retain_tags = _normalize_retain_tags(
+            cfg.get("retain_tags") or os.environ.get("HINDSIGHT_RETAIN_TAGS", "")
+        )
+        self._tags = self._retain_tags or None
+        self._observation_scopes = _normalize_observation_scopes(
+            cfg.get("observation_scopes") or os.environ.get("HINDSIGHT_RETAIN_OBSERVATION_SCOPES", "")
+        )
+        self._retain_source = _text("retain_source", "HINDSIGHT_RETAIN_SOURCE", _DEFAULT_RETAIN_SOURCE)
+        self._retain_user_prefix = _text("retain_user_prefix", "HINDSIGHT_RETAIN_USER_PREFIX", "User") or "User"
+        self._retain_assistant_prefix = (
+            _text("retain_assistant_prefix", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant") or "Assistant"
+        )
+        self._auto_retain = cfg.get("auto_retain", True)
+        self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
+        self._retain_context = cfg.get("retain_context", _RETAIN_CONTEXT_DEFAULT)
+        self._retain_async = cfg.get("retain_async", True)
+        # On by default so the user SEES memory working whether or not the model
+        # mentions it; off switch for customer-facing agents (recall_indicator too).
+        self._retain_indicator = bool(cfg.get("retain_indicator", True))
+        self._prefetch_waits_for_retain = cfg.get("prefetch_waits_for_retain", True)
+        self._prefetch_retain_drain_timeout = float(cfg.get("prefetch_retain_drain_timeout", 10.0))
+
+    def _apply_recall_settings(self, cfg: dict) -> None:
+        self._recall_tags = cfg.get("recall_tags") or None
+        self._recall_tags_match = cfg.get("recall_tags_match", "any")
+        self._auto_recall = cfg.get("auto_recall", True)
+        self._recall_sync = bool(cfg.get("recall_sync", False))
+        self._recall_max_tokens = int(cfg.get("recall_max_tokens", 4096))
+        self._recall_max_input_chars = int(cfg.get("recall_max_input_chars", 800))
+        # None -> observation-only; a comma-separated string is accepted for
+        # parity with recall_tags; an explicit list broadens or disables the filter.
+        configured_types = cfg.get("recall_types")
+        if configured_types is None:
+            self._recall_types = ["observation"]
+        elif isinstance(configured_types, str):
+            self._recall_types = [t.strip() for t in configured_types.split(",") if t.strip()]
+        else:
+            self._recall_types = list(configured_types) or ["observation"]
+        self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
+        self._recall_indicator = bool(cfg.get("recall_indicator", True))
+
     def _start_embedded_daemon(self) -> None:
-        """Start the embedded daemon on a background thread so it doesn't block
-        the chat; its Rich output goes to a log file, not the terminal."""
-        # PostgreSQL's initdb refuses root, so the daemon can never initialize
-        # its data directory under root. Without this guard the start thread
-        # fails, retries and loops forever, reloading embedding models (~958MB
-        # RAM, ~33% CPU) with no user-visible error.
+        """Start the embedded daemon on a background thread (Rich output -> log file)."""
+        # PostgreSQL's initdb refuses root; without this guard the start thread
+        # retries forever, reloading embedding models (~958MB RAM, ~33% CPU)
+        # with no user-visible error.
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             msg = (
                 "Hindsight local_embedded mode cannot run as root "
@@ -883,8 +882,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 "to cloud / local_external mode via 'hermes memory setup'."
             )
             logger.warning(msg)
-            # Also print: a daemon that never starts would otherwise fail
-            # silently and the user would only see Hermes get sluggish.
+            # Also print: otherwise the user would only see Hermes get sluggish.
             try:
                 print(f"  ⚠ {msg}", file=sys.stderr, flush=True)
             except Exception:
@@ -906,16 +904,14 @@ class HindsightMemoryProvider(MemoryProvider):
                     traceback.print_exc(file=f)
 
         try:
-            # Point the daemon manager's Rich console at our log file rather
-            # than redirecting global fds (which would capture other threads).
+            # Rich console -> our log file (redirecting global fds would capture other threads).
             import hindsight_embed.daemon_embed_manager as dem
             from rich.console import Console
             dem.console = Console(file=open(log_path, "a", encoding="utf-8"), force_terminal=False)
 
             client = self._get_client()
             profile = self._config.get("profile", "hermes")
-            # Keep the profile .env in sync with our config; if it changed and
-            # the daemon is running, restart it with the new settings.
+            # Profile .env out of sync with config -> rewrite and restart a running daemon.
             if _load_simple_env(_embedded_profile_env_path(self._config)) != _build_embedded_profile_env(self._config):
                 _materialize_embedded_profile_env(self._config)
                 if client._manager.is_running(profile):
@@ -962,8 +958,7 @@ class HindsightMemoryProvider(MemoryProvider):
         return kwargs
 
     def _do_recall(self, query: str) -> _RecallResult:
-        """One recall/reflect for *query*. Shared by the background prefetch
-        worker and the opt-in synchronous path (``recall_sync``)."""
+        """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)."""
         if self._recall_max_input_chars and len(query) > self._recall_max_input_chars:
             query = query[:self._recall_max_input_chars]
         try:
@@ -983,8 +978,7 @@ class HindsightMemoryProvider(MemoryProvider):
             return _RecallResult("", 0)
 
     def _finish_prefetch(self, result: str, count: int) -> str:
-        """Record indicator state (cleared on empty turns so it never reports a
-        stale count) and format the injected block."""
+        """Record indicator state (cleared on empty turns, never a stale count); format the block."""
         self._last_recall_returned = bool(result)
         self._last_recall_count = count if result else 0
         if not result:
@@ -998,26 +992,27 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return f"{header}\n\n{result}"
 
+    def _join_prefetch(self, timeout: float, *, log: bool = False) -> None:
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            if log:
+                logger.debug("Prefetch: waiting for background thread to complete")
+            self._prefetch_thread.join(timeout=timeout)
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Opt-in: recall synchronously against the *current* message so the
         # injected memories match this turn's query, not the previous turn's.
         if self._recall_sync:
-            if self._recall_disabled():
-                return self._finish_prefetch("", 0)
-            recalled = self._do_recall(query)
+            recalled = _RecallResult("", 0) if self._recall_disabled() else self._do_recall(query)
             return self._finish_prefetch(recalled.text, recalled.count)
         # Default: the background worker's result for the previous turn (capped join).
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            logger.debug("Prefetch: waiting for background thread to complete")
-            self._prefetch_thread.join(timeout=3.0)
+        self._join_prefetch(3.0, log=True)
         with self._prefetch_lock:
             result, count = self._prefetch_result, self._prefetch_count
             self._prefetch_result, self._prefetch_count = "", 0
         return self._finish_prefetch(result, count)
 
     def recall_status(self) -> Optional[RecallStatus]:
-        """Count injected by the last prefetch, or None when nothing was injected
-        or ``recall_indicator=false`` (customer-facing agents)."""
+        """Count injected by the last prefetch; None if nothing injected or ``recall_indicator=false``."""
         if not self._recall_indicator or not self._last_recall_returned:
             return None
         return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH)
@@ -1075,49 +1070,39 @@ class HindsightMemoryProvider(MemoryProvider):
         occurred_at: str | None = None,
         update_mode: str | None = None,
     ) -> Dict[str, Any]:
-        """Build one aretain_batch item. The item timestamp is what the server
-        uses to resolve occurred_start/occurred_end (incl. relative phrases in
-        content): an explicit occurred_at wins, else the configured event clock."""
+        """Build one aretain_batch item. The server resolves occurred_start/end (incl.
+        relative phrases in content) from the item timestamp: explicit occurred_at
+        wins, else the configured event clock."""
         item: Dict[str, Any] = {
             "content": content,
             "metadata": metadata or self._build_metadata(message_count=1, turn_index=self._turn_index),
             "timestamp": (occurred_at or "").strip() or _event_timestamp(),
         }
-        if context is not None:
-            item["context"] = context
-        if update_mode is not None:
-            item["update_mode"] = update_mode
         merged_tags = _normalize_retain_tags(list(self._retain_tags) + _normalize_retain_tags(tags))
-        if merged_tags:
-            item["tags"] = merged_tags
-        if self._observation_scopes:
-            item["observation_scopes"] = self._observation_scopes
+        for key, value in (("context", context), ("update_mode", update_mode)):
+            if value is not None:
+                item[key] = value
+        for key, value in (("tags", merged_tags), ("observation_scopes", self._observation_scopes)):
+            if value:
+                item[key] = value
         return item
 
     def _lineage_tags(self) -> list[str]:
-        tags = []
-        if self._session_id:
-            tags.append(f"session:{self._session_id}")
-        if self._parent_session_id:
-            tags.append(f"parent:{self._parent_session_id}")
-        return tags
+        pairs = (("session", self._session_id), ("parent", self._parent_session_id))
+        return [f"{kind}:{sid}" for kind, sid in pairs if sid]
 
     def _retain_batch(self, item: dict, *, bank_id: str, document_id: str | None = None,
                       retain_async: bool | None = None):
         """Dispatch one item via aretain_batch (bank_id/document_id/retain_async are
         call-level args, never item keys)."""
         kwargs: Dict[str, Any] = {"bank_id": bank_id, "items": [item]}
-        if document_id is not None:
-            kwargs["document_id"] = document_id
-        if retain_async is not None:
-            kwargs["retain_async"] = retain_async
+        kwargs.update({k: v for k, v in (("document_id", document_id), ("retain_async", retain_async)) if v is not None})
         return self._run_hindsight_operation(lambda client: client.aretain_batch(**kwargs))
 
     def _make_turn_retain_job(self, turns: list[str], *, document_id: str, update_mode: str | None,
                               label: str, track_ops: bool = True) -> Callable[[], None]:
-        """Build the writer job that ships *turns* as one document. Every input is
-        snapshotted NOW because the writer runs after later sync_turn() calls have
-        mutated _session_turns / _turn_index / _session_id."""
+        """Writer job shipping *turns* as one document. Inputs are snapshotted NOW: the
+        writer runs after later sync_turn() calls mutate _session_turns/_turn_index/_session_id."""
         content = "[" + ",".join(turns) + "]"
         metadata = self._build_metadata(message_count=len(turns) * 2, turn_index=self._turn_index)
         tags = self._lineage_tags() or None
@@ -1138,15 +1123,12 @@ class HindsightMemoryProvider(MemoryProvider):
         return _job
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Enqueue a retain for the current turn (non-blocking; runs on the writer
-        thread). Dropped once shutdown() has fired so post-exit retains never
-        reach aiohttp during interpreter teardown."""
-        if not self._auto_retain:
-            logger.debug("sync_turn: skipped (auto_retain disabled)")
-            return
-        if self._shutting_down.is_set():
-            logger.debug("sync_turn: skipped (shutting down)")
-            return
+        """Enqueue a retain for the current turn (non-blocking; writer thread). Dropped
+        once shutdown() fired so post-exit retains never reach aiohttp during teardown."""
+        for skip, why in ((not self._auto_retain, "auto_retain disabled"), (self._shutting_down.is_set(), "shutting down")):
+            if skip:
+                logger.debug("sync_turn: skipped (%s)", why)
+                return
         if session_id:
             self._session_id = str(session_id).strip()
 
@@ -1174,20 +1156,23 @@ class HindsightMemoryProvider(MemoryProvider):
 
         job = self._make_turn_retain_job(turns_to_retain, document_id=document_id,
                                          update_mode=update_mode, label="retain")
-        self._ensure_writer()
-        self._register_atexit()
-        # Emitted only once every skip/buffer gate above has passed, so it fires
-        # solely on turns that actually persist.
+        # Indicator fires only past every skip/buffer gate: solely on turns that persist.
         self._emit_saving_indicator()
-        self._retain_queue.put(job)
+        self._enqueue_retain(job)
         # Advance the watermark only after the delta is queued so a later retain
         # doesn't re-ship turns already handed to the writer.
         if update_mode == "append":
             self._last_retained_turn_count = len(self._session_turns)
 
+    def _enqueue_retain(self, job: Callable[[], None]) -> None:
+        """Hand *job* to the (lazily started) writer and arm the atexit drain."""
+        self._ensure_writer()
+        self._register_atexit()
+        self._retain_queue.put(job)
+
     def _emit_saving_indicator(self) -> None:
-        """Model-independent "saving to memory" status line. No-op when
-        ``retain_indicator=false`` or no status channel; never raises."""
+        """Model-independent "saving to memory" status line; no-op without
+        ``retain_indicator``/status channel; never raises."""
         if not self._retain_indicator or self._status_callback is None:
             return
         try:
@@ -1265,27 +1250,19 @@ class HindsightMemoryProvider(MemoryProvider):
         reset: bool = False,
         **kwargs,
     ) -> None:
-        """Refresh per-session state when the agent rotates session_id (/resume,
-        /branch, /reset, /new, context compression); otherwise writes land in
-        the previous session's document.
-
-        Always: update ``_session_id`` (metadata/tags), mint a fresh
-        ``_document_id`` (so the new session can't overwrite the old document),
-        and clear the batch buffers — even for /resume and /branch, batching must
-        restart from zero so an in-flight retain doesn't flush under the wrong
-        document. Before clearing, flush buffered turns under the OLD ids
-        (``retain_every_n_turns > 1`` would otherwise silently lose them), and
-        join any in-flight prefetch and drop its cached result so the new
-        session's first ``prefetch()`` can't read stale recall. ``reset`` is
-        accepted but unneeded: buffer clearing is correct for every switch.
-        """
+        """Rotate per-session state (/resume, /branch, /reset, /new, compression) so
+        writes don't land in the previous session's document. Always: flush buffered
+        turns under the OLD ids first (``retain_every_n_turns > 1`` would silently
+        lose them), join the in-flight prefetch and drop its result (no stale recall
+        for the new session), then set ``_session_id``, mint a fresh ``_document_id``
+        and clear the batch buffers. ``reset`` is accepted but unneeded: buffer
+        clearing is correct for every switch."""
         new_id = str(new_session_id or "").strip()
         if not new_id:
             return
 
         # 1. Flush buffered turns under the OLD identifiers, resolved BEFORE the
-        # rotation so the flush lands in the old session's document either way
-        # (legacy: per-process unique; >=0.5.0: stable session-scoped + append).
+        # rotation (legacy: per-process unique; >=0.5.0: session-scoped + append).
         if self._session_turns:
             old_document_id, old_update_mode = self._resolve_retain_target(self._document_id)
             job = self._make_turn_retain_job(list(self._session_turns), document_id=old_document_id,
@@ -1298,17 +1275,13 @@ class HindsightMemoryProvider(MemoryProvider):
                 except Exception as e:
                     logger.warning("Hindsight flush-on-switch failed: %s", e, exc_info=True)
 
-            # Same writer queue as sync_turn: FIFO behind still-queued old-session
-            # retains, no two threads racing aretain_batch on one document, and
-            # shutdown's drain semantics intact. Skip once shutdown has fired.
+            # Same writer queue as sync_turn: FIFO behind queued old-session retains,
+            # no two threads racing aretain_batch on one document, shutdown drain intact.
             if not self._shutting_down.is_set():
-                self._ensure_writer()
-                self._register_atexit()
-                self._retain_queue.put(_flush)
+                self._enqueue_retain(_flush)
 
         # 2. Drain the old session's in-flight prefetch and drop its result.
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
+        self._join_prefetch(3.0)
         with self._prefetch_lock:
             self._prefetch_result = ""
 
@@ -1342,15 +1315,13 @@ class HindsightMemoryProvider(MemoryProvider):
             if writer.is_alive():
                 logger.warning("Hindsight writer did not stop within 10s; abandoning %d pending retain(s)",
                                self._retain_queue.qsize())
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=5.0)
+        self._join_prefetch(5.0)
         if self._client is not None:
             try:
                 if self._mode == "local_embedded":
-                    # HindsightEmbedded.close() closes its sync client from this
-                    # thread, which can raise "attached to a different loop" before
-                    # aiohttp releases the session. Close the inner async client on
-                    # the shared loop first, then let the wrapper clean up bookkeeping.
+                    # HindsightEmbedded.close() closes its sync client from this thread
+                    # ("attached to a different loop" before aiohttp releases the
+                    # session): aclose the inner client on the shared loop first.
                     inner_client = getattr(self._client, "_client", None)
                     if inner_client is not None and hasattr(inner_client, "aclose"):
                         _run_sync(inner_client.aclose())
@@ -1367,11 +1338,10 @@ class HindsightMemoryProvider(MemoryProvider):
             except Exception:
                 pass
             self._client = None
-        # The module-global loop (_loop / _loop_thread) is intentionally NOT
-        # stopped: it's shared by every provider in the process (one per AIAgent,
-        # one AIAgent per gateway chat session). Stopping it would strand sibling
-        # providers' aiohttp sessions on a dead loop ("Unclosed client session").
-        # It runs on a daemon thread and is reclaimed at process exit.
+        # The module-global loop is intentionally NOT stopped: it's shared by every
+        # provider in the process (one per gateway chat session); stopping it would
+        # strand siblings' aiohttp sessions ("Unclosed client session"). Daemon
+        # thread, reclaimed at process exit.
 
 
 def register(ctx) -> None:
