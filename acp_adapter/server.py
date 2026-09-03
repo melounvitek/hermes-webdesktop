@@ -643,16 +643,13 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 infos = []
 
         has_more = len(infos) > _LIST_SESSIONS_PAGE_SIZE
-        infos = infos[:_LIST_SESSIONS_PAGE_SIZE]
-
         sessions = [
             SessionInfo(
                 session_id=s["session_id"], cwd=s["cwd"], title=s.get("title"),
                 updated_at=None if s.get("updated_at") is None else str(s["updated_at"]),
             )
-            for s in infos
+            for s in infos[:_LIST_SESSIONS_PAGE_SIZE]
         ]
-
         next_cursor = sessions[-1].session_id if has_more and sessions else None
         return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
 
@@ -678,12 +675,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             if interrupted_prompt:
                 return (_attach_interrupted_prompt(interrupted_prompt, steer_text),) * 2
             return (steer_text, steer_text) if idle else (user_text, user_content)
-
-        if not user_text.startswith("/"):
-            _idle, interrupted_prompt = _take_interrupted_prompt(state)
-            if interrupted_prompt:
-                return (_attach_interrupted_prompt(interrupted_prompt, user_text),) * 2
-
+        if not user_text.startswith("/") and (interrupted_prompt := _take_interrupted_prompt(state)[1]):
+            return (_attach_interrupted_prompt(interrupted_prompt, user_text),) * 2
         return user_text, user_content
 
     def _claim_turn_or_queue(
@@ -691,27 +684,21 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
     ) -> str | None:
         """Mark the session running; if a turn is active, redirect it (text-only, supported
         runtime) or queue it. Returns the client message when absorbed, else None."""
-        redirected = False
-        queued_depth: int | None = None
         with state.runtime_lock:
-            if state.is_running:
-                if text_only and isinstance(user_content, str) and hasattr(state.agent, "redirect") and (
-                    getattr(state.agent, "_supports_active_turn_redirect", False) is True
-                ):
-                    try:
-                        redirected = bool(state.agent.redirect(user_content))
-                    except Exception:
-                        logger.debug("ACP active-turn redirect failed for %s", session_id, exc_info=True)
-                if not redirected:
-                    state.queued_prompts.append(user_text or "[Image attachment]")
-                    queued_depth = len(state.queued_prompts)
-            else:
+            if not state.is_running:
                 state.is_running = True
                 state.current_prompt_text = user_text or "[Image attachment]"
-
-        if redirected:
-            return "Redirected the active turn with your correction."
-        return None if queued_depth is None else f"Queued for the next turn. ({queued_depth} queued)"
+                return None
+            if text_only and isinstance(user_content, str) and hasattr(state.agent, "redirect") and (
+                getattr(state.agent, "_supports_active_turn_redirect", False) is True
+            ):
+                try:
+                    if state.agent.redirect(user_content):
+                        return "Redirected the active turn with your correction."
+                except Exception:
+                    logger.debug("ACP active-turn redirect failed for %s", session_id, exc_info=True)
+            state.queued_prompts.append(user_text or "[Image attachment]")
+            return f"Queued for the next turn. ({len(state.queued_prompts)} queued)"
 
     def _run_agent_turn(
         self, *, state: SessionState, session_id: str, user_text: str, user_content: Any, conn: Any,
