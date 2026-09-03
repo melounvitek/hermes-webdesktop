@@ -2,8 +2,7 @@
 list_authenticated_providers / list_picker_providers, and the parallel cache prefetch.
 
 Split out of ``hermes_cli/model_switch.py``; every moved name is re-imported there so
-``hermes_cli.model_switch.<name>`` keeps resolving (and monkeypatching) as before.
-"""
+``hermes_cli.model_switch.<name>`` keeps resolving (and monkeypatching) as before."""
 
 from __future__ import annotations
 
@@ -30,8 +29,7 @@ def _save_discovered_models_to_config(
     """Persist a successful ``/v1/models`` probe into the matching ``custom_providers`` entry.
 
     Matches by base_url (slash-normalised), api_mode and headers. A failed config write is
-    swallowed — the picker still shows the live models for this session.
-    """
+    swallowed — the picker still shows the live models for this session."""
     from hermes_cli.model_switch import _extra_headers_from_config
     if not api_url or not model_ids:
         return
@@ -71,8 +69,7 @@ def _discovered_catalog_stale(entry: dict, model_ids: list[str]) -> bool:
     A ``models`` mapping or list of dicts is user-curated per-model metadata — never replaced.
     A mapping Hermes itself discovered (entry flag or legacy in-mapping sentinel) is ours to
     refresh, but only when stale; a legacy-shape entry is always rewritten so the save migrates
-    it to the clean entry-level flag.
-    """
+    it to the clean entry-level flag."""
     existing = entry.get("models")
     legacy_discovered = isinstance(existing, dict) and existing.get("__discovered_model_catalog__") is True
     entry_discovered = entry.get("models_discovered") is True or legacy_discovered
@@ -138,8 +135,7 @@ def _credential_pool_is_usable(provider: str, *, raw_pool_present: bool = False)
 
     Legacy opaque ``auth.json`` pool values that do not deserialize into ``PooledCredential``
     stay visible (``raw_pool_present``); a real pool's availability is authoritative — an
-    all-exhausted/dead pool is not authenticated.
-    """
+    all-exhausted/dead pool is not authenticated."""
     try:
         from agent.credential_pool import load_pool
         pool = load_pool(provider)
@@ -155,8 +151,7 @@ def prewarm_picker_cache_async() -> Optional["_threading.Thread"]:
 
     The first ``/model`` open (or the first after the 1h TTL) otherwise blocks ~1-2s on serial
     live ``/v1/models`` fetches. Fire-and-forget, at most once per process, fully
-    exception-isolated. Returns the thread (for tests) or None if already warmed.
-    """
+    exception-isolated. Returns the thread (for tests) or None if already warmed."""
     from hermes_cli.model_switch import list_authenticated_providers
     if _picker_prewarm_done.is_set():
         return None
@@ -185,8 +180,7 @@ def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
 
     On a cold cache the serial loop would block 1-8s per provider; after the prefetch the wait is
     the slowest single provider. Each worker re-persists through the thread-safe
-    ``update_provider_cache_entry`` so concurrent writes cannot clobber each other.
-    """
+    ``update_provider_cache_entry`` so concurrent writes cannot clobber each other."""
     from hermes_cli.models import (
         _PROVIDER_MODELS_CACHE_TTL, _credential_fingerprint, _load_provider_models_cache,
         cached_provider_model_ids, normalize_provider)
@@ -245,8 +239,7 @@ def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
     Skips vendor names that alias through an aggregator (bare "openai" -> "openrouter" would
     silently switch a user onto an endpoint they may have no key for), aliases of another canonical
     profile ("kimi" -> "kimi-coding"), non-api_key auth types (section 2 handles them) and
-    unroutable providers. PROVIDER_REGISTRY env var names win over models.dev's.
-    """
+    unroutable providers. PROVIDER_REGISTRY env var names win over models.dev's."""
     from agent.models_dev import PROVIDER_TO_MODELS_DEV
     from hermes_cli.auth import PROVIDER_REGISTRY, is_runtime_provider_routable
     from hermes_cli.models import _AGGREGATOR_PROVIDERS
@@ -315,8 +308,7 @@ def _overlay_has_env_creds(pid: str, hermes_slug: str, overlay, read_env) -> boo
     """Section-2 env/SDK credential check shared by the picker and the prefetch scan.
 
     Vertex authenticates via OAuth2 (service-account JSON / ADC), not an API key, so it gets its
-    own probe; otherwise the provider is hidden from the picker even when fully configured.
-    """
+    own probe; otherwise the provider is hidden from the picker even when fully configured."""
     from hermes_cli.auth import PROVIDER_REGISTRY
     has_creds = False
     if overlay.auth_type == "vertex":
@@ -339,8 +331,7 @@ def _has_fast_aws_sdk_signal() -> bool:
     """True when explicit AWS auth config is present in the environment.
 
     Deliberately avoids botocore's full credential chain: picker discovery runs for non-Bedrock
-    providers too, and botocore may probe EC2 IMDS (169.254.169.254) before giving up.
-    """
+    providers too, and botocore may probe EC2 IMDS (169.254.169.254) before giving up."""
     def _set(name: str) -> bool:
         return bool(os.environ.get(name, "").strip())
     return (
@@ -510,8 +501,7 @@ def _discover_endpoint_models(
     warm same-fingerprint cache entry still serves the full catalog with no round-trip.
     ``has_explicit_models`` gates the *probe* (a network-cost guard for keyless endpoints that
     declare a catalog), never the cache read — applying it to the read re-pins the endpoint to
-    its declared subset. Returns ``(None, False)`` when nothing usable was found.
-    """
+    its declared subset. Returns ``(None, False)`` when nothing usable was found."""
     from hermes_cli.model_switch import _fetch_picker_live_models
     timeout = 1.5 if for_picker else 5.0
     if probe_live:
@@ -544,8 +534,7 @@ def _collect_authed_provider_slugs(
     Mirrors the credential checks of sections 1, 2 and 2b of :func:`list_authenticated_providers`
     but never calls ``cached_provider_model_ids``; feeds :func:`_prefetch_provider_models_parallel`.
     Env vars are read through the per-profile secret scope. AWS SDK providers are skipped
-    (heavier detection).
-    """
+    (heavier detection)."""
     from hermes_cli.model_switch import _scoped_key_env
     from agent.models_dev import PROVIDER_TO_MODELS_DEV
     from hermes_cli.auth import PROVIDER_REGISTRY
@@ -1034,8 +1023,7 @@ def list_authenticated_providers(
     ``force_fresh_nous_tier`` bypasses the short Nous tier cache (account-sensitive flows only);
     ``refresh`` busts the model-id disk cache up front (explicit user action only);
     ``probe_custom_providers`` enables live ``/models`` discovery for saved custom endpoints (CLI
-    true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint.
-    """
+    true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint."""
     from hermes_cli.model_switch import _collect_authed_provider_slugs, _prefetch_provider_models_parallel
     from agent.models_dev import fetch_models_dev
     from hermes_cli.config import coerce_provider_id, stringify_provider_map
@@ -1128,8 +1116,7 @@ def _prepend_moa_picker_provider(providers: List[dict], current_provider: str = 
 
     ``list_authenticated_providers()`` only returns real/auth-backed providers; the CLI inventory
     adds MoA separately, so gateway pickers need the same virtual row here. Reuses the
-    inventory's single row builder so the row shape stays defined in one place.
-    """
+    inventory's single row builder so the row shape stays defined in one place."""
     try:
         from hermes_cli.inventory import _moa_provider_row
         moa_row = _moa_provider_row(current_provider)
@@ -1148,8 +1135,7 @@ def list_picker_providers(
 
     OpenRouter's list is replaced with :func:`hermes_cli.models.fetch_openrouter_models` (curated
     snapshot filtered against the live catalog) and rows left with no models are dropped — except
-    custom endpoints, where the user may supply their own model set through config.
-    """
+    custom endpoints, where the user may supply their own model set through config."""
     from hermes_cli.model_switch import list_authenticated_providers
     from hermes_cli.models import fetch_openrouter_models
     providers = list_authenticated_providers(

@@ -29,8 +29,7 @@ def _coerce_number(value: Any, cast, default=None, *, positive: bool = False):
     """Coerce ``value`` with ``cast`` (float/int); ``default`` when unset/blank/invalid.
 
     ``int`` also accepts float-looking strings ("3.0"). With ``positive`` the result must be > 0
-    (and finite for floats) or ``default`` is returned.
-    """
+    (and finite for floats) or ``default`` is returned."""
     if value is None or value == "":
         return default
     try:
@@ -50,8 +49,7 @@ def _coerce_number(value: Any, cast, default=None, *, positive: bool = False):
 def _coerce_reference_timeout(value: Any) -> float | None:
     """Finite positive advisor timeout, or None to inherit ``auxiliary.moa_reference.timeout``.
 
-    No artificial cap: long-thinking advisor models legitimately run far beyond five minutes.
-    """
+    No artificial cap: long-thinking advisor models legitimately run far beyond five minutes."""
     if isinstance(value, bool):
         return DEFAULT_MOA_REFERENCE_TIMEOUT
     return _coerce_number(value, float, DEFAULT_MOA_REFERENCE_TIMEOUT, positive=True)
@@ -84,8 +82,7 @@ def coerce_privacy_filter(value: Any) -> str:
 
     ``false``/``None``/unknown values land on '' so a hand-edited config degrades to prior
     behavior. 'display' redacts user-visible surfaces only (reference blocks in the UI and saved
-    MoA trace records).
-    """
+    MoA trace records)."""
     if value is True:
         return "full"
     if value is None or value is False:
@@ -118,8 +115,7 @@ def _slot_problem(slot: Any) -> str | None:
     """Human-readable problem for a slot ``_clean_slot`` would drop; None when complete and valid.
 
     Mirrors ``_clean_slot`` exactly so the write-boundary validator (``validate_moa_payload``) and
-    the tolerant runtime normalizer can never disagree about what is acceptable.
-    """
+    the tolerant runtime normalizer can never disagree about what is acceptable."""
     if not isinstance(slot, dict):
         return "must be an object with 'provider' and 'model'"
     provider = str(slot.get("provider") or "").strip()
@@ -172,8 +168,7 @@ def validate_moa_payload(raw: Any) -> list[str]:
     """Return the problems ``normalize_moa_config`` would silently paper over (empty = safe to save).
 
     Read-time tolerance (a hand-edited config degrades to defaults instead of crashing) is a
-    corruption engine at write time: a half-filled slot would silently replace the whole preset.
-    """
+    corruption engine at write time: a half-filled slot would silently replace the whole preset."""
     if not isinstance(raw, dict):
         return ["MoA config must be an object"]
 
@@ -285,8 +280,7 @@ def exact_moa_preset_name(config: Any, text: str) -> str | None:
     Used by the no-explicit-provider switch path for a bare ``/model <preset>``. Because the match
     is implicit it honors the per-preset ``enabled`` opt-out: a plain model switch that collides
     with a disabled preset's name must not silently pivot onto the MoA provider. Explicit
-    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable.
-    """
+    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable."""
     wanted = str(text or "").strip()
     if not wanted:
         return None
