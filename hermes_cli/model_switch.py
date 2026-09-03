@@ -571,7 +571,8 @@ def parse_model_switch_args(raw: str) -> ModelSwitchRequest:
                                         ("global", parsed.is_global)) if on), "default")
     return ModelSwitchRequest(
         raw=raw, target=parsed.model_input, scope=scope, errors=tuple(errors),
-        **{f: getattr(parsed, f) for f in ("explicit_provider", "is_global", "is_session", "is_once", "force_refresh")})
+        **{f: getattr(parsed, f)
+           for f in ("explicit_provider", "is_global", "is_session", "is_once", "force_refresh")})
 
 
 def _effective_model_candidate(value: Any) -> str:
@@ -1041,7 +1042,8 @@ class _Switch:
         for ``new_model``; headers keep their current value when the resolver returns none."""
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rt = resolve_runtime_provider(target_model=self.new_model, **kwargs)
-        self.api_key, self.base_url, self.api_mode = rt.get("api_key", ""), rt.get("base_url", ""), rt.get("api_mode", "")
+        self.api_key, self.base_url = rt.get("api_key", ""), rt.get("base_url", "")
+        self.api_mode = rt.get("api_mode", "")
         self.validation_headers = rt.get("extra_headers") or self.validation_headers
 
 
@@ -1333,7 +1335,8 @@ def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
                       "message": f"Could not validate `{st.new_model}`: {e}"}
 
     if not validation.get("accepted"):
-        if not _config_declares_model(st.new_model, st.target_provider, st.base_url, st.user_providers, st.custom_providers):
+        if not _config_declares_model(
+                st.new_model, st.target_provider, st.base_url, st.user_providers, st.custom_providers):
             return st.fail(
                 validation.get("message", "Invalid model"),
                 new_model=st.new_model, target_provider=st.target_provider, provider_label=st.provider_label)
@@ -1407,7 +1410,8 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
         provider_changed=st.provider_changed, api_key=st.api_key, base_url=st.base_url, api_mode=st.api_mode,
         request_overrides=dict(request_overrides or {}), warning_message=" | ".join(warnings) if warnings else "",
         provider_label=st.provider_label, resolved_via_alias=st.resolved_alias, capabilities=capabilities,
-        runtime_capabilities={k: v for k, v in runtime_capabilities.items() if isinstance(k, str) and isinstance(v, bool)},
+        runtime_capabilities={
+            k: v for k, v in runtime_capabilities.items() if isinstance(k, str) and isinstance(v, bool)},
         model_info=model_info, is_global=st.is_global)
 
 
