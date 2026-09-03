@@ -1,7 +1,6 @@
 """Shell completion script generation for hermes CLI.
 
-Walks the live argparse parser tree to generate accurate, always-up-to-date completion scripts — no
-hardcoded subcommand lists, no extra dependencies.
+Walks the live argparse parser tree, so completion scripts never go stale; no extra dependencies.
 """
 
 from __future__ import annotations
@@ -17,23 +16,15 @@ def _walk(parser: argparse.ArgumentParser) -> dict[str, Any]:
 
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
-            # _choices_actions has one entry per canonical name; aliases are
-            # omitted, which keeps completion lists clean.
-            seen: set[str] = set()
+            # _choices_actions has one entry per canonical name (aliases omitted).
             for pseudo in action._choices_actions:
                 name = pseudo.dest
-                if name in seen:
-                    continue
-                seen.add(name)
                 subparser = action.choices.get(name)
-                if subparser is None:
+                if name in subcommands or subparser is None:
                     continue
-                info = _walk(subparser)
-                info["help"] = _clean(pseudo.help or "")
-                subcommands[name] = info
+                subcommands[name] = {**_walk(subparser), "help": _clean(pseudo.help or "")}
         elif action.option_strings:
             flags.extend(o for o in action.option_strings if o.startswith("-"))
-
     return {"flags": flags, "subcommands": subcommands}
 
 
@@ -42,22 +33,24 @@ def _clean(text: str, maxlen: int = 60) -> str:
     return text.replace("'", "").replace('"', "").replace("\\", "")[:maxlen]
 
 
-# ---------------------------------------------------------------------------
-# Bash
-# ---------------------------------------------------------------------------
+# Profile actions that take a profile name as their next argument.
+_PROFILE_NAME_ACTIONS = ("use", "delete", "show", "alias", "rename", "export")
+
+
+def _sorted_subcommands(parser: argparse.ArgumentParser) -> list[tuple[str, dict[str, Any]]]:
+    tree = _walk(parser)
+    return sorted(tree["subcommands"].items())
+
 
 def generate_bash(parser: argparse.ArgumentParser) -> str:
-    tree = _walk(parser)
-    top_cmds = " ".join(sorted(tree["subcommands"]))
-
+    subcommands = _sorted_subcommands(parser)
+    top_cmds = " ".join(cmd for cmd, _ in subcommands)
     cases: list[str] = []
-    for cmd in sorted(tree["subcommands"]):
-        info = tree["subcommands"][cmd]
+    for cmd, info in subcommands:
         if cmd == "profile" and info["subcommands"]:
-            # Profile subcommand: complete actions, then profile names for
-            # actions that accept a profile argument.
+            # Complete actions, then profile names for actions that accept a profile argument.
             subcmds = " ".join(sorted(info["subcommands"]))
-            profile_actions = "use delete show alias rename export"
+            profile_actions = " ".join(_PROFILE_NAME_ACTIONS)
             cases.append(
                 f"        profile)\n"
                 f"            case \"$prev\" in\n"
@@ -82,7 +75,6 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
             )
 
     cases_str = "\n".join(cases)
-
     return f"""# Hermes Agent bash completion
 # Add to ~/.bashrc:
 #   eval "$(hermes completion bash)"
@@ -125,10 +117,6 @@ complete -F _hermes_completion hermes
 """
 
 
-# ---------------------------------------------------------------------------
-# Zsh
-# ---------------------------------------------------------------------------
-
 def _zsh_describe_lines(subcommands: dict[str, Any], indent: str) -> str:
     """One ``'name:help'`` line per subcommand, sorted, at the given indent."""
     return "\n".join(
@@ -138,22 +126,19 @@ def _zsh_describe_lines(subcommands: dict[str, Any], indent: str) -> str:
 
 
 def generate_zsh(parser: argparse.ArgumentParser) -> str:
-    tree = _walk(parser)
-    top_cmds_str = _zsh_describe_lines(tree["subcommands"], " " * 16)
-
+    subcommands = _sorted_subcommands(parser)
+    top_cmds_str = _zsh_describe_lines(dict(subcommands), " " * 16)
     sub_cases: list[str] = []
-    for cmd in sorted(tree["subcommands"]):
-        info = tree["subcommands"][cmd]
+    for cmd, info in subcommands:
         if not info["subcommands"]:
             continue
         if cmd == "profile":
-            # Profile subcommand: complete actions, then profile names for
-            # actions that accept a profile argument.
+            # Complete actions, then profile names for actions that accept a profile argument.
             sub_str = _zsh_describe_lines(info["subcommands"], " " * 24)
             sub_cases.append(
                 f"                profile)\n"
                 f"                    case ${{line[2]}} in\n"
-                f"                        use|delete|show|alias|rename|export)\n"
+                f"                        {'|'.join(_PROFILE_NAME_ACTIONS)})\n"
                 f"                            _hermes_profiles\n"
                 f"                            ;;\n"
                 f"                        *)\n"
@@ -179,7 +164,6 @@ def generate_zsh(parser: argparse.ArgumentParser) -> str:
                 f"                    ;;"
             )
     sub_cases_str = "\n".join(sub_cases)
-
     return f"""#compdef hermes
 # Hermes Agent zsh completion
 # Add to ~/.zshrc:
@@ -225,15 +209,9 @@ compdef _hermes hermes
 """
 
 
-# ---------------------------------------------------------------------------
-# Fish
-# ---------------------------------------------------------------------------
-
 def generate_fish(parser: argparse.ArgumentParser) -> str:
-    tree = _walk(parser)
-    top_cmds = sorted(tree["subcommands"])
-    top_cmds_str = " ".join(top_cmds)
-
+    subcommands = _sorted_subcommands(parser)
+    top_cmds_str = " ".join(cmd for cmd, _ in subcommands)
     lines: list[str] = [
         "# Hermes Agent fish completion",
         "# Add to your config:",
@@ -259,42 +237,30 @@ def generate_fish(parser: argparse.ArgumentParser) -> str:
         "# Top-level subcommands",
     ]
 
-    for cmd in top_cmds:
-        info = tree["subcommands"][cmd]
-        help_text = _clean(info.get("help", ""))
+    for cmd, info in subcommands:
         lines.append(
             f"complete -c hermes -f "
             f"-n 'not __fish_seen_subcommand_from {top_cmds_str}' "
-            f"-a {cmd} -d '{help_text}'"
+            f"-a {cmd} -d '{_clean(info.get('help', ''))}'"
         )
-
-    lines.append("")
-    lines.append("# Subcommand completions")
-
-    profile_name_actions = {"use", "delete", "show", "alias", "rename", "export"}
-
-    for cmd in top_cmds:
-        info = tree["subcommands"][cmd]
+    lines += ["", "# Subcommand completions"]
+    for cmd, info in subcommands:
         if not info["subcommands"]:
             continue
         lines.append(f"# {cmd}")
-        for sc in sorted(info["subcommands"]):
-            sinfo = info["subcommands"][sc]
-            sh = _clean(sinfo.get("help", ""))
+        for sc, sinfo in sorted(info["subcommands"].items()):
             lines.append(
                 f"complete -c hermes -f "
                 f"-n '__fish_seen_subcommand_from {cmd}' "
-                f"-a {sc} -d '{sh}'"
+                f"-a {sc} -d '{_clean(sinfo.get('help', ''))}'"
             )
-        # For profile subcommand, complete profile names for relevant actions
-        if cmd == "profile":
-            for action in sorted(profile_name_actions):
+        if cmd == "profile":  # profile names for the actions that take one
+            for action in sorted(_PROFILE_NAME_ACTIONS):
                 lines.append(
                     f"complete -c hermes -f "
                     f"-n '__fish_seen_subcommand_from {action}; "
                     f"and __fish_seen_subcommand_from profile' "
                     f"-a '(__hermes_profiles)' -d 'Profile name'"
                 )
-
     lines.append("")
     return "\n".join(lines)
