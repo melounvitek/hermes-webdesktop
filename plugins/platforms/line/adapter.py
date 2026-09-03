@@ -394,7 +394,7 @@ class LineAdapter(BasePlatformAdapter):
         self._media_ttl = MEDIA_TOKEN_TTL_SECONDS
         self._pending_buttons: Dict[str, str] = {}  # one outstanding button per chat: chat_id → request_id
 
-    def _fail(self, code: str, detail: str, *, retryable: bool = False) -> bool:
+    def _fail(self, code: str, detail: str, *, retryable: bool = False) -> bool:  # fatal connect error → False
         self._set_fatal_error(code, detail, retryable=retryable)
         return False
 
@@ -482,8 +482,7 @@ class LineAdapter(BasePlatformAdapter):
             return web.Response(status=400, text="bad request")
         if len(body) > WEBHOOK_BODY_MAX_BYTES:
             return web.Response(status=413, text="payload too large")
-        signature = request.headers.get("X-Line-Signature", "")
-        if not verify_line_signature(body, signature, self.channel_secret):
+        if not verify_line_signature(body, request.headers.get("X-Line-Signature", ""), self.channel_secret):
             return web.Response(status=401, text="invalid signature")
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -505,9 +504,8 @@ class LineAdapter(BasePlatformAdapter):
             return
         if self._bot_user_id and source.get("userId", "") == self._bot_user_id:
             return
-        if not _allowed_for_source(
-            source, allow_all=self.allow_all, user_ids=self.allowed_users,
-            group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
+        if not _allowed_for_source(source, allow_all=self.allow_all, user_ids=self.allowed_users,
+                                   group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
             logger.info("LINE: rejecting unauthorized source %s", source)
             return
         if event_type == "message":
@@ -521,8 +519,7 @@ class LineAdapter(BasePlatformAdapter):
 
     async def _handle_message_event(self, event: Dict[str, Any]) -> None:
         msg = event.get("message") or {}
-        msg_type = msg.get("type", "")
-        message_id = msg.get("id", "")
+        msg_type, message_id = msg.get("type", ""), msg.get("id", "")
         reply_token = event.get("replyToken", "")
         source = event.get("source") or {}
         chat_id, chat_type = _resolve_chat(source)
@@ -540,8 +537,7 @@ class LineAdapter(BasePlatformAdapter):
                 media_urls, media_types = [local_path], [media_type]
             text = f"[{msg_type}]"
         elif msg_type == "sticker":
-            keywords = msg.get("keywords") or []
-            text = f"[sticker: {', '.join(keywords)}]" if keywords else "[sticker]"
+            text = f"[sticker: {', '.join(msg['keywords'])}]" if msg.get("keywords") else "[sticker]"
         elif msg_type == "location":
             text = f"[location: {msg.get('title', '')} {msg.get('address', '')}]".strip()
         else:
