@@ -10,12 +10,10 @@ from hermes_cli.cli_output import print_info as _print_info
 from hermes_cli.colors import Colors, color
 from hermes_cli.config import cfg_get, load_config, save_config, get_env_value
 from hermes_cli.nous_subscription import (
-    NousSubscriptionFeatures, apply_nous_managed_defaults, get_nous_subscription_features,
-)
+    NousSubscriptionFeatures, apply_nous_managed_defaults, get_nous_subscription_features)
 from hermes_cli.platforms import PLATFORMS as _PLATFORMS_REGISTRY
 from hermes_cli.toolset_scope import (
-    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform,
-)
+    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform)
 # Re-exports: keep ``hermes_cli.tools_config.X`` callers and test patch targets resolving.
 from hermes_cli.tools_config_cua import (  # noqa: F401
     _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd,
@@ -26,8 +24,7 @@ from hermes_cli.tools_config_cua import (  # noqa: F401
     _clear_stale_windows_cua_install_lock, _clear_stale_cua_install_lock, _cua_install_lock_held,
     _cua_release_endpoint_reachable, _ps_single_quote, _cua_driver_autostart_registered_windows,
     _repair_cua_driver_autostart_windows, _remove_quietly, _print_cua_platform_notes,
-    _run_cua_driver_installer,
-)
+    _run_cua_driver_installer)
 from hermes_cli.tools_config_post_setup import (  # noqa: F401
     _ensure_browser_use_cli, _post_setup_lightpanda, _post_setup_agent_browser, _post_setup_camofox,
     _KITTENTTS_WHEEL_URL, _PIP_POST_SETUP_HOOKS, _post_setup_pip, _post_setup_spotify, _post_setup_langfuse,
@@ -35,8 +32,7 @@ from hermes_cli.tools_config_post_setup import (  # noqa: F401
     _POST_SETUP_INSTALLED, _post_setup_already_installed, _module_installed,
     _RESTORABLE_PYTHON_TOOL_DEPENDENCIES, active_restorable_python_tool_dependencies,
     restorable_python_tool_dependency, _agent_browser_installed, _camofox_installed, _lightpanda_installed,
-    _cloud_agent_browser_installed, _POST_SETUP_READY,
-)
+    _cloud_agent_browser_installed, _POST_SETUP_READY)
 from hermes_cli.tools_config_providers import (  # noqa: F401
     _plugin_provider_rows, _plugin_image_gen_providers, _plugin_video_gen_providers,
     _plugin_web_search_providers, _plugin_browser_providers, _plugin_tts_providers, web_provider_capabilities,
@@ -49,13 +45,11 @@ from hermes_cli.tools_config_providers import (  # noqa: F401
     _select_plugin_video_gen_provider, STT_MODEL_CATALOG, _STT_MODEL_CONFIG_KEY, _configure_stt_model,
     _PROVIDER_MARKER_SECTIONS, _write_provider_config, apply_provider_selection, _nous_provider_gate,
     _finish_provider_selection, _print_provider_selection, _configure_provider, _reconfigure_provider,
-    _configure_vision_backend, _configure_vision_provider_model, _configure_simple_requirements,
-)
+    _configure_vision_backend, _configure_vision_provider_model, _configure_simple_requirements)
 from hermes_cli.tools_config_mcp import (  # noqa: F401
     _mcp_match_filter, _mcp_preselected, _apply_mcp_checklist, _configure_mcp_tools_interactive,
     _apply_toolset_change, _apply_mcp_change, _print_tools_list, _known_tool_platforms,
-    tools_disable_enable_command,
-)
+    tools_disable_enable_command)
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +185,7 @@ def _checklist_toolset_keys(platform: str) -> Set[str]:
     composites, MCP names) are NOT here — the checklist never shows them."""
     return {
         ts_key for ts_key, _, _ in _get_effective_configurable_toolsets()
-        if _toolset_allowed_for_platform(ts_key, platform) and ts_key not in _CONFIG_ONLY_TOOLSETS
-    }
+        if _toolset_allowed_for_platform(ts_key, platform) and ts_key not in _CONFIG_ONLY_TOOLSETS}
 
 
 def _platform_default_toolset(platform: str) -> str:
@@ -419,8 +412,7 @@ TOOLSET_ENV_REQUIREMENTS = {"vision": [("OPENROUTER_API_KEY", "https://openroute
 # --- Platform / Toolset Helpers ---
 _PLATFORM_ENABLE_ENV_VARS = (
     ("telegram", "TELEGRAM_BOT_TOKEN"), ("discord", "DISCORD_BOT_TOKEN"), ("slack", "SLACK_BOT_TOKEN"),
-    ("whatsapp", "WHATSAPP_ENABLED"), ("qqbot", "QQ_APP_ID"),
-)
+    ("whatsapp", "WHATSAPP_ENABLED"), ("qqbot", "QQ_APP_ID"))
 
 
 def _get_enabled_platforms() -> List[str]:
@@ -550,8 +542,7 @@ def _platform_default_keys() -> Set[str]:
 
 def _explicit_toolsets(
     toolset_names: List[str], explicit_known_keys: Set[str], config: dict, platform: str,
-    explicitly_configured: bool,
-) -> Set[str]:
+    explicitly_configured: bool) -> Set[str]:
     """Enabled set when the saved list names configurable/plugin keys directly. Direct membership avoids the
     subset-inference bug where composites like ``hermes-cli`` (all _HERMES_CORE_TOOLS) re-enabled disabled
     toolsets. A mixed list (``[hermes-cli, spotify]``) still expands the composite, else sessions keep only the
@@ -561,8 +552,7 @@ def _explicit_toolsets(
     enabled = {ts for ts in toolset_names if ts in explicit_known_keys and _toolset_allowed_for_platform(ts, platform)}
     composite_tools = {
         t for ts_name in toolset_names if ts_name not in explicit_known_keys and ts_name in TOOLSETS
-        for t in resolve_toolset(ts_name)
-    }
+        for t in resolve_toolset(ts_name)}
     if composite_tools:
         enabled |= _configurable_subset_of(composite_tools, platform) - _default_off_toolsets(platform, explicitly_configured)
     _enable_recently_shipped_toolsets(enabled, config, platform)
@@ -708,8 +698,7 @@ def _warn_all_invalid_platform_toolsets(platform: str, explicit: list) -> None:
             "platform '%s' has no valid toolsets configured (unknown "
             "name(s): %s) - tools will be unavailable. Run `hermes tools` "
             "to reconfigure. See issue #38798.",
-            platform, ", ".join(named),
-        )
+            platform, ", ".join(named))
 
 
 def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[str]):
@@ -817,8 +806,7 @@ def _estimate_tool_tokens() -> Dict[str, int]:
     # Mirror the wire shape sent to the API.
     counts = {
         name: len(enc.encode(_json.dumps({"type": "function", "function": schema})))
-        for name in registry.get_all_tool_names() if (schema := registry.get_schema(name))
-    }
+        for name in registry.get_all_tool_names() if (schema := registry.get_schema(name))}
     _tool_token_cache[cache_key] = counts
     return counts
 
@@ -832,13 +820,11 @@ def _prompt_toolset_checklist(platform_label: str, enabled: Set[str], platform: 
     # Drop platform-scoped toolsets that don't apply here and config-only capabilities (stt).
     effective = [
         (k, l, d) for (k, l, d) in _get_effective_configurable_toolsets()
-        if _toolset_allowed_for_platform(k, platform) and k not in _CONFIG_ONLY_TOOLSETS
-    ]
+        if _toolset_allowed_for_platform(k, platform) and k not in _CONFIG_ONLY_TOOLSETS]
     labels = [
         f"{ts_label}  ({ts_desc})"
         + ("  [no API key]" if not _toolset_has_keys(ts_key, force_fresh=force_fresh) and _is_configurable(ts_key) else "")
-        for ts_key, ts_label, ts_desc in effective
-    ]
+        for ts_key, ts_label, ts_desc in effective]
     pre_selected = {i for i, (ts_key, _, _) in enumerate(effective) if ts_key in enabled}
 
     status_fn = None
@@ -876,9 +862,7 @@ def _reconfigure_tool(config: dict, *, force_fresh: bool = True):
         for ts_key, ts_label, _ in _get_effective_configurable_toolsets()
         if _is_configurable(ts_key) and (
             _toolset_has_keys(ts_key, config, force_fresh=force_fresh)
-            or _toolset_enabled_for_reconfigure(ts_key, config)
-        )
-    ]
+            or _toolset_enabled_for_reconfigure(ts_key, config))]
     if not configurable:
         _print_info("No configured tools to reconfigure.")
         return
@@ -1014,8 +998,7 @@ def _first_install_flow(config: dict, enabled_platforms: List[str]) -> None:
         # Browserbase), TTS (Edge vs OpenAI vs ElevenLabs), etc. are shown even when a free provider exists.
         _configure_list(
             [ts for ts in sorted(new_enabled) if _is_configurable(ts) and ts not in auto_configured],
-            config, selected=False,
-        )
+            config, selected=False)
         _save_platform_tools(config, pkey, new_enabled)
         save_config(config)
         print(color(f"  ✓ Saved {pinfo['label']} tool configuration", Colors.GREEN))

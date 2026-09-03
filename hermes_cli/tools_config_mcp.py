@@ -6,12 +6,10 @@ from typing import List, Set
 
 from hermes_cli.cli_output import (
     print_error as _print_error, print_info as _print_info, print_success as _print_success,
-    print_warning as _print_warning,
-)
+    print_warning as _print_warning)
 from hermes_cli.colors import Colors, color
 from hermes_cli.toolset_scope import (
-    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform,
-)
+    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform)
 
 
 def _mcp_match_filter():
@@ -65,8 +63,7 @@ def _apply_mcp_checklist(server_name: str, tools_cfg: dict, tool_names: List[str
                 f"tool(s) still match glob exclude pattern(s) "
                 f"{glob_entries} and stay excluded — edit "
                 f"mcp_servers.{server_name}.tools.exclude in config.yaml "
-                "to enable them."
-            )
+                "to enable them.")
         if new_exclude:
             tools_cfg["exclude"] = new_exclude
         else:
@@ -296,8 +293,7 @@ def tools_disable_enable_command(args):
     successful = [
         t for t in targets
         if t not in unknown_toolsets and t not in restricted_targets
-        and (":" not in t or t.split(":")[0] not in failed_servers)
-    ]
+        and (":" not in t or t.split(":")[0] not in failed_servers)]
     if successful:
         verb = "Disabled" if action == "disable" else "Enabled"
         _print_success(f"{verb}: {', '.join(successful)}")

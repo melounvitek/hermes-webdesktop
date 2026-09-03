@@ -15,8 +15,7 @@ def _platform_default_toolset(platform: object) -> str:
 
 def _platform_default_is_valid(
     platform: object, default_toolset: str, is_valid_toolset: Callable[[str], bool],
-    is_allowed_for_platform: Callable[[str, str], bool],
-) -> bool:
+    is_allowed_for_platform: Callable[[str, str], bool]) -> bool:
     if is_valid_toolset(default_toolset) and is_allowed_for_platform(default_toolset, str(platform)):
         return True
     # Dynamic plugin platforms are resolved by toolsets.resolve_toolset() even though their synthesized
@@ -64,8 +63,7 @@ def validate_platform_toolsets(
                 value_detail = f"invalid {type(raw).__name__} toolset value"
             warnings.append(
                 f"platform '{platform}' has {value_detail} — "
-                f"{fallback_detail}. Run `hermes tools` to configure explicitly."
-            )
+                f"{fallback_detail}. Run `hermes tools` to configure explicitly.")
             if platform_valid_count == 0:
                 warnings.append(f"platform '{platform}' has no valid toolsets configured — {_NO_TOOLS}")
             continue
@@ -91,6 +89,5 @@ def validate_platform_toolsets(
     if valid_count == 0:
         warnings.append(
             "platform_toolsets resolves to zero valid toolsets — the agent will "
-            "have no tools. Run `hermes tools` to reconfigure."
-        )
+            "have no tools. Run `hermes tools` to reconfigure.")
     return warnings

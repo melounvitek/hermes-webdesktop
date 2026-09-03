@@ -37,8 +37,7 @@ def _plugin_registry(module: str):
 
 def _plugin_provider_rows(
     registry_module: str, marker_keys: tuple[str, ...], *, require_name: bool = True, skip_builtin: bool = False,
-    flatten_variants: bool = False,
-) -> list[dict]:
+    flatten_variants: bool = False) -> list[dict]:
     """Picker-row dicts (TOOL_CATEGORIES-shaped) for a plugin registry's providers.
 
     ``marker_keys`` are all set to the registry name so downstream config/model-picker code routes through
@@ -92,8 +91,7 @@ _PLUGIN_PROVIDER_ROW_SPECS = {
     "video_gen": ("agent.video_gen_registry", ("video_gen_plugin_name",), {"require_name": False}),
     "web": ("agent.web_search_registry", ("web_backend", "web_search_plugin_name"), {"flatten_variants": True}),
     "browser": ("agent.browser_registry", ("browser_provider", "browser_plugin_name"), {}),
-    "tts": ("agent.tts_registry", ("tts_provider", "tts_plugin_name"), {"skip_builtin": True}),
-}
+    "tts": ("agent.tts_registry", ("tts_provider", "tts_plugin_name"), {"skip_builtin": True})}
 
 
 def _plugin_rows_for(category: str) -> list[dict]:
@@ -133,8 +131,7 @@ _PLUGIN_ROW_BUILDERS = {
     "Video Generation": _plugin_video_gen_providers,
     "Web Search & Extract": _plugin_web_search_providers,
     "Browser Automation": _plugin_browser_providers,
-    "Text-to-Speech": _plugin_tts_providers,
-}
+    "Text-to-Speech": _plugin_tts_providers}
 
 
 def _visible_providers(
@@ -361,8 +358,7 @@ def _web_tier_matches(provider: dict, config: dict) -> bool:
 # Managed-row marker -> (config section, key) the pick writes, in check order.
 _MANAGED_SELECTION_KEYS: tuple[tuple[str, str, str], ...] = (
     ("tts_provider", "tts", "provider"), ("stt_provider", "stt", "provider"),
-    ("browser_provider", "browser", "cloud_provider"), ("web_backend", "web", "backend"),
-)
+    ("browser_provider", "browser", "cloud_provider"), ("web_backend", "web", "backend"))
 
 
 def _has_marker(provider: dict, marker: str) -> bool:
@@ -389,8 +385,7 @@ def _managed_provider_active(provider: dict, config: dict, managed_feature: str,
             if (
                 configured_provider != NOUS_MANAGED_PROVIDER
                 and gen_cfg.get("use_gateway") is not None
-                and not is_truthy_value(gen_cfg.get("use_gateway"), default=False)
-            ):
+                and not is_truthy_value(gen_cfg.get("use_gateway"), default=False)):
                 return False
         return feature.managed_by_nous
     # Browser Use mode is a driver on top of the provider (attaches to its CDP endpoint), so the browser
@@ -457,8 +452,7 @@ def _imagegen_backend_active(provider: dict, config: dict) -> bool:
         isinstance(image_cfg, dict)
         and provider["imagegen_backend"] == "fal"
         and image_cfg.get("provider") in {None, "", "fal"}
-        and not is_truthy_value(image_cfg.get("use_gateway"), default=False)
-    )
+        and not is_truthy_value(image_cfg.get("use_gateway"), default=False))
 
 
 # Non-managed active checks, evaluated in order; the first marker the row carries decides (see ``_has_marker``).
@@ -470,8 +464,7 @@ _ACTIVE_CHECKS: tuple[tuple[str, Callable[[dict, dict], bool]], ...] = (
     ("browser_backend", _browser_backend_active),
     ("web_backend", lambda p, c: cfg_get(c, "web", "backend") == p["web_backend"] and _web_tier_matches(p, c)),
     ("computer_use_backend", lambda p, c: cfg_get(c, "computer_use", "backend") == p["computer_use_backend"]),
-    ("imagegen_backend", _imagegen_backend_active),
-)
+    ("imagegen_backend", _imagegen_backend_active))
 
 
 def _is_provider_active(provider: dict, config: dict, *, force_fresh: bool = False) -> bool:
@@ -522,8 +515,7 @@ def _fal_model_catalog():
 # Per-backend model catalog (config_key = top-level config.yaml section, catalog_fn -> ({model_id: metadata},
 # default_model)); a TOOL_CATEGORIES row tagged `imagegen_backend: "<name>"` selects the catalog at picker time.
 IMAGEGEN_BACKENDS = {
-    "fal": {"display": "FAL.ai", "config_key": "image_gen", "catalog_fn": _fal_model_catalog},
-}
+    "fal": {"display": "FAL.ai", "config_key": "image_gen", "catalog_fn": _fal_model_catalog}}
 
 
 def _plugin_model_catalog(registry_module: str, plugin_name: str):
@@ -574,8 +566,7 @@ def _pick_model_from_catalog(
     widths = {
         "model": max(len(m) for m in model_ids),
         "speed": max((len(catalog[m].get("speed", "")) for m in model_ids), default=6),
-        "strengths": max((len(catalog[m].get("strengths", "")) for m in model_ids), default=0),
-    }
+        "strengths": max((len(catalog[m].get("strengths", "")) for m in model_ids), default=0)}
 
     print()
     header = (f"  {'Model':<{widths['model']}}  {'Speed':<{widths['speed']}}  "
@@ -625,8 +616,7 @@ def _configure_xai_imagine_storage(section_name: str, config: dict) -> None:
     storage_cfg = _cfg_section(_cfg_section(_cfg_section(config, section_name), "xai"), "storage")
     _print_warning(
         "  xAI Imagine can store generated media and create reusable public URLs. "
-        "xAI may bill for stored files and public URL hosting."
-    )
+        "xAI may bill for stored files and public URL hosting.")
     choices = ["Enable public URLs without automatic expiry (recommended)", "Disable stored public URLs",
                "Enable public URLs for 2 days"]
     idx = _prompt_choice("  Stored public URLs:", choices, default=0)
@@ -671,8 +661,7 @@ STT_MODEL_CATALOG = {
     "local": ["base", "tiny", "small", "medium", "large-v3"],
     "groq": ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"],
     "openai": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
-    "elevenlabs": ["scribe_v2", "scribe_v1"],
-}
+    "elevenlabs": ["scribe_v2", "scribe_v1"]}
 
 # ElevenLabs historically uses ``model_id`` instead of ``model``.
 _STT_MODEL_CONFIG_KEY = {"elevenlabs": "model_id"}
@@ -798,8 +787,7 @@ def apply_provider_selection(ts_key: str, provider_name: str, config: dict) -> N
     selections = [
         ("image_gen", provider.get("image_gen_plugin_name")),
         ("video_gen", provider.get("video_gen_plugin_name")),
-        ("image_gen", "fal" if provider.get("imagegen_backend") and not managed_feature else None),
-    ]
+        ("image_gen", "fal" if provider.get("imagegen_backend") and not managed_feature else None)]
     for section_key, vendor in selections:
         if vendor:
             section = _cfg_section(config, section_key)
@@ -821,8 +809,7 @@ def _nous_provider_gate(provider: dict, config: dict, managed_feature, *, force_
 
         if not ensure_nous_portal_access(
             capability=f"{provider.get('name', 'the Nous Tool Gateway')}",
-            coverage_category=MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature),
-        ):
+            coverage_category=MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature)):
             _print_warning("  Not enabled — Nous Portal access is required for this backend.")
             return False
         return True
@@ -832,8 +819,7 @@ def _nous_provider_gate(provider: dict, config: dict, managed_feature, *, force_
         entitled = bool(features.account_info and features.account_info.paid_service_access is True)
         if not features.nous_auth_present or not entitled:
             message = format_nous_portal_entitlement_message(
-                features.account_info, capability=f"{provider.get('name', 'Nous Subscription')}"
-            )
+                features.account_info, capability=f"{provider.get('name', 'Nous Subscription')}")
             _print_warning(f"  {message or 'Nous Subscription is only available after logging into Nous Portal.'}")
             return False
     return True
@@ -1017,8 +1003,7 @@ def _configure_vision_backend() -> None:
         "Auto — use your main model / aggregator fallback (recommended)",
         "Pick a provider and model",
         "Custom OpenAI-compatible endpoint — base URL, API key, model",
-        "Skip",
-    ]
+        "Skip"]
     idx = _prompt_choice("  Configure vision backend", choices, 0)
 
     config = load_config()
@@ -1087,8 +1072,7 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
     if not providers:
         _print_warning(
             "  No authenticated providers found. Configure a provider first "
-            "with `hermes model`, then re-run this."
-        )
+            "with `hermes model`, then re-run this.")
         return
 
     provider_labels = [label for _slug, label, _models in format_aux_picker_entries(

@@ -12,8 +12,7 @@ from typing import Set
 
 from hermes_cli.cli_output import (
     print_error as _print_error, print_info as _print_info, print_success as _print_success,
-    print_warning as _print_warning,
-)
+    print_warning as _print_warning)
 from hermes_cli.config import get_env_value
 from hermes_cli.tools_config_cua import (
     _cua_driver_install_ready, _pip_install, _post_setup_no_window_flags, _run_text, install_cua_driver,
@@ -97,8 +96,7 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
         # Lazy import so the tools_config UI doesn't pull in browser_tool at import time.
         from tools.browser_tool import (
             _chromium_installed, _running_in_docker, _find_agent_browser, _resolve_npx_bin,
-            _is_npx_agent_browser_sentinel, AGENT_BROWSER_NPX_SPEC,
-        )
+            _is_npx_agent_browser_sentinel, AGENT_BROWSER_NPX_SPEC)
     except Exception as exc:  # pragma: no cover — defensive
         _print_warning(f"    Could not check Chromium status: {exc}")
         return
@@ -179,8 +177,7 @@ _PIP_POST_SETUP_HOOKS: dict = {
         "args": ["-U", "faster-whisper", "--quiet"], "manual": "uv pip install -U faster-whisper",
         "on_install": ("Model sizes: tiny, base (default), small, medium, large-v3",
                        "Change via stt.local.model in ~/.hermes/config.yaml"),
-        "always": (),
-    },
+        "always": ()},
     "kittentts": {
         "module": "kittentts", "label": "kittentts",
         "installing": "Installing kittentts (~25-80MB model, CPU-only)...",
@@ -188,8 +185,7 @@ _PIP_POST_SETUP_HOOKS: dict = {
         "manual": f"uv pip install -U '{_KITTENTTS_WHEEL_URL}' soundfile",
         "on_install": ("Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo",
                        "Models: KittenML/kitten-tts-nano-0.8-int8 (25MB), micro (41MB), mini (80MB)"),
-        "always": (),
-    },
+        "always": ()},
     "piper": {
         "module": "piper", "label": "piper-tts",
         "installing": "Installing piper-tts (~14MB wheel, voices downloaded on first use)...",
@@ -197,17 +193,14 @@ _PIP_POST_SETUP_HOOKS: dict = {
         "on_install": (),
         "always": ("Default voice: en_US-lessac-medium (downloaded on first TTS call)",
                    "Full voice list: https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/VOICES.md",
-                   "Switch voices by setting tts.piper.voice in ~/.hermes/config.yaml"),
-    },
+                   "Switch voices by setting tts.piper.voice in ~/.hermes/config.yaml")},
     "ddgs": {
         "module": "ddgs", "label": "ddgs",
         "installing": "Installing ddgs (DuckDuckGo search package)...",
         "args": ["-U", "ddgs", "--quiet"], "manual": "uv pip install -U ddgs",
         "on_install": (),
         "always": ("No API key required. DuckDuckGo enforces server-side rate limits.",
-                   "Pair with an extract provider if you also need web_extract."),
-    },
-}
+                   "Pair with an extract provider if you also need web_extract.")}}
 
 
 def _post_setup_pip(spec: dict) -> None:
@@ -253,8 +246,7 @@ def _post_setup_spotify() -> None:
     _print_info("    Starting Spotify login...")
     try:
         login_spotify_command(SimpleNamespace(
-            client_id=None, redirect_uri=None, scope=None, no_browser=False, timeout=None,
-        ))
+            client_id=None, redirect_uri=None, scope=None, no_browser=False, timeout=None))
         _print_success("    Spotify authenticated")
     except SystemExit as exc:
         # User aborted the wizard or OAuth failed — don't fail the toolset enable.
@@ -326,10 +318,8 @@ def _post_setup_xai_grok() -> None:
         choices=[
             "Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
             "Paste an xAI API key (console.x.ai)",
-            "Skip — configure later via `hermes auth add xai-oauth`",
-        ],
-        default=0,
-    )
+            "Skip — configure later via `hermes auth add xai-oauth`"],
+        default=0)
     if idx == 0:
         if _run_xai_oauth_login_from_setup():
             _print_success("    Logged in — xAI will use these OAuth credentials")
@@ -378,8 +368,7 @@ def valid_post_setup_keys() -> Set[str]:
         _plugin_browser_providers,
         _plugin_image_gen_providers,
         _plugin_video_gen_providers,
-        _plugin_web_search_providers,
-    )
+        _plugin_web_search_providers)
 
     keys: Set[str] = set()
     for cat in TOOL_CATEGORIES.values():
@@ -453,16 +442,14 @@ _RESTORABLE_PYTHON_TOOL_DEPENDENCIES: dict[str, tuple[str, tuple[str, ...]]] = {
     "kittentts": ("kittentts", ("-U", _KITTENTTS_WHEEL_URL, "soundfile")),
     "piper": ("piper", ("-U", "piper-tts")),
     "ddgs": ("ddgs", ("-U", "ddgs")),
-    "langfuse": ("langfuse", ("langfuse",)),
-}
+    "langfuse": ("langfuse", ("langfuse",))}
 
 
 def active_restorable_python_tool_dependencies() -> list[str]:
     """Return ``hermes tools`` Python dependencies present in this runtime."""
     return [
         name for name, (module_name, _install_args) in _RESTORABLE_PYTHON_TOOL_DEPENDENCIES.items()
-        if _module_installed(module_name)
-    ]
+        if _module_installed(module_name)]
 
 
 def restorable_python_tool_dependency(name: str) -> tuple[str, tuple[str, ...]] | None:
@@ -516,5 +503,4 @@ _POST_SETUP_READY: dict = {
     "browserbase": lambda: _cloud_agent_browser_installed(),
     "camofox": lambda: _camofox_installed(),
     "lightpanda": lambda: _lightpanda_installed(),
-    "cua_driver": lambda: _cua_driver_install_ready(),
-}
+    "cua_driver": lambda: _cua_driver_install_ready()}

@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from hermes_cli.cli_output import (
-    print_info as _print_info, print_success as _print_success, print_warning as _print_warning,
-)
+    print_info as _print_info, print_success as _print_success, print_warning as _print_warning)
 
 logger = logging.getLogger("hermes_cli.tools_config")
 
@@ -224,16 +223,14 @@ def _confirmed_update_check(driver_cmd: str, require_confirmed_update: bool) -> 
             _print_info(
                 f"    Could not confirm a newer {driver_cmd} release "
                 "(offline, rate-limited, or driver too old to check); "
-                "keeping the installed version."
-            )
+                "keeping the installed version.")
             _print_info(f"    Force a refresh with: {_UPGRADE_CMD}")
             return False, None
         return True, None
     if not _state.get("update_available"):
         _print_success(
             f"    {driver_cmd} is already on the latest release "
-            f"({_state.get('current_version') or 'unknown'})."
-        )
+            f"({_state.get('current_version') or 'unknown'}).")
         return False, None
     # Windows routine upgrades run unattended-safe (stdin closed, version pinned, ceiling
     # _CUA_BACKGROUND_UPDATE_TIMEOUT, preflights skip in seconds); only contract repairs and fresh
@@ -353,15 +350,13 @@ def install_cua_driver(
     ok = _run_cua_driver_installer(
         label="Repairing" if repair_existing else "Refreshing", verbose=False, pin_version=confirmed_version,
         show_progress=show_installer_progress,
-        installer_timeout=_CUA_BACKGROUND_UPDATE_TIMEOUT if require_confirmed_update else None,
-    )
+        installer_timeout=_CUA_BACKGROUND_UPDATE_TIMEOUT if require_confirmed_update else None)
     if ok and repair_existing:
         repaired = _cua_driver_contract_status()
         if not repaired.get("ready"):
             _print_warning(
                 "    cua-driver was reinstalled, but its runtime contract is still "
-                f"unusable: {repaired.get('reason') or 'unknown error'}."
-            )
+                f"unusable: {repaired.get('reason') or 'unknown error'}.")
             _print_info("    Run: hermes computer-use doctor")
             return False
     if ok and before:
@@ -411,8 +406,7 @@ def _clear_stale_windows_cua_install_lock() -> None:
         create_file = kernel32.CreateFileW
         create_file.argtypes = [
             _wintypes.LPCWSTR, _wintypes.DWORD, _wintypes.DWORD, _wintypes.LPVOID,
-            _wintypes.DWORD, _wintypes.DWORD, _wintypes.HANDLE,
-        ]
+            _wintypes.DWORD, _wintypes.DWORD, _wintypes.HANDLE]
         create_file.restype = _wintypes.HANDLE
         close_handle = kernel32.CloseHandle
         close_handle.argtypes = [_wintypes.HANDLE]
@@ -420,19 +414,16 @@ def _clear_stale_windows_cua_install_lock() -> None:
 
         handle = create_file(
             str(lock_file), generic_read | generic_write | delete_access, 0,  # 0 = FileShare::None
-            None, open_existing, file_attribute_normal | file_flag_delete_on_close, None,
-        )
+            None, open_existing, file_attribute_normal | file_flag_delete_on_close, None)
         if handle == _wintypes.HANDLE(-1).value:
             logger.debug(
                 "Windows cua install lock at %s is still held or cannot be removed (winerror %s)",
-                lock_file, _ctypes.get_last_error(),
-            )
+                lock_file, _ctypes.get_last_error())
             return
         if not close_handle(handle):
             logger.debug(
                 "could not close Windows cua install lock probe at %s (winerror %s)",
-                lock_file, _ctypes.get_last_error(),
-            )
+                lock_file, _ctypes.get_last_error())
             return
         if lock_file.exists():
             logger.debug("Windows cua install lock probe succeeded but %s remains", lock_file)
@@ -549,8 +540,7 @@ def _cua_driver_autostart_registered_windows() -> bool:
     try:
         result = subprocess.run(
             ["schtasks.exe", "/Query", "/TN", "cua-driver-serve"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
-        )
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     except Exception:
         return False
     return result.returncode == 0
@@ -576,8 +566,7 @@ def _repair_cua_driver_autostart_windows(driver_cmd: str, *, verbose: bool) -> b
         "$proc = Start-Process -FilePath $exe "
         "-ArgumentList @('autostart','enable') "
         "-Verb RunAs -Wait -PassThru -ErrorAction Stop; "
-        "exit $proc.ExitCode"
-    )
+        "exit $proc.ExitCode")
     _print_info("    Registering cua-driver auto-start..." if verbose else "    Repairing cua-driver auto-start registration...")
 
     try:
@@ -609,8 +598,7 @@ def _remove_quietly(path: str) -> None:
 
 _MAC_PERMISSION_PATHS = (
     "      System Settings > Privacy & Security > Accessibility",
-    "      System Settings > Privacy & Security > Screen Recording",
-)
+    "      System Settings > Privacy & Security > Screen Recording")
 
 
 def _print_cua_platform_notes(is_windows: bool, is_linux: bool, *, fresh_install: bool) -> None:
@@ -682,8 +670,7 @@ def _reap_after_timeout(proc, *, is_windows: bool) -> None:
         logger.debug(
             "cua-driver installer pipes still open %ss after the kill — "
             "abandoning the drain, a surviving descendant holds the inherited handle",
-            _CUA_INSTALLER_DRAIN_GRACE,
-        )
+            _CUA_INSTALLER_DRAIN_GRACE)
     except (OSError, ValueError) as e:
         logger.debug("cua-driver installer drain failed: %s", e)
 
@@ -745,8 +732,7 @@ def _unattended_installer_preflight(install_cmd: list, is_windows: bool):
 
 def _run_cua_driver_installer(
     label: str = "Installing", verbose: bool = True, pin_version: Optional[str] = None, show_progress: bool = True,
-    installer_timeout: Optional[float] = None,
-) -> bool:
+    installer_timeout: Optional[float] = None) -> bool:
     """Run the upstream cua-driver installer for this platform.
 
     The scripts are idempotent: they always download the latest release, so re-running on an
