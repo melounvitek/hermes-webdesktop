@@ -204,10 +204,7 @@ def real_profile_data_dir(browser: str, system: str | None = None) -> str | None
 
 
 def _first_present(paths) -> str | None:
-    for p in paths:
-        if p and os.path.isfile(p):
-            return p
-    return None
+    return next((p for p in paths if p and os.path.isfile(p)), None)
 
 
 def chromium_executable(browser: str, system: str | None = None) -> str | None:
@@ -225,11 +222,8 @@ def chromium_executable(browser: str, system: str | None = None) -> str | None:
             os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))]
         return _first_present(os.path.join(base, *parts) for base in bases for parts in b.win_install)
     # Linux: PATH lookup first, then the known absolute install paths.
-    for name in b.linux_exec or b.linux_bins:
-        found = shutil.which(name)
-        if found:
-            return found
-    return _first_present(b.linux_paths)
+    found = next(filter(None, map(shutil.which, b.linux_exec or b.linux_bins)), None)
+    return found or _first_present(b.linux_paths)
 
 
 def _classify_default(value: str, channels, table, match) -> str | None:
@@ -238,13 +232,9 @@ def _classify_default(value: str, channels, table, match) -> str | None:
     Channels are checked FIRST: a recognized Beta/Dev/Canary identifier must fail closed
     (UNSUPPORTED_CHANNEL), never fall through to a stable match and drive the stable profile.
     """
-    for chan in channels:
-        if match(value, chan):
-            return UNSUPPORTED_CHANNEL
-    for frag, browser in table:
-        if match(value, frag):
-            return browser
-    return None
+    if any(match(value, chan) for chan in channels):
+        return UNSUPPORTED_CHANNEL
+    return next((browser for frag, browser in table if match(value, frag)), None)
 
 
 def _detect_default_windows() -> str | None:
@@ -296,19 +286,15 @@ def _launchservices_https_handler(dump: str) -> str | None:
         # releases used, and the role regex below would return it instead of the bundle id.
         low = re.sub(r"lshandlerpreferredversions\s*=\s*\{[^}]*\}\s*;", "", low)
         # The real bundle id is the first non-"-" role value at this level.
-        for role in re.findall(r'lshandlerrole(?:all|viewer)\s*=\s*"?([a-z0-9.\-]+)"?\s*;', low):
-            if role != "-":
-                return role
-        return None
+        roles = re.findall(r'lshandlerrole(?:all|viewer)\s*=\s*"?([a-z0-9.\-]+)"?\s*;', low)
+        return next((role for role in roles if role != "-"), None)
     return None
 
 
 def _detect_default_darwin() -> str | None:
     out = _run_stdout(["defaults", "read",
                        "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
-    if out is None:
-        return None
-    bundle = _launchservices_https_handler(out)
+    bundle = _launchservices_https_handler(out) if out is not None else None
     if not bundle:
         return None
     # Exact match. A non-Chromium https handler (Safari, Firefox, Arc, …) or an unknown
@@ -451,15 +437,11 @@ def _mirror_profile_auth(src: str, dst: str, source_profile: str) -> int:
 
     Returns the number of DB auth files that could NOT be copied (0 = clean).
     """
-    dst_default = os.path.join(dst, "Default")
     failed_dbs = 0
     for rel in _AUTH_REFRESH_PROFILE_FILES:
         s = os.path.join(src, source_profile, rel)
-        if not os.path.isfile(s):
-            continue
-        ok = _copy_auth_file(s, os.path.join(dst_default, rel))
-        if not ok and os.path.basename(rel) in _SQLITE_AUTH_DBS:
-            failed_dbs += 1
+        if os.path.isfile(s) and not _copy_auth_file(s, os.path.join(dst, "Default", rel)):
+            failed_dbs += os.path.basename(rel) in _SQLITE_AUTH_DBS
     return failed_dbs
 
 
@@ -484,10 +466,8 @@ def _profile_is_locked(src: str, source_profile: str) -> bool:
     try:
         with open(db, "rb"):
             return False
-    except PermissionError:
-        return True
-    except OSError:  # transient — don't declare locked; let the copy try
-        return False
+    except OSError as e:  # other OSErrors are transient — don't declare locked; let the copy try
+        return isinstance(e, PermissionError)
 
 
 def _browser_setting(key: str):
@@ -587,7 +567,7 @@ def close_browser_holding_profile(src: str, timeout: float = 15.0) -> tuple[bool
     for p in targets:
         with contextlib.suppress(*gone_errs):
             p.terminate()
-    _gone, alive = psutil.wait_procs(targets, timeout=min(timeout, 8.0))
+    alive = psutil.wait_procs(targets, timeout=min(timeout, 8.0))[1]
     for p in alive:
         with contextlib.suppress(*gone_errs):
             p.kill()
@@ -708,9 +688,8 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         os.makedirs(dst, exist_ok=True)
         # Secure the snapshot dir AND its browser-profile parent on EVERY launch so a failed
         # first attempt or an older-build dir still converges to owner-only perms.
-        if os.path.dirname(dst):
-            _secure_snapshot(os.path.dirname(dst))
-        _secure_snapshot(dst)
+        for path in filter(None, (os.path.dirname(dst), dst)):
+            _secure_snapshot(path)
         _sync_local_state(src, dst, source_profile)
         if not populated:
             _copy_profile_tree(src, dst, source_profile)
@@ -770,14 +749,12 @@ def _debug_candidate_paths(system: str):
 
 
 def get_chrome_debug_candidates(system: str) -> list[str]:
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for path in _debug_candidate_paths(system):
-        normalized = os.path.normcase(os.path.normpath(path)) if path else None
-        if path and normalized not in seen and os.path.isfile(path):
-            candidates.append(path)
-            seen.add(normalized)
-    return candidates
+    candidates: dict[str, str] = {}  # normalized -> first path seen (dedupe, keep order)
+    for path in filter(None, _debug_candidate_paths(system)):
+        normalized = os.path.normcase(os.path.normpath(path))
+        if normalized not in candidates and os.path.isfile(path):
+            candidates[normalized] = path
+    return list(candidates.values())
 
 
 def chrome_debug_data_dir() -> str:
@@ -829,11 +806,8 @@ _LOOPBACK_SOCKET_HOSTS = ("127.0.0.1", "::1")
 
 def discover_local_cdp_url(port: int, timeout: float = 1.0) -> str | None:
     """Return the first loopback URL (IPv4 first, then IPv6) speaking CDP, else None."""
-    for host in _LOOPBACK_PROBE_HOSTS:
-        url = f"http://{host}:{port}"
-        if is_browser_debug_ready(url, timeout=timeout):
-            return url
-    return None
+    urls = (f"http://{host}:{port}" for host in _LOOPBACK_PROBE_HOSTS)
+    return next((url for url in urls if is_browser_debug_ready(url, timeout=timeout)), None)
 
 
 def local_port_in_use(port: int, timeout: float = 0.5) -> bool:
@@ -857,10 +831,8 @@ def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: in
         except OSError:
             return False
     loopbacks = ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1"))
-    for port in range(preferred + 1, preferred + 1 + attempts):
-        if all(bindable(family, host, port) for family, host in loopbacks):
-            return port
-    return preferred + 1
+    ports = range(preferred + 1, preferred + 1 + attempts)
+    return next((p for p in ports if all(bindable(f, h, p) for f, h in loopbacks)), preferred + 1)
 
 
 def manual_chrome_debug_command(port: int = DEFAULT_BROWSER_CDP_PORT, system: str | None = None) -> str | None:
