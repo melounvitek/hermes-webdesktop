@@ -35,17 +35,15 @@ def _looks_like_error_output(content: Any) -> bool:
     content = _stringify_tool_content(content)
     if not content:
         return False
-    head = content.lstrip()
-    if head.startswith("{") or head.startswith("["):
+    if content.lstrip().startswith(("{", "[")):
         try:
             parsed = json.loads(content)
-            if isinstance(parsed, dict):
-                if parsed.get("error"):
-                    return True
-                if str(parsed.get("status") or "").strip().lower() in {"error", "failed", "failure", "timeout"}:
-                    return True
         except Exception:
-            pass
+            parsed = None
+        if isinstance(parsed, dict) and (
+            parsed.get("error") or str(parsed.get("status") or "").strip().lower() in {"error", "failed", "failure", "timeout"}
+        ):
+            return True
     first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
     return first.startswith(("error:", "failed:", "traceback ", "exception:"))
 
@@ -125,12 +123,10 @@ def _input_summary(keys: Any, targets: Any) -> Dict[str, Any]:
 
 def _summarize_tool_arguments(arguments: Any) -> Dict[str, Any]:
     """Summarize argument names and side-effect targets without raw payloads."""
-    parsed = None
-    if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except (TypeError, ValueError):
-            pass
+    try:
+        parsed = json.loads(arguments) if isinstance(arguments, str) else None
+    except (TypeError, ValueError):
+        parsed = None
     if not isinstance(parsed, dict):
         return _input_summary([], {})
     return _input_summary(sorted(str(key)[:128] for key in parsed), parsed)
@@ -154,8 +150,7 @@ def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
         history.append({
             "tool_name": str(item.get("tool") or "unknown")[:256],
             "tool_input": _input_summary(summary.get("argument_keys"), summary.get("targets")),
-            "input_bytes": _byte_count(item, "args_bytes"),
-            "output_bytes": _byte_count(item, "result_bytes"),
+            "input_bytes": _byte_count(item, "args_bytes"), "output_bytes": _byte_count(item, "result_bytes"),
             "status": status if status in {"ok", "error"} else "unknown",
         })
     return history
