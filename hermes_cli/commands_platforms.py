@@ -1,6 +1,6 @@
 """Gateway platform command derivations (Telegram / Discord / Slack) from ``COMMAND_REGISTRY``.
 
-Extracted from :mod:`hermes_cli.commands`, which re-exports every name here so
+:mod:`hermes_cli.commands` lazily re-exports every name here, so
 ``from hermes_cli.commands import telegram_menu_commands`` keeps working.
 """
 
@@ -21,11 +21,16 @@ from hermes_cli.commands import (
 # Logger name parity with the origin module (tests capture "hermes_cli.commands").
 logger = logging.getLogger("hermes_cli.commands")
 
-_CMD_NAME_LIMIT = 32
-"""Max command name length shared by Telegram and Discord."""
+_CMD_NAME_LIMIT = 32  # max command name length shared by Telegram and Discord
 
 _TG_INVALID_CHARS = re.compile(r"[^a-z0-9_]")
 _TG_MULTI_UNDERSCORE = re.compile(r"_{2,}")
+
+
+def _gateway_available_commands() -> list:
+    """Registry entries visible on gateway surfaces (config gates read once)."""
+    overrides = _resolve_config_gates()
+    return [cmd for cmd in COMMAND_REGISTRY if _is_gateway_available(cmd, overrides)]
 
 
 def _requires_argument(args_hint: str) -> bool:
@@ -34,7 +39,8 @@ def _requires_argument(args_hint: str) -> bool:
 
 
 def _sanitize_telegram_name(raw: str) -> str:
-    """Telegram allows only ``[a-z0-9_]``: lowercase → hyphens to underscores → strip the rest → collapse/strip ``_``."""
+    """Telegram allows only ``[a-z0-9_]``: lowercase, hyphens -> ``_``, strip the rest,
+    collapse/strip ``_``."""
     name = _TG_INVALID_CHARS.sub("", raw.lower().replace("-", "_"))
     return _TG_MULTI_UNDERSCORE.sub("_", name).strip("_")
 
@@ -44,7 +50,9 @@ def _truncate_desc(desc: str, limit: int) -> str:
     return desc if len(desc) <= limit else desc[:limit - 3] + "..."
 
 
-def _clamp_command_names(entries: Sequence[tuple[str, ...]], reserved: set[str]) -> list[tuple[str, ...]]:
+def _clamp_command_names(
+    entries: Sequence[tuple[str, ...]], reserved: set[str],
+) -> list[tuple[str, ...]]:
     """Enforce the 32-char Telegram/Discord name limit with collision avoidance.
 
     Over-long names are truncated; if that collides with *reserved* or an
@@ -73,30 +81,27 @@ def _clamp_command_names(entries: Sequence[tuple[str, ...]], reserved: set[str])
     return result
 
 
-# ---------------------------------------------------------------------------
-# Telegram
-# ---------------------------------------------------------------------------
+# --- Telegram ---------------------------------------------------------------
 
 def telegram_bot_commands(*, include_plugins: bool = True) -> list[tuple[str, str]]:
     """Return (command_name, description) pairs for Telegram setMyCommands.
 
-    Names are Telegram-sanitized; aliases are skipped (one menu entry per
-    canonical command). Built-ins that require arguments are **included** —
-    their handlers show usage text when selected bare. Plugin commands
-    requiring arguments are **excluded** because plugins may lack a no-arg
-    fallback; callers needing source metadata pass ``include_plugins=False``
-    and use :func:`_collect_gateway_skill_entries`.
+    Names are Telegram-sanitized; aliases are skipped (one entry per canonical
+    command). Built-ins requiring arguments are **included** (their handlers show
+    usage when selected bare); plugin commands requiring arguments are **excluded**
+    because plugins may lack a no-arg fallback. Callers needing source metadata
+    pass ``include_plugins=False`` and use :func:`_collect_gateway_skill_entries`.
     """
-    overrides = _resolve_config_gates()
-    pairs = [(cmd.name, cmd.description) for cmd in COMMAND_REGISTRY if _is_gateway_available(cmd, overrides)]
+    pairs = [(cmd.name, cmd.description) for cmd in _gateway_available_commands()]
     if include_plugins:
-        pairs += [(n, d) for n, d, hint in _iter_plugin_command_entries() if not _requires_argument(hint)]
+        pairs += [(n, d) for n, d, hint in _iter_plugin_command_entries()
+                  if not _requires_argument(hint)]
     return [(tg, desc) for name, desc in pairs if (tg := _sanitize_telegram_name(name))]
 
 
-# Telegram allows 100 BotCommands; the 60-slot default keeps every built-in
-# plus common skill commands visible while staying under the ~4KB payload
-# limit. Tunable via platforms.telegram.extra.command_menu.max_commands.
+# Telegram allows 100 BotCommands; the 60-slot default keeps every built-in plus
+# common skill commands visible under the ~4KB payload limit. Tunable via
+# platforms.telegram.extra.command_menu.max_commands.
 _DEFAULT_TELEGRAM_MENU_MAX_COMMANDS = 60
 _TELEGRAM_BOT_API_MAX_COMMANDS = 100
 # priority_mode -> rank tables consulted in order ("configured" = user list,
@@ -167,12 +172,9 @@ def _sanitized_rank(raw_names: Sequence[str]) -> dict[str, int]:
 def _prioritize_telegram_menu_candidates(
     candidates: list[tuple[str, str, str, str]],
 ) -> list[tuple[str, str, str, str]]:
-    """Order ``(final_name, description, source, raw_name)`` candidates; default priority applies to core only.
-
-    ``raw_name`` is the pre-clamp name so an explicitly configured long command
-    stays addressable after Telegram name clamping. "replace" mode ignores the
-    built-in defaults entirely.
-    """
+    """Order ``(final_name, description, source, raw_name)`` candidates; the default
+    priority applies to core only, "replace" mode ignores it entirely. ``raw_name``
+    is the pre-clamp name so a configured long command stays addressable."""
     # Lazy origin import: tests patch ``hermes_cli.commands._telegram_command_menu_config``.
     from hermes_cli.commands import _telegram_command_menu_config as menu_config
 
@@ -195,27 +197,26 @@ def _prioritize_telegram_menu_candidates(
     return [c for _i, c in sorted(enumerate(candidates), key=lambda item: _rank(*item))]
 
 
-# ---------------------------------------------------------------------------
-# Shared skill/plugin collection for gateway platforms
-# ---------------------------------------------------------------------------
+# --- Shared skill/plugin collection for gateway platforms -------------------
 
 def _iter_gateway_skills(platform: str):
     """Yield ``(cmd_key, info, rel_parts)`` for skills eligible as gateway slash commands.
 
-    Scan roots are the local ``SKILLS_DIR`` plus every configured
-    ``skills.external_dirs`` / trusted project skills dir — a skill anywhere
-    else, or under the hub dir (``SKILLS_DIR/.hub``), is skipped, as are skills
-    disabled for *platform*. Paths are resolved on both sides so symlinked roots
-    (macOS ``/var`` → ``/private/var``) still match, and matching is per path
-    component so ``/my-skills`` never admits ``/my-skills-extra``. ``rel_parts``
-    is the skill dir relative to its root (``("creative", "ascii-art")``) for
-    category derivation. Iterates ``sorted(skill_cmds)`` so first-wins
-    collision handling is alphabetical.
+    Scan roots: local ``SKILLS_DIR`` plus configured ``skills.external_dirs`` /
+    trusted project skills dirs; anything elsewhere or under ``SKILLS_DIR/.hub``
+    is skipped, as are skills disabled for *platform*. Paths are resolved on both
+    sides (symlinked roots such as macOS ``/var`` -> ``/private/var`` still match)
+    and matched per path component (``/my-skills`` never admits
+    ``/my-skills-extra``). ``rel_parts`` is the skill dir relative to its root
+    (``("creative", "ascii-art")``) for category derivation. Iterates
+    ``sorted(skill_cmds)`` so first-wins collision handling is alphabetical.
     """
     from pathlib import Path
 
     from agent.skill_commands import get_skill_commands
-    from agent.skill_utils import get_disabled_skill_names, get_external_skills_dirs, get_project_skills_dirs
+    from agent.skill_utils import (
+        get_disabled_skill_names, get_external_skills_dirs, get_project_skills_dirs,
+    )
     from tools.skills_tool import SKILLS_DIR
 
     try:
@@ -260,13 +261,13 @@ def _collect_gateway_skill_entries(
 
     Plugin slash commands come first and are never trimmed; skill commands
     (alphabetical, see :func:`_iter_gateway_skills`) fill the remaining
-    *max_slots* — ``None`` returns every candidate for a caller applying its
-    own global cap. *reserved_names* (built-in names) is mutated in place as
-    names are claimed. *sanitize_name* runs before clamping and may return ""
-    to skip an entry. Returns ``(entries, hidden_count)`` with entries of
-    ``(name, description, cmd_key, raw_name)`` — ``cmd_key`` is the original
-    skill key ("" for plugins); ``raw_name`` the sanitized pre-clamp name used
-    for configured-priority matching.
+    *max_slots* — ``None`` returns every candidate for a caller applying its own
+    cap. *reserved_names* (built-in names) is mutated in place as names are
+    claimed. *sanitize_name* runs before clamping and may return "" to skip an
+    entry. Returns ``(entries, hidden_count)`` with entries of
+    ``(name, description, cmd_key, raw_name)`` — ``cmd_key`` is the original skill
+    key ("" for plugins); ``raw_name`` the sanitized pre-clamp name used for
+    configured-priority matching.
     """
     sanitize = sanitize_name or (lambda n: n)
     # Tier 1: plugin slash commands (never trimmed). No cmd_key — "" placeholder.
@@ -275,10 +276,11 @@ def _collect_gateway_skill_entries(
         from hermes_cli.plugins import get_plugin_commands
         plugin_cmds = get_plugin_commands()
         for cmd_name in sorted(plugin_cmds):
-            if platform == "telegram" and _requires_argument(str(plugin_cmds[cmd_name].get("args_hint") or "")):
+            meta = plugin_cmds[cmd_name]
+            if platform == "telegram" and _requires_argument(str(meta.get("args_hint") or "")):
                 continue
             if name := sanitize(cmd_name):
-                desc = _truncate_desc(plugin_cmds[cmd_name].get("description", "Plugin command"), desc_limit)
+                desc = _truncate_desc(meta.get("description", "Plugin command"), desc_limit)
                 plugin_entries.append((name, desc, "", name))
     except Exception:
         pass
@@ -291,7 +293,8 @@ def _collect_gateway_skill_entries(
     try:
         for cmd_key, info, _rel in _iter_gateway_skills(platform):
             if name := sanitize(cmd_key.lstrip("/")):
-                skill_entries.append((name, _truncate_desc(info.get("description", ""), desc_limit), cmd_key, name))
+                desc = _truncate_desc(info.get("description", ""), desc_limit)
+                skill_entries.append((name, desc, cmd_key, name))
     except Exception:
         pass
     skill_entries = _clamp_command_names(skill_entries, reserved_names)
@@ -306,11 +309,10 @@ def _collect_gateway_skill_entries(
 def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str]], int]:
     """Return ``(menu_commands, hidden_count)`` for Telegram, capped to the Bot API limit.
 
-    Tier order: core CommandDefs, then plugin slash commands, then skill
-    commands (alphabetical; hub skills and telegram-disabled skills excluded).
-    Tiers keep their relative order unless named in
-    ``platforms.telegram.extra.command_menu.priority`` — explicit priority is
-    applied to the combined list *before* the cap, so a prioritized dynamic
+    Tier order: core CommandDefs, plugin slash commands, skill commands
+    (alphabetical; hub and telegram-disabled skills excluded). Tiers keep their
+    relative order unless named in ``platforms.telegram.extra.command_menu.priority``
+    — applied to the combined list *before* the cap, so a prioritized dynamic
     command can displace an unprioritized core command.
     """
     # Lazy origin import: tests patch ``hermes_cli.commands.telegram_bot_commands``.
@@ -325,16 +327,15 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
         sanitize_name=_sanitize_telegram_name,
     )
     candidates = [(name, desc, "core", name) for name, desc in core_commands]
-    candidates += [(name, desc, "skill" if cmd_key else "plugin", raw) for name, desc, cmd_key, raw in entries]
+    candidates += [(name, desc, "skill" if cmd_key else "plugin", raw)
+                   for name, desc, cmd_key, raw in entries]
     candidates = _prioritize_telegram_menu_candidates(candidates)
     overflow_count = max(0, len(candidates) - max_commands)
     menu = [(name, desc) for name, desc, _source, _raw_name in candidates[:max_commands]]
     return menu, hidden_count + overflow_count
 
 
-# ---------------------------------------------------------------------------
-# Discord
-# ---------------------------------------------------------------------------
+# --- Discord ----------------------------------------------------------------
 
 def discord_skill_commands_by_category(
     reserved_names: set[str],
@@ -344,24 +345,22 @@ def discord_skill_commands_by_category(
     Skills nested >= 2 levels under a scan root (``creative/ascii-art/SKILL.md``)
     are grouped under ``categories[top_level]``; root-level skills are
     *uncategorized*. Entries are ``(name, description, cmd_key)`` with names
-    clamped to 32 chars and descriptions to 100. Eligibility follows
-    :func:`_iter_gateway_skills`. No per-group cap is applied — the caller
-    flattens everything into one autocomplete callback, which scales to
-    thousands of entries; ``hidden_count`` only reports 32-char clamp
+    clamped to 32 chars and descriptions to 100; eligibility follows
+    :func:`_iter_gateway_skills`. No per-group cap — the caller flattens everything
+    into one autocomplete callback; ``hidden_count`` only reports 32-char clamp
     collisions against reserved names or earlier skills.
     """
     categories: dict[str, list[tuple[str, str, str]]] = {}
     uncategorized: list[tuple[str, str, str]] = []
-    # clamped name → origin. Reserved (gateway-builtin) names carry a sentinel
-    # so the warning can distinguish "collided with a reserved command" from
-    # "two skills collided on the 32-char clamp" — the rename-worthy case.
+    # clamped name -> origin. Reserved (gateway-builtin) names carry a sentinel so
+    # the warning distinguishes "collided with a reserved command" from "two
+    # skills collided on the 32-char clamp" — the rename-worthy case.
     names_used: dict[str, str] = dict.fromkeys(reserved_names, "<reserved>")
     hidden = 0
     try:
         for cmd_key, info, rel_parts in _iter_gateway_skills("discord"):
             # On collision the first (alphabetical) skill wins and the loser is
-            # dropped from the picker; warn loudly, since a silent ``hidden``
-            # count gave skill authors no way to discover the drop.
+            # dropped from the picker; warn loudly so skill authors can discover it.
             discord_name = cmd_key.lstrip("/")[:32]
             prior = names_used.get(discord_name)
             if prior == "<reserved>":
@@ -387,16 +386,17 @@ def discord_skill_commands_by_category(
                 continue
             names_used[discord_name] = cmd_key
             entry = (discord_name, _truncate_desc(info.get("description", ""), 100), cmd_key)
-            # creative/ascii-art/SKILL.md → category "creative"; root-level skills are uncategorized.
-            (categories.setdefault(rel_parts[0], []) if len(rel_parts) >= 2 else uncategorized).append(entry)
+            # creative/ascii-art/SKILL.md -> category "creative"; root-level = uncategorized.
+            if len(rel_parts) >= 2:
+                categories.setdefault(rel_parts[0], []).append(entry)
+            else:
+                uncategorized.append(entry)
     except Exception:
         pass
     return categories, uncategorized, hidden
 
 
-# ---------------------------------------------------------------------------
-# Slack native slash commands
-# ---------------------------------------------------------------------------
+# --- Slack native slash commands --------------------------------------------
 
 # Slack slash names: lowercase a-z, 0-9, hyphens, underscores, max 32 chars;
 # an app manifest accepts up to 50 slash commands.
@@ -411,18 +411,19 @@ _SLACK_RESERVED_COMMANDS = frozenset({
     "topic", "mute", "pro", "shortcuts",
 })
 
-# Canonical commands intentionally NOT given a native Slack slash slot. Slack
-# caps apps at 50 slash commands and the registry is at that ceiling; rather
-# than let the clamp silently drop whichever command sorts last (breaking the
-# Telegram-parity test), low-frequency commands are routed through
-# ``/hermes <command>`` on Slack only. They stay native on every other surface.
-# Rule: when a new canonical command tips the registry past the cap, demote a
-# rarer one-off lookup here (version, whoami, platform, diff, update, ...)
-# rather than a recurring interactive surface (context, loop, save, approvals).
-# Keep TIGHT and intentional — the parity test reads this set. (Aliases are
-# never pinned ahead of canonicals: /bg and /btw became canonical commands
-# instead, so they win first-pass slots on their own.)
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "review", "pause", "whoami", "platform", "insights"})
+# Canonical commands intentionally NOT given a native Slack slash slot: Slack caps
+# apps at 50 and the registry is at that ceiling, so rather than let the clamp
+# silently drop whichever command sorts last (breaking the Telegram-parity test),
+# low-frequency commands go through ``/hermes <command>`` on Slack only (native
+# everywhere else). Rule: when a new canonical command tips past the cap, demote a
+# rarer one-off lookup here (version, whoami, platform, diff, update, ...) rather
+# than a recurring interactive surface (context, loop, save, approvals). Keep
+# TIGHT — the parity test reads this set. Aliases are never pinned ahead of
+# canonicals (/bg and /btw became canonical so they win first-pass slots).
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat",
+    "refine", "review", "pause", "whoami", "platform", "insights",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -433,22 +434,22 @@ def _sanitize_slack_name(raw: str) -> str:
 def slack_native_slashes() -> list[tuple[str, str, str]]:
     """Return (slash_name, description, usage_hint) triples for Slack.
 
-    Every gateway-available command (canonical names first, then aliases,
-    then plugin commands) becomes a standalone Slack slash, clamped to the
-    50-command cap with duplicate avoidance. Names colliding with a Slack
-    built-in (``/status``, ``/me``, ...) or listed in _SLACK_VIA_HERMES_ONLY
-    are skipped. ``/hermes`` is always the first entry so the
-    ``/hermes <command>`` form keeps working for anything dropped.
+    Every gateway-available command (canonical names first, then aliases, then
+    plugin commands) becomes a standalone Slack slash, clamped to the 50-command
+    cap with duplicate avoidance. Names colliding with a Slack built-in
+    (``/status``, ``/me``, ...) or in _SLACK_VIA_HERMES_ONLY are skipped.
+    ``/hermes`` is always first so ``/hermes <command>`` works for anything dropped.
     """
-    overrides = _resolve_config_gates()
-    available = [cmd for cmd in COMMAND_REGISTRY if _is_gateway_available(cmd, overrides)]
+    available = _gateway_available_commands()
     # Canonical names first so they win slots at the cap; aliases second; plugins third.
     wanted = [(cmd.name, cmd.description, cmd.args_hint or "") for cmd in available]
     wanted += [(alias, f"Alias for /{cmd.name} — {cmd.description}", cmd.args_hint or "")
                for cmd in available for alias in cmd.aliases]
     wanted += [(name, desc, hint or "") for name, desc, hint in _iter_plugin_command_entries()]
 
-    entries: list[tuple[str, str, str]] = [("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]")]
+    entries: list[tuple[str, str, str]] = [
+        ("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]"),
+    ]
     seen = {"hermes"}
     for name, desc, hint in wanted:
         slack_name = _sanitize_slack_name(name)
@@ -466,16 +467,19 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     return entries
 
 
-def slack_app_manifest(request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
+def slack_app_manifest(
+    request_url: str = "https://hermes-agent.local/slack/commands",
+) -> dict[str, Any]:
     """Return the ``features.slash_commands`` manifest portion for all gateway slashes.
 
-    ``request_url`` is schema-required but ignored in Socket Mode (a
-    placeholder is fine). Only this portion is returned so we stay decoupled
-    from the rest of the manifest users configure once in the Slack UI.
+    ``request_url`` is schema-required but ignored in Socket Mode (a placeholder is
+    fine). Only this portion is returned so we stay decoupled from the rest of the
+    manifest users configure once in the Slack UI.
     """
     slashes = []
     for name, desc, usage in slack_native_slashes():
-        entry = {"command": f"/{name}", "description": desc or f"Run /{name}", "should_escape": False, "url": request_url}
+        entry = {"command": f"/{name}", "description": desc or f"Run /{name}",
+                 "should_escape": False, "url": request_url}
         if usage:
             entry["usage_hint"] = usage
         slashes.append(entry)
@@ -483,13 +487,11 @@ def slack_app_manifest(request_url: str = "https://hermes-agent.local/slack/comm
 
 
 def slack_subcommand_map() -> dict[str, str]:
-    """Return name/alias -> "/command" mapping for the Slack ``/hermes`` handler, plugin commands included."""
-    overrides = _resolve_config_gates()
-    mapping: dict[str, str] = {}
-    for cmd in COMMAND_REGISTRY:
-        if _is_gateway_available(cmd, overrides):
-            for name in (cmd.name, *cmd.aliases):
-                mapping[name] = f"/{name}"
+    """name/alias -> "/command" for the Slack ``/hermes`` handler, plugin commands included."""
+    mapping: dict[str, str] = {
+        name: f"/{name}"
+        for cmd in _gateway_available_commands() for name in (cmd.name, *cmd.aliases)
+    }
     for name, _description, _args_hint in _iter_plugin_command_entries():
         mapping.setdefault(name, f"/{name}")
     return mapping
