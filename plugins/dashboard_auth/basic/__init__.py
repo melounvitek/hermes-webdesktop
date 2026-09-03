@@ -20,9 +20,9 @@ import secrets
 import time
 from typing import Optional
 
-from hermes_cli.dashboard_auth import (
-    DashboardAuthProvider, InvalidCredentialsError, LoginStart, RefreshExpiredError, Session)
-from plugins.dashboard_auth._shared import SkipRegistration, load_config_section, register_provider, resolve_env_or_cfg
+from hermes_cli.dashboard_auth import DashboardAuthProvider, InvalidCredentialsError, RefreshExpiredError, Session
+from plugins.dashboard_auth._shared import (
+    NonInteractiveMixin, SkipRegistration, load_config_section, register_provider, resolve_env_or_cfg)
 
 logger = logging.getLogger(__name__)
 _TAG = "dashboard-auth-basic"
@@ -111,12 +111,16 @@ def _unsign(token: str, secret: bytes, kind: str) -> Optional[dict]:
 
 # ---- Provider ----
 
-class BasicAuthProvider(DashboardAuthProvider):
+class BasicAuthProvider(NonInteractiveMixin, DashboardAuthProvider):
     """Username/password provider with stateless HMAC-signed sessions."""
 
     name = "basic"
     display_name = "Username & Password"
     supports_password = True
+    _NOT_INTERACTIVE = "BasicAuthProvider is password-only; use complete_password_login."
+    _NO_START_LOGIN = (
+        "BasicAuthProvider is password-only; there is no OAuth redirect flow. "
+        "The login page POSTs to /auth/password-login instead.")
 
     def __init__(self, *, username: str, password_hash: str, secret: bytes, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> None:
         if not username:
@@ -129,16 +133,6 @@ class BasicAuthProvider(DashboardAuthProvider):
         self._password_hash = password_hash
         self._secret = secret
         self._ttl = max(60, int(ttl_seconds))
-
-    # ---- OAuth methods: not used (pure-password provider) ------------------
-
-    def start_login(self, *, redirect_uri: str) -> LoginStart:
-        raise NotImplementedError(
-            "BasicAuthProvider is password-only; there is no OAuth redirect flow. "
-            "The login page POSTs to /auth/password-login instead.")
-
-    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
-        raise NotImplementedError("BasicAuthProvider is password-only; use complete_password_login.")
 
     # ---- password login ----------------------------------------------------
 

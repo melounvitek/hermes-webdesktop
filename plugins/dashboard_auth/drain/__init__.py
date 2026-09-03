@@ -16,8 +16,8 @@ import os
 from collections import Counter
 from typing import Optional
 
-from hermes_cli.dashboard_auth import DashboardAuthProvider, LoginStart, Session, TokenPrincipal
-from plugins.dashboard_auth._shared import SkipRegistration, load_config_section, register_provider
+from hermes_cli.dashboard_auth import DashboardAuthProvider, Session, TokenPrincipal
+from plugins.dashboard_auth._shared import NonInteractiveMixin, SkipRegistration, load_config_section, register_provider
 
 logger = logging.getLogger(__name__)
 _TAG = "dashboard-auth-drain"
@@ -65,13 +65,15 @@ def assess_secret_strength(secret: str, *, min_chars: int = _DEFAULT_MIN_SECRET_
     return None
 
 
-class DrainSecretProvider(DashboardAuthProvider):
+class DrainSecretProvider(NonInteractiveMixin, DashboardAuthProvider):
     """Non-interactive shared-bearer-secret provider for drain control."""
 
     name = "drain-secret"
     display_name = "Drain Control (service credential)"
     supports_token = True
     supports_session = False
+    _NOT_INTERACTIVE = "DrainSecretProvider is a non-interactive service credential."
+    _NO_START_LOGIN = "DrainSecretProvider is a non-interactive service credential; there is no login flow."
 
     def __init__(self, *, secret: str, scope: str = "drain") -> None:
         # Defence in depth: construction enforces the entropy bar too, so a
@@ -93,19 +95,13 @@ class DrainSecretProvider(DashboardAuthProvider):
 
     # ---- interactive methods: unsupported (service credential only) --------
 
-    def start_login(self, *, redirect_uri: str) -> LoginStart:
-        raise NotImplementedError("DrainSecretProvider is a non-interactive service credential; there is no login flow.")
-
-    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
-        raise NotImplementedError("DrainSecretProvider is a non-interactive service credential.")
-
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         # Never mints a Session, so never recognises a cookie. Return None (don't raise)
         # so it stacks harmlessly in the cookie-verify loop.
         return None
 
     def refresh_session(self, *, refresh_token: str) -> Session:
-        raise NotImplementedError("DrainSecretProvider is a non-interactive service credential.")
+        raise NotImplementedError(self._NOT_INTERACTIVE)
 
     def revoke_session(self, *, refresh_token: str) -> None:
         return None
