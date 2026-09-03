@@ -146,7 +146,7 @@ def match_profile_route(
     thread_id: Optional[str] = None, parent_chat_id: Optional[str] = None,
 ) -> Optional[ProfileRoute]:
     """Return the first (most specific) matching route, or None."""
-    return next(
-        (r for r in routes if r.matches(platform, guild_id=guild_id, chat_id=chat_id, thread_id=thread_id, parent_chat_id=parent_chat_id)),
-        None,
-    )
+    for route in routes:
+        if route.matches(platform, guild_id=guild_id, chat_id=chat_id, thread_id=thread_id, parent_chat_id=parent_chat_id):
+            return route
+    return None

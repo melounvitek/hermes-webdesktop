@@ -168,32 +168,26 @@ def _env_reply_mode(config: GatewayConfig, platform: Platform, env: str) -> None
         config.platforms.setdefault(platform, PlatformConfig()).reply_to_mode = mode
 
 
-def _enable_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfig:
+def _enable_from_env(
+    config: GatewayConfig, platform: Platform, *, pop_marker: bool = False, warn: bool = True
+) -> PlatformConfig:
     """Enable *platform* on env credentials unless config.yaml explicitly disabled it.
-    READS (does not pop) ``_enabled_explicit``: the plugin-enable pass also needs it."""
-    if platform not in config.platforms:
-        config.platforms[platform] = PlatformConfig(enabled=True)
-        return config.platforms[platform]
-    platform_config = config.platforms[platform]
-    if not platform_config.enabled:
-        if platform_config.extra.get("_enabled_explicit", False):
-            _warn_explicit_disable_beats_env(platform)
-        else:
-            platform_config.enabled = True
-    return platform_config
-
-
-def _enable_port_bound_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfig:
-    """Enable a port-binding platform unless config.yaml explicitly disabled it.
 
     A multiplex secondary profile pins ``enabled: false`` to share the default profile's listener
     yet inherits the process env; without this guard env presence would force-enable it and trip
-    MultiplexConfigError. POPs the marker (terminal branch).
+    MultiplexConfigError. By default the ``_enabled_explicit`` marker is READ (the plugin-enable
+    and relay passes still need it) and the disable is warned once; port-binding platforms POP it
+    (terminal branch) and stay silent.
     """
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
-    explicit = platform_config.extra.pop("_enabled_explicit", False)
-    if not explicit or platform_config.enabled:
+    extra = platform_config.extra
+    explicit = extra.pop("_enabled_explicit", False) if pop_marker else extra.get("_enabled_explicit", False)
+    if platform_config.enabled:
+        return platform_config
+    if not explicit:
         platform_config.enabled = True
+    elif warn:
+        _warn_explicit_disable_beats_env(platform)
     return platform_config
 
 
@@ -305,7 +299,7 @@ def _api_server(config: GatewayConfig) -> None:
     key = getenv("API_SERVER_KEY")
     if not _has_usable_api_server_key(key):
         return
-    extra = _enable_port_bound_from_env(config, Platform.API_SERVER).extra
+    extra = _enable_from_env(config, Platform.API_SERVER, pop_marker=True, warn=False).extra
     extra["key"] = key
     _csv_extras(extra, (("cors_origins", getenv("API_SERVER_CORS_ORIGINS")),))
     _env_extras(extra, (("port", "API_SERVER_PORT", _INT), ("host", "API_SERVER_HOST"), ("model_name", "API_SERVER_MODEL_NAME")))
@@ -313,7 +307,7 @@ def _api_server(config: GatewayConfig) -> None:
 
 def _webhook(config: GatewayConfig) -> None:
     if is_truthy_value(getenv("WEBHOOK_ENABLED")):
-        extra = _enable_port_bound_from_env(config, Platform.WEBHOOK).extra
+        extra = _enable_from_env(config, Platform.WEBHOOK, pop_marker=True, warn=False).extra
         _env_extras(extra, (("port", "WEBHOOK_PORT", _INT), ("secret", "WEBHOOK_SECRET")))
 
 
@@ -326,9 +320,8 @@ def _msgraph_webhook(config: GatewayConfig) -> None:
             or client_state or resources or allowed_cidrs):
         return
     msgraph_cfg = config.platforms.setdefault(Platform.MSGRAPH_WEBHOOK, PlatformConfig())
-    # Same guard as webhook, but READ (don't pop) the marker: the relay pass still consults it.
-    if enabled and (not msgraph_cfg.extra.get("_enabled_explicit", False) or msgraph_cfg.enabled):
-        msgraph_cfg.enabled = True
+    if enabled:  # same guard as webhook, but READ (don't pop) the marker: the relay pass still consults it
+        _enable_from_env(config, Platform.MSGRAPH_WEBHOOK, warn=False)
     _env_extras(msgraph_cfg.extra, (("port", "MSGRAPH_WEBHOOK_PORT", _INT),))
     if client_state:
         msgraph_cfg.extra["client_state"] = client_state

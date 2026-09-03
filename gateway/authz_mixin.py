@@ -223,9 +223,9 @@ class GatewayAuthorizationMixin:
         """Resolve the live adapter for an inbound ``SessionSource``."""
         if source is None:
             return None
-        transport_adapter = self._registered_transport_adapter(source)
-        if transport_adapter is not None:
-            return transport_adapter
+        owner = self._transport_owner(source)
+        if owner is not None:
+            return owner[0]
         # Relay ingress keeps the underlying platform on the source, but delivery must use the one
         # process-level RelayAdapter owning the connector socket; a profile-aware lookup would
         # silently disable streaming/typing/tool progress.
@@ -243,8 +243,8 @@ class GatewayAuthorizationMixin:
                 return True, profile
         return False, None
 
-    def _registered_transport_adapter(self, source: SessionSource):
-        """The registered adapter that created *source*, if retained.
+    def _transport_owner(self, source: SessionSource):
+        """``(adapter, profile)`` of the registered adapter that created *source*, if retained; else None.
 
         ``source.profile`` may differ from the adapter profile when one shared credential serves
         several routed runtimes; ``build_source`` keeps the receiving adapter as provenance so replies
@@ -255,17 +255,13 @@ class GatewayAuthorizationMixin:
         platform = getattr(source, "platform", None)
         if adapter is None or platform is None:
             return None
-        registered, _ = self._owning_profile(adapter, platform)
-        return adapter if registered else None
+        registered, profile = self._owning_profile(adapter, platform)
+        return (adapter, profile) if registered else None
 
     def _adapter_profile_for_source(self, source: SessionSource) -> Optional[str]:
         """Resolve the transport-owning profile for adapter policy lookups."""
-        adapter = self._registered_transport_adapter(source)
-        if adapter is not None:
-            registered, profile = self._owning_profile(adapter, getattr(source, "platform", None))
-            if registered:
-                return profile
-        return getattr(source, "profile", None)
+        owner = self._transport_owner(source)
+        return owner[1] if owner is not None else getattr(source, "profile", None)
 
     def _adapter_flag(self, platform, name: str, profile) -> bool:
         """Adapter-declared boolean, False when unknown. ``authorization_is_upstream`` (relay: a trusted
