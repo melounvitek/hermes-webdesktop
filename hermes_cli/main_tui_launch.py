@@ -418,12 +418,10 @@ def _tui_node_bin(bin: str) -> str:
     from hermes_constants import find_node_executable
     path = find_node_executable(bin)
     if not path and bin == "node":
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.dep_ensure import ensure_dependency
             if ensure_dependency("node"):
                 path = find_node_executable("node")
-        except Exception:
-            pass
     if not path:
         print(f"{bin} not found — install Node.js to use the TUI.")
         sys.exit(1)
@@ -764,11 +762,9 @@ def _launch_tui(
         with contextlib.suppress(OSError):
             os.unlink(active_session_file)
         if wt_info:
-            try:
+            with contextlib.suppress(Exception):
                 from cli import _cleanup_worktree
                 _cleanup_worktree(wt_info)
-            except Exception:
-                pass
 
     # Exit code 42 = TUI requested an update. Relaunch as `hermes update`;
     # preserve_inherited=False keeps --tui and other flags out of the subcommand.
@@ -785,21 +781,17 @@ def _pin_kanban_board_env() -> None:
     ``hermes kanban`` calls agree even if a concurrent ``boards switch`` flips the file mid-turn."""
     if os.environ.get("HERMES_KANBAN_BOARD"):
         return
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.kanban_db import get_current_board
         os.environ["HERMES_KANBAN_BOARD"] = get_current_board()
-    except Exception:
-        pass
 
 
 def _sync_bundled_skills_quietly() -> None:
     """Seed ``~/.hermes/skills/`` with the bundled library (idempotent, milliseconds when synced).
     Failures are swallowed: skills are an enhancement, not a hard dependency."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
-    except Exception:
-        pass
 
 
 def _resolve_use_tui(args) -> bool:

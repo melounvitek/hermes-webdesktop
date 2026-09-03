@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import hashlib
 import json
 import os
@@ -98,12 +99,10 @@ def _hash_source_tree(project_root: Path, tree_dir: Path) -> str:
     def _hash_file(path: Path) -> None:
         h.update(str(path.relative_to(project_root)).encode())
         h.update(b"\0")
-        try:
+        with contextlib.suppress(OSError):
             with open(path, "rb") as f:
                 for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
-        except OSError:
-            pass
         h.update(b"\0")
 
     from pathspec import PathSpec
@@ -284,7 +283,8 @@ def _nixos_build_env() -> dict[str, str] | None:
         if venv_python.exists():
             return {**os.environ, "PYTHON": str(venv_python)}
 
-    try:
+    # nix-shell not available — caller will get None
+    with contextlib.suppress(Exception):
         result = subprocess.run(
             ["nix-shell", "-p", "python3", "--run", "which python3"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=15,
@@ -293,8 +293,6 @@ def _nixos_build_env() -> dict[str, str] | None:
             python3_path = result.stdout.strip()
             if python3_path and Path(python3_path).exists():
                 return {**os.environ, "PYTHON": python3_path}
-    except Exception:
-        pass  # nix-shell not available — caller will get None
 
     return None
 

@@ -373,11 +373,9 @@ def _finalize_update_output(state):
             sys.stderr = state.get("prev_stderr", sys.stderr)
     log_file = state.get("log_file")
     if log_file is not None:
-        try:
+        with contextlib.suppress(Exception):
             log_file.flush()
             log_file.close()
-        except Exception:
-            pass
 
 
 def _report_dashboard_status() -> int:
@@ -662,11 +660,9 @@ def _route_named_profile_dashboard(
         print(f"Machine dashboard already running on port {args.port}.")
         print(f"  Managing profile '{_launch_profile}': {url}")
         if not args.no_open:
-            try:
+            with contextlib.suppress(Exception):
                 import webbrowser
                 webbrowser.open(url)
-            except Exception:
-                pass
         sys.exit(0)
 
     print(

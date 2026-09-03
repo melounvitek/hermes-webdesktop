@@ -484,21 +484,18 @@ def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] =
         if not cache_dir.is_dir():
             continue
         for zip_path in sorted(cache_dir.rglob("electron-*.zip")):
-            try:
+            # locked/permission-denied: let the build report its own error
+            with contextlib.suppress(OSError):
                 zip_path.unlink()
                 removed.append(zip_path)
-            except OSError:
-                pass  # locked/permission-denied: let the build report its own error
 
     if release_dir is None:
         release_dir = desktop_dir / "release"
     if release_dir.is_dir():
         for unpacked in release_dir.glob("*-unpacked"):
-            try:
+            with contextlib.suppress(OSError):
                 shutil.rmtree(unpacked, ignore_errors=True)
                 removed.append(unpacked)
-            except OSError:
-                pass
 
     return removed
 
@@ -626,15 +623,13 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
             continue
     if stopped:
         # Wait for the handles (and thus the file locks) to actually release.
-        try:
+        with contextlib.suppress(Exception):
             _, alive = psutil.wait_procs(victims, timeout=5)
             for proc in alive:
                 try:
                     proc.kill()
                 except Exception:
                     continue
-        except Exception:
-            pass
     return stopped
 
 
@@ -902,11 +897,10 @@ def _macos_create_signing_identity(
         _export_p12([])
         imported = _import_p12()
         if imported.returncode != 0 and "MAC verification failed" in (imported.stderr or ""):
-            try:
+            # older OpenSSL without -legacy: keep the original failure
+            with contextlib.suppress(subprocess.CalledProcessError):
                 _export_p12(["-legacy"])
                 imported = _import_p12()
-            except subprocess.CalledProcessError:
-                pass  # older OpenSSL without -legacy: keep the original failure
         if imported.returncode != 0:
             print(f"  (could not import signing identity into keychain: {imported.stderr.strip()})")
             return False
@@ -1132,7 +1126,7 @@ def _detect_linux_password_store() -> str | None:
         return "kwallet"
     if os.environ.get("GNOME_KEYRING_CONTROL"):
         return "gnome-libsecret"
-    try:
+    with contextlib.suppress(Exception):
         result = subprocess.run(
             [
                 "dbus-send", "--session", "--print-reply", "--reply-timeout=2000",
@@ -1144,8 +1138,6 @@ def _detect_linux_password_store() -> str | None:
             timeout=5)
         if result.returncode == 0:
             return "gnome-libsecret"
-    except Exception:
-        pass
     return None
 
 
@@ -1434,11 +1426,9 @@ def cmd_gui(args: argparse.Namespace):
         print(f"Desktop GUI source not found at: {desktop_dir}")
         sys.exit(1)
 
-    try:
+    with contextlib.suppress(Exception):
         from hermes_logging import setup_logging as _setup_logging_gui
         _setup_logging_gui(mode="gui")
-    except Exception:
-        pass
 
     env, config_electron_flags = _desktop_launch_env(args)
 
