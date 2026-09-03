@@ -202,23 +202,7 @@ def register_self(purpose: str, *, project_root: Optional[Path] = None, detail: 
     pipeline can relaunch a manually-started serve with its real bind address.
     """
     tag = parse_spawn_tag(os.environ.get(SPAWN_ENV_VAR))
-    spawner_pid: Optional[int] = tag.spawner_pid if tag else None
-    spawner_create: Optional[float] = tag.spawner_create if tag else None
-    if spawner_pid is None:
-        # Desktop compatibility: Electron stamps children with HERMES_PARENT_PID (+ optional
-        # `winms:<ms>` start marker) for its parent-death watchdog; reuse it as spawner identity.
-        try:
-            raw = int(os.environ.get("HERMES_PARENT_PID", ""))
-            if raw > 0:
-                spawner_pid = raw
-        except (TypeError, ValueError):
-            pass
-        marker = os.environ.get("HERMES_PARENT_START_MARKER", "")
-        if spawner_pid is not None and marker.startswith("winms:"):
-            try:
-                spawner_create = float(marker.split(":", 1)[1]) / 1000.0
-            except (ValueError, IndexError):
-                spawner_create = None
+    spawner_pid, spawner_create = (tag.spawner_pid, tag.spawner_create) if tag else _desktop_spawner_identity()
     entry = _new_entry(os.getpid(), _process_create_time(), purpose, project_root, spawner_pid, spawner_create)
     if detail:
         try:
@@ -235,8 +219,26 @@ def register_self(purpose: str, *, project_root: Optional[Path] = None, detail: 
         entry.argv = " ".join(_sys.argv[:10])
     except Exception:
         pass
-
     return _append_entry(entry)
+
+
+def _desktop_spawner_identity() -> tuple[Optional[int], Optional[float]]:
+    """Spawner ``(pid, create_time)`` from the Electron app's HERMES_PARENT_PID (+ optional
+    ``winms:<ms>`` start marker) parent-death watchdog vars, so ledger lineage works with every
+    Desktop version without a TS change. ``(None, None)`` when absent/malformed."""
+    try:
+        spawner_pid = int(os.environ.get("HERMES_PARENT_PID", ""))
+    except (TypeError, ValueError):
+        spawner_pid = 0
+    if spawner_pid <= 0:
+        return None, None
+    marker = os.environ.get("HERMES_PARENT_START_MARKER", "")
+    if not marker.startswith("winms:"):
+        return spawner_pid, None
+    try:
+        return spawner_pid, float(marker.split(":", 1)[1]) / 1000.0
+    except (ValueError, IndexError):
+        return spawner_pid, None
 
 
 def _new_entry(
