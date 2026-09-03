@@ -3,9 +3,9 @@
 The router process is ours (restart with backoff on crash); router children are its problem — child
 failures surface via GET /models exit_code, never auto-retried here.
 
-Readiness rules (each learned the hard way on real hardware): - health-200 is NOT readiness; every
+Readiness rules (each learned the hard way on real hardware): health-200 is NOT readiness; every
 readiness claim requires a touch generation (temp-0, expected token, generous budget,
-reasoning_content scanned). - Always dial 127.0.0.1 — resolving localhost adds ~2s per request on
+reasoning_content scanned). Always dial 127.0.0.1 — resolving localhost adds ~2s per request on
 Windows via IPv6 fallback.
 """
 
@@ -29,11 +29,17 @@ logger = logging.getLogger(__name__)
 TOUCH_PROMPT = "Reply with exactly one word: the capital of France."
 TOUCH_EXPECT = "paris"
 _RESTART_BACKOFF_S = (1, 5, 15, 60)
+_RESIDENT = ("loaded", "ready")
+
+# Chosen once and reused across restarts: sessions persist the resolved base_url, so an ephemeral
+# port would strand every resumed session after each restart. Deliberately NOT 8080 so we never
+# collide with a user's own llama-server/Ollama-adjacent stack.
+_DEFAULT_PORT = 18434
 
 
 def state_path() -> Path:
-    """Endpoint state for other Hermes processes (provider resolution reads
-    this to route llamacpp-alias requests at the managed server)."""
+    """Endpoint state for other Hermes processes (provider resolution routes llamacpp-alias
+    requests at the managed server from this)."""
     return runtimes_root() / "server.json"
 
 
@@ -43,18 +49,9 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-# Default port for the managed server, chosen once and reused across
-# restarts. Sessions persist the resolved base_url; an ephemeral port
-# would strand every resumed session on a dead endpoint after each
-# restart. Deliberately NOT 8080 so we never collide with a user's own
-# llama-server/Ollama-adjacent stack.
-_DEFAULT_PORT = 18434
-
-
 def _stable_port() -> int:
-    """The stable default port, falling back to an ephemeral one only when something else already
-    listens there (and it isn't a leftover managed server, which stop() would have cleaned up).
-    """
+    """The stable default port, or an ephemeral one only when something else already listens
+    there (a leftover managed server would have been cleaned up by stop())."""
     try:
         with socket.socket() as s:
             s.bind(("127.0.0.1", _DEFAULT_PORT))
@@ -69,9 +66,9 @@ def _stable_port() -> int:
 def _stable_api_key() -> str:
     """One key for the life of the install, persisted beside the runtimes.
 
-    Endpoint identity must survive restarts as a UNIT — sessions persist the resolved base_url +
-    api_key, so a per-boot key strands every resumed session on HTTP 401 exactly the way a per-boot
-    port would strand them on connection errors.
+    Endpoint identity must survive restarts as a UNIT — sessions persist base_url + api_key, so a
+    per-boot key strands every resumed session on HTTP 401 exactly as a per-boot port would on
+    connection errors.
     """
     key_path = runtimes_root() / ".api_key"
     try:
@@ -92,6 +89,12 @@ def _stable_api_key() -> str:
 
 class LlamaServerSupervisor:
     """Own one llama-server router process for the life of a Hermes session."""
+
+    # A model that has gone quiet gets its VRAM back after this long. A constant, not a knob:
+    # long enough that an active conversation never trips it, short enough that a wandered-off
+    # session frees ~20 GiB within the hour. No exemptions: demand reloads anything the user
+    # comes back to.
+    IDLE_UNLOAD_S = 15 * 60
 
     def __init__(self, install_dir: Path, models_dir: Path, *,
                  models_max: int = 4, port: int | None = None,
@@ -151,19 +154,15 @@ class LlamaServerSupervisor:
             "--api-key", self.api_key,
             "--models-dir", str(self.models_dir),
             "--models-max", str(self.models_max),
-            # The residency contract at the layer that sees every message:
-            # a chat request to a staged-but-unloaded model loads it (slow
-            # first token) instead of failing with 'model not found' —
-            # without this flag, chat after an eject is a bare 400/404.
+            # Residency contract: a chat request to a staged-but-unloaded model loads it (slow
+            # first token) instead of a bare 400/404 after an eject.
             "--models-autoload",
             "--metrics",          # opt-in flag; supervisor telemetry needs it
             "--slots",            # /slots endpoint is also opt-in; is_idle reads it
             "--no-webui",
             "--jinja",
-            # Direct I/O on model load: bypasses the page cache, so a
-            # multi-GB load doesn't evict half the OS cache — measured
-            # faster loads on NVMe, and our router bounces (download/
-            # delete/activate) reload models often enough to care.
+            # Direct I/O on model load bypasses the page cache so a multi-GB load doesn't evict
+            # half the OS cache — measured faster on NVMe, and our router bounces reload often.
             "-dio",
         ]
         if self.preset_path and self.preset_path.exists():
@@ -171,8 +170,7 @@ class LlamaServerSupervisor:
         cmd += self.extra_args
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self._log_handle is not None:
-            # The crash-restart loop calls _spawn repeatedly; without
-            # closing the prior handle each restart leaks one fd.
+            # The crash-restart loop calls _spawn repeatedly; each restart would leak one fd.
             try:
                 self._log_handle.close()
             except Exception:  # noqa: BLE001 — best-effort
@@ -184,10 +182,9 @@ class LlamaServerSupervisor:
         self.proc = subprocess.Popen(cmd, stdout=self._log_handle,
                                      stderr=subprocess.STDOUT, cwd=str(exe.parent))
         logger.info("llama-server router spawned pid=%s port=%s", self.proc.pid, self.port)
-        # State goes down at SPAWN, not after health: endpoint resolution
-        # treats a live-pid-but-not-yet-healthy server as "starting" rather
-        # than "unconfigured", so a readiness probe racing the boot doesn't
-        # throw the app back to onboarding (observed on first restart test).
+        # State goes down at SPAWN, not after health: endpoint resolution treats a
+        # live-pid-but-not-yet-healthy server as "starting" rather than "unconfigured", so a
+        # readiness probe racing the boot doesn't throw the app back to onboarding.
         self._write_state()
 
     def start(self, timeout_s: int = 120) -> None:
@@ -263,12 +260,10 @@ class LlamaServerSupervisor:
     def _terminate_tree(proc: subprocess.Popen) -> None:
         """Terminate the router AND its model children.
 
-        The router spawns one child llama-server per loaded model, each holding gigabytes of VRAM.
-        Terminating only the router (on Windows, TerminateProcess with no cleanup) orphans them: the
-        port goes quiet but the weights stay resident. Enumerate children FIRST (the parent must be
-        alive to walk them), then terminate all together, escalating to kill for stragglers.
+        Each child holds gigabytes of VRAM; terminating only the router (TerminateProcess on
+        Windows does no cleanup) orphans them with the weights still resident. Enumerate children
+        FIRST (the parent must be alive to walk them), terminate all, escalate to kill.
         """
-        children: list = []
         try:
             import psutil
 
@@ -295,10 +290,9 @@ class LlamaServerSupervisor:
     def _reap_orphaned_children(self) -> None:
         """Kill model children orphaned by a router crash, before respawn.
 
-        A crashed router can't clean up its children, and a dead parent can't be walked — so match
-        by identity instead: any process running OUR llama-server binary whose parent is gone is an
-        orphan of a previous router. Their VRAM must come back before the new router loads models
-        next to the ghosts.
+        A dead parent can't be walked, so match by identity: any process running OUR
+        llama-server binary whose parent is gone is an orphan of a previous router. Its VRAM must
+        come back before the new router loads models next to the ghosts.
         """
         try:
             import psutil
@@ -332,33 +326,21 @@ class LlamaServerSupervisor:
         self._request("/models/load", {"model": model_id}, timeout_s=timeout_s)
 
     def unload_model(self, model_id: str) -> None:
-        """Free the child's VRAM now. Route existence verified empirically on b10290 (POST
-        /models/unload; bogus name -> 400 'model is not found'). Momentary action: never touches
-        primary_model — the declaration is durable, an eject is not (residency design).
-        """
+        """Free the child's VRAM now (POST /models/unload; bogus name -> 400). Momentary: never
+        touches primary_model — the declaration is durable, an eject is not."""
         self._request("/models/unload", {"model": model_id}, timeout_s=120)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             try:
-                if self.models().get(model_id) not in ("loaded", "ready", "unloading"):
+                if self.models().get(model_id) not in (*_RESIDENT, "unloading"):
                     return
             except Exception:  # noqa: BLE001
                 return
             time.sleep(0.3)
 
-    # ── idle residency (non-primary models) ──────────────────
-
-    # A model that has gone quiet gets its VRAM back after this long. A
-    # constant, not a knob: long enough that an active conversation never
-    # trips it, short enough that a wandered-off session frees ~20 GiB
-    # within the hour. No exemptions (residency v2): demand reloads
-    # anything the user comes back to.
-    IDLE_UNLOAD_S = 15 * 60
-
     def sweep_idle(self, now: float | None = None) -> list[str]:
-        """Unload models idle past IDLE_UNLOAD_S. Returns the model ids
-        unloaded. Idle means no busy slots and no queued work, tracked
-        per model across calls; a model seen busy resets its clock."""
+        """Unload models idle past IDLE_UNLOAD_S; returns their ids. Idle = no busy slots and no
+        queued work, tracked per model across calls; a model seen busy resets its clock."""
         now = time.monotonic() if now is None else now
         unloaded: list[str] = []
         try:
@@ -366,7 +348,7 @@ class LlamaServerSupervisor:
         except Exception:  # noqa: BLE001
             return unloaded
         for model_id, status in statuses.items():
-            if status not in ("loaded", "ready") or not self.is_idle(model_id):
+            if status not in _RESIDENT or not self.is_idle(model_id):
                 self._idle_since.pop(model_id, None)
                 continue
             first_idle = self._idle_since.setdefault(model_id, now)
@@ -383,8 +365,7 @@ class LlamaServerSupervisor:
 
     def touch_generate(self, model_id: str, timeout_s: int = 300) -> bool:
         """The readiness proof. Generous budget + reasoning_content scan — small token budgets
-        false-fail reasoning models, which spend their first tokens thinking.
-        """
+        false-fail reasoning models, which spend their first tokens thinking."""
         try:
             resp = self._request("/v1/chat/completions", {
                 "model": model_id,
@@ -403,23 +384,21 @@ class LlamaServerSupervisor:
         status = self.models().get(model_id)
         if status is None:
             raise KeyError(f"model {model_id} not present in models dir")
-        if status not in ("loaded", "ready"):
+        if status not in _RESIDENT:
             self.load_model(model_id, timeout_s=timeout_s)
         return self.touch_generate(model_id)
 
     # ── telemetry ────────────────────────────────────────────
 
     def is_idle(self, model_id: str | None = None) -> bool:
-        """No processing requests and no busy slots. Router quirk: /slots and /metrics are per-child
-        and require ?model= (bare calls 400), and no KV-usage metric exists. With ``model_id``
-        checks that one child; without, every loaded child.
-        """
+        """No processing requests and no busy slots. Router quirk: /slots and /metrics are
+        per-child and require ?model= (bare calls 400). With ``model_id`` checks that one child;
+        without, every loaded child."""
         try:
             if model_id is not None:
                 loaded = [model_id]
             else:
-                loaded = [m for m, status in self.models().items()
-                          if status in ("loaded", "ready")]
+                loaded = [m for m, status in self.models().items() if status in _RESIDENT]
             for mid in loaded:
                 slots = self._request(f"/slots?model={mid}")
                 if any(s.get("is_processing") for s in slots):
@@ -427,9 +406,9 @@ class LlamaServerSupervisor:
                 with self._open(f"/metrics?model={mid}", timeout_s=10, json_type=False) as r:
                     text = r.read().decode()
                 for line in text.splitlines():
-                    if line.startswith("llamacpp:requests_processing"):
-                        if float(line.split()[-1]) != 0.0:
-                            return False
+                    if (line.startswith("llamacpp:requests_processing")
+                            and float(line.split()[-1]) != 0.0):
+                        return False
             return True
         except Exception:  # noqa: BLE001
             return False

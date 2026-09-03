@@ -2,11 +2,10 @@
 
 Small and honest: every entry carries the estimator inputs (measured on real GGUFs) so the picker
 can price a model BEFORE the user downloads gigabytes. Once a file is on disk, profile_from_gguf()
-is the authority and the catalog numbers are only used for the download decision.
+is the authority; the catalog numbers only drive the download decision.
 
-Validation lifecycle: builds proven end-to-end on real hardware are marked validated. Day-0 entries
-ship before that proof (they simply lack the validated flag) — ensure_model_ready's touch generation
-still gates every first load at runtime.
+Builds proven end-to-end on real hardware are marked validated; day-0 entries ship without the flag
+— ensure_model_ready's touch generation still gates every first load at runtime.
 """
 
 from __future__ import annotations
@@ -40,11 +39,11 @@ _PART_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$")
 
 @dataclass(frozen=True)
 class AssetFile:
-    """One downloadable file: repo-relative path and exact bytes (the size feeds the estimator and the
-    download progress bar; there is no download-time integrity check by design — a corrupt file
-    surfaces as a llama.cpp load error). ``local`` overrides the on-disk name (repos reuse generic
-    names like mmproj-BF16.gguf across models). Non-model extras live under the models dir's assets/
-    subdirectory so the router never lists them.
+    """One downloadable file: repo-relative path and exact bytes (feeds the estimator and the
+    progress bar; no download-time integrity check by design — a corrupt file surfaces as a
+    llama.cpp load error). ``local`` overrides the on-disk name (repos reuse generic names like
+    mmproj-BF16.gguf). Non-model extras live under the models dir's assets/ subdirectory so the
+    router never lists them.
     """
 
     path: str                   # repo-relative (may include a subdir)
@@ -58,8 +57,8 @@ class AssetFile:
 
 @dataclass(frozen=True)
 class QuantVariant:
-    """One downloadable build of a model. Split GGUFs list every part in
-    files; the model loads from the first part."""
+    """One downloadable build. Split GGUFs list every part in files; the model loads from the
+    first part."""
 
     quant: str                  # e.g. "UD-Q4_K_M"
     files: tuple                # AssetFile, first = the load target
@@ -76,9 +75,8 @@ class QuantVariant:
 
     @property
     def weights_bytes(self) -> int:
-        """Pre-download weights estimate: GGUF bytes ≈ tensor bytes + a small header (<2%) — a safe,
-        slightly conservative stand-in until profile_from_gguf reads the real table.
-        """
+        """Pre-download weights estimate: GGUF bytes ≈ tensor bytes + a <2% header — slightly
+        conservative until profile_from_gguf reads the real table."""
         return self.size_bytes
 
 
@@ -89,9 +87,9 @@ class CatalogEntry:
     description: str            # one line, plain language
     repo: str                   # HF repo
     variants: tuple             # QuantVariant (exactly one, Q4-class)
-    # Estimator inputs (measured or config-derived; quant changes weights,
-    # never KV). Entries with gated upstream configs carry a conservative
-    # same-family prior — the GGUF header is the authority after download.
+    # Estimator inputs (measured or config-derived; quant changes weights, never KV). Gated
+    # upstream configs carry a conservative same-family prior — the GGUF header is the authority
+    # after download.
     n_ctx_train: int
     full_layers: int
     recurrent_layers: int
@@ -100,32 +98,25 @@ class CatalogEntry:
     swa_window: int = 0
     moe: bool = False
     mtp: bool = False           # ships MTP heads (spec decode when loaded)
-    # Speculative draft depth for MTP models. Per-model and measured:
-    # deeper drafting pays only while draft acceptance holds, and the
-    # break-even depth differs by model.
+    # Speculative draft depth for MTP models: per-model and measured — deeper drafting pays only
+    # while draft acceptance holds, and the break-even depth differs by model.
     mtp_draft_depth: int = 3
-    # Vocab size prices the GPU logits buffers (ubatch x vocab x fp32,
-    # doubled under MTP backend sampling) — a multi-GiB term at large
-    # vocab sizes that a weights-only fit would miss.
+    # Vocab size prices the GPU logits buffers (ubatch x vocab x fp32, doubled under MTP backend
+    # sampling) — a multi-GiB term at large vocabs that a weights-only fit would miss.
     n_vocab: int = 0
     mmproj: "AssetFile | None" = None    # vision projector, downloads with model
     draft: "AssetFile | None" = None     # spec-decode draft model (e.g. DSpark)
     sampling: dict = field(default_factory=dict)  # INI long-form launch defaults
-    # Oldest llama.cpp release tag that can load this model (day-0
-    # architectures need the release where their support landed). Empty
-    # means any installed engine. The pane gates download/activate on it.
+    # Oldest llama.cpp release tag that can load this model (day-0 architectures need the release
+    # where their support landed). Empty means any installed engine.
     min_engine: str = ""
-    # Editorial quality ordering (higher = smarter), authored once,
-    # globally, at catalog-authoring time — Artificial Analysis-informed
-    # where they cover the model (scripts/aa_quality_sync.py proposes,
-    # the commit decides), editorial elsewhere. Ranks entries for the
-    # per-machine recommendation; never displayed as a score (it grades
-    # the full-precision model, not our Q4 build).
+    # Editorial quality ordering (higher = smarter), authored once at catalog time — Artificial
+    # Analysis-informed where covered (scripts/aa_quality_sync.py proposes, the commit decides).
+    # Ranks entries for the per-machine recommendation; never displayed as a score (it grades the
+    # full-precision model, not our Q4 build).
     quality: int = 0
-    # Fraction of the build's bytes read per decoded token: 1.0 for dense
-    # models (every weight streams every token), the active slice for MoE
-    # (attention + shared + routed experts over total). With memory
-    # bandwidth this predicts decode speed — the physics half of the
+    # Fraction of the build's bytes read per decoded token: 1.0 for dense, the active slice for
+    # MoE. With memory bandwidth this predicts decode speed — the physics half of the
     # recommendation.
     decode_fraction: float = 1.0
 
@@ -151,8 +142,8 @@ class CatalogEntry:
 
 @dataclass(frozen=True)
 class VariantChoice:
-    """Selection result: which build this machine should download and why.
-    reason_key is a UI-copy discriminator, not display text."""
+    """Which build this machine should download and why. reason_key is a UI-copy
+    discriminator, not display text."""
 
     variant: QuantVariant
     zero_spill: bool
@@ -160,14 +151,11 @@ class VariantChoice:
 
 
 def select_variant(entry: CatalogEntry, budget: HardwareBudget) -> VariantChoice | None:
-    """Fit the entry's one build (Q4-class) to this machine.
+    """Fit the entry's one Q4-class build to this machine; headroom buys a bigger window, never a
+    bigger quant.
 
-    Every entry ships exactly one variant (see the module docstring for why there is no quant
-    ladder); headroom buys a bigger window, never a bigger quant. The fit shapes:
-
-    - "best-large-window": zero-spills at TARGET_WINDOW - "best-fits": zero-spills at the 64K floor
-    - "smallest-fits-spilled": weights spill to host RAM, priced honestly - None: even spilled,
-    physics refuses (the machine can't run it)
+    "best-large-window": zero-spill at TARGET_WINDOW; "best-fits": zero-spill at the 64K floor;
+    "smallest-fits-spilled": weights spill to host RAM, priced honestly; None: physics refuses.
     """
     overhead = (RUNTIME_OVERHEAD_BYTES
                 + (entry.mmproj.size_bytes if entry.mmproj else 0)
@@ -189,30 +177,20 @@ def select_variant(entry: CatalogEntry, budget: HardwareBudget) -> VariantChoice
 
 # ── recommendation: best quality that fits and isn't miserably slow ──
 #
-# Two axes, each living where it belongs. QUALITY is a judgment made once,
-# globally, at authoring time (entry.quality — AA-informed, editorially
-# owned). SPEED is physics computed per machine: decode is memory-bound,
-# so predicted tok/s ≈ bandwidth / bytes-read-per-token, and the bytes per
-# token are the build's size scaled by its decode fraction (dense reads
-# everything; MoE reads the active slice). The pick: highest quality among
-# entries that run resident and clear a pleasant speed floor; else the
-# fastest resident entry; else the least-painful spilled one.
-#
-# The bandwidth axis is the `uma` flag for now: every discrete card that
-# matters is 900+ GB/s GDDR while the unified-memory class measures ~1/5th
-# of that, so the flag IS the high/low split. A measured per-machine
-# bandwidth (one cached memcpy probe) can replace these class constants
-# without touching the rule; predictions order candidates and gate the
-# floor — they are not display values.
+# QUALITY is a judgment made once at authoring time (entry.quality). SPEED is physics per machine:
+# decode is memory-bound, so predicted tok/s ≈ bandwidth / bytes-read-per-token (build size scaled
+# by decode fraction). The bandwidth axis is the `uma` flag: every discrete card that matters is
+# 900+ GB/s GDDR while the unified-memory class measures ~1/5th of that. A measured per-machine
+# bandwidth could replace these class constants without touching the rule; predictions order
+# candidates and gate the floor — they are not display values.
 
 _DISCRETE_BANDWIDTH_GB_S = 1000.0   # representative GDDR6X/GDDR7 class
 _UMA_BANDWIDTH_GB_S = 210.0         # measured on unified-memory NVIDIA
 _HOST_BANDWIDTH_GB_S = 80.0         # spilled weights stream over host DRAM
 
-# The one editorial constant in the tree: below this predicted decode
-# speed a model stops feeling pleasant for agentic use (roughly reading
-# speed with headroom for tool-call bursts). Distinct from the growth
-# policy's 6 tok/s compress floor, which marks unusable, not unpleasant.
+# Below this predicted decode speed a model stops feeling pleasant for agentic use (roughly
+# reading speed with headroom for tool-call bursts). Distinct from the growth policy's 6 tok/s
+# compress floor, which marks unusable, not unpleasant.
 PLEASANT_FLOOR_TOK_S = 20.0
 
 
@@ -230,16 +208,13 @@ def predicted_decode_tok_s(entry: CatalogEntry, variant: QuantVariant,
 def recommended_entry(budget: HardwareBudget,
                       entries: "tuple[CatalogEntry, ...] | None" = None
                       ) -> "tuple[CatalogEntry, str] | None":
-    """The catalog's default pick for THIS machine, with its reason.
+    """The catalog's default pick for THIS machine, with its reason key.
 
     Callers pass pre-filtered entries when some are ineligible for reasons the catalog can't know
-    (engine too old); default is the full catalog.
-
-    best-quality-resident quality won among resident entries that clear the pleasant floor speed-
-    gated-quality same, but the floor eliminated a HIGHER quality candidate — the exact 'why not the
-    big model?' a unified-memory owner asks fastest-resident nothing resident clears the floor; the
-    quickest resident entry wins least-painful-spilled nothing runs resident; fastest from host
-    memory (MoE by construction)
+    (engine too old). Reasons: best-quality-resident (quality won among resident entries clearing
+    the pleasant floor); speed-gated-quality (same, but the floor eliminated a HIGHER quality
+    candidate); fastest-resident (nothing resident clears the floor); least-painful-spilled
+    (nothing runs resident; fastest from host memory — MoE by construction).
     """
     pool = CATALOG if entries is None else entries
     fitting = [(e, c) for e in pool if (c := select_variant(e, budget)) is not None]
@@ -257,22 +232,16 @@ def recommended_entry(budget: HardwareBudget,
         return (pick, "speed-gated-quality" if floor_gated else "best-quality-resident")
     if resident:
         return (max(resident, key=speed)[0], "fastest-resident")
-    # Everything spills: take the least painful — fastest predicted decode
-    # from host memory (MoE wins here by construction; a dense spill
-    # streams every weight over the host bus).
     return (max(fitting, key=lambda t: speed(t, spilled=True))[0], "least-painful-spilled")
 
 
 # ── catalog data: packaged JSON, refreshed from GitHub in memory ─
 #
-# The catalog DATA lives in catalog.json (checked in beside this module
-# and shipped as package data); this module keeps all policy. At import
-# we load the packaged copy — no network on the import path. A TTL-gated
-# background refresh fetches the same file from the repo's main branch
-# and swaps it in memory only: nothing on disk changes, so a git
-# checkout never sees a dirty tracked file and the packaged copy remains
-# the offline truth. A reverted commit on main heals every install on
-# its next fetch, and day-0 entries reach users without an app release.
+# catalog.json ships as package data and is loaded at import (no network on the import path). A
+# TTL-gated background refresh fetches the same file from the repo's main branch and swaps it in
+# MEMORY only: nothing on disk changes, so a git checkout never sees a dirty tracked file and the
+# packaged copy remains the offline truth. A reverted commit on main heals every install on its
+# next fetch, and day-0 entries reach users without an app release.
 
 _CATALOG_URL = ("https://raw.githubusercontent.com/NousResearch/hermes-agent"
                 "/main/hermes_cli/local_runtime/catalog.json")
@@ -289,8 +258,7 @@ def _asset_from(d: "dict | None") -> "AssetFile | None":
                      local=d.get("local"))
 
 
-# Scalar CatalogEntry fields parsed from JSON: key -> (coerce, default);
-# a None default means the key is required.
+# Scalar CatalogEntry fields parsed from JSON: key -> (coerce, default); None default = required.
 _SCALAR_FIELDS = {
     "n_ctx_train": (int, None), "full_layers": (int, None),
     "recurrent_layers": (int, None), "per_layer_f16": (int, None),
@@ -302,9 +270,8 @@ _SCALAR_FIELDS = {
 
 
 def _load_catalog(doc: dict) -> "tuple[CatalogEntry, ...]":
-    """Parse a catalog document into entries. Unknown fields are ignored
-    (newer catalogs stay readable by older apps); a major schema bump is
-    the signal that they wouldn't be, and the caller skips the document."""
+    """Parse a catalog document. Unknown fields are ignored (newer catalogs stay readable by older
+    apps); a major schema bump is the signal that they wouldn't be, and the caller skips it."""
     if int(doc.get("schema_version", 0)) != _SCHEMA_VERSION:
         raise ValueError(f"catalog schema {doc.get('schema_version')!r} "
                          f"(this build reads {_SCHEMA_VERSION})")
@@ -337,12 +304,9 @@ CATALOG: "tuple[CatalogEntry, ...]" = _packaged_catalog()
 
 
 def refresh_catalog(force: bool = False) -> bool:
-    """Fetch the current catalog from the repo and swap it in memory.
-
-    Best-effort by design: any failure (offline, GitHub down, unreadable schema) leaves the running
-    catalog untouched and retries after the TTL. Returns True when a fetched document replaced the
-    catalog.
-    """
+    """Fetch the current catalog from the repo and swap it in memory. Best-effort: any failure
+    (offline, GitHub down, unreadable schema) leaves the running catalog untouched and retries
+    after the TTL. Returns True when a fetched document replaced the catalog."""
     global CATALOG, _last_refresh_attempt
 
     now = time.monotonic()
@@ -365,9 +329,8 @@ def refresh_catalog(force: bool = False) -> bool:
 
 
 def refresh_catalog_soon() -> None:
-    """TTL-gated background refresh; returns immediately. The caller's current request serves the
-    catalog it already has — the refresh lands for the next one.
-    """
+    """TTL-gated background refresh; returns immediately. The current request serves the catalog
+    it already has — the refresh lands for the next one."""
     if time.monotonic() - _last_refresh_attempt < _REFRESH_TTL_S:
         return
     threading.Thread(target=refresh_catalog, daemon=True,
