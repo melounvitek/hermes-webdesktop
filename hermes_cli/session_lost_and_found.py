@@ -144,12 +144,11 @@ def _notnull_defaults(conn: sqlite3.Connection, table: str) -> dict[int, Any]:
     for index, row in enumerate(conn.execute(f'PRAGMA table_info("{table}")')):
         if not row[3]:  # notnull flag
             continue
-        default = row[4]
-        if default is None:
+        if row[4] is not None:
+            substitutes[index] = _parse_sql_default(str(row[4]))
+        else:
             declared = str(row[2] or "").upper()
             substitutes[index] = 0 if ("INT" in declared or "REAL" in declared) else ""
-            continue
-        substitutes[index] = _parse_sql_default(str(default))
     return substitutes
 
 
@@ -170,9 +169,9 @@ def _is_session_id(value: Any) -> bool:
 
 
 def _looks_like_source(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return value in KNOWN_SOURCES or bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
+    return bool(value) and isinstance(value, str) and (
+        value in KNOWN_SOURCES or bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
+    )
 
 
 def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional[str]:
@@ -180,9 +179,10 @@ def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional
     if len(cells) >= 3 and cells[0] is None:
         # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL; messages is the only canonical
         # table shaped like that with a session id second and a role third.
-        if isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES:
-            return "messages"
-        return None
+        is_message = (
+            isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES
+        )
+        return "messages" if is_message else None
     if not _is_session_id(cells[0] if cells else None):
         return None
     second = cells[1] if len(cells) > 1 else None
@@ -338,7 +338,8 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
         for session_id, info in sorted(orphan_ids.items()):
             title = next(titles)
             dest.execute(
-                "INSERT INTO sessions (id, source, started_at, title, message_count) VALUES (?, 'recovered', ?, ?, ?)",
+                "INSERT INTO sessions (id, source, started_at, title, message_count) "
+                "VALUES (?, 'recovered', ?, ?, ?)",
                 (session_id, info["started_at"], title, info["message_count"]),
             )
             result["sessions_stubbed"] += 1
