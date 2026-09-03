@@ -7,6 +7,7 @@ never included in reprs, status payloads, or exception messages.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -21,36 +22,20 @@ from gateway.hosted_room_peer import (
     TransportSecurity,
     validate_room_link_url,
 )
-import contextlib
 
 
 MAX_LINKS = 512
 MAX_GRANT_CHARS = 16 * 1024
 _LEGACY_FIELDS = {
-    "room_id",
-    "member_id",
-    "target_url",
-    "target_profile",
-    "grant",
-    "catalog",
-    "cancellation_scope_id",
-    "trace_id",
-    "updated_at",
+    "room_id", "member_id", "target_url", "target_profile", "grant", "catalog",
+    "cancellation_scope_id", "trace_id", "updated_at",
 }
 _OPTIONAL_FIELDS = {"transport_security", "status"}
 # SQLite record columns that map 1:1 onto mapping fields, in record order
 # (``catalog_json`` is the serialized ``catalog``).
 _RECORD_FIELDS = (
-    "room_id",
-    "member_id",
-    "target_url",
-    "target_profile",
-    "grant",
-    "cancellation_scope_id",
-    "trace_id",
-    "transport_security",
-    "status",
-    "updated_at",
+    "room_id", "member_id", "target_url", "target_profile", "grant", "cancellation_scope_id",
+    "trace_id", "transport_security", "status", "updated_at",
 )
 _STATUSES = {"ready", "unavailable", "needs_reauthorization"}
 
@@ -96,9 +81,7 @@ class StoredRoomLink:
             target_profile=target_profile,
             grant=grant,
             catalog=GatewayRoomCatalog.from_mapping(value["catalog"]),
-            cancellation_scope_id=_short_string(
-                value["cancellation_scope_id"], "cancellation_scope_id"
-            ),
+            cancellation_scope_id=_short_string(value["cancellation_scope_id"], "cancellation_scope_id"),
             trace_id=_short_string(value["trace_id"], "trace_id"),
             transport_security=transport_security,  # type: ignore[arg-type]
             status=status,
@@ -111,18 +94,14 @@ class StoredRoomLink:
             catalog = json.loads(str(value["catalog_json"]))
         except Exception as exc:
             raise HostedRoomPeerError("stored room link catalog is unreadable") from exc
-        return cls.from_mapping(
-            {**{name: value[name] for name in _RECORD_FIELDS}, "catalog": catalog}
-        )
+        return cls.from_mapping({**{name: value[name] for name in _RECORD_FIELDS}, "catalog": catalog})
 
     def catalog_mapping(self) -> dict[str, Any]:
         return self.catalog.as_mapping()
 
     def as_record(self) -> dict[str, Any]:
         record = {name: getattr(self, name) for name in _RECORD_FIELDS}
-        record["catalog_json"] = json.dumps(
-            self.catalog_mapping(), sort_keys=True, separators=(",", ":")
-        )
+        record["catalog_json"] = json.dumps(self.catalog_mapping(), sort_keys=True, separators=(",", ":"))
         return record
 
 
@@ -144,9 +123,7 @@ def load_room_links(db_path: Path | str) -> tuple[StoredRoomLink, ...]:
     return tuple(StoredRoomLink.from_record(row) for row in _link_rows(db_path))
 
 
-def load_room_links_tolerant(
-    db_path: Path | str,
-) -> tuple[tuple[StoredRoomLink, ...], tuple[str, ...]]:
+def load_room_links_tolerant(db_path: Path | str) -> tuple[tuple[StoredRoomLink, ...], tuple[str, ...]]:
     """Load healthy routes while quarantining malformed rows by identity."""
     links = []
     errors = []
@@ -161,27 +138,17 @@ def load_room_links_tolerant(
 
 
 def save_room_link(db_path: Path | str, link: StoredRoomLink) -> None:
-    hosted_rooms.upsert_room_link_record(
-        db_path, record=link.as_record(), max_links=MAX_LINKS
-    )
+    hosted_rooms.upsert_room_link_record(db_path, record=link.as_record(), max_links=MAX_LINKS)
     if os.name == "posix":
         with contextlib.suppress(OSError):
             Path(db_path).chmod(0o600)
 
 
-def mark_room_link_status(
-    db_path: Path | str,
-    *,
-    room_id: str,
-    member_id: str,
-    status: str,
-) -> bool:
+def mark_room_link_status(db_path: Path | str, *, room_id: str, member_id: str, status: str) -> bool:
     if status not in _STATUSES:
         raise HostedRoomPeerError("stored room link status is invalid")
     return hosted_rooms.update_room_link_status(
-        db_path,
-        room_id=_short_string(room_id, "room_id"),
-        member_id=_short_string(member_id, "member_id"),
+        db_path, room_id=_short_string(room_id, "room_id"), member_id=_short_string(member_id, "member_id"),
         status=status,
     )
 
