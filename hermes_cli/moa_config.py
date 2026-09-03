@@ -58,12 +58,9 @@ def _coerce_reference_timeout(value: Any) -> float | None:
 
 
 def _coerce_fanout(value: Any) -> str:
-    """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2).
-
-    The mapping form ``{mode: every_n, n: N}`` from hand-edited YAML is normalized to the string;
-    ``every_n:1`` collapses to ``per_iteration``; anything unparseable falls back to ``user_turn``
-    (the cheapest cadence).
-    """
+    """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2);
+    the mapping form ``{mode: every_n, n: N}`` becomes the string, ``every_n:1`` collapses to
+    ``per_iteration``, anything unparseable falls back to ``user_turn`` (the cheapest cadence)."""
     def _every_n(n: int) -> str:
         return f"every_n:{n}" if n >= 2 else ("per_iteration" if n == 1 else "user_turn")
 
@@ -172,12 +169,10 @@ def _reference_slots(raw_refs: Any) -> list:
 
 
 def validate_moa_payload(raw: Any) -> list[str]:
-    """Return the problems ``normalize_moa_config`` would silently paper over.
+    """Return the problems ``normalize_moa_config`` would silently paper over (empty = safe to save).
 
-    ``normalize_moa_config`` is deliberately tolerant: at *read* time a hand-edited config must
-    degrade to defaults rather than crash the agent. That same tolerance at *write* time is a
-    corruption engine — a client that sends a half-filled slot gets its whole preset silently
-    replaced with the hardcoded defaults. Empty list means safe to save.
+    Read-time tolerance (a hand-edited config degrades to defaults instead of crashing) is a
+    corruption engine at write time: a half-filled slot would silently replace the whole preset.
     """
     if not isinstance(raw, dict):
         return ["MoA config must be an object"]
@@ -225,16 +220,11 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # Failed-advisor disclosure policy; unknown values fail loud.
         "degraded_reference_policy": policy if policy in {"loud", "silent"} else "loud",
         "max_tokens": _coerce_number(raw.get("max_tokens"), int, 4096),
-        # Cap on each reference ADVISOR's output per turn. None (default) = uncapped. Advisor
-        # generation dominates MoA latency (~0.88 correlation with output tokens) and the
-        # aggregator only needs the gist, so e.g. 600 roughly halves wall time. Never caps the
-        # acting aggregator (its output is the user-visible answer).
+        # Per-turn cap on each reference ADVISOR (never the acting aggregator). None = uncapped;
+        # advisor generation dominates MoA latency, so e.g. 600 roughly halves wall time.
         "reference_max_tokens": _coerce_number(raw.get("reference_max_tokens"), int, positive=True),
-        # When the reference fan-out runs: "user_turn" (default, cheapest) runs advisors ONCE per
-        # user turn, then the aggregator acts alone; "per_iteration" re-runs them every tool
-        # iteration (advice tracks live state, spend multiplied by loop depth); "every_n:<N>"
-        # runs on the first iteration of each turn and every Nth after, reusing cached guidance
-        # in between.
+        # "user_turn" (default, cheapest): advisors run ONCE per user turn; "per_iteration": every
+        # tool iteration; "every_n:<N>": first iteration of each turn and every Nth after.
         "fanout": _coerce_fanout(raw.get("fanout"))}
 
 

@@ -250,11 +250,10 @@ def _skip(seen: set, excluded: set, *keys: str) -> bool:
 def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
     """Yield ``(hermes_id, mdev_id, pconfig, env_vars)`` for section-1 rows.
 
-    Skips vendor names that alias through an aggregator (bare "openai" -> "openrouter": emitting
-    them would silently switch a user onto an endpoint they may have no key for), aliases of
-    another canonical profile ("kimi" -> "kimi-coding"), non-api_key auth types (section 2 handles
-    them with auth-store checks), and providers Hermes cannot route. PROVIDER_REGISTRY env var
-    names win over models.dev's (which can be wrong).
+    Skips vendor names that alias through an aggregator (bare "openai" -> "openrouter" would
+    silently switch a user onto an endpoint they may have no key for), aliases of another canonical
+    profile ("kimi" -> "kimi-coding"), non-api_key auth types (section 2 handles them) and
+    unroutable providers. PROVIDER_REGISTRY env var names win over models.dev's.
     """
     from agent.models_dev import PROVIDER_TO_MODELS_DEV
     from hermes_cli.auth import PROVIDER_REGISTRY, is_runtime_provider_routable
@@ -357,8 +356,7 @@ def _has_fast_aws_sdk_signal() -> bool:
         or (_set("AWS_ACCESS_KEY_ID") and _set("AWS_SECRET_ACCESS_KEY"))
         or any(_set(name) for name in (
             "AWS_PROFILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE"))
-    )
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE")))
 
 
 def _has_aws_sdk_creds_for_listing(slug: str, current_provider: str) -> bool:
@@ -910,8 +908,7 @@ def _lap_bare_custom_row(b: _PickerBuild, custom_providers: list | None) -> None
         discovered, native_catalog_empty = _discover_endpoint_models(
             "", api_url, "custom", False, headers=None, api_mode=None,
             probe_live=bool(b.refresh or b.probe_current_custom_provider), discovery_allowed=True,
-            for_picker=b.for_picker,
-        )
+            for_picker=b.for_picker)
         if discovered is not None:
             models = discovered
     except Exception:
@@ -964,8 +961,7 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
     section4_slugs: set = set()
     current_url_group_count = sum(
         1 for grp in groups.values()
-        if b.current_base_url_norm and _norm_url(grp["api_url"]) == b.current_base_url_norm
-    )
+        if b.current_base_url_norm and _norm_url(grp["api_url"]) == b.current_base_url_norm)
     for grp in groups.values():
         api_url, api_key, slug = grp["api_url"], grp.get("api_key", ""), grp["slug"]
         # Slug claimed by a built-in/overlay/providers: row -> skip (don't shadow).
@@ -988,23 +984,19 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
             continue
         is_current = b.endpoint_is_current(
             slug, {str(alias).lower() for alias in grp["aliases"]}, grp_url_norm,
-            url_match_ok=current_url_group_count == 1,
-        )
+            url_match_ok=current_url_group_count == 1)
         discovered, native_catalog_empty, probe_live = b.discover_endpoint(
             api_key, api_url,
             "ollama" if "ollama" in {str(slug).strip().lower(), str(grp.get("name") or "").strip().lower()} else "custom",
-            bool(grp.get("has_explicit_models")),
-            headers=grp.get("extra_headers") or None, api_mode=grp.get("api_mode"),
-            discovery_allowed=bool(api_url) and grp.get("discover_models", True), is_current=is_current,
-        )
+            bool(grp.get("has_explicit_models")), headers=grp.get("extra_headers") or None,
+            api_mode=grp.get("api_mode"), discovery_allowed=bool(api_url) and grp.get("discover_models", True),
+            is_current=is_current)
         if discovered is not None:
             grp["models"] = discovered
-            if probe_live:
-                # A successful live probe persists the catalog for no-probe surfaces.
+            if probe_live:  # a successful live probe persists the catalog for no-probe surfaces
                 try:
                     _save_discovered_models_to_config(
-                        api_url, discovered, api_mode=grp.get("api_mode"), headers=grp.get("extra_headers") or None,
-                    )
+                        api_url, discovered, api_mode=grp.get("api_mode"), headers=grp.get("extra_headers") or None)
                 except Exception:
                     pass
         b.add_endpoint_row(slug, grp["name"], grp["api_url"], grp["models"], is_current, native_catalog_empty)
