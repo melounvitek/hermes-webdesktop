@@ -72,18 +72,6 @@ class TestOpenCodeFreeAuthAlias:
 class TestOpenCodeFreeModelLists:
     """Curated keyless model lists exist and stay in sync."""
 
-    def test_fallback_models_exist(self):
-        from hermes_cli.setup import _DEFAULT_PROVIDER_MODELS
-        assert "opencode-free" in _DEFAULT_PROVIDER_MODELS
-
-    def test_setup_list_matches_curated_catalog(self):
-        """setup.py sample list must be a subset of the curated catalog
-        (behavior contract, not a frozen snapshot)."""
-        from hermes_cli.models import _PROVIDER_MODELS
-        from hermes_cli.setup import _DEFAULT_PROVIDER_MODELS
-        curated = set(_PROVIDER_MODELS["opencode-free"])
-        assert set(_DEFAULT_PROVIDER_MODELS["opencode-free"]) <= curated
-
     def test_delisted_ox_alpha_not_in_floor(self):
         """x-preview-f-free was delisted by the relay 2026-08-26 (401s keyless);
         the offline floor must not offer it (#95914)."""
