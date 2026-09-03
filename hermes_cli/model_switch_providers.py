@@ -195,11 +195,9 @@ _PARALLEL_PREFETCH_WORKERS = 8
 def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
     """Fetch stale/missing provider catalogs in parallel before the serial picker loop.
 
-    On a cold cache the serial loop would block 1-8s per provider; after the prefetch it hits
-    warm entries and the wait is the slowest single provider. Fresh entries are skipped. Each
-    worker re-persists through the thread-safe ``update_provider_cache_entry`` so concurrent
-    writes to ``provider_models_cache.json`` cannot clobber each other. Unknown slugs are
-    silently skipped.
+    On a cold cache the serial loop would block 1-8s per provider; after the prefetch the wait is
+    the slowest single provider. Each worker re-persists through the thread-safe
+    ``update_provider_cache_entry`` so concurrent writes cannot clobber each other.
     """
     from hermes_cli.models import (
         _PROVIDER_MODELS_CACHE_TTL, _credential_fingerprint, _load_provider_models_cache,
@@ -287,13 +285,9 @@ def _iter_builtin_candidates(models_dev_data: dict, excluded: set, seen: set):
         pconfig = PROVIDER_REGISTRY.get(hermes_id)
         if (pconfig and pconfig.auth_type != "api_key") or not is_runtime_provider_routable(hermes_id):
             continue
-        if pconfig and pconfig.api_key_env_vars:
-            env_vars = list(pconfig.api_key_env_vars)
-        else:
-            env_vars = pdata.get("env", [])
-            if not isinstance(env_vars, list):
-                continue
-        yield hermes_id, mdev_id, pconfig, env_vars
+        env_vars = list(pconfig.api_key_env_vars) if pconfig and pconfig.api_key_env_vars else pdata.get("env", [])
+        if isinstance(env_vars, list):
+            yield hermes_id, mdev_id, pconfig, env_vars
 
 
 def _auth_store_has_provider(*keys: str) -> bool:
@@ -362,7 +356,6 @@ def _has_fast_aws_sdk_signal() -> bool:
     """
     def _set(name: str) -> bool:
         return bool(os.environ.get(name, "").strip())
-
     return (
         _set("AWS_BEARER_TOKEN_BEDROCK")
         or (_set("AWS_ACCESS_KEY_ID") and _set("AWS_SECRET_ACCESS_KEY"))
@@ -476,12 +469,11 @@ def _entry_api_mode(entry: dict) -> str | None:
     return str(entry.get("api_mode") or entry.get("transport") or "").strip().lower() or None
 
 
-def _entry_key_env(entry: dict, *keys: str) -> str:
-    return str(next((entry.get(k) for k in keys if entry.get(k)), "")).strip()
-
-
-def _credential_identity(inline_api_key: str, key_env: str) -> str:
-    return inline_api_key if inline_api_key else (f"env:{key_env}" if key_env else "")
+def _entry_credentials(entry: dict, *key_env_keys: str) -> tuple[str, str, str]:
+    """``(inline_api_key, key_env, identity)`` — identity is the inline key, else ``env:<VAR>``, else ""."""
+    inline_api_key = str(entry.get("api_key", "") or "").strip()
+    key_env = str(next((entry.get(k) for k in key_env_keys if entry.get(k)), "")).strip()
+    return inline_api_key, key_env, inline_api_key or (f"env:{key_env}" if key_env else "")
 
 
 def _discover_flag(entry: dict):
@@ -589,13 +581,10 @@ def _collect_authed_provider_slugs(
 
 @dataclass
 class _PickerBuild:
-    """Mutable state threaded through the ``list_authenticated_providers`` sections:
-    1 built-ins mapped to models.dev, 2 Hermes-only overlays (nous, openai-codex, copilot,
-    opencode-*), 2b canonical providers missed by 1/2 (keeps /model in sync with `hermes model`),
-    3 ``providers:`` entries + 3b the bare active custom endpoint, 4 ``custom_providers:`` entries.
-    Every ``hermes_cli.auth/models`` import in the row builders stays lazy so tests can patch
-    those modules."""
-
+    """State threaded through the ``list_authenticated_providers`` sections: 1 built-ins mapped to
+    models.dev, 2 Hermes-only overlays, 2b canonical providers missed by 1/2, 3 ``providers:``
+    entries + 3b the bare active custom endpoint, 4 ``custom_providers:`` entries. Row-builder
+    imports of ``hermes_cli.auth/models`` stay lazy so tests can patch those modules."""
     current_provider: str
     current_base_url: str
     current_model: str
@@ -626,10 +615,7 @@ class _PickerBuild:
     def record_builtin_endpoint(self, slug: str) -> None:
         """Prefer the live env override (e.g. DASHSCOPE_BASE_URL) over the static inference_base_url
         so dedup matches what a user typing that URL into custom_providers would actually hit."""
-        try:
-            from hermes_cli.auth import PROVIDER_REGISTRY
-        except Exception:
-            return
+        from hermes_cli.auth import PROVIDER_REGISTRY
         pcfg = PROVIDER_REGISTRY.get(slug)
         if not pcfg:
             return
@@ -717,7 +703,7 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
     """Section-2 credential ladder: env/SDK, external-process executable, auth store, pool,
     anthropic's external credential files."""
     from hermes_cli.model_switch import _credential_pool_is_usable
-    if getattr(overlay, "keyless", False):
+    if overlay.keyless:
         return True  # served anonymously (opencode-free)
     if overlay.auth_type == "aws_sdk":
         has_creds = _has_aws_sdk_creds_for_listing(hermes_slug, b.current_provider)
@@ -799,11 +785,7 @@ def _lap_overlay_rows(b: _PickerBuild, data: dict) -> None:
 def _lap_canonical_rows(b: _PickerBuild) -> None:
     """Section 2b: CANONICAL_PROVIDERS missed by sections 1/2."""
     from hermes_cli.auth import PROVIDER_REGISTRY
-    try:
-        from hermes_cli.models import CANONICAL_PROVIDERS
-    except ImportError:
-        CANONICAL_PROVIDERS = []
-
+    from hermes_cli.models import CANONICAL_PROVIDERS
     for cp in CANONICAL_PROVIDERS:
         if _skip(b.seen_slugs, b.excluded, cp.slug):
             continue
@@ -846,12 +828,9 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
             continue
         display_name = coerce_provider_id(ep_cfg.get("name")) or ep_name
         api_url = _entry_base_url(ep_cfg, ("base_url", "api", "url"))
-        key_env = _entry_key_env(ep_cfg, "key_env", "api_key_env")
-        inline_api_key = str(ep_cfg.get("api_key", "") or "").strip()
+        inline_api_key, key_env, cred_identity = _entry_credentials(ep_cfg, "key_env", "api_key_env")
         headers = _extra_headers_from_config(ep_cfg)
-        group_key = (
-            _norm_url(api_url), _credential_identity(inline_api_key, key_env), _entry_api_mode(ep_cfg),
-            tuple(sorted(headers.items())))
+        group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
 
         # ``default_model`` is the legacy key; ``model`` matches custom_providers.
         entry_models: list = []
@@ -955,17 +934,14 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
         api_url = str(_entry_base_url(entry) or "").strip().rstrip("/")
         if not raw_name or not api_url:
             continue
-        inline_api_key = str(entry.get("api_key") or "").strip()
-        key_env = _entry_key_env(entry, "key_env")
+        inline_api_key, key_env, cred_identity = _entry_credentials(entry, "key_env")
         api_key = inline_api_key or _scoped_key_env(key_env)
         api_mode = _entry_api_mode(entry)
         discover = _discover_flag(entry)
         entry_extra_headers = _extra_headers_from_config(entry)
         prefix = _display_prefix(raw_name)
         provider_key = str(entry.get("provider_key") or "").strip()
-        group_key = (
-            api_url, _credential_identity(inline_api_key, key_env), api_mode,
-            tuple(sorted(entry_extra_headers.items())), prefix.lower())
+        group_key = (api_url, cred_identity, api_mode, tuple(sorted(entry_extra_headers.items())), prefix.lower())
         if group_key not in groups:
             display_name = prefix or raw_name
             groups[group_key] = {
@@ -1076,21 +1052,15 @@ def list_authenticated_providers(
     max_models: int | None = None, current_model: str = "", refresh: bool = False,
     probe_custom_providers: bool = True, probe_current_custom_provider: bool = False,
     for_picker: bool = False, excluded_providers: list | None = None) -> List[dict]:
-    """Detect which providers have credentials and list their curated models.
-
-    Uses the hand-picked agentic lists from hermes_cli/models.py, NOT the full models.dev
-    catalog. Only providers with API keys set or user-defined endpoints appear.
+    """Detect which providers have credentials and list their curated (not full models.dev) models.
 
     Returns dicts with ``slug`` (the --provider value), ``name``, ``is_current``,
     ``is_user_defined``, ``models`` (up to max_models), ``total_models``, ``source``
     ("built-in", "hermes", "canonical", "user-config", "model-config").
-
-    ``force_fresh_nous_tier`` bypasses the short Nous tier cache (account-sensitive flows only).
-    ``refresh`` busts the per-provider model-id disk cache up front (explicit "refresh models"
-    action only). ``probe_custom_providers`` controls live ``/models`` discovery for saved custom
-    endpoints (default true for CLI parity; GUI opens pass false).
-    ``probe_current_custom_provider`` probes only the currently-selected custom endpoint so its
-    list matches without blocking on offline ones.
+    ``force_fresh_nous_tier`` bypasses the short Nous tier cache (account-sensitive flows only);
+    ``refresh`` busts the model-id disk cache up front (explicit user action only);
+    ``probe_custom_providers`` enables live ``/models`` discovery for saved custom endpoints (CLI
+    true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint.
     """
     from hermes_cli.model_switch import _collect_authed_provider_slugs, _prefetch_provider_models_parallel
     from agent.models_dev import fetch_models_dev
@@ -1202,11 +1172,9 @@ def list_picker_providers(
     include_moa: bool = False, excluded_providers: list | None = None) -> List[dict]:
     """Interactive-picker variant of :func:`list_authenticated_providers`.
 
-    Narrows the payload to models actually callable in this install: OpenRouter's list is
-    replaced with :func:`hermes_cli.models.fetch_openrouter_models` (curated snapshot filtered
-    against the live catalog), and rows whose model list ends up empty are dropped — except
-    custom endpoints (``is_user_defined`` with an ``api_url``) where the user may supply their
-    own model set through config. The typed ``/model <name>`` path is unaffected.
+    OpenRouter's list is replaced with :func:`hermes_cli.models.fetch_openrouter_models` (curated
+    snapshot filtered against the live catalog) and rows left with no models are dropped — except
+    custom endpoints, where the user may supply their own model set through config.
     """
     from hermes_cli.model_switch import list_authenticated_providers
     from hermes_cli.models import fetch_openrouter_models
@@ -1231,5 +1199,4 @@ def list_picker_providers(
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if p.get("models") or is_custom_endpoint:
             filtered.append(p)
-
     return filtered

@@ -1,11 +1,8 @@
 """Shared model-switching logic for the CLI and gateway /model commands.
 
 Pipeline: parse flags -> alias resolution -> provider resolution -> credential resolution ->
-normalize model name -> metadata lookup -> build result. Built on ``agent.models_dev``
-(catalog), ``hermes_cli.providers`` (identity + overlays) and ``hermes_cli.model_normalize``.
-
-Provider switching uses ``--provider`` exclusively; colons are reserved for OpenRouter variant
-suffixes (``:free``, ``:extended``, ``:fast``).
+normalize model name -> metadata lookup -> build result. Provider switching uses ``--provider``
+exclusively; colons are reserved for OpenRouter variant suffixes (``:free``, ``:extended``).
 """
 
 from __future__ import annotations
@@ -212,12 +209,9 @@ def _load_direct_aliases() -> dict[str, DirectAlias]:
 
     ``model_aliases:`` entries are dicts (``model``, ``provider``, ``base_url``, optional
     ``api_key`` — literal or ``"${VAR}"`` — / ``key_env``); with neither credential field the key
-    is resolved from the alias HOST, never from the previously active provider.
-
-    ``model.aliases`` (``hermes config set model.aliases.xxx`` or hand-written) never overrides
-    ``model_aliases``. String entries (``ds-flash: deepseek/deepseek-v4-flash``) take the provider
-    from the ``provider/`` prefix, else the current provider; dict entries use the
-    ``model_aliases`` shape.
+    is resolved from the alias HOST, never from the previously active provider. ``model.aliases``
+    never overrides ``model_aliases``; its string entries (``ds-flash: deepseek/deepseek-v4-flash``)
+    take the provider from the ``provider/`` prefix, else the current provider.
     """
     merged = dict(_BUILTIN_DIRECT_ALIASES)
     try:
@@ -355,7 +349,6 @@ def _may_reuse_session_credential(session_base_url: str, alias_base_url: str) ->
 
 class StartupModelRoute(NamedTuple):
     """Model/provider pair resolved before an agent is constructed."""
-
     model: str
     provider: str = ""
     base_url: str = ""
@@ -373,11 +366,10 @@ def resolve_startup_model_route(
 
     ``HermesCLI`` is constructed before the interactive ``/model`` pipeline runs; resolving here
     keeps startup from attaching the configured default provider to an explicitly requested
-    model. ``provider/model`` strings are consumed only for providers present in user config;
-    aggregator namespaces stay untouched. When ``current_provider`` is a routing aggregator and
-    the raw string is an aggregator-native slug (``anthropic/claude-opus-4.6`` on OpenRouter),
-    the input stays on the aggregator — a ``providers:`` block for the same vendor must not
-    steal the route.
+    model. ``provider/model`` strings are consumed only for providers present in user config. When
+    ``current_provider`` is a routing aggregator and the raw string is an aggregator-native slug
+    (``anthropic/claude-opus-4.6`` on OpenRouter) the input stays on the aggregator — a
+    ``providers:`` block for the same vendor must not steal the route.
     """
     raw = _clean(raw_model)
     if not raw:
@@ -436,7 +428,6 @@ def resolve_startup_model_route(
 @dataclass
 class ModelSwitchResult:
     """Result of a model switch attempt."""
-
     success: bool
     new_model: str = ""
     target_provider: str = ""
@@ -458,7 +449,6 @@ class ModelSwitchResult:
 @dataclass(frozen=True)
 class ModelFlagParseResult:
     """Parsed flags for a /model command."""
-
     model_input: str
     explicit_provider: str = ""
     is_global: bool = False
@@ -499,7 +489,6 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
         else:
             filtered.append(parts[i])
         i += 1
-
     return ModelFlagParseResult(model_input=" ".join(filtered).strip(), explicit_provider=explicit_provider, **flags)
 
 
@@ -563,7 +552,6 @@ class ModelSwitchRequest:
     via :data:`MODEL_SWITCH_ERROR_TEXT`. ``model_input`` keeps it a drop-in for
     :class:`ModelFlagParseResult` consumers.
     """
-
     raw: str
     target: str
     explicit_provider: str = ""
@@ -601,11 +589,9 @@ def parse_model_switch_args(raw: str) -> ModelSwitchRequest:
     # First matching flag wins: once > session > global > default.
     scope = next((name for name, on in (("once", parsed.is_once), ("session", parsed.is_session),
                                         ("global", parsed.is_global)) if on), "default")
-
     return ModelSwitchRequest(
-        raw=raw, target=parsed.model_input, explicit_provider=parsed.explicit_provider,
-        is_global=parsed.is_global, is_session=parsed.is_session, is_once=parsed.is_once,
-        force_refresh=parsed.force_refresh, scope=scope, errors=tuple(errors))
+        raw=raw, target=parsed.model_input, scope=scope, errors=tuple(errors),
+        **{f: getattr(parsed, f) for f in ("explicit_provider", "is_global", "is_session", "is_once", "force_refresh")})
 
 
 def _effective_model_candidate(value: Any) -> str:
@@ -717,7 +703,6 @@ class AmbiguousAliasError(Exception):
     Raised by :func:`resolve_alias` instead of silently picking one via version-sort heuristics.
     ``candidates`` is sorted best-guess-first (see :func:`_model_sort_key`) for display only.
     """
-
     def __init__(self, alias: str, provider: str, candidates: list[str]):
         self.alias = alias
         self.provider = provider
@@ -1021,15 +1006,13 @@ def _apply_direct_alias_endpoint(
 ) -> tuple[str, str, dict | None, bool]:
     """Route a direct alias to its own base_url and decide its credential.
 
-    Returns ``(api_key, base_url, validation_headers_override, suppress_ollama_headers)`` where a
-    ``None`` headers override means "leave as is".
-
-    Credentials were resolved against the DEFAULT provider; carrying that key onto the alias's
-    endpoint both 401s and ships the default provider's secret to an unrelated host. The alias's
-    own endpoint decides: its declared key when it has one; the session key only when the alias
-    points at the SAME ORIGIN; otherwise a fresh resolution against the alias base_url (whose
-    env-key fallbacks are gated on authoritative hosts, so OLLAMA_API_KEY still resolves for
-    ollama.com while OPENROUTER_API_KEY never reaches an unrelated host).
+    Returns ``(api_key, base_url, validation_headers_override, suppress_ollama_headers)``; a
+    ``None`` headers override means "leave as is". Credentials were resolved against the DEFAULT
+    provider; carrying that key onto the alias endpoint both 401s and ships the default provider's
+    secret to an unrelated host. The alias's own endpoint decides: its declared key; else the
+    session key only for the SAME ORIGIN; else a fresh resolution against the alias base_url
+    (env-key fallbacks are host-gated: OLLAMA_API_KEY resolves for ollama.com, OPENROUTER_API_KEY
+    never reaches an unrelated host).
     """
     from hermes_cli.models import _same_ollama_native_root
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1091,7 +1074,6 @@ class _Switch:
     resolves its block); the credential step fills ``api_key`` / ``base_url`` / ``api_mode`` /
     ``validation_headers``.
     """
-
     raw_input: str
     current_provider: str
     current_model: str
@@ -1115,6 +1097,10 @@ class _Switch:
     def fail(self, message: str, **fields) -> ModelSwitchResult:
         return ModelSwitchResult(success=False, is_global=self.is_global, error_message=message, **fields)
 
+    def fail_on_target(self, message: str) -> ModelSwitchResult:
+        """Failure carrying the already-settled ``target_provider`` / ``provider_label``."""
+        return self.fail(message, target_provider=self.target_provider, provider_label=self.provider_label)
+
     @property
     def provider_changed(self) -> bool:
         return self.target_provider != self.current_provider
@@ -1129,29 +1115,26 @@ def _route_explicit_provider(st: _Switch) -> Optional[ModelSwitchResult]:
     if pdef is None:
         return st.fail(_unknown_provider_message(st.explicit_provider))
 
-    st.target_provider = pdef.id
+    st.target_provider, st.provider_label = pdef.id, pdef.name  # label is re-derived in the credential step
     if st.target_provider == "moa" and not st.new_model:
         st.new_model = _moa_default_preset()
 
     agg_err = _aggregator_alias_error(
-        st.explicit_provider, st.target_provider, st.current_provider, st.user_providers, st.custom_providers,
-    )
+        st.explicit_provider, st.target_provider, st.current_provider, st.user_providers, st.custom_providers)
     if agg_err:
-        return st.fail(agg_err, target_provider=st.target_provider, provider_label=pdef.name)
+        return st.fail_on_target(agg_err)
 
     if not st.new_model:
         if not pdef.base_url:
-            return st.fail(
+            return st.fail_on_target(
                 f"Provider '{pdef.name}' has no base URL configured. "
-                f"Specify a model: /model <model-name> --provider {st.explicit_provider}",
-                target_provider=st.target_provider, provider_label=pdef.name)
+                f"Specify a model: /model <model-name> --provider {st.explicit_provider}")
         from hermes_cli.runtime_provider import _auto_detect_local_model
         st.new_model = _auto_detect_local_model(pdef.base_url)
         if not st.new_model:
-            return st.fail(
+            return st.fail_on_target(
                 f"No model detected on {pdef.name} ({pdef.base_url}). "
-                f"Specify the model explicitly: /model <model-name> --provider {st.explicit_provider}",
-                target_provider=st.target_provider, provider_label=pdef.name)
+                f"Specify the model explicitly: /model <model-name> --provider {st.explicit_provider}")
 
     try:
         alias_result = resolve_alias(st.new_model, st.target_provider)
@@ -1331,9 +1314,7 @@ def _creds_for_switched_provider(st: _Switch) -> Optional[ModelSwitchResult]:
             st.api_key, st.base_url, st.api_mode, st.validation_headers = _runtime_creds(
                 st.validation_headers, requested=st.target_provider, target_model=st.new_model)
         except Exception as e:
-            return st.fail(
-                f"Could not resolve credentials for provider '{st.provider_label}': {e}",
-                target_provider=st.target_provider, provider_label=st.provider_label)
+            return st.fail_on_target(f"Could not resolve credentials for provider '{st.provider_label}': {e}")
     return None
 
 
@@ -1501,7 +1482,6 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
         request_overrides = _custom_provider_request_overrides(cp_for_ro) or None if cp_for_ro else None
     except Exception:
         request_overrides = None
-
     return ModelSwitchResult(
         success=True, new_model=st.new_model, target_provider=st.target_provider,
         provider_changed=st.provider_changed, api_key=st.api_key, base_url=st.base_url, api_mode=st.api_mode,
@@ -1517,11 +1497,10 @@ def switch_model(
     user_providers: dict = None, custom_providers: list | None = None) -> ModelSwitchResult:
     """Core model-switching pipeline shared between CLI and gateway.
 
-    Route (:func:`_route_explicit_provider` when ``--provider`` was given, else
-    :func:`_route_from_model_input`) -> :func:`_resolve_switch_credentials` ->
-    :func:`_validate_switch` -> :func:`_build_switch_result`; each step returns a failure
-    :class:`ModelSwitchResult` to stop the chain, or ``None`` to continue. ``user_providers`` /
-    ``custom_providers`` are the ``providers:`` dict and ``custom_providers:`` list from config.yaml.
+    Route (PATH A with ``--provider``, else PATH B) -> credentials -> validation -> result; each
+    step returns a failure :class:`ModelSwitchResult` to stop the chain, or ``None`` to continue.
+    ``user_providers`` / ``custom_providers`` are the config.yaml ``providers:`` dict and
+    ``custom_providers:`` list.
     """
     st = _Switch(
         raw_input=raw_input, current_provider=current_provider, current_model=current_model,
