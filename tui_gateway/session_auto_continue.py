@@ -169,16 +169,9 @@ def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict |
     text = entry.get("text")
     if not original or entry.get("image_paths") or not isinstance(text, str):
         return entry
-    stripped = text.strip()
-    if not stripped or stripped == original:
-        return None
-    # Lossless text-merge glued the live original onto a later follow-up.
-    for sep in ("\n\n", "\n"):
-        prefix = original + sep
-        if text.startswith(prefix):
-            rest = text[len(prefix) :].strip()
-            return None if not rest or rest == original else {**entry, "text": rest}
-    return entry
+    # A lossless text-merge may have glued the live original onto a later follow-up: keep the remainder.
+    rest = next((text[len(original + sep):] for sep in ("\n\n", "\n") if text.startswith(original + sep)), text).strip()
+    return None if not rest or rest == original else (entry if rest == text.strip() else {**entry, "text": rest})
 
 
 def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
@@ -188,8 +181,10 @@ def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
     if not original:
         return
     head = session.get("queued_prompt")
-    entries = ([head] if head else []) + list(session.get("queued_prompts") or [])
-    cleaned = (_sanitize_queued_entry_vs_inflight_user(entry, original) for entry in entries)
+    cleaned = (
+        _sanitize_queued_entry_vs_inflight_user(e, original)
+        for e in ([head] if head else []) + list(session.get("queued_prompts") or [])
+    )
     _ac_set_queue(session, [c for c in cleaned if c is not None])
 
 
