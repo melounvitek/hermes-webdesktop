@@ -273,29 +273,43 @@ def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
         return slug, f"slug:{slug}"
 
 
-def _kb_poll_board(_kb, conn, slug: str, session_key: str) -> list:
-    """Claim + format this session's unseen events on one open board connection."""
+def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
+    """Claim + format this session's unseen events on one board. One poller per live session: the board
+    is not opened writable unless it has a subscription owned by this exact session (if the read-only
+    probe fails — locked/corrupt DB — delivery is preserved by falling through)."""
     try:
-        subs = _kb.list_notify_subs(conn)
+        if _kb.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
+            return []
+    except Exception:
+        pass
+    try:
+        conn = _kb.connect(board=slug)
     except Exception:
         return []
     texts: list = []
-    for sub in subs:
-        if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
-            continue
-        sub_ident = dict(
-            task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or ""
-        )
-        _old, _new, events = _kb.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
-        if not events:
-            continue
-        task = _kb.get_task(conn, sub["task_id"])
-        texts.extend(t for t in (_format_kanban_event_text(sub, task, ev, slug) for ev in events) if t)
-        # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so keeping the
-        # sub lets a later reopen notify the same session. The claimed cursor prevents replay.
-        if task and getattr(task, "status", "") == "archived":
-            with contextlib.suppress(Exception):
-                _kb.remove_notify_sub(conn, **sub_ident)
+    try:
+        try:
+            subs = _kb.list_notify_subs(conn)
+        except Exception:
+            return []
+        for sub in subs:
+            if (sub.get("platform") or "").lower() != "tui" or sub.get("chat_id") != session_key:
+                continue
+            sub_ident = dict(
+                task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"], thread_id=sub.get("thread_id") or ""
+            )
+            _old, _new, events = _kb.claim_unseen_events_for_sub(conn, kinds=_KANBAN_NOTIFY_KINDS, **sub_ident)
+            if not events:
+                continue
+            task = _kb.get_task(conn, sub["task_id"])
+            texts.extend(t for t in (_format_kanban_event_text(sub, task, ev, slug) for ev in events) if t)
+            # Unsubscribe only on archive: ``done`` is reversible in review/controller flows, so keeping the
+            # sub lets a later reopen notify the same session. The claimed cursor prevents replay.
+            if task and getattr(task, "status", "") == "archived":
+                with contextlib.suppress(Exception):
+                    _kb.remove_notify_sub(conn, **sub_ident)
+    finally:
+        conn.close()
     return texts
 
 
@@ -318,28 +332,11 @@ def _collect_kanban_notifications(session: dict) -> list:
             boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
         except Exception:
             return []
-    texts: list = []
-    seen_db_paths: set = set()
+    # dict keyed by resolved DB identity: first slug per DB wins (a pinned HERMES_KANBAN_DB aliases slugs).
+    unique = {}
     for slug, resolved in (_kb_board_key(_kb, board_meta) for board_meta in boards):
-        if resolved in seen_db_paths:
-            continue
-        seen_db_paths.add(resolved)
-        # One poller per live session: don't open this board writable unless it has a subscription owned
-        # by this exact session. If the read-only probe fails (locked/corrupt DB), preserve delivery.
-        try:
-            if _kb.count_notify_subs(board=slug, platform="tui", chat_id=session_key) == 0:
-                continue
-        except Exception:
-            pass
-        try:
-            conn = _kb.connect(board=slug)
-        except Exception:
-            continue
-        try:
-            texts.extend(_kb_poll_board(_kb, conn, slug, session_key))
-        finally:
-            conn.close()
-    return texts
+        unique.setdefault(resolved, slug)
+    return [t for slug in unique.values() for t in _kb_poll_board(_kb, slug, session_key)]
 
 
 def _notif_poll_kanban(sid: str, session: dict) -> None:
