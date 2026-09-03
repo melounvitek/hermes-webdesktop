@@ -121,6 +121,62 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
         _cprint(f"    ⚠ {result.warning_message}")
 
 
+def _switch_model_from(
+    cli, raw_input, *, is_global, explicit_provider, user_providers, custom_providers
+):
+    """``switch_model`` seeded with this CLI's live route."""
+    from hermes_cli.model_switch import switch_model
+    return switch_model(
+        raw_input=raw_input, current_provider=cli.provider or "", current_model=cli.model or "",
+        current_base_url=cli.base_url or "", current_api_key=cli.api_key or "", is_global=is_global,
+        explicit_provider=explicit_provider, user_providers=user_providers,
+        custom_providers=custom_providers,
+    )
+
+
+def _run_confirm_and_apply(cli, target, *args) -> None:
+    """Run a confirm+apply sequence off the UI thread when the TUI is live.
+
+    The expensive-model modal blocks its thread on a response queue (_prompt_text_input_modal);
+    on the prompt_toolkit main thread that freezes rendering, so the modal never appears and the
+    switch silently cancels after the 120s timeout.
+    """
+    if getattr(cli, "_app", None):
+        threading.Thread(target=target, args=args, daemon=True).start()
+    else:
+        target(*args)
+
+
+def _commit_model_switch(
+    cli, result, *, persist_global: bool, one_turn: bool = False, picker: bool = False
+) -> None:
+    """Stage + swap, print the summary, persist (session row unless --once; config on --global).
+
+    ``picker``: the picker path tolerates context-resolution errors and labels the config write
+    "(--global)"; the typed /model path additionally records the one-turn restore snapshot.
+    """
+    from cli import HermesCLI, _cprint
+    old_model = cli.model
+    snapshot = cli._snapshot_model_runtime() if one_turn else None
+    if not cli._stage_and_swap_model(result, old_model):
+        return
+    if not picker:
+        cli._pending_one_turn_model_restore = snapshot
+    _print_switch_summary(cli, result, old_model, one_turn=one_turn, strict_context=not picker)
+    if persist_global:
+        _persist_global_switch(cli, result)
+        _cprint("    Saved to config.yaml (--global)" if picker else "    Saved to config.yaml")
+    elif one_turn:
+        _cprint("    (next turn only — restores after one response)")
+    else:
+        _cprint("    (session only — add --global to persist)")
+    # --global also updates config.yaml (future sessions), but the row still records what THIS
+    # session runs — otherwise a later resume would restore the stale creation-time model over
+    # the new global choice. --once is ephemeral and restored after one turn: never touch the row.
+    if not one_turn:
+        HermesCLI._persist_model_switch_to_session(cli, result)
+
+
 def _persist_global_switch(cli, result) -> None:
     """Write the switched route to config.yaml (--global).
 
@@ -580,25 +636,13 @@ class CLIModelSwitchMixin:
     def _apply_model_switch_result(
         self, result, persist_global: bool, custom_providers=None
     ) -> None:
-        """Picker-path commit: swap, report, persist (session row always, config on --global)."""
-        from cli import HermesCLI, _cprint
+        """Picker-path commit (see _commit_model_switch)."""
+        from cli import _cprint
         if not result.success:
             _cprint(f"  ✗ {result.error_message}")
             return
         _merge_preflight_warning(self, result, custom_providers)
-        old_model = self.model
-        if not self._stage_and_swap_model(result, old_model):
-            return
-        _print_switch_summary(self, result, old_model, one_turn=False, strict_context=False)
-        if persist_global:
-            _persist_global_switch(self, result)
-            _cprint("    Saved to config.yaml (--global)")
-        else:
-            _cprint("    (session only — add --global to persist)")
-        # --global also updates config.yaml (future sessions), but the row still records
-        # what THIS session runs — otherwise a later resume would restore the stale
-        # creation-time model over the user's new global choice.
-        HermesCLI._persist_model_switch_to_session(self, result)
+        _commit_model_switch(self, result, persist_global=persist_global, picker=True)
 
     def _handle_model_picker_selection(self, persist_global: bool = False) -> None:
         state = self._model_picker_state
@@ -650,11 +694,8 @@ class CLIModelSwitchMixin:
                 self._close_model_picker()
                 return
             if 0 <= selected < back_idx:
-                from hermes_cli.model_switch import switch_model
-                result = switch_model(
-                    raw_input=visible_labels[selected], current_provider=self.provider or "",
-                    current_model=self.model or "", current_base_url=self.base_url or "",
-                    current_api_key=self.api_key or "", is_global=persist_global,
+                result = _switch_model_from(
+                    self, visible_labels[selected], is_global=persist_global,
                     explicit_provider=provider_data.get("slug"),
                     user_providers=state.get("user_provs"),
                     custom_providers=state.get("custom_provs"),
@@ -662,15 +703,10 @@ class CLIModelSwitchMixin:
                 # Capture before close — picker state is cleared on close.
                 _picker_custom_provs = state.get("custom_provs")
                 self._close_model_picker()
-                if getattr(self, "_app", None):
-                    threading.Thread(
-                        target=self._confirm_and_apply_model_switch_result,
-                        args=(result, persist_global, _picker_custom_provs), daemon=True,
-                    ).start()
-                else:
-                    self._confirm_and_apply_model_switch_result(
-                        result, persist_global, custom_providers=_picker_custom_provs
-                    )
+                _run_confirm_and_apply(
+                    self, self._confirm_and_apply_model_switch_result,
+                    result, persist_global, _picker_custom_provs,
+                )
                 return
             self._close_model_picker()
 
@@ -690,9 +726,7 @@ class CLIModelSwitchMixin:
         switches are session-scoped). ``--global`` persists, ``--once`` is next-turn only.
         """
         from cli import _cprint
-        from hermes_cli.model_switch import (
-            switch_model, parse_model_switch_args, resolve_persist_behavior
-        )
+        from hermes_cli.model_switch import parse_model_switch_args, resolve_persist_behavior
 
         parts = cmd_original.split(None, 1)  # split off '/model'
         # Single-owner flag parser (hermes_cli.model_switch): --provider/--global/--session/
@@ -735,60 +769,34 @@ class CLIModelSwitchMixin:
         if not request.target and not request.explicit_provider:
             return _show_model_picker(self, ctx, request.force_refresh)
 
-        result = switch_model(
-            raw_input=request.target, current_provider=self.provider or "",
-            current_model=self.model or "", current_base_url=self.base_url or "",
-            current_api_key=self.api_key or "", is_global=persist_global,
-            explicit_provider=request.explicit_provider, user_providers=user_provs,
-            custom_providers=custom_provs,
+        result = _switch_model_from(
+            self, request.target, is_global=persist_global,
+            explicit_provider=request.explicit_provider,
+            user_providers=user_provs, custom_providers=custom_provs,
         )
         if not result.success:
             _cprint(f"  ✗ {result.error_message}")
             return
         _merge_preflight_warning(self, result, custom_provs)
-
-        # Confirm + apply runs off the main thread when the TUI is live: the
-        # expensive-model modal blocks its thread on a response queue
-        # (_prompt_text_input_modal); on the prompt_toolkit main thread that freezes
-        # rendering, so the modal never appears and the switch cancels after 120s.
-        if getattr(self, "_app", None):
-            threading.Thread(
-                target=self._confirm_and_apply_cli_model_switch,
-                args=(result, persist_global, one_turn, custom_provs), daemon=True,
-            ).start()
-            return
-        self._confirm_and_apply_cli_model_switch(result, persist_global, one_turn, custom_provs)
+        _run_confirm_and_apply(
+            self, self._confirm_and_apply_cli_model_switch,
+            result, persist_global, one_turn, custom_provs,
+        )
 
     def _confirm_and_apply_cli_model_switch(
         self, result, persist_global: bool, one_turn: bool, custom_provs=None
     ) -> None:
         """Confirm an expensive model switch and apply it to CLI state.
 
-        Runs on a worker thread when the TUI is active (see _handle_model_switch) so the
+        Runs on a worker thread when the TUI is active (see _run_confirm_and_apply) so the
         confirmation modal can render. Updates requested_provider (via the swap) so
         _ensure_runtime_credentials() doesn't overwrite the switch on the next turn.
         """
-        from cli import HermesCLI, _cprint
+        from cli import _cprint
         if not self._confirm_expensive_model_switch(result):
             _cprint("  Model switch cancelled.")
             return
-        old_model = self.model
-        _one_turn_restore_snapshot = self._snapshot_model_runtime() if one_turn else None
-        if not self._stage_and_swap_model(result, old_model):
-            return
-        self._pending_one_turn_model_restore = _one_turn_restore_snapshot if one_turn else None
-        _print_switch_summary(self, result, old_model, one_turn=one_turn, strict_context=True)
-        if persist_global:
-            _persist_global_switch(self, result)
-            _cprint("    Saved to config.yaml")
-        elif one_turn:
-            _cprint("    (next turn only — restores after one response)")
-        else:
-            _cprint("    (session only — add --global to persist)")
-        # Session row records what THIS session runs (see _apply_model_switch_result);
-        # --once is ephemeral and restored after one turn, so it must not touch the row.
-        if not one_turn:
-            HermesCLI._persist_model_switch_to_session(self, result)
+        _commit_model_switch(self, result, persist_global=persist_global, one_turn=one_turn)
 
     def _handle_codex_runtime(self, cmd_original: str) -> None:
         """Handle /codex-runtime — toggle the codex app-server runtime opt-in.
