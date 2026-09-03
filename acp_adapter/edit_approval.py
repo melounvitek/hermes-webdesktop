@@ -125,8 +125,7 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
 
 # (tool_name, patch mode or None) -> proposal builder.
 _PROPOSAL_BUILDERS = {
-    ("write_file", None): _proposal_for_write_file,
-    ("patch", "replace"): _proposal_for_patch_replace,
+    ("write_file", None): _proposal_for_write_file, ("patch", "replace"): _proposal_for_patch_replace,
     ("patch", "patch"): _proposal_for_patch_v4a,
 }
 

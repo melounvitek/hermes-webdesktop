@@ -94,8 +94,7 @@ def make_approval_callback(request_permission_fn: Callable, loop: asyncio.Abstra
             allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied,
         )
         coro = request_permission_fn(
-            session_id=session_id,
-            tool_call=_build_permission_tool_call(command, description),
+            session_id=session_id, tool_call=_build_permission_tool_call(command, description),
             options=options,
         )
         future = safe_schedule_threadsafe(

@@ -32,25 +32,16 @@ from acp.schema import (
 
 from acp_adapter.auth import TERMINAL_SETUP_AUTH_METHOD_ID, build_auth_methods, detect_provider
 from acp_adapter.events import (
-    _build_plan_update_from_todo_result,
-    make_message_cb,
-    make_step_cb,
-    make_thinking_cb,
+    _build_plan_update_from_todo_result, make_message_cb, make_step_cb, make_thinking_cb,
     make_tool_progress_cb,
 )
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
 from acp_adapter.tools import build_tool_complete, build_tool_start
-from agent.context_compressor import (
-    COMPRESSED_SUMMARY_METADATA_KEY,
-    ContextCompressor,
-)
+from agent.context_compressor import (COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor)
 from agent.interrupt_compat import request_hard_interrupt
-from tools.approval import (
-    reset_hermes_interactive_context,
-    set_hermes_interactive_context,
-)
+from tools.approval import (reset_hermes_interactive_context, set_hermes_interactive_context)
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +64,9 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
     ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip.
     """
     try:
-        from hermes_cli.config import (
-            get_compatible_custom_providers,
-            is_provider_enabled,
-            load_config,
-        )
+        from hermes_cli.config import (get_compatible_custom_providers, is_provider_enabled, load_config)
         from hermes_cli.model_switch import (
-            _NativePickerModelList,
-            _declared_model_ids,
-            _entry_models_discovered,
-            _fetch_picker_live_models,
+            _NativePickerModelList, _declared_model_ids, _entry_models_discovered, _fetch_picker_live_models,
             _models_config_is_allowlist,
         )
         from hermes_cli.model_switch_providers import _discover_flag
@@ -138,13 +122,9 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
         if _discover_flag(entry) and (api_key or is_native_ollama):
             try:
                 live = _fetch_picker_live_models(
-                    api_key,
-                    base_url,
-                    provider_key if is_native_ollama and is_ollama_key else "custom",
+                    api_key, base_url, provider_key if is_native_ollama and is_ollama_key else "custom",
                     _models_config_is_allowlist(models_cfg, _entry_models_discovered(entry)),
-                    headers=native_headers,
-                    timeout=1.5,
-                    api_mode=entry.get("api_mode"),
+                    headers=native_headers, timeout=1.5, api_mode=entry.get("api_mode"),
                 )
             except Exception:
                 live = None
@@ -467,9 +447,7 @@ def _choice_provider(model_id: str) -> str:
 
         lowered = model_id.lower()
         for candidate in sorted(
-            (p for p in _configured_custom_provider_ids() if p.startswith("custom:")),
-            key=len,
-            reverse=True,
+            (p for p in _configured_custom_provider_ids() if p.startswith("custom:")), key=len, reverse=True,
         ):
             if lowered.startswith(candidate + ":"):
                 return candidate
@@ -759,9 +737,7 @@ class HermesACPAgent(acp.Agent):
             "Auto-allow workspace and /tmp edits; still asks for sensitive paths.",
         ),
         "dont_ask": (
-            "session",
-            "Don't Ask",
-            "Auto-allow file edits for this session except sensitive paths.",
+            "session", "Don't Ask", "Auto-allow file edits for this session except sensitive paths."
         ),
     }
     _MODE_TO_EDIT_APPROVAL_POLICY = {mode: spec[0] for mode, spec in _MODES.items()}
@@ -832,8 +808,7 @@ class HermesACPAgent(acp.Agent):
 
             normalized_provider = normalize_provider(provider)
             context = load_picker_context().with_overrides(
-                current_provider=normalized_provider,
-                current_model=model,
+                current_provider=normalized_provider, current_model=model,
                 current_base_url=str(getattr(state.agent, "base_url", "") or ""),
             )
             payload = build_models_payload(
@@ -844,8 +819,7 @@ class HermesACPAgent(acp.Agent):
             )
 
             cat = _ModelCatalog(
-                normalize_provider=normalize_provider,
-                current_model=model,
+                normalize_provider=normalize_provider, current_model=model,
                 current_choice_provider=str(provider or "").strip().lower(),
                 current_base_url=str(getattr(state.agent, "base_url", "") or "").strip().rstrip("/").lower(),
             )
@@ -866,8 +840,7 @@ class HermesACPAgent(acp.Agent):
             if current_model_id and current_model_id not in {item.model_id for item in available_models}:
                 provider_name = provider_label(normalized_provider)
                 available_models.insert(0, ModelInfo(
-                    model_id=current_model_id,
-                    name=f"{provider_name} · {model}",
+                    model_id=current_model_id, name=f"{provider_name} · {model}",
                     description=f"Provider: {provider_name} • current",
                 ))
 
@@ -1108,11 +1081,8 @@ class HermesACPAgent(acp.Agent):
     # ---- ACP lifecycle ------------------------------------------------------
 
     async def initialize(
-        self,
-        protocol_version: int | None = None,
-        client_capabilities: ClientCapabilities | None = None,
-        client_info: Implementation | None = None,
-        **kwargs: Any,
+        self, protocol_version: int | None = None, client_capabilities: ClientCapabilities | None = None,
+        client_info: Implementation | None = None, **kwargs: Any,
     ) -> InitializeResponse:
         auth_methods = build_auth_methods()
         logger.info(
@@ -1715,8 +1685,7 @@ class HermesACPAgent(acp.Agent):
             tool_view = SimpleNamespace(
                 tools=list(tools or []),
                 valid_tool_names={t.get("function", {}).get("name") for t in tools or [] if isinstance(t, dict)},
-                enabled_toolsets=toolsets,
-                _memory_manager=getattr(state.agent, "_memory_manager", None),
+                enabled_toolsets=toolsets, _memory_manager=getattr(state.agent, "_memory_manager", None),
             )
             inject_memory_provider_tools(tool_view)
             tools = tool_view.tools
@@ -1840,8 +1809,7 @@ class HermesACPAgent(acp.Agent):
             self.session_manager.save_session(state.session_id)
 
             new_tokens = _estimate_tokens(
-                state.history, agent,
-                getattr(agent, "_cached_system_prompt", "") or _sys_prompt,
+                state.history, agent, getattr(agent, "_cached_system_prompt", "") or _sys_prompt,
                 getattr(agent, "tools", None) or _tools,
             )
             return (

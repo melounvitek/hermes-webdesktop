@@ -74,10 +74,7 @@ def _upgrade_queue(tool_call_ids: Dict[str, Deque[str]], name: str) -> Deque[str
 
 
 def make_tool_progress_cb(
-    conn: acp.Client,
-    session_id: str,
-    loop: asyncio.AbstractEventLoop,
-    tool_call_ids: Dict[str, Deque[str]],
+    conn: acp.Client, session_id: str, loop: asyncio.AbstractEventLoop, tool_call_ids: Dict[str, Deque[str]],
     tool_call_meta: Dict[str, Dict[str, Any]],
     edit_approval_policy_getter: Callable[[], tuple[str, str | None]] | None = None,
 ) -> Callable:
@@ -153,10 +150,7 @@ def make_message_cb(conn: acp.Client, session_id: str, loop: asyncio.AbstractEve
 
 
 def make_step_cb(
-    conn: acp.Client,
-    session_id: str,
-    loop: asyncio.AbstractEventLoop,
-    tool_call_ids: Dict[str, Deque[str]],
+    conn: acp.Client, session_id: str, loop: asyncio.AbstractEventLoop, tool_call_ids: Dict[str, Deque[str]],
     tool_call_meta: Dict[str, Dict[str, Any]],
 ) -> Callable:
     """Create a ``step_callback(api_call_count: int, prev_tools: list)`` for AIAgent."""

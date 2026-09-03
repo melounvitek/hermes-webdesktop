@@ -30,10 +30,7 @@ def _is_compression_end(row: Any) -> bool:
 
 
 def build_session_provenance(
-    db: Any,
-    acp_session_id: str,
-    current_hermes_session_id: str,
-    *,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *,
     previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build ``_meta.hermes.sessionProvenance`` for an ACP session.
@@ -88,15 +85,11 @@ def build_session_provenance(
 
 
 def session_provenance_meta(
-    db: Any,
-    acp_session_id: str,
-    current_hermes_session_id: str,
-    *,
+    db: Any, acp_session_id: str, current_hermes_session_id: str, *,
     previous_hermes_session_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a ready ``_meta`` payload: ``{"hermes": {"sessionProvenance": ...}}``."""
     prov = build_session_provenance(
-        db, acp_session_id, current_hermes_session_id,
-        previous_hermes_session_id=previous_hermes_session_id,
+        db, acp_session_id, current_hermes_session_id, previous_hermes_session_id=previous_hermes_session_id,
     )
     return None if prov is None else {"hermes": {"sessionProvenance": prov}}

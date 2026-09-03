@@ -949,10 +949,7 @@ def _build_tool_start(tool_call_id: str, tool_name: str, arguments: Args, *, edi
 
 
 def build_tool_complete(
-    tool_call_id: str,
-    tool_name: str,
-    result: Optional[str] = None,
-    function_args: Optional[Args] = None,
+    tool_call_id: str, tool_name: str, result: Optional[str] = None, function_args: Optional[Args] = None,
     snapshot: Any = None,
 ) -> ToolCallProgress:
     """Create a ToolCallUpdate (progress) event for a completed tool call."""
@@ -963,10 +960,8 @@ def build_tool_complete(
         content = _build_tool_complete_content(tool_name, result, function_args=function_args, snapshot=snapshot)
     structured = isinstance(_json_loads_maybe(result), (dict, list))
     return acp.update_tool_call(
-        tool_call_id,
-        kind=get_tool_kind(tool_name),
-        status="failed" if _tool_result_failed(result, tool_name) else "completed",
-        content=content,
+        tool_call_id, kind=get_tool_kind(tool_name),
+        status="failed" if _tool_result_failed(result, tool_name) else "completed", content=content,
         raw_output=None if tool_name in _POLISHED_TOOLS or structured else result,
     )
 

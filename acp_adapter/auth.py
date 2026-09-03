@@ -43,8 +43,7 @@ def build_auth_methods() -> list[Any]:
     provider = detect_provider()
     if provider:
         methods.append(AuthMethodAgent(
-            id=provider,
-            name=f"{provider} runtime credentials",
+            id=provider, name=f"{provider} runtime credentials",
             description=f"Authenticate Hermes using the currently configured {provider} runtime credentials.",
         ))
     methods.append(TerminalAuthMethod(
