@@ -1,8 +1,5 @@
-"""Persistent dashboard compute-host process.
-
-The long-lived child that owns live AIAgent objects when ``dashboard.turn_isolation``
-is enabled; frames are line-JSON over stdin/stdout.
-"""
+"""Persistent dashboard compute-host child: owns live AIAgent objects when
+``dashboard.turn_isolation`` is enabled; frames are line-JSON over stdin/stdout."""
 
 from __future__ import annotations
 
@@ -101,17 +98,15 @@ class ComputeHost:
     def shutdown(self, *, reason: str = "shutdown", wait: float = 10.0) -> None:
         """Drain in-flight turns, then finalize every session.
 
-        Order matters: ``_finalize_session`` is a one-shot latch, so finalizing before
-        the drain would spend the flush's single chance mid-turn, fire
-        ``on_session_end(interrupted=True)`` against a running session and release the
-        active-session lease under a live turn. ``_FLUSH_RESERVE_SECS`` (never more than
-        half of ``wait``) is withheld from the drain so the flush still runs when turns
-        outlast the window. Sessions whose turn is *still running* at the deadline are
-        excluded from the flush (``_executor.shutdown`` does not join them): finalizing
-        one mid-turn would leave it un-finalizable with its lease released, whereas
-        leaving it unfinalized keeps it recoverable. ``server._shutdown_sessions``
-        (atexit) may still re-finalize skipped sessions on the SIGTERM / stdin_closed
-        paths; the orphan path (``os._exit``) bypasses atexit.
+        Order matters: ``_finalize_session`` is a one-shot latch, so finalizing before the
+        drain would spend it mid-turn, fire ``on_session_end(interrupted=True)`` on a running
+        session and release its lease. ``_FLUSH_RESERVE_SECS`` (at most half of ``wait``) is
+        withheld from the drain so the flush still runs when turns outlast the window.
+        Sessions still running at the deadline are skipped (``_executor.shutdown`` does not
+        join them): finalizing mid-turn would leave them un-finalizable with the lease
+        released; unfinalized keeps them recoverable. ``server._shutdown_sessions`` (atexit)
+        may re-finalize skipped sessions on SIGTERM / stdin_closed; ``os._exit`` (orphan)
+        bypasses atexit.
         """
         self._closed.set()
         budget = max(0.0, wait)
@@ -130,7 +125,7 @@ class ComputeHost:
         with self._turn_futures_lock:
             live_sids = {sid for f, sid in self._turn_futures.items() if sid and not f.done()}
         self.flush_all_sessions(reason=reason, skip_sids=live_sids)
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self.close()
 
     def flush_all_sessions(
         self, *, reason: str = "shutdown", skip_sids: Collection[str] | None = None) -> None:
@@ -160,12 +155,10 @@ class ComputeHost:
         self.emit({"type": "shutdown.ack", "request_id": frame.get("request_id")})
         # Explicit supervisor/test shutdown is a clean child-process close;
         # SIGTERM and orphan paths are the durability flush paths.
-        self._closed.set()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self.close()
 
     def _track_turn_future(self, future: concurrent.futures.Future, sid: str) -> None:
-        """Register an in-flight turn against its session; the done callback must pop
-        under the lock or the mapping grows for the host's life."""
+        """Track an in-flight turn; the done callback pops it or the map grows forever."""
         with self._turn_futures_lock:
             self._turn_futures[future] = sid
         future.add_done_callback(self._untrack_turn_future)
@@ -252,16 +245,13 @@ class ComputeHost:
             if run_thread is not None and hasattr(run_thread, "join"):
                 run_thread.join()
             with session["history_lock"]:
-                history_version = int(session.get("history_version", 0))
-                message_count = len(session.get("history") or [])
+                meta = _history_meta(session)
                 interrupted = bool(session.get("_turn_cancel_requested"))
-                session_key = str(session.get("session_key") or "")
             session_info = server._session_info(session.get("agent"), session)
             self._bump_progress()
             self._reply(
-                "turn.end", sid, request_id, history_version=history_version,
-                session_key=session_key, message_count=message_count, interrupted=interrupted,
-                ended_ns=now_ns(), session_info=session_info, session_info_emitted=True)
+                "turn.end", sid, request_id, **meta, interrupted=interrupted, ended_ns=now_ns(),
+                session_info=session_info, session_info_emitted=True)
         except Exception as exc:
             with contextlib.suppress(Exception):
                 from tui_gateway import server
@@ -392,13 +382,6 @@ class ComputeHost:
                 _error(str(response["error"].get("message") or failure))
                 return None
             return response
-
-        def _history_meta() -> dict[str, Any]:
-            """Ack metadata read under ``history_lock`` (caller holds it)."""
-            return {
-                "session_key": str(session.get("session_key") or ""),
-                "history_version": int(session.get("history_version", 0)),
-                "message_count": len(session.get("history") or [])}
         try:
             from tui_gateway import server
             route = MUTATOR_ROUTE_TABLE.get(route_name)
@@ -429,7 +412,7 @@ class ComputeHost:
                 if response is None:
                     return
                 with session["history_lock"]:
-                    meta = _history_meta()
+                    meta = _history_meta(session)
                 _ack(
                     result=response.get("result") or {}, **meta,
                     session_info=server._session_info(session.get("agent"), session))
@@ -438,11 +421,10 @@ class ComputeHost:
             output = server._mirror_slash_side_effects(sid, session, command) if command else ""
             with session["history_lock"]:
                 messages = server._history_to_messages(list(session.get("history") or []))
-                meta = _history_meta()
+                meta = _history_meta(session)
             _ack(
-                output=output, session_key=meta["session_key"],
-                history_version=meta["history_version"], message_count=meta["message_count"],
-                messages=messages, session_info=server._session_info(session.get("agent"), session))
+                output=output, **meta, messages=messages,
+                session_info=server._session_info(session.get("agent"), session))
         except Exception as exc:
             if route_name in {"session.compress", "slash.compress"}:
                 # The compress mirror defers the context-engine boundary notification until
@@ -480,6 +462,14 @@ class ComputeHost:
                 self.emit({"type": "orphan", "old_ppid": self._parent_pid, "ppid": ppid})
                 self.shutdown(reason="orphan")
                 os._exit(0)
+
+
+def _history_meta(session: dict) -> dict[str, Any]:
+    """Transcript identity for turn.end / control.ack frames; caller holds history_lock."""
+    return {
+        "session_key": str(session.get("session_key") or ""),
+        "history_version": int(session.get("history_version", 0)),
+        "message_count": len(session.get("history") or [])}
 
 
 def _rss_mb(pid: int) -> float:
@@ -547,8 +537,7 @@ def run_host(stdin: Any = None, stdout: Any = None) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Dashboard compute-host process")
-    parser.parse_args(argv)
+    argparse.ArgumentParser(description="Dashboard compute-host process").parse_args(argv)
     run_host()
     return 0
 

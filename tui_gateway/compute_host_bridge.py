@@ -1,9 +1,6 @@
-"""Compute-host (turn isolation) bridge: relay prompts/controls to the child process
-and mirror its metadata/clarify/compress acks back into the session.
-
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
-"""
+"""Compute-host (turn isolation) bridge: relay prompts/controls to the child process and
+mirror its metadata/clarify/compress acks back into the session. Bodies are rebound onto
+server.py's globals at install time (method_ctx.bind_module), so they use them bare."""
 
 from __future__ import annotations
 

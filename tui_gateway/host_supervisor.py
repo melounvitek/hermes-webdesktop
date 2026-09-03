@@ -1,9 +1,6 @@
-"""Supervisor for the dashboard compute-host child process.
-
-When ``dashboard.turn_isolation`` is enabled, agent turns move behind one persistent
-``python -m tui_gateway.compute_host`` child so compute-heavy agent threads do not
-contend with the serving process' event loop for the same GIL.
-"""
+"""Supervisor for the dashboard compute-host child: with ``dashboard.turn_isolation``
+agent turns run in one persistent ``python -m tui_gateway.compute_host`` child so heavy
+agent threads do not contend with the serving process' event loop for the GIL."""
 
 from __future__ import annotations
 
@@ -52,10 +49,9 @@ _CONTROL_REPLY_TYPES = frozenset({
 
 def append_log_record(path: str | Path, record: str) -> None:
     """Append one log record using O_APPEND and exactly one os.write call."""
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     text = record if record.endswith("\n") else f"{record}\n"
-    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         os.write(fd, text.encode("utf-8", errors="replace"))
     finally:
@@ -87,13 +83,21 @@ def _pid_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-        return True
+    except Exception as exc:
+        return isinstance(exc, PermissionError)
+    return True
+
+
+def _signal_pid(pid: int, sig: int, label: str) -> bool:
+    """Send ``sig``; False when the pid is gone or the signal failed (logged)."""
+    try:
+        os.kill(pid, sig)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        return True
     except Exception:
+        logger.debug("failed to %s compute host pid=%s", label, pid, exc_info=True)
         return False
+    return True
 
 
 def _pid_command(pid: int) -> str:
@@ -154,10 +158,6 @@ class HostSupervisor:
     def pid(self) -> int:
         proc = self._proc
         return int(proc.pid or 0) if proc is not None else 0
-
-    @property
-    def hello(self) -> dict[str, Any]:
-        return dict(self._hello)
 
     def is_running(self) -> bool:
         proc = self._proc
@@ -266,10 +266,9 @@ class HostSupervisor:
     ) -> dict:
         """Send a control frame; with ``wait`` block up to ``timeout`` for its ack.
 
-        ``on_late_ack`` (only with ``wait``) keeps the request adoptable after the
-        waiter gives up: the host's eventual ``control.ack``/``control.error``/``error``
-        for this ``request_id`` fires the handler once instead of being dropped.
-        Bounded by ``_LATE_CONTROL_TTL_SECS`` / ``_LATE_CONTROL_MAX``.
+        ``on_late_ack`` (only with ``wait``) keeps the request adoptable after the waiter
+        gives up: the host's eventual ``control.ack``/``control.error``/``error`` fires it
+        once instead of being dropped (bounded by ``_LATE_CONTROL_TTL_SECS``/``_MAX``).
         """
         if route_name not in MUTATOR_ROUTE_TABLE:
             raise ValueError(f"unclassified host mutator route: {route_name}")
@@ -459,18 +458,14 @@ class HostSupervisor:
         with self._lock:
             pending = self._pending_turns
             self._pending_turns = {}
+        failure = {"reason": reason, "message": message}
         for request_id, (sid, cb) in pending.items():
             self.rpc_sink({
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "type": "error", "session_id": sid,
-                    "payload": {"message": message, "reason": reason}}})
+                "jsonrpc": "2.0", "method": "event",
+                "params": {"type": "error", "session_id": sid, "payload": dict(failure)}})
             if cb is not None:
                 try:
-                    cb({
-                        "type": "turn.error", "sid": sid, "request_id": request_id,
-                        "reason": reason, "message": message})
+                    cb({"type": "turn.error", "sid": sid, "request_id": request_id, **failure})
                 except Exception:
                     logger.exception("compute host error callback failed")
         # A crashed host never emits the late acks timed-out control waiters still
@@ -480,9 +475,7 @@ class HostSupervisor:
             self._late_control_handlers = {}
         for request_id, (_registered_at, handler) in late.items():
             try:
-                handler({
-                    "type": "control.error", "request_id": request_id, "reason": reason,
-                    "message": message})
+                handler({"type": "control.error", "request_id": request_id, **failure})
             except Exception:
                 logger.exception("compute host late control error handler failed")
 
@@ -512,34 +505,22 @@ class HostSupervisor:
     _pid_matches_compute_host = staticmethod(is_compute_host_identity)
 
     def _terminate_pid(self, pid: int, *, timeout: float = _SHUTDOWN_TIMEOUT_SECS) -> None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        except Exception:
-            logger.debug("failed to SIGTERM compute host pid=%s", pid, exc_info=True)
+        if not _signal_pid(pid, signal.SIGTERM, "SIGTERM"):
             return
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if not _pid_alive(pid):
                 return
             time.sleep(0.05)
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        except Exception:
-            logger.debug("failed to SIGKILL compute host pid=%s", pid, exc_info=True)
+        _signal_pid(pid, signal.SIGKILL, "SIGKILL")
 
     def _terminate_process(self, proc: subprocess.Popen[str]) -> None:
         if proc.poll() is not None:
             return
-        try:
+        with contextlib.suppress(Exception):
             proc.terminate()
             proc.wait(timeout=_SHUTDOWN_TIMEOUT_SECS)
             return
-        except Exception:
-            pass
         with contextlib.suppress(Exception):
             proc.kill()
         with contextlib.suppress(Exception):

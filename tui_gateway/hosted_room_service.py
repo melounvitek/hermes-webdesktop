@@ -35,6 +35,10 @@ _TERMINAL_STATUSES = ("deferred", "settled", "failed", "cancelled")
 _LIVE_STATUSES = ("queued", "running", "stopping")
 _STOPPABLE_STATUSES = ("queued", "running", "indeterminate", "deferred", "stopping")
 _RETRYABLE_STATUSES = ("indeterminate", "deferred")
+# (message, error_code) for a refreshed peer catalog whose digests drift from the dispatch.
+_POLICY_DRIFT = (
+    "peer room execution policy needs reauthorization", "room_execution_policy_changed")
+_CATALOG_DRIFT = ("peer room capabilities need reauthorization", "room_capability_catalog_changed")
 
 
 def _hosted_room_turn_timeout_seconds() -> float:
@@ -85,10 +89,9 @@ class HostedRoomService:
             self._load_stored_links()
         except Exception as exc:
             self._link_load_error = str(exc)
-        supplied_routes = dict(peer_routes or {})
         supplied_clients = dict(peer_clients or {})
-        self.peer_routes.update(supplied_routes)
-        for key, route in supplied_routes.items():
+        for key, route in dict(peer_routes or {}).items():
+            self.peer_routes[key] = route
             client = supplied_clients.get(key)
             if client is None:
                 client = supplied_clients.get(route.target_install_id)
@@ -149,12 +152,13 @@ class HostedRoomService:
     def _room(self, room_id: str) -> dict[str, Any]:
         return hosted_rooms.room_state(self.db_path, room_id=room_id)
 
-    def _owned_room(self, room_id: str) -> dict[str, Any]:
-        room = self._room(room_id)
-        if str(room["authority_gateway_id"]) != hosted_rooms.local_authority_gateway_id():
+    def _owned_authority(self, room_id: str) -> tuple[str, int]:
+        """(gateway_id, epoch) of a room this gateway owns; conflict error otherwise."""
+        gateway_id, epoch = _authority(self._room(room_id))
+        if gateway_id != hosted_rooms.local_authority_gateway_id():
             raise hosted_rooms.AuthorityConflictError(
                 "This Group Chat is managed by another gateway.")
-        return room
+        return gateway_id, epoch
 
     @contextlib.contextmanager
     def _turn_lock(self, profile: str) -> Iterator[None]:
@@ -215,11 +219,9 @@ class HostedRoomService:
         self.runtime.wakeup()
 
     def revoke_room_routes(self, room_id: str) -> int:
-        """Revoke and forget every scoped peer route for one room.
-
-        Remote revocation is the boundary: an unreachable target leaves the room
-        intact for retry rather than reporting a false disband with a live grant.
-        """
+        """Revoke and forget every scoped peer route for one room. Remote revocation is the
+        boundary: an unreachable target leaves the room intact for retry rather than
+        reporting a false disband with a live grant."""
         with self._policy_lock:
             routes = [(key, route) for key, route in self.peer_routes.items() if key[0] == room_id]
         for key, route in routes:
@@ -335,11 +337,8 @@ class HostedRoomService:
         route = self.peer_routes.get(key)
         if route is None:
             raise RuntimeError("peer room route is unavailable")
-        stored = next(
-            (
-                link for link in hosted_room_links.load_room_links(self.db_path)
-                if (link.room_id, link.member_id) == key),
-            None)
+        links = hosted_room_links.load_room_links(self.db_path)
+        stored = next((l for l in links if (l.room_id, l.member_id) == key), None)
         if stored is None:
             raise RuntimeError("peer room route cannot be renewed before persistence")
         digests = {}
@@ -390,10 +389,6 @@ class HostedRoomService:
                 raise RuntimeError("hosted room replay cursor did not advance")
             cursor = next_cursor
 
-    def _append_plan(self, room_id: str, plan: discussion.PublicationPlan) -> None:
-        for event in plan.events:
-            hosted_rooms.append_event(self.db_path, **event.append_kwargs(room_id))
-
     def _policy_snapshot(self, room: Mapping[str, Any]) -> PolicySnapshot:
         return self.policy_checkpoint.snapshot(
             room_id=str(room["room_id"]), latest_seq=int(room["latest_seq"]))
@@ -417,7 +412,8 @@ class HostedRoomService:
                     room, task_events, plan, status=status, result=task.get("result"),
                     execution_generation=execution_generation if status == "deferred" else None,
                     local_profiles=local_profiles)
-                self._append_plan(room_id, publication)
+                for event in publication.events:
+                    hosted_rooms.append_event(self.db_path, **event.append_kwargs(room_id))
                 changed = True
         return changed
 
@@ -442,7 +438,7 @@ class HostedRoomService:
     def prepare_room(self, binding: HostedRoomBinding) -> None:
         with self._policy_lock:
             room = self._room(binding.room_id)
-            snapshot = self._policy_snapshot(room)
+            snapshot = self._policy_snapshot(room)  # sync() side effect feeds the publish below
             if self._publish_terminal_tasks(room):
                 room = self._room(binding.room_id)
                 snapshot = self._policy_snapshot(room)
@@ -494,7 +490,7 @@ class HostedRoomService:
 
     def send(self, *, room_id: str, event_id: str, payload: Any) -> dict[str, Any]:
         normalized = discussion.validate_user_payload(payload)
-        gateway_id, epoch = _authority(self._owned_room(room_id))
+        gateway_id, epoch = self._owned_authority(room_id)
         event = hosted_rooms.append_event(
             self.db_path, room_id=room_id, event_id=event_id, kind="message.user",
             actor={"kind": "user", "id": "desktop"}, payload=normalized,
@@ -508,11 +504,10 @@ class HostedRoomService:
 
     def stop_room(
         self, room_id: str, *, cancel_id: str, require_acknowledged: bool = False) -> int:
-        gateway_id, epoch = _authority(self._owned_room(room_id))
+        gateway_id, epoch = self._owned_authority(room_id)
         hosted_rooms.request_room_stop(
             self.db_path, room_id=room_id, cancel_id=cancel_id, expected_gateway_id=gateway_id,
             expected_epoch=epoch)
-        cancelled = 0
         pending = 0
         with self._policy_lock:
             tasks = {
@@ -523,9 +518,9 @@ class HostedRoomService:
                     str(task.get("cancel_id") or "") if task.get("status") == "stopping" else "")
                 result = self.runtime.cancel(
                     task["identity"], cancel_id=task_cancel_id or cancel_id)
-                cancelled += 1
                 if result["status"] == "stopping":
                     pending += 1
+        cancelled = len(tasks)
         if require_acknowledged and pending:
             raise RuntimeError("room work is still stopping; retry deletion after Stop completes")
         self.runtime.wakeup()
@@ -533,11 +528,8 @@ class HostedRoomService:
 
     def retry_room_task(self, room_id: str, *, task_id: str) -> dict[str, Any]:
         """Retry one uncertain or deferred task only after explicit user action."""
-        task = next(
-            (
-                candidate for candidate in self._list_tasks(room_id, _RETRYABLE_STATUSES)
-                if candidate["identity"].task_id == task_id),
-            None)
+        candidates = self._list_tasks(room_id, _RETRYABLE_STATUSES)
+        task = next((c for c in candidates if c["identity"].task_id == task_id), None)
         if task is None:
             raise driver.InvalidTaskTransitionError("no retryable room task matches task_id")
         return self.runtime.retry_indeterminate(task["identity"])
@@ -601,8 +593,7 @@ class HostedRoomService:
                 if action_room_id == room_id)
         return {
             "running": runtime["running"],
-            "working": bool(
-                counts.get("running") or counts.get("queued") or counts.get("stopping")),
+            "working": any(counts.get(s) for s in _LIVE_STATUSES),
             "blocked": room_id in runtime["blocked_rooms"]
             or bool(counts.get("indeterminate") or counts.get("stopping")),
             "counts": dict(counts),
@@ -622,13 +613,10 @@ class _RouteStatusPeerClient:
         self._on_refreshed = on_refreshed
 
     def _refresh_grant(self, kwargs: dict) -> dict:
-        """Rotate an expiring grant before dispatch; return the kwargs to send.
-
-        Refresh failures only escalate to reauthorization when the peer says so or the
-        grant is already past its hard expiry; otherwise the original grant is tried
-        as-is. A refreshed catalog whose digests drift from the dispatch is a policy
-        change and is refused before any dispatch.
-        """
+        """Rotate an expiring grant before dispatch; return the kwargs to send. Refresh
+        failures escalate to reauthorization only when the peer says so or the grant is
+        past its hard expiry; otherwise the original grant is tried as-is. A refreshed
+        catalog whose digests drift from the dispatch is a policy change: refused."""
         grant = kwargs["grant"]
         if not room_grant_needs_dispatch_refresh(grant):
             return kwargs
@@ -654,13 +642,9 @@ class _RouteStatusPeerClient:
             refreshed_catalog = GatewayRoomCatalog.from_mapping(refreshed.get("catalog"))
             drift = None
             if refreshed_catalog.execution_policy.policy_digest != checked.execution_policy_digest:
-                drift = (
-                    "peer room execution policy needs reauthorization",
-                    "room_execution_policy_changed")
+                drift = _POLICY_DRIFT
             elif refreshed_catalog.catalog_digest != checked.capability_digest:
-                drift = (
-                    "peer room capabilities need reauthorization", "room_capability_catalog_changed"
-                )
+                drift = _CATALOG_DRIFT
             if drift is not None:
                 self._on_reauthorization()
                 raise PeerRunsHTTPError(
