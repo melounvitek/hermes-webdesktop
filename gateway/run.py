@@ -4944,68 +4944,53 @@ def _start_gateway_make_shutdown_signal_handler(runner, _signal_initiated_shutdo
     def shutdown_signal_handler(received_signal=None):
         # Planned --replace takeover (sibling wrote a marker naming this PID before SIGTERM): exit 0 so
         # systemd's Restart=on-failure doesn't revive us to flap-fight the replacer.
-        planned_takeover = False
-        try:
+        def _takeover() -> bool:
             from gateway.status import consume_takeover_marker_for_self
-            planned_takeover = consume_takeover_marker_for_self()
-        except Exception as e:
-            logger.debug("Takeover marker check failed: %s", e)
+            return consume_takeover_marker_for_self()
 
         # Planned stop: service managers and `hermes gateway stop` also send SIGTERM, indistinguishable
         # from an external kill unless the CLI marks it first. SIGINT is an interactive Ctrl+C stop.
-        planned_stop = False
-        if received_signal == signal.SIGINT:
-            planned_stop = True
-        elif not planned_takeover:
-            try:
-                from gateway.status import consume_planned_stop_marker_for_self
-                planned_stop = consume_planned_stop_marker_for_self()
-            except Exception as e:
-                logger.debug("Planned stop marker check failed: %s", e)
+        def _planned_stop() -> bool:
+            from gateway.status import consume_planned_stop_marker_for_self
+            return consume_planned_stop_marker_for_self()
 
         # Fast (<10ms) snapshot of who's asking us to shut down — runs synchronously inside the asyncio
         # signal handler: stdlib + /proc only, no subprocesses (a sync `ps aux` here once blocked ~3s).
-        try:
-            from gateway.shutdown_forensics import (
-                format_context_for_log, snapshot_shutdown_context, spawn_async_diagnostic)
-            _shutdown_ctx = snapshot_shutdown_context(received_signal)
-        except Exception as _e:
-            _shutdown_ctx = None
-            logger.debug("snapshot_shutdown_context failed: %s", _e)
+        def _snapshot():
+            from gateway.shutdown_forensics import snapshot_shutdown_context
+            return snapshot_shutdown_context(received_signal)
+
+        planned_takeover = bool(_best_effort(_takeover, "Takeover marker check failed: %s"))
+        planned_stop = received_signal == signal.SIGINT or (
+            not planned_takeover and bool(_best_effort(_planned_stop, "Planned stop marker check failed: %s")))
+        _shutdown_ctx = _best_effort(_snapshot, "snapshot_shutdown_context failed: %s")
+        sig_name = _shutdown_ctx["signal"] if _shutdown_ctx else None
 
         if planned_takeover:
-            logger.info(
-                "Received %s as a planned --replace takeover — exiting cleanly",
-                _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM")
+            logger.info("Received %s as a planned --replace takeover — exiting cleanly", sig_name or "SIGTERM")
         elif planned_stop:
-            logger.info(
-                "Received %s as a planned gateway stop — exiting cleanly",
-                _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM/SIGINT")
+            logger.info("Received %s as a planned gateway stop — exiting cleanly", sig_name or "SIGTERM/SIGINT")
         else:
-            _signal_initiated_shutdown[0] = True
-            # Mirrored so _stop_impl suppresses the gateway_state=stopped persist for unexpected signals;
-            # operator stops take the `planned_stop` branch above and leave this False (DO persist).
-            runner._signal_initiated_shutdown = True
-            logger.info(
-                "Received %s — initiating shutdown",
-                _shutdown_ctx["signal"] if _shutdown_ctx else "SIGTERM/SIGINT")
+            # Mirrored onto the runner so _stop_impl suppresses the gateway_state=stopped persist for
+            # unexpected signals; operator stops take the `planned_stop` branch and leave it False (DO persist).
+            _signal_initiated_shutdown[0] = runner._signal_initiated_shutdown = True
+            logger.info("Received %s — initiating shutdown", sig_name or "SIGTERM/SIGINT")
 
-        # Always log who/what triggered the signal — the most useful line for "gateway keeps dying" tickets.
         if _shutdown_ctx is not None:
-            try:
-                logger.warning(
-                    "Shutdown context: %s", format_context_for_log(_shutdown_ctx))
-            except Exception as _e:
-                logger.debug("format_context_for_log failed: %s", _e)
+            def _log_context() -> None:
+                # The most useful line for "gateway keeps dying" tickets.
+                from gateway.shutdown_forensics import format_context_for_log
+                logger.warning("Shutdown context: %s", format_context_for_log(_shutdown_ctx))
 
-            # Spawn the heavyweight diagnostic (ps auxf, pstree, dmesg) detached so it can finish
-            # writing even if our cgroup is torn down; bounded by an internal timeout, never blocks.
-            try:
-                _diag_log = _hermes_home / "logs" / "gateway-shutdown-diag.log"
+            def _diagnostic() -> None:
+                # Heavyweight (ps auxf, pstree, dmesg), detached so it finishes even if our cgroup is torn
+                # down; bounded by an internal timeout, never blocks.
+                from gateway.shutdown_forensics import spawn_async_diagnostic
                 spawn_async_diagnostic(
-                    _diag_log, _shutdown_ctx["signal"], timeout_seconds=5.0)
-            except Exception as _e:
-                logger.debug("spawn_async_diagnostic failed: %s", _e)
+                    _hermes_home / "logs" / "gateway-shutdown-diag.log", _shutdown_ctx["signal"], timeout_seconds=5.0)
+
+            _best_effort(_log_context, "format_context_for_log failed: %s")
+            _best_effort(_diagnostic, "spawn_async_diagnostic failed: %s")
         asyncio.create_task(runner.stop())
     return shutdown_signal_handler
 
