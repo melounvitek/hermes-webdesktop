@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
-from plugins.memory.honcho.client import _host_block, profile_host_key, resolve_active_host, resolve_config_path, HOST
+from plugins.memory.honcho.client import _first_parsed, _host_block, profile_host_key, resolve_active_host, resolve_config_path, HOST
 from hermes_cli.config import cfg_get
 
 RULE = "─" * 40
@@ -511,11 +511,7 @@ def _apply_grant_to_host(hermes_host: dict, cred) -> None:
     hermes_host["oauth"] = cred.oauth_block()
     if cred.consent_peer_name:  # default the peer prompt to the consent name
         hermes_host["peerName"] = cred.consent_peer_name
-
-
-def _open_in_browser(url: str) -> None:
-    import webbrowser
-    webbrowser.open(url)
+    print("  Authorized — token saved. Let's finish configuring.\n")
 
 
 def _setup_local_auth(cfg: dict, hermes_host: dict) -> None:
@@ -553,10 +549,11 @@ def _setup_device_login(hermes_host: dict, write_path: Path, *, open_browser: bo
         print(f"  Waiting for approval (expires in {mins} min, Ctrl-C to cancel) ", end="", flush=True)
 
     print("\n  Requesting device code…")
+    import webbrowser
     try:
         cred = authorize_via_device_code(
             config_path=write_path, source="hermes-cli", apply_config=False, display=_show,
-            open_url=_open_in_browser if open_browser else None, on_poll=lambda: print(".", end="", flush=True),
+            open_url=webbrowser.open if open_browser else None, on_poll=lambda: print(".", end="", flush=True),
         )
     except KeyboardInterrupt:
         print("\n  Cancelled. Re-run 'hermes honcho setup' to try again.\n")
@@ -565,14 +562,11 @@ def _setup_device_login(hermes_host: dict, write_path: Path, *, open_browser: bo
     except AccessDenied:
         print("\n  Sign-in was denied on the approval page.\n" + _RETRY_HINT)
     except Exception as e:
-        if isinstance(e, DeviceFlowError) and e.error == "http_429":
-            print("\n  Too many device-code requests — wait a minute and re-run setup.\n")
-        else:
-            print(f"\n  Device sign-in failed: {e}\n" + _RETRY_HINT)
+        print("\n  Too many device-code requests — wait a minute and re-run setup.\n"
+              if isinstance(e, DeviceFlowError) and e.error == "http_429" else f"\n  Device sign-in failed: {e}\n" + _RETRY_HINT)
     else:
         print(" approved")
         _apply_grant_to_host(hermes_host, cred)
-        print("  Authorized — token saved. Let's finish configuring.\n")
         return True
     return False
 
@@ -581,10 +575,11 @@ def _setup_browser_login(hermes_host: dict, write_path: Path) -> bool:
     """Loopback OAuth sign-in. Tokens merge into the in-memory cfg so the wizard's final save
     keeps them; settings stay wizard-owned (apply_config=False). Returns False on abort."""
     from plugins.memory.honcho.oauth_flow import authorize_via_loopback
+    import webbrowser
 
     def _open(url: str) -> None:
         print(f"\n  Open this link to authorize (waiting up to 5 minutes):\n\n    {url}\n")
-        _open_in_browser(url)
+        webbrowser.open(url)
 
     print("\n  Starting browser sign-in…")
     try:
@@ -593,7 +588,6 @@ def _setup_browser_login(hermes_host: dict, write_path: Path) -> bool:
         print(f"  OAuth sign-in failed: {e}\n" + _RETRY_HINT)
         return False
     _apply_grant_to_host(hermes_host, cred)
-    print("  Authorized — token saved. Let's finish configuring.\n")
     return True
 
 
@@ -615,11 +609,9 @@ def _setup_cloud_auth(cfg: dict, hermes_host: dict, write_path: Path) -> bool:
 
     default_method = "oauth"
     if is_remote or not can_browse:
-        if device_available:
-            print("  (no usable local browser detected — device code recommended)")
-            default_method = "device"
-        else:
-            print("  (no usable local browser detected — browser sign-in may need an SSH tunnel to 127.0.0.1:8765)")
+        default_method = "device" if device_available else "oauth"
+        print("  (no usable local browser detected — device code recommended)" if device_available else
+              "  (no usable local browser detected — browser sign-in may need an SSH tunnel to 127.0.0.1:8765)")
     method = _prompt("oauth, device, or apikey?" if device_available else "OAuth or API key?",
                      default=default_method).strip().lower()
 
@@ -630,11 +622,11 @@ def _setup_cloud_auth(cfg: dict, hermes_host: dict, write_path: Path) -> bool:
     print(f"\n  Current API key: {_mask(cfg.get('apiKey', ''))}")
     if new_key := _prompt("Honcho API key (leave blank to keep current)", secret=True):
         cfg["apiKey"] = new_key
-    if not cfg.get("apiKey"):
-        print("\n  No API key configured. Get yours at https://app.honcho.dev\n"
-              "  Run 'hermes honcho setup' again once you have a key.\n")
-        return False
-    return True
+    if cfg.get("apiKey"):
+        return True
+    print("\n  No API key configured. Get yours at https://app.honcho.dev\n"
+          "  Run 'hermes honcho setup' again once you have a key.\n")
+    return False
 
 
 def _menu(header: str, *lines: str) -> None:
@@ -664,10 +656,7 @@ def _setup_tuning(cfg: dict, hermes_host: dict) -> None:
           "session -- batch write at session end only",
           "N       -- write every N turns (e.g. 5)")
     new_wf = _prompt("Write frequency", default=str(_pref(hermes_host, cfg, "writeFrequency", "async")))
-    try:
-        hermes_host["writeFrequency"] = int(new_wf)
-    except (ValueError, TypeError):
-        hermes_host["writeFrequency"] = new_wf if new_wf in {"async", "turn", "session"} else "async"
+    hermes_host["writeFrequency"] = _first_parsed([new_wf], int, new_wf if new_wf in {"async", "turn", "session"} else "async")
 
     _menu("Recall mode", *(f"{m:<7} -- {desc}" for m, desc in _MODES.items()))
     raw_recall = _pref(hermes_host, cfg, "recallMode", "hybrid")
@@ -680,24 +669,18 @@ def _setup_tuning(cfg: dict, hermes_host: dict) -> None:
     new_ctx_tokens = _prompt("Context tokens", default=str(current_ctx_tokens) if current_ctx_tokens else "uncapped").strip()
     if new_ctx_tokens.lower() in {"none", "uncapped", "no limit"}:
         hermes_host.pop("contextTokens", None)
-    elif new_ctx_tokens:
-        try:
-            val = int(new_ctx_tokens)
-        except (ValueError, TypeError):
-            val = -1  # non-numeric keeps current
-        if val >= 0:
-            hermes_host["contextTokens"] = val
+    elif new_ctx_tokens and (val := _first_parsed([new_ctx_tokens], int, -1)) >= 0:  # non-numeric keeps current
+        hermes_host["contextTokens"] = val
 
     _menu("Dialectic cadence",
           "How often Honcho rebuilds its user model (LLM call on Honcho backend).",
           "1 = every turn, 2 = every other turn, 3+ = sparser.",
           "Recommended: 1-5.")
     new_dialectic = _prompt("Dialectic cadence", default=str(_pref(hermes_host, cfg, "dialecticCadence") or "2"))
-    try:
-        if (val := int(new_dialectic)) >= 1:
-            hermes_host["dialecticCadence"] = val
-    except (ValueError, TypeError):
+    if (val := _first_parsed([new_dialectic], int, None)) is None:
         hermes_host["dialecticCadence"] = 2
+    elif val >= 1:
+        hermes_host["dialecticCadence"] = val
 
     _menu("Dialectic reasoning level",
           "Depth Honcho uses when synthesizing user context on auto-injected calls.",
@@ -844,18 +827,13 @@ def cmd_status(args) -> None:
     active_path = _config_path()
     write_path = _local_config_path()
     from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
-    if not cfg:  # config file missing — the env-var fallback may still yield a usable config
-        try:
-            _env_cfg = HonchoClientConfig.from_global_config(host=_host_key())
-            cfg = bool(_env_cfg.api_key or _env_cfg.base_url)
-        except Exception:
-            cfg = False
-        if not cfg:
-            return print(f"  No Honcho config found at {active_path}\n  Run 'hermes honcho setup' to configure.\n")
+    not_found = f"  No Honcho config found at {active_path}\n  Run 'hermes honcho setup' to configure.\n"
     try:
         hcfg = HonchoClientConfig.from_global_config(host=_host_key())
     except Exception as e:
-        return print(f"  Config error: {e}\n")
+        return print(not_found if not cfg else f"  Config error: {e}\n")
+    if not cfg and not (hcfg.api_key or hcfg.base_url):  # file missing and no env-var fallback either
+        return print(not_found)
 
     # The OAuth access token is also stored under apiKey, so the auth line
     # distinguishes a refreshable grant from a static key explicitly.
@@ -912,16 +890,13 @@ def _show_peer_cards(hcfg, client) -> None:
         mgr, session_key = _session_manager(hcfg, client)
         card = mgr.get_peer_card(session_key)
         if card:
-            print(f"\n  User peer card ({len(card)} facts):")
-            print("\n".join(f"    - {fact}" for fact in card[:10]))
+            print(f"\n  User peer card ({len(card)} facts):\n" + "\n".join(f"    - {fact}" for fact in card[:10]))
             if len(card) > 10:
                 print(f"    ... and {len(card) - 10} more")
         ai_text = mgr.get_ai_representation(session_key).get("representation", "")
         if ai_text:
             print(f"\n  AI peer representation:\n    {ai_text[:200] + ('...' if len(ai_text) > 200 else '')}")
-        if not card and not ai_text:
-            print("\n  No peer data yet (accumulates after first conversation)")
-        print()
+        print("" if card or ai_text else "\n  No peer data yet (accumulates after first conversation)\n")
     except Exception as e:
         print(f"\n  Peer data unavailable: {e}\n")
 
@@ -991,12 +966,27 @@ def cmd_map(args) -> None:
 
 # ── peer / mode / strategy / tokens ────────────────────────────────────────
 
+def _show_or_set_fields(args, fields: tuple, show) -> None:
+    """Shared body of ``peer`` / ``tokens``: with no flags, ``show(block, cfg)`` prints the
+    current values; otherwise each ``(attr, key, echo, valid)`` flag that is set is written
+    (an invalid value aborts before saving)."""
+    cfg = _read_config()
+    values = {attr: getattr(args, attr, None) for attr, _key, _echo, _valid in fields}
+    if all(v is None for v in values.values()):
+        return show(_active_block(cfg), cfg)
+    for attr, key, echo, valid in fields:
+        if (value := values[attr]) is None:
+            continue
+        if valid is not None and value not in valid:  # only --reasoning carries a choice set
+            return print(f"  Invalid reasoning level '{value}'. Options: {', '.join(valid)}")
+        value = value.strip() if isinstance(value, str) else value
+        _set_field(cfg, key, value, echo.format(value))
+    _save(cfg)
+
+
 def cmd_peer(args) -> None:
     """Show or update peer names and dialectic reasoning level."""
-    cfg = _read_config()
-    user_name, ai_name, reasoning = (getattr(args, k, None) for k in ("user", "ai", "reasoning"))
-    if user_name is None and ai_name is None and reasoning is None:
-        hermes = _active_block(cfg)
+    def show(hermes, cfg):
         print(f"""
 Honcho peers
 {RULE}
@@ -1009,17 +999,8 @@ Honcho peers
   Dialectic reasoning:  {_pref(hermes, cfg, 'dialecticReasoningLevel') or 'low'}  ({', '.join(REASONING_LEVELS)})
   Dialectic cap:        {_pref(hermes, cfg, 'dialecticMaxChars') or 600} chars
 """)
-        return
-
-    if user_name is not None:
-        _set_field(cfg, "peerName", user_name.strip(), f"User peer -> {user_name.strip()}")
-    if ai_name is not None:
-        _set_field(cfg, "aiPeer", ai_name.strip(), f"AI peer   -> {ai_name.strip()}")
-    if reasoning is not None:
-        if reasoning not in REASONING_LEVELS:
-            return print(f"  Invalid reasoning level '{reasoning}'. Options: {', '.join(REASONING_LEVELS)}")
-        _set_field(cfg, "dialecticReasoningLevel", reasoning, f"Dialectic reasoning level -> {reasoning}")
-    _save(cfg)
+    _show_or_set_fields(args, (("user", "peerName", "User peer -> {}", None), ("ai", "aiPeer", "AI peer   -> {}", None),
+                               ("reasoning", "dialecticReasoningLevel", "Dialectic reasoning level -> {}", REASONING_LEVELS)), show)
 
 
 def _show_or_set_choice(args, *, attr: str, key: str, noun: str, title: str, choices: dict,
@@ -1054,10 +1035,7 @@ def cmd_strategy(args) -> None:
 
 def cmd_tokens(args) -> None:
     """Show or set token budget settings."""
-    cfg = _read_config()
-    context, dialectic = getattr(args, "context", None), getattr(args, "dialectic", None)
-    if context is None and dialectic is None:
-        hermes = _active_block(cfg)
+    def show(hermes, cfg):
         print(f"""
 Honcho budgets
 {RULE}
@@ -1074,13 +1052,8 @@ Honcho budgets
 
   Set with: hermes honcho tokens [--context N] [--dialectic N]
 """)
-        return
-
-    if context is not None:
-        _set_field(cfg, "contextTokens", context, f"context tokens -> {context}")
-    if dialectic is not None:
-        _set_field(cfg, "dialecticMaxChars", dialectic, f"dialectic cap  -> {dialectic} chars")
-    _save(cfg)
+    _show_or_set_fields(args, (("context", "contextTokens", "context tokens -> {}", None),
+                               ("dialectic", "dialecticMaxChars", "dialectic cap  -> {} chars", None)), show)
 
 
 # ── identity / migrate ─────────────────────────────────────────────────────
