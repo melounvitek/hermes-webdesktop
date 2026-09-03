@@ -47,11 +47,8 @@ def __getattr__(name: str):
 
 def _resolve_requests_verify(base_url: str = "") -> bool | str:
     """SSL ``verify`` for ``requests`` probes; mirrors ``agent.ssl_verify.resolve_httpx_verify``.
-    Priority: per-provider ``ssl_verify: false`` -> per-provider ``ssl_ca_cert``
-    (otherwise probes log spurious CERTIFICATE_VERIFY_FAILED while the httpx
-    chat path succeeds) -> HERMES_CA_BUNDLE / REQUESTS_CA_BUNDLE / SSL_CERT_FILE
-    -> ``True`` (certifi). Callers without a ``base_url`` keep env-only behavior.
-    """
+    Priority: per-provider ``ssl_verify: false`` -> per-provider ``ssl_ca_cert`` (else probes log
+    spurious CERTIFICATE_VERIFY_FAILED while the httpx chat path succeeds) -> CA env vars -> certifi."""
     if base_url:
         try:
             from hermes_cli.config import get_custom_provider_tls_settings
@@ -89,10 +86,8 @@ _TAILSCALE_CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
 
 
 def _strip_provider_prefix(model: str) -> str:
-    """Strip a registry-known provider prefix: ``"local:m"`` -> ``"m"``.
-    Ollama ``model:tag`` ids are preserved even when the model half is a
-    provider name (``qwen:0.5b``, ``deepseek:latest``).
-    """
+    """Strip a registry-known provider prefix: ``"local:m"`` -> ``"m"``. Ollama ``model:tag``
+    ids are preserved even when the model half is a provider name (``qwen:0.5b``)."""
     if ":" not in model or model.startswith("http"):
         return model
     prefix, suffix = model.split(":", 1)
@@ -136,22 +131,19 @@ def _endpoint_host_key(base_url: str) -> Optional[str]:
     """``host:port`` key (None without a host) so every probe path for one server shares an entry."""
     try:
         parsed = _parse_base_url(base_url)
-        if parsed is None:
+        if parsed is None or not parsed.hostname:
             return None
-        host = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return f"{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}"
     except Exception:
         return None
-    return f"{host}:{port}" if host else None
 
 
 def _note_endpoint_blackholed(base_url: str) -> None:
     """Record that a probe to ``base_url`` timed out during TCP connect."""
     key = _endpoint_host_key(base_url)
-    if key is None:
-        return
-    _endpoint_blackhole_cache[key] = time.monotonic()
-    logger.debug("Endpoint %s timed out connecting — skipping further probes for %.0fs", key, _ENDPOINT_BLACKHOLE_TTL_SECONDS)
+    if key is not None:
+        _endpoint_blackhole_cache[key] = time.monotonic()
+        logger.debug("Endpoint %s timed out connecting — skipping further probes for %.0fs", key, _ENDPOINT_BLACKHOLE_TTL_SECONDS)
 
 
 def _endpoint_blackholed(base_url: str) -> bool:
@@ -175,19 +167,12 @@ def _note_if_connect_timeout(exc: BaseException, base_url: str) -> None:
 
 
 def _is_connect_timeout(exc: BaseException) -> bool:
-    """True for connect-phase timeouts raised by httpx or requests.
-    Read timeouts are deliberately excluded: those mean the server accepted
-    the connection, which is the opposite of the blackhole this guards.
-    """
+    """True for connect-phase timeouts raised by httpx or requests. Read timeouts are
+    excluded: the server accepted the connection, the opposite of a blackhole."""
     try:
         import httpx
-        if isinstance(exc, httpx.ConnectTimeout):
-            return True
-    except Exception:
-        pass
-    try:
         from requests.exceptions import ConnectTimeout
-        return isinstance(exc, ConnectTimeout)
+        return isinstance(exc, (httpx.ConnectTimeout, ConnectTimeout))
     except Exception:
         return False
 
@@ -225,16 +210,11 @@ def _ttl_memo_get(path: Path, key: str, ttl: float, *, ts_key: str, value_key: s
         return None
 
 
-def _ttl_memo_put(
-    path: Path, key: str, value: Any, ttl: float, *, ts_key: str, value_key: str, what: str, ts_first: bool = False,
-) -> None:
+def _ttl_memo_put(path: Path, key: str, value: Any, ttl: float, *, ts_key: str, value_key: str, what: str, ts_first: bool = False) -> None:
     """Write ``key`` into a TTL memo file, dropping expired siblings. Best-effort."""
     try:
         now = time.time()
-        data = {
-            k: v for k, v in _load_json_dict(path).items()
-            if isinstance(v, dict) and (now - float(v.get(ts_key, 0))) < ttl
-        }
+        data = {k: v for k, v in _load_json_dict(path).items() if isinstance(v, dict) and (now - float(v.get(ts_key, 0))) < ttl}
         data[key] = {ts_key: now, value_key: value} if ts_first else {value_key: value, ts_key: now}
         atomic_json_write(path, data, indent=0, separators=(",", ":"))
     except Exception as e:
@@ -247,18 +227,12 @@ def _local_probe_disk_cache_path() -> Path:
 
 def _local_probe_disk_get(kind: str, key: str) -> Optional[Any]:
     """Return a fresh cached value for ``kind:key``, else None."""
-    return _ttl_memo_get(
-        _local_probe_disk_cache_path(), f"{kind}:{key}", _LOCAL_PROBE_DISK_TTL_SECONDS,
-        ts_key="ts", value_key="value",
-    )
+    return _ttl_memo_get(_local_probe_disk_cache_path(), f"{kind}:{key}", _LOCAL_PROBE_DISK_TTL_SECONDS, ts_key="ts", value_key="value")
 
 
 def _local_probe_disk_put(kind: str, key: str, value: Any) -> None:
     """Persist a successful probe result. Best-effort; prunes stale entries."""
-    _ttl_memo_put(
-        _local_probe_disk_cache_path(), f"{kind}:{key}", value, _LOCAL_PROBE_DISK_TTL_SECONDS,
-        ts_key="ts", value_key="value", what="local probe disk cache",
-    )
+    _ttl_memo_put(_local_probe_disk_cache_path(), f"{kind}:{key}", value, _LOCAL_PROBE_DISK_TTL_SECONDS, ts_key="ts", value_key="value", what="local probe disk cache")
 
 
 def _get_model_metadata_cache_path() -> Path:
@@ -280,9 +254,7 @@ def _load_model_metadata_disk_cache() -> Dict[str, Dict[str, Any]]:
     try:
         with _get_model_metadata_cache_path().open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        return {str(key): value for key, value in data.items() if isinstance(value, dict)}
+        return {str(key): value for key, value in data.items() if isinstance(value, dict)} if isinstance(data, dict) else {}
     except Exception as e:
         logger.debug("Failed to load OpenRouter model metadata disk cache: %s", e)
         return {}
@@ -301,15 +273,10 @@ def _get_endpoint_metadata_cache_path() -> Path:
 
 
 def _endpoint_disk_cache_get(normalized: str) -> Optional[Dict[str, Dict[str, Any]]]:
-    """Fresh cross-process memo of a remote ``/models`` probe (same TTL as in-memory).
-    One-shot runs (``hermes -q``, cron, Bot Mode hops) start cold and Nous bypasses
-    the persistent context cache, so without this every launch paid the live probe.
-    Local endpoints are never memoized (transient loaded context).
-    """
-    models = _ttl_memo_get(
-        _get_endpoint_metadata_cache_path(), normalized, _ENDPOINT_MODEL_CACHE_TTL,
-        ts_key="at", value_key="models",
-    )
+    """Fresh cross-process memo of a remote ``/models`` probe (same TTL as in-memory): one-shot
+    runs (``hermes -q``, cron) start cold and Nous bypasses the persistent context cache, so
+    without this every launch paid the live probe. Local endpoints are never memoized."""
+    models = _ttl_memo_get(_get_endpoint_metadata_cache_path(), normalized, _ENDPOINT_MODEL_CACHE_TTL, ts_key="at", value_key="models")
     return models if isinstance(models, dict) else None
 
 
@@ -317,8 +284,7 @@ def _endpoint_disk_cache_put(normalized: str, cache: Dict[str, Dict[str, Any]]) 
     """Memoize a successful remote ``/models`` probe; expired siblings are dropped."""
     _ttl_memo_put(
         _get_endpoint_metadata_cache_path(), normalized, cache, _ENDPOINT_MODEL_CACHE_TTL,
-        ts_key="at", value_key="models", what="endpoint model metadata disk cache", ts_first=True,
-    )
+        ts_key="at", value_key="models", what="endpoint model metadata disk cache", ts_first=True)
 
 
 # Descending probe tiers for unknown models; tier[0] is also the default fallback.
@@ -331,14 +297,13 @@ def _warn_context_length_fallback(model: str, base_url: str) -> None:
     """Warn once per model+endpoint that detection failed and the hard default is used,
     so small-context models (8K, 32K) don't silently get 256K and fail at the API."""
     key = (model, base_url or "")
-    if key in _FALLBACK_WARNED:
-        return
-    _FALLBACK_WARNED.add(key)
-    logger.warning(
-        "Could not determine context length for model %r (base_url=%s) — falling back to %s tokens. "
-        "Set model.context_length in config.yaml to override.",
-        model, base_url or "default", f"{DEFAULT_FALLBACK_CONTEXT:,}",
-    )
+    if key not in _FALLBACK_WARNED:
+        _FALLBACK_WARNED.add(key)
+        logger.warning(
+            "Could not determine context length for model %r (base_url=%s) — falling back to %s tokens. "
+            "Set model.context_length in config.yaml to override.",
+            model, base_url or "default", f"{DEFAULT_FALLBACK_CONTEXT:,}",
+        )
 
 
 # Sessions, model switches and cron jobs reject models below this (too little working memory).
@@ -514,10 +479,8 @@ def _server_root(base_url: str) -> str:
 
 
 def _longest_key_match(table: Dict[str, int], model_lower: str) -> Optional[Tuple[str, int]]:
-    """First ``(key, value)`` whose key is a substring of ``model_lower``, longest key first.
-    Longest-first makes specific entries (``gpt-5.4-mini``) win over their
-    family catch-all (``gpt-5``); ties keep table order (stable sort).
-    """
+    """First ``(key, value)`` whose key is a substring of ``model_lower``, longest key first so
+    specific entries (``gpt-5.4-mini``) beat their family catch-all (``gpt-5``); ties keep table order."""
     for key, value in sorted(table.items(), key=lambda x: len(x[0]), reverse=True):
         if key in model_lower:
             return key, value
@@ -525,12 +488,9 @@ def _longest_key_match(table: Dict[str, int], model_lower: str) -> Optional[Tupl
 
 
 def _ollama_show_context(data: Dict[str, Any], *, gguf_first: bool, minimum: Optional[int] = None) -> Optional[int]:
-    """Context length from an Ollama ``/api/show`` payload.
-    ``parameters.num_ctx`` is the RUNTIME window (Modelfile override) and
-    ``model_info.*.context_length`` the GGUF training max, which can exceed it.
-    Local users control num_ctx (prefer it); hosted operators may cap it
-    arbitrarily (``gguf_first``).
-    """
+    """Context length from an Ollama ``/api/show`` payload. ``parameters.num_ctx`` is the RUNTIME
+    window (Modelfile override), ``model_info.*.context_length`` the GGUF training max. Local users
+    control num_ctx (prefer it); hosted operators may cap it arbitrarily (``gguf_first``)."""
     def _num_ctx():
         for line in data.get("parameters", "").split("\n"):
             parts = line.strip().split()
@@ -558,35 +518,24 @@ _ENDPOINT_SCOPED_CONTEXT = (
 
 
 def _endpoint_scoped_context_length(model: str, base_url: str) -> Optional[int]:
-    """Context confirmed for one provider endpoint only (see _ENDPOINT_SCOPED_CONTEXT).
-    Kimi Coding serves K3 at 1 Mi only on the canonical ``api.kimi.com/coding`` host
-    (legacy Moonshot keys do not); NVIDIA NIM serves deepseek-v4-pro at 262,144
-    while DeepSeek's native endpoint is 1M — the lower limit stays scoped to NVIDIA.
-    """
+    """Context confirmed for one provider endpoint only (see _ENDPOINT_SCOPED_CONTEXT): Kimi Coding
+    serves K3 at 1 Mi only on the canonical ``api.kimi.com/coding`` host (legacy Moonshot keys do
+    not); NVIDIA NIM serves deepseek-v4-pro at 262,144 while DeepSeek's native endpoint is 1M."""
     try:
         parsed = urlparse(_normalize_base_url(base_url))
         port = parsed.port
     except ValueError:
         return None
     # Only canonical https://host[:443]/path with no credentials/query/fragment.
-    if (
-        parsed.scheme.lower() != "https" or port not in (None, 443)
-        or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
-    ):
+    if parsed.scheme.lower() != "https" or port not in (None, 443) or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment:
         return None
-    host = (parsed.hostname or "").lower()
-    path = parsed.path.rstrip("/")
-    model_key = model.strip().lower()
-    for scoped_host, paths, models, ctx in _ENDPOINT_SCOPED_CONTEXT:
-        if host == scoped_host and path in paths and model_key in models:
-            return ctx
-    return None
+    host, path, model_key = (parsed.hostname or "").lower(), parsed.path.rstrip("/"), model.strip().lower()
+    return next((ctx for scoped_host, paths, models, ctx in _ENDPOINT_SCOPED_CONTEXT if host == scoped_host and path in paths and model_key in models), None)
 
 
 def _skip_persistent_context_cache(base_url: str, provider: str) -> bool:
-    """Providers whose on-disk context cache must not short-circuit probing: LM Studio
-    (loaded context is transient) and Codex OAuth (entitlement-specific window; a
-    persisted fallback would suppress revalidation)."""
+    """Providers whose disk context cache must not short-circuit probing: LM Studio (loaded
+    context is transient), Codex OAuth (entitlement-specific window; a persisted fallback would suppress revalidation)."""
     return (provider or "").strip().lower() in {"lmstudio", "openai-codex"}
 
 
@@ -597,10 +546,8 @@ def _save_unless_skipped(model: str, base_url: str, ctx: int, provider: str) -> 
 
 
 def _maybe_cache_local_context_length(model: str, base_url: str, length: int) -> None:
-    """Persist a probed local window only at/above MINIMUM_CONTEXT_LENGTH.
-    Sub-minimum windows are still returned so agent_init can reject them, but
-    must not be blessed into the on-disk cache as valid operating limits.
-    """
+    """Persist a probed local window only at/above MINIMUM_CONTEXT_LENGTH: sub-minimum windows are
+    still returned so agent_init can reject them, but must not be blessed into the disk cache."""
     if length >= MINIMUM_CONTEXT_LENGTH:
         save_context_length(model, base_url, length)
 
@@ -608,11 +555,11 @@ def _maybe_cache_local_context_length(model: str, base_url: str, length: int) ->
 def _probe_local_context_length(model: str, base_url: str, api_key: str, provider: str) -> Optional[int]:
     """Live local probe; persists a positive result unless the provider opts out of the disk cache."""
     local_ctx = _query_local_context_length(model, base_url, api_key=api_key)
-    if local_ctx and local_ctx > 0:
-        if not _skip_persistent_context_cache(base_url, provider):
-            _maybe_cache_local_context_length(model, base_url, local_ctx)
-        return local_ctx
-    return None
+    if not (local_ctx and local_ctx > 0):
+        return None
+    if not _skip_persistent_context_cache(base_url, provider):
+        _maybe_cache_local_context_length(model, base_url, local_ctx)
+    return local_ctx
 
 
 def _reconcile_local_cached_context_length(model: str, base_url: str, cached: int, api_key: str = "") -> int:
@@ -623,15 +570,12 @@ def _reconcile_local_cached_context_length(model: str, base_url: str, cached: in
     if not (live_ctx and live_ctx > 0 and live_ctx != cached):
         return cached
     if live_ctx < MINIMUM_CONTEXT_LENGTH:
-        logger.info(
-            "Live local probe for %s@%s reports %s (< minimum %s); invalidating stale cache — agent init should reject",
-            model, base_url, f"{live_ctx:,}", f"{MINIMUM_CONTEXT_LENGTH:,}",
-        )
-        _invalidate_cached_context_length(model, base_url)
-        return live_ctx
-    logger.info("Reconciling stale local cache entry %s@%s: %s -> %s (live probe)", model, base_url, f"{cached:,}", f"{live_ctx:,}")
+        logger.info("Live local probe for %s@%s reports %s (< minimum %s); invalidating stale cache — agent init should reject", model, base_url, f"{live_ctx:,}", f"{MINIMUM_CONTEXT_LENGTH:,}")
+    else:
+        logger.info("Reconciling stale local cache entry %s@%s: %s -> %s (live probe)", model, base_url, f"{cached:,}", f"{live_ctx:,}")
     _invalidate_cached_context_length(model, base_url)
-    _maybe_cache_local_context_length(model, base_url, live_ctx)
+    if live_ctx >= MINIMUM_CONTEXT_LENGTH:
+        _maybe_cache_local_context_length(model, base_url, live_ctx)
     return live_ctx
 
 
@@ -641,22 +585,17 @@ def is_local_endpoint(base_url: str) -> bool:
     the same timeout auto-bumps as localhost)."""
     try:
         parsed = _parse_base_url(base_url)
-        if parsed is None:
-            return False
-        host = parsed.hostname or ""
+        host = parsed.hostname or "" if parsed is not None else None
     except Exception:
         return False
-    if host in _LOCAL_HOSTS or any(host.endswith(suffix) for suffix in _CONTAINER_LOCAL_SUFFIXES):
-        return True
-    # Unqualified hostnames (no dots) are local by definition — Docker
-    # Compose service names, /etc/hosts entries, or mDNS names.
-    if host and "." not in host:
+    if host is None:
+        return False
+    # Unqualified hostnames (no dots) are local by definition — Docker Compose service names, /etc/hosts entries, mDNS.
+    if host in _LOCAL_HOSTS or host.endswith(_CONTAINER_LOCAL_SUFFIXES) or (host and "." not in host):
         return True
     try:
         addr = ipaddress.ip_address(host)
-        if addr.is_private or addr.is_loopback or addr.is_link_local:
-            return True
-        if isinstance(addr, ipaddress.IPv4Address) and addr in _TAILSCALE_CGNAT:
+        if addr.is_private or addr.is_loopback or addr.is_link_local or (isinstance(addr, ipaddress.IPv4Address) and addr in _TAILSCALE_CGNAT):
             return True
     except ValueError:
         pass
@@ -673,9 +612,8 @@ def is_local_endpoint(base_url: str) -> bool:
 
 
 def _localhost_to_ipv4(url: str) -> str:
-    """``localhost`` HOST -> ``127.0.0.1`` (Windows dual-stack resolves ::1 first and pays
-    a ~2s IPv6 connect timeout on IPv4-only servers). Anchored at the scheme so an
-    embedded ``?upstream=http://localhost`` is untouched."""
+    """``localhost`` HOST -> ``127.0.0.1`` (Windows dual-stack resolves ::1 first and pays a ~2s IPv6
+    connect timeout on IPv4-only servers). Scheme-anchored so ``?upstream=http://localhost`` is untouched."""
     if not url or not isinstance(url, str):
         return url  # non-string values (test doubles, lazy config) pass through
     return re.sub(r"^(https?://)localhost(?=[:/]|$)", r"\g<1>127.0.0.1", url, count=1)
@@ -684,16 +622,13 @@ def _localhost_to_ipv4(url: str) -> str:
 def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     """Probe known endpoints: "ollama", "lm-studio", "vllm", "llamacpp", or None (TTL-cached)."""
     import httpx
-    # IPv4-resolve BEFORE deriving server/LM Studio URLs and the cache lookup,
-    # so localhost and 127.0.0.1 share a cache entry.
+    # IPv4-resolve BEFORE deriving server/LM Studio URLs and the cache lookup, so localhost and 127.0.0.1 share a cache entry.
     normalized = _localhost_to_ipv4(_normalize_base_url(base_url))
     server_url = _server_root(normalized)
     lmstudio_url = _lmstudio_server_root(normalized)
     cached = _endpoint_probe_path_cache.get(server_url)
-    if cached is not None:
-        ttl = _ENDPOINT_PROBE_TTL_SECONDS if cached[0] is not None else _ENDPOINT_PROBE_FAILURE_TTL_SECONDS
-        if (time.monotonic() - cached[1]) < ttl:
-            return cached[0]
+    if cached is not None and (time.monotonic() - cached[1]) < (_ENDPOINT_PROBE_TTL_SECONDS if cached[0] is not None else _ENDPOINT_PROBE_FAILURE_TTL_SECONDS):
+        return cached[0]
     # Blackholed host: skip the waterfall. Deliberately NOT written to the
     # hour-long verdict cache, which would pin "undetected" after it comes back.
     if _endpoint_blackholed(server_url):
@@ -702,9 +637,8 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     if isinstance(disk_hit, str):
         _endpoint_probe_path_cache[server_url] = (disk_hit, time.monotonic())
         return disk_hit
-    # Most specific first. (name, paths tried until one answers 200, body check). LM Studio
-    # answers /api/tags with {"error": ...} and 200, so Ollama's body must carry "models";
-    # older llama.cpp builds have no /v1 prefix.
+    # Most specific first: (name, paths tried until one answers 200, body check). LM Studio answers /api/tags
+    # with {"error": ...} and 200, so Ollama's body must carry "models"; older llama.cpp builds have no /v1 prefix.
     waterfall = (
         ("lm-studio", (f"{lmstudio_url}/api/v1/models",), lambda r: True),
         ("ollama", (f"{server_url}/api/tags",), lambda r: "models" in r.json()),
@@ -748,12 +682,10 @@ def _iter_nested_dicts(value: Any):
 
 
 def _coerce_reasonable_int(value: Any, minimum: int = 1024, maximum: int = 10_000_000) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
     try:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, str):
-            value = value.strip().replace(",", "")
-        result = int(value)
+        result = int(value.strip().replace(",", "") if isinstance(value, str) else value)
     except (TypeError, ValueError):
         return None
     return result if minimum <= result <= maximum else None
@@ -771,40 +703,27 @@ def _extract_first_int(payload: Dict[str, Any], keys: tuple[str, ...]) -> Option
 
 
 def _extract_flat_context_length(payload: Dict[str, Any]) -> Optional[int]:
-    """Top-level-only context WINDOW read (no nested walk, so an unrelated nested
-    section can't leak a same-named key). ``max_tokens`` is deliberately NOT a
-    window key: on OpenAI-compatible passthroughs it is the max OUTPUT."""
-    for key in _CONTEXT_LENGTH_KEYS:
-        coerced = _coerce_reasonable_int(payload.get(key))
-        if coerced is not None:
-            return coerced
-    return None
+    """Top-level-only context WINDOW read (no nested walk, so an unrelated nested section can't leak
+    a same-named key). ``max_tokens`` is NOT a window key: on OpenAI-compatible passthroughs it is the max OUTPUT."""
+    return next((c for c in map(_coerce_reasonable_int, (payload.get(k) for k in _CONTEXT_LENGTH_KEYS)) if c is not None), None)
 
 
 def _context_length_from_model_payload(payload: Dict[str, Any]) -> Optional[int]:
-    """Context window from a ``/v1/models`` object: window keys first, ``max_tokens`` last
-    (Anthropic payloads carry ``max_input_tokens`` = 1M window AND ``max_tokens`` = 128k
-    OUTPUT cap; reading max_tokens first would fire the compressor at 75% of 128k)."""
+    """Context window from a ``/v1/models`` object: window keys first, ``max_tokens`` last (Anthropic
+    payloads carry ``max_input_tokens`` = 1M window AND ``max_tokens`` = 128k OUTPUT cap)."""
     if not isinstance(payload, dict):
         return None
     ctx = _extract_flat_context_length(payload)
     if ctx is not None:
         return ctx
     raw = payload.get("max_tokens")
-    if isinstance(raw, (int, float)) and int(raw) > 0:
-        return int(raw)
-    return None
+    return int(raw) if isinstance(raw, (int, float)) and int(raw) > 0 else None
 
 
 def _extract_pricing(payload: Dict[str, Any]) -> Dict[str, Any]:
     def _per_token(source: Dict[str, Any], fields: Dict[str, str], scale) -> Dict[str, Any]:
-        # Provider $/MTok (or Novita's 1/10_000-$ per M) -> per-token strings so
-        # usage_pricing consumes them through the same path as OpenRouter.
-        return {
-            target: str(scale(float(source[key])))
-            for target, key in fields.items()
-            if source.get(key) is not None
-        }
+        # Provider $/MTok (or Novita's 1/10_000-$ per M) -> per-token strings, the same path usage_pricing uses for OpenRouter.
+        return {target: str(scale(float(source[key]))) for target, key in fields.items() if source.get(key) is not None}
     novita_fields = {"prompt": "input_token_price_per_m", "completion": "output_token_price_per_m"}
     if any(payload.get(k) is not None for k in novita_fields.values()):
         return _per_token(payload, novita_fields, lambda v: v / 10_000 / 1_000_000)
@@ -843,9 +762,9 @@ def _add_model_aliases(cache: Dict[str, Dict[str, Any]], model_id: str, entry: D
 def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
     """Fetch model metadata from OpenRouter (cached for 1 hour)."""
     global _model_metadata_cache, _model_metadata_cache_time
-    if not force_refresh and _model_metadata_cache and (time.time() - _model_metadata_cache_time) < _MODEL_CACHE_TTL:
-        return _model_metadata_cache
     if not force_refresh:
+        if _model_metadata_cache and (time.time() - _model_metadata_cache_time) < _MODEL_CACHE_TTL:
+            return _model_metadata_cache
         disk_age = _model_metadata_disk_cache_age_seconds()
         if disk_age is not None and disk_age < _MODEL_CACHE_TTL:
             disk_cache = _load_model_metadata_disk_cache()
@@ -855,8 +774,7 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
                 return _model_metadata_cache
     try:
         _ensure_requests()
-        # (connect, read) tuple: a flat timeout lets urllib3 block per retry
-        # stage through proxies that 403 CONNECT, ballooning to minutes.
+        # (connect, read) tuple: a flat timeout lets urllib3 block per retry stage through proxies that 403 CONNECT.
         response = requests.get(OPENROUTER_MODELS_URL, timeout=(5, 10), verify=_resolve_requests_verify())
         response.raise_for_status()
         cache = {}
@@ -865,13 +783,11 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
             entry = {
                 "context_length": model.get("context_length", 128000),
                 "max_completion_tokens": model.get("top_provider", {}).get("max_completion_tokens", 4096),
-                "name": model.get("name", model_id),
-                "pricing": model.get("pricing", {}),
+                "name": model.get("name", model_id), "pricing": model.get("pricing", {}),
             }
-            _add_model_aliases(cache, model_id, entry)
             canonical = model.get("canonical_slug", "")
-            if canonical and canonical != model_id:
-                _add_model_aliases(cache, canonical, entry)
+            for alias in ((model_id, canonical) if canonical and canonical != model_id else (model_id,)):
+                _add_model_aliases(cache, alias, entry)
         _model_metadata_cache = cache
         _model_metadata_cache_time = time.time()
         _save_model_metadata_disk_cache(cache)
@@ -893,14 +809,8 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
 
 def _endpoint_model_entry(model: Dict[str, Any], model_id: str, context_length: Optional[int]) -> Dict[str, Any]:
     """Cache entry for one ``/models`` item; optional keys are set only when known."""
-    optional = (
-        ("context_length", context_length),
-        ("max_completion_tokens", _extract_first_int(model, _MAX_COMPLETION_KEYS)),
-        ("pricing", _extract_pricing(model) or None),
-    )
-    entry: Dict[str, Any] = {"name": model.get("name", model_id)}
-    entry.update((k, v) for k, v in optional if v is not None)
-    return entry
+    optional = (("context_length", context_length), ("max_completion_tokens", _extract_first_int(model, _MAX_COMPLETION_KEYS)), ("pricing", _extract_pricing(model) or None))
+    return {"name": model.get("name", model_id), **{k: v for k, v in optional if v is not None}}
 
 
 def _lmstudio_loaded_context(model: Dict[str, Any]) -> Optional[int]:
@@ -915,16 +825,11 @@ def _lmstudio_loaded_context(model: Dict[str, Any]) -> Optional[int]:
 
 def _lmstudio_native_models(normalized: str, headers: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     """LM Studio ``/api/v1/models`` → cache; context comes from the first loaded instance."""
-    response = requests.get(
-        _lmstudio_server_root(normalized).rstrip("/") + "/api/v1/models",
-        headers=headers, timeout=(5, 10), verify=_resolve_requests_verify(normalized),
-    )
+    response = requests.get(_lmstudio_server_root(normalized).rstrip("/") + "/api/v1/models", headers=headers, timeout=(5, 10), verify=_resolve_requests_verify(normalized))
     response.raise_for_status()
     cache: Dict[str, Dict[str, Any]] = {}
     for model in response.json().get("models", []):
-        if not isinstance(model, dict):
-            continue
-        model_id = model.get("key") or model.get("id")
+        model_id = (model.get("key") or model.get("id")) if isinstance(model, dict) else None
         if not model_id:
             continue
         entry = _endpoint_model_entry(model, model_id, _lmstudio_loaded_context(model))
@@ -936,10 +841,9 @@ def _lmstudio_native_models(normalized: str, headers: Dict[str, str]) -> Dict[st
 
 
 def _apply_llamacpp_props(cache: Dict[str, Dict[str, Any]], request_candidate: str, headers: Dict[str, str], verify) -> None:
-    """Overwrite ``context_length`` with llama.cpp's allocated ``n_ctx`` from /props
-    (``/v1/props`` first, ``/props`` for older builds). In router mode the bare endpoint
-    400s, so each LOADED child is read via ``/props?model=``; unloaded children are
-    skipped — probing could autoload them."""
+    """Overwrite ``context_length`` with llama.cpp's allocated ``n_ctx`` from /props (``/v1/props``, then
+    ``/props`` for older builds). In router mode the bare endpoint 400s, so each LOADED child is read
+    via ``/props?model=``; unloaded children are skipped — probing could autoload them."""
     base = request_candidate.rstrip("/").replace("/v1", "")
     def _props(params=None):
         resp = requests.get(base + "/v1/props", params=params, headers=headers, timeout=5, verify=verify)
@@ -951,8 +855,7 @@ def _apply_llamacpp_props(cache: Dict[str, Dict[str, Any]], request_candidate: s
     props_resp = _props()
     if props_resp.ok:
         props = props_resp.json()
-        n_ctx = _n_ctx(props)
-        model_alias = props.get("model_alias", "")
+        n_ctx, model_alias = _n_ctx(props), props.get("model_alias", "")
         if n_ctx and model_alias and model_alias in cache:
             cache[model_alias]["context_length"] = n_ctx
         return
@@ -960,17 +863,13 @@ def _apply_llamacpp_props(cache: Dict[str, Dict[str, Any]], request_candidate: s
     if not native.ok:
         return
     for child in (native.json() or {}).get("data", [])[:16]:
-        if not isinstance(child, dict):
-            continue
-        child_id = child.get("id")
-        status = (child.get("status") or {}).get("value")
-        if not child_id or child_id not in cache or status not in ("loaded", "ready"):
+        child_id = child.get("id") if isinstance(child, dict) else None
+        if not child_id or child_id not in cache or (child.get("status") or {}).get("value") not in ("loaded", "ready"):
             continue
         pr = _props({"model": child_id})
-        if pr.ok:
-            child_ctx = _n_ctx(pr.json())
-            if child_ctx:
-                cache[child_id]["context_length"] = child_ctx
+        child_ctx = _n_ctx(pr.json()) if pr.ok else None
+        if child_ctx:
+            cache[child_id]["context_length"] = child_ctx
 
 
 def _remember_endpoint_models(normalized: str, cache: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
