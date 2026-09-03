@@ -33,6 +33,15 @@ logger = logging.getLogger("hermes_state")
 _REPAIR_LOCK_POLL_SECONDS = 0.1
 # Snapshot copies are data transfer, not locking: bounded separately at 10 MiB/s (historical two-minute floor).
 _REPAIR_SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SECOND = 10 * 1024 * 1024
+# ── Repair-loop bounding + dead-backup hygiene (#86747) ───────────────────── ``_claim_repair_attempt``
+# above is an in-memory set: it bounds the loop only WITHIN one process. A corruption class the strategies
+# cannot heal (b-tree page damage) failed repair on EVERY process start, and each pass took a fresh ~900MB
+# forensic backup — 105 attempts / 89GB of identical dead copies in the reporting install. Two persistent
+# bounds fix the class: * a sidecar attempt ledger (``<db>.repair-attempts.json``) that refuses further
+# surgery after ``_MAX_PERSISTENT_REPAIR_ATTEMPTS`` failures on the SAME damaged file (fingerprint = size +
+# a bounded content sample; any successful repair or replacement changes it and resets the count); * backup
+# dedupe + a retention cap in ``_backup_db_file`` — an identical damaged file is never copied twice, and
+# only the newest ``_MAX_MALFORMED_BACKUPS`` forensic copies are kept.
 _MAX_PERSISTENT_REPAIR_ATTEMPTS = 3
 _MAX_MALFORMED_BACKUPS = 3
 # Sidecars copied with a damaged DB and pruned with it. ``-journal``: DELETE mode (the NFS/SMB/FUSE/ZFS and
@@ -48,6 +57,10 @@ _FINGERPRINT_VOLATILE_HEADER_RANGES = ((24, 28), (92, 96))
 # Headroom for the forensic backup (a full raw copy; a repair loop on a large state.db is a disk amplifier).
 # Proportional, not a flat multi-GB floor: a refused backup is a HARD STOP, and a big reserve would make repair
 # never run on small volumes.
+# The backup is a full raw copy of the damaged DB (plus its -wal/-shm sidecars), so a repair loop on a large
+# state.db is a disk amplifier: the reporting incident wrote ~98MB every ~10s until the volume was nearly
+# full, which would have taken down every agent on the host. Require the copy itself plus a small slice of
+# the volume, clamped to a modest floor. See #69603.
 _REPAIR_BACKUP_MIN_FREE_BYTES = 256 * 1024 * 1024  # 256 MiB absolute floor
 _REPAIR_BACKUP_FREE_FRACTION = 0.02  # plus 2% of the volume
 _FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
@@ -156,7 +169,12 @@ def _cross_process_repair_lock(db_path: Path):
     repair); a forked child inheriting the fd is the exception, so the acquire records pid + start time and
     breaks a provably dead holder's lock. Bounded because a live repairer can sit in ``VACUUM`` for minutes.
     An unopenable lock file (no space/inodes/descriptors) fails closed too: a sibling that opened ITS handle
-    before the disk filled may be inside surgery."""
+    before the disk filled may be inside surgery.
+
+    The acquire is still bounded because a *live* repairer can legitimately sit in ``VACUUM`` for minutes on
+    a large DB, and an unbounded wait would hang the caller's open with no traceback (the failure shape of
+    #36644).
+    """
     from hermes_state import _IS_WINDOWS, _REPAIR_LOCK_TIMEOUT_SECONDS
     lock_path, handle = _open_lock_file(
         db_path, ".repair.lock", "repair", "skipping schema surgery rather than running it without cross-process authority.")
@@ -329,7 +347,10 @@ def _backup_content_identity(db_path: Path) -> "Optional[str]":
     size and both 64 KiB slices — reusing a backup on that basis hands the operator a snapshot predating real
     user data. A forensic copy must claim byte identity, so this digests the ENTIRE main file plus every
     present sidecar (the WAL can hold uncheckpointed frames). ``None`` when a live connection makes the read
-    unsafe (:func:`_read_offline`) — the caller then takes a fresh backup, never a false reuse."""
+    unsafe (:func:`_read_offline`) — the caller then takes a fresh backup, never a false reuse.
+
+    See #87409.
+    """
     def _digest() -> str:
         hasher = hashlib.sha256()
         members = [("main", db_path), *((sfx, p) for sfx, p in zip(_DB_SIDECAR_SUFFIXES, _sidecars(db_path)) if p.exists())]
@@ -465,7 +486,10 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
     partials, deleted intact copies) and dedupe could return one with no real forensic copy on disk.
 
     Refusal reasons (``_backup_free_space_error`` / ``_MANUAL_RECOVER_HINT``) point operators at the safe lane,
-    `hermes sessions recover --source <db> --inspect-only`, never at a raw sqlite3 shell on the live file."""
+    `hermes sessions recover --source <db> --inspect-only`, never at a raw sqlite3 shell on the live file.
+
+    See #69603.
+    """
     with contextlib.suppress(ImportError):  # scaffold/embed installs without hermes_cli track no connections
         from hermes_cli.sqlite_safe_read import has_live_connection
         if has_live_connection(db_path):
@@ -498,6 +522,7 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
             logger.error("Refusing forensic backup of %s: %s", db_path, reason)
             return None, reason
         _publish_backup_bundle(db_path, db_path.with_name(f"{db_path.name}.backup-staging-{stamp}"), backup_path)
+        # Retention cap (#86747): keep only the newest few forensic copies.
         _prune_malformed_backups(db_path)
         return backup_path, None
     except Exception as exc:  # pragma: no cover - best effort
@@ -513,7 +538,10 @@ def preflight_db_writability(db_path: Path, *, db_label: str = "state.db") -> No
     "fix" (deleting the ``-wal``) loses committed transactions. ``chmod u+rw`` repair only inside the Hermes home
     tree (Hermes owns those files; ``chmod`` fails on files the user doesn't own, bounding the repair exactly);
     otherwise fail fast naming the file and command. Never deletes/truncates a WAL sidecar — once writable, the
-    normal open checkpoints it. ``:memory:``/``file:`` skipped. Shared with ``kanban_db``."""
+    normal open checkpoints it. ``:memory:``/``file:`` skipped. Shared with ``kanban_db``.
+
+    Port of Kilo-Org/kilocode#12508's startup preflight. This preflight:
+    """
     if str(db_path) == ":memory:" or str(db_path).startswith("file:"):
         return
     home: Optional[Path] = None
@@ -663,8 +691,15 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
     Runs the first statement that trips the malformed-schema parse (``PRAGMA journal_mode``),
     ``integrity_check``, a ``sessions`` read, FTS5 MATCH probes and a rolled-back ``messages`` write — so FTS5
     index corruption (reads and ``integrity_check`` pass, every ``INSERT INTO messages`` fails through the FTS
-    triggers) is reported as unhealthy."""
+    triggers) is reported as unhealthy.
+
+    See #50502.
+    """
     from hermes_state import SessionDB, load_fts5_cjk_extension
+    # ── Strategy 0.5: rebuild stale B-tree indexes (#63386) ── PRAGMA integrity_check can report "wrong #
+    # of entries in index" when a B-tree index (e.g. idx_sessions_handoff_state) falls out of sync with its
+    # base table. REINDEX rewrites the index b-tree from the canonical table rows using the existing index
+    # definition, fixing the mismatch without touching data or FTS schema.
     conn = _connect_repair_durable(db_path)
     try:
         with contextlib.closing(conn):
@@ -689,6 +724,9 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
                     # not built yet.
                     benign = SessionDB._is_fts5_unavailable_error(exc) or _schema_not_built(exc)
                     if not (isinstance(exc, sqlite3.OperationalError) and benign):
+                        # This is the corruption class #66724 actually wants caught: partial shadow-table
+                        # damage where MATCH / snippet / rank queries raise DatabaseError("database disk
+                        # image is malformed") while reads of the FTS5 table itself parse fine.
                         return f"fts5 read probe failed on {fts_table}: {exc}"
             # FTS write probe: drive a row through the messages_fts* triggers in a transaction that is always
             # rolled back.
@@ -749,7 +787,10 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
     transactionally, so canonical rows are never modified by a failed attempt. A raw backup is taken first
     unless ``backup=False``. Serialised across processes (gateway, Desktop backend and CLI open the same file;
     concurrent ``writable_schema`` surgery is itself a corruption source). Returns ``{repaired, strategy,
-    backup_path, error}``."""
+    backup_path, error}``.
+
+    See #50502.
+    """
     from hermes_state import (_cross_process_repair_lock, _db_opens_cleanly, _live_writer_holds_db,
                               _persistent_repair_attempts_exhausted, _probe_journal_mode_for_repair,
                               _record_repair_outcome, _repair_state_db_schema_locked)
@@ -763,6 +804,11 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
         return report
     # Cross-restart cap: the in-memory claim bounds one process, but unhealable b-tree damage used to re-run
     # surgery + a fresh backup on EVERY restart.
+    # Cross-restart attempt cap (#86747): the in-memory claim bounds one process, but a corruption class the
+    # strategies below cannot heal (b-tree page damage) previously re-ran the whole surgery — and took a
+    # fresh multi-hundred-MB forensic backup — on EVERY restart, forever. After
+    # _MAX_PERSISTENT_REPAIR_ATTEMPTS failures against the same damaged file, stop retrying and surface a
+    # terminal, actionable error.
     if _persistent_repair_attempts_exhausted(db_path):
         return _repair_skip(report, "skipped", _persistent_repair_exhausted_error(db_path))
 
@@ -790,6 +836,8 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
         else:
             # Probe journal mode BEFORE surgery: a rebuilt file comes back in the default (delete) mode and nothing
             # else records the flip. Unprobeable (damaged file) -> database.journal_mode is the restore target.
+            # The open-time WAL-reset gate never sees this flip because it happens inside the repair path
+            # (distinct from the open-time flip #89393 warns about).
             before_mode = _probe_journal_mode_for_repair(db_path)
             result = _repair_state_db_schema_locked(db_path, backup=backup, report=report,
                                                     journal_mode_before=before_mode)
@@ -827,7 +875,13 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     :func:`apply_wal_with_fallback`, not a direct pragma, so it inherits the WAL-reset gate (a vulnerable
     runtime deliberately keeps DELETE; the journal_mode-changed WARNING is expected there), the macOS-NFS
     silent-refusal handling and the WAL companions. ``before_mode`` is only for the log comparison; the target
-    is ``database.journal_mode``. Best-effort: the repair already succeeded, so failures log at WARNING."""
+    is ``database.journal_mode``. Best-effort: the repair already succeeded, so failures log at WARNING.
+
+    See #89674.
+    See #89393.
+    The transactional promotion already leaves the destination in its pre-repair mode, so on that path this
+    is mostly the WAL-companion re-assertion; the reopen is the hazard, not the mode. See #101064.
+    """
     from hermes_state import apply_wal_with_fallback
     try:
         if conn is None:
@@ -854,7 +908,12 @@ def _repair_state_db_schema_locked(
     release is not a repair mutation). WHY not in place: the final strategy ends in ``VACUUM``, which rebuilds the
     file from the schema SQLite can still parse — when the damage IS in the schema b-tree (the ``malformed database
     schema ()`` class) every table hanging off the unreadable part is silently dropped, the probe still reports
-    malformed, and repair returned ``repaired=False`` having destroyed what it was asked to save."""
+    malformed, and repair returned ``repaired=False`` having destroyed what it was asked to save.
+
+    The pre-repair backup (#69603) does not close this: it is a forensic artefact that nothing reads back,
+    so recovery still depends on a human noticing a ``.malformed-backup-*`` file and knowing what to do with
+    it. Not mutating the original in the first place is the property that holds without a human in the loop.
+    """
     from hermes_state import (_backup_db_file, _copy_database_snapshot, _db_opens_cleanly, _exclusive_repair_db_guard,
                               _repair_scratch_space_error, _restore_journal_mode_after_repair, _run_repair_strategies,
                               _unlink_db_triple)

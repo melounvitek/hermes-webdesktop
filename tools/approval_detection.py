@@ -94,13 +94,24 @@ HARDLINE_PATTERNS = [
     (_RM_FLAG_PREFIX + _hardline_rm_path(r'(?:~|\$\{?HOME\}?)(?:/?|/\*)?'), "recursive delete of home directory"),
     # Command-name rules (mkfs, dd, kill, shutdown...) are _CMDPOS-anchored so quoted prose
     # (`echo "does this use mkfs?"`) cannot trip the floor.
+    # See #93392.
     (_CMDPOS + r'mkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
+    # `dd` is a command-name token, so anchor it to command position like mkfs/rm/shutdown (#93392): quoted
+    # prose such as `git commit -m "never dd of=/dev/sda"` is an argument, not a command. The argument tail
+    # ([^\n]*of=/dev/...) is kept so flag order doesn't matter.
     (_CMDPOS + r'dd\b[^\n]*\bof=/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*', "dd to raw block device"),
     # Positionless rules (no command-name token: `>` sits mid-command, the fork bomb is a function
     # definition) are matched against a QUOTE-MASKED variant (_QUOTE_MASKED_HARDLINE_DESCRIPTIONS /
     # _mask_quoted_prose) so quoted prose cannot trip them; sh -c / bash -c / eval payloads still scan raw.
+    # The redirect rule has no command-name token to anchor (`>` appears mid-command: `cat f > /dev/sda`),
+    # so command-position anchoring is the wrong tool. It is instead matched against a QUOTE-MASKED variant
+    # of the command (see _QUOTE_MASKED_HARDLINE / _mask_quoted_strings) so quoted prose (`echo "cat f >
+    # /dev/sda"`) cannot trip it, while shell-carrying wrappers (sh -c / bash -c / eval) still surface their
+    # payload as a raw detection variant — quoting is not a bypass (#93392).
     (r'>\s*/dev/(sd|nvme|hd|mmcblk|vd|xvd)[a-z0-9]*\b', "redirect to raw block device"),
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
+    # Kill every process on the system — anchor the command-name token so `echo "kill -1 sends SIGHUP to
+    # everything"` doesn't trip (#93392).
     (_CMDPOS + r'kill\s+(-[^\s]+\s+)*-1\b', "kill all processes"),
     (_CMDPOS + r'(shutdown|reboot|halt|poweroff)\b', "system shutdown/reboot"),
     (_CMDPOS + r'init\s+[06]\b', "init 0/6 (shutdown/reboot)"),
@@ -133,7 +144,12 @@ def _mask_quoted_prose(command: str) -> str:
     """Blank out quoted string CONTENT for positionless hardline matching (detection-only).
     Quote characters stay; inside double quotes `$(...)` and backtick spans are kept RAW because
     the shell really executes them. An unclosed quote masks to end-of-string, which cannot hide a
-    runnable command (the shell would not run it either)."""
+    runnable command (the shell would not run it either).
+
+    Detection-only rewrite used by the quote-masked hardline rules (redirect-to-block-device, fork bomb):
+    text inside single or double quotes is data the shell passes as an argument, so `echo "cat f >
+    /dev/sda"` must not trip the unconditional floor (#93392). Unquoted text is untouched.
+    """
     return "".join(
         command[i:j] if quote is None or kind in ("quote", "subst") else " " * (j - i)
         for kind, i, j, quote in _scan_shell(command, subst="q", naive_backtick=True)
@@ -189,6 +205,10 @@ DANGEROUS_PATTERNS = [
     # or a bare ` -- ` end-of-options (after which `-rf` is a literal filename). The flag token
     # must follow whitespace so the `r` in long options like `--registry` does not count.
     (r'\brm\s+(?!--(?:\s|$))(?:(?!\s--(?:\s|$))[^\n"\';|&])*\s' r'(?:-[a-z]*r[a-z]*\b|--recursive\b)',
+     # GNU rm permutes options, so a recursive flag group may legally FOLLOW the operands: `rm build/ -rf`,
+     # `rm build/ -r -f`, and `rm build/ --recursive --force` are all equivalent to the flags-first
+     # spellings the two patterns above catch — without this rule they run with no approval prompt at all.
+     # Port of openai/codex#33464 ("recognize force options when they follow operands").
      "recursive delete (flags after operands)"),
     # Windows cmd/powershell destructive built-ins: gate only when executed through the shell so
     # prose/filenames containing "del"/"rd" do not trip.
@@ -202,6 +222,7 @@ DANGEROUS_PATTERNS = [
     # lowercase. Each requires the destructive flag/verb so benign usage (`taskkill /IM app.exe`,
     # `reg query`, `icacls file`) does NOT prompt. Bare Remove-Item form (ACP clients, pwsh-default
     # SSH hosts, or compound commands where `powershell` appeared earlier).
+    # See #69472.
     (r'\bremove-item\b[^\n;|&]*\s-(?:recurse|force)\b', "PowerShell destructive delete (Remove-Item)"),
     # Bare cmd builtins with /s (recurse) or /q (quiet); plain `del file.txt` is covered only by the prefixed rule.
     (r'\b(?:del|erase|rd|rmdir)\s+(?:/[a-z]\s+)*/[sq]\b', "Windows destructive delete (recursive/quiet switch)"),
@@ -239,6 +260,7 @@ DANGEROUS_PATTERNS = [
     (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
     (r'\bchown\s+--recur[a-z]*\b.*root', "recursive chown to root (long flag)"),
     # _CMDPOS-anchored like the hardline twins: quoted prose mentioning mkfs/dd must not require approval to echo.
+    # See #93392.
     (_CMDPOS + r'mkfs\b', "format filesystem"),
     (_CMDPOS + r'dd\s+.*if=', "disk copy"),
     (r'>\s*/dev/sd', "write to block device"),
@@ -320,6 +342,12 @@ DANGEROUS_PATTERNS = [
     # injection) — pairs the tee/redirection coverage. Anchored to the command tail so only the
     # DESTINATION fires; reading OUT of a sensitive path (`cp ~/.ssh/config /tmp/x`) stays safe.
     # The trailing `[^\s"\']*` consumes the rest of the destination filename.
+    # The tee/redirection patterns above already gate _SENSITIVE_WRITE_TARGET (~/.ssh/*,
+    # ~/.netrc/.pgpass/.npmrc/.pypirc, shell rc files, ~/.hermes/config.yaml/.env), but cp/mv/install was
+    # only paired for /etc and project-relative env/config — so `cp evil ~/.ssh/authorized_keys` (key
+    # implant), `cp creds ~/.netrc`, and `cp evil ~/.bashrc` (login-time command injection) slipped through
+    # with auto-approve. Same unpaired-door rationale as #14639 / the sed-tee-redirect pairing on these
+    # targets. `authorized_keys` after the `~/.ssh/` fragment).
     (rf'\b(cp|mv|install)\b.*\s["\']?{_SENSITIVE_WRITE_TARGET}[^\s"\']*["\']?{_COMMAND_TAIL}', "copy/move file into sensitive credential/SSH/shell-rc path"),
     # In-place edits mutate the file directly, bypassing redirection/tee/cp coverage; gate the same
     # startup/credential files.
@@ -330,10 +358,15 @@ DANGEROUS_PATTERNS = [
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     # sed -i on Hermes config/.env bypasses the redirection/tee rules; pairs the file_tools
     # write_file/patch deny so the terminal side is not an open door.
+    # In-place edit of a Hermes-managed security file (~/.hermes/config.yaml or .env). sed -i bypasses the
+    # redirection/tee patterns above because it mutates the file directly. See #14639.
     (rf'\bsed\s+-[^\s]*i.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
     (rf'\bsed\s+--in-place\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (long flag)"),
     # perl/ruby -i: the flag may be its own token after other flags (`-p -i -e`), combined (`-pi`), or carry a backup
     # suffix (`-i.bak`), so match any flag token containing `i` anywhere; `perl -e '...'` (no -i) does not trip.
+    # perl -i and ruby -i perform the same in-place mutation as sed -i but are not caught by the -e/-c
+    # script-execution pattern above (which targets code evaluation, not file mutation). Pairs the sed -i
+    # coverage from #14639.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
     # Interpreter heredocs are handled by _execution_flag_findings(); only shell heredocs stay
     # regex-based. `bash <<'EOF'` runs arbitrary commands without triggering the `bash -c` path.
@@ -1042,6 +1075,7 @@ def _command_detection_variants(command: str):
     # reaches the patterns as `del C:Usersme.sshid_rsa`. When the RAW command has a drive-letter or UNC backslash
     # path, also yield a variant with backslashes flattened to `/` BEFORE normalization. Gated on a real path shape so
     # POSIX escape semantics (`echo a\"b`) are untouched elsewhere.
+    # See #69472.
     if re.search(r"(?:[A-Za-z]:|\\\\)[\\\\]", command) or re.search(r"[A-Za-z]:\\", command):
         win_variant = _normalize_command_for_detection(_mask_quoted_newlines(command.replace("\\", "/")))
         if fresh(win_variant):
@@ -1101,7 +1135,11 @@ def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
     verb is an ARGUMENT, so ``launchctl kick"start" -k gui/501/ai.hermes.gateway`` auto-approved.
     Delegates to ``cron.lifecycle_guard`` (shlex-tokenized, anchored on a hermes-gateway
     identifier). Runs last so an ordinary pattern match keeps its more specific reason; this layer
-    only prompts — the non-bypassable block still lives in ``cron.lifecycle_guard``."""
+    only prompts — the non-bypassable block still lives in ``cron.lifecycle_guard``.
+
+    ``_normalize_command_for_detection`` strips backslash escapes, so ``kick\\start`` already reaches the
+    launchctl pattern above. See #80269.
+    """
     try:
         from cron.lifecycle_guard import contains_gateway_lifecycle_command
     except Exception:

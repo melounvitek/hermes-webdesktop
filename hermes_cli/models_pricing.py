@@ -473,7 +473,12 @@ def pricing_cache_scope(provider: str, *, current_provider: str = "", current_ba
             return env_base.rstrip("/").removesuffix("/v1")
         if normalize_provider(current_provider) == "nous" and current_base_url:
             return current_base_url.rstrip("/").removesuffix("/v1")
-        persisted_base = get_cached_nous_inference_base_url()
+        # Call-time lookup through the facade: tests (and plugins) patch
+        # ``hermes_cli.models.get_cached_nous_inference_base_url``; a bare module-global read here would
+        # silently bypass the patch and fall back to the default endpoint.
+        from hermes_cli.models import get_cached_nous_inference_base_url as _persisted_nous_base
+
+        persisted_base = _persisted_nous_base()
         if persisted_base:
             return persisted_base
         return _pricing_provider_cache_keys.get((_pricing_profile_key(), normalized), _DEFAULT_NOUS_INFERENCE_BASE)
