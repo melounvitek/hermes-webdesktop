@@ -183,41 +183,18 @@ def _refresh_agent_tool_definitions(agent) -> bool:
 
 
 _COMPRESSOR_ATTEMPT_STATE_FIELDS = (
-    "_previous_summary",
-    "_summary_has_user_turn",
-    "compression_count",
-    "_last_compression_savings_pct",
-    "_ineffective_compression_count",
-    "_anti_thrash_recovery_deadline",
-    "_fallback_compression_streak",
-    "_verify_compaction_cleared_threshold",
-    "_last_compression_made_progress",
-    "_summary_failure_cooldown_until",
-    "_cooldown_persist_failed",
-    "_last_summary_error",
-    "_consecutive_timeout_failures",
-    "_last_summary_dropped_count",
-    "_last_summary_fallback_used",
-    "_last_compress_aborted",
-    "_last_summary_auth_failure",
-    "_last_summary_network_failure",
-    "_last_summary_empty_content_failure",
-    "_last_summary_truncated_failure",
-    "_last_aux_model_failure_error",
-    "_last_aux_model_failure_model",
-    "_summary_model_fallen_back",
-    "summary_model",
-    "_last_compression_telemetry",
-    "_active_compression_telemetry",
-    "_compression_telemetry_seed",
+    "_previous_summary", "_summary_has_user_turn", "compression_count", "_last_compression_savings_pct",
+    "_ineffective_compression_count", "_anti_thrash_recovery_deadline", "_fallback_compression_streak",
+    "_verify_compaction_cleared_threshold", "_last_compression_made_progress", "_summary_failure_cooldown_until",
+    "_cooldown_persist_failed", "_last_summary_error", "_consecutive_timeout_failures", "_last_summary_dropped_count",
+    "_last_summary_fallback_used", "_last_compress_aborted", "_last_summary_auth_failure",
+    "_last_summary_network_failure", "_last_summary_empty_content_failure", "_last_summary_truncated_failure",
+    "_last_aux_model_failure_error", "_last_aux_model_failure_model", "_summary_model_fallen_back", "summary_model",
+    "_last_compression_telemetry", "_active_compression_telemetry", "_compression_telemetry_seed",
     "_proactive_prune_rearm_tokens",
 )
 
-_COMPRESSOR_COOLDOWN_STATE_FIELDS = (
-    "_summary_failure_cooldown_until",
-    "_last_summary_error",
-    "_cooldown_persist_failed",
-)
+_COMPRESSOR_COOLDOWN_STATE_FIELDS = ("_summary_failure_cooldown_until", "_last_summary_error", "_cooldown_persist_failed")
 
 
 def _snapshot_compressor_attempt_state(compressor: Any) -> dict[str, Any]:
@@ -770,22 +747,13 @@ def resolve_context_compression_timeouts(compression_cfg: Optional[dict] = None)
         except Exception:
             cfg = {}
     if isinstance(cfg, dict):
-        raw_idle = cfg.get("context_timeout_seconds")
-        if raw_idle is not None:
-            try:
-                parsed = float(raw_idle)
-                # Explicit 0/negative disables; positive values win.
-                idle = parsed
-            except (TypeError, ValueError):
-                pass
-        raw_ceiling = cfg.get("context_total_ceiling_seconds")
-        if raw_ceiling is not None:
-            try:
-                parsed = float(raw_ceiling)
-                if parsed > 0:
-                    ceiling = parsed
-            except (TypeError, ValueError):
-                pass
+        # Explicit 0/negative idle disables; a non-positive ceiling is ignored.
+        with contextlib.suppress(TypeError, ValueError):
+            if cfg.get("context_timeout_seconds") is not None:
+                idle = float(cfg["context_timeout_seconds"])
+        with contextlib.suppress(TypeError, ValueError):
+            if cfg.get("context_total_ceiling_seconds") is not None and float(cfg["context_total_ceiling_seconds"]) > 0:
+                ceiling = float(cfg["context_total_ceiling_seconds"])
     if idle > 0:
         ceiling = max(ceiling, idle)
     return idle, ceiling
@@ -1587,6 +1555,18 @@ def _adopt_live_compression_child(
     return recovered
 
 
+def _reopen_orphaned_parent(session_db: Any, session_id: str) -> None:
+    """Reopen a compression-ended parent that has no continuation and no lease holder."""
+    orphan_reopener = getattr(type(session_db), "reopen_orphaned_compression_session", None)
+    if not callable(orphan_reopener):
+        return
+    try:
+        if orphan_reopener(session_db, session_id):
+            logger.warning("compression recovery: reopened orphaned session=%s with no continuation", session_id)
+    except Exception as exc:
+        logger.warning("orphaned compression session reopen failed for %s: %s", session_id, exc)
+
+
 def recover_rotated_compression_session(agent: Any) -> Optional[List[Dict[str, Any]]]:
     """Recover a stale live agent before a new turn writes to its old parent."""
     session_db = getattr(agent, "_session_db", None)
@@ -1604,18 +1584,10 @@ def recover_rotated_compression_session(agent: Any) -> Optional[List[Dict[str, A
             if recovered is not None:
                 return recovered
             holder = holder_getter(session_id) if callable(holder_getter) else None
-            if not holder or attempt == 20:
-                if not holder:
-                    orphan_reopener = getattr(type(session_db), "reopen_orphaned_compression_session", None)
-                    if callable(orphan_reopener):
-                        try:
-                            if orphan_reopener(session_db, session_id):
-                                logger.warning(
-                                    "compression recovery: reopened orphaned session=%s with no continuation",
-                                    session_id,
-                                )
-                        except Exception as exc:
-                            logger.warning("orphaned compression session reopen failed for %s: %s", session_id, exc)
+            if not holder:
+                _reopen_orphaned_parent(session_db, session_id)
+                return None
+            if attempt == 20:
                 return None
             time.sleep(0.05)
         return None
@@ -2106,6 +2078,19 @@ def _is_real_user_message(message: Any) -> bool:
     return not ContextCompressor._is_synthetic_compression_user_turn(message)
 
 
+_STEER_FALLBACK_OPEN = "[OUT-OF-BAND USER MESSAGE"
+_STEER_FALLBACK_CLOSE = "[/OUT-OF-BAND USER MESSAGE]"
+
+
+def _steer_markers() -> Tuple[str, str]:
+    """``(open, close)`` steer markers from prompt_builder, or the stable fallback literals."""
+    try:
+        from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
+        return STEER_MARKER_OPEN, STEER_MARKER_CLOSE
+    except Exception:
+        return _STEER_FALLBACK_OPEN, _STEER_FALLBACK_CLOSE
+
+
 def _message_contains_busy_steer(message: Any) -> bool:
     """Return whether *message* carries a busy-steer marker.
 
@@ -2115,11 +2100,8 @@ def _message_contains_busy_steer(message: Any) -> bool:
     text = _message_text(message)
     if not text:
         return False
-    try:
-        from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
-        return STEER_MARKER_OPEN in text and STEER_MARKER_CLOSE in text
-    except Exception:
-        return "[OUT-OF-BAND USER MESSAGE" in text and "[/OUT-OF-BAND USER MESSAGE]" in text
+    open_marker, close_marker = _steer_markers()
+    return open_marker in text and close_marker in text
 
 
 def _extract_steer_text_from_message(message: Any) -> Optional[str]:
@@ -2127,35 +2109,24 @@ def _extract_steer_text_from_message(message: Any) -> Optional[str]:
     text = _message_text(message)
     if not text:
         return None
-    try:
-        from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
-        open_marker = STEER_MARKER_OPEN
-        close_marker = STEER_MARKER_CLOSE
-    except Exception:
-        open_marker = "[OUT-OF-BAND USER MESSAGE"
-        close_marker = "[/OUT-OF-BAND USER MESSAGE]"
+    open_marker, close_marker = _steer_markers()
     start = text.find(open_marker)
     if start == -1:
-        # Fallback: marker wording may evolve; look for the stable prefix.
-        fallback_open = "[OUT-OF-BAND USER MESSAGE"
-        start = text.find(fallback_open)
+        # Fallback: marker wording may evolve; look for the stable prefix, then skip to
+        # the end of the opening line.
+        start = text.find(_STEER_FALLBACK_OPEN)
         if start == -1:
             return None
-        # Skip to end of the opening line.
         nl = text.find("\n", start)
-        if nl != -1:
-            start = nl + 1
-        else:
-            start += len(fallback_open)
+        start = nl + 1 if nl != -1 else start + len(_STEER_FALLBACK_OPEN)
     else:
         start += len(open_marker)
     end = text.find(close_marker, start)
     if end == -1:
-        end = text.find("[/OUT-OF-BAND USER MESSAGE]", start)
+        end = text.find(_STEER_FALLBACK_CLOSE, start)
         if end == -1:
             return None
-    extracted = text[start:end].strip()
-    return extracted if extracted else None
+    return text[start:end].strip() or None
 
 
 def _compressed_has_busy_steer(messages: list) -> bool:
@@ -2294,35 +2265,31 @@ CompressedUserTurnOutcome = Literal["inserted", "merged", "already_present", "pl
 
 def _insert_real_user_anchor(messages: list, anchor: dict) -> CompressedUserTurnOutcome:
     """Insert the latest human turn without breaking role alternation."""
-    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.context_compressor import _DB_PERSISTED_MARKER, ContextCompressor
+
     def _role(msg: Any) -> Optional[str]:
         return msg.get("role") if isinstance(msg, dict) else None
+
+    def _place(index: int) -> CompressedUserTurnOutcome:
+        anchor[_DB_PERSISTED_MARKER] = True
+        messages.insert(index, anchor)
+        return "inserted"
 
     # Preferred anchor: the summary boundary — first assistant message not preceded
     # by a user turn. Left neighbour is then non-user, right is an assistant.
     for index, message in enumerate(messages):
-        if _role(message) != "assistant":
-            continue
-        previous_role = _role(messages[index - 1]) if index > 0 else None
-        if previous_role != "user":
-            anchor[_DB_PERSISTED_MARKER] = True
-            messages.insert(index, anchor)
-            return "inserted"
-    # Every assistant is user-preceded (or there are none). Appending is
-    # safe whenever the transcript does not already end with a user turn.
-    if not messages or _role(messages[-1]) != "user":
-        anchor[_DB_PERSISTED_MARKER] = True
-        messages.append(anchor)
-        return "inserted"
-    # The transcript ends with a user-role message and no slot avoids
-    # user/user adjacency.
-    from agent.context_compressor import ContextCompressor
-    if ContextCompressor._is_context_summary_content(_message_text(messages[-1])):
-        # Never merge into a summary: its prefix must stay at message start for summary
-        # detection; repair_message_sequence merges adjacent user turns summary-first.
-        anchor[_DB_PERSISTED_MARKER] = True
-        messages.append(anchor)
-        return "inserted"
+        if _role(message) == "assistant" and (index == 0 or _role(messages[index - 1]) != "user"):
+            return _place(index)
+    # Every assistant is user-preceded (or there are none). Appending is safe whenever the
+    # transcript does not already end with a user turn. Never merge into a summary either:
+    # its prefix must stay at message start for summary detection; repair_message_sequence
+    # merges adjacent user turns summary-first.
+    if (
+        not messages
+        or _role(messages[-1]) != "user"
+        or ContextCompressor._is_context_summary_content(_message_text(messages[-1]))
+    ):
+        return _place(len(messages))
     # Trailing user-role scaffolding (e.g. the todo snapshot): merge instead
     # of inserting a consecutive same-role message (#55677 strict templates).
     _merge_anchor_into_user_message(messages[-1], anchor)
@@ -4521,12 +4488,7 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
 
 
 __all__ = [
-    "COMPACTION_STATUS",
-    "COMPACTION_DONE_STATUS",
-    "COMPACTION_STATUS_MARKER",
-    "is_compaction_progress_status",
-    "check_compression_model_feasibility",
-    "replay_compression_warning",
-    "compress_context",
+    "COMPACTION_STATUS", "COMPACTION_DONE_STATUS", "COMPACTION_STATUS_MARKER", "is_compaction_progress_status",
+    "check_compression_model_feasibility", "replay_compression_warning", "compress_context",
     "try_shrink_image_parts_in_messages",
 ]
