@@ -2278,15 +2278,15 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _clear_compression_failure_cooldown(self) -> None:
         # Fence check BEFORE cooldown-clear: a late cancelled worker must not undo the host's timeout cooldown.
-        if self._compression_cancelled():
+        # Class-qualified helper calls: tests bind this single method onto a bare stub.
+        if ContextCompressor._compression_cancelled(self):
             logger.info("Skipping compression cooldown clear: host already cancelled this compression attempt")
             return
         self._summary_failure_cooldown_until = 0.0
         self._last_summary_error = None
         self._consecutive_timeout_failures = 0
         self._cooldown_persist_failed = False
-
-        self._durable_write("clear_compression_failure_cooldown", "compression failure cooldown clear")
+        ContextCompressor._durable_write(self, "clear_compression_failure_cooldown", "compression failure cooldown clear")
 
     def _compression_cancelled(self) -> bool:
         """Read the host-owned cooperative cancellation signal, if installed."""
