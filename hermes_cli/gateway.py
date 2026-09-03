@@ -196,7 +196,6 @@ def _get_parent_pid(pid: int) -> int | None:
         return None
     try:
         import psutil  # type: ignore
-
         return psutil.Process(pid).ppid() or None
     except ImportError:
         pass
@@ -275,7 +274,6 @@ def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
         return True
     # ``os.kill(pid, 0)`` hard-kills on Windows (TerminateProcess); use _pid_exists instead.
     from gateway.status import _pid_exists
-
     deadline = time.monotonic() + max(timeout, 0.0)
     while True:
         if not _pid_exists(pid):
@@ -313,7 +311,6 @@ def _probe_loop_tick_socket(pid: int, home: Path | None, timeout: float = 1.0) -
     """Ping the loop-tick witness socket: True answered, False node present but silent, None no node (not evidence)."""
     try:
         from gateway.shutdown_watchdog import get_loop_tick_socket_path
-
         path = get_loop_tick_socket_path(home, pid)
         if not path.is_socket():
             return None
@@ -392,7 +389,6 @@ def probe_gateway_loop_liveness(
         stale_budget = DEFAULT_LOOP_LIVENESS_STALE_AFTER_S
     try:
         from gateway.shutdown_watchdog import get_loop_heartbeat_path
-
         path = get_loop_heartbeat_path(home)
         mtime = path.stat().st_mtime
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -453,7 +449,6 @@ def _escalate_wedged_gateway(pid: int, *, term_grace: float = 5.0, kill_wait: fl
     busy gateway bypasses the cron drain floor and SIGKILLs live work. True once the PID is gone.
     """
     from gateway.status import get_process_start_time
-
     expected_start_time = get_process_start_time(pid)
     try:
         terminate_pid(pid, force=False)
@@ -617,7 +612,6 @@ def _windows_process_listing() -> str | None:
     hides the console window this windowless pythonw backend would otherwise flash.
     """
     from hermes_cli._subprocess_compat import bounded_probe_run
-
     wmic_path = shutil.which("wmic")
     result = None
     if wmic_path is not None:
@@ -668,7 +662,6 @@ def find_gateway_pids(exclude_pids: set | None = None, all_profiles: bool = Fals
     if not all_profiles:
         try:
             from gateway.status import get_running_pid
-
             _append_unique_pid(pids, get_running_pid(), _exclude)
         except Exception:
             pass
@@ -847,7 +840,6 @@ def _capture_gateway_argv(pid: int) -> list[str] | None:
     # Never respawn an unrelated process the scan happened to report.
     try:
         from gateway.status import looks_like_gateway_command_line
-
         if not looks_like_gateway_command_line(" ".join(argv)):
             return None
     except Exception:
@@ -900,7 +892,6 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
     if sys.platform == "win32":
         try:
             from hermes_cli.gateway_windows import windowless_gateway_restart_spec
-
             run_argv, respawn_cwd, respawn_env_overlay = windowless_gateway_restart_spec(list(run_argv))
         except Exception:
             # Fall back to the original argv: a visible window beats a failed respawn.
@@ -915,9 +906,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         import sys
         import time
         from hermes_cli._subprocess_compat import (
-            _WINDOWS_GATEWAY_BREAKAWAY_ENV,
-            windows_detach_flags,
-            windows_detach_flags_without_breakaway,
+            _WINDOWS_GATEWAY_BREAKAWAY_ENV, windows_detach_flags, windows_detach_flags_without_breakaway,
         )
 
         pid = int(sys.argv[1])
@@ -951,10 +940,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         # Windows needs explicit creationflags. CREATE_BREAKAWAY_FROM_JOB is critical: the watcher may
         # itself sit inside a job object (Electron/Tauri parent) and without breakaway the respawned
         # gateway dies when that job tears down. See _subprocess_compat.windows_detach_flags().
-        _popen_kwargs = {{
-            "stdout": _stdio_target,
-            "stderr": _stdio_target,
-        }}
+        _popen_kwargs = {{"stdout": _stdio_target, "stderr": _stdio_target}}
         # Anchor at the stable working dir and overlay the env (VIRTUAL_ENV / PYTHONPATH /
         # HERMES_HOME) the windowless base interpreter needs to import hermes_cli. Empty on POSIX.
         if _respawn_cwd:
@@ -967,19 +953,13 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
                     # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
                     # respawned gateway's exit-diag / lifecycle records show whether it escaped the
                     # parent Job Object (a job-teardown kill is otherwise indistinguishable).
-                    _popen_kwargs["env"] = {{
-                        **_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1",
-                    }}
+                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
                     subprocess.Popen(cmd, **_popen_kwargs)
                 except OSError:
                     # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
                     # job object refuses breakaway; retry without it (mirrors _spawn_detached).
-                    _popen_kwargs["creationflags"] = (
-                        windows_detach_flags_without_breakaway()
-                    )
-                    _popen_kwargs["env"] = {{
-                        **_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0",
-                    }}
+                    _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
+                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
                     subprocess.Popen(cmd, **_popen_kwargs)
             else:
                 if _respawn_env_overlay:
@@ -1004,8 +984,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         # Parent job object rejected CREATE_BREAKAWAY_FROM_JOB; retry without it (Windows only —
         # ``start_new_session=True`` cannot raise OSError on POSIX).
         fallback_kwargs: dict = (
-            {"creationflags": windows_detach_flags_without_breakaway()}
-            if sys.platform == "win32"
+            {"creationflags": windows_detach_flags_without_breakaway()} if sys.platform == "win32"
             else {"start_new_session": True}
         )
         try:
@@ -2503,7 +2482,6 @@ def launchd_gateway_labels_for_install() -> list[str]:
     names can't map to a service suffix are skipped; uninstalled profiles are harmless to include.
     """
     import re as _re
-
     from hermes_cli.profiles import list_profiles
     root_label: list[str] = []
     profile_labels: list[str] = []
@@ -4172,7 +4150,6 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
 
     try:
         from gateway.status import _pid_exists, _pid_from_record, _read_pid_record
-
         rec = _read_pid_record(default_root / "gateway.pid")
         if not rec:
             return False
@@ -4181,12 +4158,10 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
             return False
 
         from gateway.config import _env_multiplex_profiles_override
-
         cfg_path = default_root / "config.yaml"
         cfg = {}
         if cfg_path.exists():
             from hermes_cli.config import read_user_config_raw
-
             cfg = read_user_config_raw(cfg_path)
 
         env_multiplex = _env_multiplex_profiles_override()
@@ -4205,7 +4180,6 @@ def named_profile_served_by_running_multiplexer(profile_name: str | None = None)
             raw_allowlist = gateway_cfg.get("multiplex_profile_allowlist")
         from gateway.config import _normalize_multiplex_profile_allowlist
         from hermes_cli.profiles import normalize_profile_name
-
         profile_allowlist = _normalize_multiplex_profile_allowlist(raw_allowlist)
         return profile_allowlist is None or normalize_profile_name(suffix) in profile_allowlist
     except Exception:
@@ -4295,7 +4269,6 @@ def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
         return
     try:
         from gateway.status import get_running_pid
-
         pid = get_running_pid()
     except Exception:
         logger.debug("Existing-gateway process probe failed", exc_info=True)
@@ -4305,7 +4278,6 @@ def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
         # belongs to another profile (user switched profiles while the old gateway still runs).
         try:
             from gateway.status import _read_pid_record, _pid_record_belongs_to_current_profile
-
             stale = _read_pid_record()
             if stale is not None and not _pid_record_belongs_to_current_profile(stale):
                 logger.warning(
@@ -4392,7 +4364,6 @@ def _absorb_windows_console_controls() -> None:
     # control events (CTRL_CLOSE/CTRL_LOGOFF included), as background services should.
     try:
         import ctypes
-
         ctypes.windll.kernel32.SetConsoleCtrlHandler(None, 1)  # type: ignore[attr-defined]
     except (OSError, AttributeError):
         pass
@@ -4411,7 +4382,6 @@ def _make_exit_diag():
             return
         try:
             from hermes_constants import get_hermes_home as _ghh
-
             log_dir = _ghh() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             line = {
@@ -4434,12 +4404,10 @@ def _respawn_storm_backoff() -> None:
     """
     try:
         from gateway.status import record_start_and_check_storm
-
         _max_starts = 5
         _win = 120.0
         try:
             from hermes_cli.config import load_config
-
             _cfg = load_config()
             _gw = _cfg.get("gateway") if isinstance(_cfg, dict) else None
             _rs = _gw.get("respawn_storm") if isinstance(_gw, dict) else None
@@ -4467,7 +4435,6 @@ def _respawn_storm_backoff() -> None:
             # Tell the startup watchdog the backoff sleep is intentional, not a parked deadlock.
             try:
                 from gateway.startup_watchdog import kick_startup_watchdog
-
                 kick_startup_watchdog(extra_s=_storm.backoff_s)
             except Exception:
                 pass
@@ -4505,7 +4472,6 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             pass  # best-effort; don't block gateway startup
 
     from gateway.run import start_gateway
-
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ⚕ Hermes Gateway Starting...                 │")
     print("├─────────────────────────────────────────────────────────┤")
@@ -4519,7 +4485,6 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     import atexit as _atexit
     import traceback as _traceback
-
     _exit_diag = _make_exit_diag()
     _exit_diag(
         "gateway.start", replace=replace, argv=sys.argv, stdin_is_tty=stdin_is_tty,
@@ -4534,7 +4499,6 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         # Mirror gateway.run.main()'s wedge-proof exit: bypass Python finalization so non-daemon
         # threads (in-flight cron jobs) can't delay a /restart by minutes.
         from gateway.run import _exit_after_graceful_shutdown
-
         _exit_after_graceful_shutdown(code)
 
     success = False
@@ -4675,7 +4639,6 @@ def _all_platforms() -> list[dict]:
     hidden on Windows: python-olm has no wheel or native build (use WSL)."""
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()
     except Exception as e:
         logger.debug("plugin discovery failed during platform enumeration: %s", e)
@@ -4709,7 +4672,6 @@ def _platform_status(platform: dict) -> str:
         try:
             if entry.is_connected is not None:
                 from gateway.config import PlatformConfig
-
                 configured = bool(entry.is_connected(PlatformConfig(enabled=True)))
             else:
                 configured = bool(entry.check_fn())
@@ -4765,7 +4727,6 @@ def _runtime_health_lines() -> list[str]:
     elif gateway_state == "draining":
         action = "restart" if state.get("restart_requested") else "shutdown"
         from gateway.status import parse_active_agents
-
         count = parse_active_agents(state.get("active_agents"))
         lines.append(f"⏳ Gateway draining for {action} ({count} active agent(s))")
     elif gateway_state == "stopped" and exit_reason:
@@ -4925,7 +4886,6 @@ def _prompt_allowlist_var(var: dict, platform_key: str, auto_owner_user_id) -> s
 def _setup_standard_platform(platform: dict):
     """Interactive setup for Telegram, Discord, or Slack."""
     from hermes_cli.setup_hidden_env import is_setup_hidden_env as _is_setup_hidden_env
-
     emoji, label, token_var = platform["emoji"], platform["label"], platform["token_var"]
     _print_setup_header(f"{emoji} {label}")
 
@@ -4993,7 +4953,6 @@ def _setup_standard_platform(platform: dict):
 
 def _running_under_s6() -> bool:
     from hermes_cli.service_manager import detect_service_manager
-
     return detect_service_manager() == "s6"
 
 
@@ -5004,7 +4963,6 @@ def _systemd_unit_installed() -> bool:
 
 
 def _is_service_installed() -> bool:
-    """Check if the gateway is installed as a system service."""
     return _installed_service_kind() is not None
 
 
@@ -5068,8 +5026,6 @@ def _setup_weixin():
         print_info("  Cancelled.")
         return
 
-    import asyncio
-
     try:
         credentials = asyncio.run(qr_login(str(get_hermes_home())))
     except KeyboardInterrupt:
@@ -5086,20 +5042,18 @@ def _setup_weixin():
 
     account_id = credentials.get("account_id", "")
     user_id = credentials.get("user_id", "")
-    base_url = credentials.get("base_url", "")
-
     save_env_value("WEIXIN_ACCOUNT_ID", account_id)
     save_env_value("WEIXIN_TOKEN", credentials.get("token", ""))
-    if base_url:
-        save_env_value("WEIXIN_BASE_URL", base_url)
+    if credentials.get("base_url", ""):
+        save_env_value("WEIXIN_BASE_URL", credentials.get("base_url", ""))
     save_env_value(
         "WEIXIN_CDN_BASE_URL", get_env_value("WEIXIN_CDN_BASE_URL") or "https://novac2c.cdn.weixin.qq.com/c2c"
     )
 
     print()
     access_choices = [
-        "Use DM pairing approval (recommended)", "Allow all direct messages",
-        "Only allow listed user IDs", "Disable direct messages",
+        "Use DM pairing approval (recommended)", "Allow all direct messages", "Only allow listed user IDs",
+        "Disable direct messages",
     ]
     access_idx = prompt_choice("  How should direct messages be authorized?", access_choices, 0)
     if access_idx == 2:
@@ -5153,15 +5107,11 @@ def _setup_qqbot():
         return
 
     print()
-    method_choices = [
-        "Scan QR code to add bot automatically (recommended)",
-        "Enter existing App ID and App Secret manually",
-    ]
+    method_choices = ["Scan QR code to add bot automatically (recommended)", "Enter existing App ID and App Secret manually"]
     credentials = None
     if prompt_choice("  How would you like to set up QQ Bot?", method_choices, 0) == 0:
         try:
             from gateway.platforms.qqbot import qr_register
-
             credentials = qr_register()
         except KeyboardInterrupt:
             print()
@@ -5193,10 +5143,7 @@ def _setup_qqbot():
     user_openid = credentials.get("user_openid", "")
 
     print()
-    access_choices = [
-        "Use DM pairing approval (recommended)", "Allow all direct messages",
-        "Only allow listed user OpenIDs",
-    ]
+    access_choices = ["Use DM pairing approval (recommended)", "Allow all direct messages", "Only allow listed user OpenIDs"]
     access_idx = prompt_choice("  How should direct messages be authorized?", access_choices, 0)
     if access_idx == 0:
         save_env_value("QQ_ALLOW_ALL_USERS", "false")
@@ -5278,7 +5225,6 @@ def _setup_signal():
     print_info("  Testing connection...")
     try:
         import httpx
-
         resp = httpx.get(f"{url.rstrip('/')}/api/v1/check", timeout=10.0)
         if resp.status_code == 200:
             print_success("  signal-cli daemon is reachable!")
@@ -5338,7 +5284,6 @@ def _setup_signal():
 def _builtin_setup_fn(key: str):
     """Resolve a built-in platform's setup function; late-bound to dodge the hermes_cli.setup cycle."""
     from hermes_cli import setup as _s
-
     return {
         # telegram/discord/slack/whatsapp/dingtalk/feishu/wecom setup_fns come from their plugins.
         "bluebubbles": _s._setup_bluebubbles,
@@ -5551,7 +5496,6 @@ def _wizard_post_setup() -> None:
             reason, home = "wsl", ""
         elif is_termux():
             from hermes_constants import display_hermes_home as _dhh
-
             reason, home = "termux", _dhh()
         else:
             reason, home = "unsupported", ""
@@ -5617,7 +5561,6 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
     A bare pkill is seen by s6-supervise as a crash and restarted ~1s later; the service manager flips
     ``want up``/``want down`` correctly. ``start --all`` is not a CLI surface."""
     from hermes_cli.service_manager import (detect_service_manager, get_service_manager)
-
     if detect_service_manager() != "s6" or action not in ("stop", "restart"):
         return False
     mgr = get_service_manager()
@@ -5705,7 +5648,6 @@ def _block_until_terminated() -> None:
             pause()
     else:  # pragma: no cover - non-Unix fallback, not exercised in the s6 image
         import threading
-
         threading.Event().wait()
 
 
@@ -5730,18 +5672,16 @@ def _stop_installed_service(system: bool) -> bool:
     if kind is None:
         return False
     # SystemScopeRequiresRootError is a RuntimeError and must propagate from systemd_stop.
-    swallow = (subprocess.CalledProcessError, RuntimeError) if kind == "windows" else subprocess.CalledProcessError
     try:
         _service_call(kind, "stop", system)
         return True
-    except swallow:
+    except (subprocess.CalledProcessError, *((RuntimeError,) if kind == "windows" else ())):
         return False
 
 
 def _refuse_from_inside_gateway(verb: str, reason: str) -> None:
     """Refuse self-targeting stop/restart/uninstall from inside the gateway process (#92560)."""
     from tools.process_registry import _is_supervised_gateway_process
-
     if _is_supervised_gateway_process():
         print_error(
             f"Refusing to {verb} the gateway from inside the gateway process.\n"
@@ -6013,7 +5953,6 @@ def _cmd_restart(args):
         linger_ok, _detail = get_systemd_linger_status()
         if linger_ok is not True:
             import getpass
-
             _print_lines(
                 "", "⚠ Cannot restart gateway as a service — linger is not enabled.",
                 "  The gateway user service requires linger to function on headless servers.", "",
