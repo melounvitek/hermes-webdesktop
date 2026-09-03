@@ -77,27 +77,21 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
 
 
 _IS_WINDOWS = os.name == "nt"
-
 # Windows rename failures possibly caused by another handle on the target. CPython opens files
-# without FILE_SHARE_DELETE, so ``os.replace`` onto an open file is denied with:
-#   5  ERROR_ACCESS_DENIED     — what a held *target* handle actually reports (measured: a plain
-#                                reader, in- or cross-process, yields 5, NOT 32)
-#   32 ERROR_SHARING_VIOLATION — the *source* temp file is held
-#   33 ERROR_LOCK_VIOLATION    — byte-range lock on the target
-# These are ambiguous (a real ACL denial is also 5), so recovery is bounded and a still-failing
-# write is re-raised unchanged rather than classified up front.
+# without FILE_SHARE_DELETE, so ``os.replace`` onto an open file is denied with 5 ERROR_ACCESS_DENIED
+# (what a held *target* handle actually reports — measured: a plain reader yields 5, NOT 32),
+# 32 ERROR_SHARING_VIOLATION (the *source* temp file is held) or 33 ERROR_LOCK_VIOLATION (byte-range
+# lock on the target). Ambiguous (a real ACL denial is also 5), so recovery is bounded and a
+# still-failing write is re-raised unchanged rather than classified up front.
 _WINDOWS_CONTENDED_REPLACE_ERRORS = frozenset({5, 32, 33})
-
 # Retry budget for the atomic rename. A rename that wins here keeps the write fully atomic, so the
-# budget covers a realistic hold (desktop auth-init holds auth.json >100 ms; a status read is
-# ~0.05 ms): ~200 ms recovered atomically, ~310 ms worst case. The cap matters as much as the
-# count — gateway_state.json is rewritten every turn, so a permanently-held target pays the full
-# budget per write (~0.3 s here vs ~1.3 s for 6 x 20..400 ms). Jittered so concurrent writers
-# don't retry in lockstep.
+# budget covers a realistic hold (desktop auth-init holds auth.json >100 ms): ~200 ms recovered
+# atomically, ~310 ms worst case. The cap matters as much as the count — gateway_state.json is
+# rewritten every turn, so a permanently-held target pays the full budget per write. Jittered so
+# concurrent writers don't retry in lockstep.
 _REPLACE_RETRY_ATTEMPTS = 4
 _REPLACE_RETRY_BASE_DELAY_S = 0.02
 _REPLACE_RETRY_MAX_DELAY_S = 0.1
-
 _CROSS_DEVICE_ERRNOS = (errno.EXDEV, errno.EBUSY)
 
 
@@ -160,11 +154,8 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
         if contended:
             # Lazy: keeps ``utils`` free of a package-level dependency on ``agent``.
             from agent.retry_utils import jittered_backoff
-
             for attempt in range(1, _REPLACE_RETRY_ATTEMPTS + 1):
-                time.sleep(jittered_backoff(
-                    attempt, base_delay=_REPLACE_RETRY_BASE_DELAY_S, max_delay=_REPLACE_RETRY_MAX_DELAY_S
-                ))
+                time.sleep(jittered_backoff(attempt, base_delay=_REPLACE_RETRY_BASE_DELAY_S, max_delay=_REPLACE_RETRY_MAX_DELAY_S))
                 try:
                     os.replace(tmp_str, real_path)
                     return real_path
@@ -175,22 +166,15 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
                         break
                     if not _is_contended_windows_replace_error(retry_exc):
                         raise
-        logger.debug(
-            "atomic_replace: %s -> %s failed with %s; falling back to %s", tmp_str, real_path,
-            getattr(exc, "winerror", None) or errno.errorcode.get(exc.errno or 0, exc.errno),
-            "in-place rewrite" if contended else "copy",
-        )
-        if contended:
-            # Re-raises the rewrite's own error, so an ACL denial is reported as such, not as contention.
-            _rewrite_in_place(tmp_str, real_path)
-        else:
-            _copy_fallback(tmp_str, real_path)
+        logger.debug("atomic_replace: %s -> %s failed with %s; falling back to %s", tmp_str, real_path,
+                     getattr(exc, "winerror", None) or errno.errorcode.get(exc.errno or 0, exc.errno),
+                     "in-place rewrite" if contended else "copy")
+        # The rewrite re-raises its own error, so an ACL denial is reported as such, not as contention.
+        (_rewrite_in_place if contended else _copy_fallback)(tmp_str, real_path)
     return real_path
 
 
-def _atomic_write(
-    path: Path, write, *, prefix: str, encoding: str = "utf-8", mode: "int | None" = None, preserve_owner: bool = True
-) -> None:
+def _atomic_write(path: Path, write, *, prefix: str, encoding: str = "utf-8", mode: "int | None" = None, preserve_owner: bool = True) -> None:
     """Temp file + fsync + :func:`atomic_replace`, then re-apply owner/mode.
 
     *write(f)* emits the payload into the open text handle. *mode* is fchmod'd onto the temp fd
@@ -208,8 +192,7 @@ def _atomic_write(
             write(f)
             f.flush()
             os.fsync(f.fileno())
-        # Preserve symlinks — swap in place on the real file.
-        _restore_file_metadata(Path(atomic_replace(tmp_path, path)), original_owner, mode)
+        _restore_file_metadata(Path(atomic_replace(tmp_path, path)), original_owner, mode)  # symlink-preserving
     except BaseException:
         with suppress(OSError):
             os.unlink(tmp_path)
@@ -222,36 +205,26 @@ def _mode_for_write(path: Path, create_mode: "int | None", preserve: bool = True
     return mode if mode is not None or path.exists() else create_mode
 
 
-def atomic_write_text(
-    path: Union[str, Path], content: str, *, encoding: str = "utf-8", tmp_prefix: str = ".tmp_",
-    preserve_mode: bool = False, create_mode: "int | None" = None,
-) -> None:
+def atomic_write_text(path: Union[str, Path], content: str, *, encoding: str = "utf-8", tmp_prefix: str = ".tmp_",
+                      preserve_mode: bool = False, create_mode: "int | None" = None) -> None:
     """Write *content* to *path* via temp file + fsync + atomic rename.
 
     The target is never left partially written on crash/interrupt. Shared by every destructive
     file rewrite (memory store, skill manager, agent importer, ...).
     """
     path = Path(path)
-    _atomic_write(
-        path, lambda f: f.write(content), prefix=tmp_prefix, encoding=encoding,
-        mode=_mode_for_write(path, create_mode, preserve=preserve_mode), preserve_owner=preserve_mode,
-    )
+    _atomic_write(path, lambda f: f.write(content), prefix=tmp_prefix, encoding=encoding,
+                  mode=_mode_for_write(path, create_mode, preserve=preserve_mode), preserve_owner=preserve_mode)
 
 
-def atomic_json_write(
-    path: Union[str, Path], data: Any, *, indent: int = 2, mode: int | None = None, **dump_kwargs: Any
-) -> None:
+def atomic_json_write(path: Union[str, Path], data: Any, *, indent: int = 2, mode: int | None = None, **dump_kwargs: Any) -> None:
     """Write JSON to *path* atomically (temp file + fsync + replace)."""
     path = Path(path)
-    _atomic_write(
-        path, lambda f: json.dump(data, f, indent=indent, ensure_ascii=False, **dump_kwargs),
-        prefix=f".{path.stem}_", mode=mode if mode is not None else _preserve_file_mode(path),
-    )
+    _atomic_write(path, lambda f: json.dump(data, f, indent=indent, ensure_ascii=False, **dump_kwargs),
+                  prefix=f".{path.stem}_", mode=mode if mode is not None else _preserve_file_mode(path))
 
 
-def warn_if_credential_file_broadly_readable(
-    path: Union[str, Path], *, label: str = "", log: logging.Logger | None = None
-) -> bool:
+def warn_if_credential_file_broadly_readable(path: Union[str, Path], *, label: str = "", log: logging.Logger | None = None) -> bool:
     """Warn when a credential file is group/world-readable; True when a warning was emitted.
 
     Hand-made secret files (or ones older Hermes wrote without an explicit mode) commonly end up
@@ -266,10 +239,8 @@ def warn_if_credential_file_broadly_readable(
         return False
     if os.name != "posix" or not (file_mode & (stat.S_IRGRP | stat.S_IROTH)):
         return False
-    (log or logger).warning(
-        "%s%s is group/world-readable (mode 0%o) and contains secrets. Run: chmod 600 %s",
-        f"{label} " if label else "", p.name, stat.S_IMODE(file_mode), p,
-    )
+    (log or logger).warning("%s%s is group/world-readable (mode 0%o) and contains secrets. Run: chmod 600 %s",
+                            f"{label} " if label else "", p.name, stat.S_IMODE(file_mode), p)
     return True
 
 
@@ -285,10 +256,8 @@ class IndentDumper(yaml.SafeDumper):
         return super().increase_indent(flow, False)
 
 
-def atomic_yaml_write(
-    path: Union[str, Path], data: Any, *, default_flow_style: bool = False, sort_keys: bool = False,
-    extra_content: str | None = None, create_mode: "int | None" = None,
-) -> None:
+def atomic_yaml_write(path: Union[str, Path], data: Any, *, default_flow_style: bool = False, sort_keys: bool = False,
+                      extra_content: str | None = None, create_mode: "int | None" = None) -> None:
     """Write YAML to *path* atomically (temp file + fsync + replace)."""
     path = Path(path)
 
@@ -296,39 +265,30 @@ def atomic_yaml_write(
         # allow_unicode=True writes emoji/kaomoji as real UTF-8. Without it PyYAML emits astral
         # chars as `\UXXXXXXXX` escapes inside `\`-continued double-quoted strings — a structure
         # stricter parsers and hand-edits routinely break into unclosed quotes, corrupting the config.
-        yaml.dump(
-            data, f, Dumper=IndentDumper, default_flow_style=default_flow_style, sort_keys=sort_keys, allow_unicode=True
-        )
+        yaml.dump(data, f, Dumper=IndentDumper, default_flow_style=default_flow_style, sort_keys=sort_keys, allow_unicode=True)
         if extra_content:
             f.write(extra_content)
 
     _atomic_write(path, _write, prefix=f".{path.stem}_", mode=_mode_for_write(path, create_mode))
 
 
-def _roundtrip_yaml():
-    """ruamel round-trip ``YAML`` configured to keep quotes/Unicode with 2-space indents."""
+def _roundtrip_load(path: Path):
+    """``(yaml_rt, CommentedMap)``: a ruamel round-trip loader keeping quotes/Unicode with 2-space
+    indents, plus *path* loaded through it (empty map when missing/blank)."""
     from ruamel.yaml import YAML
+    from ruamel.yaml.comments import CommentedMap
 
     yaml_rt = YAML(typ="rt")
     yaml_rt.preserve_quotes = True
     yaml_rt.allow_unicode = True
     yaml_rt.default_flow_style = False
     yaml_rt.indent(mapping=2, sequence=4, offset=2)
-    return yaml_rt
-
-
-def _load_commented_map(yaml_rt, path: Path):
-    """Load *path* with *yaml_rt* as a ``CommentedMap`` (empty when missing/blank)."""
-    from ruamel.yaml.comments import CommentedMap
-
     data = yaml_rt.load(path.read_text(encoding="utf-8")) if path.exists() else None
-    return data if isinstance(data, CommentedMap) else CommentedMap(data or {})
+    return yaml_rt, data if isinstance(data, CommentedMap) else CommentedMap(data or {})
 
 
 def _roundtrip_dump(path: Path, yaml_rt, config) -> None:
-    _atomic_write(
-        path, lambda f: yaml_rt.dump(config, f), prefix=f".{path.stem}_", mode=_preserve_file_mode(path)
-    )
+    _atomic_write(path, lambda f: yaml_rt.dump(config, f), prefix=f".{path.stem}_", mode=_preserve_file_mode(path))
 
 
 def atomic_roundtrip_yaml_update(path: Union[str, Path], key_path: str, value: Any) -> None:
@@ -338,7 +298,6 @@ def atomic_roundtrip_yaml_update(path: Union[str, Path], key_path: str, value: A
     single setting mutation must not disturb the rest. Still writes via temp file + atomic replace.
     """
     from ruamel.yaml.comments import CommentedMap
-
     # Honor escaped dots and prefer existing literal dotted keys (model IDs like ``glm-5.3``) over
     # blind splitting — same navigation as ``hermes config set``'s ``_set_nested``; otherwise
     # /model + TUI persistence wrote ``glm-5: {'3': ...}`` phantom siblings.
@@ -346,9 +305,7 @@ def atomic_roundtrip_yaml_update(path: Union[str, Path], key_path: str, value: A
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    yaml_rt = _roundtrip_yaml()
-    config = _load_commented_map(yaml_rt, path)
-
+    yaml_rt, config = _roundtrip_load(path)
     current = config
     keys = _split_key_path(key_path)
     i = 0
@@ -364,7 +321,6 @@ def atomic_roundtrip_yaml_update(path: Union[str, Path], key_path: str, value: A
             current[seg] = next_value
         current = next_value
         i += consumed
-
     _roundtrip_dump(path, yaml_rt, config)
 
 
@@ -384,14 +340,12 @@ def atomic_roundtrip_yaml_save(path: Union[str, Path], new_state: dict) -> None:
     """
     from ruamel.yaml.comments import CommentedMap
     from ruamel.yaml.scalarstring import DoubleQuotedScalarString
-
     from hermes_cli.config import require_readable_config_before_write
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     require_readable_config_before_write(path)
-    yaml_rt = _roundtrip_yaml()
-    existing = _load_commented_map(yaml_rt, path)
+    yaml_rt, existing = _roundtrip_load(path)
 
     def _merge(dst: CommentedMap, src: dict) -> None:
         for key, value in src.items():
@@ -435,10 +389,8 @@ def fast_safe_load(stream: Any) -> Any:
 
 def _env_number(key: str, default, cast):
     raw = os.getenv(key, "").strip()
-    if not raw:
-        return default
     try:
-        return cast(raw)
+        return cast(raw) if raw else default
     except (ValueError, TypeError):
         return default
 
@@ -481,9 +433,7 @@ def normalize_proxy_env_vars() -> None:
 def _parse_base_url(base_url: str):
     """``urlparse`` that tolerates a bare ``host[:port][/path]`` (no scheme)."""
     raw = (base_url or "").strip()
-    if not raw:
-        return None
-    return urlparse(raw if "://" in raw else f"//{raw}")
+    return urlparse(raw if "://" in raw else f"//{raw}") if raw else None
 
 
 def _hostname_of(parsed) -> str:
@@ -523,9 +473,7 @@ def base_url_origin(base_url: str) -> tuple[str, str, int]:
         port = parsed.port
     except ValueError:  # out-of-range or non-numeric port — not a usable origin
         return ("", "", 0)
-    if port is None:
-        port = {"https": 443, "http": 80}.get(scheme, 0)
-    return (scheme, hostname, port)
+    return (scheme, hostname, {"https": 443, "http": 80}.get(scheme, 0) if port is None else port)
 
 
 def base_url_host_matches(base_url: str, domain: str) -> bool:
