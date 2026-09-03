@@ -3473,10 +3473,9 @@ class _ToolCallAccumulator:
 class _StreamingCall:
     """One streaming request on the chat_completions / anthropic_messages wire.
 
-    State shared between the request worker (``_call`` and the per-wire
-    ``_call_chat_completions`` / ``_call_anthropic``) and the poll-loop monitor
-    (heartbeat, stale-stream kill, interrupt abort) lives on the instance;
-    the dict/lock holders are mutated in place from both threads.
+    State shared between the request worker (``_call`` and the per-wire methods)
+    and the poll-loop monitor (heartbeat, stale kill, interrupt abort) lives on
+    the instance; the dict/lock holders are mutated in place from both threads.
     """
 
     def __init__(self, agent, api_kwargs: dict, on_first_delta):
@@ -3485,40 +3484,31 @@ class _StreamingCall:
         self.on_first_delta = on_first_delta
         self.worker = None  # request thread; None in inline mode
         self.result = {"response": None, "error": None, "partial_tool_names": []}
-
         self.clients = _RequestClientRegistry(agent)
-        # Request-local cancellation flag — see interruptible_api_call for the full
-        # rationale. The streaming retry loop is where the 7-minute cascading-
-        # interrupt hang originated: a force-close raised RemoteProtocolError, the
-        # loop classified it as a transient network error, and burned full retry
-        # cycles (and emitted "reconnecting" noise) on a request the user already
-        # cancelled. The token lets the worker recognize its own forced close and
-        # exit immediately instead of retrying. (PR #6600.)
+        # Request-local cancel flag: the worker recognizes its own interrupt
+        # force-close (RemoteProtocolError) and exits instead of retrying (#6600).
         self._request_cancelled = {"value": False}
-
         self.first_delta_fired = {"done": False}
-        self.deltas_were_sent = {"yes": False}  # Track if any deltas were fired (for fallback)
+        self.deltas_were_sent = {"yes": False}  # for the partial-delivery fallback
         self.provider_tool_in_flight = {"yes": False}
-        # Wall-clock timestamp of the last real streaming chunk.  The outer
-        # poll loop uses this to detect stale connections that keep receiving
-        # SSE keep-alive pings but no actual data.
+        # Last REAL chunk; the monitor detects SSE-ping-only connections with it.
         self.last_chunk_time = {"t": time.time()}
-        # Stale-stream patience, shared between the httpx socket read timeout
-        # (built in ``_call_chat_completions`` below) and the stale-stream detector
-        # (computed further down, before the worker thread starts).  Initialized
-        # here so the read-timeout builder can floor itself at the stale value and
-        # never fire before the detector.  ``None`` until the detector value is
-        # resolved, so the builder degrades to its plain default if it ever runs
-        # first.
+        # Shared by the socket read timeout (``_stream_timeouts``) and the stale
+        # detector (``_resolve_stale_timeout``); None until resolved.
         self._stream_stale_timeout = None
         self.stream_attempt_lock = threading.Lock()
-        self.stream_attempt_state = {
-            "current": 0,
-            "cancelled": set(),
-            "discarded_chunks": 0,
-            "discarded_bytes": 0,
-        }
+        self.stream_attempt_state = {"current": 0, "cancelled": set(), "discarded_chunks": 0, "discarded_bytes": 0}
         self.managed_stream_holder = {"stream": None}
+
+    # ── shared small helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _quiet(fn, *args) -> None:
+        """Best-effort callback: never let a display hook break the stream."""
+        try:
+            fn(*args)
+        except Exception:
+            pass
 
     def _set_managed_stream(self, stream: Any) -> Any:
         self.managed_stream_holder["stream"] = stream
@@ -3526,9 +3516,7 @@ class _StreamingCall:
 
     def _close_managed_stream(self) -> None:
         stream = self.managed_stream_holder.pop("stream", None)
-        if stream is None:
-            return
-        close = getattr(stream, "close", None)
+        close = getattr(stream, "close", None) if stream is not None else None
         if callable(close):
             try:
                 close()
@@ -3548,11 +3536,7 @@ class _StreamingCall:
             if current:
                 self.stream_attempt_state["cancelled"].add(current)
         if current:
-            logger.debug(
-                "Marked stream attempt %s cancelled: %s",
-                current,
-                reason,
-            )
+            logger.debug("Marked stream attempt %s cancelled: %s", current, reason)
 
     def _stream_attempt_is_active(self, stream_attempt_id: int) -> bool:
         with self.stream_attempt_lock:
@@ -3575,71 +3559,114 @@ class _StreamingCall:
             self.stream_attempt_state["discarded_bytes"] += chunk_bytes
             discarded_chunks = self.stream_attempt_state["discarded_chunks"]
             discarded_bytes = self.stream_attempt_state["discarded_bytes"]
-        if discarded_chunks == 1:
-            logger.warning(
-                "Discarding chunk from superseded stream attempt %s "
-                "(discarded_chunks=%s discarded_bytes=%s)",
-                stream_attempt_id,
-                discarded_chunks,
-                discarded_bytes,
-            )
-        else:
-            logger.debug(
-                "Discarded stale stream chunk from attempt %s "
-                "(discarded_chunks=%s discarded_bytes=%s)",
-                stream_attempt_id,
-                discarded_chunks,
-                discarded_bytes,
-            )
+        first = discarded_chunks == 1
+        (logger.warning if first else logger.debug)(
+            ("Discarding chunk from superseded stream attempt %s " if first else "Discarded stale stream chunk from attempt %s ")
+            + "(discarded_chunks=%s discarded_bytes=%s)",
+            stream_attempt_id, discarded_chunks, discarded_bytes,
+        )
 
     def _fire_first_delta(self):
         if not self.first_delta_fired["done"] and self.on_first_delta:
             self.first_delta_fired["done"] = True
+            self._quiet(self.on_first_delta)
+
+    def _emit_text(self, text: str) -> None:
+        self._fire_first_delta()
+        self.agent._fire_stream_delta(text)
+        self.deltas_were_sent["yes"] = True
+
+    def _emit_reasoning(self, text: str) -> None:
+        self._fire_first_delta()
+        self.agent._fire_reasoning_delta(text)
+
+    def _emit_tool_started(self, name: str) -> None:
+        self._fire_first_delta()
+        self.agent._fire_tool_gen_started(name)
+
+    def _route_suppressed_text(self, text: str) -> None:
+        """Tool-call turns suppress content streaming (no chatty preamble), but
+        reasoning tags inside it must still reach the display: route through
+        the delta callback for tag extraction (the CLI drops non-reasoning text
+        once the stream box is closed)."""
+        if self.agent.stream_delta_callback:
             try:
-                self.on_first_delta()
+                self.agent.stream_delta_callback(text)
+                self.agent._record_streamed_assistant_text(text)
             except Exception:
                 pass
+
+    def _new_diag(self) -> dict:
+        diag = self.agent._stream_diag_init()
+        self.clients.diag = diag
+        return diag
+
+    def _count_chunk(self, diag, chunk) -> None:
+        """Stamp liveness for a real chunk; diagnostics are best-effort."""
+        self.last_chunk_time["t"] = time.time()
+        self.agent._touch_activity("receiving stream response")
+        try:
+            diag["chunks"] = int(diag.get("chunks", 0)) + 1
+            if diag.get("first_chunk_at") is None:
+                diag["first_chunk_at"] = self.last_chunk_time["t"]
+            # Delta-length estimate: ~3x cheaper than repr() per chunk.
+            diag["bytes"] = int(diag.get("bytes", 0)) + _estimate_chunk_bytes(chunk)
+        except Exception:
+            pass
+
+    # ── chat_completions wire ───────────────────────────────────────────
+
+    def _stream_timeouts(self) -> tuple[float, float, float]:
+        """``(write, read, connect/pool)`` socket timeouts. Per-provider
+        ``request_timeout_seconds`` wins over HERMES_API_TIMEOUT (1800s) and
+        HERMES_STREAM_READ_TIMEOUT (120s); connect/pool cover the handshake, not
+        inference: 30s, or capped at 60s when configured."""
+        cfg = get_provider_request_timeout(self.agent.provider, self.agent.model)
+        base = cfg if cfg is not None else env_float("HERMES_API_TIMEOUT", 1800.0)
+        if cfg is not None:
+            return base, cfg, min(base, 60.0)
+        read = env_float("HERMES_STREAM_READ_TIMEOUT", 120.0)
+        stale = self._stream_stale_timeout
+        if read == 120.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
+            read = base  # local providers prefill for minutes
+            logger.debug("Local provider detected (%s) — stream read timeout raised to %.0fs", self.agent.base_url, read)
+        elif read == 120.0 and stale is not None and stale != float("inf") and stale > read:
+            # Reasoning models pause mid-stream for minutes; the stale detector
+            # tolerates that, so the raw read timeout must not fire first.
+            read = stale
+            logger.debug("Cloud reasoning stream — read timeout raised to %.0fs to match stale-stream detector", read)
+        return base, read, 30.0
+
+    @staticmethod
+    def _choiceless_chunk(chunk, finish_reason):
+        """Chunk with empty ``choices`` -> ``(usage, finish_reason)``. Raises
+        ProviderStreamError for providers (DeepInfra) that send validation errors
+        as in-stream chunks (choices=None + error_type/error_message), which
+        would otherwise surface as a misleading EmptyStreamError plus retries."""
+        usage = chunk.usage if hasattr(chunk, "usage") and chunk.usage else None  # final usage chunk
+        _err_type = getattr(chunk, "error_type", None)
+        _err_msg = getattr(chunk, "error_message", None)
+        if _err_type or _err_msg:
+            _status = _status_code_from_payload({"code": _err_type, "message": _err_msg}) or _status_code_from_value(_err_type)
+            body = _provider_error_body(
+                {"code": _err_type or "provider_in_stream_error", "message": str(_err_msg or chunk)}, _status,
+            )
+            raise ProviderStreamError(status_code=_status, body=body, raw_text=f"{_err_type}: {_err_msg}")
+        # Nous Portal usage frames (choices=[] + lastOne=true, no [DONE]) are a
+        # clean terminal, not a drop; relabelled upstreams send 1 / "true".
+        last_one = getattr(chunk, "lastOne", None)
+        if last_one is None:
+            extra = getattr(chunk, "model_extra", None)
+            if isinstance(extra, dict):
+                last_one = extra.get("lastOne")
+        if last_one in (True, 1, "true") and finish_reason is None:
+            finish_reason = "stop"
+        return usage, finish_reason
 
     def _call_chat_completions(self, stream_attempt_id: int):
         """Stream a chat completions response."""
         import httpx as _httpx
-        # Per-provider / per-model request_timeout_seconds (from config.yaml)
-        # wins over the HERMES_API_TIMEOUT env default if the user set it.
-        _provider_timeout_cfg = get_provider_request_timeout(self.agent.provider, self.agent.model)
-        _base_timeout = (
-            _provider_timeout_cfg
-            if _provider_timeout_cfg is not None
-            else env_float("HERMES_API_TIMEOUT", 1800.0)
-        )
-        # Read timeout: config wins; else HERMES_STREAM_READ_TIMEOUT (120s).
-        if _provider_timeout_cfg is not None:
-            _stream_read_timeout = _provider_timeout_cfg
-        else:
-            _stream_read_timeout = env_float("HERMES_STREAM_READ_TIMEOUT", 120.0)
-            # Local providers prefill for minutes: raise the read timeout
-            # unless the user overrode HERMES_STREAM_READ_TIMEOUT.
-            if _stream_read_timeout == 120.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
-                _stream_read_timeout = _base_timeout
-                logger.debug(
-                    "Local provider detected (%s) — stream read timeout raised to %.0fs",
-                    self.agent.base_url, _stream_read_timeout,
-                )
-            elif (
-                _stream_read_timeout == 120.0
-                and self._stream_stale_timeout is not None
-                and self._stream_stale_timeout != float("inf")
-                and self._stream_stale_timeout > _stream_read_timeout
-            ):
-                # Reasoning models pause mid-stream for minutes; the stale
-                # detector (180–300s) tolerates that, so the raw 120s socket
-                # read timeout must not fire first and preempt it.
-                _stream_read_timeout = self._stream_stale_timeout
-                logger.debug(
-                    "Cloud reasoning stream — read timeout raised to %.0fs to "
-                    "match stale-stream detector", _stream_read_timeout,
-                )
-        # connect/pool cover the TCP handshake, not inference: cap at 60s.
-        _conn_cap = min(_base_timeout, 60.0) if _provider_timeout_cfg is not None else 30.0
+        base_timeout, read_timeout, conn_cap = self._stream_timeouts()
         content_parts: list = []
         tool_calls = _ToolCallAccumulator()
         tool_calls_acc = tool_calls.acc
@@ -3648,32 +3675,21 @@ class _StreamingCall:
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
-        _diag = self.agent._stream_diag_init()
-        self.clients.diag = _diag
+        _diag = self._new_diag()
         _writer_token = {"value": None}
         attempt_request_client = {"value": None}
         attempt_stream_response = {"value": None}
+        pending_text_parts: list[str] = []
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
-            stream_kwargs = {
-                **next_api_kwargs,
-                "stream": True,
-                "timeout": _httpx.Timeout(
-                    connect=_conn_cap,
-                    read=_stream_read_timeout,
-                    write=_base_timeout,
-                    pool=_conn_cap,
-                ),
-            }
+            timeout = _httpx.Timeout(connect=conn_cap, read=read_timeout, write=base_timeout, pool=conn_cap)
+            stream_kwargs = {**next_api_kwargs, "stream": True, "timeout": timeout}
             # Native Gemini rejects OpenAI's usage-streaming extension.
             if not is_native_gemini_base_url(self.agent.base_url):
                 stream_kwargs["stream_options"] = {"include_usage": True}
-            request_client = self.clients.set_client(
-                self.agent._create_request_openai_client(
-                    reason="chat_completion_stream_request",
-                    api_kwargs=stream_kwargs,
-                )
-            )
+            request_client = self.clients.set_client(self.agent._create_request_openai_client(
+                reason="chat_completion_stream_request", api_kwargs=stream_kwargs,
+            ))
             attempt_request_client["value"] = request_client
             self.last_chunk_time["t"] = time.time()
             self.agent._touch_activity("waiting for provider response (streaming)")
@@ -3689,35 +3705,25 @@ class _StreamingCall:
             _writer_token["value"] = claim_stream_writer(self.agent)
 
         def _accept_stream_chunk(_chunk: Any) -> bool:
-            # A stale-attempt fence can win while Relay hands back a received
-            # tool-call chunk: record only that a tool call was in flight (so
-            # retry policy doesn't see a partial text response); the chunk is
-            # still rejected below.
             try:
                 choices = getattr(_chunk, "choices", None)
-                delta = getattr(choices[0], "delta", None) if choices else None
+                choice = choices[0] if choices else None
+                delta = getattr(choice, "delta", None)
+                # A stale-attempt fence can win while Relay hands back a tool-call
+                # chunk: record that a tool call was in flight (retry policy must
+                # not see a partial text response); the chunk is still rejected.
                 if getattr(delta, "tool_calls", None):
                     self.provider_tool_in_flight["yes"] = True
-            except Exception:
-                pass
-            # Marker-only finish chunk (finish_reason, no writable delta)
-            # always passes: the fence only stops a superseded stream writing
-            # MORE text, and fending the completion signal would make the
-            # drop-guard mislabel a clean end as a mid-stream drop.
-            try:
-                _choices = getattr(_chunk, "choices", None)
-                if _choices:
-                    _choice = _choices[0]
-                    if getattr(_choice, "finish_reason", None):
-                        _delta = getattr(_choice, "delta", None)
-                        _has_write = bool(
-                            getattr(_delta, "content", None)
-                            or getattr(_delta, "tool_calls", None)
-                            or getattr(_delta, "reasoning_content", None)
-                            or getattr(_delta, "reasoning", None)
-                        )
-                        if not _has_write:
-                            return True
+                # Marker-only finish chunk (no writable delta) always passes: the
+                # fence only stops MORE text; fending the completion signal would
+                # make the drop-guard mislabel a clean end as a drop.
+                if getattr(choice, "finish_reason", None) and not (
+                    getattr(delta, "content", None)
+                    or getattr(delta, "tool_calls", None)
+                    or getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "reasoning", None)
+                ):
+                    return True
             except Exception:
                 pass
             if not self._stream_attempt_is_active(stream_attempt_id):
@@ -3725,421 +3731,261 @@ class _StreamingCall:
             token = _writer_token["value"]
             if token is not None and not stream_writer_is_current(self.agent, token):
                 logger.warning(
-                    "Streaming attempt superseded by a newer stream; stopping "
-                    "consumption to preserve the single-writer invariant "
-                    "(model=%s).",
-                    self.api_kwargs.get("model", "unknown"),
+                    "Streaming attempt superseded by a newer stream; stopping consumption to preserve the "
+                    "single-writer invariant (model=%s).", self.api_kwargs.get("model", "unknown"),
                 )
                 return False
-            # Stamp activity BEFORE Relay processes the chunk so the watchdog
-            # can't cancel a live stream mid-interceptor.
+            # Stamp BEFORE Relay processes the chunk so the watchdog can't cancel
+            # a live stream mid-interceptor.
             self.last_chunk_time["t"] = time.time()
             return True
 
         def _relay_final_response() -> dict[str, Any]:
-            tool_calls = [tool_calls_acc[index] for index in sorted(tool_calls_acc)]
-            return {
-                "model": model_name,
-                "choices": [
-                    {
-                        "message": {
-                            "role": role,
-                            "content": "".join(content_parts) or None,
-                            "reasoning_content": "".join(reasoning_parts) or None,
-                            "tool_calls": tool_calls or None,
-                        },
-                        "finish_reason": finish_reason or "stop",
-                    }
-                ],
-                "usage": usage_obj,
+            message = {
+                "role": role, "content": "".join(content_parts) or None,
+                "reasoning_content": "".join(reasoning_parts) or None,
+                "tool_calls": [tool_calls_acc[i] for i in sorted(tool_calls_acc)] or None,
             }
+            choices = [{"message": message, "finish_reason": finish_reason or "stop"}]
+            return {"model": model_name, "choices": choices, "usage": usage_obj}
+
+        def _flush_pending_stream_text():
+            pending_parts = list(pending_text_parts)
+            pending_text_parts.clear()
+            for text in pending_parts:
+                if tool_calls_acc:
+                    self._route_suppressed_text(text)
+                else:
+                    self._emit_text(text)
 
         from agent import relay_llm
 
-        stream = self._set_managed_stream(
-            relay_llm.stream(
-                self.api_kwargs,
-                _open_stream,
-                **_relay_stream_identity(self.agent, "provider"),
-                finalizer=_relay_final_response,
-                on_stream_created=_stream_created,
-                accept_chunk=_accept_stream_chunk,
-                completed_response_predicate=lambda value: hasattr(value, "choices"),
-                metadata=_relay_stream_metadata(self.agent, "chat_completions"),
-                defer_logical_completion=True,
-            )
-        )
+        stream = self._set_managed_stream(relay_llm.stream(
+            self.api_kwargs, _open_stream, **_relay_stream_identity(self.agent, "provider"),
+            finalizer=_relay_final_response, on_stream_created=_stream_created, accept_chunk=_accept_stream_chunk,
+            completed_response_predicate=lambda value: hasattr(value, "choices"),
+            metadata=_relay_stream_metadata(self.agent, "chat_completions"), defer_logical_completion=True,
+        ))
         if self.agent.provider == "moa":
-            # Hermes interrupts the managed stream; Relay retains sole
-            # ownership of closing the underlying provider stream.
+            # Hermes interrupts the managed stream; Relay alone closes the provider stream.
             self.clients.set_stream_handle(stream)
-        pending_text_parts: list[str] = []
 
-        def _flush_pending_stream_text():
-            if not pending_text_parts:
-                return
-            pending_parts = list(pending_text_parts)
-            pending_text_parts.clear()
-            if not tool_calls_acc:
-                for text in pending_parts:
-                    self._fire_first_delta()
-                    self.agent._fire_stream_delta(text)
-                    self.deltas_were_sent["yes"] = True
-                return
-            if self.agent.stream_delta_callback:
-                for text in pending_parts:
-                    try:
-                        self.agent.stream_delta_callback(text)
-                        self.agent._record_streamed_assistant_text(text)
-                    except Exception:
-                        pass
-
-        for chunk in _iter_provider_stream_chunks(
-            stream,
-            response=lambda: attempt_stream_response["value"],
-        ):
-            self.last_chunk_time["t"] = time.time()
-            self.agent._touch_activity("receiving stream response")
-
-            # Best-effort diagnostics; never interrupt the hot path.
-            try:
-                _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
-                if _diag.get("first_chunk_at") is None:
-                    _diag["first_chunk_at"] = self.last_chunk_time["t"]
-                # Delta-length estimate: ~3x cheaper than repr() per chunk.
-                try:
-                    _diag["bytes"] = int(_diag.get("bytes", 0)) + _estimate_chunk_bytes(chunk)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
+        for chunk in _iter_provider_stream_chunks(stream, response=lambda: attempt_stream_response["value"]):
+            self._count_chunk(_diag, chunk)
             if self.agent._interrupt_requested:
-                # A half-read SSE response stays checked out of the httpx pool,
-                # and the partial response below makes the finally cache the
-                # client WITH the leaked connection (one per interrupt until
-                # the pool exhausts). Close on the owning thread first.
+                # A half-read SSE response stays checked out of the httpx pool and
+                # the finally would cache the client WITH the leaked connection:
+                # close on the owning thread first.
                 try:
                     stream.close()
                 except Exception:
-                    # Still checked out: poison the slot so the finally really
-                    # closes the pool instead of caching it.
+                    # Still checked out: poison the slot so the finally really closes the pool.
                     request_client = attempt_request_client["value"]
                     if request_client is not None:
-                        self.agent._abort_request_openai_client(
-                            request_client,
-                            reason="interrupt_stream_close_failed",
-                        )
+                        self.agent._abort_request_openai_client(request_client, reason="interrupt_stream_close_failed")
                 break
-
             if not self._stream_attempt_is_active(stream_attempt_id):
                 self._discard_stale_stream_chunk(stream_attempt_id, chunk)
                 continue
-
-            if not chunk.choices:
-                if hasattr(chunk, "model") and chunk.model:
-                    model_name = chunk.model
-                # Usage comes in the final chunk with empty choices
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage_obj = chunk.usage
-                # Some providers (DeepInfra) send validation errors as
-                # in-stream chunks (choices=None + error_type/error_message);
-                # otherwise they'd surface as a misleading EmptyStreamError
-                # and pointless retries (#65631).
-                _err_type = getattr(chunk, "error_type", None)
-                _err_msg = getattr(chunk, "error_message", None)
-                if _err_type or _err_msg:
-                    _status = _status_code_from_payload(
-                        {"code": _err_type, "message": _err_msg}
-                    ) or _status_code_from_value(_err_type)
-                    raise ProviderStreamError(
-                        status_code=_status,
-                        body=_provider_error_body(
-                            {
-                                "code": _err_type or "provider_in_stream_error",
-                                "message": str(_err_msg or chunk),
-                            },
-                            _status,
-                        ),
-                        raw_text=f"{_err_type}: {_err_msg}",
-                    )
-                # Nous Portal usage frames often have choices=[] plus
-                # lastOne=true and no [DONE]. Treat that as a clean
-                # terminal, not a mid-stream drop (#90848).
-                last_one = getattr(chunk, "lastOne", None)
-                if last_one is None:
-                    extra = getattr(chunk, "model_extra", None)
-                    if isinstance(extra, dict):
-                        last_one = extra.get("lastOne")
-                # Integer/string-truthy sentinels included — relabelled
-                # upstreams have been seen sending 1 / "true".
-                if last_one in (True, 1, "true") and finish_reason is None:
-                    finish_reason = "stop"
-                continue
-
-            delta = chunk.choices[0].delta
             if hasattr(chunk, "model") and chunk.model:
                 model_name = chunk.model
+            if not chunk.choices:
+                usage, finish_reason = self._choiceless_chunk(chunk, finish_reason)
+                usage_obj = usage or usage_obj
+                continue
 
-            # Read finish_reason/usage BEFORE any content-shape `continue`:
-            # the SSE-echo guard below can swallow a merged finish chunk
-            # (vLLM emitting standalone ':' tokens), falsely flagging
-            # truncation (#94614).
-            chunk_finish_reason = getattr(chunk.choices[0], "finish_reason", None)
-            if chunk_finish_reason:
-                finish_reason = chunk_finish_reason
+            choice = chunk.choices[0]
+            delta = choice.delta
+            # Read finish_reason/usage BEFORE any content-shape `continue`: the SSE-echo
+            # guard can swallow a merged finish chunk (vLLM standalone ':' tokens).
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_obj = chunk.usage
 
-            # Accumulate reasoning content
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if reasoning_text:
-                # Summary-part models send one markdown block per delta with no
-                # separator; re-insert it (see agent/reasoning_summaries.py).
+                # Summary-part models omit the separator between markdown blocks; re-insert it.
                 reasoning_text = separate_glued_reasoning_blocks(
-                    reasoning_parts[-1] if reasoning_parts else "",
-                    reasoning_text,
+                    reasoning_parts[-1] if reasoning_parts else "", reasoning_text,
                 )
                 reasoning_parts.append(reasoning_text)
-                self._fire_first_delta()
-                self.agent._fire_reasoning_delta(reasoning_text)
+                self._emit_reasoning(reasoning_text)
 
-            # Text content (list-of-blocks deltas flattened once); callbacks
-            # fire only when no tool calls.
+            # Text (list-of-blocks deltas flattened once); possible echoed SSE is
+            # buffered until it can be judged.
             delta_content = flatten_message_text(getattr(delta, "content", None), sep="")
             if delta_content:
                 content_parts.append(delta_content)
-                if not tool_calls_acc:
-                    if pending_text_parts or _provider_stream_text_may_be_sse(delta_content):
-                        pending_text_parts.append(delta_content)
-                        pending_text = "".join(pending_text_parts)
-                        if _provider_stream_text_may_be_sse(pending_text):
-                            continue
-                        _flush_pending_stream_text()
+                if tool_calls_acc:
+                    self._route_suppressed_text(delta_content)
+                elif pending_text_parts or _provider_stream_text_may_be_sse(delta_content):
+                    pending_text_parts.append(delta_content)
+                    if _provider_stream_text_may_be_sse("".join(pending_text_parts)):
                         continue
-                    self._fire_first_delta()
-                    self.agent._fire_stream_delta(delta_content)
-                    self.deltas_were_sent["yes"] = True
-                # Tool calls suppress content streaming (no chatty "I'll use
-                # the tool..." preamble), but reasoning tags inside that
-                # content must still reach the display or the reasoning box
-                # only appears post-response. Route it through the delta
-                # callback for tag extraction; the CLI drops non-reasoning
-                # text once the stream box is closed.
-                elif self.agent.stream_delta_callback:
-                    try:
-                        self.agent.stream_delta_callback(delta_content)
-                        self.agent._record_streamed_assistant_text(delta_content)
-                    except Exception:
-                        pass
+                    _flush_pending_stream_text()
+                    continue
+                else:
+                    self._emit_text(delta_content)
 
-            # Accumulate tool call deltas — notify display on first name
             delta_tool_calls = getattr(delta, "tool_calls", None)
             if delta_tool_calls:
                 _flush_pending_stream_text()
                 for tc_delta in delta_tool_calls:
                     name = tool_calls.feed(tc_delta)
                     if name is not None:
-                        self._fire_first_delta()
-                        self.agent._fire_tool_gen_started(name)
-                        # Record the partial tool-call name so the outer
-                        # stub-builder can surface a user-visible warning
-                        # if streaming dies before this tool's arguments
-                        # are fully delivered; otherwise a stall during
-                        # tool-call JSON generation lets the stub return
-                        # ``tool_calls=None`` and silently discard the action.
+                        self._emit_tool_started(name)
+                        # Lets the stub-builder warn if streaming dies before the args
+                        # complete instead of silently discarding the action.
                         self.result["partial_tool_names"].append(name)
 
-
-
         self._close_managed_stream()
-
         if self._stream_attempt_was_cancelled(stream_attempt_id):
-            raise _httpx.RemoteProtocolError(
-                f"stream attempt {stream_attempt_id} was superseded"
-            )
-
-        # Some adapters accept ``stream=True`` but return a completed
-        # response: switch this session to non-streaming.
+            raise _httpx.RemoteProtocolError(f"stream attempt {stream_attempt_id} was superseded")
         if stream.final_response is not None:
-            final_response = stream.final_response
-            logger.info(
-                "Streaming request returned a final response object instead of "
-                "an iterator; switching %s/%s to non-streaming for this session.",
-                self.agent.provider or "unknown",
-                self.agent.model or "unknown",
-            )
-            self.agent._disable_streaming = True
-            choices = final_response.choices
-            first_choice = (
-                choices[0]
-                if isinstance(choices, (list, tuple)) and choices
-                else None
-            )
-            message = getattr(first_choice, "message", None)
-            if message is not None:
-                reasoning_text = (
-                    getattr(message, "reasoning_content", None)
-                    or getattr(message, "reasoning", None)
-                )
-                if isinstance(reasoning_text, str) and reasoning_text:
-                    self._fire_first_delta()
-                    self.agent._fire_reasoning_delta(reasoning_text)
-                content = getattr(message, "content", None)
-                if isinstance(content, str) and content:
-                    self._fire_first_delta()
-                    self.agent._fire_stream_delta(content)
-            return final_response
+            return self._adopt_final_response(stream.final_response)
+        return self._finish_chat_stream(
+            stream, role, content_parts, reasoning_parts, tool_calls_acc, finish_reason, model_name, usage_obj,
+            flush_pending=_flush_pending_stream_text,
+        )
 
-        # Build mock response matching non-streaming shape
-        full_content = "".join(content_parts) or None
-        mock_tool_calls = None
+    def _adopt_final_response(self, final_response):
+        """Adapter returned a completed response for ``stream=True``: switch the
+        session to non-streaming and replay its content as deltas."""
+        logger.info(
+            "Streaming request returned a final response object instead of an iterator; "
+            "switching %s/%s to non-streaming for this session.",
+            self.agent.provider or "unknown", self.agent.model or "unknown",
+        )
+        self.agent._disable_streaming = True
+        choices = final_response.choices
+        message = getattr(choices[0] if isinstance(choices, (list, tuple)) and choices else None, "message", None)
+        if message is not None:
+            reasoning_text = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
+            if isinstance(reasoning_text, str) and reasoning_text:
+                self._emit_reasoning(reasoning_text)
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content:
+                self._fire_first_delta()
+                self.agent._fire_stream_delta(content)
+        return final_response
+
+    @staticmethod
+    def _assemble_tool_calls(tool_calls_acc, finish_reason):
+        """Materialize accumulated tool calls; flag truncated/unrepairable args."""
+        mock_tool_calls = []
         has_truncated_tool_args = False
-        if tool_calls_acc:
-            mock_tool_calls = []
-            for idx in sorted(tool_calls_acc):
-                tc = tool_calls_acc[idx]
-                arguments = tc["function"]["arguments"]
-                tool_name = tc["function"]["name"] or "?"
-                if arguments and arguments.strip():
-                    try:
-                        json.loads(arguments)
-                    except json.JSONDecodeError:
-                        # Repair before flagging (GLM via Ollama: trailing
-                        # commas, unclosed brackets, Python None); "{}" means
-                        # unrepairable -> truncation handling.
-                        repaired = _repair_tool_call_arguments(arguments, tool_name)
-                        if repaired != "{}":
-                            arguments = repaired
-                        else:
-                            has_truncated_tool_args = True
-                elif finish_reason is None:
-                    # Name arrived, zero argument bytes, no finish_reason:
-                    # unflagged this becomes a "stop" turn whose empty args
-                    # are coerced to "{}" and executed with no retry (#80498).
-                    has_truncated_tool_args = True
-                mock_tool_calls.append(SimpleNamespace(
-                    id=tc["id"],
-                    type=tc["type"],
-                    extra_content=tc.get("extra_content"),
-                    function=SimpleNamespace(
-                        name=tc["function"]["name"],
-                        arguments=arguments,
-                    ),
-                ))
+        for idx in sorted(tool_calls_acc):
+            tc = tool_calls_acc[idx]
+            arguments = tc["function"]["arguments"]
+            if arguments and arguments.strip():
+                try:
+                    json.loads(arguments)
+                except json.JSONDecodeError:
+                    # Repair before flagging (GLM via Ollama); "{}" = unrepairable.
+                    repaired = _repair_tool_call_arguments(arguments, tc["function"]["name"] or "?")
+                    if repaired != "{}":
+                        arguments = repaired
+                    else:
+                        has_truncated_tool_args = True
+            elif finish_reason is None:
+                # Name arrived, zero arg bytes, no finish_reason: unflagged this
+                # becomes a "stop" turn executing "{}" with no retry.
+                has_truncated_tool_args = True
+            mock_tool_calls.append(SimpleNamespace(
+                id=tc["id"], type=tc["type"], extra_content=tc.get("extra_content"),
+                function=SimpleNamespace(name=tc["function"]["name"], arguments=arguments),
+            ))
+        return mock_tool_calls or None, has_truncated_tool_args
 
-        # Zero-chunk guard: nothing usable = upstream error / malformed SSE,
-        # not a legitimate empty completion.
-        if (
-            finish_reason is None
-            and not content_parts
-            and not reasoning_parts
-            and not tool_calls_acc
-        ):
+    def _finish_chat_stream(
+        self, stream, role, content_parts, reasoning_parts, tool_calls_acc, finish_reason, model_name, usage_obj,
+        *, flush_pending,
+    ):
+        """Assemble the non-streaming-shaped response after the chunk loop. A
+        stream ending with no finish_reason is a drop, not a completion: return a
+        partial-stream stub so the loop fails fast instead of executing empty
+        args or stamping "stop"."""
+        full_content = "".join(content_parts) or None
+        full_reasoning = "".join(reasoning_parts) or None
+        mock_tool_calls, has_truncated_tool_args = self._assemble_tool_calls(tool_calls_acc, finish_reason)
+        # Zero-chunk guard: nothing usable = upstream error / malformed SSE.
+        if finish_reason is None and not content_parts and not reasoning_parts and not tool_calls_acc:
             raise EmptyStreamError(
-                "Provider returned an empty stream with no finish_reason "
-                "(possible upstream error or malformed SSE response)."
+                "Provider returned an empty stream with no finish_reason (possible upstream error or malformed SSE response)."
             )
-
-        # Partial/unparseable tool args WITH finish_reason="length" is a real
-        # output-cap truncation (boost max_tokens on retry). With NO
-        # finish_reason the upstream dropped/stalled mid tool-call (some
-        # dedicated endpoints close cleanly after minutes of stalling); the
-        # model never hit a cap, so stamping "length" would burn 3 useless
-        # max_tokens retries and report a misleading truncation. Route it
-        # through the partial-stream stub so the loop fails fast and honestly.
-        _tool_args_dropped_no_finish = has_truncated_tool_args and finish_reason is None
-        if _tool_args_dropped_no_finish:
-            _dropped_names = [
-                (tool_calls_acc[idx]["function"]["name"] or "?")
-                for idx in sorted(tool_calls_acc)
-            ]
+        if has_truncated_tool_args and finish_reason is None:
+            # Partial args WITH finish_reason="length" is a real output cap; with
+            # NONE the upstream dropped mid tool-call, and stamping "length"
+            # would burn 3 useless max_tokens retries.
+            _dropped_names = [(tool_calls_acc[idx]["function"]["name"] or "?") for idx in sorted(tool_calls_acc)]
             logger.warning(
-                "Stream ended with no finish_reason while a tool call's "
-                "arguments were still incomplete (tools=%s); treating as a "
-                "mid-tool-call stream drop, not an output-length truncation.",
+                "Stream ended with no finish_reason while a tool call's arguments were still incomplete "
+                "(tools=%s); treating as a mid-tool-call stream drop, not an output-length truncation.",
                 _dropped_names,
             )
             return _build_partial_stream_stub(
-                role, full_content,
-                "".join(reasoning_parts) or None,
-                model_name, usage_obj,
-                dropped_tool_names=_dropped_names or None,
+                role, full_content, full_reasoning, model_name, usage_obj, dropped_tool_names=_dropped_names or None,
             )
-
-        # Text-only drop: no finish_reason after text but no tool calls.
-        # Without this the partial text is stamped "stop" and the model's next
-        # step is lost (#32086). A usage object proves the provider finished
-        # (include_usage sends a final usage-only chunk with empty choices and
-        # no finish_reason, #91373), so that is not a drop.
-        _text_only_dropped_no_finish = (
-            finish_reason is None
-            and content_parts
-            and not tool_calls_acc
-            and usage_obj is None
-        )
-        if _text_only_dropped_no_finish:
+        if finish_reason is None and content_parts and not tool_calls_acc and usage_obj is None:
+            # Text-only drop: otherwise the partial text is stamped "stop" and the
+            # next step is lost. A usage object proves the provider finished
+            # (include_usage's final chunk has empty choices, no finish_reason).
             logger.warning(
-                "Stream ended with no finish_reason after delivering text "
-                "with no tool calls; treating as a mid-stream drop."
+                "Stream ended with no finish_reason after delivering text with no tool calls; treating as a mid-stream drop."
             )
-            return _build_partial_stream_stub(
-                role, full_content,
-                "".join(reasoning_parts) or None,
-                model_name, usage_obj,
-            )
-
-        effective_finish_reason = finish_reason or "stop"
-        if has_truncated_tool_args:
-            effective_finish_reason = "length"
-
+            return _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj)
+        effective_finish_reason = "length" if has_truncated_tool_args else (finish_reason or "stop")
         provider_stream_error = _provider_stream_error_from_text(
-            full_content or "",
-            effective_finish_reason,
-            response=getattr(stream, "response", None),
+            full_content or "", effective_finish_reason, response=getattr(stream, "response", None),
         )
         if provider_stream_error is not None:
             raise provider_stream_error
-        _flush_pending_stream_text()
-
-        full_reasoning = "".join(reasoning_parts) or None
-        mock_message = SimpleNamespace(
-            role=role,
-            content=full_content,
-            tool_calls=mock_tool_calls,
-            reasoning_content=full_reasoning,
-        )
-        mock_choice = SimpleNamespace(
-            index=0,
-            message=mock_message,
-            finish_reason=effective_finish_reason,
+        flush_pending()
+        message = SimpleNamespace(
+            role=role, content=full_content, tool_calls=mock_tool_calls, reasoning_content=full_reasoning,
         )
         return SimpleNamespace(
             id="stream-" + str(uuid.uuid4()),
             model=model_name,
-            choices=[mock_choice],
+            choices=[SimpleNamespace(index=0, message=message, finish_reason=effective_finish_reason)],
             usage=usage_obj,
         )
 
+    # ── anthropic_messages wire ─────────────────────────────────────────
+
+    @staticmethod
+    def _check_anthropic_message(message, *, tool_drop: bool = True):
+        """Raise EmptyStreamError for a message the stream never completed: no
+        content and no stop_reason (eventless -> retry), or with ``tool_drop`` a
+        ``tool_use`` block and no stop_reason — the SSE closed mid tool call and
+        its input is a partial snapshot (usually ``{}``), so raising blocks the
+        empty-args execution (bounded retry, or stub/continuation after text)."""
+        content = getattr(message, "content", None)
+        if not content and getattr(message, "stop_reason", None) is None:
+            raise EmptyStreamError(
+                "Provider returned an empty stream with no stop_reason (possible upstream error or malformed event stream)."
+            )
+        if tool_drop and getattr(message, "stop_reason", None) is None and any(
+            getattr(block, "type", None) == "tool_use" for block in content or []
+        ):
+            raise EmptyStreamError(
+                "Stream ended with no stop_reason while a tool_use block was still incomplete; "
+                "treating as a mid-tool-call stream drop (#80498)."
+            )
+        return message
+
     def _call_anthropic(self, request_client):
-        """Stream an Anthropic Messages API response.
-
-        Fires delta callbacks but returns the native Message from
-        get_final_message() so the rest of the loop is unchanged. Runs on the
-        per-request ``request_client`` (registered with the abort machinery)
-        so the watchdog can abort this socket without closing the shared
-        client mid-flight (#67142).
-        """
+        """Stream an Anthropic Messages API response; fires delta callbacks but
+        returns the native Message from get_final_message(). Runs on the
+        per-request ``request_client`` so the watchdog can abort this socket
+        without closing the shared client mid-flight."""
         has_tool_use = False
-        # Eventless stream: the real SDK's get_final_message() raises
-        # AssertionError (no message_start); shims may fabricate a contentless
-        # Message with no stop_reason, or return None under ``python -O``.
-        # All are normalized to EmptyStreamError so _call() retries.
+        # Eventless stream: the SDK's get_final_message() raises AssertionError
+        # (no message_start); shims may fabricate a contentless Message or return
+        # None under ``python -O``. All normalize to EmptyStreamError (retry).
         saw_stream_event = False
-
         self.last_chunk_time["t"] = time.time()
-        _diag = self.agent._stream_diag_init()
-        self.clients.diag = _diag
+        _diag = self._new_diag()
         _writer_token = {"value": None}
         _stream_context = {"manager": None, "stream": None}
         base_final_message = None
@@ -4151,25 +3997,17 @@ class _StreamingCall:
 
         def _open_anthropic_stream(next_api_kwargs: dict[str, Any]):
             final_kwargs = dict(next_api_kwargs)
-            sanitize_anthropic_kwargs(
-                final_kwargs,
-                log_prefix=getattr(self.agent, "log_prefix", ""),
-            )
+            sanitize_anthropic_kwargs(final_kwargs, log_prefix=getattr(self.agent, "log_prefix", ""))
             manager = request_client.messages.stream(**final_kwargs)
             _stream_context["manager"] = manager
             return manager.__enter__()
 
         def _anthropic_stream_created(raw_stream: Any) -> None:
             _stream_context["stream"] = raw_stream
-            # Snapshot ``stream.response`` diagnostics now so they survive a
-            # stream that dies before the first event.
-            try:
-                self.agent._stream_diag_capture_response(
-                    _diag,
-                    getattr(raw_stream, "response", None),
-                )
-            except Exception:
-                pass
+            # Snapshot response diagnostics now so they survive a stream dying before the first event.
+            self._quiet(
+                lambda: self.agent._stream_diag_capture_response(_diag, getattr(raw_stream, "response", None))
+            )
             _writer_token["value"] = claim_stream_writer(self.agent)
 
         def _accept_anthropic_event(_event: Any) -> bool:
@@ -4177,41 +4015,23 @@ class _StreamingCall:
             if token is None or stream_writer_is_current(self.agent, token):
                 return True
             logger.warning(
-                "Anthropic streaming attempt superseded by a newer stream; "
-                "stopping consumption to preserve the single-writer "
-                "invariant (model=%s).",
-                self.api_kwargs.get("model", "unknown"),
+                "Anthropic streaming attempt superseded by a newer stream; stopping consumption to preserve the "
+                "single-writer invariant (model=%s).", self.api_kwargs.get("model", "unknown"),
             )
             return False
 
-        stream = self._set_managed_stream(
-            relay_llm.stream(
-                self.api_kwargs,
-                _open_anthropic_stream,
-                **_relay_stream_identity(self.agent, "anthropic"),
-                finalizer=accumulator.finalize,
-                on_stream_created=_anthropic_stream_created,
-                on_chunk=accumulator.observe,
-                accept_chunk=_accept_anthropic_event,
-                metadata=_relay_stream_metadata(self.agent, "anthropic_messages"),
-                defer_logical_completion=True,
-            )
-        )
+        stream = self._set_managed_stream(relay_llm.stream(
+            self.api_kwargs, _open_anthropic_stream, **_relay_stream_identity(self.agent, "anthropic"),
+            finalizer=accumulator.finalize, on_stream_created=_anthropic_stream_created,
+            on_chunk=accumulator.observe, accept_chunk=_accept_anthropic_event,
+            metadata=_relay_stream_metadata(self.agent, "anthropic_messages"), defer_logical_completion=True,
+        ))
         try:
             for event in stream:
                 saw_stream_event = True
-                self.last_chunk_time["t"] = time.time()
-                self.agent._touch_activity("receiving stream response")
-                try:
-                    _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
-                    if _diag.get("first_chunk_at") is None:
-                        _diag["first_chunk_at"] = self.last_chunk_time["t"]
-                    _diag["bytes"] = int(_diag.get("bytes", 0)) + _estimate_chunk_bytes(event)
-                except Exception:
-                    pass
+                self._count_chunk(_diag, event)
                 if self.agent._interrupt_requested:
                     break
-
                 event_type = getattr(event, "type", None)
                 if event_type == "content_block_start":
                     block = getattr(event, "content_block", None)
@@ -4219,35 +4039,28 @@ class _StreamingCall:
                         has_tool_use = True
                         tool_name = getattr(block, "name", None)
                         if tool_name:
-                            self._fire_first_delta()
-                            self.agent._fire_tool_gen_started(tool_name)
+                            self._emit_tool_started(tool_name)
                 elif event_type == "content_block_delta":
                     delta = getattr(event, "delta", None)
-                    if delta:
-                        delta_type = getattr(delta, "type", None)
-                        if delta_type == "text_delta":
-                            text = getattr(delta, "text", "")
-                            if text and not has_tool_use:
-                                self._fire_first_delta()
-                                self.agent._fire_stream_delta(text)
-                                self.deltas_were_sent["yes"] = True
-                        elif delta_type == "thinking_delta":
-                            thinking_text = getattr(delta, "thinking", "")
-                            if thinking_text:
-                                self._fire_first_delta()
-                                self.agent._fire_reasoning_delta(thinking_text)
-            if not self.agent._interrupt_requested:
-                raw_stream = _stream_context["stream"]
-                if raw_stream is not None:
-                    try:
-                        base_final_message = raw_stream.get_final_message()
-                    except AssertionError:
-                        if not saw_stream_event:
-                            raise EmptyStreamError(
-                                "Provider returned an empty stream with no events "
-                                "(possible upstream error or malformed event stream)."
-                            ) from None
-                        raise
+                    delta_type = getattr(delta, "type", None) if delta else None
+                    if delta_type == "text_delta":
+                        text = getattr(delta, "text", "")
+                        if text and not has_tool_use:
+                            self._emit_text(text)
+                    elif delta_type == "thinking_delta":
+                        thinking_text = getattr(delta, "thinking", "")
+                        if thinking_text:
+                            self._emit_reasoning(thinking_text)
+            raw_stream = _stream_context["stream"]
+            if not self.agent._interrupt_requested and raw_stream is not None:
+                try:
+                    base_final_message = raw_stream.get_final_message()
+                except AssertionError:
+                    if not saw_stream_event:
+                        raise EmptyStreamError(
+                            "Provider returned an empty stream with no events (possible upstream error or malformed event stream)."
+                        ) from None
+                    raise
         finally:
             try:
                 self._close_managed_stream()
@@ -4258,304 +4071,152 @@ class _StreamingCall:
 
         if self.agent._interrupt_requested:
             return None
+        if base_final_message is not None:
+            self._check_anthropic_message(base_final_message, tool_drop=False)
+            if not stream.output_modified:
+                return self._check_anthropic_message(base_final_message)
+        return self._check_anthropic_message(accumulator.response(base_final_message))
 
-        def _tool_use_dropped_mid_stream(message) -> bool:
-            """True when the stream died mid tool call (#80498 sibling).
+    # ── retry loop ──────────────────────────────────────────────────────
 
-            A legitimate completion always has a ``stop_reason``; a
-            ``tool_use`` block with none means the SSE closed between
-            ``content_block_start`` and ``message_delta`` and its ``input`` is
-            a partial snapshot (usually ``{}``). Raising EmptyStreamError
-            blocks the empty-args execution on every path: no streamed text
-            -> bounded stream retry; text already streamed -> partial-stream
-            stub / continuation.
-            """
-            if getattr(message, "stop_reason", None) is not None:
-                return False
-            for block in getattr(message, "content", None) or []:
-                if getattr(block, "type", None) == "tool_use":
-                    return True
+    def _retry_after_drop(self, e, attempt: int, max_retries: int, *, mid_tool_call: bool, reason: str) -> None:
+        """Warn about the drop and tear down the request-local client. Shared
+        clients are never closed from inside a request (FD-recycle hazard); the
+        OpenAI primary is replaced lazily."""
+        self.agent._emit_stream_drop(
+            error=e, attempt=attempt + 2, max_attempts=max_retries + 1, mid_tool_call=mid_tool_call, diag=self.clients.diag,
+        )
+        self._cancel_current_stream_attempt(reason)
+        self.clients.close_once(reason)
+
+    def _maybe_disable_streaming(self, e) -> None:
+        """Flip to non-streaming when the provider rejects streaming outright or
+        AnthropicBedrock IAM lacks InvokeModelWithResponseStream."""
+        _err_lower = str(e).lower()
+        _is_stream_unsupported = "stream" in _err_lower and "not supported" in _err_lower
+        _is_bedrock_stream_denied = False
+        if not _is_stream_unsupported and "invokemodelwithresponsestream" in _err_lower:
+            # Message pre-check first: importing bedrock_adapter triggers a lazy boto3 install.
+            from agent.bedrock_adapter import is_streaming_access_denied_error
+            _is_bedrock_stream_denied = is_streaming_access_denied_error(e)
+        if _is_stream_unsupported or _is_bedrock_stream_denied:
+            self.agent._disable_streaming = True
+            self.agent._safe_print(
+                "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream. Switching to non-streaming.\n"
+                "   Grant that action to restore streaming output.\n"
+                if _is_bedrock_stream_denied else
+                "\n⚠  Streaming is not supported for this model/provider. Switching to non-streaming.\n"
+                "   To avoid this delay, set display.streaming: false in config.yaml\n"
+            )
+
+    def _handle_stream_error(self, e: Exception, attempt: int, max_retries: int) -> bool:
+        """Classify a failed attempt: True = retry; False = stop with
+        ``result["error"]`` set (unless our own interrupt force-closed the
+        socket). Runs inside the ``except`` so ``logger.exception`` works."""
+        import httpx as _httpx
+        # Our own interrupt force-close: no retry/fallback/"reconnecting" (the
+        # poll loop raises InterruptedError).
+        if self._request_cancelled["value"]:
+            logger.debug(
+                "Streaming worker caught %s after request cancellation — exiting without retry.", type(e).__name__,
+            )
             return False
+        _is_timeout = isinstance(e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout))
+        _is_conn_err = isinstance(e, (_httpx.ConnectError, _httpx.RemoteProtocolError, ConnectionError))
+        _is_stream_parse_err = self.agent._is_provider_stream_parse_error(e)
+        _is_empty_stream = isinstance(e, EmptyStreamError)
+        _is_sse_conn_err = not _is_timeout and not _is_conn_err and _is_sse_connection_error(e)
+        _is_transient = _is_timeout or _is_conn_err or _is_sse_conn_err or _is_stream_parse_err
 
-        if (
-            base_final_message is not None
-            and not getattr(base_final_message, "content", None)
-            and getattr(base_final_message, "stop_reason", None) is None
-        ):
-            raise EmptyStreamError(
-                "Provider returned an empty stream with no stop_reason "
-                "(possible upstream error or malformed event stream)."
+        if self.deltas_were_sent["yes"]:
+            # Died AFTER tokens were delivered: normally no retry (would duplicate
+            # text). Exception: a tool call in flight — aborting discards it, so
+            # retry TRANSIENT errors (a "reconnecting" marker + duplicated
+            # preamble beats a failed action; no tool has executed yet).
+            _partial_tool_in_flight = bool(self.result.get("partial_tool_names")) or self.provider_tool_in_flight["yes"]
+            if not (_partial_tool_in_flight and _is_transient and attempt < max_retries):
+                logger.warning("Streaming failed after partial delivery, not retrying: %s", e)
+                self.result["error"] = e
+                return False
+            # Marker explains the re-streamed preamble (``_emit_stream_drop`` logs
+            # the WARNING); reset the streamed-text buffer so the preamble isn't
+            # double-recorded, and start fresh accumulators.
+            self._quiet(self.agent._fire_stream_delta, "\n\n⚠ Connection dropped mid tool-call; reconnecting…\n\n")
+            self._quiet(self.agent._reset_stream_delivery_tracking)
+            self.result["partial_tool_names"] = []
+            self.deltas_were_sent["yes"] = False
+            self.first_delta_fired["done"] = False
+            self._retry_after_drop(e, attempt, max_retries, mid_tool_call=True, reason="stream_mid_tool_retry_cleanup")
+            return True
+
+        if _is_transient or _is_empty_stream:
+            # Transient network / timeout error: retry with a fresh connection first.
+            if attempt < max_retries:
+                self._retry_after_drop(e, attempt, max_retries, mid_tool_call=False, reason="stream_retry_cleanup")
+                return True
+            # Exhausted: log full diagnostics (chain, headers, bytes/elapsed).
+            self.agent._log_stream_retry(
+                kind="exhausted", error=e, attempt=max_retries + 1, max_attempts=max_retries + 1, mid_tool_call=False,
+                diag=self.clients.diag,
             )
-        if base_final_message is not None and not stream.output_modified:
-            if _tool_use_dropped_mid_stream(base_final_message):
-                raise EmptyStreamError(
-                    "Stream ended with no stop_reason while a tool_use "
-                    "block was still incomplete; treating as a "
-                    "mid-tool-call stream drop (#80498)."
-                )
-            return base_final_message
-        final_message = accumulator.response(base_final_message)
-        if (
-            not getattr(final_message, "content", None)
-            and getattr(final_message, "stop_reason", None) is None
-        ):
-            raise EmptyStreamError(
-                "Provider returned an empty stream with no stop_reason "
-                "(possible upstream error or malformed event stream)."
+            if _is_stream_parse_err:
+                _what = "Provider returned malformed streaming data after"
+            elif _is_empty_stream:
+                # Opened but no chunks: "connection failed" would send users chasing network issues.
+                _what = "Provider returned an empty response stream after"
+            else:
+                _what = "Connection to provider failed after"
+            self.agent._buffer_status(
+                f"❌ {_what} {max_retries + 1} attempts. The provider may be experiencing issues — try again in a moment."
             )
-        if _tool_use_dropped_mid_stream(final_message):
-            raise EmptyStreamError(
-                "Stream ended with no stop_reason while a tool_use "
-                "block was still incomplete; treating as a "
-                "mid-tool-call stream drop (#80498)."
-            )
-        return final_message
+        else:
+            self._maybe_disable_streaming(e)
+            logger.exception("Streaming failed before delivery: %s", e)
+        # Propagate to the main retry loop (credential rotation, fallback, backoff).
+        self.result["error"] = e
+        return False
 
     def _call(self):
-        import httpx as _httpx
-
         _max_stream_retries = env_int("HERMES_STREAM_RETRIES", 2)
-
         try:
             for _stream_attempt in range(_max_stream_retries + 1):
                 stream_attempt_id = self._start_stream_attempt()
-                # Interrupt check before each retry: otherwise /stop closes
-                # the connection and the retry opens a FRESH one, blocking up
-                # to a full read timeout per attempt.
+                # Otherwise /stop closes the connection and the retry opens a
+                # FRESH one, blocking up to a full read timeout per attempt.
                 if self.agent._interrupt_requested:
                     self._cancel_current_stream_attempt("interrupt_before_stream_retry")
                     raise InterruptedError("Agent interrupted before stream retry")
                 _emit_stream_start(self.agent)
                 try:
                     if self.agent.api_mode == "anthropic_messages":
-                        # Per-request client (credential refresh inside) so the
-                        # watchdog aborts its socket, not the shared client (#67142).
+                        # Per-request client so the watchdog aborts its socket, not the shared one.
                         request_client = self.clients.set_client(
-                            self.agent._create_request_anthropic_client(
-                                reason="anthropic_stream_request"
-                            ),
+                            self.agent._create_request_anthropic_client(reason="anthropic_stream_request"),
                             kind="anthropic_messages",
                         )
                         self.result["response"] = self._call_anthropic(request_client)
                     else:
                         self.result["response"] = self._call_chat_completions(stream_attempt_id)
-                    _emit_stream_end(self.agent, 
-                        final_text=_stream_final_text(self.result["response"]),
-                        finished=True,
-                        error=None,
-                    )
+                    final_text = _stream_final_text(self.result["response"])
+                    _emit_stream_end(self.agent, final_text=final_text, finished=True, error=None)
                     return  # success
                 except Exception as e:
                     _emit_stream_end(self.agent, final_text="", finished=False, error=str(e))
                     self._close_managed_stream()
-                    # Our own interrupt force-close caused this error: exit
-                    # with no retry/fallback/"reconnecting" (the poll loop
-                    # raises InterruptedError). Fix for the cascading-interrupt
-                    # hang (#6600).
-                    if self._request_cancelled["value"]:
-                        logger.debug(
-                            "Streaming worker caught %s after request "
-                            "cancellation — exiting without retry.",
-                            type(e).__name__,
-                        )
+                    if not self._handle_stream_error(e, _stream_attempt, _max_stream_retries):
                         return
-                    _is_timeout = isinstance(
-                        e, (_httpx.ReadTimeout, _httpx.ConnectTimeout, _httpx.PoolTimeout)
-                    )
-                    _is_conn_err = isinstance(
-                        e, (_httpx.ConnectError, _httpx.RemoteProtocolError, ConnectionError)
-                    )
-                    _is_stream_parse_err = self.agent._is_provider_stream_parse_error(e)
-                    _is_empty_stream = isinstance(e, EmptyStreamError)
-
-                    # Stream died AFTER tokens were delivered: normally no
-                    # retry (would duplicate text the user saw). Exception: a
-                    # tool call in flight — aborting discards it, so retry on
-                    # TRANSIENT connection errors only (a "reconnecting"
-                    # marker + duplicated preamble beats a failed action). No
-                    # tool has executed yet in this call, so this is safe.
-                    if self.deltas_were_sent["yes"]:
-                        _partial_tool_in_flight = bool(
-                            self.result.get("partial_tool_names")
-                        ) or self.provider_tool_in_flight["yes"]
-                        _is_sse_conn_err_preview = (
-                            not _is_timeout and not _is_conn_err and _is_sse_connection_error(e)
-                        )
-                        _is_transient = (
-                            _is_timeout
-                            or _is_conn_err
-                            or _is_sse_conn_err_preview
-                            or _is_stream_parse_err
-                        )
-                        _can_silent_retry = (
-                            _partial_tool_in_flight
-                            and _is_transient
-                            and _stream_attempt < _max_stream_retries
-                        )
-                        if not _can_silent_retry:
-                            # Either no tool call was in-flight (so the
-                            # turn was a pure text response — current
-                            # stub-with-recovered-text behaviour is
-                            # correct), or retries are exhausted, or the
-                            # error isn't transient.  Fall through to the
-                            # stub path.
-                            logger.warning(
-                                "Streaming failed after partial delivery, not retrying: %s", e
-                            )
-                            self.result["error"] = e
-                            return
-                        # Retry silently: "reconnecting" marker (explains the
-                        # re-streamed preamble), then reset per-attempt state.
-                        # ``_emit_stream_drop`` below emits the WARNING.
-                        try:
-                            self.agent._fire_stream_delta(
-                                "\n\n⚠ Connection dropped mid tool-call; "
-                                "reconnecting…\n\n"
-                            )
-                        except Exception:
-                            pass
-                        # Reset the streamed-text buffer so the retry's preamble
-                        # isn't double-recorded in _current_streamed_assistant_text.
-                        try:
-                            self.agent._reset_stream_delivery_tracking()
-                        except Exception:
-                            pass
-                        # Fresh accumulators: don't concat onto the dead stream's partial JSON.
-                        self.result["partial_tool_names"] = []
-                        self.deltas_were_sent["yes"] = False
-                        self.first_delta_fired["done"] = False
-                        self.agent._emit_stream_drop(
-                            error=e,
-                            attempt=_stream_attempt + 2,
-                            max_attempts=_max_stream_retries + 1,
-                            mid_tool_call=True,
-                            diag=self.clients.diag,
-                        )
-                        self._cancel_current_stream_attempt("stream_mid_tool_retry_cleanup")
-                        self.clients.close_once("stream_mid_tool_retry_cleanup")
-                        # Shared clients are never closed from inside a request
-                        # (#67142/#70773 FD-recycle): the request-local client
-                        # was worker-closed above; the next attempt builds fresh.
-                        continue
-
-                    _is_sse_conn_err = (
-                        not _is_timeout and not _is_conn_err and _is_sse_connection_error(e)
-                    )
-
-                    if (
-                        _is_timeout
-                        or _is_conn_err
-                        or _is_sse_conn_err
-                        or _is_stream_parse_err
-                        or _is_empty_stream
-                    ):
-                        # Transient network / timeout error. Retry the
-                        # streaming request with a fresh connection first.
-                        if _stream_attempt < _max_stream_retries:
-                            self.agent._emit_stream_drop(
-                                error=e,
-                                attempt=_stream_attempt + 2,
-                                max_attempts=_max_stream_retries + 1,
-                                mid_tool_call=False,
-                                diag=self.clients.diag,
-                            )
-                            self._cancel_current_stream_attempt("stream_retry_cleanup")
-                            self.clients.close_once("stream_retry_cleanup")
-                            # Shared clients are never closed from inside a request
-                            # (#67142/#70773); _ensure_primary_openai_client
-                            # replaces the OpenAI primary lazily on the next attempt.
-                            continue
-                        # Retries exhausted: log with full diagnostics (chain,
-                        # headers, bytes/elapsed); subagent lines carry log_prefix.
-                        self.agent._log_stream_retry(
-                            kind="exhausted",
-                            error=e,
-                            attempt=_max_stream_retries + 1,
-                            max_attempts=_max_stream_retries + 1,
-                            mid_tool_call=False,
-                            diag=self.clients.diag,
-                        )
-                        if _is_stream_parse_err:
-                            _exhausted_msg = (
-                                "❌ Provider returned malformed streaming data after "
-                                f"{_max_stream_retries + 1} attempts. "
-                                "The provider may be experiencing issues — "
-                                "try again in a moment."
-                            )
-                        elif _is_empty_stream:
-                            # Stream opened but no chunks: don't say "connection
-                            # failed" — that sends users chasing network issues.
-                            _exhausted_msg = (
-                                "❌ Provider returned an empty response stream "
-                                f"after {_max_stream_retries + 1} attempts. "
-                                "The provider may be experiencing issues — "
-                                "try again in a moment."
-                            )
-                        else:
-                            _exhausted_msg = (
-                                "❌ Connection to provider failed after "
-                                f"{_max_stream_retries + 1} attempts. "
-                                "The provider may be experiencing issues — "
-                                "try again in a moment."
-                            )
-                        self.agent._buffer_status(_exhausted_msg)
-                    else:
-                        _err_lower = str(e).lower()
-                        _is_stream_unsupported = (
-                            "stream" in _err_lower
-                            and "not supported" in _err_lower
-                        )
-                        # AnthropicBedrock: IAM without InvokeModelWithResponseStream
-                        # rejects messages.stream() for the whole session ->
-                        # flip to non-streaming (messages.create = InvokeModel).
-                        _is_bedrock_stream_denied = False
-                        if (
-                            not _is_stream_unsupported
-                            and "invokemodelwithresponsestream" in _err_lower
-                        ):
-                            # Message pre-check first: importing bedrock_adapter
-                            # triggers a lazy boto3 install.
-                            from agent.bedrock_adapter import (
-                                is_streaming_access_denied_error,
-                            )
-                            _is_bedrock_stream_denied = (
-                                is_streaming_access_denied_error(e)
-                            )
-                        if _is_stream_unsupported or _is_bedrock_stream_denied:
-                            self.agent._disable_streaming = True
-                            self.agent._safe_print(
-                                "\n⚠  AWS IAM denied bedrock:InvokeModelWithResponseStream. "
-                                "Switching to non-streaming.\n"
-                                "   Grant that action to restore streaming output.\n"
-                                if _is_bedrock_stream_denied else
-                                "\n⚠  Streaming is not supported for this "
-                                "model/provider. Switching to non-streaming.\n"
-                                "   To avoid this delay, set display.streaming: false "
-                                "in config.yaml\n"
-                            )
-                        logger.exception(
-                            "Streaming failed before delivery: %s",
-                            e,
-                        )
-
-                    # Propagate to the main retry loop (credential rotation,
-                    # fallback, backoff; _disable_streaming flips the next attempt).
-                    self.result["error"] = e
-                    return
         except InterruptedError as e:
-            # A fast pre-retry interrupt noticed on the worker surfaces
-            # through the normal result channel.
+            # Fast pre-retry interrupt surfaces through the normal result channel.
             self.result["error"] = e
             return
         finally:
             self._close_managed_stream()
-            # Reuse reason only on a clean stream; otherwise really close so
-            # the next attempt builds a fresh pool.
+            # Reuse only after a clean stream; otherwise really close (fresh pool next).
             self.clients.close_once(
-                "stream_request_complete"
-                if self.result["response"] is not None
-                else "stream_error_cleanup"
+                "stream_request_complete" if self.result["response"] is not None else "stream_error_cleanup"
             )
+
+    # ── poll-loop monitor (heartbeat / stale kill / interrupt) ──────────
 
     def _run_call(self):
         try:
@@ -4569,179 +4230,133 @@ class _StreamingCall:
     def _wait_call(self, timeout: float) -> None:
         self._call_done.wait(timeout=timeout)
 
+    def _poll_local_load_notice(self, now: float) -> bool:
+        """Managed local server: surface a cold model's weight-load progress
+        instead of the 30s "provider may be slow" copy. Polled ~1s only while no
+        REAL chunk arrived for 2s+ (never during healthy token flow); in-memory,
+        no network. True while loading = heartbeat liveness, skip the rest of
+        this iteration (the stale detector's local floor dwarfs any load)."""
+        m = self._mon
+        if now - self.last_chunk_time["t"] < 2.0 or now - m.last_load_poll < 1.0:
+            return False
+        m.last_load_poll = now
+        _load_notice = _managed_local_load_notice(self.agent, self.api_kwargs)
+        if _load_notice is not None:
+            self.agent._emit_wait_notice(_load_notice)
+            self.agent._touch_activity("local model loading")
+            m.load_notice_shown, m.load_notice_misses, m.last_heartbeat = True, 0, now  # loading IS liveness
+            return True
+        if m.load_notice_shown:
+            # One missed sample is routine (probe timeout under load); clearing on it strobed the line.
+            m.load_notice_misses += 1
+            if m.load_notice_misses >= 3:
+                m.load_notice_shown, m.load_notice_misses = False, 0
+                self.agent._emit_wait_notice("")
+        return False
+
+    def _heartbeat(self, waiting_secs: int, interval: float) -> None:
+        """Gateway inactivity heartbeat: the start-to-first-chunk gap (thinking,
+        local prefill) can exceed the gateway timeout."""
+        if waiting_secs >= interval:
+            # No chunks for 30s+: say WHAT the wait is and WHEN recovery kicks in.
+            stale = self._stream_stale_timeout
+            _recovery = f"; auto-reconnect at {int(stale)}s" if stale is not None and stale != float("inf") else ""
+            self.agent._emit_wait_notice(
+                f"⏳ waiting on {self.api_kwargs.get('model', 'the provider')} — {waiting_secs}s with no output yet "
+                f"(provider may be slow or overloaded, or the model is thinking{_recovery})"
+            )
+        else:
+            # Chunks are flowing — keep the tracker fresh, leave the display alone.
+            self.agent._touch_activity(f"waiting for stream response ({waiting_secs}s, no chunks yet)")
+
+    def _kill_stale_stream(self, elapsed: float) -> None:
+        """SSE pings but no chunks: cancel the attempt and abort the request-local
+        client so the retry loop opens a fresh one. The shared client is never
+        closed from this (stranger) thread — earlier stale-killed workers may
+        still be unwinding SSL BIOs (FD-recycle corruption); the OpenAI primary
+        is replaced lazily."""
+        _est_ctx = estimate_request_context_tokens(self.api_kwargs)
+        logger.warning(
+            "Stream stale for %.0fs (threshold %.0fs) — no chunks received. model=%s context=~%s tokens. Killing connection.",
+            elapsed, self._stream_stale_timeout, self.api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
+        )
+        self.agent._buffer_status(
+            f"⚠️ No response from provider for {int(elapsed)}s (model: {self.api_kwargs.get('model', 'unknown')}, "
+            f"context: ~{_est_ctx:,} tokens). Reconnecting..."
+        )
+        try:
+            self._cancel_current_stream_attempt("stale_stream_kill")
+            self.clients.close_once("stale_stream_kill")
+        except Exception:
+            pass
+        _bump_stale_streak(self.agent)  # circuit breaker, see ``_stale_streak()``
+        # Reset the timer so we don't kill repeatedly while the worker unwinds.
+        self.last_chunk_time["t"] = time.time()
+        self.agent._emit_wait_notice(f"⚠ no output from provider for {int(elapsed)}s — reconnecting...")
+        self.agent._touch_activity(f"stale stream detected after {int(elapsed)}s, reconnecting")
+
+    def _abort_for_interrupt(self, stale_elapsed: float) -> None:
+        """/stop seen by the monitor: mark cancelled, abort the request-local
+        socket, wait for the worker, flag the interrupt."""
+        # The stale branch already counted this iteration if its deadline won the race.
+        if stale_elapsed <= self._stream_stale_timeout:
+            _record_interrupted_provider_wait(self.agent, stale_elapsed, response_started=self.deltas_were_sent["yes"])
+        # Mark cancelled BEFORE force-closing so the worker treats the forced
+        # transport error as a cancel, not a network error (#6600).
+        self._request_cancelled["value"] = True
+        logger.debug("Force-closing streaming httpx client due to interrupt (not a network error).")
+        try:
+            self._cancel_current_stream_attempt("stream_interrupt_abort")
+            # Kind-aware: only the request-local socket; the shared _anthropic_client is never closed here.
+            self.clients.close_once("stream_interrupt_abort")
+        except Exception:
+            pass
+        # Let the worker unwind Relay-managed scopes first; raising first lets
+        # turn teardown race a still-open scope and corrupt the LIFO stack.
+        if self.worker is not None:
+            _join_worker_for_relay_teardown(self.worker, label="Streaming")
+        self._monitor_interrupted["yes"] = True
+
     def _monitor_loop(self) -> None:
-        _last_heartbeat = time.time()
         _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
-        # Managed local server: surface a cold model's weight-load progress
-        # immediately instead of the 30s "provider may be slow" copy. Polled
-        # ~1s only while no chunks have arrived; in-memory read, no network.
-        _last_load_poll = 0.0
-        _load_notice_shown = False
-        _load_notice_misses = 0
+        self._mon = SimpleNamespace(last_heartbeat=time.time(), last_load_poll=0.0, load_notice_shown=False, load_notice_misses=0)
         _is_local_base = bool(self.agent.base_url) and is_local_endpoint(self.agent.base_url)
         while self._call_alive():
             self._wait_call(0.3)
-
             _hb_now = time.time()
-            # Cold-load window: last_chunk_time is touched only by REAL chunks,
-            # so "no chunk for 2s+" holds through a model load and never during
-            # healthy token flow — keeps this probe off the hot path.
-            if (
-                _is_local_base
-                and _hb_now - self.last_chunk_time["t"] >= 2.0
-                and _hb_now - _last_load_poll >= 1.0
-            ):
-                _last_load_poll = _hb_now
-                _load_notice = _managed_local_load_notice(self.agent, self.api_kwargs)
-                if _load_notice is not None:
-                    self.agent._emit_wait_notice(_load_notice)
-                    self.agent._touch_activity("local model loading")
-                    _load_notice_shown = True
-                    _load_notice_misses = 0
-                    # Loading IS liveness for the heartbeat; the stale detector
-                    # needs no help — the local floor (900s) dwarfs any load.
-                    _last_heartbeat = _hb_now
-                    continue
-                if _load_notice_shown:
-                    # One missed sample is routine (probe timeout under load);
-                    # clearing on it strobed the status line. Require 3 misses.
-                    _load_notice_misses += 1
-                    if _load_notice_misses >= 3:
-                        _load_notice_shown = False
-                        _load_notice_misses = 0
-                        self.agent._emit_wait_notice("")
-
-            # Heartbeat for the gateway inactivity monitor: the worker touches
-            # activity per chunk, but the start-to-first-chunk gap (thinking,
-            # local prefill) can exceed the gateway timeout.
-            if _hb_now - _last_heartbeat >= _HEARTBEAT_INTERVAL:
-                _last_heartbeat = _hb_now
-                _waiting_secs = int(_hb_now - self.last_chunk_time["t"])
-                if _waiting_secs >= _HEARTBEAT_INTERVAL:
-                    # No chunks for 30s+: say WHAT the wait is and WHEN recovery kicks in.
-                    if (
-                        self._stream_stale_timeout is not None
-                        and self._stream_stale_timeout != float("inf")
-                    ):
-                        _recovery = f"; auto-reconnect at {int(self._stream_stale_timeout)}s"
-                    else:
-                        _recovery = ""
-                    self.agent._emit_wait_notice(
-                        f"⏳ waiting on {self.api_kwargs.get('model', 'the provider')} — "
-                        f"{_waiting_secs}s with no output yet (provider may be "
-                        f"slow or overloaded, or the model is thinking{_recovery})"
-                    )
-                else:
-                    # Chunks are flowing — keep the activity tracker fresh but
-                    # leave the live display alone.
-                    self.agent._touch_activity(
-                        f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
-                    )
-
-            # Detect stale streams: connections kept alive by SSE pings
-            # but delivering no real chunks.  Kill the client so the
-            # inner retry loop can start a fresh connection.
+            if _is_local_base and self._poll_local_load_notice(_hb_now):
+                continue
+            if _hb_now - self._mon.last_heartbeat >= _HEARTBEAT_INTERVAL:
+                self._mon.last_heartbeat = _hb_now
+                self._heartbeat(int(_hb_now - self.last_chunk_time["t"]), _HEARTBEAT_INTERVAL)
             _stale_elapsed = time.time() - self.last_chunk_time["t"]
             if _stale_elapsed > self._stream_stale_timeout:
-                _est_ctx = estimate_request_context_tokens(self.api_kwargs)
-                logger.warning(
-                    "Stream stale for %.0fs (threshold %.0fs) — no chunks received. "
-                    "model=%s context=~%s tokens. Killing connection.",
-                    _stale_elapsed, self._stream_stale_timeout,
-                    self.api_kwargs.get("model", "unknown"), f"{_est_ctx:,}",
-                )
-                self.agent._buffer_status(
-                    f"⚠️ No response from provider for {int(_stale_elapsed)}s "
-                    f"(model: {self.api_kwargs.get('model', 'unknown')}, "
-                    f"context: ~{_est_ctx:,} tokens). "
-                    f"Reconnecting..."
-                )
-                try:
-                    self._cancel_current_stream_attempt("stale_stream_kill")
-                    self.clients.close_once("stale_stream_kill")
-                except Exception:
-                    pass
-                # Circuit breaker (#58962): count the stale kill.  See the
-                # canonical comment block above ``_stale_streak()``.
-                _bump_stale_streak(self.agent)
-                # The shared client (anthropic or OpenAI) must NOT be closed
-                # from this poll (stranger) thread: worker threads from earlier
-                # stale-killed attempts may still be unwinding SSL BIOs — the
-                # FD-recycle corruption vector (#67142/#70773). The request-
-                # local client was aborted above (keeps the #28161 no-hang
-                # guarantee); the OpenAI primary is replaced lazily.
-                # Reset the timer so we don't kill repeatedly while
-                # the inner thread processes the closure.
-                self.last_chunk_time["t"] = time.time()
-                self.agent._emit_wait_notice(
-                    f"⚠ no output from provider for {int(_stale_elapsed)}s — "
-                    f"reconnecting..."
-                )
-                self.agent._touch_activity(
-                    f"stale stream detected after {int(_stale_elapsed)}s, reconnecting"
-                )
-
+                self._kill_stale_stream(_stale_elapsed)
             if self.agent._interrupt_requested:
-                # The stale branch above already counted this iteration when its
-                # deadline won the race; do not double-count a simultaneous stop.
-                if _stale_elapsed <= self._stream_stale_timeout:
-                    _record_interrupted_provider_wait(
-                        self.agent,
-                        _stale_elapsed,
-                        response_started=self.deltas_were_sent["yes"],
-                    )
-                # Mark THIS request cancelled before force-closing so the worker's
-                # exception handler recognizes the forced transport error as a
-                # cancel and exits without retrying or surfacing a network error.
-                # (#6600)
-                self._request_cancelled["value"] = True
-                logger.debug(
-                    "Force-closing streaming httpx client due to interrupt "
-                    "(not a network error)."
-                )
-                try:
-                    self._cancel_current_stream_attempt("stream_interrupt_abort")
-                    # #67142: kind-aware — anthropic aborts the request-local
-                    # client's socket from this poll thread; the shared
-                    # _anthropic_client is never closed here.
-                    self.clients.close_once("stream_interrupt_abort")
-                except Exception:
-                    pass
-                # Let the worker unwind Relay-managed scopes before raising
-                # InterruptedError; raising first lets turn teardown race a
-                # still-open physical scope and corrupt the LIFO stack (#81521).
-                # No-op without Relay; inline mode has no worker to wait for.
-                if self.worker is not None:
-                    _join_worker_for_relay_teardown(self.worker, label="Streaming")
-                self._monitor_interrupted["yes"] = True
+                self._abort_for_interrupt(_stale_elapsed)
                 return
 
-    def run(self):
-        """Resolve the stale timeout, run the request (worker thread or inline),
-        drive the heartbeat/stale/interrupt monitor, then translate the outcome."""
+    # ── orchestration ───────────────────────────────────────────────────
 
-        # Provider-configured stale timeout takes priority over env default.
+    def _resolve_stale_timeout(self) -> None:
+        """Set ``_stream_stale_timeout``: provider config beats
+        HERMES_STREAM_STALE_TIMEOUT (180s). Local endpoints (unless that env is
+        set) get long but FINITE patience — 900s / ``agent.local_stream_stale_timeout``
+        / HERMES_LOCAL_STREAM_STALE_TIMEOUT — an infinite one stalled sessions on
+        a crashed endpoint forever. Cloud values scale with context size (slow
+        models think for minutes) and are floored for known reasoning models
+        (else BrokenPipeError from the gateway)."""
         _cfg_stale = get_provider_stale_timeout(self.agent.provider, self.agent.model)
-        if _cfg_stale is not None:
-            _stream_stale_timeout_base = _cfg_stale
-        else:
-            _stream_stale_timeout_base = env_float("HERMES_STREAM_STALE_TIMEOUT", 180.0)
-        # Local providers can prefill for 300s+, so tolerate much longer
-        # silence — but finite (an infinite timeout stalled sessions on a
-        # crashed endpoint forever). 900s default from config
-        # ``agent.local_stream_stale_timeout``; HERMES_LOCAL_STREAM_STALE_TIMEOUT
-        # overrides. Skipped when the user set HERMES_STREAM_STALE_TIMEOUT.
-        if _stream_stale_timeout_base == 180.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
+        base = _cfg_stale if _cfg_stale is not None else env_float("HERMES_STREAM_STALE_TIMEOUT", 180.0)
+        if base == 180.0 and self.agent.base_url and is_local_endpoint(self.agent.base_url):
             _local_default = 900.0
             try:
                 from hermes_cli.config import load_config_readonly
-
                 _cfg = load_config_readonly()  # read-only consumer — no deepcopy
                 _agent_cfg = _cfg.get("agent") if isinstance(_cfg, dict) else None
-                if isinstance(_agent_cfg, dict):
-                    _v = _agent_cfg.get("local_stream_stale_timeout")
-                    if isinstance(_v, (int, float)):
-                        _local_default = float(_v)
+                _v = _agent_cfg.get("local_stream_stale_timeout") if isinstance(_agent_cfg, dict) else None
+                if isinstance(_v, (int, float)):
+                    _local_default = float(_v)
             except Exception:
                 pass
             self._stream_stale_timeout = env_float("HERMES_LOCAL_STREAM_STALE_TIMEOUT", _local_default)
@@ -4749,152 +4364,106 @@ class _StreamingCall:
                 "Local provider detected (%s) — stale stream timeout set to %.0fs",
                 self.agent.base_url, self._stream_stale_timeout,
             )
-        else:
-            # Large contexts: slow models think for minutes before the first
-            # token; scale the threshold or the detector kills healthy streams.
-            _est_tokens = estimate_request_context_tokens(self.api_kwargs)
-            if _est_tokens > 100_000:
-                self._stream_stale_timeout = max(_stream_stale_timeout_base, 300.0)
-            elif _est_tokens > 50_000:
-                self._stream_stale_timeout = max(_stream_stale_timeout_base, 240.0)
-            else:
-                self._stream_stale_timeout = _stream_stale_timeout_base
-            # Known reasoning models exceed the 180s chat threshold while
-            # thinking (surfaces as BrokenPipeError from the gateway). Floor
-            # only — explicit user config (get_provider_stale_timeout) wins.
-            from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
-            _reasoning_floor = get_reasoning_stale_timeout_floor(self.api_kwargs.get("model"))
-            if _reasoning_floor is not None:
-                self._stream_stale_timeout = max(self._stream_stale_timeout, _reasoning_floor)
+            return
+        _est_tokens = estimate_request_context_tokens(self.api_kwargs)
+        if _est_tokens > 100_000:
+            base = max(base, 300.0)
+        elif _est_tokens > 50_000:
+            base = max(base, 240.0)
+        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+        _reasoning_floor = get_reasoning_stale_timeout_floor(self.api_kwargs.get("model"))
+        self._stream_stale_timeout = base if _reasoning_floor is None else max(base, _reasoning_floor)
 
-        # Delegated children and cron turns run the request INLINE: a worker
-        # thread inside their nested pools wedges before the socket opens
-        # (#62151, #60203). They must still STREAM — a silent non-streaming
-        # POST is killed by edge proxies during thinking (#90202) and our
-        # stale watchdog can't tell thinking from a hang (#100260). Only the
-        # poll loop (heartbeat/stale/interrupt) moves to a monitor thread,
-        # which never issues a request, so the no-worker deadlock fix holds.
+    def _partial_stream_stub(self):
+        """Tokens already reached the platform: a finish_reason="length" stub
+        fires the continuation machinery; tool_calls=None blocks executing
+        incomplete calls. Content may be EMPTY on purpose — the loop skips
+        appending an empty stub and only sends the nudge (placeholder text
+        defeated that guard and leaked into the stitched response); persisted
+        empty turns are healed by ``repair_empty_non_final_messages``."""
+        error = self.result["error"]
+        _partial_text = (getattr(self.agent, "_current_streamed_assistant_text", "") or "").strip() or None
+        _partial_names = list(self.result.get("partial_tool_names") or [])
+        if _partial_names:
+            # User-visible warning so the user and model both know what was attempted.
+            _name_str = ", ".join(_partial_names[:3])
+            if len(_partial_names) > 3:
+                _name_str += f", +{len(_partial_names) - 3} more"
+            _warn = (
+                f"\n\n⚠ Stream stalled mid tool-call ({_name_str}); the action was not executed. "
+                f"Ask me to retry if you want to continue."
+            )
+            _partial_text = (_partial_text or "") + _warn
+            self._quiet(self.agent._fire_stream_delta, _warn)  # visible immediately
+            logger.warning(
+                "Partial stream dropped tool call(s) %s after %s chars of text; surfaced warning to user: %s",
+                _partial_names, len(_partial_text or ""), error,
+            )
+        else:
+            logger.warning(
+                "Partial stream delivered before error; returning length-truncated stub with %s chars of "
+                "recovered content so the loop can continue from where the stream died: %s",
+                len(_partial_text or ""), error,
+            )
+        # Classify content filtering (MiniMax 1027, Azure content_filter,
+        # Anthropic refusal) before the raw error is swallowed into the stub:
+        # the loop reads the tag and falls back instead of re-hitting the filter.
+        try:
+            from agent.error_classifier import classify_api_error, FailoverReason
+            _cls = classify_api_error(
+                error, provider=str(getattr(self.agent, "provider", "") or ""), model=str(getattr(self.agent, "model", "") or ""),
+            )
+            _content_filter_terminated = _cls.reason == FailoverReason.content_policy_blocked
+        except Exception:
+            _content_filter_terminated = False
+        _stub_msg = SimpleNamespace(role="assistant", content=_partial_text, tool_calls=None, reasoning_content=None)
+        _stub = SimpleNamespace(
+            id=PARTIAL_STREAM_STUB_ID,
+            model=getattr(self.agent, "model", "unknown"),
+            choices=[SimpleNamespace(index=0, message=_stub_msg, finish_reason=FINISH_REASON_LENGTH)],
+            usage=None,
+            _dropped_tool_names=_partial_names or None,
+        )
+        if _content_filter_terminated:
+            _stub._content_filter_terminated = True
+        _reset_stale_streak(self.agent)  # deltas fired => provider responsive: clear the breaker
+        return _stub
+
+    def run(self):
+        """Resolve the stale timeout, run the request (worker thread or inline),
+        drive the heartbeat/stale/interrupt monitor, then translate the outcome."""
+        self._resolve_stale_timeout()
+        # Delegated children and cron turns run the request INLINE (a worker
+        # thread inside their nested pools wedges before the socket opens) but
+        # must still STREAM (edge proxies kill silent POSTs during thinking).
+        # Only the poll loop moves to a monitor thread, which never issues a
+        # request, so the no-worker deadlock fix holds.
         self._inline = should_use_direct_api_call(self.agent)
         self._call_done = threading.Event()
         self._monitor_interrupted = {"yes": False}
-
         if self._inline:
             self.worker = None
-        else:
-            self.worker = threading.Thread(target=_context_thread_target(self._run_call), daemon=True)
-            self.worker.start()
-
-        if self._inline:
-            # Request on THIS thread; heartbeat / stale / interrupt monitor on a
-            # side thread that only ever aborts sockets (never dispatches).
-            monitor = threading.Thread(
-                target=_context_thread_target(self._monitor_loop),
-                name="stream-inline-monitor",
-                daemon=True,
-            )
+            monitor_target = _context_thread_target(self._monitor_loop)
+            monitor = threading.Thread(target=monitor_target, name="stream-inline-monitor", daemon=True)
             monitor.start()
             try:
                 self._run_call()
             finally:
                 monitor.join(timeout=2.0)
         else:
+            self.worker = threading.Thread(target=_context_thread_target(self._run_call), daemon=True)
+            self.worker.start()
             self._monitor_loop()
         if self._monitor_interrupted["yes"]:
             raise InterruptedError("Agent interrupted during streaming API call")
-        # The worker may return early on interrupt (e.g. _call_anthropic ->
-        # None) before the poll loop saw the flag; re-check so /stop is not
-        # swallowed (#59999 area).
-        if self.agent._interrupt_requested:
+        if self.agent._interrupt_requested:  # worker returned early before the monitor saw the flag
             raise InterruptedError("Agent interrupted during streaming API call (post-worker)")
         if self.result["error"] is not None:
             if self.deltas_were_sent["yes"]:
-                # Tokens already reached the platform: return a
-                # finish_reason="length" stub so the continuation machinery
-                # fires; tool_calls=None blocks executing incomplete calls.
-                _partial_text = (
-                    getattr(self.agent, "_current_streamed_assistant_text", "") or ""
-                ).strip() or None
-
-                # Append a user-visible warning if tool calls were dropped so
-                # the user and model both know what was attempted.
-                _partial_names = list(self.result.get("partial_tool_names") or [])
-                if _partial_names:
-                    _name_str = ", ".join(_partial_names[:3])
-                    if len(_partial_names) > 3:
-                        _name_str += f", +{len(_partial_names) - 3} more"
-                    _warn = (
-                        f"\n\n⚠ Stream stalled mid tool-call "
-                        f"({_name_str}); the action was not executed. "
-                        f"Ask me to retry if you want to continue."
-                    )
-                    _partial_text = (_partial_text or "") + _warn
-                    # Fire as streaming delta so the user sees it immediately.
-                    try:
-                        self.agent._fire_stream_delta(_warn)
-                    except Exception:
-                        pass
-                    logger.warning(
-                        "Partial stream dropped tool call(s) %s after %s chars "
-                        "of text; surfaced warning to user: %s",
-                        _partial_names, len(_partial_text or ""), self.result["error"],
-                    )
-                    _stub_finish_reason = FINISH_REASON_LENGTH
-                else:
-                    logger.warning(
-                        "Partial stream delivered before error; returning "
-                        "length-truncated stub with %s chars of recovered "
-                        "content so the loop can continue from where the "
-                        "stream died: %s",
-                        len(_partial_text or ""),
-                        self.result["error"],
-                    )
-                    _stub_finish_reason = FINISH_REASON_LENGTH
-                # The stub may carry EMPTY content on purpose: the loop's
-                # truncation path skips appending an empty PARTIAL_STREAM_STUB_ID
-                # stub and only sends the continuation nudge. Placeholder text
-                # here was tried and reverted — it defeats that guard and leaks
-                # into the stitched final response. Persisted empty turns are
-                # healed by ``repair_empty_non_final_messages`` (single owner).
-                _stub_msg = SimpleNamespace(
-                    role="assistant", content=_partial_text, tool_calls=None,
-                    reasoning_content=None,
-                )
-                # Classify output-layer content filtering (MiniMax 1027, Azure
-                # content_filter, Anthropic refusal) HERE, before the raw error is
-                # swallowed into the length stub: the loop reads the tag and falls
-                # back instead of re-hitting a deterministic filter (#32421).
-                _content_filter_terminated = False
-                try:
-                    from agent.error_classifier import classify_api_error, FailoverReason
-                    _cls = classify_api_error(
-                        self.result["error"],
-                        provider=str(getattr(self.agent, "provider", "") or ""),
-                        model=str(getattr(self.agent, "model", "") or ""),
-                    )
-                    _content_filter_terminated = (
-                        _cls.reason == FailoverReason.content_policy_blocked
-                    )
-                except Exception:
-                    _content_filter_terminated = False
-                _stub = SimpleNamespace(
-                    id=PARTIAL_STREAM_STUB_ID,
-                    model=getattr(self.agent, "model", "unknown"),
-                    choices=[SimpleNamespace(
-                        index=0, message=_stub_msg, finish_reason=_stub_finish_reason,
-                    )],
-                    usage=None,
-                    _dropped_tool_names=_partial_names or None,
-                )
-                if _content_filter_terminated:
-                    _stub._content_filter_terminated = True
-                # Deltas fired => provider responsive: clear the breaker (#58962).
-                _reset_stale_streak(self.agent)
-                return _stub
+                return self._partial_stream_stub()
             raise self.result["error"]
-        # Success — clear the circuit breaker (#58962): the provider proved
-        # responsive.  See the canonical comment block above ``_stale_streak()``.
         if self.result["response"] is not None:
-            _reset_stale_streak(self.agent)
+            _reset_stale_streak(self.agent)  # provider proved responsive: clear the breaker
         # Propagate first-chunk timing for the ``post_api_request`` hook.
         _diag_last = self.clients.diag
         if isinstance(_diag_last, dict) and _diag_last.get("first_chunk_at"):
@@ -4905,20 +4474,11 @@ class _StreamingCall:
 def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=None):
     """Streaming variant of _interruptible_api_call for real-time token delivery.
 
-    Handles all api_modes:
-    - chat_completions: stream=True on OpenAI-compatible endpoints
-    - anthropic_messages: client.messages.stream() via Anthropic SDK
-    - bedrock_converse: boto3 converse_stream() with delta callbacks
-    - codex_responses: delegates to _run_codex_stream (already streaming)
-
-    Fires stream_delta_callback and _stream_callback for each text token.
-    Tool-call turns suppress the callback — only text-only final responses
-    stream to the consumer.  Returns a SimpleNamespace that mimics the
-    non-streaming response shape so the rest of the agent loop is unchanged.
-
-    Cron turns and delegated children (should_use_direct_api_call) stay on
-    this streaming path and run the request inline (see ``_StreamingCall.run``);
-    only the codex branch detours through _interruptible_api_call.
+    Handles every api_mode (codex_responses delegates to the already-streaming
+    codex runner). Fires the delta callbacks per text token (tool-call turns
+    suppress them) and returns a SimpleNamespace mimicking the non-streaming
+    response shape. Cron turns and delegated children stay on this path and run
+    inline (see ``_StreamingCall.run``).
     """
     if agent._interrupt_requested:
         raise InterruptedError("Agent interrupted before streaming API call")
@@ -4926,9 +4486,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         return _stream_codex_passthrough(agent, api_kwargs, on_first_delta)
     if agent.api_mode == "bedrock_converse":
         return _stream_bedrock_converse(agent, api_kwargs, on_first_delta)
-    # Cross-turn stale-stream circuit breaker (#58962) — see the canonical
-    # comment block above ``_stale_streak()``.  Raises past the give-up
-    # threshold instead of burning another stale-timeout×retries cycle.
+    # Cross-turn stale-stream circuit breaker (see ``_stale_streak()``).
     _check_stale_giveup(agent)
     return _StreamingCall(agent, api_kwargs, on_first_delta).run()
 
