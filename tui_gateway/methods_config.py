@@ -158,12 +158,10 @@ def _cfg_get_personality(params):
 
 def _cfg_get_reasoning(params):
     cfg = _load_cfg()
-    session = _sessions.get(params.get("session_id", ""))
-    reasoning_config = None
-    if session is not None:
-        reasoning_config = session.get("create_reasoning_override")
-        if not isinstance(reasoning_config, dict):
-            reasoning_config = getattr(session.get("agent"), "reasoning_config", None)
+    session = _sessions.get(params.get("session_id", "")) or {}
+    reasoning_config = session.get("create_reasoning_override")
+    if session and not isinstance(reasoning_config, dict):
+        reasoning_config = getattr(session.get("agent"), "reasoning_config", None)
     if isinstance(reasoning_config, dict):
         enabled = reasoning_config.get("enabled") is not False
         effort = str(reasoning_config.get("effort") or "medium") if enabled else "none"
@@ -171,21 +169,17 @@ def _cfg_get_reasoning(params):
         raw_effort = (cfg.get("agent") or {}).get("reasoning_effort", "")
         # YAML `reasoning_effort: false` means thinking disabled, not "unset".
         effort = "none" if raw_effort is False else str(raw_effort or "medium")
-    display = "show" if bool((cfg.get("display") or {}).get("show_reasoning", True)) else "hide"
+    display = "show" if (cfg.get("display") or {}).get("show_reasoning", True) else "hide"
     return {"value": effort, "display": display}
 
 
 def _cfg_get_fast(params):
     # `config.set fast` is session-scoped: prefer the session's live/pinned value over the
     # global key (a pre-build session keeps its pin in create_service_tier_override).
-    session = _sessions.get(params.get("session_id", ""))
-    tier = None
-    if session is not None:
-        agent = session.get("agent")
-        if agent is not None:
-            tier = getattr(agent, "service_tier", None)
-        elif session.get("create_service_tier_override") is not None:
-            tier = session["create_service_tier_override"]
+    session = _sessions.get(params.get("session_id", "")) or {}
+    agent = session.get("agent")
+    tier = (getattr(agent, "service_tier", None) if agent is not None
+            else session.get("create_service_tier_override"))
     if tier is None:
         tier = _load_service_tier()
     return {"value": "fast" if tier == "priority" else "normal"}
@@ -276,14 +270,15 @@ def _readiness_profile_scope(params: dict):
 
 
 def _readiness_check(rid, params, probe):
-    """Shared shell of setup.status / setup.runtime_check: ``probe(profile)`` runs inside the
-    profile scope; an unknown profile answers ``ok=False`` (never a JSON-RPC error)."""
+    """Shared shell of setup.status / setup.runtime_check: ``probe(profile, scoped)`` runs inside
+    the profile scope (``scoped`` = the ``{"profile": ...}`` payload stamp, ``{}`` for the launch
+    profile); an unknown profile answers ``ok=False`` (never a JSON-RPC error)."""
     try:
         profile, scope = _readiness_profile_scope(params)
     except FileNotFoundError as e:
         return _ok(rid, {"ok": False, "profile": params.get("profile"), "error": str(e)})
     with scope:
-        payload = probe(profile)
+        payload = probe(profile, {"profile": profile} if profile else {})
     return _ok(rid, payload)
 
 
@@ -292,11 +287,9 @@ def _(rid, params: dict) -> dict:
     """Loose provider check; ``profile`` (optional) scopes it to that profile's home."""
     try:
         from hermes_cli.main import _has_any_provider_configured
-
-        def probe(profile):
-            configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
-            return {"provider_configured": configured, **({"profile": profile} if profile else {})}
-        return _readiness_check(rid, params, probe)
+        return _readiness_check(rid, params, lambda profile, scoped: {
+            "provider_configured": bool(_has_any_provider_configured(strict_profile_scope=bool(profile))),
+            **scoped})
     except Exception as e:
         return _err(rid, 5016, str(e))
 
@@ -313,10 +306,9 @@ def _(rid, params: dict) -> dict:
         from hermes_cli.main import _has_any_provider_configured
         requested = str(params.get("provider") or "").strip() or None
 
-        def probe(profile):
+        def probe(profile, scoped):
             runtime = resolve_runtime_provider(requested=requested)
             provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
-            scoped = {"profile": profile} if profile else {}
             provider = runtime.get("provider") or "provider"
             source = str(runtime.get("source") or "")
 

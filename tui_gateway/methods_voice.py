@@ -441,16 +441,16 @@ def _wake_detect_handler(transport, sid: str, phrase: str, new_session: bool):
 
 @method("gateway.capabilities")
 def _(rid, params: dict) -> dict:
-    """Advertise what THIS BUILD enforces (a client withholds unless the guarantee is advertised).
-    Sourced from the enforcing module, never config: a believed-but-absent capability is worse."""
+    """What THIS BUILD enforces (a client withholds unless advertised), sourced from the enforcing
+    module, never config: a believed-but-absent capability is worse."""
     from hermes_cli.active_sessions import PER_SESSION_EXCLUSIVE_SUBMIT
     return _ok(rid, {"per_session_exclusive_submit": bool(PER_SESSION_EXCLUSIVE_SUBMIT)})
 
 
 @method("ping")
 def _(rid, params: dict) -> dict:
-    """Cheapest liveness probe, answered on the WS reader thread (works while every agent is
-    mid-turn) so the desktop can tell a half-open socket after sleep/wake and reconnect."""
+    """Cheapest liveness probe, answered on the WS reader thread (works while every agent is mid-turn)
+    so the desktop can tell a half-open socket after sleep/wake."""
     return _ok(rid, {"pong": True})
 
 
@@ -478,8 +478,7 @@ def _(rid, params: dict) -> dict:
     if not reqs["available"]:
         logger.warning("wake.start(%s): not available — %s", surface, reqs.get("hint"))
         return refused("unavailable", hint=reqs.get("hint") or "", capture=capture_mode)
-    persist = bool(params.get("persist"))
-    enabled_persisted = bool(persist and not cfg.get("enabled") and _persist_wake_enabled(True))
+    enabled_persisted = bool(params.get("persist")) and not cfg.get("enabled") and _persist_wake_enabled(True)
     if enabled_persisted:
         cfg = {**cfg, "enabled": True}
     if not wake_surface_enabled(surface, cfg):
@@ -490,9 +489,7 @@ def _(rid, params: dict) -> dict:
                     surface, reason, cfg.get("enabled"), cfg.get("surface"))
         return refused(reason)
     existing_owner, existing_surface = _wake_owner_snapshot()
-    if existing_owner is not None and (
-        _transport_is_dead(existing_owner) or not owns_listener(existing_owner)
-    ):
+    if existing_owner is not None and (_transport_is_dead(existing_owner) or not owns_listener(existing_owner)):
         _release_wake_for_transport(existing_owner)
         existing_owner, existing_surface = None, ""
     if existing_owner is not None and existing_owner is not transport:
