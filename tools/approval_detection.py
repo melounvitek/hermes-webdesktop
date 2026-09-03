@@ -185,54 +185,10 @@ def _mask_quoted_prose(command: str) -> str:
     unclosed quote masks to end-of-string, which cannot hide a runnable command
     (the shell would not run it either).
     """
-    out: list[str] = []
-    quote: str | None = None
-    i = 0
-    n = len(command)
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-                out.append(ch)
-            else:
-                out.append(" ")
-            i += 1
-            continue
-        if quote == '"':
-            if ch == "\\" and i + 1 < n:
-                out.append("  ")
-                i += 2
-                continue
-            if ch == '"':
-                quote = None
-                out.append(ch)
-                i += 1
-                continue
-            if ch == "$" and i + 1 < n and command[i + 1] == "(":
-                end = _scan_dollar_paren_end(command, i)
-                if end is not None:
-                    out.append(command[i:end])
-                    i = end
-                    continue
-            if ch == "`":
-                close = command.find("`", i + 1)
-                if close != -1:
-                    out.append(command[i:close + 1])
-                    i = close + 1
-                    continue
-            out.append(" ")
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < n:
-            out.append(command[i:i + 2])
-            i += 2
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-        out.append(ch)
-        i += 1
-    return "".join(out)
+    return "".join(
+        command[i:j] if quote is None or kind in ("quote", "subst") else " " * (j - i)
+        for kind, i, j, quote in _scan_shell(command, subst="q", naive_backtick=True)
+    )
 
 
 # =========================================================================
@@ -764,48 +720,36 @@ def _shell_tokens_with_spans(segment: str, start: int):
     operand is data rather than another command.
     """
     tokens = []
-    i = start
-    while i < len(segment):
-        while i < len(segment) and segment[i].isspace():
-            i += 1
-        if i >= len(segment):
-            break
-        token_start = i
-        value = []
-        quote = None
-        while i < len(segment) and (quote or not segment[i].isspace()):
-            char = segment[i]
-            if quote:
-                if char == quote:
-                    quote = None
-                    i += 1
-                elif char == "\\" and quote == '"' and i + 1 < len(segment):
-                    value.append(segment[i + 1])
-                    i += 2
-                else:
-                    value.append(char)
-                    i += 1
-            elif char in {"'", '"'}:
-                quote = char
-                i += 1
-            elif char == "\\":
-                if i + 1 >= len(segment):
-                    return None
-                value.append(segment[i + 1])
-                i += 2
-            else:
-                value.append(char)
-                i += 1
-        if quote:
-            return None
-        raw = segment[token_start:i]
+    value: list[str] = []
+    token_start = quote = None
+
+    def flush(end: int) -> None:
+        raw = segment[token_start:end]
         # Only a wholly single-quoted operand is inert shell data. Double
         # quotes still execute $() and backticks; unquoted substitutions do too.
-        inert_single_quoted = (
-            (raw.startswith("'") and raw.endswith("'"))
-            or ("='" in raw and raw.endswith("'"))
-        )
-        tokens.append(("".join(value), token_start, i, inert_single_quoted))
+        inert = (raw.startswith("'") and raw.endswith("'")) or ("='" in raw and raw.endswith("'"))
+        tokens.append(("".join(value), token_start, end, inert))
+
+    for kind, i, _, _ in _scan_shell(segment, start):
+        if kind == "char" and not quote and segment[i].isspace():
+            if token_start is not None:
+                flush(i)
+                value, token_start = [], None
+            continue
+        if token_start is None:
+            token_start = i
+        if kind == "quote":
+            quote = None if quote else segment[i]
+        elif kind == "esc":
+            value.append(segment[i + 1])
+        elif segment[i] == "\\" and not quote:
+            return None  # dangling backslash
+        else:
+            value.append(segment[i])
+    if quote:
+        return None
+    if token_start is not None:
+        flush(len(segment))
     return tokens
 
 
@@ -953,28 +897,11 @@ def _shell_segment_tokens(segment: str, start: int) -> list[str] | None:
 def _iter_top_level_shell_segments(command: str):
     """Yield top-level command segments in one left-to-right pass."""
     start = 0
-    quote: str | None = None
-    escaped = False
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if escaped:
-            escaped = False
-        elif char == "\\" and quote != "'":
-            escaped = True
-        elif quote:
-            if char == quote:
-                quote = None
-        elif char in {"'", '"'}:
-            quote = char
-        elif char in ";&|\n":
-            if start < index:
-                yield command[start:index]
-            # Consume a doubled && / || separator as one boundary.
-            if char in "&|" and index + 1 < len(command) and command[index + 1] == char:
-                index += 1
-            start = index + 1
-        index += 1
+    for kind, i, _, quote in _scan_shell(command):
+        if kind == "char" and quote is None and command[i] in ";&|\n":
+            if start < i:
+                yield command[start:i]
+            start = i + 1
     if start < len(command):
         yield command[start:]
 
@@ -1149,101 +1076,85 @@ def _skip_shell_whitespace(command: str, pos: int) -> int:
     return pos
 
 
+def _scan_shell(text: str, start: int = 0, end: int | None = None, *, subst: str = "",
+                brace: bool = False, stop_unterminated: bool = False, naive_backtick: bool = False):
+    """Yield ``(kind, i, j, quote)`` lexical steps over ``text[start:end]`` without expanding.
+
+    The single quote/escape state machine behind every detection scanner. ``kind`` is
+    ``"char"`` (one char), ``"esc"`` (backslash + the char it escapes; never inside
+    single quotes), ``"quote"`` (an opening or closing quote char) or ``"subst"`` (a
+    ``$(...)`` / `` `...` `` / ``${...}`` span). ``quote`` is the state the step was read
+    in (``None``, ``'`` or ``"``). Substitutions are recognized unquoted when ``"u"`` is in
+    *subst*, inside double quotes when ``"q"`` is; ``brace`` adds unquoted ``${...}``. An
+    unterminated substitution falls through as plain chars unless *stop_unterminated*,
+    which yields ``("subst", i, None, quote)`` and ends the scan (the caller descends
+    to *end* itself). *naive_backtick* closes a backtick at the next backtick even if
+    escaped (the quoted-prose masker's historical behavior).
+    """
+    n = len(text) if end is None else end
+    quote: str | None = None
+    i = start
+    while i < n:
+        ch = text[i]
+        if quote != "'" and ch == "\\" and i + 1 < n:
+            yield ("esc", i, i + 2, quote)
+            i += 2
+        elif ch == quote or (quote is None and ch in "'\""):
+            yield ("quote", i, i + 1, quote)
+            quote = None if quote else ch
+            i += 1
+        elif quote != "'" and ("q" if quote else "u") in subst and (
+            ch == "`" or text.startswith("$(", i) or (brace and not quote and text.startswith("${", i))
+        ):
+            if ch == "`":
+                j = text.find("`", i + 1) + 1 or None if naive_backtick else _scan_backtick_end(text, i)
+            elif text[i + 1] == "(":
+                j = _scan_dollar_paren_end(text, i)
+            else:
+                j = text.find("}", i + 2) + 1 or None
+            if j is not None:
+                yield ("subst", i, j, quote)
+                i = j
+            elif stop_unterminated:
+                yield ("subst", i, None, quote)
+                return
+            else:
+                yield ("char", i, i + 1, quote)
+                i += 1
+        else:
+            yield ("char", i, i + 1, quote)
+            i += 1
+
+
 def _scan_dollar_paren_end(command: str, start: int) -> int | None:
     """Return the offset after a balanced ``$(...)`` command substitution."""
     depth = 1
-    quote: str | None = None
-    i = start + 2
-    while i < len(command):
-        ch = command[i]
-        if quote:
-            if ch == "\\" and quote == '"' and i + 1 < len(command):
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < len(command):
-            i += 2
+    for kind, i, _, quote in _scan_shell(command, start + 2):
+        if kind != "char" or quote:
             continue
         if command.startswith("$(", i):
             depth += 1
-            i += 2
-            continue
-        if ch == ")":
+        elif command[i] == ")":
             depth -= 1
-            i += 1
             if depth == 0:
-                return i
-            continue
-        i += 1
+                return i + 1
     return None
 
 
 def _scan_backtick_end(command: str, start: int) -> int | None:
-    i = start + 1
-    while i < len(command):
-        if command[i] == "\\" and i + 1 < len(command):
-            i += 2
-            continue
-        if command[i] == "`":
-            return i + 1
-        i += 1
-    return None
+    # Backticks have no quote awareness: only a backslash escapes the next char.
+    match = re.compile(r"(?:\\.|[^`\\])*`", re.DOTALL).match(command, start + 1)
+    return match.end() if match else None
 
 
 def _read_shell_word(command: str, pos: int) -> tuple[int, int, str]:
     """Read one shell word without executing expansions."""
-    start = _skip_shell_whitespace(command, pos)
-    i = start
-    quote: str | None = None
-    while i < len(command):
-        ch = command[i]
-        if quote:
-            if ch == "\\" and quote == '"' and i + 1 < len(command):
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < len(command):
-            i += 2
-            continue
-        if command.startswith("$(", i):
-            end = _scan_dollar_paren_end(command, i)
-            if end is None:
-                i += 2
-            else:
-                i = end
-            continue
-        if command.startswith("${", i):
-            end = command.find("}", i + 2)
-            if end == -1:
-                i += 2
-            else:
-                i = end + 1
-            continue
-        if ch == "`":
-            end = _scan_backtick_end(command, i)
-            if end is None:
-                i += 1
-            else:
-                i = end
-            continue
-        if ch.isspace() or ch in ";&|":
+    start = end = _skip_shell_whitespace(command, pos)
+    for kind, i, j, quote in _scan_shell(command, start, subst="u", brace=True):
+        if kind == "char" and quote is None and (command[i].isspace() or command[i] in ";&|"):
             break
-        i += 1
-    return (start, i, command[start:i])
+        end = j
+    return (start, end, command[start:end])
 
 
 def _is_simple_shell_literal(value: str) -> bool:
@@ -1284,22 +1195,17 @@ def _replace_simple_command_substitutions(word: str) -> str:
     chars: list[str] = []
     i = 0
     while i < len(word):
+        end = opener = None
         if word.startswith("$(", i):
-            end = _scan_dollar_paren_end(word, i)
-            if end is not None:
-                replacement = _literal_command_substitution_output(word[i + 2:end - 1])
-                if replacement is not None:
-                    chars.append(replacement)
-                    i = end
-                    continue
-        if word[i] == "`":
-            end = _scan_backtick_end(word, i)
-            if end is not None:
-                replacement = _literal_command_substitution_output(word[i + 1:end - 1])
-                if replacement is not None:
-                    chars.append(replacement)
-                    i = end
-                    continue
+            end, opener = _scan_dollar_paren_end(word, i), 2
+        elif word[i] == "`":
+            end, opener = _scan_backtick_end(word, i), 1
+        if end is not None:
+            replacement = _literal_command_substitution_output(word[i + opener:end - 1])
+            if replacement is not None:
+                chars.append(replacement)
+                i = end
+                continue
         chars.append(word[i])
         i += 1
     return "".join(chars)
@@ -1312,34 +1218,10 @@ def _replace_simple_shell_expansions(word: str) -> str:
 
 
 def _strip_shell_word_syntax(word: str) -> str:
-    chars: list[str] = []
-    quote: str | None = None
-    i = 0
-    while i < len(word):
-        ch = word[i]
-        if quote:
-            if ch == "\\" and quote == '"' and i + 1 < len(word):
-                chars.append(word[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-                i += 1
-                continue
-            chars.append(ch)
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            i += 1
-            continue
-        if ch == "\\" and i + 1 < len(word):
-            chars.append(word[i + 1])
-            i += 2
-            continue
-        chars.append(ch)
-        i += 1
-    return "".join(chars)
+    return "".join(
+        word[i + 1] if kind == "esc" else word[i]
+        for kind, i, _, _ in _scan_shell(word) if kind != "quote"
+    )
 
 
 def _deobfuscate_shell_word_for_detection(word: str) -> str:
@@ -1359,62 +1241,25 @@ def _deobfuscate_shell_word_for_detection(word: str) -> str:
 def _iter_shell_command_starts(command: str):
     starts = [0]
 
-    def descend(i: int, opener_len: int, nested_end: int | None, end: int) -> int:
-        """Record a nested $(...)/backtick command start, scan it, return resume offset."""
-        starts.append(i + opener_len)
-        scan(i + opener_len, nested_end - 1 if nested_end is not None else end)
-        return nested_end if nested_end is not None else end
-
     def scan(start: int, end: int) -> None:
-        quote: str | None = None
-        i = start
-        while i < end:
-            ch = command[i]
-            if quote == "'":
-                if ch == "'":
-                    quote = None
-                i += 1
-                continue
-            if quote == '"':
-                if ch == "\\" and i + 1 < end:
-                    i += 2
-                    continue
-                if ch == '"':
-                    quote = None
-                    i += 1
-                    continue
-                if command.startswith("$(", i):
-                    i = descend(i, 2, _scan_dollar_paren_end(command, i), end)
-                    continue
-                if ch == "`":
-                    i = descend(i, 1, _scan_backtick_end(command, i), end)
-                    continue
-                i += 1
-                continue
-            if ch in ("'", '"'):
-                quote = ch
-                i += 1
-                continue
-            if ch == "\\" and i + 1 < end:
-                i += 2
-                continue
-            if command.startswith("$(", i):
-                i = descend(i, 2, _scan_dollar_paren_end(command, i), end)
-                continue
-            if ch == "`":
-                i = descend(i, 1, _scan_backtick_end(command, i), end)
-                continue
-            if ch in ("(", "{") or ch in ";\n":
-                starts.append(i + 1)
-            elif ch in "&|":
-                repeated = i + 1 < end and command[i + 1] == ch
-                starts.append(i + 2 if repeated else i + 1)
-                if repeated:
-                    i += 1
-            i += 1
+        skip = -1
+        for kind, i, j, quote in _scan_shell(command, start, end, subst="uq", stop_unterminated=True):
+            if kind == "subst":
+                # Record a nested $(...)/backtick command start and scan its body.
+                inner = i + (1 if command[i] == "`" else 2)
+                starts.append(inner)
+                scan(inner, end if j is None else j - 1)
+            elif kind == "char" and quote is None and i != skip:
+                ch = command[i]
+                if ch in "({;\n":
+                    starts.append(i + 1)
+                elif ch in "&|":
+                    repeated = i + 1 < end and command[i + 1] == ch
+                    starts.append(i + 2 if repeated else i + 1)
+                    if repeated:
+                        skip = i + 1
 
     scan(0, len(command))
-
     seen: set[int] = set()
     for start in starts:
         start = _skip_shell_whitespace(command, start)
@@ -1460,30 +1305,10 @@ def _mask_quoted_newlines(command: str) -> str:
     """
     if "\n" not in command:
         return command
-    out: list[str] = []
-    quote: str | None = None
-    i = 0
-    while i < len(command):
-        ch = command[i]
-        if quote:
-            if ch == "\\" and quote == '"' and i + 1 < len(command):
-                out.append(command[i:i + 2])
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-            out.append(" " if ch == "\n" else ch)
-            i += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-        elif ch == "\\" and i + 1 < len(command):
-            out.append(command[i:i + 2])
-            i += 2
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+    return "".join(
+        " " if quote and kind == "char" and command[i] == "\n" else command[i:j]
+        for kind, i, j, quote in _scan_shell(command)
+    )
 
 
 def _iter_shell_command_word_spans(command: str):
