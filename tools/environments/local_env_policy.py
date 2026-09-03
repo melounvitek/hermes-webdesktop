@@ -68,16 +68,14 @@ def _build_provider_env_blocklist() -> frozenset:
                 blocked.add(name)
     except ImportError:
         pass
-    # CLAUDE_CODE_OAUTH_TOKEN (arrives via the anthropic registry entry) is owned by
-    # the user's Claude Code install, not a Hermes credential. Stripping it made
-    # agent-spawned ``claude`` CLIs fall through to the shared Keychain / ~/.claude
-    # store and, on auth failure, wipe it — logging the user out.
-    blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
-    # BUZZ_* is deliberately NOT discarded: this blocklist feeds every scrub surface
-    # (terminal, execute_code, hermes_subprocess_env Tier-2), so an import-time
-    # discard would leak BUZZ_PRIVATE_KEY into non-terminal children. The Buzz
-    # carve-out is a terminal-only, context-gated exemption
+    # CLAUDE_CODE_OAUTH_TOKEN (via the anthropic registry entry) belongs to the user's
+    # Claude Code install, not Hermes: stripping it made agent-spawned ``claude`` CLIs
+    # fall through to the shared Keychain / ~/.claude store and, on auth failure, wipe
+    # it — logging the user out. BUZZ_* is deliberately NOT discarded: this list feeds
+    # every scrub surface, so an import-time discard would leak BUZZ_PRIVATE_KEY into
+    # non-terminal children; the Buzz carve-out is terminal-only and context-gated
     # (``_is_terminal_first_party_env``).
+    blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
     return frozenset(blocked)
 
 

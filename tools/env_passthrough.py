@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from contextvars import ContextVar
 from typing import Iterable
-from hermes_cli.config import cfg_get
+from hermes_cli.config import cfg_get, read_raw_config
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,11 @@ _config_passthrough: frozenset[str] | None = None
 def _is_hermes_provider_credential(name: str) -> bool:
     """True if ``name`` is a Hermes-managed provider credential per
     ``_HERMES_PROVIDER_ENV_BLOCKLIST`` or a dynamic Hermes-internal secret
-    (AUXILIARY_*_API_KEY / _BASE_URL, GATEWAY_RELAY_*, injected per task/relay so
-    the static list can't enumerate them).
-
-    Skill-declared ``required_environment_variables`` must not override this list —
-    that was the GHSA-rhgp-j443-p4rf bypass (a malicious skill registered
-    ``OPENAI_API_KEY`` as passthrough and received it in the ``execute_code`` child).
-    Non-Hermes API keys (TENOR_API_KEY, NOTION_TOKEN, …) remain registerable.
-
-    Fail closed: if the authoritative blocklist cannot be imported (partial install,
-    import-time error), treat the name as protected.
-    """
+    (AUXILIARY_*_API_KEY / _BASE_URL, GATEWAY_RELAY_*). Skill-declared
+    ``required_environment_variables`` must not override this — that was the
+    GHSA-rhgp-j443-p4rf bypass (a skill registered ``OPENAI_API_KEY`` and received it
+    in the ``execute_code`` child); non-Hermes keys (TENOR_API_KEY, …) stay
+    registerable. Fails closed when the blocklist cannot be imported."""
     try:
         from tools.environments.local import (
             _HERMES_PROVIDER_ENV_BLOCKLIST,
@@ -75,21 +69,26 @@ def register_env_passthrough(var_names: Iterable[str]) -> None:
     a skill needing a Hermes-managed provider should use the main-process tools
     (web_search, web_extract, …). Third-party keys pass normally.
     """
-    for name in var_names:
-        name = name.strip()
+    for name in _accepted((n.strip() for n in var_names), (
+        "env passthrough: refusing to register Hermes provider "
+        "credential %r (blocked by _HERMES_PROVIDER_ENV_BLOCKLIST). "
+        "Skills must not override the execute_code sandbox's "
+        "credential scrubbing; see GHSA-rhgp-j443-p4rf."
+    )):
+        _get_allowed().add(name)
+        logger.debug("env passthrough: registered %s", name)
+
+
+def _accepted(names, refusal_msg: str):
+    """Yield non-empty *names* that are not Hermes provider credentials; refused
+    names are logged with *refusal_msg* (``%r`` = name)."""
+    for name in names:
         if not name:
             continue
         if _is_hermes_provider_credential(name):
-            logger.warning(
-                "env passthrough: refusing to register Hermes provider "
-                "credential %r (blocked by _HERMES_PROVIDER_ENV_BLOCKLIST). "
-                "Skills must not override the execute_code sandbox's "
-                "credential scrubbing; see GHSA-rhgp-j443-p4rf.",
-                name,
-            )
+            logger.warning(refusal_msg, name)
             continue
-        _get_allowed().add(name)
-        logger.debug("env passthrough: registered %s", name)
+        yield name
 
 
 def _load_config_passthrough() -> frozenset[str]:
@@ -102,24 +101,16 @@ def _load_config_passthrough() -> frozenset[str]:
 
     result: set[str] = set()
     try:
-        from hermes_cli.config import read_raw_config
         passthrough = cfg_get(read_raw_config(), "terminal", "env_passthrough")
-        for item in passthrough if isinstance(passthrough, list) else ():
-            name = item.strip() if isinstance(item, str) else ""
-            if not name:
-                continue
-            if _is_hermes_provider_credential(name):
-                logger.warning(
-                    "env passthrough: refusing to register Hermes "
-                    "provider credential %r from config.yaml (blocked "
-                    "by _HERMES_PROVIDER_ENV_BLOCKLIST). Operator "
-                    "configuration must not override the execute_code "
-                    "sandbox's credential scrubbing; see "
-                    "GHSA-rhgp-j443-p4rf.",
-                    name,
-                )
-                continue
-            result.add(name)
+        items = passthrough if isinstance(passthrough, list) else ()
+        result.update(_accepted((i.strip() for i in items if isinstance(i, str)), (
+            "env passthrough: refusing to register Hermes "
+            "provider credential %r from config.yaml (blocked "
+            "by _HERMES_PROVIDER_ENV_BLOCKLIST). Operator "
+            "configuration must not override the execute_code "
+            "sandbox's credential scrubbing; see "
+            "GHSA-rhgp-j443-p4rf."
+        )))
     except Exception as e:
         logger.debug("Could not read tools.env_passthrough from config: %s", e)
 
