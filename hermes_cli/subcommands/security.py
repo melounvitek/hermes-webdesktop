@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
     """Attach the ``security`` subcommand to ``subparsers``."""
@@ -19,9 +21,7 @@ def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
     audit_parser = security_subparsers.add_parser(
         "audit", help="Run a one-shot supply-chain audit",
         description="Query OSV.dev for known vulnerabilities in installed components.")
-    audit_parser.add_argument(
-        "--json", action="store_true",
-        help="Emit machine-readable JSON instead of human-readable text")
+    add_json_flag(audit_parser, "Emit machine-readable JSON instead of human-readable text")
     audit_parser.add_argument(
         "--fail-on", default="critical", choices=["low", "moderate", "high", "critical"],
         help="Exit non-zero when any finding meets this severity (default: critical)")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def _cu_install(args) -> int:
     from hermes_cli.tools_config import _cua_driver_contract_status, install_cua_driver
@@ -155,9 +157,8 @@ def build_computer_use_parser(subparsers) -> None:
     computer_use_doctor.add_argument(
         "--skip", action="append", default=[], metavar="CHECK",
         help="Skip the listed checks. Repeat for multiple. Wins over --include.")
-    computer_use_doctor.add_argument(
-        "--json", action="store_true",
-        help="Emit the raw structured payload as JSON (same shape as `tools/call`).")
+    add_json_flag(computer_use_doctor,
+                  "Emit the raw structured payload as JSON (same shape as `tools/call`).")
     computer_use_perms = computer_use_sub.add_parser(
         "permissions", help="Check or grant macOS Accessibility + Screen Recording (macOS)",
         description="Computer Use drives the Mac through cua-driver, whose TCC grants\n"
@@ -168,8 +169,7 @@ def build_computer_use_parser(subparsers) -> None:
     computer_use_perms_sub = computer_use_perms.add_subparsers(dest="computer_use_perms_action")
     computer_use_perms_status = computer_use_perms_sub.add_parser(
         "status", help="Report Accessibility + Screen Recording grant state (read-only)")
-    computer_use_perms_status.add_argument(
-        "--json", action="store_true", help="Emit the normalized permission payload as JSON.")
+    add_json_flag(computer_use_perms_status, "Emit the normalized permission payload as JSON.")
     computer_use_perms_sub.add_parser(
         "grant", help="Request the grants (opens the dialog attributed to CuaDriver)")
     _perms_actions = {"grant": _cu_perms_grant, "status": _cu_perms_status}

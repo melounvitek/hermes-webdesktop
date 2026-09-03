@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_yes_flag
+
 
 def build_import_agent_parser(subparsers, *, cmd_import_agent: Callable) -> None:
     """Attach the ``import-agent`` subcommand to ``subparsers``."""
@@ -30,5 +32,5 @@ def build_import_agent_parser(subparsers, *, cmd_import_agent: Callable) -> None
     parser.add_argument(
         "--overwrite", action="store_true",
         help="Overwrite existing Hermes items on name conflicts (default: skip)")
-    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    add_yes_flag(parser, "Skip confirmation prompts")
     parser.set_defaults(func=cmd_import_agent)

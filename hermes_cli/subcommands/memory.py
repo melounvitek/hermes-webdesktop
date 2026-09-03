@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_yes_flag
+
 
 def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     """Attach the ``memory`` subcommand to ``subparsers``."""
@@ -24,7 +26,7 @@ def build_memory_parser(subparsers, *, cmd_memory: Callable) -> None:
     memory_sub.add_parser("off", help="Disable external provider (built-in only)")
     _reset_parser = memory_sub.add_parser(
         "reset", help="Erase all built-in memory (MEMORY.md and USER.md)")
-    _reset_parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+    add_yes_flag(_reset_parser)
     _reset_parser.add_argument(
         "--target", choices=["all", "memory", "user"], default="all",
         help="Which store to reset: 'all' (default), 'memory', or 'user'")

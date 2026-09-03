@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def build_approvals_parser(subparsers, *, cmd_approvals: Callable) -> None:
     """Attach the ``approvals`` subcommand to ``subparsers``."""
@@ -33,9 +35,7 @@ def build_approvals_parser(subparsers, *, cmd_approvals: Callable) -> None:
         "--apply", dest="apply_indices", metavar="N[,M...]",
         help="Merge the numbered proposals (from a prior run) into "
         "command_allowlist in config.yaml")
-    suggest_parser.add_argument(
-        "--json", action="store_true",
-        help="Emit machine-readable JSON instead of human-readable text")
+    add_json_flag(suggest_parser, "Emit machine-readable JSON instead of human-readable text")
     suggest_parser.add_argument(
         "--days", type=int, default=90,
         help="How far back to scan session history (default: 90; 0 = all)")
@@ -62,9 +62,7 @@ def build_approvals_parser(subparsers, *, cmd_approvals: Callable) -> None:
         "--env-type", dest="env_type", default="local",
         help="Terminal backend type to evaluate against (default: local; "
         "isolated container backends like docker skip the guards)")
-    test_parser.add_argument(
-        "--json", action="store_true",
-        help="Emit machine-readable JSON instead of human-readable text")
+    add_json_flag(test_parser, "Emit machine-readable JSON instead of human-readable text")
     test_parser.add_argument(
         "command_words",
         nargs=argparse.REMAINDER,

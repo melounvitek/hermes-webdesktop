@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     """Attach the ``plugins`` subcommand to ``subparsers``."""
@@ -40,7 +42,7 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
         "term", nargs="?", default="",
         help="Search term matched fuzzily against name, description, and tags "
         "(omit to browse the full index)")
-    plugins_search.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    add_json_flag(plugins_search, "Print machine-readable JSON")
     plugins_search.add_argument(
         "--capability", metavar="CAP",
         help="Filter by declared capability (e.g. tools, platform, commands)")
@@ -65,7 +67,7 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     plugins_list.add_argument(
         "--plain", action="store_true",
         help="Print compact plain-text output instead of a Rich table")
-    plugins_list.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    add_json_flag(plugins_list, "Print machine-readable JSON")
 
     plugins_enable = plugins_subparsers.add_parser("enable", help="Enable a disabled plugin")
     plugins_enable.add_argument("name", help="Plugin name to enable")

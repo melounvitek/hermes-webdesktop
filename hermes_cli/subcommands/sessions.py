@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag, add_yes_flag
+
 
 def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     """Attach the ``sessions`` subcommand to ``subparsers``."""
@@ -75,7 +77,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         p.add_argument(
             "--dry-run", action="store_true",
             help="List matching sessions without changing anything")
-        p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+        add_yes_flag(p, "Skip confirmation")
 
     sessions_export = sessions_subparsers.add_parser(
         "export", help="Export sessions to JSONL, Markdown, or QMD")
@@ -119,7 +121,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
 
     sessions_delete = sessions_subparsers.add_parser("delete", help="Delete a specific session")
     sessions_delete.add_argument("session_id", help="Session ID to delete")
-    sessions_delete.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+    add_yes_flag(sessions_delete, "Skip confirmation")
 
     sessions_prune = sessions_subparsers.add_parser(
         "prune", help="Delete old sessions (filterable by time window, source, title, ...)")
@@ -267,9 +269,7 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to unpin")
 
     sessions_pinned = sessions_subparsers.add_parser("pinned", help="List pinned sessions")
-    sessions_pinned.add_argument(
-        "--json", action="store_true",
-        help="Emit machine-readable JSON (for backup/restore scripting)")
+    add_json_flag(sessions_pinned, "Emit machine-readable JSON (for backup/restore scripting)")
 
     sessions_retitle = sessions_subparsers.add_parser(
         "retitle-skills", help="Re-title sessions whose auto-title came from a /skill's own text",

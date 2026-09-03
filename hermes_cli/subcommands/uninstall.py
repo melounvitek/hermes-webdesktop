@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_yes_flag
+
 
 def build_uninstall_parser(subparsers, *, cmd_uninstall: Callable) -> None:
     """Attach the ``uninstall`` subcommand to ``subparsers``."""
@@ -20,8 +22,7 @@ def build_uninstall_parser(subparsers, *, cmd_uninstall: Callable) -> None:
         "--gui-summary", action="store_true",
         help="Print a JSON summary of installed GUI/agent artifacts and exit "
         "(used by the desktop app to gate uninstall options)")
-    uninstall_parser.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    add_yes_flag(uninstall_parser, "Skip confirmation prompts")
     uninstall_parser.add_argument(
         "--dry-run", action="store_true",
         help="Print what uninstall would remove without changing anything")

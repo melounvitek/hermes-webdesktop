@@ -416,33 +416,21 @@ def build_peer_parser(subparsers) -> None:
     rm_p = peer_sub.add_parser("remove", aliases=["rm"], help="Remove a peer")
     rm_p.add_argument("name", help="Peer name")
 
-    dm_p = peer_sub.add_parser("dm", help="Message an agent on a peer gateway and print its reply")
-    dm_p.add_argument(
-        "target", help="<peer> or <peer>/<agent> (named profile on a multiplexed peer)")
-    dm_p.add_argument("message", nargs="?", default=None, help="Message text (or stdin)")
-    dm_p.add_argument("--json", action="store_true", default=False, help="Emit a JSON result")
+    def _remote(name: str, help: str, *, run_id: bool):
+        sp = peer_sub.add_parser(name, help=help)
+        sp.add_argument("target", help="<peer> or <peer>/<agent> (named profile on a multiplexed peer)")
+        if run_id:
+            sp.add_argument("run_id", help="Run ID returned by 'hermes peer run'")
+        else:
+            sp.add_argument("message", nargs="?", default=None, help="Message text (or stdin)")
+            if name == "run":
+                sp.add_argument(
+                    "--idempotency-key", default=None, help="Stable retry key (generated when omitted)")
+        sp.add_argument("--json", action="store_true", default=False, help="Emit a JSON result")
 
-    run_p = peer_sub.add_parser(
-        "run", help="Start a long peer turn asynchronously and return its run ID")
-    run_p.add_argument(
-        "target", help="<peer> or <peer>/<agent> (named profile on a multiplexed peer)")
-    run_p.add_argument("message", nargs="?", default=None, help="Message text (or stdin)")
-    run_p.add_argument(
-        "--idempotency-key", default=None, help="Stable retry key (generated when omitted)")
-    run_p.add_argument("--json", action="store_true", default=False, help="Emit a JSON result")
-
-    status_p = peer_sub.add_parser(
-        "status", help="Read the status and final output of an asynchronous peer run")
-    status_p.add_argument(
-        "target", help="<peer> or <peer>/<agent> (named profile on a multiplexed peer)")
-    status_p.add_argument("run_id", help="Run ID returned by 'hermes peer run'")
-    status_p.add_argument("--json", action="store_true", default=False, help="Emit a JSON result")
-
-    stop_p = peer_sub.add_parser(
-        "stop", help="Stop one asynchronous peer run without affecting another turn")
-    stop_p.add_argument(
-        "target", help="<peer> or <peer>/<agent> (named profile on a multiplexed peer)")
-    stop_p.add_argument("run_id", help="Run ID returned by 'hermes peer run'")
-    stop_p.add_argument("--json", action="store_true", default=False, help="Emit a JSON result")
+    _remote("dm", "Message an agent on a peer gateway and print its reply", run_id=False)
+    _remote("run", "Start a long peer turn asynchronously and return its run ID", run_id=False)
+    _remote("status", "Read the status and final output of an asynchronous peer run", run_id=True)
+    _remote("stop", "Stop one asynchronous peer run without affecting another turn", run_id=True)
 
     parser.set_defaults(func=cmd_peer)

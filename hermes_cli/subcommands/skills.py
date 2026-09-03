@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag, add_yes_flag
+
 
 def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     """Attach the ``skills`` subcommand to ``subparsers``."""
@@ -77,9 +79,8 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
             "minimax"],
         help="Filter by source or provider (e.g. nvidia, openai)")
     skills_search.add_argument("--limit", type=int, default=25, help="Max results")
-    skills_search.add_argument(
-        "--json", action="store_true",
-        help="Output JSON instead of a table (full identifiers, scripting-friendly)")
+    add_json_flag(
+        skills_search, "Output JSON instead of a table (full identifiers, scripting-friendly)")
 
     skills_install = skills_subparsers.add_parser("install", help="Install a skill")
     skills_install.add_argument(
@@ -93,8 +94,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     )
     skills_install.add_argument(
         "--force", action="store_true", help="Install despite blocked scan verdict")
-    skills_install.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompt (needed in TUI mode)")
+    add_yes_flag(skills_install, "Skip confirmation prompt (needed in TUI mode)")
 
     skills_inspect = skills_subparsers.add_parser(
         "inspect", help="Preview a skill without installing")
@@ -127,8 +127,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_uninstall = skills_subparsers.add_parser(
         "uninstall", help="Remove a hub-installed skill")
     skills_uninstall.add_argument("name", help="Skill name to remove")
-    skills_uninstall.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompt")
+    add_yes_flag(skills_uninstall)
 
     skills_reset = skills_subparsers.add_parser(
         "reset",
@@ -140,8 +139,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_reset.add_argument(
         "--restore", action="store_true",
         help="Also delete the current copy and re-copy the bundled version")
-    skills_reset.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --restore")
+    add_yes_flag(skills_reset, "Skip confirmation prompt when using --restore")
 
     skills_list_modified = skills_subparsers.add_parser(
         "list-modified", help="List bundled skills you've edited (which `hermes update` keeps)",
@@ -149,7 +147,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
             "synced, i.e. the ones `hermes update` reports as user-modified and skips. "
             "Use `hermes skills diff <name>` to see changes and `hermes skills reset "
             "<name>` to resume updates.")
-    skills_list_modified.add_argument("--json", action="store_true", help="Output the list as JSON")
+    add_json_flag(skills_list_modified, "Output the list as JSON")
 
     skills_diff = skills_subparsers.add_parser(
         "diff", help="Show how your copy of a bundled skill differs from the stock version",
@@ -168,8 +166,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_opt_out.add_argument(
         "--remove", action="store_true",
         help="Also delete already-present unmodified bundled skills")
-    skills_opt_out.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --remove")
+    add_yes_flag(skills_opt_out, "Skip confirmation prompt when using --remove")
 
     skills_opt_in = skills_subparsers.add_parser(
         "opt-in", help="Re-enable bundled-skill seeding (undo opt-out)",
@@ -190,8 +187,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_repair_official.add_argument(
         "--restore", action="store_true",
         help="Restore from official optional source, backing up existing matching copies")
-    skills_repair_official.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --restore")
+    add_yes_flag(skills_repair_official, "Skip confirmation prompt when using --restore")
 
     skills_publish = skills_subparsers.add_parser("publish", help="Publish a skill to a registry")
     skills_publish.add_argument("skill_path", help="Path to skill directory")

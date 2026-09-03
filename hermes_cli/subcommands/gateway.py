@@ -11,12 +11,15 @@ from hermes_cli.subcommands._shared import add_accept_hooks_flag
 def _add_compat_platform_flag(parser: argparse.ArgumentParser) -> None:
     """Accept stale `gateway <verb> --platform X` docs without advertising it.
 
-    Gateway service lifecycle commands operate on the gateway process, not a
-    single messaging adapter.  Photon briefly printed a per-platform start
-    command during setup; keep that command parseable so users following the
-    old hint don't get blocked by argparse before the gateway can start.
+    Lifecycle commands operate on the gateway process, not one adapter; Photon briefly
+    printed a per-platform start command during setup, so keep it parseable.
     """
     parser.add_argument("--platform", dest="platform", help=argparse.SUPPRESS)
+
+
+def _add_system_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--system", action="store_true", help="Target the Linux system-level gateway service")
 
 
 def build_gateway_parser(
@@ -66,8 +69,7 @@ def build_gateway_parser(
     # gateway start
     gateway_start = gateway_subparsers.add_parser(
         "start", help="Start the installed systemd/launchd background service")
-    gateway_start.add_argument(
-        "--system", action="store_true", help="Target the Linux system-level gateway service")
+    _add_system_flag(gateway_start)
     gateway_start.add_argument(
         "--all", action="store_true",
         help="Kill ALL stale gateway processes across all profiles before starting")
@@ -75,15 +77,13 @@ def build_gateway_parser(
 
     # gateway stop
     gateway_stop = gateway_subparsers.add_parser("stop", help="Stop gateway service")
-    gateway_stop.add_argument(
-        "--system", action="store_true", help="Target the Linux system-level gateway service")
+    _add_system_flag(gateway_stop)
     gateway_stop.add_argument(
         "--all", action="store_true", help="Stop ALL gateway processes across all profiles")
 
     # gateway restart
     gateway_restart = gateway_subparsers.add_parser("restart", help="Restart gateway service")
-    gateway_restart.add_argument(
-        "--system", action="store_true", help="Target the Linux system-level gateway service")
+    _add_system_flag(gateway_restart)
     gateway_restart.add_argument(
         "--all", action="store_true",
         help="Kill ALL gateway processes across all profiles before restarting")
@@ -95,8 +95,7 @@ def build_gateway_parser(
     gateway_status.add_argument(
         "-l", "--full", action="store_true",
         help="Show full, untruncated service/log output where supported")
-    gateway_status.add_argument(
-        "--system", action="store_true", help="Target the Linux system-level gateway service")
+    _add_system_flag(gateway_status)
     _add_compat_platform_flag(gateway_status)
 
     # gateway install
@@ -126,8 +125,7 @@ def build_gateway_parser(
 
     # gateway uninstall
     gateway_uninstall = gateway_subparsers.add_parser("uninstall", help="Uninstall gateway service")
-    gateway_uninstall.add_argument(
-        "--system", action="store_true", help="Target the Linux system-level gateway service")
+    _add_system_flag(gateway_uninstall)
 
     # gateway list
     gateway_subparsers.add_parser("list", help="List all profiles and their gateway status")

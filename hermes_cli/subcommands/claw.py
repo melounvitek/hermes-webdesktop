@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_yes_flag
+
 
 def build_claw_parser(subparsers, *, cmd_claw: Callable) -> None:
     """Attach the ``claw`` subcommand to ``subparsers``."""
@@ -42,7 +44,7 @@ def build_claw_parser(subparsers, *, cmd_claw: Callable) -> None:
     claw_migrate.add_argument(
         "--skill-conflict", choices=["skip", "overwrite", "rename"], default="skip",
         help="How to handle skill name conflicts (default: skip)")
-    claw_migrate.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    add_yes_flag(claw_migrate, "Skip confirmation prompts")
 
     # claw cleanup
     claw_cleanup = claw_subparsers.add_parser(
@@ -53,5 +55,5 @@ def build_claw_parser(subparsers, *, cmd_claw: Callable) -> None:
     claw_cleanup.add_argument(
         "--dry-run", action="store_true",
         help="Preview what would be archived without making changes")
-    claw_cleanup.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    add_yes_flag(claw_cleanup, "Skip confirmation prompts")
     claw_parser.set_defaults(func=cmd_claw)

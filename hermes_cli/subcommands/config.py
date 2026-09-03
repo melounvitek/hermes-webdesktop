@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     """Attach the ``config`` subcommand to ``subparsers``."""
@@ -21,7 +23,7 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     # config get
     config_get = config_subparsers.add_parser("get", help="Print a resolved configuration value")
     config_get.add_argument("key", nargs="?", help="Configuration key (e.g., model)")
-    config_get.add_argument("--json", action="store_true", help="Print value as JSON")
+    add_json_flag(config_get, "Print value as JSON")
 
     # config set
     config_set = config_subparsers.add_parser("set", help="Set a configuration value")

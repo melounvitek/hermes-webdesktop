@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 # Keep in sync with agent/verify/runner.py defaults; not imported here to
 # avoid paying an extra module import on every `hermes` invocation.
 DEFAULT_PHASE_TIMEOUT = 600.0
@@ -44,6 +46,5 @@ def build_verify_parser(subparsers, *, cmd_verify: Callable) -> None:
     verify_parser.add_argument(
         "--ready-timeout", type=float, default=DEFAULT_READY_TIMEOUT,
         help=f"Readiness poll timeout in seconds (default: {DEFAULT_READY_TIMEOUT:.0f})")
-    verify_parser.add_argument(
-        "--json", action="store_true", help="Emit a machine-readable JSON result")
+    add_json_flag(verify_parser, "Emit a machine-readable JSON result")
     verify_parser.set_defaults(func=cmd_verify)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from hermes_cli.subcommands._shared import add_json_flag
+
 
 def build_prompt_size_parser(subparsers, *, cmd_prompt_size: Callable) -> None:
     """Attach the ``prompt-size`` subcommand to ``subparsers``."""
@@ -15,6 +17,5 @@ def build_prompt_size_parser(subparsers, *, cmd_prompt_size: Callable) -> None:
     prompt_size_parser.add_argument(
         "--platform", default="cli",
         help="Platform to simulate (cli, telegram, discord, ...). Default: cli")
-    prompt_size_parser.add_argument(
-        "--json", action="store_true", help="Emit the breakdown as JSON")
+    add_json_flag(prompt_size_parser, "Emit the breakdown as JSON")
     prompt_size_parser.set_defaults(func=cmd_prompt_size)
