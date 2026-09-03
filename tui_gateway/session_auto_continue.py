@@ -67,10 +67,6 @@ def _ac_release_turn(session: dict, *, unschedule: bool = False) -> None:
             session["_auto_continue_scheduled"] = False
 
 
-def _ac_dispatch_failed(what: str, exc: BaseException) -> None:
-    print(f"[tui_gateway] {what} dispatch failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-
-
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
     """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths, once the
     live record is registered). Returns a descriptor for the resume payload when scheduled, else None.
@@ -133,7 +129,7 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             _emit("message.start", sid)
             _run_prompt_submit(rid, sid, session, text, display_kind="auto_continue")
         except Exception as exc:
-            _ac_dispatch_failed("auto-continue", exc)
+            _notif_log_failure("auto-continue dispatch failed", exc)
             _ac_release_turn(session)
 
     threading.Thread(target=kickoff, daemon=True).start()
@@ -356,7 +352,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         else:
             _run_prompt_submit(rid, sid, session, queued["text"], **kwargs)
     except Exception as exc:
-        _ac_dispatch_failed("queued prompt", exc)
+        _notif_log_failure("queued prompt dispatch failed", exc)
         _ac_release_turn(session)
         dispatch_failed = True
     if dispatch_failed:

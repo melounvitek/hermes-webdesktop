@@ -88,6 +88,15 @@ def _run(cli: HermesCLI, command: str) -> str:
     return strip_ansi(buf.getvalue().rstrip())
 
 
+def _sw_log(reason: str) -> None:
+    print(f"[slash-worker] {reason}", file=sys.stderr, flush=True)
+
+
+def _reply(**fields) -> None:
+    sys.stdout.write(json.dumps(fields) + "\n")
+    sys.stdout.flush()
+
+
 def main():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--session-key", required=True)
@@ -108,13 +117,6 @@ def main():
     # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway
     # entry point — any child inheriting fd 0 can flip the flag).
     _sw_recovery_times: list[float] = []
-
-    def _sw_log(reason: str) -> None:
-        print(f"[slash-worker] {reason}", file=sys.stderr, flush=True)
-
-    def _reply(**fields) -> None:
-        sys.stdout.write(json.dumps(fields) + "\n")
-        sys.stdout.flush()
 
     while True:
         raw = sys.stdin.readline()
