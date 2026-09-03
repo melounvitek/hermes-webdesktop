@@ -1,25 +1,11 @@
-"""
-Platform Adapter Registry
+"""Platform adapter registry.
 
 Platform adapters (built-in and plugin) self-register here so the gateway can
-discover and instantiate them without hardcoded if/elif chains.  Plugins
+discover and instantiate them without hardcoded if/elif chains. Plugins
 register via ``PluginContext.register_platform()``; ``GatewayRunner
 ._create_adapter()`` consults the registry first and falls back to the legacy
-built-in path.
-
-Usage (plugin side)::
-
-    platform_registry.register(PlatformEntry(
-        name="irc", label="IRC",
-        adapter_factory=lambda cfg: IRCAdapter(cfg),
-        check_fn=check_requirements,
-        validate_config=lambda cfg: bool(cfg.extra.get("server")),
-        required_env=["IRC_SERVER"], install_hint="pip install irc",
-    ))
-
-Usage (gateway side)::
-
-    adapter = platform_registry.create_adapter("irc", platform_config)
+built-in path. Plugin side: ``platform_registry.register(PlatformEntry(...))``;
+gateway side: ``platform_registry.create_adapter("irc", platform_config)``.
 """
 
 import logging
@@ -60,113 +46,81 @@ def _caller_plugin_scope() -> Optional[str]:
 class PlatformEntry:
     """Metadata and factory for a single platform adapter."""
 
-    # Identifier used in config.yaml (e.g. "irc") and human-readable label.
-    name: str
-    label: str
-
-    # Receives a PlatformConfig, returns an adapter instance.  A factory (not a
-    # bare class) lets plugins do custom init / wrapping.
+    name: str  # config.yaml identifier (e.g. "irc")
+    label: str  # human-readable
+    # Receives a PlatformConfig, returns an adapter instance (a factory, not a
+    # bare class, so plugins can do custom init / wrapping).
     adapter_factory: Callable[[Any], Any]
-
-    # PASSIVE dependency probe: True when deps are importable RIGHT NOW.  Must
-    # be side-effect free -- it runs from status displays (`hermes setup`,
-    # `hermes status`, dashboard readiness) and the config enablement pass,
-    # none of which may pip-install.  Install logic belongs in ensure_deps_fn.
+    # PASSIVE dependency probe: True when deps are importable RIGHT NOW. Must be
+    # side-effect free -- it runs from status displays and the config enablement
+    # pass, none of which may pip-install. Install logic belongs in ensure_deps_fn.
     check_fn: Callable[[], bool]
-
-    # Optional config check.  None = skip and let connect() fail descriptively.
+    # Optional config check. None = skip and let connect() fail descriptively.
     validate_config: Optional[Callable[[Any], bool]] = None
-
-    # ACTIVE dependency installer: make deps importable (pip / lazy_deps),
-    # returning True on success.  Called by ``create_adapter()`` only when
-    # ``check_fn`` is False -- the one moment the user has the platform
-    # enabled+configured and the gateway is about to connect it.  None = a
-    # False ``check_fn`` is a hard block (correct for platforms without
-    # optional deps).  The passive/active split exists because a single field
-    # either pip-installed from every status display or never installed at all.
+    # ACTIVE dependency installer, returning True on success. Called by
+    # ``create_adapter()`` only when ``check_fn`` is False -- the one moment the
+    # platform is enabled+configured and about to connect. None = a False
+    # ``check_fn`` is a hard block. The passive/active split exists because a
+    # single field either pip-installed from every status display or never at all.
     ensure_deps_fn: Optional[Callable[[], bool]] = None
-
-    # Is the platform connected/enabled for this PlatformConfig?  Used by
-    # ``GatewayConfig.get_connected_platforms()`` and setup UI status; None
-    # falls back to ``validate_config`` or ``check_fn``.
+    # Is the platform connected/enabled for this PlatformConfig? Used by
+    # ``GatewayConfig.get_connected_platforms()`` and setup UI status; None falls
+    # back to ``validate_config`` or ``check_fn``.
     is_connected: Optional[Callable[[Any], bool]] = None
-
-    # Env vars this platform needs (``hermes setup`` display) and the hint
-    # shown when check_fn returns False.
+    # Env vars this platform needs (``hermes setup`` display) and the hint shown
+    # when check_fn returns False.
     required_env: list = field(default_factory=list)
     install_hint: str = ""
-
-    # Interactive setup ``() -> None``.  None falls back to
-    # _setup_standard_platform (needs token_var + vars) or a generic env display.
+    # Interactive setup ``() -> None``. None falls back to _setup_standard_platform
+    # (needs token_var + vars) or a generic env display.
     setup_fn: Optional[Callable[[], None]] = None
-
     # "builtin" or "plugin"; plugin_name is the owning manifest (empty for
     # built-ins) so ``hermes gateway setup`` can auto-enable the plugin.
     source: str = "plugin"
     plugin_name: str = ""
-
     # Auth env var names for _is_user_authorized: comma-separated allowed user
     # IDs, and a truthy "allow everyone" switch.
     allowed_users_env: str = ""
     allow_all_env: str = ""
-
-    # Max message length for smart-chunking; 0 = no limit.
-    max_message_length: int = 0
-
-    # If True, session descriptions redact PII (phone numbers, etc.).
-    pii_safe: bool = False
-
-    # Emoji for CLI/gateway display.
-    emoji: str = "🔌"
-
-    # Whether /update may be issued from this platform (_UPDATE_ALLOWED_PLATFORMS).
-    allow_update_command: bool = True
-
-    # Platform hint injected into the system prompt; empty = none.
-    platform_hint: str = ""
-
-    # Env-driven auto-configuration ``() -> Optional[dict]``: returns
-    # ``PlatformConfig.extra`` fields to seed when the platform is auto-enabled.
-    # Runs during ``_apply_env_overrides`` BEFORE the adapter is constructed so
-    # ``gateway status`` reflects env-only config.  None/empty dict = skip.
+    max_message_length: int = 0  # smart-chunking cap; 0 = no limit
+    pii_safe: bool = False  # session descriptions redact PII (phone numbers, etc.)
+    emoji: str = "🔌"  # CLI/gateway display
+    allow_update_command: bool = True  # /update may be issued from this platform
+    platform_hint: str = ""  # injected into the system prompt; empty = none
+    # Env-driven auto-configuration ``() -> Optional[dict]``: ``PlatformConfig.extra``
+    # fields to seed when the platform is auto-enabled. Runs during
+    # ``_apply_env_overrides`` BEFORE the adapter is constructed so ``gateway status``
+    # reflects env-only config. None/empty dict = skip.
     env_enablement_fn: Optional[Callable[[], Optional[dict]]] = None
-
-    # YAML->env bridge ``(yaml_cfg, platform_cfg) -> Optional[dict]``: lets a
-    # plugin own its config.yaml translation instead of core gateway/config.py.
-    # Called from ``load_gateway_config()`` after the generic shared-key loop and
-    # before ``_apply_env_overrides``.  May mutate ``os.environ`` (guard with
-    # ``not os.getenv(...)`` to keep env > YAML precedence); the returned dict is
-    # merged into ``PlatformConfig.extra``.  Exceptions are logged at debug.
-    # Full contract: website/docs/developer-guide/adding-platform-adapters.md.
+    # YAML->env bridge ``(yaml_cfg, platform_cfg) -> Optional[dict]``: a plugin owns
+    # its config.yaml translation. Called from ``load_gateway_config()`` after the
+    # generic shared-key loop and before ``_apply_env_overrides``. May mutate
+    # ``os.environ`` (guard with ``not os.getenv(...)`` to keep env > YAML); the
+    # returned dict is merged into ``PlatformConfig.extra``. Exceptions logged at
+    # debug. Full contract: website/docs/developer-guide/adding-platform-adapters.md.
     apply_yaml_config_fn: Optional[Callable[[dict, dict], Optional[dict]]] = None
-
-    # Home-channel env var (e.g. "IRC_HOME_CHANNEL").  When set, cron.scheduler
-    # accepts ``deliver=<name>`` and reads it for the default chat/room ID.
+    # Home-channel env var (e.g. "IRC_HOME_CHANNEL"): cron.scheduler accepts
+    # ``deliver=<name>`` and reads it for the default chat/room ID.
     cron_deliver_env_var: str = ""
-
     # Target parsing ``(target_ref) -> Optional[(chat_id, thread_id)]``, run by
     # ``tools/send_message_tool._parse_target_ref`` before channel-directory
-    # fallback so plugins can declare native target syntax
-    # (e.g. ``fmsg:@alice@example.com``).  None result = continue to directory
-    # resolution; no opaque fallback is applied.
+    # fallback so plugins can declare native target syntax (``fmsg:@alice@x``).
+    # None result = continue to directory resolution; no opaque fallback.
     parse_target_ref_fn: Optional[Callable[[str], Optional[tuple[str, Optional[str]]]]] = None
-
-    # Validation after parsing/normalization or directory resolution: True to
-    # accept, False to reject, or a non-empty string to reject with diagnostic.
+    # Validation after parsing or directory resolution: True to accept, False to
+    # reject, or a non-empty string to reject with diagnostic.
     validate_target_ref_fn: Optional[Callable[[str], bool | str]] = None
-
     # Whole-request delivery handler ``(args, normalized_chat_id, platform_name,
-    # pconfig)``, sync or async.  Prefer standalone_sender_fn when the standard
+    # pconfig)``, sync or async. Prefer standalone_sender_fn when the standard
     # send contract suffices.
     send_message_handler: Optional[Callable[[dict, str, str, Any], Any]] = None
-
-    # Out-of-process sender used by ``_send_via_adapter`` when cron runs apart
-    # from the gateway and the in-process adapter weakref is None::
+    # Out-of-process sender used by ``_send_via_adapter`` when cron runs apart from
+    # the gateway and the in-process adapter weakref is None::
     #     async (pconfig, chat_id, message, *, thread_id=None,
     #            media_files=None, force_document=False) -> dict
-    # Returns ``{"success": True, "message_id": ...}`` or ``{"error": str}``.
-    # Without it, plugin platforms cannot be cron ``deliver=`` targets when the
-    # gateway is not co-resident.
+    # Returns ``{"success": True, "message_id": ...}`` or ``{"error": str}``. Without
+    # it, plugin platforms cannot be cron ``deliver=`` targets when the gateway is
+    # not co-resident.
     standalone_sender_fn: Optional[Callable[..., Awaitable[dict]]] = None
 
 
@@ -185,7 +139,7 @@ class PlatformRegistry:
         # process-global entries for lookups in that profile's runtime scope.
         self._scoped_entries: dict[str, dict[str, PlatformEntry]] = {}
         # Deferred loaders: name -> zero-arg callable that imports the owning
-        # plugin module (which calls register()).  Adapter modules import heavy
+        # plugin module (which calls register()). Adapter modules import heavy
         # SDKs at module level; eagerly loading ~20 bundled platforms added
         # seconds to every `hermes` invocation, so the real import happens only
         # when a lookup actually asks for that platform.
@@ -220,28 +174,24 @@ class PlatformRegistry:
         entry = entries.get(name)
         loader = deferred.get(name)
         if entry is None and loader is None:
-            loader = self._inflight_loaders.get((scope, name))
-        if entry is None and loader is None:
-            loader = self._consumed_loaders.get((scope, name))
+            loader = self._inflight_loaders.get((scope, name)) or self._consumed_loaders.get((scope, name))
         return entry, loader
 
     def _prune_scope(self, scope: Optional[str]) -> None:
         if scope is None:
             return
-        if not self._scoped_entries.get(scope):
-            self._scoped_entries.pop(scope, None)
-        if not self._scoped_deferred.get(scope):
-            self._scoped_deferred.pop(scope, None)
+        for maps in (self._scoped_entries, self._scoped_deferred):
+            if not maps.get(scope):
+                maps.pop(scope, None)
 
     # -- deferred loading ----------------------------------------------------
 
     def register_deferred(self, name: str, loader: _Loader, *, scope: Optional[str] = None) -> None:
         """Register a lazy loader for a platform that hasn't been imported yet.
 
-        *loader* imports the owning plugin module, which must call
-        :meth:`register` for *name*.  It runs at most once, on first lookup
-        (or full materialization).  A concrete registration takes precedence
-        and drops the loader.
+        *loader* imports the owning plugin module, which must call :meth:`register`
+        for *name*. It runs at most once, on first lookup (or full materialization).
+        A concrete registration takes precedence and drops the loader.
         """
         with self._lock:
             entries, deferred = self._scope_maps(scope, create=True)
@@ -271,7 +221,7 @@ class PlatformRegistry:
         """Restore a registration if its full state is still *current* (CAS).
 
         Identity checks protect a later registration from removal while letting
-        an unloaded override reveal what it displaced.  Deferred loaders are
+        an unloaded override reveal what it displaced. Deferred loaders are
         part of the state because bundled platform plugins load lazily.
         """
         with self._lock:
@@ -355,7 +305,7 @@ class PlatformRegistry:
             self._resolve(name, active_scope)
 
     def is_deferred_load_cancelled(self, name: str, *, scope: Optional[str] = None) -> bool:
-        """Return whether ownership teardown cancelled an in-flight loader."""
+        """Whether ownership teardown cancelled an in-flight loader."""
         with self._lock:
             return (scope, name) in self._cancelled_inflight
 
@@ -364,7 +314,7 @@ class PlatformRegistry:
 
         Only the iterate-all accessors (``all_entries``/``plugin_entries``) call
         this, from paths that genuinely need every adapter (gateway startup,
-        ``hermes setup``/``gateway status``, channel directory).  CLI chat never
+        ``hermes setup``/``gateway status``, channel directory). CLI chat never
         iterates the full set.
         """
         active_scope = self.current_scope_key()
@@ -386,11 +336,11 @@ class PlatformRegistry:
         """Register a platform adapter entry (last writer wins on name clash)."""
         with self._lock:
             if scope is None and entry.source == "plugin":
-                scope = _caller_plugin_scope()
-                if scope is None:
-                    scope = _plugin_scope_from_callable(entry.adapter_factory)
-                if scope is None:
-                    scope = _plugin_scope_from_callable(entry.check_fn)
+                scope = (
+                    _caller_plugin_scope()
+                    or _plugin_scope_from_callable(entry.adapter_factory)
+                    or _plugin_scope_from_callable(entry.check_fn)
+                )
             # A concrete registration supersedes any pending deferred loader.
             entries, deferred = self._scope_maps(scope, create=True)
             self._consumed_loaders.pop((scope, entry.name), None)
@@ -404,7 +354,7 @@ class PlatformRegistry:
             logger.debug("Registered platform adapter: %s (%s)", entry.name, entry.source)
 
     def unregister(self, name: str, *, scope: Optional[str] = None) -> bool:
-        """Remove a platform entry.  Returns True if it existed."""
+        """Remove a platform entry. Returns True if it existed."""
         with self._lock:
             inferred_scope = scope if scope is not None else _caller_plugin_scope()
             active_scope = inferred_scope or self.current_scope_key()
@@ -455,7 +405,7 @@ class PlatformRegistry:
         """Concrete and deferred platform names without loading adapters.
 
         Same scope semantics as ``is_registered()``: current profile scope AND
-        process-global names.  Plugin platforms register deferred loaders under
+        process-global names. Plugin platforms register deferred loaders under
         a profile scope, so the global maps alone would miss every plugin.
         """
         with self._lock:
