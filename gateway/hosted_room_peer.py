@@ -281,8 +281,7 @@ def catalog_mapping(
         raise HostedRoomPeerError("remote room execution requires manual or smart approvals")
     value = {
         "installation_id": _identifier(installation_id, field="installation_id"),
-        "protocol_versions": sorted(
-            {_positive_int(item, field="protocol_version") for item in protocol_versions}),
+        "protocol_versions": sorted({_positive_int(item, field="protocol_version") for item in protocol_versions}),
         # Direct HTTPS/loopback is the only RoomLink transport implemented by
         # this backend slice. Do not advertise pull/relay placeholders.
         "link_modes": [mode for mode in dict.fromkeys(link_modes) if mode == "direct"],

@@ -160,14 +160,7 @@ def make_stored_link(
     catalog: GatewayRoomCatalog, cancellation_scope_id: str, trace_id: str) -> StoredRoomLink:
     target_url, transport_security = validate_room_link_url(target_url)
     return StoredRoomLink.from_mapping({
-        "room_id": room_id,
-        "member_id": member_id,
-        "target_url": target_url,
-        "target_profile": target_profile,
-        "grant": grant,
-        "catalog": catalog.as_mapping(),
-        "cancellation_scope_id": cancellation_scope_id,
-        "trace_id": trace_id,
-        "transport_security": transport_security,
-        "status": "ready",
-        "updated_at": time.time()})
+        "room_id": room_id, "member_id": member_id, "target_url": target_url, "target_profile": target_profile,
+        "grant": grant, "catalog": catalog.as_mapping(), "cancellation_scope_id": cancellation_scope_id,
+        "trace_id": trace_id, "transport_security": transport_security, "status": "ready", "updated_at": time.time(),
+    })

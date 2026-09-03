@@ -264,10 +264,8 @@ class HostedRoomPolicyCheckpoint:
             (int(event["seq"]), str(event["room_id"])))
 
     _APPLY_BY_KIND: dict[str, Callable[..., None]] = {
-        "message.user": _apply_user_message,
-        "message.member": _apply_discussion_event,
-        **dict.fromkeys(_TERMINAL_KINDS, _apply_discussion_event),
-        "room.activity": _apply_room_activity,
+        "message.user": _apply_user_message, "message.member": _apply_discussion_event,
+        **dict.fromkeys(_TERMINAL_KINDS, _apply_discussion_event), "room.activity": _apply_room_activity,
         "room.stop_requested": _apply_stop_requested,
     }
 

@@ -268,11 +268,9 @@ def promote_replica(
         claim_seq = int(replica["last_seq"]) + 1
         claim_event_id = f"system:authority-claimed:{target_epoch}"
         claim_actor_json, claim_payload_json = _control_event_json({
-            "previous_gateway_id": previous_gateway,
-            "authority_gateway_id": local_gateway,
-            "authority_epoch": target_epoch,
-            "promoted_from_replica": True,
-            "reason": reason})
+            "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
+            "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason,
+        })
         claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
 
         conn.execute(

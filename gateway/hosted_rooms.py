@@ -397,16 +397,12 @@ _LEGACY_COLUMN_DDL = (
     (
         "hosted_rooms", "authority_epoch",
         "ALTER TABLE hosted_rooms ADD COLUMN authority_epoch INTEGER NOT NULL DEFAULT 1"),
-    (
-        "hosted_rooms", "event_bytes",
-        "ALTER TABLE hosted_rooms ADD COLUMN event_bytes INTEGER NOT NULL DEFAULT 0"),
+    ("hosted_rooms", "event_bytes", "ALTER TABLE hosted_rooms ADD COLUMN event_bytes INTEGER NOT NULL DEFAULT 0"),
     (
         "hosted_room_events", "actor_json",
         "ALTER TABLE hosted_room_events "
         f"ADD COLUMN actor_json TEXT NOT NULL DEFAULT '{_LEGACY_ACTOR_JSON}'"),
-    (
-        "hosted_room_events", "authority_epoch",
-        "ALTER TABLE hosted_room_events ADD COLUMN authority_epoch INTEGER"))
+    ("hosted_room_events", "authority_epoch", "ALTER TABLE hosted_room_events ADD COLUMN authority_epoch INTEGER"))
 
 
 def _migrate_legacy_columns(conn: sqlite3.Connection) -> None:
@@ -764,11 +760,10 @@ def revoke_room_grant_scope(
                 AND member_id=? AND target_profile=? AND authority_gateway_id=?
                 AND authority_epoch=?""",
             (
-                timestamp, timestamp,
-                str(claims.get("room_id") or ""), str(claims.get("member_id") or ""),
-                str(claims.get("target_profile") or ""),
-                str(claims.get("authority_gateway_id") or ""),
-                int(claims.get("authority_epoch") or 0)))
+                timestamp, timestamp, str(claims.get("room_id") or ""), str(claims.get("member_id") or ""),
+                str(claims.get("target_profile") or ""), str(claims.get("authority_gateway_id") or ""),
+                int(claims.get("authority_epoch") or 0),
+            ))
 
 
 def _reservation_claims(claims: Mapping[str, Any]) -> tuple[str, str, str, str, int]:
@@ -897,8 +892,7 @@ def list_remote_run_receipts(
     """Return remote run handles in durable task order."""
     filters = [
         (column, value)
-        for column, value in (
-            ("room_id", room_id), ("target_profile", target_profile), ("session_id", session_id))
+        for column, value in (("room_id", room_id), ("target_profile", target_profile), ("session_id", session_id))
         if value is not None]
     where = f" WHERE {' AND '.join(f'{column}=?' for column, _ in filters)}" if filters else ""
     with _transaction(db_path) as conn:

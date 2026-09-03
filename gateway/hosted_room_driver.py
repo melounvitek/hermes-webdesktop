@@ -87,8 +87,7 @@ _COMPLETE_STOP_SQL = _task_update(
 # row stale message); the UPDATE is _generation_update(set_clause, status).
 _INDETERMINATE_STALE = "indeterminate task generation changed"
 _GENERATION_TRANSITIONS = {
-    "resolve": (
-        "indeterminate", _SETTLE_SET, _INDETERMINATE_STALE, "indeterminate task changed during reconciliation"),
+    "resolve": ("indeterminate", _SETTLE_SET, _INDETERMINATE_STALE, "indeterminate task changed during reconciliation"),
     "resolve_cancel": (
         "indeterminate", _CANCEL_SET, "indeterminate cancellation proof is stale",
         "indeterminate cancellation proof lost its fence"),

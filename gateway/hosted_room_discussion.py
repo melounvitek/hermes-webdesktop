@@ -47,10 +47,9 @@ _TURN_ID_RE = re.compile(
 _LOCAL_TARGET_FIELDS = frozenset({"kind", "profile"})
 _PEER_TARGET_FIELDS = frozenset({"kind", "peer_id", "installation_id", "profile", "capability_digest"})
 _REMOTE_MEMBER_FIELDS = frozenset({
-    "connectionId", "connectionKind", "connectionLabel", "connection_id",
-    "connection_kind", "connection_label", "remoteSource", "route",
-    "sourceMissing", "sourceReachable", "sourceScoped", "targetProfile",
-    "target_profile"})
+    "connectionId", "connectionKind", "connectionLabel", "connection_id", "connection_kind", "connection_label",
+    "remoteSource", "route", "sourceMissing", "sourceReachable", "sourceScoped", "targetProfile", "target_profile",
+})
 _USER_PAYLOAD_FIELDS = frozenset({"text", "thread_id"})
 _TURN_COORDINATE_FIELDS = frozenset(
     {"discussion_event_id", "member_id", "member_index", "round_index", "task_id", "thread_id", "turn_id", })
@@ -275,8 +274,7 @@ def validate_roster(value: Any, *, local_profiles: Iterable[str]) -> tuple[Discu
             else "member targets must be unique")
         for key, seen, message in (
             (target_key, targets, target_message),
-            (handle.casefold(), handles,
-             "member handles must be unique and cannot reserve @all or @everyone"),
+            (handle.casefold(), handles, "member handles must be unique and cannot reserve @all or @everyone"),
             (member_id.casefold(), member_ids, "member ids must be unique")):
             if key in seen:
                 raise DiscussionValidationError(message)
@@ -618,15 +616,11 @@ def _make_task_plan(
         f"d{discussion_event.seq}.r{round_index}.p{member_index}."
         f"s{seen_through_seq}.m{_member_digest(member)}")
     seed = compact_json({
-        "discussion_event_id": discussion_event.event_id,
-        "member_id": member.member_id,
-        "member_index": member_index,
-        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-        "room_id": room.room_id,
-        "round_index": round_index,
-        "seen_through_seq": seen_through_seq,
-        "source_event_seq": discussion_event.seq,
-        "thread_id": discussion_event.payload["thread_id"]})
+        "discussion_event_id": discussion_event.event_id, "member_id": member.member_id, "member_index": member_index,
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(), "room_id": room.room_id,
+        "round_index": round_index, "seen_through_seq": seen_through_seq, "source_event_seq": discussion_event.seq,
+        "thread_id": discussion_event.payload["thread_id"],
+    })
     task_id = f"dtask:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:48]}"
     identity = driver.TaskIdentity(
         room_id=room.room_id, task_id=task_id,
@@ -836,14 +830,10 @@ def _settled_effects(
         effects.append(EventPlan(
             event_id=message_event_id, kind="message.member", actor=member_actor,
             payload={
-                "discussion_event_id": task.discussion_event_id,
-                "member_id": task.member.member_id,
-                "member_index": task.member_index,
-                "round_index": task.round_index,
-                "task_id": task.identity.task_id,
-                "text": text,
-                "thread_id": task.identity.thread_id,
-                "turn_id": task.identity.turn_id},
+                "discussion_event_id": task.discussion_event_id, "member_id": task.member.member_id,
+                "member_index": task.member_index, "round_index": task.round_index, "task_id": task.identity.task_id,
+                "text": text, "thread_id": task.identity.thread_id, "turn_id": task.identity.turn_id,
+            },
             authority_gateway_id=room.gateway_id, authority_epoch=room.authority_epoch))
     return {"message_event_id": None if passed else message_event_id, "passed": passed}, effects
 
