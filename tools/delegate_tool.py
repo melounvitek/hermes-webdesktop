@@ -412,16 +412,12 @@ def _run_single_child(
         return entry
 
     except Exception as exc:
+        # Close steer acceptance before any completion callback (see _merge_late_steer).
         _late_pending_steer = (_close_subagent_steering(_subagent_id, child) if _subagent_id else None)
         duration = round(time.monotonic() - child_start, 2)
         logging.exception(f"[subagent-{task_index}] failed")
         _safe_progress(
-            child_progress_cb,
-            "subagent.complete",
-            preview=str(exc),
-            status="failed",
-            duration_seconds=duration,
-            summary=str(exc),
+            child_progress_cb, "subagent.complete", preview=str(exc), status="failed", duration_seconds=duration, summary=str(exc),
         )
         _error_entry = _fabricated_entry(task_index, "error", str(exc), child, duration)
         _append_missed_steer(_error_entry, _late_pending_steer)
