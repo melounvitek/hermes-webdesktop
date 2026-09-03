@@ -65,11 +65,6 @@ _REQUIRED_PACKAGES = [
 _REDIRECT_URI = "http://localhost:1"
 
 
-def _hermes_home() -> Path:
-    """Resolve HERMES_HOME at call time (late-binding for tests / profile switches)."""
-    return get_hermes_home()
-
-
 def _sanitize_email(email: str) -> str:
     cleaned = _EMAIL_FS_RE.sub("_", (email or "").strip().lower())
     return cleaned or "_unknown_"
@@ -81,27 +76,25 @@ def _token_rel(email: Optional[str]) -> str:
 
 
 def _user_tokens_dir() -> Path:
-    return _hermes_home() / "google_chat_user_tokens"
+    return get_hermes_home() / "google_chat_user_tokens"
 
 
 def _token_path(email: Optional[str] = None) -> Path:
     """Per-user token path for ``email``, or the legacy single-user path."""
-    return _hermes_home() / _token_rel(email)
+    return get_hermes_home() / _token_rel(email)
 
 
 def _client_secret_path() -> Path:
-    return _hermes_home() / "google_chat_user_client_secret.json"
+    return get_hermes_home() / "google_chat_user_client_secret.json"
 
 
 def _pending_auth_path(email: Optional[str] = None) -> Path:
     if email:
-        return _hermes_home() / "google_chat_user_oauth_pending" / f"{_sanitize_email(email)}.json"
-    return _hermes_home() / "google_chat_user_oauth_pending.json"
+        return get_hermes_home() / "google_chat_user_oauth_pending" / f"{_sanitize_email(email)}.json"
+    return get_hermes_home() / "google_chat_user_oauth_pending.json"
 
 
-# =============================================================================
-# Library API — called from the adapter at runtime
-# =============================================================================
+# -- Library API — called from the adapter at runtime -------------------------
 
 
 def _refresh_and_persist(creds: Any, token_path: Path, request_cls: Any, *, failure_msg: str) -> Optional[Any]:
@@ -192,9 +185,7 @@ def _persist_credentials(creds: Any, token_path: Path) -> None:
         logger.debug("[google_chat_user_oauth] failed to persist credentials at %s", token_path, exc_info=True)
 
 
-# =============================================================================
-# CLI commands — driven by the agent via /setup-files
-# =============================================================================
+# -- CLI commands — driven by the agent via /setup-files ----------------------
 
 
 def _normalize_authorized_user_payload(payload: dict) -> dict:

@@ -101,9 +101,6 @@ class SmsAdapter(BasePlatformAdapter):
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
 
-    def _basic_auth_header(self) -> str:
-        return _basic_auth(self._account_sid, self._auth_token)
-
     # -- Lifecycle -----------------------------------------------------------
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -169,7 +166,7 @@ class SmsAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(self.format_message(content))
         last_result = SendResult(success=True)
         url = f"{TWILIO_API_BASE}/{self._account_sid}/Messages.json"
-        headers = {"Authorization": self._basic_auth_header()}
+        headers = {"Authorization": _basic_auth(self._account_sid, self._auth_token)}
         session = self._http_session or _new_session(trust_env=gateway_trust_env())
         try:
             for chunk in chunks:

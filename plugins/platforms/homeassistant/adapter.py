@@ -14,7 +14,7 @@ import os
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 try:
     import aiohttp
@@ -52,38 +52,21 @@ def _triggered(val: str) -> str:
     return "triggered" if val == "on" else "cleared"
 
 
-def _describe_climate(name, old_val, new_val, attrs) -> str:
-    temp = attrs.get("current_temperature", "?")
-    target = attrs.get("temperature", "?")
-    return (
-        f"[Home Assistant] {name}: HVAC mode changed from "
-        f"'{old_val}' to '{new_val}' (current: {temp}, target: {target})"
-    )
-
-
-def _describe_sensor(name, old_val, new_val, attrs) -> str:
-    unit = attrs.get("unit_of_measurement", "")
-    return f"[Home Assistant] {name}: changed from {old_val}{unit} to {new_val}{unit}"
-
-
-def _describe_on_off(name, old_val, new_val, attrs) -> str:
-    return f"[Home Assistant] {name}: turned {_on_off(new_val)}"
-
-
-# domain -> (name, old_val, new_val, attrs) -> human-readable description
-_DOMAIN_DESCRIBERS: Dict[str, Callable[..., str]] = {
-    "climate": _describe_climate,
-    "sensor": _describe_sensor,
-    "binary_sensor": lambda name, old_val, new_val, attrs: (
-        f"[Home Assistant] {name}: {_triggered(new_val)} (was {_triggered(old_val)})"
+# domain -> description template; see ``_format_state_change`` for the fields.
+_TURNED = "[Home Assistant] {name}: turned {on_off}"
+_DOMAIN_TEMPLATES = {
+    "climate": (
+        "[Home Assistant] {name}: HVAC mode changed from "
+        "'{old}' to '{new}' (current: {temp}, target: {target})"
     ),
-    "light": _describe_on_off,
-    "switch": _describe_on_off,
-    "fan": _describe_on_off,
-    "alarm_control_panel": lambda name, old_val, new_val, attrs: (
-        f"[Home Assistant] {name}: alarm state changed from '{old_val}' to '{new_val}'"
-    ),
+    "sensor": "[Home Assistant] {name}: changed from {old}{unit} to {new}{unit}",
+    "binary_sensor": "[Home Assistant] {name}: {triggered} (was {was_triggered})",
+    "light": _TURNED,
+    "switch": _TURNED,
+    "fan": _TURNED,
+    "alarm_control_panel": "[Home Assistant] {name}: alarm state changed from '{old}' to '{new}'",
 }
+_DEFAULT_TEMPLATE = "[Home Assistant] {name} ({entity_id}): changed from '{old}' to '{new}'"
 
 
 class HomeAssistantAdapter(BasePlatformAdapter):
@@ -280,11 +263,13 @@ class HomeAssistantAdapter(BasePlatformAdapter):
         if old_val == new_val:
             return None
         attrs = new_state.get("attributes", {})
-        name = attrs.get("friendly_name", entity_id)
-        describe = _DOMAIN_DESCRIBERS.get(_domain_of(entity_id))
-        if describe is not None:
-            return describe(name, old_val, new_val, attrs)
-        return f"[Home Assistant] {name} ({entity_id}): changed from '{old_val}' to '{new_val}'"
+        template = _DOMAIN_TEMPLATES.get(_domain_of(entity_id), _DEFAULT_TEMPLATE)
+        return template.format(
+            name=attrs.get("friendly_name", entity_id), entity_id=entity_id, old=old_val, new=new_val,
+            temp=attrs.get("current_temperature", "?"), target=attrs.get("temperature", "?"),
+            unit=attrs.get("unit_of_measurement", ""), on_off=_on_off(new_val),
+            triggered=_triggered(new_val), was_triggered=_triggered(old_val),
+        )
 
     # -- Outbound messaging -------------------------------------------------
 
