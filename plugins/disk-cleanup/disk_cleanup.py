@@ -16,15 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-try:
-    from hermes_constants import get_hermes_home
-except Exception:  # pragma: no cover — plugin may load before constants resolves
-    import os
-
-    def get_hermes_home() -> Path:  # type: ignore[no-redef]
-        val = (os.environ.get("HERMES_HOME") or "").strip()
-        return Path(val).resolve() if val else (Path.home() / ".hermes").resolve()
-
+from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +39,12 @@ def is_safe_path(path: Path) -> bool:
 
 def _log(message: str) -> None:
     """Append to the audit log; never let it break the agent loop."""
-    try:
+    with contextlib.suppress(OSError):
         log_file = _state_file("cleanup.log")
         log_file.parent.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {message}\n")
-    except OSError:
-        pass
 
 
 def load_tracked() -> List[Dict[str, Any]]:
@@ -63,18 +53,14 @@ def load_tracked() -> List[Dict[str, Any]]:
     tf.parent.mkdir(parents=True, exist_ok=True)
     if not tf.exists():
         return []
-    try:
+    with contextlib.suppress(ValueError):
         return json.loads(tf.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, ValueError):
-        pass
     bak = tf.with_suffix(".json.bak")
     if bak.exists():
-        try:
+        with contextlib.suppress(Exception):
             data = json.loads(bak.read_text(encoding="utf-8"))
             _log("WARN: tracked.json corrupted — restored from .bak")
             return data
-        except Exception:
-            pass
     _log("WARN: tracked.json corrupted, no backup — starting fresh")
     return []
 
@@ -221,8 +207,7 @@ _STALE_SKIP_NOTE = {"cron-output": "", "test": " — under protected tree"}
 
 def dry_run() -> Tuple[List[Dict], List[Dict]]:
     """Return (auto_delete_list, needs_prompt_list) without touching files."""
-    auto: List[Dict] = []
-    prompt: List[Dict] = []
+    auto, prompt = [], []
     for item, p, age in _live_items(load_tracked(), datetime.now(timezone.utc)):
         cat = item["category"]
         # Stale cron-output entries are skipped by quick(); omit them here too.
@@ -331,7 +316,7 @@ def guess_category(path: Path) -> Optional[str]:
     """Category label for *path*, or None if we shouldn't track it (``post_tool_call`` hook)."""
     if not is_safe_path(path):
         return None
-    try:
+    with contextlib.suppress(ValueError):  # not under HERMES_HOME (/tmp/hermes-*) — name rules only
         rel = path.resolve().relative_to(get_hermes_home())
         top = rel.parts[0] if rel.parts else ""
         if top in _NEVER_TRACK_TOP_LEVEL:
@@ -342,7 +327,5 @@ def guess_category(path: Path) -> Optional[str]:
             return "cron-output" if len(rel.parts) >= 3 and rel.parts[1] == "output" else None
         if top == "cache":
             return "temp"
-    except ValueError:
-        pass  # not under HERMES_HOME (e.g. /tmp/hermes-*) — fall through to name rules
     name = path.name
     return "test" if name.startswith(_TEST_PATTERNS) or name.endswith(_TEST_SUFFIXES) else None
