@@ -1,8 +1,6 @@
-"""cua-driver binary resolution, MCP-invocation discovery, the 0.20 runtime contract gate, and the
-update check. Config-derived policy (``_cua_no_overlay``, ``_run_driver`` ...) is looked up lazily
-through ``tools.computer_use.cua_backend`` so tests that patch it there keep working; logger name
-parity is kept for the same reason.
-"""
+"""cua-driver binary resolution, MCP-invocation discovery, the 0.20 runtime contract gate, and the update check.
+Config-derived policy (``_cua_no_overlay``, ``_run_driver`` ...) is looked up lazily through
+``tools.computer_use.cua_backend`` so tests that patch it there keep working; logger name parity likewise."""
 
 from __future__ import annotations
 
@@ -39,15 +37,16 @@ def _cb():
     return cua_backend
 
 def _driver_json(driver_cmd: str, *args: str, timeout: float, require_ok: bool) -> Optional[Dict[str, Any]]:
-    """Run a driver verb and parse its stdout as a JSON object; None on spawn failure, empty stdout (older
-    drivers print usage to stderr), unparseable or non-object output — and, with ``require_ok``, on a
-    non-zero exit."""
+    """Run a driver verb and parse its stdout as a JSON object; None on spawn failure, empty stdout (older drivers
+    print usage to stderr), unparseable or non-object output — and, with ``require_ok``, on a non-zero exit."""
     proc = _cb()._run_driver(driver_cmd, *args, timeout=timeout, swallow=Exception)
     out = (proc.stdout or "").strip() if proc is not None else ""
-    if not out or (require_ok and proc.returncode != 0):
-        return None
+    return None if not out or (require_ok and proc.returncode != 0) else _json_object(out)
+
+def _json_object(text: str) -> Optional[Dict[str, Any]]:
+    """``json.loads`` that yields a dict or None (unparseable / non-object)."""
     try:
-        data = json.loads(out)
+        data = json.loads(text)
     except (ValueError, TypeError):
         return None
     return data if isinstance(data, dict) else None
@@ -63,9 +62,9 @@ def _has_path_separator(value: str) -> bool:
     return os.sep in value or (os.altsep is not None and os.altsep in value)
 
 def _wsl_windows_path_to_posix(path: str) -> str:
-    """Translate a Windows absolute manifest command to its DrvFS ``/mnt/<drive>/...`` form when Hermes runs
-    in WSL (a Windows cua-driver manifest can report ``C:\\...`` while Hermes spawns via POSIX). Non-Windows
-    paths and non-WSL hosts are returned unchanged."""
+    """Translate a Windows absolute manifest command to its DrvFS ``/mnt/<drive>/...`` form when Hermes runs in WSL
+    (a Windows cua-driver manifest can report ``C:\\...`` while Hermes spawns via POSIX). Non-Windows paths and
+    non-WSL hosts are returned unchanged."""
     if not re.match(r"^[A-Za-z]:[\\/]", path):
         return path
     try:
@@ -81,10 +80,10 @@ def _wsl_windows_path_to_posix(path: str) -> str:
     return os.path.join("/mnt", drive, *(str(part) for part in win.parts[1:]))
 
 def _candidate_cua_driver_commands(override: Optional[str] = None) -> List[str]:
-    """Candidate commands in resolution order. ``override`` / a non-empty ``HERMES_CUA_DRIVER_CMD`` is
-    authoritative (if wrong, report the driver missing rather than silently picking another binary).
-    Otherwise PATH, then canonical installer locations — Finder/Dock-launched apps inherit a narrow PATH
-    without ``~/.local/bin``; fresh Windows sessions inherit a stale one."""
+    """Candidate commands in resolution order. ``override`` / a non-empty ``HERMES_CUA_DRIVER_CMD`` is authoritative
+    (if wrong, report the driver missing rather than silently picking another binary). Otherwise PATH, then
+    canonical installer locations — Finder/Dock-launched apps inherit a narrow PATH without ``~/.local/bin``;
+    fresh Windows sessions inherit a stale one."""
     configured = (override if override is not None else os.environ.get(_CUA_DRIVER_CMD_ENV, "")).strip()
     if configured:
         return [configured]
@@ -138,20 +137,20 @@ def _cua_driver_supports_no_overlay(driver_cmd: str) -> bool:
         return False
 
 def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[str, List[str]]:
-    """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of the driver itself via
-    ``cua-driver manifest`` (``mcp_invocation``) so a subcommand rename keeps working. Falls back to
-    ``(driver_cmd, ["mcp"])`` on older drivers or any discovery failure — the wrapper must not refuse to
-    start over a failed discovery hop. ``--no-overlay`` appended when allowed."""
+    """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of the driver itself via ``cua-driver
+    manifest`` (``mcp_invocation``) so a subcommand rename keeps working. Falls back to ``(driver_cmd, ["mcp"])``
+    on older drivers or any discovery failure — the wrapper must not refuse to start over a failed discovery hop.
+    ``--no-overlay`` appended when allowed."""
     manifest = _driver_json(driver_cmd, "manifest", timeout=timeout, require_ok=True) or {}
     invocation = manifest.get("mcp_invocation")
     args = _valid_mcp_args(invocation)
     command = invocation.get("command") if args is not None and isinstance(invocation, dict) else None
     args = list(_CUA_DRIVER_ARGS) if args is None else args
     if isinstance(command, str) and command:
-        # Translate a Windows ``C:\...`` command for WSL BEFORE the separator check (backslash is not a
-        # separator on POSIX). A generic ``cua-driver`` name would lose the resolved user-local path under
-        # a GUI's thin PATH, so only a concrete (path-bearing) command replaces the one we verified — and
-        # THAT binary is probed for `--no-overlay`, not the system one.
+        # Translate a Windows ``C:\...`` command for WSL BEFORE the separator check (backslash is not a separator
+        # on POSIX). A generic ``cua-driver`` name would lose the resolved user-local path under a GUI's thin PATH,
+        # so only a concrete (path-bearing) command replaces the one we verified — and THAT binary is probed for
+        # `--no-overlay`, not the system one.
         command = _wsl_windows_path_to_posix(command)
         if _has_path_separator(command):
             return command, _mcp_args_with_overlay_flag(args, driver_cmd=command)
@@ -200,24 +199,19 @@ def cua_driver_runtime_contract_status(binary: Optional[str] = None) -> Dict[str
             detail = (result.stderr or result.stdout or "manifest command failed").strip()
             result, reason = None, detail.splitlines()[-1][:200]
         if result is not None:
-            try:
-                manifest = json.loads(result.stdout or "")
-            except (TypeError, ValueError):
-                manifest = None
-            manifest = manifest if isinstance(manifest, dict) else None
+            manifest = _json_object(result.stdout or "")
             reason = _manifest_contract_reason(manifest)
             if manifest is not None:
                 version = str(manifest.get("binary_version") or "").strip() or None
     return {"ready": not reason, "binary": resolved, "version": version, "reason": reason}
 
 def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """``cua-driver check-update --json`` payload (``{current_version, latest_version, update_available,
-    ...}``), or ``None`` when the binary is missing, the driver predates the verb, the GitHub check failed
-    (``error`` set) or the output didn't parse. Never raises. ``timeout`` defaults to 8s on POSIX / 25s on
-    Windows: first spawn of the exe routinely eats seconds in Defender scanning, and callers treat ``None``
-    as indeterminate (the upgrade path used to fall through to a full reinstall on a false timeout)."""
-    if timeout is None:
-        timeout = 25.0 if sys.platform == "win32" else 8.0
+    """``cua-driver check-update --json`` payload (``{current_version, latest_version, update_available, ...}``),
+    or ``None`` when the binary is missing, the driver predates the verb, the GitHub check failed (``error`` set)
+    or the output didn't parse. Never raises. ``timeout`` defaults to 8s on POSIX / 25s on Windows: first spawn of
+    the exe routinely eats seconds in Defender scanning, and callers treat ``None`` as indeterminate (the upgrade
+    path used to fall through to a full reinstall on a false timeout)."""
+    timeout = (25.0 if sys.platform == "win32" else 8.0) if timeout is None else timeout
     driver_cmd = _cb().resolve_cua_driver_cmd()
     if not driver_cmd:
         return None
@@ -225,8 +219,8 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
     return None if data is None or data.get("error") else data
 
 def cua_driver_update_nudge() -> Optional[str]:
-    """One-line "an update is available" message, or ``None`` when up to date, indeterminate, or the driver
-    is too old to report."""
+    """One-line "an update is available" message, or ``None`` when up to date, indeterminate, or the driver is too
+    old to report."""
     state = _cb().cua_driver_update_check()
     if not state or not state.get("update_available"):
         return None

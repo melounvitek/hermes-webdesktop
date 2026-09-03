@@ -1,17 +1,11 @@
-"""Cua-driver backend (macOS, Windows, Linux): MCP over stdio to `cua-driver`.
-
-The async `mcp` SDK runs on a background loop (``cua_backend_session``); the same tool surface
-works on all three platforms, and per-host gaps (no DISPLAY, missing AT-SPI, TCC) surface via
-`hermes computer-use doctor` instead of failing silently. Install with `hermes computer-use
-install`. The macOS path uses private SkyLight SPIs that can break on OS updates.
-
-Siblings: ``cua_backend_driver`` (binary resolution, runtime contract, update check),
-``cua_backend_capture`` / ``cua_backend_input`` (backend mixins), ``cua_backend_parse`` (pure
-parsing), ``cua_backend_session`` (bridge + session + CLI fallback), ``cua_backend_daemon``
-(private daemon + macOS app identity). Moved names are re-imported here so
-``patch("tools.computer_use.cua_backend.X")`` keeps working; siblings look policy helpers up
-lazily through this module.
-"""
+"""Cua-driver backend (macOS, Windows, Linux): MCP over stdio to `cua-driver`. The async `mcp` SDK runs on a
+background loop (``cua_backend_session``); the same tool surface works on all three platforms, and per-host gaps
+(no DISPLAY, missing AT-SPI, TCC) surface via `hermes computer-use doctor` instead of failing silently. Install
+with `hermes computer-use install`. The macOS path uses private SkyLight SPIs that can break on OS updates.
+Siblings: ``cua_backend_driver`` (binary/contract/update), ``cua_backend_capture`` + ``cua_backend_input``
+(mixins), ``cua_backend_parse``, ``cua_backend_session`` (bridge + session + CLI fallback), ``cua_backend_daemon``
+(private daemon + macOS app identity). Moved names are re-imported here so ``patch("tools.computer_use.cua_backend.X")``
+keeps working; siblings look policy helpers up lazily through this module."""
 
 from __future__ import annotations
 
@@ -59,11 +53,10 @@ def _computer_use_cfg() -> Dict[str, Any]:
         return {}
 
 def _cua_no_overlay() -> bool:
-    """Pass ``--no-overlay``? ``computer_use.no_overlay`` overrides; else off on macOS (cursor-overlay
-    redraw loop can peg a core after a session), headless Linux / WSL2 / containers, and Linux X11 (the
-    overlay is a fullscreen always-on-top all-workspaces window with no compositor-owned lifecycle, so an
-    unclean session end can leave it wedged over every app); on for Windows and Linux Wayland
-    (compositor owns the surface)."""
+    """Pass ``--no-overlay``? ``computer_use.no_overlay`` overrides; else off on macOS (cursor-overlay redraw
+    loop can peg a core after a session), headless Linux / WSL2 / containers, and Linux X11 (the overlay is a
+    fullscreen always-on-top all-workspaces window with no compositor-owned lifecycle, so an unclean session
+    end can leave it wedged over every app); on for Windows and Linux Wayland (compositor owns the surface)."""
     val = _computer_use_cfg().get("no_overlay")
     if val is not None:
         return bool(val)
@@ -71,12 +64,9 @@ def _cua_no_overlay() -> bool:
         return sys.platform == "darwin"
     if not os.environ.get("DISPLAY"):
         return True
-    try:
-        with open("/proc/version", encoding="utf-8") as f:
-            if "microsoft" in f.read().lower():
-                return True
-    except Exception:
-        pass
+    with contextlib.suppress(Exception), open("/proc/version", encoding="utf-8") as f:
+        if "microsoft" in f.read().lower():
+            return True
     return os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY")
 
 def _cua_telemetry_disabled() -> bool:
@@ -84,9 +74,9 @@ def _cua_telemetry_disabled() -> bool:
     return not bool(_computer_use_cfg().get("cua_telemetry", False))
 
 def _cua_configured_permission_mode() -> str:
-    """``computer_use.permission_mode``: ``standard`` (default) or ``bounded``; unknown values fall closed
-    to ``standard``. ``unrestricted`` is deliberately NOT a config value — it stays tied to the per-session
-    YOLO toggle so a stale config line can never silently bypass approvals."""
+    """``computer_use.permission_mode``: ``standard`` (default) or ``bounded``; unknown values fall closed to
+    ``standard``. ``unrestricted`` is deliberately NOT a config value — it stays tied to the per-session YOLO
+    toggle so a stale config line can never silently bypass approvals."""
     raw = str(_computer_use_cfg().get("permission_mode", "standard") or "").strip().lower()
     return raw if raw in {"standard", "bounded"} else "standard"
 
@@ -115,9 +105,8 @@ def _computer_use_max_image_dimension() -> Optional[int]:
     return dim if dim > 0 else None
 
 def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Env for spawning cua-driver: ``base_env`` (default ``os.environ``) plus
-    ``CUA_DRIVER_RS_TELEMETRY_ENABLED=0`` unless the user opted in. Used by every spawn site (MCP,
-    status, doctor, install) so the policy is uniform."""
+    """Env for spawning cua-driver: ``base_env`` (default ``os.environ``) plus ``CUA_DRIVER_RS_TELEMETRY_ENABLED=0``
+    unless the user opted in. Used by every spawn site (MCP, status, doctor, install) so the policy is uniform."""
     env = dict(base_env if base_env is not None else os.environ)
     if _cua_telemetry_disabled():
         env[_CUA_TELEMETRY_ENV_VAR] = "0"
@@ -134,9 +123,9 @@ def sanitized_cua_driver_env() -> Dict[str, str]:
         return env
 
 def _run_quiet(argv: List[str], *, timeout: float, swallow: Any = (), **kw: Any) -> Any:
-    """``subprocess.run`` for short probe verbs: text mode, stdin=DEVNULL (older drivers fall into a
-    stdin-reading mode on unknown verbs; EOF makes them exit fast instead of blocking until the timeout),
-    output captured unless the caller redirects it. Exceptions in ``swallow`` return None; others raise."""
+    """``subprocess.run`` for short probe verbs: text mode, stdin=DEVNULL (older drivers fall into a stdin-reading
+    mode on unknown verbs; EOF makes them exit fast instead of blocking until the timeout), output captured unless
+    the caller redirects it. Exceptions in ``swallow`` return None; others raise."""
     if "stdout" not in kw:
         kw["capture_output"] = True
     try:
@@ -152,26 +141,20 @@ def _run_driver(driver_cmd: str, *args: str, timeout: float, swallow: Any = ()) 
 
 # ── Linux display diagnostics ─────────────────────────────────────────────
 def _linux_session_locked() -> Optional[bool]:
-    """Is the graphical session locked? (Linux; best-effort.) A locked KDE/GNOME session freezes renderers
-    and half-disables the AX tree, so discovery legitimately returns nothing — which otherwise reads as a
-    driver bug. True/False when loginctl answers, None when unavailable (non-Linux, no systemd-logind,
-    probe failure)."""
+    """Is the graphical session locked? (Linux; best-effort.) A locked KDE/GNOME session freezes renderers and
+    half-disables the AX tree, so discovery legitimately returns nothing — which otherwise reads as a driver bug.
+    True/False when loginctl answers, None when unavailable (non-Linux, no systemd-logind, probe failure)."""
     if sys.platform != "linux":
         return None
     try:
         proc = _run_quiet(["loginctl", "list-sessions", "--no-legend"], timeout=2.0)
         if proc.returncode != 0:
             return None
-        any_seat = False
-        for line in proc.stdout.splitlines():
-            parts = line.split()
-            if len(parts) < 2 or "seat" not in line:
-                continue
-            any_seat = True
-            hint = _run_quiet(["loginctl", "show-session", parts[0], "-p", "LockedHint"], timeout=2.0)
-            if "LockedHint=no" in hint.stdout:
+        seats = [line.split()[0] for line in proc.stdout.splitlines() if len(line.split()) >= 2 and "seat" in line]
+        for session_id in seats:
+            if "LockedHint=no" in _run_quiet(["loginctl", "show-session", session_id, "-p", "LockedHint"], timeout=2.0).stdout:
                 return False
-        return True if any_seat else None
+        return True if seats else None
     except Exception:
         return None
 
@@ -197,15 +180,15 @@ def _empty_discovery_reason() -> str:
 
 # ── One-shot start() helpers: auto-repair + update nudge ──────────────────
 _update_checked = False
-# One auto-repair attempt per process: when the runtime-contract gate fails for something a reinstall
-# fixes (old version, missing manifest verbs) run the standard install path once instead of telling the
-# user to. Guarded so a failing installer can't loop — the second start() goes straight to the error.
+# One auto-repair attempt per process: when the runtime-contract gate fails for something a reinstall fixes
+# (old version, missing manifest verbs) run the standard install path once instead of telling the user to.
+# Guarded so a failing installer can't loop — the second start() goes straight to the error.
 _contract_repair_attempted = False
 
 def _maybe_repair_runtime_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
     """Try one automatic driver repair; return the post-repair contract (or the original when no repair was
-    attempted / it failed). Never raises. An explicit ``HERMES_CUA_DRIVER_CMD`` override is authoritative
-    even when broken, and a missing binary means installation was never requested."""
+    attempted / it failed). Never raises. An explicit ``HERMES_CUA_DRIVER_CMD`` override is authoritative even
+    when broken, and a missing binary means installation was never requested."""
     global _contract_repair_attempted
     if (contract.get("ready") or _contract_repair_attempted
             or os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip() or not contract.get("binary")):
@@ -225,20 +208,18 @@ def _maybe_repair_runtime_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
         return contract
 
 def _maybe_nudge_update() -> None:
-    """Emit an update nudge at most once per process, off-thread so the (cached, ~20h) GitHub poll never
-    blocks the first computer_use action."""
+    """Emit an update nudge at most once per process, off-thread so the (cached, ~20h) GitHub poll never blocks
+    the first computer_use action."""
     global _update_checked
     if _update_checked:
         return
     _update_checked = True
 
     def _run() -> None:
-        try:
+        with contextlib.suppress(Exception):
             msg = cua_driver_update_nudge()
-        except Exception:
-            return
-        if msg:
-            logger.info("computer_use: %s", msg)
+            if msg:
+                logger.info("computer_use: %s", msg)
 
     threading.Thread(target=_run, name="cua-driver-update-check", daemon=True).start()
 
@@ -260,18 +241,13 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
                 capability_manifest=raw.strip() if isinstance(raw, str) and raw.strip() else None)
         self._bridge = _AsyncBridge()
         self._session = _CuaDriverSession(self._bridge, self._embedded_daemon)
-        # Sticky target — set by capture()/focus_app(), used by actions. `_last_target` is the exact
-        # identity for capture_after: Linux app names may be generic (several unrelated Qt windows can
-        # all say Qt6Application). `_snapshot_tokens` is the per-snapshot `element_index ->
-        # element_token`; actions attach it so cua-driver reports "stale" instead of silently re-resolving.
-        self._active_pid: Optional[int] = None
-        self._active_window_id: Optional[int] = None
-        self._last_app: Optional[str] = None
-        self._last_target: Optional[Dict[str, Optional[int]]] = None
-        self._snapshot_tokens: Dict[int, str] = {}
-        # Public session label (one per Hermes run) sent as `session` on every call: owns the cursor
-        # color and gives config/recording state a stable owner across transport restarts. Part of
-        # the 0.20 runtime contract.
+        # Sticky target — set by capture()/focus_app(), used by actions: `_active_pid`, `_active_window_id`,
+        # `_last_app`, `_last_target` (exact identity for capture_after: Linux app names may be generic — several
+        # unrelated Qt windows can all say Qt6Application) and `_snapshot_tokens` (per-snapshot `element_index ->
+        # element_token`; actions attach it so cua-driver reports "stale" instead of silently re-resolving).
+        self._clear_active_target()
+        # Public session label (one per Hermes run) sent as `session` on every call: owns the cursor color and
+        # gives config/recording state a stable owner across transport restarts. Part of the 0.20 runtime contract.
         self._session_id: str = f"hermes-{uuid.uuid4().hex[:12]}"
         self._session.set_transport_reset_callback(self._handle_transport_reset)
 
@@ -286,31 +262,26 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
             contract = _maybe_repair_runtime_contract(contract)
         if not contract.get("ready"):
             repair = ("Update the binary selected by HERMES_CUA_DRIVER_CMD or remove that override."
-                      if os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip()
-                      else "Run `hermes computer-use install` to repair it.")
-            raise RuntimeError(f"cua-driver is not ready: "
-                               f"{contract.get('reason') or 'runtime contract is incomplete'}. {repair}")
+                      if os.environ.get(_CUA_DRIVER_CMD_ENV, "").strip() else "Run `hermes computer-use install` to repair it.")
+            raise RuntimeError(f"cua-driver is not ready: {contract.get('reason') or 'runtime contract is incomplete'}. {repair}")
         _maybe_nudge_update()
         # `mcp` is an optional extra: lazy-install on first use (gated by `security.allow_lazy_installs`);
         # failure raises FeatureUnavailable with the exact `uv pip install` hint.
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("tool.computer_use", prompt=False)
         importlib.invalidate_caches()  # a just-installed package may not be importable yet
-        daemon = self._embedded_daemon
-        try:
-            if daemon is not None:
-                daemon.start()
+        with contextlib.ExitStack() as rollback:  # a failed start stops the private daemon, then re-raises
+            if self._embedded_daemon is not None:
+                rollback.callback(self._embedded_daemon.stop)
+                self._embedded_daemon.start()
             self._session.start()
-        except Exception:
-            if daemon is not None:
-                daemon.stop()
-            raise
-        # Declare this run's identity. Non-fatal: cua-driver accepts anonymous calls (the cursor just
-        # won't render), so degrade rather than abort.
+            rollback.pop_all()
+        # Declare this run's identity. Non-fatal: cua-driver accepts anonymous calls (the cursor just won't
+        # render), so degrade rather than abort.
         self._best_effort("start_session failed (continuing anonymous)",
                           self._session.call_tool, "start_session", {"session": self._session_id})
-        # Post-handshake tuning guards on `_started`: before the handshake flips it, call_tool would
-        # re-enter session.start() (stubbed start() recurses).
+        # Post-handshake tuning guards on `_started`: before the handshake flips it, call_tool would re-enter
+        # session.start() (stubbed start() recurses).
         if self._session._started:
             max_dim = _computer_use_max_image_dimension()
             if max_dim:  # smaller screenshots cost less over the daemon socket and per turn
@@ -321,8 +292,8 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
                                   self.set_agent_cursor_enabled, False, cursor_id=self._session_id)
 
     def stop(self) -> None:
-        # Best-effort end_session so the driver cleans per-session state (cursor overlay, recording
-        # ownership, config overrides); the connection drop below releases daemon-side state regardless.
+        # Best-effort end_session so the driver cleans per-session state (cursor overlay, recording ownership,
+        # config overrides); the connection drop below releases daemon-side state regardless.
         if self._session._started:
             self._best_effort("end_session failed (continuing teardown)",
                               self._session.call_tool, "end_session", {"session": self._session_id})
@@ -348,14 +319,17 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
     # ── Target state ───────────────────────────────────────────────
     def _clear_active_target(self) -> None:
         """Forget a capture/focus target so a failed lookup cannot misroute input."""
-        self._active_pid = self._active_window_id = self._last_app = self._last_target = None
-        self._snapshot_tokens = {}
+        self._active_pid: Optional[int] = None
+        self._active_window_id: Optional[int] = None
+        self._last_app: Optional[str] = None
+        self._last_target: Optional[Dict[str, Optional[int]]] = None
+        self._snapshot_tokens: Dict[int, str] = {}
 
     def _set_active_target(self, target: Dict[str, Any]) -> None:
         self._active_pid = target["pid"]
         self._active_window_id = target["window_id"]
-        # Tokens belong to the prior snapshot; disarm before any capture call so an exception cannot
-        # pair old tokens with this target.
+        # Tokens belong to the prior snapshot; disarm before any capture call so an exception cannot pair old
+        # tokens with this target.
         self._snapshot_tokens = {}
         self._last_target = {"pid": self._active_pid, "window_id": self._active_window_id}
 
@@ -363,9 +337,8 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
     def launch_app(self, *, bundle_id: Optional[str] = None, name: Optional[str] = None,
                    urls: Optional[List[str]] = None, additional_arguments: Optional[List[str]] = None,
                    creates_new_application_instance: bool = False) -> Dict[str, Any]:
-        """Idempotent launch returning ``{pid, bundle_id, name, windows[]}``.
-        ``creates_new_application_instance=True`` forces a fresh instance so concurrent runs touching
-        the same app get isolated windows."""
+        """Idempotent launch returning ``{pid, bundle_id, name, windows[]}``. ``creates_new_application_instance=True``
+        forces a fresh instance so concurrent runs touching the same app get isolated windows."""
         if not bundle_id and not name:
             raise ValueError("launch_app requires either bundle_id or name")
         args: Dict[str, Any] = {"session": self._session_id}
@@ -382,8 +355,8 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         args: Dict[str, Any] = {"pid": int(pid)}
         if window_id is not None:
             args["window_id"] = int(window_id)
-        # The live schema is strict and has no session property: this is a standalone native focus
-        # operation, not a session-scoped input action.
+        # The live schema is strict and has no session property: this is a standalone native focus operation,
+        # not a session-scoped input action.
         return self._action("bring_to_front", args, inject_session=False)
 
     # ── Agent cursor / config ────────────────────────────────────────
@@ -400,18 +373,17 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
         return self._action("set_config", dict(config))
 
     def call_tool(self, name: str, args: Optional[Dict[str, Any]] = None, *, timeout: float = 30.0) -> Dict[str, Any]:
-        """Generic escape hatch: call any cua-driver MCP tool by name. ``session`` is injected via
-        setdefault, so this is the supported path for tools the wrapper does not type-wrap (preferred over
-        ``self._session.call_tool``)."""
+        """Generic escape hatch: call any cua-driver MCP tool by name. ``session`` is injected via setdefault, so
+        this is the supported path for tools the wrapper does not type-wrap (preferred over ``self._session.call_tool``)."""
         payload = dict(args) if args else {}
         payload.setdefault("session", self._session_id)
         return self._session.call_tool(name, payload, timeout=timeout)
 
     # ── Internal ───────────────────────────────────────────────────
     def _action(self, name: str, args: Dict[str, Any], *, inject_session: bool = True) -> ActionResult:
-        # Attach the snapshot's `element_token` to an `element_index` call so a superseded snapshot
-        # yields an explicit 'stale' error. Gated on the per-tool capability: older drivers
-        # (`additionalProperties: false`) must never see the field.
+        # Attach the snapshot's `element_token` to an `element_index` call so a superseded snapshot yields an
+        # explicit 'stale' error. Gated on the per-tool capability: older drivers (`additionalProperties: false`)
+        # must never see the field.
         idx = args.get("element_index")
         token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
         if token and self._session.supports_capability("accessibility.element_tokens", tool=name):
