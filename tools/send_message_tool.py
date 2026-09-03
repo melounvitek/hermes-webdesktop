@@ -294,11 +294,9 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     target_label = f"{platform_name}:{chat_id}" + (f":{thread_id}" if thread_id is not None else "")
     return {
         "success": True, "skipped": True, "reason": "cron_auto_delivery_duplicate_target", "target": target_label,
-        "note": (
-            f"Skipped send_message to {target_label}. This cron job will already auto-deliver "
-            "its final response to that same target. Put the intended user-facing content in "
-            "your final response instead, or use a different target if you want an additional message."
-        )}
+        "note": (f"Skipped send_message to {target_label}. This cron job will already auto-deliver "
+                 "its final response to that same target. Put the intended user-facing content in "
+                 "your final response instead, or use a different target if you want an additional message.")}
 
 
 def _bounded_send_error(detail, max_chars=900):
@@ -412,14 +410,12 @@ async def _send_via_adapter(
         entry = None
     if entry is None or entry.standalone_sender_fn is None:
         return {"error": (
-            f"No live adapter for platform '{platform_name}'. Is the gateway "
-            f"running with this platform connected? For out-of-process delivery "
-            f"(e.g. cron in a separate process), the platform plugin must "
-            f"register a standalone_sender_fn on its PlatformEntry.")}
+            f"No live adapter for platform '{platform_name}'. Is the gateway running with this platform "
+            f"connected? For out-of-process delivery (e.g. cron in a separate process), the platform "
+            f"plugin must register a standalone_sender_fn on its PlatformEntry.")}
     try:
-        result = await entry.standalone_sender_fn(
-            pconfig, chat_id, chunk,
-            thread_id=thread_id, media_files=media_files, force_document=force_document)
+        result = await entry.standalone_sender_fn(pconfig, chat_id, chunk, thread_id=thread_id,
+                                                 media_files=media_files, force_document=force_document)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -429,10 +425,8 @@ async def _send_via_adapter(
         if result.get("error"):
             return {**result, "error": _bounded_send_error(result["error"])}
         return result
-    return {"error": (
-        f"Plugin standalone send for '{platform_name}' returned an "
-        f"invalid result: expected a dict with 'success' or 'error' "
-        f"keys, got {type(result).__name__}")}
+    return {"error": (f"Plugin standalone send for '{platform_name}' returned an invalid result: "
+                      f"expected a dict with 'success' or 'error' keys, got {type(result).__name__}")}
 
 
 async def _send_chunks(chunks, send_one):
@@ -460,11 +454,9 @@ def _platform_max_length(platform):
     try:
         from gateway.platform_registry import platform_registry
         entry = platform_registry.get(platform.value)
-        if entry and entry.max_message_length > 0:
-            return entry.max_message_length
+        return entry.max_message_length if entry and entry.max_message_length > 0 else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 # Plugin platforms whose media (Discord: all) sends bypass the live adapter on purpose for
@@ -492,17 +484,12 @@ async def _send_plugin_standalone(
     extra = {"force_document": force_document} if pass_force else {}
     if captionable:
         # Cap on the platform's own message limit so the caption is deliverable.
-        caption, _ = _media_caption_split(
-            message, media_files, max_caption_len=(max_len or _DEFAULT_CAPTION_LIMIT))
+        caption, _ = _media_caption_split(message, media_files, max_caption_len=(max_len or _DEFAULT_CAPTION_LIMIT))
         if caption is not None:
-            return await sender(
-                pconfig, chat_id, "", thread_id=thread_id, media_files=media_files,
-                caption=caption, **extra)
-    return await _send_chunks(
-        chunks,
-        lambda chunk, is_last: sender(
-            pconfig, chat_id, chunk, thread_id=thread_id,
-            media_files=media_files if is_last else empty_media, **extra))
+            return await sender(pconfig, chat_id, "", thread_id=thread_id, media_files=media_files,
+                                caption=caption, **extra)
+    return await _send_chunks(chunks, lambda chunk, is_last: sender(
+        pconfig, chat_id, chunk, thread_id=thread_id, media_files=media_files if is_last else empty_media, **extra))
 
 
 # Native-media chunked routes for built-in platforms; media rides on the final chunk,
@@ -556,25 +543,21 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # Telegram chunks internally on the *formatted* text (escaping inflates length).
     if platform == Platform.TELEGRAM:
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
-        return await _send_telegram(
-            pconfig.token, chat_id, message,
-            media_files=media_files, thread_id=thread_id,
-            disable_link_previews=disable_link_previews, force_document=force_document)
+        return await _send_telegram(pconfig.token, chat_id, message, media_files=media_files, thread_id=thread_id,
+                                    disable_link_previews=disable_link_previews, force_document=force_document)
 
     from gateway.platforms.base import BasePlatformAdapter
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
     if platform_name == "discord" or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA):
-        return await _send_plugin_standalone(
-            platform_name, pconfig, chat_id, message, chunks, media_files,
-            thread_id=thread_id, max_len=max_len, force_document=force_document)
+        return await _send_plugin_standalone(platform_name, pconfig, chat_id, message, chunks, media_files,
+                                             thread_id=thread_id, max_len=max_len, force_document=force_document)
 
     route = _CHUNKED_ROUTES.get(platform_name)
     if route is not None and (media_files or not route[0]):
         _, empty_media, sender = route
         return await _send_chunks(chunks, lambda chunk, is_last: sender(
-            platform, pconfig, chat_id, chunk,
-            media_files if is_last else empty_media, thread_id, force_document))
+            platform, pconfig, chat_id, chunk, media_files if is_last else empty_media, thread_id, force_document))
 
     # Generic path: text only. Buzz has verified native media delivery through
     # _send_via_adapter (media-only sends included), so it is exempt from the warning.
