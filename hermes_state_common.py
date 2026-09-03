@@ -16,8 +16,8 @@ from agent.context_compressor import (LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX, _ME
 
 
 # Session preview = head of the first user message (shown when a session has no title).  A /skill invocation
-# embeds the whole skill body, so scaffolded rows carry a wider excerpt (whole message under budget, else
-# head + tail where the typed instruction lands) so ``_shape_preview`` can recover ``/work — fix ...``.
+# embeds the whole skill body, so scaffolded rows take a wider excerpt (whole message under budget, else head +
+# tail where the typed instruction lands) and ``_shape_preview`` recovers ``/work — fix ...`` from it.
 _PREVIEW_HEAD_CHARS = 63
 _PREVIEW_SCAFFOLD_WINDOW = 400
 _PREVIEW_MAX_CHARS = 60
@@ -56,8 +56,8 @@ def _sql_after_marker(marker: str) -> str:
     return f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(marker)}) + {len(marker)})"
 
 
-# Current and legacy long-form prefixes share this introduction; matching all of it keeps an ordinary message
-# that merely starts with the bracketed label from counting as a compaction carrier.
+# Match the whole introduction shared by current and legacy prefixes, so a message that merely starts with the
+# bracketed label is not a compaction carrier.
 _PREVIEW_LONG_FORM_PREFIX = SUMMARY_PREFIX.split("Do NOT answer", 1)[0]
 _PREVIEW_SUMMARY_PREFIXES = (_PREVIEW_LONG_FORM_PREFIX, LEGACY_SUMMARY_PREFIX)
 _PREVIEW_STANDALONE_SUMMARY_SQL = _sql_starts_with("m.content", _PREVIEW_SUMMARY_PREFIXES)
@@ -487,9 +487,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
 
 # Deferred FTS rebuild bookkeeping: while a background rebuild is pending, state_meta H = fts_rebuild_high_water
 # (MAX(messages.id) when the old indexes were dropped) and P = fts_rebuild_progress (highest backfilled id)
-# define the indexed rows: id <= P OR id > H (post-drop rows are indexed live by the insert triggers); (P, H]
-# is not.  Every trigger gates on that predicate: an external-content 'delete' for an unindexed row corrupts
-# the index and skipping one for an indexed row leaves a stale entry.  No rebuild pending => COALESCE tautology.
+# define the indexed rows, id <= P OR id > H (post-drop rows are indexed live by the insert triggers).  Every
+# trigger gates on that predicate: an external-content 'delete' for an unindexed row corrupts the index and
+# skipping one for an indexed row leaves a stale entry.  No rebuild pending => both absent, COALESCE tautology.
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
@@ -606,8 +606,8 @@ _FTS_CJK_TRIGGERS = ("messages_fts_cjk_insert", "messages_fts_cjk_delete", "mess
 # and must not serve reads until `hermes sessions optimize-storage` rebuilds it on a capable host.
 FTS_CJK_STALE_KEY = "fts_cjk_stale"
 
-# Set when a base/trigram FTS index was detached after runtime corruption.  While present, startup must rebuild
-# the complete index before reinstalling sync triggers: rows written while they were absent leave an unknown gap.
+# Set when a base/trigram FTS index was detached after runtime corruption; startup must rebuild the complete
+# index before reinstalling sync triggers (rows written while they were absent leave an unknown gap).
 FTS_STALE_KEY = "fts_stale"
 
 # Durable diagnostic for stale FTS recovery blocked across process restarts.
@@ -674,18 +674,15 @@ END;
 # concurrent rebuilds corrupted state.db in production.  Gates `rebuild_fts()`, `_rebuild_fts_indexes()`,
 # `_recover_stale_fts()`; the chunked backfill (`fts_rebuild_step`) is deliberately NOT routed through it (it
 # claims progress under SQLite transaction authority).  Mirrors `hermes_state._cross_process_repair_lock`:
-# portable (msvcrt/flock), bounded wait, FAIL CLOSED.  flock rides the open file description, so a forked
-# child holds it forever after the holder dies; holder pid + start time are recorded under the lock and a
-# provably-dead holder's lock is broken by unlinking and retaking on a fresh inode.  Indeterminate liveness
-# defers.  `<db>.fts_rebuild.lock` is distinct from `<db>.repair.lock` (offline schema surgery, minutes in
-# VACUUM).  Lives here because mixins cannot import hermes_state (cycle).
+# portable (msvcrt/flock), bounded wait, FAIL CLOSED; orphaned-fd holders (see `_acquire_db_flock`) are broken
+# only when provably dead, indeterminate liveness defers.  `<db>.fts_rebuild.lock` is distinct from
+# `<db>.repair.lock` (offline schema surgery, minutes in VACUUM).  Lives here: mixins cannot import hermes_state.
 
 logger = logging.getLogger("hermes_state")
 
 _FTS_REBUILD_LOCK_TIMEOUT_SECONDS = 120.0
 _FTS_REBUILD_LOCK_POLL_SECONDS = 0.1
 _IS_WINDOWS = sys.platform == "win32"
-
 # Post-break re-acquire budget: the fresh inode is contended only by live processes — never the full timeout.
 _LOCK_BREAK_REACQUIRE_SECONDS = 5.0
 
@@ -703,10 +700,9 @@ def _proc_start_ticks(pid: int):
     """Kernel start time of *pid* (field 22 of ``/proc/<pid>/stat``; with the PID it identifies a process
     uniquely).  None off Linux or on any failure — callers must treat None as unknowable and FAIL CLOSED."""
     try:
-        with open(f"/proc/{pid}/stat", "rb") as fh:
-            stat = fh.read()
         # comm (field 2) may contain spaces/parens; split after the LAST ')'.
-        return int(stat.rsplit(b")", 1)[1].split()[19])
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return int(fh.read().rsplit(b")", 1)[1].split()[19])
     except (OSError, ValueError, IndexError):
         return None
 
@@ -765,19 +761,17 @@ def _lock_holder_provably_dead(record) -> bool:
     if recorded_ticks is None:
         return False
     current_ticks = _proc_start_ticks(pid)
-    # Same PID, different start time: recycled by an unrelated process.
-    return current_ticks is not None and current_ticks != recorded_ticks
+    return current_ticks is not None and current_ticks != recorded_ticks  # different start time: PID recycled
 
 
 def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, description):
     """Bounded POSIX flock acquire with orphaned-holder break.  Returns ``(acquired, handle)``; *handle* may
     have been re-opened and the caller closes whichever comes back.  *acquired*: True, False (a holder kept
-    the lock past the deadline) or None (non-contention ``OSError``, already logged; callers treat it as not
-    acquired without the held-by-another-process warning).  ``flock`` belongs to the open file DESCRIPTION,
-    which ``fork()`` duplicates, so a holder that forks then dies leaves the lock held forever; when the
-    acquirer is provably dead the file is unlinked and retaken on a fresh inode (the orphan's flock stays on
-    the old inode blocking nobody).  Every successful acquire verifies its inode still names *lock_path*,
-    so a racer that locked a dead inode retries instead of running alongside the breaker."""
+    the lock past the deadline) or None (non-contention ``OSError``, already logged: treat as not acquired
+    without the held-by-another-process warning).  ``flock`` rides the open file DESCRIPTION, which ``fork()``
+    duplicates, so a holder that forks then dies leaves the lock held forever; when the acquirer is provably
+    dead the file is unlinked and retaken on a fresh inode (the orphan's flock excludes nobody).  Every
+    acquire verifies its inode still names *lock_path*, so a racer on a dead inode retries."""
     import fcntl
     deadline = time.monotonic() + timeout_seconds
     broke_lock = False
@@ -786,7 +780,6 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
             if not is_advisory_lock_contention(exc):
-                # Not a holder and polling cannot fix it: defer NOW.
                 logger.warning("Could not acquire %s %s (%s) — deferring rather than "
                                "waiting out the %.0fs holder timeout on a non-contention error.",
                                description, lock_path, exc, timeout_seconds)
@@ -863,10 +856,10 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
 @contextlib.contextmanager
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     """Serialize full structural FTS rebuilds on *db_path* across processes.  Yields True when this process
-    holds the authority, False when the bounded acquire timed out or the lock file could not be opened; on
-    False the caller must NOT rebuild (fail closed; the stale breadcrumb guarantees a retry).  ``db_path``
-    None (in-memory DB) yields True.  Opportunistic in-process retries pass ``timeout_seconds=0`` so a live
-    holder never stalls a long-lived writer; the orphan break still applies."""
+    holds the authority, False when the bounded acquire timed out or the lock file could not be opened: the
+    caller must NOT rebuild (fail closed; the stale breadcrumb guarantees a retry).  ``db_path`` None
+    (in-memory) yields True.  In-process retries pass ``timeout_seconds=0`` so a live holder never stalls a
+    long-lived writer; the orphan break still applies."""
     if db_path is None:
         yield True
         return
@@ -877,8 +870,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     except OSError as exc:
         # Fail closed like a timed-out acquire: an unopenable lock file means the FS is out of
         # space/inodes/descriptors and a sibling that opened earlier may still be rebuilding — yielding True
-        # gave every process on a full disk a concurrent rebuild.  Deferring costs nothing (the breadcrumb
-        # retries; the rebuild's own writes could not have committed either).
+        # gave every process on a full disk a concurrent rebuild.  Deferring is free: the breadcrumb retries.
         logger.warning("Could not open FTS rebuild lock %s (%s) — deferring this rebuild "
                        "rather than running it without cross-process authority.", lock_path, exc)
         yield False
@@ -907,16 +899,14 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
         yield acquired
     finally:
         try:
-            if acquired:
-                if _IS_WINDOWS:
+            with contextlib.suppress(OSError):  # best-effort release
+                if acquired and _IS_WINDOWS:
                     import msvcrt
                     handle.seek(0)
                     msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
+                elif acquired:
                     import fcntl
                     _clear_lock_holder_record(handle)
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        except OSError:  # pragma: no cover - best effort release
-            pass
         finally:
             handle.close()
