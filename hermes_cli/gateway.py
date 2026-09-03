@@ -4500,7 +4500,7 @@ def _respawn_storm_backoff() -> None:
             )
             # Tell the startup watchdog the backoff sleep is intentional, not a parked deadlock.
             try:
-                from gateway.startup_watchdog import kick_startup_watchdog
+                from hermes_startup_watchdog import kick_startup_watchdog
                 kick_startup_watchdog(extra_s=_storm.backoff_s)
             except Exception:
                 pass

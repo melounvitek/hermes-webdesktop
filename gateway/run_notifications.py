@@ -598,7 +598,8 @@ class GatewayNotificationsMixin:
 
     async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
         """Notify the chat that initiated /restart that the gateway is back."""
-        from gateway.run import _hermes_home, _non_conversational_metadata, resolve_delivery_transport
+        from gateway.delivery import resolve_delivery_transport
+        from gateway.run import _hermes_home, _non_conversational_metadata
         notify_path = _hermes_home / ".restart_notify.json"
         if not notify_path.exists():
             return None
@@ -647,7 +648,7 @@ class GatewayNotificationsMixin:
 
     def _home_channel_transports(self):
         """Yield ``(platform, platform_cfg, home, transport)`` for every home channel with a live transport."""
-        from gateway.run import resolve_delivery_transport
+        from gateway.delivery import resolve_delivery_transport
         for platform, platform_cfg in self.config.platforms.items():
             home = platform_cfg.home_channel
             if not home or not home.chat_id:
@@ -866,7 +867,7 @@ class GatewayNotificationsMixin:
         """Adapter for a synthetic-event platform: alias-aware transport resolver first (one
         Platform.RELAY adapter fronts N logical platforms; native wins), literal ``p.value`` scan as
         fallback for minimal runner stubs / exotic platform strings when the resolver can't run."""
-        from gateway.run import resolve_delivery_transport
+        from gateway.delivery import resolve_delivery_transport
         try:
             _transport = resolve_delivery_transport(Platform(platform_name), self.config, self.adapters)
         except Exception:

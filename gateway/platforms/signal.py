@@ -632,9 +632,6 @@ class SignalAdapter(BasePlatformAdapter):
             logger.log(fail_level, "Signal RPC %s failed: %s", method, e)
             return None
 
-    # Backward-compatible alias for the shared formatting helper.
-    _markdown_to_signal = staticmethod(markdown_to_signal)
-
     def format_message(self, content: str) -> str:
         """Plain-text fallback for the base-class send path; send() applies rich styles itself."""
         return content
@@ -714,7 +711,7 @@ class SignalAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
         base_params = await self._with_target({"account": self.account}, chat_id)
-        chunks = self._split_signal_formatted_message(*self._markdown_to_signal(content), self.MAX_MESSAGE_LENGTH)
+        chunks = self._split_signal_formatted_message(*markdown_to_signal(content), self.MAX_MESSAGE_LENGTH)
         last_result = None
         for idx, (plain_text, text_styles) in enumerate(chunks, start=1):
             params: Dict[str, Any] = dict(base_params, message=plain_text)

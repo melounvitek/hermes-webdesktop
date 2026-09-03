@@ -21,7 +21,8 @@ from gateway.session import SessionSource
 from typing import Any, Dict, Optional, Union
 
 if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
-    from gateway.run import GatewayRunner, TurnRunner  # noqa: F401
+    from gateway.run import GatewayRunner  # noqa: F401
+    from gateway.run_turn_runner import TurnRunner  # noqa: F401
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
@@ -275,7 +276,7 @@ class GatewayBusySessionMixin:
     )
 
     def _queue_or_replace_pending_event(self, session_key: str, event: MessageEvent) -> None:
-        from gateway.run import merge_pending_message_event
+        from gateway.platforms.base import merge_pending_message_event
         adapter = self._adapter_for_source(event.source)
         if not adapter:
             return

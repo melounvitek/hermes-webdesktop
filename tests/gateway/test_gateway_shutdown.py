@@ -7,7 +7,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import HomeChannel, Platform
 from gateway.platforms.base import MessageEvent
-from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+from gateway.restart import DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT, GATEWAY_SERVICE_RESTART_EXIT_CODE
 from gateway.session import build_session_key
 from tests.gateway.restart_test_helpers import make_restart_runner, make_restart_source
 
@@ -217,7 +217,7 @@ def test_post_interrupt_grace_tolerates_duck_typed_runner():
 
     assert (
         gateway_run.GatewayRunner._post_interrupt_grace_timeout(runner)
-        == gateway_run.DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT
+        == DEFAULT_GATEWAY_POST_INTERRUPT_GRACE_TIMEOUT
     )
 
 @pytest.mark.asyncio

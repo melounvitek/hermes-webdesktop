@@ -267,6 +267,3 @@ def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
             return None
     return total_us if total_us > 0 else None
 
-
-# Backward-compat private alias (pre-promotion name).
-_parse_systemd_duration_to_us = parse_systemd_duration_to_us

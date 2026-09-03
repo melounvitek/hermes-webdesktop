@@ -628,13 +628,13 @@ async def _send_qqbot(pconfig, chat_id, message):
 async def _send_yuanbao(chat_id, message, media_files=None):
     """Send via the running Yuanbao adapter's persistent WebSocket (no throwaway client possible)."""
     try:
-        from gateway.platforms.yuanbao import get_active_adapter, send_yuanbao_direct
+        from gateway.platforms.yuanbao import YuanbaoAdapter
     except ImportError:
         return _error("Yuanbao adapter module not available.")
-    adapter = get_active_adapter()
+    adapter = YuanbaoAdapter.get_active()
     if adapter is None:
         return _error("Yuanbao adapter is not running. Start the gateway with yuanbao platform enabled first.")
     try:
-        return await send_yuanbao_direct(adapter, chat_id, message, media_files=media_files)
+        return await adapter._outbound.sender.send_direct(chat_id, message, media_files)
     except Exception as e:
         return _error(f"Yuanbao send failed: {e}")

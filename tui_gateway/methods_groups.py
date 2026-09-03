@@ -148,7 +148,7 @@ def _room_link_run_storage_durable() -> bool:
     if store is None:
         # This process does not construct the API adapter that owns the store; open the
         # same shared SQLite store lazily so negotiation reflects the real replay boundary.
-        from gateway.platforms.api_server import RunIdempotencyStore
+        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
         with _run_store_lock:
             store = getattr(_bound_server, "_run_idempotency_store", None)
             if store is None:
