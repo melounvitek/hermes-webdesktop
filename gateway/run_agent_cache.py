@@ -191,8 +191,7 @@ class GatewayAgentCacheMixin:
             except Exception:
                 logger.debug(
                     "Credential re-resolution failed for persisted override "
-                    "(provider=%s); using credential-less override",
-                    provider, exc_info=True,
+                    "(provider=%s); using credential-less override", provider, exc_info=True,
                 )
         self._session_state(session_key).conversation.model_override = override
         logger.info(
@@ -725,8 +724,7 @@ class GatewayAgentCacheMixin:
             agent.commit_memory_session(messages if isinstance(messages, list) else None)
             logger.debug(
                 "Committed on_session_end extraction before soft-evicting "
-                "finalizable session=%s (cache pressure, pre-expiry)",
-                key,
+                "finalizable session=%s (cache pressure, pre-expiry)", key,
             )
         except Exception as _e:
             logger.debug("Pre-evict memory commit failed for %s: %s", key, _e)

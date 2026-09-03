@@ -131,8 +131,7 @@ class GatewayNotificationsMixin:
         if not target_session_id or target_session_id == pinned_session_id:
             logger.warning(
                 "Async-delegation completion pinned to compressed session %s "
-                "without a continuation; dropping injection.",
-                pinned_session_id,
+                "without a continuation; dropping injection.", pinned_session_id,
             )
             return None
 
@@ -200,8 +199,7 @@ class GatewayNotificationsMixin:
         if pinned_row is None:
             logger.warning(
                 "Async-delegation completion has unknown spawning session %s; "
-                "dropping injection (#55578 fail-closed).",
-                pinned_session_id,
+                "dropping injection (#55578 fail-closed).", pinned_session_id,
             )
             return None
 
@@ -213,8 +211,7 @@ class GatewayNotificationsMixin:
                 logger.warning(
                     "Async-delegation completion pinned to user-closed session %s "
                     "(end_reason=%r); dropping injection instead of resurrecting it "
-                    "(#55578 fail-closed).",
-                    pinned_session_id, _end_reason,
+                    "(#55578 fail-closed).", pinned_session_id, _end_reason,
                 )
                 return None
             if _end_reason != "compression":
@@ -1642,8 +1639,7 @@ class GatewayNotificationsMixin:
                 if process_registry.is_completion_consumed(session_id):
                     logger.debug(
                         "Process watcher: completion for %s already consumed "
-                        "via wait/log — skipping raw notification (#65379)",
-                        session_id,
+                        "via wait/log — skipping raw notification (#65379)", session_id,
                     )
                     break
                 should_notify = (
