@@ -236,16 +236,13 @@ def _sync_profiles(verbose: bool) -> int:
         from hermes_cli.profiles import list_profiles
         profiles = list_profiles()
     except Exception as e:
-        say(f"  Could not list profiles: {e}\n")
-        return 0
+        return say(f"  Could not list profiles: {e}\n") or 0
     cfg = _read_config()
     if not cfg:
-        say("  No Honcho config found. Run 'hermes honcho setup' first.\n")
-        return 0
+        return say("  No Honcho config found. Run 'hermes honcho setup' first.\n") or 0
     default_block, has_key = _default_block_and_key(cfg)
     if not default_block and not has_key:
-        say("  Honcho not configured on default profile. Run 'hermes honcho setup' first.\n")
-        return 0
+        return say("  Honcho not configured on default profile. Run 'hermes honcho setup' first.\n") or 0
 
     created = skipped = 0
     for p in (p for p in profiles if p.name != "default"):
@@ -286,9 +283,8 @@ def cmd_enable(args) -> None:
         _inherit_defaults(block, default_block, cfg, _INHERITED_KEYS)
         block.setdefault("aiPeer", host.split(".", 1)[1] if "." in host else host)
         block.setdefault("workspace", _pref(default_block, cfg, "workspace") or HOST)
-
     _write_config(cfg)
-    print(f"  {label}Honcho enabled.")
+    print(f"  {label}Honcho enabled.")  # before the (possibly slow) peer-creation round trip
     peer_state = f"Peer '{block.get('aiPeer', host)}' ready." if _ensure_peer_exists(host) else "Peer creation deferred (no connection)."
     print(f"  {label}{peer_state}\n  Saved to {_config_path()}\n")
 
@@ -411,18 +407,17 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
     current_shape = "single" if current_pin else "hybrid" if current_aliases else "multi"
 
     gw_platforms = _gateway_platforms()
-    if gw_platforms is None:
-        print("\n  Gateway identity mapping routes platform users to memory peers.")
-        run_mapping = _yes(_prompt("Running the Hermes gateway (Telegram/Discord/etc.)? (y/N)", default="n"))
-    elif not gw_platforms:
-        print("\n  No gateway platforms connected — identity mapping only affects\n"
-              "  gateway users, so this step doesn't apply here.")
-        run_mapping = _yes(_prompt("Configure gateway mapping anyway? (y/N)", default="n"))
-    else:
+    if gw_platforms:
         print(f"\n  Gateway platforms detected: {', '.join(gw_platforms)}")
-        run_mapping = True
-    if not run_mapping:
-        return
+    else:
+        notice, question = (
+            ("\n  Gateway identity mapping routes platform users to memory peers.",
+             "Running the Hermes gateway (Telegram/Discord/etc.)? (y/N)") if gw_platforms is None else
+            ("\n  No gateway platforms connected — identity mapping only affects\n"
+             "  gateway users, so this step doesn't apply here.", "Configure gateway mapping anyway? (y/N)"))
+        print(notice)
+        if not _yes(_prompt(question, default="n")):
+            return
 
     peer_target = hermes_host.get("peerName") or current_peer or "user"
     default_choice = {"single": "1", "hybrid": "2"}.get(current_shape, "3")
@@ -442,10 +437,8 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
     # Un-pinning without aliasing strands the pooled peerName history; steer toward pooling.
     if current_pin and shape == "multi":
         print(f"\n  ⚠ Un-pinning will orphan memory accumulated under peer\n"
-              f"    '{peer_target}'.  Existing gateway users resolve to fresh,\n"
-              f"    empty peers.")
-        confirm = _prompt("  Pool my own memory instead (alias my IDs to peerName)? (Y/n)", default="y").strip().lower()
-        if confirm in {"y", "yes", ""}:
+              f"    '{peer_target}'.  Existing gateway users resolve to fresh,\n    empty peers.")
+        if _prompt("  Pool my own memory instead (alias my IDs to peerName)? (Y/n)", default="y").strip().lower() in {"y", "yes", ""}:
             shape = "hybrid"
 
     if shape == "skip":
@@ -463,19 +456,15 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str) -> 
         hermes_host["pinUserPeer"] = shape == "single"
         if shape == "single":
             print(f"  All non-agent gateway users route to '{peer_target}' (pin overrides aliases).")
-        elif shape == "multi":
-            if prior_aliases:
-                hermes_host["userPeerAliases"] = prior_aliases
+        else:
+            aliases = prior_aliases if shape == "multi" else _collect_operator_aliases(prior_aliases, peer_target)
+            if aliases:
+                hermes_host["userPeerAliases"] = aliases
             _apply_runtime_prefix(hermes_host, current_prefix, prefix_from_root,
-                                  "Runtime peer prefix (e.g. 'telegram_', blank for none)")
-            print("  Each gateway user → own peer.")
-        else:  # hybrid
-            merged = _collect_operator_aliases(prior_aliases, peer_target)
-            if merged:
-                hermes_host["userPeerAliases"] = merged
-            _apply_runtime_prefix(hermes_host, current_prefix, prefix_from_root,
+                                  "Runtime peer prefix (e.g. 'telegram_', blank for none)" if shape == "multi" else
                                   "Runtime peer prefix for unknown users (e.g. 'telegram_', blank for none)")
-            print(f"  Your runtime IDs → '{peer_target}', others → own peer.")
+            print("  Each gateway user → own peer." if shape == "multi" else
+                  f"  Your runtime IDs → '{peer_target}', others → own peer.")
     _echo_identity_mapping(hermes_host)
 
 
@@ -539,8 +528,7 @@ def _setup_local_auth(cfg: dict, hermes_host: dict) -> None:
     the server's AUTH_JWT_SECRET as the bearer token. It is stored under the host block (not
     top-level apiKey) so ``get_honcho_client`` treats it as an explicit local auth opt-in and
     cloud/hybrid switching is unaffected."""
-    new_url = _prompt("Base URL", default=cfg.get("baseUrl") or "http://localhost:8000")
-    if new_url:
+    if new_url := _prompt("Base URL", default=cfg.get("baseUrl") or "http://localhost:8000"):
         cfg["baseUrl"] = new_url
     current_host_key = hermes_host.get("apiKey", "")
     print("\n  Local Honcho auth (JWT signed with the server's AUTH_JWT_SECRET).\n"
@@ -645,8 +633,7 @@ def _setup_cloud_auth(cfg: dict, hermes_host: dict, write_path: Path) -> bool:
     if method in {"oauth", "o"}:
         return _setup_browser_login(hermes_host, write_path)
     print(f"\n  Current API key: {_mask(cfg.get('apiKey', ''))}")
-    new_key = _prompt("Honcho API key (leave blank to keep current)", secret=True)
-    if new_key:
+    if new_key := _prompt("Honcho API key (leave blank to keep current)", secret=True):
         cfg["apiKey"] = new_key
     if not cfg.get("apiKey"):
         print("\n  No API key configured. Get yours at https://app.honcho.dev\n"
@@ -712,8 +699,7 @@ def _setup_tuning(cfg: dict, hermes_host: dict) -> None:
           "Recommended: 1-5.")
     new_dialectic = _prompt("Dialectic cadence", default=str(_pref(hermes_host, cfg, "dialecticCadence") or "2"))
     try:
-        val = int(new_dialectic)
-        if val >= 1:
+        if (val := int(new_dialectic)) >= 1:
             hermes_host["dialecticCadence"] = val
     except (ValueError, TypeError):
         hermes_host["dialecticCadence"] = 2
@@ -766,8 +752,7 @@ def cmd_setup(args) -> None:
         ("aiPeer", "AI peer name", _pref(hermes_host, cfg, "aiPeer", "hermes")),
         ("workspace", "Workspace ID", _pref(hermes_host, cfg, "workspace", "hermes")),
     ):
-        new = _prompt(label, default=default)
-        if new:
+        if new := _prompt(label, default=default):
             hermes_host[key] = new
 
     _setup_identity_mapping(cfg, hermes_host, current_peer)
@@ -916,16 +901,14 @@ def cmd_status(args) -> None:
   Observation:    user(me={hcfg.user_observe_me},others={hcfg.user_observe_others}) ai(me={hcfg.ai_observe_me},others={hcfg.ai_observe_others})
   Write freq:     {hcfg.write_frequency}""")
 
-    if hcfg.enabled and (hcfg.api_key or hcfg.base_url):
-        print("\n  Connection... ", end="", flush=True)
-        try:
-            client = get_honcho_client(hcfg)
-            _show_peer_cards(hcfg, client)
-            print("OK")
-        except Exception as e:
-            print(f"FAILED ({e})\n")
-    else:
-        print(f"\n  Not connected ({'disabled' if not hcfg.enabled else 'no API key or base URL'})\n")
+    if not (hcfg.enabled and (hcfg.api_key or hcfg.base_url)):
+        return print(f"\n  Not connected ({'disabled' if not hcfg.enabled else 'no API key or base URL'})\n")
+    print("\n  Connection... ", end="", flush=True)
+    try:
+        _show_peer_cards(hcfg, get_honcho_client(hcfg))
+        print("OK")
+    except Exception as e:
+        print(f"FAILED ({e})\n")
 
 
 def _show_peer_cards(hcfg, client) -> None:
@@ -960,10 +943,9 @@ def _cmd_status_all() -> None:
         enabled = block.get("enabled", cfg.get("enabled"))
         if enabled is None:
             enabled = _default_block_and_key(cfg)[1] if block else False
-        recall = _pref(block, cfg, "recallMode", "hybrid")
-        write = _pref(block, cfg, "writeFrequency", "async")
         marker = " *" if name == active else ""
-        print(f"  {name + marker:<14} {host:<22} {'yes' if enabled else 'no':<9} {recall:<9} {write}")
+        print(f"  {name + marker:<14} {host:<22} {'yes' if enabled else 'no':<9} "
+              f"{_pref(block, cfg, 'recallMode', 'hybrid'):<9} {_pref(block, cfg, 'writeFrequency', 'async')}")
     print("\n  * active profile\n")
 
 
@@ -1002,8 +984,7 @@ def cmd_map(args) -> None:
     if not session_name:
         return print("  Session name cannot be empty.\n")
     import re
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', session_name).strip('-')
-    if sanitized != session_name:
+    if (sanitized := re.sub(r'[^a-zA-Z0-9_-]', '-', session_name).strip('-')) != session_name:
         print(f"  Session name sanitized to: {sanitized}")
         session_name = sanitized
     cwd = os.getcwd()
@@ -1054,10 +1035,8 @@ def _show_or_set_choice(args, *, attr: str, key: str, noun: str, title: str, cho
     if value is None:
         current = _pref(_active_block(cfg), cfg, key) or default
         print(f"\nHoncho {title}\n" + RULE)
-        for m, desc in choices.items():
-            print(f"  {m:<{width}}  {desc}{' <-' if m == current else ''}")
-        print(f"\n  Set with: hermes honcho {attr} [{'|'.join(choices)}]\n")
-        return
+        print("\n".join(f"  {m:<{width}}  {desc}{' <-' if m == current else ''}" for m, desc in choices.items()))
+        return print(f"\n  Set with: hermes honcho {attr} [{'|'.join(choices)}]\n")
     if value not in choices:
         return print(f"  Invalid {noun} '{value}'. Options: {', '.join(choices)}\n")
     host = _host_key()
@@ -1189,12 +1168,12 @@ def _migrate_seed(mgr, session_key: str, agent_files: list[Path]) -> None:
 
 def _offer(question: str, action, files: list[Path]) -> None:
     """Ask, then run ``action(mgr, session_key, files)`` against a fresh client."""
-    if _yes(_prompt(question, default="y")):
-        try:
-            hcfg, client = _connect(None, reset=True)
-            action(*_session_manager(hcfg, client), files)
-        except Exception as e:
-            print(f"  Failed: {e}")
+    if not _yes(_prompt(question, default="y")):
+        return
+    try:
+        action(*_session_manager(*_connect(None, reset=True)), files)
+    except Exception as e:
+        print(f"  Failed: {e}")
 
 
 def cmd_migrate(args) -> None:

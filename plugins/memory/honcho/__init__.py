@@ -7,6 +7,7 @@ Config chain: $HERMES_HOME/honcho.json -> ~/.honcho/config.json -> env vars.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -400,16 +401,14 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         ctx_holder: dict[str, dict] = {}
 
         def _fetch_base() -> None:
-            ctx = self._manager.get_prefetch_context(self._session_key, query or None) or {}
-            ctx_holder["ctx"] = ctx
+            ctx_holder["ctx"] = ctx = self._manager.get_prefetch_context(self._session_key, query or None) or {}
             if ctx:
                 self._manager.set_context_result(self._session_key, ctx)
 
         bt = self._spawn_write(_fetch_base, "honcho-base-first", "Honcho first-turn base context failed: %s")
         base_wait = max(0.0, first_turn_base_deadline - time.monotonic()) if first_turn_base_deadline is not None else 0.0
         bt.join(timeout=base_wait)
-        ctx = ctx_holder.get("ctx")
-        if ctx:
+        if ctx := ctx_holder.get("ctx"):
             self._manager.pop_context_result(self._session_key)
             return _adopt(ctx)
         if bt.is_alive():
@@ -428,12 +427,9 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
 
         dia_wait = self._first_turn_wait(self._FIRST_TURN_DIALECTIC_CAP)
         if not self._thread_is_live():
-            self._spawn_dialectic(
-                query, thread_name="honcho-prefetch-first", fired_at=self._turn_count,
-                log_label="first-turn dialectic",
-            )
-        live = self._prefetch_thread
-        if live is not None:
+            self._spawn_dialectic(query, thread_name="honcho-prefetch-first", fired_at=self._turn_count,
+                                  log_label="first-turn dialectic")
+        if (live := self._prefetch_thread) is not None:
             live.join(timeout=dia_wait)
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             logger.debug("Honcho first-turn dialectic still running after %.1fs — will surface on next turn", dia_wait)
@@ -681,16 +677,13 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
 
     def _tool_profile(self, args: dict) -> str:
         peer = args.get("peer", "user")
-        card_update = args.get("card")
-        if card_update:
+        if card_update := args.get("card"):
             result = self._manager.set_peer_card(self._session_key, card_update, peer=peer)
             if result is None:
                 return tool_error("Failed to update peer card.")
             return json.dumps({"result": f"Peer card updated ({len(result)} facts).", "card": result})
         card = self._manager.get_peer_card(self._session_key, peer=peer)
-        if not card:
-            return json.dumps(self._empty_profile_hint(peer))
-        return json.dumps({"result": card})
+        return json.dumps({"result": card} if card else self._empty_profile_hint(peer))
 
     def _tool_search(self, args: dict) -> str:
         query = (args.get("query") or "").strip()
@@ -734,9 +727,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         parts = [f"## {header}\n{ctx[key]}"
                  for key, header in (("summary", "Summary"), ("representation", "Representation"), ("card", "Card"))
                  if ctx.get(key)]
-        if ctx.get("recent_messages"):
-            msg_str = "\n".join(f"  [{m['role']}] {m['content'][:200]}" for m in ctx["recent_messages"][-5:])
-            parts.append(f"## Recent messages\n{msg_str}")
+        if recent := ctx.get("recent_messages"):
+            parts.append("## Recent messages\n" + "\n".join(f"  [{m['role']}] {m['content'][:200]}" for m in recent[-5:]))
         return json.dumps({"result": "\n\n".join(parts) or "No context available."})
 
     def _tool_conclude(self, args: dict) -> str:
@@ -751,8 +743,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             return tool_error("query is only valid when list is true.")
 
         if list_mode:
-            conclusions = self._manager.list_conclusions(self._session_key, query=query or None, peer=peer)
-            return json.dumps({"conclusions": conclusions})
+            return json.dumps({"conclusions": self._manager.list_conclusions(self._session_key, query=query or None, peer=peer)})
         if delete_id:
             if self._manager.delete_conclusion(self._session_key, delete_id, peer=peer):
                 return json.dumps({"result": f"Conclusion {delete_id} deleted."})
@@ -779,13 +770,11 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             if self._init_thread and self._init_thread.is_alive():
                 return tool_error("Honcho session is still initializing; try again shortly.")
             if not self._ensure_session():
-                if self._init_auth_failure:
-                    return tool_error(f"Honcho memory authentication failed: {self._init_auth_failure}")
-                return tool_error("Honcho session could not be initialized.")
+                return tool_error(f"Honcho memory authentication failed: {self._init_auth_failure}"
+                                  if self._init_auth_failure else "Honcho session could not be initialized.")
         if not self._manager or not self._session_key:
             return tool_error("Honcho is not active for this session.")
-        handler = self._TOOL_HANDLERS.get(tool_name)
-        if handler is None:
+        if (handler := self._TOOL_HANDLERS.get(tool_name)) is None:
             return tool_error(f"Unknown tool: {tool_name}")
         try:
             return handler(self, args)
@@ -804,15 +793,13 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         manager = self._manager
         if not manager or (self._init_thread and self._init_thread.is_alive() and not self._session_initialized):
             return
-        try:
-            # saveMessages: false skips persistence, but the async-writer thread must still
-            # be joined so daemon threads aren't left blocked in httpx I/O at interpreter exit.
+        # saveMessages: false skips persistence, but the async-writer thread must still
+        # be joined so daemon threads aren't left blocked in httpx I/O at interpreter exit.
+        with contextlib.suppress(Exception):
             if getattr(self._config, "save_messages", True):
                 manager.shutdown()  # flush_all() + join the writer
             else:
                 manager.stop_async_writer()
-        except Exception:
-            pass
 
 
 def register(ctx) -> None:
