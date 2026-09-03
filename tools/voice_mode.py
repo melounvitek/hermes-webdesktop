@@ -1,8 +1,7 @@
 """Voice Mode -- push-to-talk recording and playback for the CLI.
 
-Audio capture via sounddevice, WAV encoding via stdlib wave, STT dispatch via
-tools.transcription_tools, TTS playback via sounddevice or system players.
-Optional deps: ``pip install sounddevice numpy`` (or ``uv sync --extra voice``).
+Capture via sounddevice, WAV via stdlib wave, STT via tools.transcription_tools,
+playback via sounddevice or system players. Optional deps: ``uv sync --extra voice``.
 """
 
 import logging
@@ -14,6 +13,7 @@ import shutil
 import subprocess
 import sys
 from collections import deque
+from contextlib import suppress
 from pathlib import Path
 import tempfile
 import threading
@@ -24,18 +24,10 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 from tools.voice_mode_transcript import (  # noqa: F401 - re-exported; tests patch tools.voice_mode.<name>
-    _voice_config,
-    WHISPER_HALLUCINATIONS,
-    _HALLUCINATION_REPEAT_RE,
-    is_whisper_hallucination,
-    DEFAULT_VOICE_STOP_PHRASES,
-    _load_voice_stop_phrases,
-    is_voice_stop_phrase,
-    DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD,
-    MIN_FRAGMENT_LENGTH_FOR_ECHO,
-    _normalize_for_echo_compare,
-    is_tts_echo,
-    voice_stop_hint,
+    _voice_config, WHISPER_HALLUCINATIONS, _HALLUCINATION_REPEAT_RE, is_whisper_hallucination,
+    DEFAULT_VOICE_STOP_PHRASES, _load_voice_stop_phrases, is_voice_stop_phrase,
+    DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD, MIN_FRAGMENT_LENGTH_FOR_ECHO, _normalize_for_echo_compare,
+    is_tts_echo, voice_stop_hint,
 )
 from hermes_constants import is_termux as _is_termux_environment
 
@@ -61,12 +53,8 @@ def _import_audio():
 
 
 def _sounddevice_output_allowed() -> bool:
-    """Whether sounddevice may be used for audio OUTPUT.
-
-    False on macOS: initializing PortAudio/CoreAudio for output triggers a
-    kTCCServiceMediaLibrary prompt, so all output goes through ``afplay`` there.
-    Does NOT affect input (recording), which legitimately needs mic permission.
-    """
+    """False on macOS: PortAudio/CoreAudio OUTPUT init triggers a kTCCServiceMediaLibrary
+    prompt, so output goes through ``afplay`` there. Input (recording) is unaffected."""
     return platform.system() != "Darwin"
 
 
@@ -95,12 +83,9 @@ def _write_wav_frames(dest, frames: bytes, sample_rate: int) -> None:
 
 def _unlink_quietly(path: Optional[str]) -> None:
     """Best-effort unlink; missing/undeletable files are ignored."""
-    if not path:
-        return
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+    if path:
+        with suppress(OSError):
+            os.unlink(path)
 
 
 def _audio_available() -> bool:
@@ -117,13 +102,11 @@ def _rms(np, data) -> float:
 
 def _default_input_samplerate(sd) -> int:
     """Default input device rate, else the Whisper-friendly SAMPLE_RATE."""
-    try:
+    with suppress(Exception):
         info = sd.query_devices(None, "input")
         rate = info.get("default_samplerate") if isinstance(info, dict) else getattr(info, "default_samplerate", None)
         if isinstance(rate, (int, float)) and rate > 0:
             return int(round(rate))
-    except Exception:
-        pass
     return SAMPLE_RATE
 
 
@@ -133,22 +116,18 @@ def _voice_capture_install_hint() -> str:
         return "pkg install python-numpy portaudio && python -m pip install sounddevice"
     # Inside a venv a bare `pip install` may hit whichever Python the shell
     # resolves first (macOS: often a Rosetta system Python) — use the venv's pip.
-    try:
+    with suppress(Exception):
         if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
             pip_in_venv = Path(sys.prefix) / "bin" / "pip"
             if pip_in_venv.exists():
                 return f"{pip_in_venv} install sounddevice numpy"
-    except Exception:
-        pass
     return "pip install sounddevice numpy"
 
 
 def _portaudio_missing_message() -> str:
     """sounddevice imports but PortAudio's .so is missing — pip can't fix that."""
-    if _is_termux_environment():
-        hint = "  Termux: pkg install portaudio"
-    else:
-        hint = "  Linux:  sudo apt-get install libportaudio2\n  macOS:  brew install portaudio"
+    hint = ("  Termux: pkg install portaudio" if _is_termux_environment()
+            else "  Linux:  sudo apt-get install libportaudio2\n  macOS:  brew install portaudio")
     return f"PortAudio system library not found -- install it first:\n{hint}\nThen retry /voice on."
 
 
@@ -158,9 +137,7 @@ _TERMUX_APP_MISSING_WARNING = (
 
 
 def _termux_microphone_command() -> Optional[str]:
-    if not _is_termux_environment():
-        return None
-    return shutil.which("termux-microphone-record")
+    return shutil.which("termux-microphone-record") if _is_termux_environment() else None
 
 
 def _run_quiet(cmd: List[str], *, timeout: float, check: bool) -> subprocess.CompletedProcess:
@@ -182,11 +159,10 @@ _TERMUX_API_PACKAGE_PROBES = (
 def _termux_api_app_installed() -> bool:
     """True iff the Termux:API Android app is installed.
 
-    Any probe reporting ``package:com.termux.api`` is authoritative. If EVERY
-    probe is inconclusive (binary missing, denied, timeout, non-zero exit) we
-    trust the ``termux-microphone-record`` binary on PATH instead: a false
-    negative blocks ``/voice on`` outright, a false positive only surfaces a
-    precise runtime error. One clean probe without the package = genuinely missing.
+    A probe reporting ``package:com.termux.api`` is authoritative. If EVERY probe
+    is inconclusive (binary missing, denied, timeout, non-zero exit) trust the
+    ``termux-microphone-record`` binary on PATH: a false negative blocks ``/voice
+    on``, a false positive only surfaces a precise runtime error.
     """
     if not _is_termux_environment():
         return False
@@ -195,9 +171,8 @@ def _termux_api_app_installed() -> bool:
         try:
             result = _run_quiet(list(cmd), timeout=5, check=False)
         except (OSError, subprocess.TimeoutExpired):
-            inconclusive = True
-            continue
-        if result.returncode != 0:
+            result = None
+        if result is None or result.returncode != 0:
             inconclusive = True
             continue
         if "package:com.termux.api" in (result.stdout or "").lower():
@@ -216,61 +191,46 @@ def _termux_voice_capture_available() -> bool:
 
 def _pulse_socket_candidates() -> List[str]:
     """Socket paths a PulseAudio/PipeWire client would try by default."""
-    candidates: List[str] = []
+    env = os.environ.get
     # PULSE_SERVER may be "unix:/path", "unix:/path;..." or a bare path.
-    for part in os.environ.get('PULSE_SERVER', '').split(';'):
-        part = part.strip()
-        if part.startswith('unix:'):
-            candidates.append(part[len('unix:'):])
-    pulse_runtime = os.environ.get('PULSE_RUNTIME_PATH')
-    if pulse_runtime:
-        candidates.append(os.path.join(pulse_runtime, 'native'))
-    xdg_runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if xdg_runtime:
-        candidates.append(os.path.join(xdg_runtime, 'pulse', 'native'))
-        candidates.append(os.path.join(xdg_runtime, 'pipewire-0'))
+    parts = [p.strip() for p in env('PULSE_SERVER', '').split(';')]
+    candidates = [p[len('unix:'):] for p in parts if p.startswith('unix:')]
+    if env('PULSE_RUNTIME_PATH'):
+        candidates.append(os.path.join(env('PULSE_RUNTIME_PATH'), 'native'))
+    if env('XDG_RUNTIME_DIR'):
+        candidates += [os.path.join(env('XDG_RUNTIME_DIR'), 'pulse', 'native'),
+                       os.path.join(env('XDG_RUNTIME_DIR'), 'pipewire-0')]
     return [c for c in candidates if c]
 
 
 def _pulse_socket_reachable() -> bool:
-    """True if a PulseAudio/PipeWire socket on disk accepts a connection.
-
-    Covers a sound server running locally (e.g. a remote SSH host) without
-    ``PULSE_SERVER``/``PIPEWIRE_REMOTE`` set; a stale socket of a dead server does not count.
-    """
+    """True if a PulseAudio/PipeWire socket on disk accepts a connection (a stale socket of
+    a dead server does not count). Covers a local sound server without PULSE_SERVER set."""
     import socket
     import stat
     for path in _pulse_socket_candidates():
         try:
             if not stat.S_ISSOCK(os.stat(path).st_mode):
                 continue
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.5)
+                sock.connect(path)
+                return True
         except OSError:
             continue
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            sock.settimeout(0.5)
-            sock.connect(path)
-            return True
-        except OSError:
-            continue
-        finally:
-            sock.close()
     return False
 
 
-def _probe_audio_libraries(
-    warnings: List[str], notices: List[str], *,
-    has_forwarded_audio: bool, termux_mic_cmd: Optional[str], termux_app_installed: bool,
-) -> None:
+def _probe_audio_libraries(warnings: List[str], notices: List[str], *, has_forwarded_audio: bool,
+                           termux_mic_cmd: Optional[str], termux_app_installed: bool) -> None:
     """Import sounddevice and query devices; append the outcome to warnings/notices.
 
-    Host audio forwarding or Termux:API capture downgrade "no devices" /
-    "query failed" to notices — in WSL with PulseAudio device queries can fail
-    even though recording/playback works fine.
+    Host audio forwarding or Termux:API capture downgrade "no devices" / "query
+    failed" to notices — in WSL with PulseAudio the query can fail yet audio works.
     """
     termux_capture = bool(termux_mic_cmd and termux_app_installed)
 
-    def outcome(termux_notice: str, warning: str, *, forwarded_notice: str = "", import_failed: bool = False):
+    def outcome(termux_notice, warning, *, forwarded_notice="", import_failed=False):
         if forwarded_notice and has_forwarded_audio:
             notices.append(forwarded_notice)
         elif termux_capture:
@@ -301,15 +261,12 @@ def _probe_audio_libraries(
 
 
 def detect_audio_environment() -> dict:
-    """Detect whether the current environment supports audio I/O.
+    """Return ``{'available', 'warnings' (hard-fail, block voice), 'notices' (informational)}``.
 
-    Returns ``{'available', 'warnings' (hard-fail, block voice mode),
-    'notices' (informational)}``. SSH, containers and WSL normally have no
-    audio devices, but a reachable sound server (PulseAudio/PipeWire socket or
-    forwarding env vars) is honored.
+    SSH, containers and WSL normally have no audio devices, but a reachable sound
+    server (PulseAudio/PipeWire socket or forwarding env vars) is honored.
     """
-    warnings: List[str] = []
-    notices: List[str] = []
+    warnings, notices = [], []
     termux_mic_cmd = _termux_microphone_command()
     termux_app_installed = _termux_api_app_installed()
     has_forwarded_audio = bool(
@@ -357,9 +314,8 @@ def detect_audio_environment() -> dict:
                 "  PipeWire:   export PIPEWIRE_REMOTE=$XDG_RUNTIME_DIR/pipewire-0\n"
                 "  Then verify: arecord -d 3 /tmp/test.wav && aplay /tmp/test.wav")
 
-    _probe_audio_libraries(
-        warnings, notices, has_forwarded_audio=has_forwarded_audio,
-        termux_mic_cmd=termux_mic_cmd, termux_app_installed=termux_app_installed)
+    _probe_audio_libraries(warnings, notices, has_forwarded_audio=has_forwarded_audio,
+                           termux_mic_cmd=termux_mic_cmd, termux_app_installed=termux_app_installed)
     return {"available": not warnings, "warnings": warnings, "notices": notices}
 
 
@@ -380,10 +336,8 @@ def _get_beep_volume() -> float:
 
 
 def _sd_play_blocking(sd, audio, sample_rate: int, *, timeout: float, blocksize: int = 0) -> None:
-    """``sd.play`` then poll until idle or *timeout*.
-
-    ``sd.wait()`` has no timeout and hangs forever if the device stalls.
-    """
+    """``sd.play`` then poll until idle or *timeout* (``sd.wait()`` has no timeout and
+    hangs forever if the device stalls)."""
     sd.play(audio, samplerate=sample_rate, blocksize=blocksize)
     deadline = time.monotonic() + timeout
     while sd.get_stream() and sd.get_stream().active and time.monotonic() < deadline:
@@ -392,19 +346,15 @@ def _sd_play_blocking(sd, audio, sample_rate: int, *, timeout: float, blocksize:
 
 
 def play_beep(frequency: int = 880, duration: float = 0.12, count: int = 1) -> None:
-    """Play *count* short beeps of *frequency* Hz, *duration* s each.
-
-    Synthesized with numpy only (no sounddevice import on the synthesis step,
-    so no macOS TCC prompt); on macOS output goes through afplay.
-    """
+    """Play *count* short beeps of *frequency* Hz, *duration* s each. Synthesized with
+    numpy only (no sounddevice import => no macOS TCC prompt); macOS output via afplay."""
     try:
         import numpy as np
     except ImportError:
         return
     try:
-        gap = 0.06  # seconds between beeps
         samples_per_beep = int(SAMPLE_RATE * duration)
-        samples_per_gap = int(SAMPLE_RATE * gap)
+        gap = np.zeros(int(SAMPLE_RATE * 0.06), dtype=np.int16)  # 60ms between beeps
         beep_volume = _get_beep_volume()
         parts = []
         for i in range(count):
@@ -415,7 +365,7 @@ def play_beep(frequency: int = 880, duration: float = 0.12, count: int = 1) -> N
             tone[-fade_len:] *= np.linspace(1, 0, fade_len)
             parts.append((tone * beep_volume * 32767).astype(np.int16))
             if i < count - 1:
-                parts.append(np.zeros(samples_per_gap, dtype=np.int16))
+                parts.append(gap)
         audio = np.concatenate(parts)
         if not _sounddevice_output_allowed():
             _play_int16_via_tempfile(audio, SAMPLE_RATE)
@@ -430,22 +380,18 @@ def play_beep(frequency: int = 880, duration: float = 0.12, count: int = 1) -> N
 
 
 # ── Thinking sound — calm ambient "blub blub" while the agent works ──
-# Minutes of silent tool use reads as "it died"; a quiet pair of water-bubble
-# blips fills the gap. Scaled by voice.beep_volume, gated by voice.thinking_sound
-# (default on). The host's *should_play* callback decides when blips are allowed;
-# the output ref-count below tells hosts when real audio is actually flowing.
+# Minutes of silent tool use reads as "it died". Scaled by voice.beep_volume, gated
+# by voice.thinking_sound (default on); the host's *should_play* callback decides
+# when blips are allowed, using the output ref-count below as its signal.
 
 _audio_output_active_count = 0
 _audio_output_lock = threading.Lock()
 
 
 def mark_audio_output_active(active: bool) -> None:
-    """Reference-count real audio output (TTS/file playback).
-
-    Playback paths bracket their work with ``(True)`` / ``(False)`` so
-    ``is_audio_output_active()`` reflects speech leaving the speakers RIGHT NOW —
-    unlike per-turn TTS-done events, which stay 'busy' while waiting for text.
-    """
+    """Ref-count real audio output; playback paths bracket with (True)/(False) so
+    ``is_audio_output_active()`` means speech is leaving the speakers RIGHT NOW —
+    unlike per-turn TTS-done events, which stay 'busy' while waiting for text."""
     global _audio_output_active_count
     with _audio_output_lock:
         _audio_output_active_count = max(0, _audio_output_active_count + (1 if active else -1))
@@ -487,12 +433,9 @@ def _synth_thinking_blip(np, frequency: float) -> "Any":
 
 
 def _thinking_sound_loop(stop: threading.Event, should_play) -> None:
-    """Daemon loop: alternating-pitch blips every ~0.8-1.2s until *stop*.
-
-    Skips (without stopping) whenever *should_play* returns False. macOS:
-    sounddevice output is TCC-gated and per-second afplay churn is worse than
-    silence, so the loop exits immediately there.
-    """
+    """Daemon loop: alternating-pitch blips every ~0.8-1.2s until *stop*; skips (without
+    stopping) while *should_play* is False. macOS exits immediately: sounddevice output
+    is TCC-gated and per-second afplay churn is worse than silence."""
     if not _sounddevice_output_allowed():
         return
     try:
@@ -506,10 +449,10 @@ def _thinking_sound_loop(stop: threading.Event, should_play) -> None:
         try:
             if should_play is None or should_play():
                 blip = blips[i % len(blips)]
+                i += 1
                 sd.play(blip, samplerate=SAMPLE_RATE)
                 stop.wait(len(blip) / SAMPLE_RATE + 0.02)
                 sd.stop()
-                i += 1
         except Exception as e:
             logger.debug("Thinking sound blip failed: %s", e)
             return
@@ -517,11 +460,8 @@ def _thinking_sound_loop(stop: threading.Event, should_play) -> None:
 
 
 def start_thinking_sound(should_play=None) -> bool:
-    """Start the ambient thinking sound (idempotent).
-
-    *should_play* is polled before each blip. Returns True when running
-    (or already running), False when disabled/unavailable.
-    """
+    """Start the ambient thinking sound (idempotent); *should_play* is polled before each
+    blip. True when running (or already running), False when disabled/unavailable."""
     global _thinking_stop
     if not thinking_sound_enabled():
         return False
@@ -556,9 +496,7 @@ class _RecorderBase:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._recording = False
-        self._start_time: float = 0.0
-        self._current_rms: int = 0
+        self._recording, self._start_time, self._current_rms = False, 0.0, 0
 
     @property
     def is_recording(self) -> bool:
@@ -566,9 +504,7 @@ class _RecorderBase:
 
     @property
     def elapsed_seconds(self) -> float:
-        if not self._recording:
-            return 0.0
-        return time.monotonic() - self._start_time
+        return time.monotonic() - self._start_time if self._recording else 0.0
 
     @property
     def current_rms(self) -> int:
@@ -611,9 +547,7 @@ class TermuxAudioRecorder(_RecorderBase):
         except Exception as e:
             raise RuntimeError(f"Termux microphone start failed: {e}") from e
         with self._lock:
-            self._start_time = time.monotonic()
-            self._recording = True
-            self._current_rms = 0
+            self._start_time, self._recording, self._current_rms = time.monotonic(), True, 0
         logger.info("Termux voice recording started")
 
     def _stop_termux_recording(self) -> None:
@@ -625,9 +559,7 @@ class TermuxAudioRecorder(_RecorderBase):
         """Clear recording state under the lock; return (was_recording, path, started_at)."""
         with self._lock:
             was_recording, path, started_at = self._recording, self._recording_path, self._start_time
-            self._recording = False
-            self._recording_path = None
-            self._current_rms = 0
+            self._recording, self._recording_path, self._current_rms = False, None, 0
         return was_recording, path, started_at
 
     def stop(self) -> Optional[str]:
@@ -645,12 +577,9 @@ class TermuxAudioRecorder(_RecorderBase):
 
     def cancel(self) -> None:
         _, path, _ = self._reset_state()
-        try:
+        with suppress(Exception):
             self._stop_termux_recording()
-        except Exception:
-            pass
-        if path and os.path.isfile(path):
-            _unlink_quietly(path)
+        _unlink_quietly(path)
         logger.info("Termux voice recording cancelled")
 
     def shutdown(self) -> None:
@@ -658,12 +587,9 @@ class TermuxAudioRecorder(_RecorderBase):
 
 
 class AudioRecorder(_RecorderBase):
-    """Thread-safe audio recorder using sounddevice.InputStream.
-
-    ``start(on_silence_stop=cb)`` ... ``stop()`` returns a WAV path (or None);
-    ``cancel()`` discards. With ``on_silence_stop`` the recording auto-stops
-    after ``silence_duration`` seconds of silence following speech.
-    """
+    """Thread-safe sounddevice.InputStream recorder: ``start(on_silence_stop=cb)`` ...
+    ``stop()`` -> WAV path or None; ``cancel()`` discards. With a callback the recording
+    auto-stops after ``silence_duration`` seconds of silence following speech."""
 
     supports_silence_autostop = True
 
@@ -675,38 +601,29 @@ class AudioRecorder(_RecorderBase):
         self._on_silence_stop = None
         self._silence_threshold: int = SILENCE_RMS_THRESHOLD
         self._silence_duration: float = SILENCE_DURATION_SECONDS
-        self._min_speech_duration: float = 0.3  # seconds of speech needed to confirm
-        self._max_dip_tolerance: float = 0.3  # max dip before resetting speech
-        self._max_wait: float = 15.0  # max seconds to wait for speech before auto-stop
-        # Hard cap on total length, wired from voice.max_recording_seconds by the
-        # CLI before each recording. 0 (or unset) = no cap.
+        self._min_speech_duration: float = 0.3  # seconds above threshold to confirm speech
+        self._max_dip_tolerance: float = 0.3  # max dip before resetting a speech attempt
+        self._max_wait: float = 15.0  # seconds to wait for speech before auto-stop
+        # Hard cap, wired from voice.max_recording_seconds by the CLI before each recording; 0 = none.
         self._max_recording_seconds: float = 0.0
         self._peak_rms: int = 0  # for the speech-presence check in stop()
         self._reset_detection_state()
 
     def _reset_detection_state(self) -> None:
         self._has_spoken = False
-        self._speech_start: float = 0.0
-        self._dip_start: float = 0.0
-        self._silence_start: float = 0.0
-        self._resume_start: float = 0.0  # sustained speech after silence started
-        self._resume_dip_start: float = 0.0
+        # speech attempt / its dip / silence run / sustained resume after silence / resume dip
+        self._speech_start = self._dip_start = self._silence_start = 0.0
+        self._resume_start = self._resume_dip_start = 0.0
 
     def _max_duration_reached(self, elapsed: float) -> bool:
         """``voice.max_recording_seconds`` cap elapsed (<= 0 / unset disables it)."""
         cap = self._max_recording_seconds
         return bool(cap and cap > 0 and elapsed >= cap)
 
-    # -- silence detection ---------------------------------------------------
-
     def _track_speech(self, rms: int, now: float) -> None:
-        """Advance the speech/dip trackers for one audio block.
-
-        Speech is confirmed after ``_min_speech_duration`` above threshold,
-        tolerating dips shorter than ``_max_dip_tolerance`` (micro-pauses).
-        After confirmation only SUSTAINED resumed speech resets the silence
-        timer — brief ambient spikes must not.
-        """
+        """Advance the speech/dip trackers for one block. Speech is confirmed after
+        ``_min_speech_duration`` above threshold, tolerating dips < ``_max_dip_tolerance``
+        (micro-pauses); afterwards only SUSTAINED resumed speech resets the silence timer."""
         if rms > self._silence_threshold:
             self._dip_start = 0.0
             if self._speech_start == 0.0:
@@ -761,8 +678,7 @@ class AudioRecorder(_RecorderBase):
     def _fire_silence_callback(self) -> None:
         """Invoke ``on_silence_stop`` once, in a daemon thread."""
         with self._lock:
-            cb = self._on_silence_stop
-            self._on_silence_stop = None  # fire only once
+            cb, self._on_silence_stop = self._on_silence_stop, None  # fire only once
         if not cb:
             return
 
@@ -785,14 +701,9 @@ class AudioRecorder(_RecorderBase):
         if self._should_auto_stop(rms, now):
             self._fire_silence_callback()
 
-    # -- public methods ------------------------------------------------------
-
     def _ensure_stream(self) -> None:
-        """Create the InputStream once and keep it alive.
-
-        Between recordings the callback simply discards chunks; this avoids the
-        CoreAudio bug where closing and re-opening an InputStream hangs on macOS.
-        """
+        """Create the InputStream once and keep it alive (between recordings the callback
+        discards chunks): re-opening an InputStream hangs on macOS CoreAudio."""
         if self._stream is not None:
             return
         sd, np = _import_audio()
@@ -805,25 +716,20 @@ class AudioRecorder(_RecorderBase):
 
         stream = None
         try:  # may block on CoreAudio (first call only)
-            stream = sd.InputStream(samplerate=self._sample_rate, channels=CHANNELS, dtype=DTYPE, callback=_callback)
+            stream = sd.InputStream(samplerate=self._sample_rate, channels=CHANNELS, dtype=DTYPE,
+                                    callback=_callback)
             stream.start()
         except Exception as e:
-            if stream is not None:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
+            with suppress(Exception):
+                stream.close()
             raise RuntimeError(
                 f"Failed to open audio input stream: {e}. "
                 "Check that a microphone is connected and accessible.") from e
         self._stream = stream
 
     def start(self, on_silence_stop=None) -> None:
-        """Start capturing from the default input device.
-
-        *on_silence_stop* is invoked (daemon thread, no args) when silence
-        follows speech. Raises ``RuntimeError`` if sounddevice/numpy are missing.
-        """
+        """Start capturing; *on_silence_stop* is invoked (daemon thread, no args) when
+        silence follows speech. Raises ``RuntimeError`` if sounddevice/numpy are missing."""
         try:
             sd, _ = _import_audio()
         except OSError as e:
@@ -854,11 +760,9 @@ class AudioRecorder(_RecorderBase):
         stream, self._stream = self._stream, None
 
         def _do_close():
-            try:
+            with suppress(Exception):
                 stream.stop()
                 stream.close()
-            except Exception:
-                pass
 
         t = threading.Thread(target=_do_close, daemon=True)
         t.start()
@@ -874,15 +778,14 @@ class AudioRecorder(_RecorderBase):
         with self._lock:
             if not self._recording:
                 return None
-            self._recording = False
-            self._current_rms = 0
+            self._recording, self._current_rms = False, 0
             if not self._frames:
                 return None
             _, np = _import_audio()
             audio_data = np.concatenate(self._frames, axis=0)
             self._frames = []
-            elapsed = time.monotonic() - self._start_time
-            logger.info("Voice recording stopped (%.1fs, %d samples)", elapsed, len(audio_data))
+            logger.info("Voice recording stopped (%.1fs, %d samples)",
+                        time.monotonic() - self._start_time, len(audio_data))
             if len(audio_data) < int(self._sample_rate * 0.3):
                 logger.debug("Recording too short (%d samples), discarding", len(audio_data))
                 return None
@@ -895,10 +798,7 @@ class AudioRecorder(_RecorderBase):
 
     def _discard(self) -> None:
         with self._lock:
-            self._recording = False
-            self._frames = []
-            self._on_silence_stop = None
-            self._current_rms = 0
+            self._recording, self._frames, self._on_silence_stop, self._current_rms = False, [], None, 0
 
     def cancel(self) -> None:
         """Stop recording and discard all captured audio (stream stays alive)."""
@@ -922,17 +822,13 @@ class AudioRecorder(_RecorderBase):
 
 def create_audio_recorder() -> AudioRecorder | TermuxAudioRecorder:
     """Return the best recorder backend for the current environment."""
-    if _termux_voice_capture_available():
-        return TermuxAudioRecorder()
-    return AudioRecorder()
+    return TermuxAudioRecorder() if _termux_voice_capture_available() else AudioRecorder()
 
 
 # ── STT dispatch ──
 def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe a WAV via ``transcribe_audio()``, filtering Whisper hallucinations.
-
-    Returns dict with ``success``, ``transcript``, and optionally ``error``.
-    """
+    """Transcribe a WAV via ``transcribe_audio()``, filtering Whisper hallucinations;
+    returns ``{success, transcript[, error]}``."""
     from tools.transcription_tools import MAX_FILE_SIZE, transcribe_audio
 
     result = transcribe_audio(wav_path, model=model, source="voice_mode")
@@ -958,8 +854,7 @@ def _transcribe_wav_in_chunks(wav_path: str, *, model: Optional[str], max_file_s
     """Split an oversized WAV into provider-sized chunks and join transcripts."""
     from tools.transcription_tools import transcribe_audio
 
-    chunk_paths: List[str] = []
-    transcripts: List[str] = []
+    chunk_paths, transcripts = [], []
     try:
         chunk_paths = _split_wav_for_transcription(wav_path, max_file_size=max_file_size)
         if not chunk_paths:
@@ -988,11 +883,10 @@ def _split_wav_for_transcription(wav_path: str, *, max_file_size: int) -> List[s
     """Write WAV chunks small enough to pass the shared STT file-size gate."""
     os.makedirs(_TEMP_DIR, exist_ok=True)
     chunk_paths: List[str] = []
-    header_reserve = 64 * 1024
     with wave.open(wav_path, "rb") as source:
         params = source.getparams()
         block_align = max(1, params.nchannels * params.sampwidth)
-        max_data_bytes = max_file_size - header_reserve
+        max_data_bytes = max_file_size - 64 * 1024  # header reserve
         if max_data_bytes < block_align:
             raise ValueError("STT max_file_size is too small for WAV chunking")
         frames_per_chunk = max(1, max_data_bytes // block_align)
@@ -1002,11 +896,10 @@ def _split_wav_for_transcription(wav_path: str, *, max_file_size: int) -> List[s
             if not frames:
                 break
             index += 1
-            temp = tempfile.NamedTemporaryFile(
-                prefix=f"{os.path.splitext(os.path.basename(wav_path))[0]}_chunk{index:03d}_",
-                suffix=".wav", dir=_TEMP_DIR, delete=False)
-            chunk_path = temp.name
-            temp.close()
+            with tempfile.NamedTemporaryFile(
+                    prefix=f"{os.path.splitext(os.path.basename(wav_path))[0]}_chunk{index:03d}_",
+                    suffix=".wav", dir=_TEMP_DIR, delete=False) as temp:
+                chunk_path = temp.name
             try:
                 with wave.open(chunk_path, "wb") as chunk:
                     chunk.setparams(params._replace(nframes=0))
@@ -1036,23 +929,17 @@ def stop_playback() -> None:
         proc = _active_playback
         _active_playback = None
     if proc and proc.poll() is None:
-        try:
+        with suppress(Exception):
             proc.terminate()
             logger.info("Audio playback interrupted")
-        except Exception:
-            pass
-    try:  # also stop sounddevice playback if active
+    with suppress(Exception):  # also stop sounddevice playback if active
         sd, _ = _import_audio()
         sd.stop()
-    except Exception:
-        pass
 
 
 def _is_wsl2_env() -> bool:
     """True inside WSL (Microsoft kernel signature in /proc/version); False on any error.
-
-    Module-level so tests can patch it instead of ``builtins.open``.
-    """
+    Module-level so tests can patch it instead of ``builtins.open``."""
     try:
         with open("/proc/version", encoding="utf-8", errors="replace") as _fv:
             return "microsoft" in _fv.read().lower()
@@ -1061,21 +948,15 @@ def _is_wsl2_env() -> bool:
 
 
 def _wsl_powershell_tts_available() -> bool:
-    """True when the WSL2 PowerShell TTS playback fallback can be used.
-
-    OUTPUT only (Media.SoundPlayer on the Windows host) — microphone recording
-    still needs a PulseAudio bridge, so callers must keep surfacing that guidance.
-    """
+    """WSL2 PowerShell TTS fallback usable. OUTPUT only (Media.SoundPlayer on the host) —
+    recording still needs a PulseAudio bridge, so callers keep surfacing that guidance."""
     return bool(_is_wsl2_env() and shutil.which("powershell.exe") and shutil.which("ffmpeg"))
 
 
 def play_audio_file(file_path: str) -> bool:
-    """Play an audio file; returns True on success.
-
-    WAV goes through ``sounddevice.play()`` when allowed; otherwise system
-    players: ``afplay`` (macOS), the WSL2 PowerShell bridge, ``ffplay``,
-    ``aplay`` (Linux). Interruptible via ``stop_playback()``.
-    """
+    """Play an audio file; True on success. WAV via ``sounddevice.play()`` when allowed,
+    else system players: afplay (macOS), WSL2 PowerShell bridge, ffplay, aplay (Linux).
+    Interruptible via ``stop_playback()``."""
     mark_audio_output_active(True)  # ref-count real speaker output for the whole call
     try:
         return _play_audio_file_impl(file_path)
@@ -1094,18 +975,15 @@ def _play_wav_via_sounddevice(file_path: str) -> bool:
         # WSLg RDP audio needs a warmup to avoid crackling: the RDP channel takes
         # ~100 ms to stabilise and the small default blocksize worsens
         # clock-adjustment jitter (microsoft/wslg#1257).
+        blocksize = 0  # default (auto)
         if _is_wsl2_env():
-            silence_samples = int(0.1 * sample_rate)
             fade_samples = int(0.1 * sample_rate)
-            fade = np.linspace(0.0, 1.0, fade_samples, dtype=np.float64)
             audio_float = audio_data.astype(np.float64)
-            audio_float[:fade_samples] *= fade
-            tail = np.zeros(int(0.05 * sample_rate), dtype=np.int16)
+            audio_float[:fade_samples] *= np.linspace(0.0, 1.0, fade_samples, dtype=np.float64)
             audio_data = np.concatenate([
-                np.zeros(silence_samples, dtype=np.int16), audio_float.astype(np.int16), tail])
+                np.zeros(int(0.1 * sample_rate), dtype=np.int16), audio_float.astype(np.int16),
+                np.zeros(int(0.05 * sample_rate), dtype=np.int16)])
             blocksize = 4096
-        else:
-            blocksize = 0  # default (auto)
         _sd_play_blocking(sd, audio_data, sample_rate,
                           timeout=len(audio_data) / sample_rate + 2.0, blocksize=blocksize)
         return True
@@ -1117,14 +995,10 @@ def _play_wav_via_sounddevice(file_path: str) -> bool:
 
 
 def _wsl_powershell_player_cmd(file_path: str) -> Optional[List[str]]:
-    """Build the WSL2 PowerShell fallback player command, or None.
-
-    Without a PulseAudio bridge ffplay/aplay have no device, but Media.SoundPlayer
-    on the Windows host does: convert to a uniquely-named WAV in Windows %TEMP%
-    (concurrent TTS calls must not collide) and play it. The WAV is deleted
-    unconditionally and the ORIGINAL exit status re-raised past that cleanup
-    (rm -f always exits 0) so the player loop can fall through.
-    """
+    """WSL2 PowerShell fallback player command, or None. Without a PulseAudio bridge
+    ffplay/aplay have no device, but Media.SoundPlayer on the host does: convert to a
+    uniquely-named WAV in Windows %TEMP% (concurrent TTS must not collide), play, always
+    delete, and re-raise the ORIGINAL exit status past the cleanup (rm -f exits 0)."""
     if not (shutil.which("powershell.exe") and shutil.which("ffmpeg") and _is_wsl2_env()):
         return None
     try:
@@ -1146,9 +1020,8 @@ def _wsl_powershell_player_cmd(file_path: str) -> Optional[List[str]]:
         ps_cmd = " && ".join([
             shlex.join(["ffmpeg", "-i", file_path, "-f", "wav", wsl_wav, "-loglevel", "quiet", "-y"]),
             shlex.join(["powershell.exe", "-NoProfile", "-Command", ps_script])])
-        cleanup = shlex.join(["rm", "-f", wsl_wav])
-        # Full path so the which(cmd[0]) check in the player loop passes.
-        return ["/bin/sh", "-c", f"( {ps_cmd} ); rc=$?; {cleanup}; exit $rc"]
+        # /bin/sh full path so the which(cmd[0]) check in the player loop passes.
+        return ["/bin/sh", "-c", f"( {ps_cmd} ); rc=$?; {shlex.join(['rm', '-f', wsl_wav])}; exit $rc"]
     except Exception:
         return None  # WSL path resolution failed; fall through to ffplay/aplay
 
@@ -1156,13 +1029,10 @@ def _wsl_powershell_player_cmd(file_path: str) -> Optional[List[str]]:
 def _system_player_candidates(file_path: str) -> List[List[str]]:
     """Ordered system-player commands for this platform."""
     system = platform.system()
-    players: List[List[str]] = []
-    if system == "Darwin":
-        players.append(["afplay", file_path])
-    if system == "Linux":
-        ps_cmd = _wsl_powershell_player_cmd(file_path)
-        if ps_cmd:
-            players.append(ps_cmd)
+    players: List[List[str]] = [["afplay", file_path]] if system == "Darwin" else []
+    ps_cmd = _wsl_powershell_player_cmd(file_path) if system == "Linux" else None
+    if ps_cmd:
+        players.append(ps_cmd)
     players.append(["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file_path])
     if system == "Linux":
         players.append(["aplay", "-q", file_path])
@@ -1175,8 +1045,8 @@ def _run_system_player(cmd: List[str]) -> bool:
     try:
         # Sibling of the TTS/STT credential scrub: players must not inherit tokens/keys.
         from tools.environments.local import hermes_subprocess_env
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL, env=hermes_subprocess_env(inherit_credentials=False))
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                env=hermes_subprocess_env(inherit_credentials=False))
         _set_active_playback(proc)
         proc.wait(timeout=300)
         rc = proc.returncode
@@ -1211,36 +1081,28 @@ def _play_audio_file_impl(file_path: str) -> bool:
 
 
 # ── Full-duplex agent-turn listener ──
-# One listener for the WHOLE agent turn in continuous voice mode: armed when an
-# utterance is submitted, disarmed when the turn (response + TTS) is done. It
-# calibrates against the QUIET room at turn start, freezes that baseline through
-# playback (never against speaker bleed), and trips on a windowed majority of
-# blocks — so the user can interject during LLM generation, not just TTS.
-
-# Minimum trigger while TTS flows: speaker bleed reaching the mic is a few
-# hundred RMS (~1000-1400 with loud close speakers); direct speech is 3000-8000.
-PLAYBACK_MIN_TRIGGER = 1500.0
-# A noisy room must never push the trigger above what normal speech can reach.
-TRIGGER_CEILING = 4000.0
-# Multiplier over the quiet-room floor (typically 50-300 RMS): 3x separates
-# speech from ambient while staying reachable (300 * 3 = 900 vs 3000+ speech).
-DEFAULT_BARGE_MULTIPLIER = 3.0
+# One listener for the WHOLE agent turn (armed at utterance submit, disarmed when
+# response + TTS are done): calibrates against the QUIET room at turn start,
+# holds that baseline through playback (never speaker bleed), trips on a windowed
+# majority of blocks — so the user can interject during generation, not just TTS.
+# Speaker bleed at the mic is a few hundred RMS (~1000-1400 loud/close); direct
+# speech is 3000-8000; a quiet-room floor is typically 50-300.
+PLAYBACK_MIN_TRIGGER = 1500.0  # min trigger while TTS flows: bleed alone never trips
+TRIGGER_CEILING = 4000.0  # a noisy room must never push the trigger past normal speech
+DEFAULT_BARGE_MULTIPLIER = 3.0  # over the quiet floor: 300 * 3 = 900 vs 3000+ speech
 
 
 def _vad_log(msg: str) -> None:
     """VAD diagnostic: logger.debug, plus stderr when HERMES_VOICE_DEBUG=1 (live tuning)."""
     logger.debug(msg)
     if os.environ.get("HERMES_VOICE_DEBUG", "").strip() == "1":
-        try:
+        with suppress(Exception):
             print(f"[voice-vad] {msg}", file=sys.stderr, flush=True)
-        except Exception:
-            pass
 
 
 def _capture_until_quiet(stream, np, block: int, pre_roll, *, endpoint_blocks: int, max_blocks: int) -> str:
-    """After a trip, read until *endpoint_blocks* of quiet (or *max_blocks*); write
-    pre-roll + capture to a WAV and return its path. Playback was cut by the
-    trigger, so plain silence endpointing works."""
+    """After a trip, read until *endpoint_blocks* of quiet (or *max_blocks*) and write
+    pre-roll + capture to a WAV. Playback was cut by the trigger, so silence endpointing works."""
     frames: List[Any] = list(pre_roll)
     quiet = 0
     for _ in range(max_blocks):
@@ -1256,31 +1118,23 @@ class _BargeDetector:
     """Per-block barge-in state machine behind ``full_duplex_listen``."""
 
     def __init__(self, np, *, mult: float, calib_blocks: int, trip_blocks: int, grace_blocks: int) -> None:
-        self._np = np
-        self.mult = mult
-        self.calib_blocks = calib_blocks
-        self.grace_blocks = grace_blocks
+        self._np, self.mult, self.calib_blocks, self.grace_blocks = np, mult, calib_blocks, grace_blocks
         self.trip_needed = max(1, int(round(trip_blocks * 0.8)))
         self.ambient: deque = deque(maxlen=100)  # ~3s of quiet-phase RMS
         self.recent_above: deque = deque(maxlen=trip_blocks)
         self.quiet_floor = float(SILENCE_RMS_THRESHOLD)
-        self.floor_locked = False
-        self.playing_prev = False
-        self.playback_seen = False
-        self.grace_remaining = 0
+        self.floor_locked = self.playing_prev = self.playback_seen = False
+        self.grace_remaining = self.block_idx = 0
         self.blocks_since_playback = 10_000
-        self.block_idx = 0
 
     def _floor(self) -> tuple:
         """(pct90, floor): 90th percentile of the quiet window; floor never below the silence threshold."""
-        seq = self.ambient
-        pct90 = float(self._np.percentile(list(seq), 90)) if seq else float(SILENCE_RMS_THRESHOLD)
+        pct90 = float(self._np.percentile(list(self.ambient), 90)) if self.ambient else float(SILENCE_RMS_THRESHOLD)
         return pct90, max(pct90, float(SILENCE_RMS_THRESHOLD))
 
     def _calibrate(self, rms: float, playing: bool) -> bool:
-        """Pre-playback calibration: the listener arms at utterance submit, before
-        any TTS exists, so the first calib_blocks sample the actual quiet room —
-        NOT speaker bleed. Returns True once the floor is locked."""
+        """Lock the floor from the first calib_blocks: the listener arms at utterance
+        submit, before any TTS exists, so they sample the quiet room — NOT bleed."""
         if not playing:
             self.ambient.append(rms)
         if len(self.ambient) >= self.calib_blocks or playing:
@@ -1292,8 +1146,7 @@ class _BargeDetector:
 
     def _track_playback(self, playing: bool) -> None:
         """Grace only when playback starts after a real gap (>=1s), so inter-sentence
-        flapping of the audio-active flag can't chain grace windows together and
-        swallow a genuine interjection."""
+        flapping of the audio-active flag can't chain windows and swallow an interjection."""
         if playing and not self.playing_prev:
             if not self.playback_seen or self.blocks_since_playback > 33:
                 self.grace_remaining = self.grace_blocks
@@ -1312,7 +1165,7 @@ class _BargeDetector:
         trigger = max(self.quiet_floor * self.mult,
                       PLAYBACK_MIN_TRIGGER if playing else float(SILENCE_RMS_THRESHOLD) * 2)
         trigger = min(trigger, TRIGGER_CEILING)
-        # Track ambient drift ONLY while nothing is playing (never absorb bleed) and the block isn't speech.
+        # Track ambient drift ONLY while nothing plays (never absorb bleed) and the block isn't speech.
         if not playing and rms < trigger:
             self.ambient.append(rms)
             _, self.quiet_floor = self._floor()
@@ -1331,43 +1184,34 @@ class _BargeDetector:
                      f"window={sum(self.recent_above)}/{self.trip_needed} phase={phase}")
         if not (above and sum(self.recent_above) >= self.trip_needed):
             return None
-        _vad_log(f"TRIPPED ({phase}): block={self.block_idx} rms={rms:.0f} "
-                 f"floor={self.quiet_floor:.0f} trigger={trigger:.0f} "
-                 f"window={sum(self.recent_above)}/{len(self.recent_above)}")
+        _vad_log(f"TRIPPED ({phase}): block={self.block_idx} rms={rms:.0f} floor={self.quiet_floor:.0f} "
+                 f"trigger={trigger:.0f} window={sum(self.recent_above)}/{len(self.recent_above)}")
         return phase
 
 
 def full_duplex_listen(
-    should_stop: Callable[[], bool],
-    is_playing: Optional[Callable[[], bool]] = None,
-    on_trigger: Optional[Callable[[str], None]] = None,
-    multiplier: Optional[float] = None,
-    sustained_ms: int = 300,
-    calibration_ms: int = 450,
-    grace_ms: int = 500,
-    pre_roll_ms: int = 1200,
-    endpoint_silence_ms: int = 1250,
-    max_utterance_ms: int = 30_000,
+    should_stop: Callable[[], bool], is_playing: Optional[Callable[[], bool]] = None,
+    on_trigger: Optional[Callable[[str], None]] = None, multiplier: Optional[float] = None,
+    sustained_ms: int = 300, calibration_ms: int = 450, grace_ms: int = 500, pre_roll_ms: int = 1200,
+    endpoint_silence_ms: int = 1250, max_utterance_ms: int = 30_000,
 ) -> Optional[str]:
     """Listen across an ENTIRE agent turn; return the captured interruption WAV path.
 
-    Two phases, decided per 30ms block by *is_playing* (usually
-    ``is_audio_output_active``): ``generation`` — the first *calibration_ms* of
-    quiet room set the noise floor, trigger = floor x *multiplier*;
-    ``playback`` — the quiet baseline is HELD, the trigger is clamped up to
-    ``PLAYBACK_MIN_TRIGGER`` so bleed alone can't trip it, and *grace_ms*
-    after playback starts suppresses onset transients. Detection is a windowed
-    majority (>=80% of the last *sustained_ms* of blocks above trigger) so
-    intra-word dips don't reset progress. On detection ``on_trigger(phase)``
-    fires and capture continues from the rolling *pre_roll_ms* buffer until
-    *endpoint_silence_ms* of quiet. Returns ``None`` when *should_stop* ends
-    the turn without speech.
+    Phase per 30ms block from *is_playing* (usually ``is_audio_output_active``):
+    ``generation`` — first *calibration_ms* of quiet room set the floor, trigger =
+    floor x *multiplier*; ``playback`` — floor HELD, trigger clamped up to
+    ``PLAYBACK_MIN_TRIGGER``, *grace_ms* after playback start suppresses onset
+    transients. Trip = >=80% of the last *sustained_ms* blocks above trigger (so
+    intra-word dips don't reset). Then ``on_trigger(phase)`` fires and capture runs
+    from the *pre_roll_ms* buffer until *endpoint_silence_ms* of quiet. ``None``
+    when *should_stop* ends the turn without speech.
     """
     try:
         sd, np = _import_audio()
     except (ImportError, OSError):
         return None
     block = int(SAMPLE_RATE * 0.03)  # 30ms blocks
+    endpoint_blocks = max(1, endpoint_silence_ms // 30)
     detector = _BargeDetector(
         np, mult=float(multiplier) if multiplier else DEFAULT_BARGE_MULTIPLIER,
         calib_blocks=max(1, calibration_ms // 30), trip_blocks=max(1, sustained_ms // 30),
@@ -1387,9 +1231,8 @@ def full_duplex_listen(
                         on_trigger(phase)
                     except Exception as e:
                         logger.debug("full-duplex trigger callback failed: %s", e)
-                return _capture_until_quiet(
-                    stream, np, block, pre_roll,
-                    endpoint_blocks=max(1, endpoint_silence_ms // 30), max_blocks=max(1, max_utterance_ms // 30))
+                return _capture_until_quiet(stream, np, block, pre_roll, endpoint_blocks=endpoint_blocks,
+                                            max_blocks=max(1, max_utterance_ms // 30))
     except Exception as e:
         logger.debug("Full-duplex listener failed: %s", e)
     return None
@@ -1414,10 +1257,8 @@ def _check_plugin_stt_provider(provider: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - discovery failure is non-fatal
         logger.debug("STT plugin requirements check skipped for '%s': %s", key, exc)
         return False
-    if plugin_provider is None:
-        return False
     try:
-        return bool(plugin_provider.is_available())
+        return plugin_provider is not None and bool(plugin_provider.is_available())
     except Exception as exc:  # noqa: BLE001 - plugins must not break status
         logger.warning(
             "STT plugin provider '%s' is_available() raised during requirements "
@@ -1438,11 +1279,8 @@ _NATIVE_STT_LABELS = {
 
 
 def check_voice_requirements() -> Dict[str, Any]:
-    """Check voice mode requirements.
-
-    Returns dict with ``available``, ``audio_available``, ``stt_available``,
-    ``missing_packages``, ``details`` and ``environment``.
-    """
+    """Check voice mode requirements: ``{available, audio_available, stt_available,
+    missing_packages, details, environment}``."""
     from tools.transcription_tools import (
         _get_provider, _load_stt_config, _resolve_command_stt_provider_config, is_stt_enabled)
     stt_config = _load_stt_config()
@@ -1451,11 +1289,10 @@ def check_voice_requirements() -> Dict[str, Any]:
     stt_label = None  # "OK (...)" once a native / command / plugin provider resolves
     if stt_provider in _NATIVE_STT_LABELS:
         stt_label = f"OK ({_NATIVE_STT_LABELS[stt_provider]})"
-    elif stt_enabled:
-        if _resolve_command_stt_provider_config(stt_provider, stt_config) is not None:
-            stt_label = f"OK (command: {stt_provider})"
-        elif _check_plugin_stt_provider(stt_provider):
-            stt_label = f"OK (plugin: {stt_provider})"
+    elif stt_enabled and _resolve_command_stt_provider_config(stt_provider, stt_config) is not None:
+        stt_label = f"OK (command: {stt_provider})"
+    elif stt_enabled and _check_plugin_stt_provider(stt_provider):
+        stt_label = f"OK (plugin: {stt_provider})"
     stt_available = stt_enabled and stt_label is not None
 
     termux_capture = _termux_voice_capture_available()
@@ -1488,16 +1325,13 @@ def cleanup_temp_recordings(max_age_seconds: int = 3600) -> int:
     """Remove ``recording_*.wav`` temp files older than *max_age_seconds*; returns the count."""
     if not os.path.isdir(_TEMP_DIR):
         return 0
-    deleted = 0
-    now = time.time()
+    deleted, now = 0, time.time()
     for entry in os.scandir(_TEMP_DIR):
         if entry.is_file() and entry.name.startswith("recording_") and entry.name.endswith(".wav"):
-            try:
+            with suppress(OSError):
                 if now - entry.stat().st_mtime > max_age_seconds:
                     os.unlink(entry.path)
                     deleted += 1
-            except OSError:
-                pass
     if deleted:
         logger.debug("Cleaned up %d old voice recordings", deleted)
     return deleted

@@ -65,11 +65,7 @@ def _direct(wire: str, provider: str, base_url: Any, api_key: str, model: Any, *
 def _deepinfra_model(section: Dict[str, Any], kind: str) -> Optional[str]:
     """Configured model, else the first catalog model of ``kind`` (stt/tts)."""
     from hermes_cli.models import deepinfra_model_ids
-    model = section.get("model")
-    if not model:
-        candidates = deepinfra_model_ids(kind)
-        model = candidates[0] if candidates else None
-    return model
+    return section.get("model") or next(iter(deepinfra_model_ids(kind)), None)
 
 
 # ── STT ──
@@ -163,8 +159,7 @@ def _resolve_tts_client_config() -> Dict[str, Any]:
         oai = _section(tts_config, "openai")
         model = oai.get("model") or tts.DEFAULT_OPENAI_MODEL
         config_base = oai.get("base_url")
-        if config_base:
-            base_url = config_base
+        base_url = config_base or base_url
         # The managed gateway only proxies MANAGED_OPENAI_TTS_MODELS — same
         # coercion text_to_speech applies server-side.
         if is_managed and not config_base and model not in tts.MANAGED_OPENAI_TTS_MODELS:
