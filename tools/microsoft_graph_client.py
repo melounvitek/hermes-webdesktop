@@ -38,12 +38,9 @@ class MicrosoftGraphAPIError(MicrosoftGraphClientError):
 
 
 class MicrosoftGraphClient:
-    """Minimal async Microsoft Graph client with retries and pagination.
-
-    Retry policy (shared by JSON requests and streaming downloads): transport
-    errors back off exponentially; 401 clears the token cache and refetches;
-    429/5xx honor ``Retry-After``. Each attempt uses a fresh ``AsyncClient``.
-    """
+    """Minimal async Graph client. Retry policy (JSON requests and streaming downloads
+    alike): transport errors back off exponentially; 401 clears the token cache and
+    refetches; 429/5xx honor ``Retry-After``. Each attempt uses a fresh ``AsyncClient``."""
 
     def __init__(
         self, token_provider: MicrosoftGraphTokenProvider, *,
@@ -71,15 +68,15 @@ class MicrosoftGraphClient:
 
     async def patch_json(self, path: str, *, json_body: Any | None = None, headers: Headers = None) -> Any:
         response = await self._request("PATCH", path, json_body=json_body, headers=headers)
-        if response.status_code == 204 or not response.content:
-            return {}
-        return self._decode_json(response)
+        return self._decode_json_or(response, {})
 
     async def delete(self, path: str, *, headers: Headers = None) -> dict[str, Any]:
         response = await self._request("DELETE", path, headers=headers)
-        if response.status_code == 204 or not response.content:
-            return {"deleted": True, "status_code": response.status_code}
-        return self._decode_json(response)
+        return self._decode_json_or(response, {"deleted": True, "status_code": response.status_code})
+
+    def _decode_json_or(self, response: httpx.Response, empty: Any) -> Any:
+        """*empty* for a 204 / bodiless response, else the decoded JSON body."""
+        return empty if response.status_code == 204 or not response.content else self._decode_json(response)
 
     async def collect_paginated(
         self, path: str, *, params: Params = None, headers: Headers = None) -> list[Any]:
@@ -102,9 +99,8 @@ class MicrosoftGraphClient:
     async def download_to_file(
         self, path: str, destination: str | Path, *, headers: Headers = None, chunk_size: int = 65536
     ) -> dict[str, Any]:
-        """Download a Graph resource to disk, streaming the body chunk-by-chunk
-        (recordings and other large artifacts never need to fit in memory).
-        Written to a ``.part`` file and renamed into place only on success."""
+        """Stream a Graph resource to disk chunk-by-chunk (large recordings never
+        fit in memory); written to ``.part`` and renamed into place only on success."""
         url = self._resolve_url(path)
         target = Path(destination)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -145,12 +141,9 @@ class MicrosoftGraphClient:
         self, method: str, url: str, accept: str, json_body: Any | None, headers: Headers,
         perform: Callable[[httpx.AsyncClient, dict[str, str]], Awaitable[tuple[httpx.Response, Any]]],
         kind: str) -> Any:
-        """Run ``perform`` (returning ``(response, result)``) under the retry policy.
-
-        ``kind`` ("request"/"download") only labels the transport-failure messages.
-        A ``MicrosoftGraphAPIError`` for the failing status is raised once retries
-        are exhausted or the status is not retryable; only a 401 forces a token refresh.
-        """
+        """Run ``perform`` (-> ``(response, result)``) under the retry policy. ``kind``
+        only labels transport-failure messages. Raises ``MicrosoftGraphAPIError`` once
+        retries are exhausted or the status is not retryable; only 401 forces a token refresh."""
         attempt = 0
         last_error: Exception | None = None
 
