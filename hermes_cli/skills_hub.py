@@ -302,8 +302,8 @@ def _prompt_for_category(c: Console, existing: List[str]) -> str:
 
 # --- search / browse / inspect ---
 
-def do_search(query: str, source: str = "all", limit: int = 10,
-              console: Optional[Console] = None, as_json: bool = False) -> None:
+def do_search(query: str, source: str = "all", limit: int = 10, console: Optional[Console] = None,
+              as_json: bool = False) -> None:
     """Search registries -> Rich table, or a clean JSON array (``as_json``) for scripting."""
     from tools.skills_hub import unified_search
     c = console or _console
@@ -669,8 +669,7 @@ def _confirm_install(c: Console, bundle, category: str) -> bool:
 
 def do_install(identifier: str, category: str = "", force: bool = False,
                console: Optional[Console] = None, skip_confirm: bool = False,
-               invalidate_cache: bool = True,
-               name_override: str = "",
+               invalidate_cache: bool = True, name_override: str = "",
                source_id: Optional[str] = None) -> None:
     """Fetch, quarantine, scan, confirm, and install a skill.
 
@@ -784,8 +783,7 @@ def _print_tier1_advisory(skill_dir, console) -> None:
 
 # --- list / check / update / audit ---
 
-def do_list(source_filter: str = "all",
-            enabled_only: bool = False,
+def do_list(source_filter: str = "all", enabled_only: bool = False,
             console: Optional[Console] = None) -> None:
     """List installed skills (hub / builtin / local). Enabled state comes from the active
     profile's config — ``-p`` swaps HERMES_HOME at process start, so no profile flag here."""
@@ -945,8 +943,7 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None,
 
 # --- uninstall / reset / bundled-skill management ---
 
-def do_uninstall(name: str, console: Optional[Console] = None,
-                 skip_confirm: bool = False,
+def do_uninstall(name: str, console: Optional[Console] = None, skip_confirm: bool = False,
                  invalidate_cache: bool = True) -> None:
     """Remove a hub-installed skill with confirmation."""
     from tools.skills_hub import uninstall_skill
@@ -962,10 +959,8 @@ def do_uninstall(name: str, console: Optional[Console] = None,
         _print_error(c, msg)
 
 
-def do_reset(name: str, restore: bool = False,
-             console: Optional[Console] = None,
-             skip_confirm: bool = False,
-             invalidate_cache: bool = True) -> None:
+def do_reset(name: str, restore: bool = False, console: Optional[Console] = None,
+             skip_confirm: bool = False, invalidate_cache: bool = True) -> None:
     """Reset a bundled skill's manifest tracking (+ optionally restore from bundled)."""
     from tools.skills_sync import reset_bundled_skill
     c = console or _console
@@ -985,8 +980,7 @@ def do_reset(name: str, restore: bool = False,
     _finish_change(c, invalidate_cache)
 
 
-def do_list_modified(console: Optional[Console] = None,
-                     as_json: bool = False) -> None:
+def do_list_modified(console: Optional[Console] = None, as_json: bool = False) -> None:
     """List bundled skills the user has edited (which `hermes update` keeps)."""
     from tools.skills_sync import list_user_modified_bundled_skills
     c = console or _console
@@ -1046,9 +1040,7 @@ def do_diff(name: str, console: Optional[Console] = None) -> None:
     c.print(f"[dim]Revert with: hermes skills reset {name} --restore[/]\n")
 
 
-def do_opt_out(remove: bool = False,
-               console: Optional[Console] = None,
-               skip_confirm: bool = False,
+def do_opt_out(remove: bool = False, console: Optional[Console] = None, skip_confirm: bool = False,
                invalidate_cache: bool = True) -> None:
     """Write the .no-bundled-skills marker; with ``remove`` also delete pristine (tracked AND
     unmodified) bundled skills. User-edited and non-bundled skills are never touched."""
@@ -1089,8 +1081,7 @@ def do_opt_out(remove: bool = False,
         _clear_skills_cache()
 
 
-def do_opt_in(sync: bool = False,
-              console: Optional[Console] = None,
+def do_opt_in(sync: bool = False, console: Optional[Console] = None,
               invalidate_cache: bool = True) -> None:
     """Remove the opt-out marker so bundled-skill seeding resumes."""
     from tools.skills_sync import set_bundled_skills_opt_out, sync_skills
@@ -1108,10 +1099,8 @@ def do_opt_in(sync: bool = False,
     c.print()
 
 
-def do_repair_official(name: str, restore: bool = False,
-                       console: Optional[Console] = None,
-                       skip_confirm: bool = False,
-                       invalidate_cache: bool = True) -> None:
+def do_repair_official(name: str, restore: bool = False, console: Optional[Console] = None,
+                       skip_confirm: bool = False, invalidate_cache: bool = True) -> None:
     """Backfill or restore official optional skills from repo source."""
     from tools.skills_sync import restore_official_optional_skill
     c = console or _console
@@ -1235,8 +1224,7 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
         c.print(f"[bold red]Unknown target:[/] {target}. Use 'github' or 'clawhub'.\n")
 
 
-def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
-                    auth) -> tuple:
+def _github_publish(skill_path: Path, skill_name: str, target_repo: str, auth) -> tuple:
     """Fork, branch, upload, and open a PR with the skill. Returns (success, message)."""
     import base64
     import httpx
