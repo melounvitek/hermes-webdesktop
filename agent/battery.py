@@ -1,9 +1,8 @@
 """System-battery read-out for the CLI/TUI status bar.
 
-Reads the host battery through ``psutil`` and exposes a compact, colour-coded
-label. Everything degrades to "unavailable" (no battery / read failure) so
-callers can render unconditionally. The status bar repaints on every keystroke,
-so :func:`read_battery` memoises the reading for a few seconds.
+Reads the host battery through ``psutil`` and exposes a compact, colour-coded label. Everything
+degrades to "unavailable" (no battery / read failure) so callers can render unconditionally. The
+status bar repaints on every keystroke, so :func:`read_battery` memoises the reading for a few seconds.
 """
 
 from __future__ import annotations
@@ -15,8 +14,7 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class BatteryStatus:
-    """One reading: ``percent`` clamped 0-100; ``plugged`` None when the
-    platform can't tell."""
+    """One reading: ``percent`` clamped 0-100; ``plugged`` None when the platform can't tell."""
 
     available: bool
     percent: Optional[int] = None
@@ -29,8 +27,7 @@ class BatteryStatus:
 
 UNAVAILABLE = BatteryStatus(available=False)
 
-# Colour buckets, mirroring the status-bar context styles but inverted (a full
-# battery is "good", an empty one is "critical").
+# Colour buckets, mirroring the status-bar context styles but inverted (full battery = "good").
 CATEGORY_GOOD = "good"
 CATEGORY_WARN = "warn"
 CATEGORY_BAD = "bad"
@@ -54,7 +51,6 @@ def _read_battery_uncached() -> BatteryStatus:
         return UNAVAILABLE
     if batt is None:
         return UNAVAILABLE
-
     percent: Optional[int] = None
     raw_percent = getattr(batt, "percent", None)
     if raw_percent is not None:
@@ -69,11 +65,8 @@ def _read_battery_uncached() -> BatteryStatus:
 def read_battery(use_cache: bool = True) -> BatteryStatus:
     """Return the current battery status (cached for a few seconds)."""
     global _cache
-    if use_cache and _cache is not None:
-        ts, cached = _cache
-        if time.monotonic() - ts < _CACHE_TTL_SECONDS:
-            return cached
-
+    if use_cache and _cache is not None and time.monotonic() - _cache[0] < _CACHE_TTL_SECONDS:
+        return _cache[1]
     status = _read_battery_uncached()
     _cache = (time.monotonic(), status)
     return status
@@ -89,8 +82,7 @@ def battery_category(status: BatteryStatus) -> str:
     """Bucket a reading into a colour category: good/warn/bad/critical/dim."""
     if not status.available or status.percent is None:
         return CATEGORY_DIM
-    # On AC power the level isn't a concern — always read as healthy.
-    if status.charging:
+    if status.charging:  # on AC power the level isn't a concern
         return CATEGORY_GOOD
     for bound, category in _LEVEL_CATEGORIES:
         if status.percent <= bound:
@@ -99,12 +91,12 @@ def battery_category(status: BatteryStatus) -> str:
 
 
 def battery_glyph(status: BatteryStatus) -> str:
-    """Return the leading glyph: a bolt while charging, else a battery."""
+    """Leading glyph: a bolt while charging, else a battery."""
     return "\u26a1" if status.charging else "\U0001f50b"  # ⚡ / 🔋
 
 
 def format_battery(status: BatteryStatus) -> str:
-    """Return a compact label like ``🔋 82%`` / ``⚡ 82%`` (empty if N/A)."""
+    """Compact label like ``🔋 82%`` / ``⚡ 82%`` (empty if N/A)."""
     if not status.available or status.percent is None:
         return ""
     return f"{battery_glyph(status)} {status.percent}%"
