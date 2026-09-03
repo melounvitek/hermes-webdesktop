@@ -197,8 +197,9 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
     for kind, payload in _iter_content_parts(_as_list(content)):
-        part = {"type": text_type, "text": payload} if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
-        if part is not None:
+        if kind == "text":
+            converted.append({"type": text_type, "text": payload})
+        elif (part := _image_part_for_role(payload, role, keep_empty_url=False)) is not None:
             converted.append(part)
     return converted
 
@@ -680,7 +681,8 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) 
         ptype = _part_type(part)
         if ptype in _TEXT_PART_TYPES:
             text = part.get("text", "")
-            validated.append({"type": text_type, "text": ctx.sanitize_text(text if isinstance(text, str) else str(text or ""))})
+            text = text if isinstance(text, str) else str(text or "")
+            validated.append({"type": text_type, "text": ctx.sanitize_text(text)})
         elif ptype in _IMAGE_PART_TYPES:
             validated.append(_image_part_for_role(part, role, keep_empty_url=True))
         else:
@@ -766,7 +768,8 @@ def _optional_dict(api_kwargs: Dict[str, Any], key: str) -> Optional[Dict[str, A
 
 
 def _preflight_codex_api_kwargs(
-    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False, sanitize_harmony_tokens: bool = False,
+    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False,
+    sanitize_harmony_tokens: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
@@ -782,7 +785,9 @@ def _preflight_codex_api_kwargs(
     input_items = _preflight_codex_input_items(
         api_kwargs.get("input"), is_github_responses=is_github_responses, sanitize_harmony_tokens=sanitize_harmony_tokens,
     )
-    normalized: Dict[str, Any] = {"model": model.strip(), "instructions": instructions, "input": input_items, "store": False}
+    normalized: Dict[str, Any] = {
+        "model": model.strip(), "instructions": instructions, "input": input_items, "store": False,
+    }
     tools = api_kwargs.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
@@ -944,7 +949,9 @@ class _OutputScan:
                 if raw_item is not None:
                     self.reasoning_items_raw.append(raw_item)
                     if item_type == "compaction":
-                        logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
+                        logger.info(
+                            "Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]),
+                        )
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
@@ -992,7 +999,9 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
             content = []
         else:
             raise RuntimeError("Responses API returned no output items")
-        output = response.output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
+        response.output = output = [
+            SimpleNamespace(type="message", role="assistant", status="completed", content=content),
+        ]
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
     scan = _OutputScan(response_status)
