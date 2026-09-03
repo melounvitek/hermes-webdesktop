@@ -259,10 +259,7 @@ class GatewayNotificationsMixin:
         return switched
 
     async def _deliver_media_from_response(
-        self,
-        response: str,
-        event: MessageEvent,
-        adapter,
+        self, response: str, event: MessageEvent, adapter,
         thread_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Extract explicit MEDIA: tags from an already-streamed response and deliver them.
@@ -335,15 +332,9 @@ class GatewayNotificationsMixin:
             logger.warning("Post-stream media extraction failed: %s", e)
 
     async def _deliver_queued_first_response(
-        self,
-        response: str,
-        source: SessionSource,
-        adapter,
-        metadata: Optional[Dict[str, Any]] = None,
-        event_message_id: Optional[str] = None,
-        text_already_delivered: bool = False,
-        deliver_media: bool = True,
-        stream_consumer=None,
+        self, response: str, source: SessionSource, adapter,
+        metadata: Optional[Dict[str, Any]] = None, event_message_id: Optional[str] = None,
+        text_already_delivered: bool = False, deliver_media: bool = True, stream_consumer=None,
     ) -> None:
         """Deliver a queued response using the normal text+attachment split."""
         from gateway.run import _strip_response_attachments_for_direct_send
@@ -403,8 +394,7 @@ class GatewayNotificationsMixin:
             claimed=_hermes_home / ".update_pending.claimed.json",
             output=_hermes_home / ".update_output.txt",
             exit_code=_hermes_home / ".update_exit_code",
-            prompt=_hermes_home / ".update_prompt.json",
-            response=_hermes_home / ".update_response",
+            prompt=_hermes_home / ".update_prompt.json", response=_hermes_home / ".update_response",
         )
 
     def _resolve_update_target(self, paths: "_UpdatePaths") -> Optional["_UpdateTarget"]:
@@ -422,10 +412,8 @@ class GatewayNotificationsMixin:
                 platform = Platform(platform_str)
                 adapter = self.adapters.get(platform)
                 metadata = self._thread_metadata_for_target(
-                    platform, chat_id, pending.get("thread_id"),
-                    chat_type=pending.get("chat_type"),
-                    reply_to_message_id=pending.get("message_id"),
-                    adapter=adapter,
+                    platform, chat_id, pending.get("thread_id"), chat_type=pending.get("chat_type"),
+                    reply_to_message_id=pending.get("message_id"), adapter=adapter,
                 )
                 if not adapter:
                     return None
@@ -513,10 +501,7 @@ class GatewayNotificationsMixin:
             state.persistent.update_prompt_pending = False
 
     async def _watch_update_progress(
-        self,
-        poll_interval: float = 2.0,
-        stream_interval: float = 4.0,
-        timeout: float = 1800.0,
+        self, poll_interval: float = 2.0, stream_interval: float = 4.0, timeout: float = 1800.0
     ) -> None:
         """Watch ``hermes update --gateway``, streaming output + forwarding prompts.
 
@@ -655,10 +640,8 @@ class GatewayNotificationsMixin:
 
             if adapter and chat_id:
                 metadata = self._thread_metadata_for_target(
-                    platform, chat_id, pending.get("thread_id"),
-                    chat_type=pending.get("chat_type"),
-                    reply_to_message_id=pending.get("message_id"),
-                    adapter=adapter,
+                    platform, chat_id, pending.get("thread_id"), chat_type=pending.get("chat_type"),
+                    reply_to_message_id=pending.get("message_id"), adapter=adapter,
                 )
                 from tools.ansi_strip import strip_ansi
                 output = strip_ansi(output).strip()
@@ -707,15 +690,14 @@ class GatewayNotificationsMixin:
             platform_cfg = self.config.platforms.get(platform)
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
-                    "Restart notification suppressed: %s has gateway_restart_notification=false", platform_str,
+                    "Restart notification suppressed: %s has gateway_restart_notification=false",
+                    platform_str,
                 )
                 return None
 
             metadata = self._thread_metadata_for_target(
-                platform, chat_id, thread_id,
-                chat_type=data.get("chat_type"),
-                reply_to_message_id=data.get("message_id"),
-                adapter=transport.adapter,
+                platform, chat_id, thread_id, chat_type=data.get("chat_type"),
+                reply_to_message_id=data.get("message_id"), adapter=transport.adapter,
             )
             if data.get("delivered_via_upstream_relay") is True:
                 metadata = dict(metadata or {})
@@ -723,8 +705,7 @@ class GatewayNotificationsMixin:
                     if data.get(field):
                         metadata[field] = str(data[field])
             result = await transport.send(
-                platform, str(chat_id),
-                "♻ Gateway restarted successfully. Your session continues.",
+                platform, str(chat_id), "♻ Gateway restarted successfully. Your session continues.",
                 metadata=_non_conversational_metadata(metadata, platform=platform),
             )
             # adapter.send() catches provider errors (e.g. "Chat not found") and returns
@@ -783,9 +764,7 @@ class GatewayNotificationsMixin:
             return False
 
     async def _send_home_channel_startup_notifications(
-        self,
-        *,
-        skip_targets: Optional[set[tuple[str, str, Optional[str]]]] = None,
+        self, *, skip_targets: Optional[set[tuple[str, str, Optional[str]]]] = None
     ) -> set[tuple[str, str, Optional[str]]]:
         """Notify configured home channels that the gateway is back online.
 
@@ -921,13 +900,8 @@ class GatewayNotificationsMixin:
                 platform_name, chat_id, chat_type,
             )
         return SessionSource(
-            platform=platform,
-            chat_id=chat_id,
-            chat_type=chat_type,
-            thread_id=_opt("thread_id"),
-            user_id=_opt("user_id"),
-            user_name=_opt("user_name"),
-            scope_id=scope_id,
+            platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt("thread_id"),
+            user_id=_opt("user_id"), user_name=_opt("user_name"), scope_id=scope_id,
         )
 
     async def _drain_watch_notifications(self, completion_queue) -> None:
@@ -1051,12 +1025,8 @@ class GatewayNotificationsMixin:
             if parent_session_id:
                 metadata["gateway_session_id"] = parent_session_id
             synth_event = MessageEvent(
-                text=synth_text,
-                message_type=MessageType.TEXT,
-                source=source,
-                internal=True,
-                message_id=str(evt.get("message_id") or "").strip() or None,
-                metadata=metadata,
+                text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
+                message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
@@ -1634,11 +1604,8 @@ class GatewayNotificationsMixin:
         _started = getattr(session, "started_at", None)
         _dur = max(0.0, time.time() - _started) if isinstance(_started, (int, float)) else None
         return _format_concise_process_notification(
-            session_id,
-            _redact_gateway_user_facing_secrets(getattr(session, "command", "") or ""),
-            session.exit_code,
-            new_output,
-            duration_seconds=_dur,
+            session_id, _redact_gateway_user_facing_secrets(getattr(session, "command", "") or ""),
+            session.exit_code, new_output, duration_seconds=_dur,
         )
 
     async def _run_process_watcher(self, watcher: dict) -> None:
