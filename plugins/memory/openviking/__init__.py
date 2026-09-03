@@ -279,10 +279,9 @@ class _VikingClient:
             return self._parse_response(send(build(include_tenant=True)))
 
     def _parse_response(self, resp) -> dict:
-        try:
+        data = None
+        with suppress(Exception):
             data = resp.json()
-        except Exception:
-            data = None
         error = data.get("error") if isinstance(data, dict) else None
         if resp.status_code >= 400:
             message = _sanitize_openviking_error_message(getattr(resp, "text", ""), resp.status_code)
@@ -325,10 +324,9 @@ class _VikingClient:
         return temp_file_id
 
     def health(self) -> bool:
-        try:
+        with suppress(Exception):
             return _probe_openviking_identity(self)[0] in _OPENVIKING_IDENTIFIED_STATES
-        except Exception:
-            return False
+        return False
 
     def _anonymous_json(self, path: str) -> dict:
         """Probe server identity without disclosing credentials or tenant IDs."""
@@ -348,12 +346,10 @@ class _VikingClient:
     def openapi_payload(self) -> dict:
         return self._anonymous_json("/openapi.json")
 
-    def validate_auth(self) -> dict:
-        """Validate authenticated access without mutating state."""
+    def validate_auth(self) -> dict:  # authenticated access, no mutation
         return self.get("/api/v1/system/status")
 
-    def validate_root_access(self) -> dict:
-        """Validate ROOT access against a read-only admin endpoint."""
+    def validate_root_access(self) -> dict:  # ROOT access via a read-only admin endpoint
         return self.get("/api/v1/admin/accounts")
 
 
@@ -457,10 +453,10 @@ def _resolve_user_space(client, *, timeout: Optional[float] = None) -> Optional[
     must not cache an unverified identity — a later probe can succeed."""
     try:
         status = client.get("/api/v1/system/status", **({"timeout": timeout} if timeout is not None else {}))
-        return str(((status or {}).get("result") or {}).get("user") or "").strip() or None
     except Exception:
         logger.debug("OpenViking user-space probe failed; using configured fallback", exc_info=True)
         return None
+    return str(((status or {}).get("result") or {}).get("user") or "").strip() or None
 
 
 def _zip_directory(dir_path: Path) -> Path:
@@ -1083,11 +1079,10 @@ def _tool_call_input(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         return {}
     if not isinstance(raw_args, str):
         return raw_args if isinstance(raw_args, dict) else {"value": raw_args}
-    try:
+    with suppress(Exception):
         parsed = json.loads(raw_args)
-    except Exception:
-        return {"value": raw_args}
-    return parsed if isinstance(parsed, dict) else {"value": parsed}
+        return parsed if isinstance(parsed, dict) else {"value": parsed}
+    return {"value": raw_args}
 
 
 def _tool_result_status(message: Dict[str, Any]) -> str:
@@ -1097,19 +1092,15 @@ def _tool_result_status(message: Dict[str, Any]) -> str:
     if raw_status in _TOOL_STATUS_COMPLETED_ALIASES:
         return "completed"
     text = _message_text(message.get("content")).strip()
+    parsed = None
     if text:
-        try:
+        with suppress(Exception):
             parsed = json.loads(text)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, dict):
-            exit_code = parsed.get("exit_code")
-            if (
-                str(parsed.get("status") or "").lower() in _TOOL_STATUS_ERROR_ALIASES
-                or parsed.get("success") is False or bool(parsed.get("error"))
-                or (isinstance(exit_code, int) and exit_code != 0)
-            ):
-                return "error"
+    if isinstance(parsed, dict):
+        exit_code = parsed.get("exit_code")
+        if (str(parsed.get("status") or "").lower() in _TOOL_STATUS_ERROR_ALIASES or parsed.get("success") is False
+                or bool(parsed.get("error")) or (isinstance(exit_code, int) and exit_code != 0)):
+            return "error"
     return "completed"
 
 
@@ -2173,19 +2164,15 @@ class OpenVikingMemoryProvider(MemoryProvider):
         """Marker/lock file under HERMES_HOME: ``pending`` -> pending_sessions/<sid>.json,
         ``lock`` -> runs/<run_id>.lock; an empty run id maps to the legacy recovery lock."""
         name = str(name or "").strip()
-        if not self._hermes_home:
-            return None
-        if kind == "lock" and not name:
-            return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / _LEGACY_RECOVERY_LOCK_FILENAME
-        if not name:
+        if not self._hermes_home or (not name and kind != "lock"):
             return None
         if kind == "pending":
             return Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR / f"{quote(name, safe='')}.json"
-        return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / f"{quote(name, safe='')}.lock"
+        return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / (f"{quote(name, safe='')}.lock" if name else _LEGACY_RECOVERY_LOCK_FILENAME)
 
     @staticmethod
     def _flock_open(path: Path):
-        """Open ``path`` and take a non-blocking exclusive flock; returns the file (caller closes on failure)."""
+        """Open ``path`` and take a non-blocking exclusive flock; returns the file (closed again on failure)."""
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_file = path.open("a+", encoding="utf-8")
         try:
@@ -2271,19 +2258,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def _clear_pending_session(self, sid: str) -> None:
         self._pending_marked_sids.discard(sid)
         path = self._state_path("pending", sid)
-        if path is None:
-            return
         try:
-            path.unlink(missing_ok=True)
+            if path is not None:
+                path.unlink(missing_ok=True)
         except Exception as e:
             logger.debug("Could not clear OpenViking pending session %s: %s", sid, e)
 
     def _pending_sessions(self) -> List[tuple[str, str]]:
         """(sid, owner_run_id) for every marker file; sid falls back to the file name."""
-        if not self._hermes_home:
-            return []
-        directory = Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR
-        if not directory.is_dir():
+        directory = Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR if self._hermes_home else None
+        if directory is None or not directory.is_dir():
             return []
         sessions: List[tuple[str, str]] = []
         for path in sorted(directory.glob("*.json")):
@@ -2685,10 +2669,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         if error:
             return tool_error(error)
         result = self._unwrap_result(self._client.delete("/api/v1/fs", params={"uri": uri, "recursive": False}))
-        payload: Dict[str, Any] = {"status": "deleted", "uri": uri}
-        if isinstance(result, dict):
-            payload["uri"] = result.get("uri") or uri
-            payload.update({key: result[key] for key in ("estimated_deleted_count", "memory_cleanup", "semantic_root_uri", "semantic_status", "queue_status") if key in result})
+        result = result if isinstance(result, dict) else {}
+        payload = {"status": "deleted", "uri": result.get("uri") or uri,
+                   **{key: result[key] for key in ("estimated_deleted_count", "memory_cleanup", "semantic_root_uri", "semantic_status", "queue_status") if key in result}}
         return json.dumps(payload, ensure_ascii=False)
 
     def _tool_add_resource(self, args: dict) -> str:
