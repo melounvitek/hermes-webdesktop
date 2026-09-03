@@ -16,8 +16,7 @@ _INLINE_PATTERNS = [
     (re.compile(r"~~(.+?)~~", re.DOTALL), "STRIKETHROUGH"),
     (re.compile(r"`(.+?)`"), "MONOSPACE"),
     (re.compile(r"(?<!\*)\*(?!\*| )(.+?)(?<!\*)\*(?!\*)"), "ITALIC"),
-    (re.compile(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)"), "ITALIC"),
-]
+    (re.compile(r"(?<!\w)_(?!_)(.+?)(?<!_)_(?!\w)"), "ITALIC")]
 
 
 def _utf16_len(s: str) -> int:
@@ -29,8 +28,7 @@ def _normalize_bullet_markers(source: str) -> str:
     """Replace Markdown bullet markers with plain Unicode bullets.
 
     Signal renders ``- item`` / ``* item`` literally. Fenced code blocks are kept
-    byte-for-byte; list-looking lines inside code are code, not prose bullets.
-    """
+    byte-for-byte; list-looking lines inside code are code, not prose bullets."""
     parts = re.split(r"(```.*?```)", source, flags=re.DOTALL)
     for idx, part in enumerate(parts):
         if idx % 2 == 0:
@@ -43,16 +41,14 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
 
     Signal uses ``bodyRanges`` (signal-cli ``textStyle`` / ``textStyles`` params) in
     the form ``start:length:STYLE``, positions in UTF-16 code units.
-    Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE.
-    """
+    Supported styles: BOLD, ITALIC, STRIKETHROUGH, MONOSPACE."""
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     text = _normalize_bullet_markers(text)
     styles: list[tuple[int, int, str]] = []
     while match := _CODE_BLOCK_RE.search(text):
         inner = match.group(1).rstrip("\n")
-        start = match.start()
+        styles.append((match.start(), len(inner), "MONOSPACE"))
         text = text[: match.start()] + inner + text[match.end() :]
-        styles.append((start, len(inner), "MONOSPACE"))
     new_text = ""
     last_end = 0
     for match in _HEADING_RE.finditer(text):
@@ -65,6 +61,7 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
         new_text += heading_text
         last_end = eol
     text = new_text + text[last_end:]
+    # Inline markers: first pattern to claim a span wins; later overlapping matches are dropped.
     all_matches: list[tuple[int, int, int, int, str]] = []
     occupied: list[tuple[int, int]] = []
     for pattern, style in _INLINE_PATTERNS:
@@ -74,36 +71,36 @@ def markdown_to_signal(text: str) -> tuple[str, list[str]]:
                 all_matches.append((ms, me, match.start(1), match.end(1), style))
                 occupied.append((ms, me))
     all_matches.sort()
+    # Strip the markers, recording (pos, len) removals so earlier block/heading
+    # ranges can be shifted, and capturing inline ranges in the stripped text.
+    result = ""
+    last_end = 0
     removals: list[tuple[int, int]] = []
-    for ms, me, g1s, g1e, _ in all_matches:
+    inline_styles: list[tuple[int, int, str]] = []
+    for ms, me, g1s, g1e, style in all_matches:
         if g1s > ms:
             removals.append((ms, g1s - ms))
         if me > g1e:
             removals.append((g1e, me - g1e))
-    removals.sort()
-    def _adjust(pos: int) -> int:
-        shift = 0
-        for remove_pos, remove_len in removals:
-            if remove_pos < pos:
-                shift += min(remove_len, pos - remove_pos)
-            else:
-                break
-        return pos - shift
-    adjusted_prior: list[tuple[int, int, str]] = []
-    for start, length, style in styles:
-        new_start = _adjust(start)
-        new_end = _adjust(start + length)
-        if new_end > new_start:
-            adjusted_prior.append((new_start, new_end - new_start, style))
-    result = ""
-    last_end = 0
-    inline_styles: list[tuple[int, int, str]] = []
-    for ms, me, g1s, g1e, style in all_matches:
         result += text[last_end:ms]
         inner = text[g1s:g1e]
         inline_styles.append((len(result), len(inner), style))
         result += inner
         last_end = me
+    removals.sort()
+
+    def _adjust(pos: int) -> int:
+        shift = 0
+        for remove_pos, remove_len in removals:
+            if remove_pos >= pos:
+                break
+            shift += min(remove_len, pos - remove_pos)
+        return pos - shift
+
+    adjusted_prior = [
+        (_adjust(start), _adjust(start + length) - _adjust(start), style)
+        for start, length, style in styles
+        if _adjust(start + length) > _adjust(start)]
     text = result + text[last_end:]
     style_strings: list[str] = []
     for cp_start, cp_len, style_type in sorted(adjusted_prior + inline_styles):
