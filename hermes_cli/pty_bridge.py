@@ -1,13 +1,9 @@
 """PTY bridge for `hermes dashboard` chat tab.
 
-Wraps a child process behind a pseudo-terminal so its ANSI output can be streamed to a browser-side
-terminal emulator (xterm.js) and typed keystrokes can be fed back in. The only caller today is the
-``/api/pty`` WebSocket endpoint in ``hermes_cli.web_server``.
-
-* **POSIX-only.** This module depends on ``fcntl``, ``termios``, and ``ptyprocess``, none of which
-exist on native Windows Python. Native Windows ConPTY is a different API (Windows 10 build 17763+)
-and would need a separate Windows implementation (``pywinpty``) — that's tracked as a future
-enhancement.
+Wraps a child process behind a pseudo-terminal so its ANSI output can be streamed to xterm.js and
+keystrokes fed back in; the only caller is the ``/api/pty`` WebSocket endpoint in
+``hermes_cli.web_server``. POSIX-only: depends on ``fcntl``, ``termios`` and ``ptyprocess`` (native
+Windows would need a separate ConPTY/``pywinpty`` implementation).
 """
 
 from __future__ import annotations
@@ -34,21 +30,17 @@ except ImportError:  # pragma: no cover - dev env without ptyprocess
 __all__ = ["PtyBridge", "PtyUnavailableError"]
 
 
-# ``struct winsize`` packs rows/cols as unsigned short (0..65535).  We clamp
-# well below that ceiling: real terminals never exceed a couple thousand
-# columns, and a value above this is a broken probe (WSL2 reports
-# columns=131072) rather than a genuine ultrawide.  Lower bound is 1 — a
-# zero/negative dimension is the classic "no size yet" signal.
+# ``struct winsize`` packs rows/cols as unsigned short; we clamp well below that ceiling because a
+# value above it is a broken probe (WSL2 reports columns=131072), not a genuine ultrawide. Lower
+# bound is 1 — a zero/negative dimension is the classic "no size yet" signal.
 _MIN_DIMENSION = 1
 _MAX_COLS = 2000
 _MAX_ROWS = 1000
 
 
 def _clamp_dimension(value: int, maximum: int) -> int:
-    """Clamp a reported terminal dimension into ``[_MIN_DIMENSION, maximum]``.
-
-    Non-integer / non-finite values fall back to ``_MIN_DIMENSION`` so a bad probe can never reach
-    ``struct.pack`` and raise ``struct.error``.
+    """Clamp into ``[_MIN_DIMENSION, maximum]``; non-integer / non-finite values fall back to
+    ``_MIN_DIMENSION`` so a bad probe can never reach ``struct.pack``.
     """
     try:
         n = int(value)
@@ -58,26 +50,20 @@ def _clamp_dimension(value: int, maximum: int) -> int:
 
 
 class PtyUnavailableError(RuntimeError):
-    """Raised when a PTY cannot be created on this platform.
-
-    Today this means native Windows (no ConPTY bindings) or a dev environment missing
-    ``ptyprocess``. The dashboard surfaces the message as a chat-tab banner.
+    """PTY cannot be created here (native Windows, or ``ptyprocess`` missing); the dashboard
+    surfaces the message as a chat-tab banner.
     """
 
 
 class PtyBridge:
-    """Thin wrapper around ``ptyprocess.PtyProcess`` for byte streaming.
-
-    Not thread-safe. A single bridge is owned by the WebSocket handler that spawned it; the reader
-    runs in an executor thread while writes happen on the event-loop thread.
+    """Thin wrapper around ``ptyprocess.PtyProcess`` for byte streaming. Not thread-safe: owned by
+    the WebSocket handler that spawned it; reads run in an executor thread, writes on the loop.
     """
 
     def __init__(self, proc: "ptyprocess.PtyProcess"):  # type: ignore[name-defined]
         self._proc = proc
         self._fd: int = proc.fd
         self._closed = False
-
-    # -- lifecycle --------------------------------------------------------
 
     @classmethod
     def is_available(cls) -> bool:
@@ -107,14 +93,9 @@ class PtyBridge:
                     "Install with: pip install ptyprocess (or pip install -e '.[pty]')."
                 )
             raise PtyUnavailableError("Pseudo-terminals are unavailable.")
-        # PTY-hosted programs expect TERM to describe the terminal type.
-        # CI often runs without TERM in the parent process, which makes
-        # simple terminal probes like `tput cols` fail before winsize reads.
-        # Preserve explicit caller overrides, but backfill a sensible default
-        # when TERM is missing or blank.
-        # env=None fallback: callers own env policy (process_registry already
-        # sanitizes). Build via the factory with exact preservation so the
-        # site stays findable without changing inherited content.
+        # env=None: callers own env policy (process_registry already sanitizes), so inherit via the
+        # factory with exact preservation. Backfill TERM when missing/blank — CI often lacks it and
+        # probes like `tput cols` then fail before winsize reads; explicit overrides are kept.
         from tools.environments.local import build_subprocess_env
         spawn_env = (
             build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
@@ -139,13 +120,10 @@ class PtyBridge:
         except Exception:
             return False
 
-    # -- I/O --------------------------------------------------------------
-
     def read(self, timeout: float = 0.2) -> Optional[bytes]:
-        """Read up to 64 KiB of raw bytes from the PTY master.
+        """Read up to 64 KiB from the PTY master, blocking at most ``timeout`` seconds.
 
-        Never blocks longer than ``timeout`` seconds. Safe to call after :meth:`close`; returns
-        ``None`` in that case.
+        ``b""`` = nothing yet; ``None`` = EOF / closed (also after :meth:`close`).
         """
         if self._closed:
             return None
@@ -184,10 +162,9 @@ class PtyBridge:
     def resize(self, cols: int, rows: int) -> None:
         """Forward a terminal resize to the child via ``TIOCSWINSZ``.
 
-        Dimensions are clamped first: some hosts (WSL2 via xterm.js) report garbage like
-        ``columns=131072, rows=1``, and ``struct winsize`` packs unsigned shorts, so an unclamped
-        value raises ``struct.error`` (not ``OSError``), breaks resizing and leaves the TUI laid out
-        for a one-row screen — the blank/disappearing-text symptom.
+        Clamped first: WSL2 via xterm.js reports garbage like ``columns=131072, rows=1`` and an
+        unclamped unsigned-short pack raises ``struct.error`` (not ``OSError``), leaving the TUI
+        laid out for a one-row screen — the blank/disappearing-text symptom.
         """
         if self._closed:
             return
@@ -200,13 +177,9 @@ class PtyBridge:
         except OSError:
             pass
 
-    # -- teardown ---------------------------------------------------------
-
     def close(self) -> None:
-        """Terminate the child (SIGTERM → 0.5s grace → SIGKILL) and close fds.
-
-        Idempotent. Reaping the child is important so we don't leak zombies across the lifetime of
-        the dashboard process.
+        """Terminate the child (SIGHUP → SIGTERM → SIGKILL, 0.5s grace each), reap it so the
+        dashboard process never leaks zombies, and close fds. Idempotent.
         """
         if self._closed:
             return
@@ -217,10 +190,8 @@ class PtyBridge:
         except Exception:
             pgid = None
 
-        # SIGHUP is the conventional "your terminal went away" signal.
-        # Send it to the whole foreground process group, not just the PTY
-        # leader: the dashboard TUI starts helper children such as the Python
-        # slash worker, and killing only the leader can strand those helpers.
+        # Signal the whole process group, not just the PTY leader: the dashboard TUI starts helper
+        # children (e.g. the Python slash worker) and killing only the leader strands them.
         for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):  # windows-footgun: ok — POSIX-only module (imports fcntl/termios/ptyprocess at top)
             if not self._proc.isalive():
                 break
@@ -240,7 +211,6 @@ class PtyBridge:
         except Exception:
             pass
 
-    # Context-manager sugar — handy in tests and ad-hoc scripts.
     def __enter__(self) -> "PtyBridge":
         return self
 

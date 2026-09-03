@@ -1,8 +1,7 @@
 """On-demand supply-chain audit for Hermes Agent installs.
 
 Vulnerabilities are looked up against OSV.dev (``api.osv.dev/v1/querybatch`` + ``/v1/vulns/{id}``).
-Single-shot, on-demand, never daily — see the design notes in ``references/security-disclosure-
-triage.md``.
+Single-shot, on-demand, never daily — see ``references/security-disclosure-triage.md``.
 """
 
 from __future__ import annotations
@@ -26,20 +25,8 @@ OSV_BATCH_MAX = 1000  # OSV documented hard cap per request
 HTTP_TIMEOUT = 20
 DETAIL_PARALLELISM = 8
 
-# Severity ordering for --fail-on gating. UNKNOWN sits below LOW so it
-# never blocks unless --fail-on is passed something even lower (we don't
-# expose that).
-SEVERITY_ORDER = {
-    "UNKNOWN": 0,
-    "LOW": 1,
-    "MODERATE": 2,
-    "MEDIUM": 2,
-    "HIGH": 3,
-    "CRITICAL": 4,
-}
-
-
-# ─── Data shapes ──────────────────────────────────────────────────────────────
+# Severity ordering for --fail-on gating. UNKNOWN sits below LOW so it never blocks.
+SEVERITY_ORDER = {"UNKNOWN": 0, "LOW": 1, "MODERATE": 2, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 
 @dataclass(frozen=True)
@@ -107,10 +94,8 @@ def _match_pins(specs: Iterable[str]) -> list[tuple[str, str]]:
 
 
 def _parse_requirements(text: str) -> list[tuple[str, str]]:
-    """Extract ``name==version`` pins. Everything else (>=, ~=, no pin) is skipped.
-
-    A loose pin can't be mapped to a single OSV query, and getting it wrong is worse than missing a
-    finding for an audit tool — false positives train users to ignore output.
+    """Extract ``name==version`` pins. Loose specs (>=, ~=, no pin) are skipped: they can't map to
+    a single OSV query, and false positives train users to ignore an audit tool's output.
     """
     lines = (raw.strip() for raw in text.splitlines())
     return _match_pins(line for line in lines if line and not line.startswith(("#", "-")))
@@ -120,9 +105,6 @@ def _parse_pyproject_pins(text: str) -> list[tuple[str, str]]:
     """Pull ``name==version`` pins from a ``pyproject.toml`` ``dependencies`` list."""
     try:
         import tomllib
-    except ImportError:  # pragma: no cover - 3.10 only
-        return []
-    try:
         data = tomllib.loads(text)
     except Exception:
         return []
@@ -140,10 +122,8 @@ _PLUGIN_PIN_FILES = (
 
 
 def _discover_plugins(hermes_home: Path) -> list[Component]:
-    """Python deps declared by plugins under ``~/.hermes/plugins``.
-
-    Plugins typically don't install into the venv (they're directory-based with relative imports),
-    so their stated requirements are useful audit surface even when the venv scan misses them.
+    """Python deps declared by plugins under ``~/.hermes/plugins``. Plugins typically don't install
+    into the venv, so their stated requirements are audit surface the venv scan misses.
     """
     plugins_dir = hermes_home / "plugins"
     if not plugins_dir.is_dir():
@@ -163,26 +143,17 @@ def _discover_plugins(hermes_home: Path) -> list[Component]:
     return out
 
 
-# npx forms we recognise:
-#   npx -y @scope/pkg@1.2.3
-#   npx --yes pkg@1.2.3
-#   npx pkg@1.2.3 [...args]
-# We deliberately don't try to resolve unversioned names — that maps to
-# "latest" at runtime and isn't a stable audit subject.
+# Recognised pinned refs: ``npx [-y|--yes] [@scope/]pkg@1.2.3`` and ``uvx [--with] pkg==1.2.3``.
+# Unversioned names map to "latest" at runtime and aren't a stable audit subject.
 _NPX_PKG = re.compile(r"^(@[A-Za-z0-9._-]+/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+)@([A-Za-z0-9._+-]+)$")
-# uvx forms:
-#   uvx pkg==1.2.3
-#   uvx --with pkg==1.2.3 entrypoint
 _UVX_PKG = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9._+!-]+)$")
 # launcher basename -> (package-ref regex, OSV ecosystem)
 _MCP_LAUNCHERS = {"npx": (_NPX_PKG, "npm"), "uvx": (_UVX_PKG, "PyPI")}
 
 
 def _extract_mcp_component(server_name: str, command: str, args: list[str]) -> Optional[Component]:
-    """Best-effort: parse `command/args` into a (name, version, ecosystem).
-
-    Returns None when the entry doesn't pin an auditable version (local paths, Docker images,
-    unversioned npx, ...); the audit stays silent rather than guess.
+    """Parse `command/args` into a Component, or None when the entry doesn't pin an auditable
+    version (local paths, Docker images, unversioned npx, ...) — stay silent rather than guess.
     """
     cmd = (command or "").strip().lower()
     launcher = next((k for k in _MCP_LAUNCHERS if cmd.endswith(k)), None)  # any prefix path
@@ -253,11 +224,11 @@ def _osv_query_batch(components: list[Component]) -> dict[Component, list[str]]:
 
 
 def _osv_severity_from_record(record: dict) -> str:
-    """Extract CVSS-derived severity tier from an OSV vuln record."""
-    # OSV puts CVSS in `severity` (top-level or per-affected) and a
-    # human-readable bucket in `database_specific.severity` for GHSAs.
-    # Top-level `severity` holds CVSS vector strings we can't tier without a lib; fall back to
-    # the per-affected ecosystem_specific bucket after the GHSA database_specific one.
+    """CVSS-derived severity tier from an OSV vuln record.
+
+    Top-level ``severity`` holds CVSS vector strings we can't tier without a lib, so use the GHSA
+    ``database_specific`` bucket first, then the per-affected ``ecosystem_specific`` one.
+    """
     candidates = [(record.get("database_specific") or {}).get("severity")] + [
         (entry.get("ecosystem_specific") or {}).get("severity") for entry in record.get("affected") or []
     ]
@@ -330,10 +301,8 @@ def run_audit(
     hermes_home: Optional[Path] = None,
     components: Optional[list[Component]] = None,
 ) -> list[Finding]:
-    """Query OSV for the given (or freshly discovered) components.
-
-    ``components`` lets callers that already ran discovery (e.g. for a count) reuse it instead
-    of scanning the venv/plugins/MCP config a second time.
+    """Query OSV for the given (or freshly discovered) components; ``components`` lets callers
+    that already ran discovery reuse it instead of scanning a second time.
     """
     if components is None:
         components = _discover_components(
@@ -401,15 +370,9 @@ def _render_json(findings: list[Finding], total_components: int) -> str:
     return json.dumps(payload, indent=2)
 
 
-# ─── CLI entrypoint ───────────────────────────────────────────────────────────
-
-
 def cmd_security_audit(args: argparse.Namespace) -> int:
     """Implementation of `hermes security audit`."""
     home = Path(get_hermes_home())
-    skip_venv = bool(getattr(args, "skip_venv", False))
-    skip_plugins = bool(getattr(args, "skip_plugins", False))
-    skip_mcp = bool(getattr(args, "skip_mcp", False))
     output_json = bool(getattr(args, "json", False))
     fail_on = (getattr(args, "fail_on", None) or "critical").upper()
     if fail_on not in SEVERITY_ORDER:
@@ -421,7 +384,10 @@ def cmd_security_audit(args: argparse.Namespace) -> int:
         return 2
 
     components = _discover_components(
-        skip_venv=skip_venv, skip_plugins=skip_plugins, skip_mcp=skip_mcp, hermes_home=home
+        skip_venv=bool(getattr(args, "skip_venv", False)),
+        skip_plugins=bool(getattr(args, "skip_plugins", False)),
+        skip_mcp=bool(getattr(args, "skip_mcp", False)),
+        hermes_home=home,
     )
     total = len(components)
     if total == 0:
