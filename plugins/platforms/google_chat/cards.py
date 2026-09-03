@@ -7,7 +7,7 @@ wire format and must stay byte-identical.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict
 
 # Invisible Unicode codepoints that render as tofu (□) in Google Chat's
 # restricted font stack: ZWS/ZWNJ/ZWJ, bidi marks, word joiner, BOM and
@@ -36,17 +36,14 @@ def format_message(content: str) -> str:
     """
     if not content:
         return content
-
-    text = content
     placeholders: Dict[str, str] = {}
-    counter = [0]
 
     def _ph(value: str) -> str:
-        key = f"\x00GC{counter[0]}\x00"
-        counter[0] += 1
+        key = f"\x00GC{len(placeholders)}\x00"
         placeholders[key] = value
         return key
 
+    text = content
     # Protect fenced blocks first, then inline code.
     text = re.sub(r"(```(?:[^\n]*\n)?[\s\S]*?```)", lambda m: _ph(m.group(0)), text)
     text = re.sub(r"(`[^`]+`)", lambda m: _ph(m.group(0)), text)
@@ -67,12 +64,25 @@ def format_message(content: str) -> str:
 
 def _required_str(mapping: Dict[str, Any], key: str, context: str) -> str:
     value = mapping.get(key)
-    if value is None:
-        raise ValueError(f"{context}.{key} is required")
-    value = str(value).strip()
+    value = str(value).strip() if value is not None else ""
     if not value:
         raise ValueError(f"{context}.{key} is required")
     return value
+
+
+def _copy_opt(dst: Dict[str, Any], src: Dict[str, Any], *keys: tuple[str, str]) -> Dict[str, Any]:
+    """Copy truthy ``src[src_key]`` into ``dst[dst_key]`` as str, in the given order."""
+    for src_key, dst_key in keys:
+        if src.get(src_key):
+            dst[dst_key] = str(src[src_key])
+    return dst
+
+
+def _required_list(mapping: Dict[str, Any], key: str, error: str) -> list:
+    items = mapping.get(key) or []
+    if not isinstance(items, list) or not items:
+        raise ValueError(error)
+    return items
 
 
 def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
@@ -82,10 +92,7 @@ def _button_to_chat(button: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw_params, dict):
         raise ValueError("button.parameters must be an object")
     parameters = [{"key": str(key), "value": str(value)} for key, value in sorted(raw_params.items())]
-    return {
-        "text": text,
-        "onClick": {"action": {"function": action, "parameters": parameters}},
-    }
+    return {"text": text, "onClick": {"action": {"function": action, "parameters": parameters}}}
 
 
 def _text_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
@@ -97,47 +104,38 @@ def _decorated_text_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
         "text": format_message(_required_str(widget, "text", "widget")),
         "wrapText": bool(widget.get("wrap_text", True)),
     }
-    if widget.get("top_label"):
-        decorated["topLabel"] = str(widget["top_label"])
-    if widget.get("bottom_label"):
-        decorated["bottomLabel"] = str(widget["bottom_label"])
-    return {"decoratedText": decorated}
+    return {"decoratedText": _copy_opt(decorated, widget, ("top_label", "topLabel"), ("bottom_label", "bottomLabel"))}
 
 
 def _image_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
     image = {"imageUrl": _required_str(widget, "image_url", "widget")}
-    if widget.get("alt_text"):
-        image["altText"] = str(widget["alt_text"])
-    return {"image": image}
+    return {"image": _copy_opt(image, widget, ("alt_text", "altText"))}
 
 
 def _buttons_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
-    raw_buttons = widget.get("buttons") or []
-    if not isinstance(raw_buttons, list) or not raw_buttons:
-        raise ValueError("button widgets require at least one button")
+    raw_buttons = _required_list(widget, "buttons", "button widgets require at least one button")
     return {"buttonList": {"buttons": [_button_to_chat(btn) for btn in raw_buttons]}}
+
+
+def _selection_item(item: Any) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError("selection items must be objects")
+    return {
+        "text": _required_str(item, "text", "selection item"),
+        "value": _required_str(item, "value", "selection item"),
+        "selected": bool(item.get("selected", False)),
+    }
 
 
 def _selection_widget(widget: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_str(widget, "name", "widget")
-    raw_items = widget.get("items") or []
-    if not isinstance(raw_items, list) or not raw_items:
-        raise ValueError("selection widgets require at least one item")
-    items: List[Dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            raise ValueError("selection items must be objects")
-        items.append({
-            "text": _required_str(item, "text", "selection item"),
-            "value": _required_str(item, "value", "selection item"),
-            "selected": bool(item.get("selected", False)),
-        })
+    raw_items = _required_list(widget, "items", "selection widgets require at least one item")
     return {
         "selectionInput": {
             "name": name,
             "label": str(widget.get("label") or name),
             "type": str(widget.get("selection_type") or "CHECK_BOX"),
-            "items": items,
+            "items": [_selection_item(item) for item in raw_items],
         }
     }
 
@@ -165,37 +163,31 @@ def _widget_to_chat(widget: Dict[str, Any]) -> Dict[str, Any]:
     return renderer(widget)
 
 
+def _section_to_chat(section: Any) -> Dict[str, Any]:
+    if not isinstance(section, dict):
+        raise ValueError("card sections must be objects")
+    widgets = _required_list(section, "widgets", "card section widgets must contain at least one widget")
+    rendered: Dict[str, Any] = {"widgets": [_widget_to_chat(w) for w in widgets]}
+    return _copy_opt(rendered, section, ("header", "header"))
+
+
+def _header_to_chat(header: Any) -> Dict[str, Any]:
+    if not isinstance(header, dict):
+        raise ValueError("card.header must be an object")
+    rendered: Dict[str, Any] = {"title": _required_str(header, "title", "card.header")}
+    _copy_opt(rendered, header, ("subtitle", "subtitle"))
+    if header.get("image_url"):
+        rendered["imageUrl"] = str(header["image_url"])
+        rendered["imageType"] = str(header.get("image_type") or "SQUARE")
+    return _copy_opt(rendered, header, ("image_alt_text", "imageAltText"))
+
+
 def card_spec_to_cards_v2(card_spec: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(card_spec, dict):
         raise ValueError("card must be an object")
-    raw_sections = card_spec.get("sections") or []
-    if not isinstance(raw_sections, list) or not raw_sections:
-        raise ValueError("card.sections must contain at least one section")
-
-    sections: List[Dict[str, Any]] = []
-    for section in raw_sections:
-        if not isinstance(section, dict):
-            raise ValueError("card sections must be objects")
-        widgets = section.get("widgets") or []
-        if not isinstance(widgets, list) or not widgets:
-            raise ValueError("card section widgets must contain at least one widget")
-        rendered: Dict[str, Any] = {"widgets": [_widget_to_chat(w) for w in widgets]}
-        if section.get("header"):
-            rendered["header"] = str(section["header"])
-        sections.append(rendered)
-
-    card: Dict[str, Any] = {"sections": sections}
+    raw_sections = _required_list(card_spec, "sections", "card.sections must contain at least one section")
+    card: Dict[str, Any] = {"sections": [_section_to_chat(s) for s in raw_sections]}
     header = card_spec.get("header")
     if header:
-        if not isinstance(header, dict):
-            raise ValueError("card.header must be an object")
-        rendered_header: Dict[str, Any] = {"title": _required_str(header, "title", "card.header")}
-        if header.get("subtitle"):
-            rendered_header["subtitle"] = str(header["subtitle"])
-        if header.get("image_url"):
-            rendered_header["imageUrl"] = str(header["image_url"])
-            rendered_header["imageType"] = str(header.get("image_type") or "SQUARE")
-        if header.get("image_alt_text"):
-            rendered_header["imageAltText"] = str(header["image_alt_text"])
-        card["header"] = rendered_header
+        card["header"] = _header_to_chat(header)
     return {"cardId": str(card_spec.get("card_id") or "hermes-card"), "card": card}
