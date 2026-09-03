@@ -607,6 +607,12 @@ _SUMMARY_INPUT_MAX_CHARS = 160_000
 
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
 
+
+def _is_summary_stub(content: str) -> bool:
+    """True for a tool result already replaced by a 1-line ``[tool] ... (N chars)`` summary."""
+    return content.startswith("[") and " chars)" in content and len(content) < 400
+
+
 # Shared floor; the clarify summary cap must stay strictly BELOW it so a preserved
 # user answer is never re-summarized away on a later prune pass.
 _PRUNE_MIN_CHARS = 200
@@ -1598,13 +1604,15 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Reset all per-session state for /new or /reset (also resets micro-compaction)."""
         super().on_session_reset()
         self._reset_session_compaction_state()
+        self._reset_micro_compact_cursor_state()
+        self._micro_compact_passes = self._micro_compact_tokens_saved_total = self._micro_compact_turns_since_pass = 0
+
+    def _reset_micro_compact_cursor_state(self) -> None:
+        """Forget the rolling micro summary and its cursor/failure bookkeeping."""
         self._micro_compact_cursor = 0
         self._micro_compact_rolling_summary = ""
         self._micro_compact_consecutive_failures = 0
         self._micro_compact_last_failure_cursor = -1
-        self._micro_compact_passes = 0
-        self._micro_compact_tokens_saved_total = 0
-        self._micro_compact_turns_since_pass = 0
 
     def _begin_compression_telemetry(
         self, *, current_tokens: int | None, attempt_id: str | None = None, session_id: str | None = None,
@@ -1612,10 +1620,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     ) -> Dict[str, Any]:
         """Initialize content-free per-attempt compression telemetry."""
         seed = getattr(self, "_compression_telemetry_seed", None)
-        if isinstance(seed, dict):
-            attempt_id = attempt_id or seed.get("attempt_id")
-            session_id = session_id or seed.get("session_id")
-            trigger_source = trigger_source or seed.get("trigger_source")
+        seed = seed if isinstance(seed, dict) else {}
+        attempt_id = attempt_id or seed.get("attempt_id")
+        session_id = session_id or seed.get("session_id")
+        trigger_source = trigger_source or seed.get("trigger_source")
         telemetry: Dict[str, Any] = {
             "event": "compression_attempt", "attempt_id": attempt_id or uuid.uuid4().hex,
             "session_id": session_id or "", "trigger_source": trigger_source or "unknown",
@@ -1630,8 +1638,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             "time_to_first_progress_ms": None, "summary_generation_ms": None, "commit_ms": None,
             "fallback_used": False, "commit_status": "unknown", "split_status": "unknown", "failure_class": None,
         }
-        self._active_compression_telemetry = telemetry
-        self._last_compression_telemetry = telemetry
+        self._active_compression_telemetry = self._last_compression_telemetry = telemetry
         return telemetry
 
     def _record_compression_regions(
@@ -1662,13 +1669,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if effective_aux_context is not None:
             telemetry["effective_aux_context"] = _safe_int(effective_aux_context)
         if telemetry["effective_aux_context"] is not None and telemetry["aux_prompt_tokens"] is not None:
-            telemetry["fit_margin"] = (
-                telemetry["effective_aux_context"]
-                - telemetry["aux_prompt_tokens"]
-                - (telemetry["aux_output_reservation"] or 0)
-            )
-        previous = telemetry.get("aux_call_duration_ms") or 0
-        telemetry["aux_call_duration_ms"] = previous + max(0, int(duration_ms))
+            telemetry["fit_margin"] = (telemetry["effective_aux_context"] - telemetry["aux_prompt_tokens"]
+                                       - (telemetry["aux_output_reservation"] or 0))
+        telemetry["aux_call_duration_ms"] = (telemetry.get("aux_call_duration_ms") or 0) + max(0, int(duration_ms))
         if not isinstance(phase_timings, dict):
             return
         for key in ("queue_wait_ms", "prompt_build_ms", "time_to_first_progress_ms", "summary_generation_ms", "commit_ms"):
@@ -1775,30 +1778,23 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _reset_real_usage_pairing(self) -> None:
         """Forget the real-vs-rough token pairing used by should_defer_preflight_to_real_usage()."""
-        self.last_real_prompt_tokens = 0
-        self.last_compression_rough_tokens = 0
-        self.last_rough_tokens_when_real_prompt_fit = 0
-        self._pending_request_rough_tokens = 0
+        self.last_real_prompt_tokens = self.last_compression_rough_tokens = 0
+        self.last_rough_tokens_when_real_prompt_fit = self._pending_request_rough_tokens = 0
         self.awaiting_real_usage_after_compression = False
 
     def _reset_session_compaction_state(self) -> None:
         """Shared per-session reset for /new, /reset and session end."""
-        self._previous_summary = None
         # A handoff may carry role="user" only for alternation, so role alone can't prove a human turn existed.
-        self._summary_has_user_turn = None
-        self._last_summary_error = None
+        self._previous_summary = self._summary_has_user_turn = self._last_summary_error = None
+        self._last_aux_model_failure_error = self._last_aux_model_failure_model = None
         self._consecutive_timeout_failures = 0
         # Turns unrecoverably dropped by a static fallback, so callers can warn.
         self._last_summary_dropped_count = 0
-        self._last_summary_fallback_used = False
-        self._last_feasibility_skip = False
-        self._last_aux_model_failure_error = None
-        self._last_aux_model_failure_model = None
+        self._last_summary_fallback_used = self._last_feasibility_skip = False
         self._last_compression_savings_pct = 100.0
         self._ineffective_compression_count = 0
         # Wall-clock probe deadline; 0.0 = unarmed (durable copy re-read via _load_anti_thrash_recovery_deadline).
-        self._anti_thrash_recovery_deadline = 0.0
-        self._structural_no_op_backoff_until = 0.0
+        self._anti_thrash_recovery_deadline = self._structural_no_op_backoff_until = 0.0
         # Observability only; never feeds the strike latch or the fallback streak.
         self._prellm_skip_count = 0
         # Only a healthy completed summary resets this; ordinary fitting responses do not.
@@ -1812,13 +1808,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # True while the local cooldown failed to persist: an empty durable row then means unknown, not cleared.
         self._cooldown_persist_failed = False
         # Callers read this to know compression was attempted but aborted (freeze until manual /compress).
-        self._last_compress_aborted = False
-        self._last_compress_refused_would_grow = False
-        self._context_probed = False
-        self._context_probe_persistable = False
+        self._last_compress_aborted = self._last_compress_refused_would_grow = False
+        self._context_probed = self._context_probe_persistable = False
         self._reset_real_usage_pairing()
-        self._last_compression_telemetry = None
-        self._active_compression_telemetry = None
+        self._last_compression_telemetry = self._active_compression_telemetry = None
         self._compression_telemetry_seed = None
         self._proactive_prune_rearm_tokens = 0
 
@@ -1829,12 +1822,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._summary_failure_cooldown_until = 0.0
         self._cooldown_persist_failed = False
         self._last_summary_error = None
-        self._consecutive_timeout_failures = 0
-        self._fallback_compression_streak = 0
-        self._ineffective_compression_count = 0
-        self._prellm_skip_count = 0
+        self._consecutive_timeout_failures = self._fallback_compression_streak = 0
+        self._ineffective_compression_count = self._prellm_skip_count = self._proactive_prune_rearm_tokens = 0
         self._anti_thrash_recovery_deadline = self._structural_no_op_backoff_until = 0.0
-        self._proactive_prune_rearm_tokens = 0
         self.get_active_compression_failure_cooldown()
         self._load_fallback_compression_streak()
         self._load_ineffective_compression_count()
@@ -1852,9 +1842,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if boundary_reason == "compression" and old_session_id:
             # Parent row carries the streak/strike state across the rotation.
             def _parent(method: str, label: str, current: int) -> int:
-                found, value = self._durable_read(
-                    method, label, int, 0, session_db=session_db, session_id=old_session_id,
-                )
+                found, value = self._durable_read(method, label, int, 0, session_db=session_db, session_id=old_session_id)
                 return value if found and value is not None else current
 
             previous_fallback_streak = _parent(
@@ -1881,10 +1869,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         Returns ``(found, value)``: ``found`` is False when no read happened; ``value`` is None when the
         row held a non-numeric value. Defaults to the bound session row; pass
         ``session_db``/``session_id`` to read another row (parent lineage)."""
-        if session_db is None:
-            session_db = getattr(self, "_session_db", None)
-        if session_id is None:
-            session_id = getattr(self, "_session_id", "")
+        session_db = getattr(self, "_session_db", None) if session_db is None else session_db
+        session_id = getattr(self, "_session_id", "") if session_id is None else session_id
         getter = getattr(session_db, method, None)
         if not session_id or not callable(getter):
             return False, default
@@ -1900,11 +1886,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _durable_write(self, method: str, label: str, *args) -> bool:
         """Best-effort write of a durable per-session value; True only when the write succeeded."""
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        setter = getattr(session_db, method, None)
-        if not session_id or not callable(setter):
+        setter = getattr(getattr(self, "_session_db", None), method, None)
+        if not getattr(self, "_session_id", "") or not callable(setter):
             return False
+        session_id = self._session_id
         try:
             setter(session_id, *args)
             return True
@@ -1920,9 +1905,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             setattr(self, attr, default if value is None else value)
 
     def _load_fallback_compression_streak(self) -> None:
-        self._load_durable(
-            "_fallback_compression_streak", "get_compression_fallback_streak", "compression fallback streak", int, 0,
-        )
+        self._load_durable("_fallback_compression_streak", "get_compression_fallback_streak", "compression fallback streak", int, 0)
 
     def _load_proactive_prune_rearm_tokens(self) -> None:
         """Restore the cache-boundary runway for a resumed durable session."""
@@ -1933,34 +1916,21 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _clear_durable_proactive_prune_rearm(self) -> None:
         """Best-effort removal of the persisted prune-runway key; transcript untouched."""
-        self._durable_write(
-            "patch_session_model_config", "proactive prune runway clear",
-            {PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
-        )
+        self._durable_write("patch_session_model_config", "proactive prune runway clear", {PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None})
 
     def _persist_fallback_compression_streak(self) -> None:
-        self._durable_write(
-            "set_compression_fallback_streak", "compression fallback streak", self._fallback_compression_streak,
-        )
+        self._durable_write("set_compression_fallback_streak", "compression fallback streak", self._fallback_compression_streak)
 
     def _load_ineffective_compression_count(self) -> None:
         """Load the durable anti-thrash strike count so a restart never disarms a guard."""
-        self._load_durable(
-            "_ineffective_compression_count",
-            "get_compression_ineffective_count", "compression ineffective count", int, 0,
-        )
+        self._load_durable("_ineffective_compression_count", "get_compression_ineffective_count", "compression ineffective count", int, 0)
 
     def _persist_ineffective_compression_count(self) -> None:
-        self._durable_write(
-            "set_compression_ineffective_count", "compression ineffective count", self._ineffective_compression_count,
-        )
+        self._durable_write("set_compression_ineffective_count", "compression ineffective count", self._ineffective_compression_count)
 
     def _load_anti_thrash_recovery_deadline(self) -> None:
         """Restore the durable recovery deadline (wall-clock epoch); missing storage leaves it disarmed."""
-        self._load_durable(
-            "_anti_thrash_recovery_deadline",
-            "get_compression_recovery_deadline", "compression recovery deadline", float, 0.0,
-        )
+        self._load_durable("_anti_thrash_recovery_deadline", "get_compression_recovery_deadline", "compression recovery deadline", float, 0.0)
 
     def _set_anti_thrash_recovery_deadline(self, deadline: float) -> None:
         """Set the recovery deadline, persisting on change only (0 = disarmed)."""
@@ -2042,12 +2012,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 return local_state
 
         session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
         getter = getattr(session_db, "get_compression_failure_cooldown", None) if session_db else None
-        if not session_id or getter is None:
+        if not getattr(self, "_session_id", "") or getter is None:
             return local_state
         try:
-            state = getter(session_id)
+            state = getter(self._session_id)
         except Exception as exc:
             if refresh:
                 self._last_cooldown_refresh_was_authoritative = False
@@ -2077,8 +2046,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._last_summary_error = state.get("error")
         self._cooldown_persist_failed = False
         return {
-            "cooldown_until": float(state.get("cooldown_until") or 0.0),
-            "remaining_seconds": remaining_seconds,
+            "cooldown_until": float(state.get("cooldown_until") or 0.0), "remaining_seconds": remaining_seconds,
             "error": self._last_summary_error,
         }
 
@@ -2092,9 +2060,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         remaining = max(0.0, self._summary_failure_cooldown_until - time.monotonic())
         cooldown_until = time.time() + remaining
 
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        if not session_db or not session_id:
+        if not getattr(self, "_session_db", None) or not getattr(self, "_session_id", ""):
             return
         # A store without the recorder or a failed write both leave the durable row unauthoritative.
         self._cooldown_persist_failed = not self._durable_write(
@@ -2105,9 +2071,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Record a consecutive timeout/stall failure via the shared ladder.
 
         Persisted error is prefixed ``backoff:<failure_kind>:strategy=<tail_mode>`` so a restart rebuilds it."""
-        strategy = getattr(self, "tail_mode", None) or "unknown"
-        kind = failure_kind or "timeout"
-        stamped = f"backoff:{kind}:strategy={strategy}: {error}"
+        stamped = f"backoff:{failure_kind or 'timeout'}:strategy={getattr(self, 'tail_mode', None) or 'unknown'}: {error}"
         self._record_compression_failure_cooldown(float(_next_timeout_cooldown(self)), stamped)
 
     def _clear_compression_failure_cooldown(self) -> None:
@@ -2138,26 +2102,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         api_mode: str = "", max_tokens: int | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
-        runtime_changed = (model, provider, base_url, api_mode) != (
-            self.model, self.provider, self.base_url, self.api_mode
-        )
-        self.model = model
-        self.base_url = base_url
-        self.api_key = api_key
-        self.provider = provider
-        self.api_mode = api_mode
+        runtime_changed = (model, provider, base_url, api_mode) != (self.model, self.provider, self.base_url, self.api_mode)
+        self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         self.context_length = context_length
         # Re-resolve from the raw config value so a switch away from an overridden model falls back correctly.
         _config_pct = getattr(self, "_config_threshold_percent", self.threshold_percent)
-        _new_base = resolve_model_threshold(model, self.model_thresholds, _config_pct)
-        self._base_threshold_percent = _new_base
-        self.threshold_percent = self._effective_threshold_percent(context_length, _new_base)
+        self._base_threshold_percent = resolve_model_threshold(model, self.model_thresholds, _config_pct)
+        self.threshold_percent = self._effective_threshold_percent(context_length, self._base_threshold_percent)
         # max_tokens=None means "unspecified": keep the existing output reservation.
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
-        self.threshold_tokens = self._compute_threshold_tokens(
-            context_length, self.threshold_percent, self.max_tokens,
-        )
+        self.threshold_tokens = self._compute_threshold_tokens(context_length, self.threshold_percent, self.max_tokens)
         self._apply_threshold_tokens_cap()
         # Reset to None so the property recomputes via the mode-aware path (not the legacy formula).
         self._tail_token_budget = None
@@ -2168,9 +2123,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # smaller window it would let should_defer_preflight_to_real_usage() suppress a compaction the
         # new model needs (oversized send after switch). 0 (not the -1 sentinel) means "no real usage
         # yet -> use the rough estimate" so post-response should_compress still fires.
-        self.last_prompt_tokens = 0
-        self.last_completion_tokens = 0
-        self.last_total_tokens = 0
+        self.last_prompt_tokens = self.last_completion_tokens = self.last_total_tokens = 0
         self._reset_real_usage_pairing()
         # Strikes were judged against the previous threshold; void them durably too.
         self._record_ineffective_compression_verdict(0)
@@ -2180,8 +2133,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._persist_fallback_compression_streak()
             # Cooldowns are scoped to the failed model/provider; a switch gets an immediate attempt.
             self._clear_compression_failure_cooldown()
-        self._verify_compaction_cleared_threshold = False
-        self._last_compression_made_progress = False
+        self._verify_compaction_cleared_threshold = self._last_compression_made_progress = False
         # Runway was computed against the previous model's trigger; clear the durable copy too.
         self._proactive_prune_rearm_tokens = 0
         self._clear_durable_proactive_prune_rearm()
@@ -2198,10 +2150,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     @staticmethod
     def _coerce_max_tokens(value: Any) -> int | None:
         """Normalize max_tokens to a positive int, or None for "no reservation"."""
-        if value is None:
-            return None
         try:
-            ivalue = int(value)
+            ivalue = int(value) if value is not None else 0
         except (TypeError, ValueError):
             return None
         return ivalue if ivalue > 0 else None
@@ -2257,11 +2207,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
     ):
-        self.model = model
-        self.base_url = base_url
-        self.api_key = api_key
-        self.provider = provider
-        self.api_mode = api_mode
+        self.model, self.base_url, self.api_key, self.provider, self.api_mode = model, base_url, api_key, provider, api_mode
         # "lean" = small clamped tail + verbatim-user summary section; "legacy" = 0.20*window tail.
         self.tail_mode = tail_mode if tail_mode in ("legacy", "lean") else "lean"
         # Per-model overrides (longest substring match wins); floor applied on top.
@@ -2272,8 +2218,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.threshold_percent = self._base_threshold_percent
         # Effective trigger = min(ratio threshold, cap); re-applied in update_model().
         self.threshold_tokens_cap = self._coerce_threshold_tokens_cap(threshold_tokens_cap)
-        self.protect_first_n = protect_first_n
-        self.protect_last_n = protect_last_n
+        self.protect_first_n, self.protect_last_n = protect_first_n, protect_last_n
         # Proactive prune runs independently of the full-compression trigger. 0 = disabled.
         self.proactive_prune_tokens = int(proactive_prune_tokens or 0)
         # Floor at 200 chars: below that a summary can exceed what it replaces and pass 2 re-summarizes
@@ -2293,15 +2238,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
         # Micro-compaction is OFF by default: each pass breaks the prompt-cache prefix every turn.
         self._micro_compact_enabled = False
-        self._micro_compact_cursor = 0
-        self._micro_compact_rolling_summary = ""
-        self._micro_compact_consecutive_failures = 0
-        self._micro_compact_last_failure_cursor = -1
+        self._reset_micro_compact_cursor_state()
         self._micro_compact_defrag_threshold_tokens = 2000
         # Set when _defrag_rolling_summary pops _DB_PERSISTED_MARKER in place; finalize_turn resets the flush cursor.
         self._flush_scan_cursor_invalidated: bool = False
-        self._micro_compact_passes: int = 0
-        self._micro_compact_tokens_saved_total: int = 0
+        self._micro_compact_passes = self._micro_compact_tokens_saved_total = 0
         # Cadence dial: how often the cache-breaking pass is paid. 1 = every turn.
         self._micro_compact_every_n_turns: int = 1
         self._micro_compact_turns_since_pass: int = 0
@@ -2313,35 +2254,32 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._resolved_context_length: int | None = None
         self._threshold_tokens = self._tail_token_budget = self._max_summary_tokens = None
         self.compression_count = 0
-
         # The init log reports resolved budgets; emit it on first resolution to keep construction non-blocking.
         self._log_init_summary = not quiet_mode
         self._context_probed = False  # True after a step-down from context error
-
-        self.last_prompt_tokens = 0
-        self.last_completion_tokens = 0
+        self.last_prompt_tokens = self.last_completion_tokens = 0
         self._reset_real_usage_pairing()
-
         self.summary_model = summary_model_override or ""
         self._session_db: Any = None
         self._session_id: str = ""
-
         # Per-session state (also reset by /new, /reset and session end).
         self._reset_session_compaction_state()
-        # Auth failure (401/403) on the summary call: compress() must ABORT regardless of abort_on_summary_failure.
-        self._last_summary_auth_failure: bool = False
-        # Transient network failure: ABORT and preserve the session; retrying later beats discarding context.
-        self._last_summary_network_failure: bool = False
-        # Empty/whitespace summary content: ABORT and preserve, independent of abort_on_summary_failure.
-        self._last_summary_empty_content_failure: bool = False
-        # finish_reason == "length": the summary is PARTIAL and must never become a checkpoint; ABORT.
-        self._last_summary_truncated_failure: bool = False
+        # Terminal summary failures (access/quota, network, empty content, finish_reason=length): compress()
+        # must ABORT and preserve the session regardless of abort_on_summary_failure (see _TERMINAL_SUMMARY_FAILURES).
+        for flag, _class, _msg in _TERMINAL_SUMMARY_FAILURES:
+            setattr(self, flag, False)
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
         self.last_total_tokens = usage.get("total_tokens", self.last_prompt_tokens + self.last_completion_tokens)
+        self._apply_real_prompt_verdict()
+        # Consume the flag once real usage arrives even without prompt_tokens, so it can't stay armed.
+        self._verify_compaction_cleared_threshold = self.awaiting_real_usage_after_compression = False
+
+    def _apply_real_prompt_verdict(self) -> None:
+        """Pair the real prompt count with its rough estimate and judge the armed compaction verdict."""
         if self.last_prompt_tokens > 0:
             self.last_real_prompt_tokens = self.last_prompt_tokens
             if self.last_prompt_tokens < self.threshold_tokens:
@@ -2374,16 +2312,12 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                         )
                 else:
                     self._record_ineffective_compression_verdict(0)
-        # Consume the flag once real usage arrives even without prompt_tokens, so it can't stay armed.
-        self._verify_compaction_cleared_threshold = False
-        self.awaiting_real_usage_after_compression = False
 
     def maybe_seed_preflight_display_tokens(self, preflight_tokens: int) -> None:
         """Seed ``last_prompt_tokens`` from a rough preflight estimate, display-only.
 
         Seeds ONLY from the 0 state; the -1 sentinel and any real provider reading are preserved."""
-        _last = self.last_prompt_tokens
-        if _last == 0 and preflight_tokens > _last:
+        if self.last_prompt_tokens == 0 and preflight_tokens > 0:
             self.last_prompt_tokens = preflight_tokens
 
     def snapshot_preflight_display_tokens(self) -> int:
@@ -2417,26 +2351,19 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # After compaction last_real_prompt_tokens is STALE (above threshold); defer one turn until real usage arrives.
         if self.awaiting_real_usage_after_compression:
             return True
-        if self.last_real_prompt_tokens <= 0:
+        if self.last_real_prompt_tokens <= 0 or self.last_real_prompt_tokens >= self.threshold_tokens:
             return False
-        if self.last_real_prompt_tokens >= self.threshold_tokens:
-            return False
-
         baseline = self.last_rough_tokens_when_real_prompt_fit or self.last_compression_rough_tokens
         if baseline <= 0:
             return False
-
         # No baseline ratchet here: advancing rough without a matching real reading would defer on stale data.
-        growth = max(0, rough_tokens - baseline)
-        projected_real = self.last_real_prompt_tokens + growth
-        return projected_real < self.threshold_tokens
+        return self.last_real_prompt_tokens + max(0, rough_tokens - baseline) < self.threshold_tokens
 
     def should_compress(self, prompt_tokens: int = None) -> bool:
         """Return True when compression should run now.
 
         Includes anti-thrash protection; see :meth:`should_compress_info` for the reason."""
-        decision, _reason = self.should_compress_info(prompt_tokens)
-        return decision
+        return self.should_compress_info(prompt_tokens)[0]
 
     def should_compress_info(self, prompt_tokens: int = None) -> "tuple[bool, str | None]":
         """Return ``(should_compress, reason)``.
@@ -2454,15 +2381,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Return the current automatic-compaction block reason, or None.
 
         One of ``"cooldown:<seconds>"``, ``"structural_backoff:<seconds>"``, ``"ineffective"``."""
-        _cooldown_remaining = self._summary_failure_cooldown_until - time.monotonic()
-        if _cooldown_remaining > 0:
-            return f"cooldown:{_cooldown_remaining:.0f}"
-        _structural_remaining = self._structural_no_op_backoff_until - time.monotonic()
-        if _structural_remaining > 0:
-            return f"structural_backoff:{_structural_remaining:.0f}"
-        if self._ineffective_compression_count >= 2 or self._fallback_compression_streak >= 2:
-            return "ineffective"
-        return None
+        for label, until in (
+            ("cooldown", self._summary_failure_cooldown_until), ("structural_backoff", self._structural_no_op_backoff_until),
+        ):
+            remaining = until - time.monotonic()
+            if remaining > 0:
+                return f"{label}:{remaining:.0f}"
+        return "ineffective" if self._tripped() else None
+
+    def _tripped(self) -> bool:
+        """Anti-thrash breaker state: two ineffective compactions or two fallback summaries in a row."""
+        return self._ineffective_compression_count >= 2 or self._fallback_compression_streak >= 2
 
     def _refresh_durable_guards(self) -> None:
         """Re-read durable cooldown + breaker state; called only when a gate is about to block."""
@@ -2503,7 +2432,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return True
         # Anti-thrash back-off must not be permanent: after _ANTI_THRASH_RECOVERY_SECONDS blocked, allow ONE
         # probe by dropping counters to 1 strike (persisted). Deadline is armed lazily and persisted on the row.
-        if self._ineffective_compression_count >= 2 or self._fallback_compression_streak >= 2:
+        if self._tripped():
             # Wall clock: the deadline is persisted so a rebuilt compressor resumes the SAME window.
             _now = time.time()
             if self._anti_thrash_recovery_deadline <= 0.0 or (
@@ -2556,9 +2485,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         accumulated = 0
         cut = n  # start from beyond the end
         for i in range(n - 1, head_end - 1, -1):
-            msg_tokens = _estimate_msg_budget_tokens(
-                messages[i], charge_stale_thinking=(charge_all_thinking or i == newest_asst_idx),
-            )
+            msg_tokens = _estimate_msg_budget_tokens(messages[i], charge_all_thinking or i == newest_asst_idx)
             if accumulated + msg_tokens > ceiling and (n - i) >= min_tail:
                 return (i if cut_at_break else cut), accumulated
             accumulated += msg_tokens
@@ -2592,8 +2519,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if h in content_hashes:
                 result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
                 pruned += 1
-            else:
-                content_hashes.add(h)
+            content_hashes.add(h)
         return pruned
 
     @staticmethod
@@ -2603,16 +2529,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if msg.get("role") != "assistant" or not msg.get("tool_calls"):
             return False
         new_tcs = []
-        modified = False
         for tc in msg["tool_calls"]:
-            if isinstance(tc, dict):
-                args = tc.get("function", {}).get("arguments", "")
-                if len(args) > 500:
-                    new_args = _truncate_tool_call_args_json(args)
-                    if new_args != args:
-                        tc = {**tc, "function": {**tc["function"], "arguments": new_args}}
-                        modified = True
-            new_tcs.append(tc)
+            args = tc.get("function", {}).get("arguments", "") if isinstance(tc, dict) else ""
+            new_args = _truncate_tool_call_args_json(args) if len(args) > 500 else args
+            new_tcs.append(tc if new_args == args else {**tc, "function": {**tc["function"], "arguments": new_args}})
+        modified = any(new is not old for new, old in zip(new_tcs, msg["tool_calls"]))
         if modified:
             result[idx] = {**msg, "tool_calls": new_tcs}
         return modified
@@ -2633,17 +2554,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if isinstance(content, list) or (isinstance(content, dict) and content.get("_multimodal")):
             # Shared strip policy with pass 3.5 (also drops the stale api_content sidecar).
             new_msg = _strip_images_from_tool_msg(msg)
-            if new_msg is None:
-                return False
-            result[idx] = new_msg
-            return True
-        if not isinstance(content, str) or not content or content == _PRUNED_TOOL_PLACEHOLDER:
-            return False
-        if content.startswith(("[Duplicate tool output", "[screenshot removed")):
-            return False
-        if content.startswith("[") and " chars)" in content and len(content) < 400:
-            return False
-        if len(content) <= min_prune_chars:
+            if new_msg is not None:
+                result[idx] = new_msg
+            return new_msg is not None
+        if (
+            not isinstance(content, str) or not content or content == _PRUNED_TOOL_PLACEHOLDER
+            or content.startswith(("[Duplicate tool output", "[screenshot removed"))
+            or _is_summary_stub(content) or len(content) <= min_prune_chars
+        ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
         if protected_skills and tool_name == "skill_view":
@@ -2694,9 +2612,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                     _shrink_at(i)
             # Last resort: the newest body alone may exceed the soft budget; summarize it.
             if (
-                last_tool_idx is not None
-                and last_tool_idx >= prune_boundary
-                and _protected_region_tokens() > soft_ceiling
+                last_tool_idx is not None and last_tool_idx >= prune_boundary and _protected_region_tokens() > soft_ceiling
             ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars):
                 demoted += 1
                 pressure_hits += 1
@@ -2762,8 +2678,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if session_db and session_id and not callable(getattr(session_db, "archive_and_compact", None)):
             return messages, 0
         pruned_msgs, pruned_count = self._prune_old_tool_results(
-            messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None,
-            min_prune_chars=self.proactive_prune_min_result_chars,
+            messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None, min_prune_chars=self.proactive_prune_min_result_chars,
         )
         if not pruned_count:
             # No-op contract: return the INPUT object so callers can gate on `result is not input`.
@@ -3012,18 +2927,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             if msg.get("role") != "tool" or i in protected:
                 continue
             content = msg.get("content")
-            if not isinstance(content, str):
+            if not isinstance(content, str) or len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content:
                 continue
-            if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS:
+            if _is_summary_stub(content):
                 continue
-            if SKILL_PRUNED_MARKER_PREFIX in content:
-                continue
-            if content.startswith("[") and " chars)" in content and len(content) < 400:
-                continue  # already a summary stub
-            stub = _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)
-            replaced = {**msg, "content": stub}
-            drop_stale_api_content(replaced)
-            result[i] = replaced
+            result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id))
             demoted += 1
         if demoted and not self.quiet_mode:
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
@@ -4490,10 +4398,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Batch marker holds MORE history than the rolling summary: reset micro state so it can't
         # supersede/defrag content it lacks; the next micro pass rehydrates from the batch marker.
-        self._micro_compact_rolling_summary = ""
-        self._micro_compact_cursor = 0
-        self._micro_compact_consecutive_failures = 0
-        self._micro_compact_last_failure_cursor = -1
+        self._reset_micro_compact_cursor_state()
         self._proactive_prune_rearm_tokens = 0
         return compressed
 
