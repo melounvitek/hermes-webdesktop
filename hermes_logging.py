@@ -128,7 +128,6 @@ def _install_session_record_factory() -> None:
         except Exception:
             record.hermes_home = ""  # type: ignore[attr-defined]
         return record
-
     _session_record_factory._hermes_session_injector = True  # type: ignore[attr-defined]
     logging.setLogRecordFactory(_session_record_factory)
 
@@ -180,9 +179,7 @@ def setup_logging(
     global _logging_initialized
     home = hermes_home or get_hermes_home()
     log_dir = mkdir_under_hermes_home(home / "logs")
-
     cfg_level, cfg_max_size, cfg_backup = _read_logging_config()
-
     level_name = (log_level or cfg_level or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     max_bytes = (max_size_mb or cfg_max_size or 5) * 1024 * 1024
@@ -215,9 +212,7 @@ def setup_logging(
     # Root level must be low enough for the handlers to fire.
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)
-
     _quiet_noisy_loggers()
-
     _logging_initialized = True
     return log_dir
 
@@ -230,7 +225,6 @@ def setup_verbose_logging() -> None:
 
     if any(getattr(h, "_hermes_verbose", False) for h in root.handlers):
         return
-
     handler = logging.StreamHandler(_safe_stderr())
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(RedactingFormatter(_LOG_FORMAT_VERBOSE, datefmt="%H:%M:%S"))
@@ -239,7 +233,6 @@ def setup_verbose_logging() -> None:
 
     if root.level > logging.DEBUG:
         root.setLevel(logging.DEBUG)
-
     _quiet_noisy_loggers()
     # rex-deploy at INFO for sandbox status.
     logging.getLogger("rex-deploy").setLevel(logging.INFO)
@@ -545,12 +538,10 @@ def enable_profile_log_routing(profile_homes: Sequence[str | Path]) -> bool:
             return False
         if any(isinstance(h, _ProfileRoutingFileHandler) for h in _queued_file_handlers):
             return True
-
         listener = _queue_listener
         if listener is not None:
             listener.stop()
             _queue_listener = None
-
         replacement = []
         for existing in _queued_file_handlers:
             if isinstance(existing, RotatingFileHandler):
@@ -558,7 +549,6 @@ def enable_profile_log_routing(profile_homes: Sequence[str | Path]) -> bool:
                 _quietly(existing.close)
             else:
                 replacement.append(existing)
-
         _queued_file_handlers[:] = replacement
         if listener is not None:
             _start_queue_listener_locked()
@@ -598,7 +588,6 @@ def _add_rotating_handler(
             and Path(getattr(existing, "baseFilename", "")).resolve() == resolved
         ):
             return
-
     handler = _new_file_handler(
         path, level=level, max_bytes=max_bytes, backup_count=backup_count, formatter=formatter,
     )

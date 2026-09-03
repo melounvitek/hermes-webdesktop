@@ -145,7 +145,6 @@ def get_default_hermes_root() -> Path:
         memo_native, memo_env, memo_result = _default_hermes_root_memo
         if memo_native == str(native_home) and memo_env == env_home:
             return memo_result
-
     result = native_home
     if env_home:
         env_path = Path(env_home)
@@ -496,7 +495,6 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     node_arch = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "x86": "x86"}.get(arch)
     if node_arch is None:
         return False
-
     home = home or get_hermes_home()
     target = home / "node"
 
@@ -522,24 +520,20 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
                 return response.read()
         except OSError:
             return None
-
     index_url = f"https://nodejs.org/dist/latest-v{_HERMES_NODE_TARGET_MAJOR}.x/"
     index_bytes = _fetch(index_url, 60)
     if index_bytes is None:
         return False
-
     match = re.search(
         rf"node-v{_HERMES_NODE_TARGET_MAJOR}\.\d+\.\d+-win-{node_arch}\.zip",
         index_bytes.decode("utf-8", errors="replace"),
     )
     if not match:
         return False
-
     zip_name = match.group(0)
     zip_bytes = _fetch(f"{index_url}{zip_name}", 300)
     if zip_bytes is None:
         return False
-
     token = uuid.uuid4().hex[:8]
     staged = home / f"node.new-{token}"
     backup = home / f"node.old-{token}"
@@ -559,7 +553,6 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
             shutil.move(str(extracted), str(staged))
     except OSError:
         return False
-
     had_live = target.exists()
     if had_live:
         try:
@@ -703,11 +696,9 @@ def find_node_executable_on_path(command: str) -> str | None:
     """
     if sys.platform != "win32":
         return shutil.which(command)
-
     command_str = str(command)
     if any(sep and sep in command_str for sep in (os.sep, os.altsep, "/", "\\")):
         return command_str if Path(command_str).is_file() else None
-
     directories = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     for name in _candidate_node_command_names(command_str):
         for directory in directories:
@@ -919,7 +910,6 @@ def get_subprocess_home(env: dict[str, str] | None = None) -> str | None:
 
     if mode == "profile":
         return profile_home
-
     real_home = get_real_home(env)
     current_home = _env_get(env, "HOME")
     repaired = real_home if _norm_home_path(real_home) != _norm_home_path(current_home) else None
@@ -988,7 +978,6 @@ def _canonical_model_variants(model: str) -> list[str]:
         """Add s plus its dots↔dashes and version-dot derivatives."""
         dashed, dotted = s.replace('.', '-'), s.replace('-', '.')
         _add(s, dashed, dotted, _dash_to_dot(s), _dot_to_dash(s), _dash_to_dot(dashed), _dot_to_dash(dotted))
-
     _add_with_derivatives(model)
     parts = model.split('/')
     if len(parts) >= 2:  # bare model (strip provider/aggregator prefix)
@@ -1039,7 +1028,6 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
         if isinstance(model_cfg, dict):
             model_cfg = model_cfg.get("default") or model_cfg.get("model") or ""
         model = model_cfg.strip() if isinstance(model_cfg, str) else ""
-
     overrides = agent_cfg.get("reasoning_overrides") or {}
     per_model = resolve_per_model_reasoning_effort(model, overrides)
     if per_model is not None:
@@ -1185,7 +1173,6 @@ def apply_ipv4_preference(force: bool = False) -> None:
 
     if getattr(socket.getaddrinfo, "_hermes_ipv4_patched", False):
         return
-
     _original_getaddrinfo = socket.getaddrinfo
 
     def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
@@ -1197,7 +1184,6 @@ def apply_ipv4_preference(force: bool = False) -> None:
             except socket.gaierror:  # no A record — pure-IPv6 host
                 return _original_getaddrinfo(host, port, family, type, proto, flags)
         return _original_getaddrinfo(host, port, family, type, proto, flags)
-
     _ipv4_getaddrinfo._hermes_ipv4_patched = True  # type: ignore[attr-defined]
     socket.getaddrinfo = _ipv4_getaddrinfo  # type: ignore[assignment]
 
