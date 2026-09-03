@@ -15,9 +15,7 @@ def build_curator_parser(subparsers) -> None:
             "periodically reviews agent-created skills, prunes stale ones, "
             "consolidates overlaps, and archives obsolete skills. "
             "Bundled and hub-installed skills are never touched. "
-            "Archives are recoverable; auto-deletion never happens."
-        ),
-    )
+            "Archives are recoverable; auto-deletion never happens."))
     try:
         from hermes_cli.curator import register_cli as _register_curator_cli
 

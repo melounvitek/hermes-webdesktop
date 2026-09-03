@@ -22,11 +22,8 @@ def _add_server_runtime_args(parser) -> None:
     browser-opening behavior and help framing differ.
     """
     parser.add_argument(
-        "--port", type=int, default=9119, help="Port (default 9119, 0 for auto-assign by OS)"
-    )
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="Host (default 127.0.0.1)"
-    )
+        "--port", type=int, default=9119, help="Port (default 9119, 0 for auto-assign by OS)")
+    parser.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
     parser.add_argument(
         "--insecure",
         action="store_true",
@@ -34,18 +31,14 @@ def _add_server_runtime_args(parser) -> None:
             "DEPRECATED / NO-OP. Formerly bypassed auth on a non-loopback "
             "bind. As of the June 2026 hardening it no longer disables "
             "authentication — a public bind always requires an auth provider "
-            "(password or OAuth). Bind 127.0.0.1 + tunnel to keep it local."
-        ),
-    )
+            "(password or OAuth). Bind 127.0.0.1 + tunnel to keep it local."))
     parser.add_argument(
         "--skip-build",
         action="store_true",
         help=(
             "Skip the web UI build step and serve the existing dist directly. "
             "Useful for non-interactive contexts (Windows Scheduled Tasks, CI) "
-            "where npm may not be available. Pre-build with: cd web && npm run build"
-        ),
-    )
+            "where npm may not be available. Pre-build with: cd web && npm run build"))
     parser.add_argument(
         "--isolated",
         action="store_true",
@@ -53,17 +46,10 @@ def _add_server_runtime_args(parser) -> None:
             "When launched from a named profile, run a dedicated server scoped "
             "to that profile instead of routing to the machine-level server. "
             "Default behavior is unified: profile launches attach to (or start) "
-            "ONE machine-level server and preselect the profile."
-        ),
-    )
+            "ONE machine-level server and preselect the profile."))
     # Internal flag set by the unified-launch re-exec (cmd_dashboard) to
     # preselect the launching profile in the SPA switcher. Hidden from --help.
-    parser.add_argument(
-        "--open-profile",
-        dest="open_profile",
-        default="",
-        help=argparse.SUPPRESS,
-    )
+    parser.add_argument("--open-profile", dest="open_profile", default="", help=argparse.SUPPRESS)
     # Lifecycle flags — mutually exclusive with each other and with the
     # start-a-server flags above (if both are passed, --stop / --status win
     # because they exit before the server is started).  The server has no
@@ -71,15 +57,9 @@ def _add_server_runtime_args(parser) -> None:
     # `hermes dashboard` / `hermes serve` cmdlines and SIGTERM them directly —
     # the same path `hermes update` uses to clean up stale servers.
     parser.add_argument(
-        "--stop",
-        action="store_true",
-        help="Stop all running Hermes web server processes and exit",
-    )
+        "--stop", action="store_true", help="Stop all running Hermes web server processes and exit")
     parser.add_argument(
-        "--status",
-        action="store_true",
-        help="List running Hermes web server processes and exit",
-    )
+        "--status", action="store_true", help="List running Hermes web server processes and exit")
 
 
 def _configure_serve_parser(parser, *, cmd_dashboard: Callable) -> None:
@@ -94,32 +74,16 @@ def _configure_serve_parser(parser, *, cmd_dashboard: Callable) -> None:
     # using the legacy flag do not trip an argparse error.
     parser.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--ssh-session-token-file",
-        dest="ssh_session_token_file",
-        metavar="PATH",
-        default=None,
-        help="Read a one-shot Desktop SSH session token from PATH",
-    )
+        "--ssh-session-token-file", dest="ssh_session_token_file", metavar="PATH", default=None,
+        help="Read a one-shot Desktop SSH session token from PATH")
     parser.add_argument(
-        "--ssh-owner-nonce",
-        dest="ssh_owner_nonce",
-        metavar="NONCE",
-        default=None,
-        help="Identify a Desktop-owned SSH backend process",
-    )
-    parser.set_defaults(
-        func=cmd_dashboard,
-        no_open=True,
-        headless_backend=True,
-        command="serve",
-    )
+        "--ssh-owner-nonce", dest="ssh_owner_nonce", metavar="NONCE", default=None,
+        help="Identify a Desktop-owned SSH backend process")
+    parser.set_defaults(func=cmd_dashboard, no_open=True, headless_backend=True, command="serve")
 
 
 def build_serve_parser(
-    *,
-    cmd_dashboard: Callable,
-    add_help: bool = True,
-    exit_on_error: bool = True,
+    *, cmd_dashboard: Callable, add_help: bool = True, exit_on_error: bool = True,
 ) -> argparse.ArgumentParser:
     """Build the standalone parser used by the lean ``serve`` dispatch path."""
     parser = argparse.ArgumentParser(
@@ -127,18 +91,15 @@ def build_serve_parser(
         description=(
             "Run the Hermes backend server - the JSON-RPC/WebSocket gateway the "
             "desktop app and remote clients connect to. Headless: it never opens "
-            "a browser UI."
-        ),
+            "a browser UI."),
         add_help=add_help,
-        exit_on_error=exit_on_error,
-    )
+        exit_on_error=exit_on_error)
     _configure_serve_parser(parser, cmd_dashboard=cmd_dashboard)
     return parser
 
 
 def build_dashboard_parser(
-    subparsers, *, cmd_dashboard: Callable, cmd_dashboard_register: Callable
-) -> None:
+    subparsers, *, cmd_dashboard: Callable, cmd_dashboard_register: Callable) -> None:
     """Attach the ``dashboard`` and ``serve`` subcommands.
 
     Both share the same backend (``cmd_dashboard`` → ``start_server``).
@@ -148,14 +109,12 @@ def build_dashboard_parser(
     ``dashboard``.
     """
     dashboard_parser = subparsers.add_parser(
-        "dashboard",
-        help="Start the web UI dashboard",
+        "dashboard", help="Start the web UI dashboard",
         description="Launch the Hermes Agent web dashboard for managing config, API keys, and sessions",
     )
     _add_server_runtime_args(dashboard_parser)
     dashboard_parser.add_argument(
-        "--no-open", action="store_true", help="Don't open browser automatically"
-    )
+        "--no-open", action="store_true", help="Don't open browser automatically")
     # Backward-compat shim: older Hermes desktop app shells (<= 0.15.x) spawn the
     # backend as `hermes dashboard --no-open --tui --host ... --port ...`. The
     # `--tui` flag was removed from this subcommand in cae6b5486 (embedded chat is
@@ -166,11 +125,7 @@ def build_dashboard_parser(
     # ignore the flag so an old app + new CLI degrades gracefully instead of
     # bricking. Hidden from --help; safe to delete once the floor app version is
     # well past 0.16.0.
-    dashboard_parser.add_argument(
-        "--tui",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    dashboard_parser.add_argument("--tui", action="store_true", help=argparse.SUPPRESS)
     dashboard_parser.set_defaults(func=cmd_dashboard)
 
     # serve command — the headless backend server
@@ -186,18 +141,14 @@ def build_dashboard_parser(
         description=(
             "Run the Hermes backend server — the JSON-RPC/WebSocket gateway the "
             "desktop app and remote clients connect to. Headless: it never opens "
-            "a browser UI."
-        ),
-    )
+            "a browser UI."))
     _configure_serve_parser(serve_parser, cmd_dashboard=cmd_dashboard)
 
     # `hermes dashboard register` — register a self-hosted dashboard OAuth
     # client with Nous Portal and write the client_id into ~/.hermes/.env.
     # Nested subparser so bare `hermes dashboard` keeps launching the server
     # (set_defaults(func=cmd_dashboard) above remains the default).
-    dashboard_subparsers = dashboard_parser.add_subparsers(
-        dest="dashboard_subcommand"
-    )
+    dashboard_subparsers = dashboard_parser.add_subparsers(dest="dashboard_subcommand")
     dashboard_register_parser = dashboard_subparsers.add_parser(
         "register",
         help="Register a self-hosted dashboard with Nous Portal (writes the OAuth client ID to .env)",
@@ -205,23 +156,17 @@ def build_dashboard_parser(
             "Register this install as a self-hosted dashboard with your Nous "
             "Portal account. Creates an OAuth client, writes "
             "HERMES_DASHBOARD_OAUTH_CLIENT_ID into ~/.hermes/.env, and prints "
-            "how to engage the login gate. Requires being logged in (hermes setup)."
-        ),
-    )
+            "how to engage the login gate. Requires being logged in (hermes setup)."))
     dashboard_register_parser.add_argument(
-        "--name",
-        default=None,
-        help="Human-readable label for the dashboard (default: an auto-generated name)",
-    )
+        "--name", default=None,
+        help="Human-readable label for the dashboard (default: an auto-generated name)")
     dashboard_register_parser.add_argument(
         "--redirect-uri",
         dest="redirect_uri",
         default=None,
         help=(
             "Optional public HTTPS OAuth redirect URI for the dashboard, e.g. "
-            "https://hermes.example.com/auth/callback. Omit for localhost-only use."
-        ),
-    )
+            "https://hermes.example.com/auth/callback. Omit for localhost-only use."))
     dashboard_register_parser.add_argument(
         "--portal-url",
         dest="portal_url",
@@ -230,7 +175,5 @@ def build_dashboard_parser(
             "Override the Nous Portal base URL for registration (default: the "
             "portal you logged into). The access token must be valid at this "
             "portal. Also settable via HERMES_DASHBOARD_PORTAL_URL. Mainly for "
-            "testing against a staging/preview portal."
-        ),
-    )
+            "testing against a staging/preview portal."))
     dashboard_register_parser.set_defaults(func=cmd_dashboard_register)

@@ -14,60 +14,31 @@ def build_tools_parser(subparsers, *, cmd_tools: Callable) -> None:
             "Enable, disable, or list tools for CLI, Telegram, Discord, etc.\n\n"
             "Built-in toolsets use plain names (e.g. web, memory).\n"
             "MCP tools use server:tool notation (e.g. github:create_issue).\n\n"
-            "Run 'hermes tools' with no subcommand for the interactive configuration UI."
-        ),
-    )
+            "Run 'hermes tools' with no subcommand for the interactive configuration UI."))
     tools_parser.add_argument(
-        "--summary",
-        action="store_true",
-        help="Print a summary of enabled tools per platform and exit",
-    )
+        "--summary", action="store_true",
+        help="Print a summary of enabled tools per platform and exit")
     tools_sub = tools_parser.add_subparsers(dest="tools_action")
 
     # hermes tools list [--platform cli]
     tools_list_p = tools_sub.add_parser(
-        "list",
-        help="Show all tools and their enabled/disabled status",
-    )
-    tools_list_p.add_argument(
-        "--platform",
-        default="cli",
-        help="Platform to show (default: cli)",
-    )
+        "list", help="Show all tools and their enabled/disabled status")
+    tools_list_p.add_argument("--platform", default="cli", help="Platform to show (default: cli)")
 
     # hermes tools disable <name...> [--platform cli]
-    tools_disable_p = tools_sub.add_parser(
-        "disable",
-        help="Disable toolsets or MCP tools",
-    )
+    tools_disable_p = tools_sub.add_parser("disable", help="Disable toolsets or MCP tools")
     tools_disable_p.add_argument(
-        "names",
-        nargs="+",
-        metavar="NAME",
-        help="Toolset name (e.g. web) or MCP tool in server:tool form",
-    )
+        "names", nargs="+", metavar="NAME",
+        help="Toolset name (e.g. web) or MCP tool in server:tool form")
     tools_disable_p.add_argument(
-        "--platform",
-        default="cli",
-        help="Platform to apply to (default: cli)",
-    )
+        "--platform", default="cli", help="Platform to apply to (default: cli)")
 
     # hermes tools enable <name...> [--platform cli]
-    tools_enable_p = tools_sub.add_parser(
-        "enable",
-        help="Enable toolsets or MCP tools",
-    )
+    tools_enable_p = tools_sub.add_parser("enable", help="Enable toolsets or MCP tools")
     tools_enable_p.add_argument(
-        "names",
-        nargs="+",
-        metavar="NAME",
-        help="Toolset name or MCP tool in server:tool form",
-    )
+        "names", nargs="+", metavar="NAME", help="Toolset name or MCP tool in server:tool form")
     tools_enable_p.add_argument(
-        "--platform",
-        default="cli",
-        help="Platform to apply to (default: cli)",
-    )
+        "--platform", default="cli", help="Platform to apply to (default: cli)")
 
     # hermes tools post-setup <key>
     tools_postsetup_p = tools_sub.add_parser(
@@ -80,12 +51,8 @@ def build_tools_parser(subparsers, *, cmd_tools: Callable) -> None:
             "KittenTTS/Piper, ddgs, Spotify, Langfuse, xAI). Stable,\n"
             "non-interactive target the dashboard spawns to drive backend\n"
             "setup. Keys: agent_browser, camofox, cua_driver, kittentts,\n"
-            "piper, ddgs, spotify, langfuse, xai_grok."
-        ),
-    )
+            "piper, ddgs, spotify, langfuse, xai_grok."))
     tools_postsetup_p.add_argument(
-        "post_setup_key",
-        metavar="KEY",
-        help="Post-setup hook key (e.g. agent_browser, camofox, kittentts)",
-    )
+        "post_setup_key", metavar="KEY",
+        help="Post-setup hook key (e.g. agent_browser, camofox, kittentts)")
     tools_parser.set_defaults(func=cmd_tools)

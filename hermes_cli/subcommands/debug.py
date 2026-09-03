@@ -29,26 +29,14 @@ Examples:
     )
     debug_sub = debug_parser.add_subparsers(dest="debug_command")
     share_parser = debug_sub.add_parser(
-        "share",
-        help="Upload debug report to a paste service and print a shareable URL",
-    )
+        "share", help="Upload debug report to a paste service and print a shareable URL")
     share_parser.add_argument(
-        "--lines",
-        type=int,
-        default=200,
-        help="Number of log lines to include per log file (default: 200)",
-    )
+        "--lines", type=int, default=200,
+        help="Number of log lines to include per log file (default: 200)")
     share_parser.add_argument(
-        "--expire",
-        type=int,
-        default=7,
-        help="Paste expiry in days (default: 7)",
-    )
+        "--expire", type=int, default=7, help="Paste expiry in days (default: 7)")
     share_parser.add_argument(
-        "--local",
-        action="store_true",
-        help="Print the report locally instead of uploading",
-    )
+        "--local", action="store_true", help="Print the report locally instead of uploading")
     share_parser.add_argument(
         "-y",
         "--yes",
@@ -56,9 +44,7 @@ Examples:
         help=(
             "Skip the confirmation prompt and upload immediately. Required "
             "in non-interactive contexts (scripts/CI); without it, and with "
-            "no TTY on stdin, the command refuses rather than upload silently."
-        ),
-    )
+            "no TTY on stdin, the command refuses rather than upload silently."))
     share_parser.add_argument(
         "--no-redact",
         action="store_true",
@@ -66,9 +52,7 @@ Examples:
             "Disable upload-time secret redaction (default: redact). Logs "
             "are normally run through agent.redact.redact_sensitive_text "
             "with force=True before upload so credentials are not leaked "
-            "into the public paste service."
-        ),
-    )
+            "into the public paste service."))
     share_parser.add_argument(
         "--nous",
         action="store_true",
@@ -77,17 +61,10 @@ Examples:
             "of a public paste service. The bundle is private — viewable only "
             "by Nous staff (and allowlisted Discord mods) via a Google-login-"
             "gated viewer — and auto-deletes after 14 days. Still force-redacts "
-            "secrets unless --no-redact is also passed."
-        ),
-    )
+            "secrets unless --no-redact is also passed."))
     delete_parser = debug_sub.add_parser(
-        "delete",
-        help="Delete a paste uploaded by 'hermes debug share'",
-    )
+        "delete", help="Delete a paste uploaded by 'hermes debug share'")
     delete_parser.add_argument(
-        "urls",
-        nargs="*",
-        default=[],
-        help="One or more paste URLs to delete (e.g. https://paste.rs/abc123)",
-    )
+        "urls", nargs="*", default=[],
+        help="One or more paste URLs to delete (e.g. https://paste.rs/abc123)")
     debug_parser.set_defaults(func=cmd_debug)

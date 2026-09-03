@@ -28,8 +28,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
     print(f"    sentinel: {path}")
     print(
         "    Cron dispatch, kanban dispatch, and new gateway turns are on hold.\n"
-        "    In-flight work keeps running. Run `hermes resume` to lift the pause."
-    )
+        "    In-flight work keeps running. Run `hermes resume` to lift the pause.")
     return 0
 
 
@@ -52,19 +51,12 @@ def build_pause_parser(subparsers) -> None:
         description=(
             "Engage the global emergency stop. Halts NEW work only — cron "
             "dispatch, kanban dispatch, and new gateway turns — until "
-            "`hermes resume`. In-flight work is never killed."
-        ),
-    )
+            "`hermes resume`. In-flight work is never killed."))
     pause_parser.add_argument(
-        "--reason",
-        default=None,
-        help="Optional reason stored in the sentinel and shown to users",
-    )
+        "--reason", default=None, help="Optional reason stored in the sentinel and shown to users")
     pause_parser.set_defaults(func=cmd_pause)
 
     resume_parser = subparsers.add_parser(
-        "resume",
-        help="Lift the emergency stop set by `hermes pause`",
-        description="Remove the ESTOP sentinel; dispatch resumes on the next tick.",
-    )
+        "resume", help="Lift the emergency stop set by `hermes pause`",
+        description="Remove the ESTOP sentinel; dispatch resumes on the next tick.")
     resume_parser.set_defaults(func=cmd_resume)

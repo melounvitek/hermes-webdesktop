@@ -13,17 +13,10 @@ def build_prompt_size_parser(subparsers, *, cmd_prompt_size: Callable) -> None:
         description=(
             "Report the fixed prompt budget for a fresh session: system "
             "prompt total, skills index, memory, user profile, and tool-schema "
-            "JSON. Runs offline (no API call)."
-        ),
-    )
+            "JSON. Runs offline (no API call)."))
     prompt_size_parser.add_argument(
-        "--platform",
-        default="cli",
-        help="Platform to simulate (cli, telegram, discord, ...). Default: cli",
-    )
+        "--platform", default="cli",
+        help="Platform to simulate (cli, telegram, discord, ...). Default: cli")
     prompt_size_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the breakdown as JSON",
-    )
+        "--json", action="store_true", help="Emit the breakdown as JSON")
     prompt_size_parser.set_defaults(func=cmd_prompt_size)

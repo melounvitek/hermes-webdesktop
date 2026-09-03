@@ -23,14 +23,9 @@ def build_monitoring_parser(subparsers, *, cmd_monitoring: Callable) -> None:
             "diagnostics, exported over OTLP to an operator-configured "
             "endpoint. Content-free by construction — no prompts, messages, "
             "tool args/results, or usage analytics. Configure under "
-            "monitoring.* in config.yaml."
-        ),
-    )
+            "monitoring.* in config.yaml."))
     sub = p.add_subparsers(dest="monitoring_action")
 
-    sub.add_parser(
-        "status",
-        help="Show monitoring settings, export state, and redaction posture",
-    )
+    sub.add_parser("status", help="Show monitoring settings, export state, and redaction posture")
 
     p.set_defaults(func=cmd_monitoring)

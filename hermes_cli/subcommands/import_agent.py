@@ -20,30 +20,17 @@ def build_import_agent_parser(subparsers, *, cmd_import_agent: Callable) -> None
             "Maps CLAUDE.md/AGENTS.md instructions, permission allowlists, MCP "
             "servers, skills, and memories into their Hermes equivalents. "
             "Always shows a preview before making changes. API keys and "
-            "credentials are never imported — run 'hermes setup' for those."
-        ),
-    )
+            "credentials are never imported — run 'hermes setup' for those."))
     parser.add_argument(
-        "agent",
-        nargs="?",
-        choices=["claude-code", "codex"],
-        help="Which agent to import from (default: auto-detect ~/.claude or ~/.codex)",
-    )
+        "agent", nargs="?", choices=["claude-code", "codex"],
+        help="Which agent to import from (default: auto-detect ~/.claude or ~/.codex)")
     parser.add_argument(
-        "--source",
-        help="Path to the agent's config directory (default: ~/.claude or ~/.codex)",
-    )
+        "--source", help="Path to the agent's config directory (default: ~/.claude or ~/.codex)")
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview only — stop after showing what would be imported",
-    )
+        "--dry-run", action="store_true",
+        help="Preview only — stop after showing what would be imported")
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing Hermes items on name conflicts (default: skip)",
-    )
-    parser.add_argument(
-        "--yes", "-y", action="store_true", help="Skip confirmation prompts"
-    )
+        "--overwrite", action="store_true",
+        help="Overwrite existing Hermes items on name conflicts (default: skip)")
+    parser.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
     parser.set_defaults(func=cmd_import_agent)

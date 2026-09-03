@@ -23,28 +23,19 @@ def build_computer_use_parser(subparsers) -> None:
             "Use `hermes computer-use doctor` to run cua-driver's\n"
             "`health_report` MCP tool and surface its check matrix\n"
             "(TCC, bundle identity, version, platform support, ...)\n"
-            "in human-readable form."
-        ),
-    )
+            "in human-readable form."))
     computer_use_sub = computer_use_parser.add_subparsers(dest="computer_use_action")
 
     computer_use_install = computer_use_sub.add_parser(
-        "install",
-        help="Install or repair the cua-driver binary (macOS/Windows/Linux)",
-    )
+        "install", help="Install or repair the cua-driver binary (macOS/Windows/Linux)")
     computer_use_install.add_argument(
         "--upgrade",
         action="store_true",
         help=(
             "Re-run the upstream installer even if cua-driver is already on "
             "PATH. The upstream install.sh always pulls the latest release, "
-            "so this performs an in-place upgrade."
-        ),
-    )
-    computer_use_sub.add_parser(
-        "status",
-        help="Print whether cua-driver is installed and on PATH",
-    )
+            "so this performs an in-place upgrade."))
+    computer_use_sub.add_parser("status", help="Print whether cua-driver is installed and on PATH")
     computer_use_doctor = computer_use_sub.add_parser(
         "doctor",
         help="Run cua-driver `health_report` and surface the check matrix",
@@ -55,9 +46,7 @@ def build_computer_use_parser(subparsers) -> None:
             "output. cua-driver owns the health model; this command stays\n"
             "thin so new checks added upstream surface here without code\n"
             "changes. Exits 0 when overall=ok, 1 when degraded/failed, 2\n"
-            "when the binary is missing or unreachable."
-        ),
-    )
+            "when the binary is missing or unreachable."))
     computer_use_doctor.add_argument(
         "--include",
         action="append",
@@ -66,21 +55,13 @@ def build_computer_use_parser(subparsers) -> None:
         help=(
             "Run only the listed checks. Repeat for multiple "
             "(e.g. --include tcc_accessibility --include bundle_identity). "
-            "Unknown names are reported by cua-driver."
-        ),
-    )
+            "Unknown names are reported by cua-driver."))
     computer_use_doctor.add_argument(
-        "--skip",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help="Skip the listed checks. Repeat for multiple. Wins over --include.",
-    )
+        "--skip", action="append", default=[], metavar="CHECK",
+        help="Skip the listed checks. Repeat for multiple. Wins over --include.")
     computer_use_doctor.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the raw structured payload as JSON (same shape as `tools/call`).",
-    )
+        "--json", action="store_true",
+        help="Emit the raw structured payload as JSON (same shape as `tools/call`).")
     computer_use_perms = computer_use_sub.add_parser(
         "permissions",
         help="Check or grant macOS Accessibility + Screen Recording (macOS)",
@@ -89,32 +70,18 @@ def build_computer_use_parser(subparsers) -> None:
             "attach to cua-driver's own identity (com.trycua.driver) — not the\n"
             "terminal or the Hermes app. `status` reports the driver's grant\n"
             "state; `grant` launches CuaDriver via LaunchServices so the macOS\n"
-            "permission dialog is attributed to the process that does the work."
-        ),
-    )
-    computer_use_perms_sub = computer_use_perms.add_subparsers(
-        dest="computer_use_perms_action"
-    )
+            "permission dialog is attributed to the process that does the work."))
+    computer_use_perms_sub = computer_use_perms.add_subparsers(dest="computer_use_perms_action")
     computer_use_perms_status = computer_use_perms_sub.add_parser(
-        "status",
-        help="Report Accessibility + Screen Recording grant state (read-only)",
-    )
+        "status", help="Report Accessibility + Screen Recording grant state (read-only)")
     computer_use_perms_status.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the normalized permission payload as JSON.",
-    )
+        "--json", action="store_true", help="Emit the normalized permission payload as JSON.")
     computer_use_perms_sub.add_parser(
-        "grant",
-        help="Request the grants (opens the dialog attributed to CuaDriver)",
-    )
+        "grant", help="Request the grants (opens the dialog attributed to CuaDriver)")
     def cmd_computer_use(args):
         action = getattr(args, "computer_use_action", None)
         if action == "install":
-            from hermes_cli.tools_config import (
-                _cua_driver_contract_status,
-                install_cua_driver,
-            )
+            from hermes_cli.tools_config import (_cua_driver_contract_status, install_cua_driver)
             if not install_cua_driver(upgrade=bool(getattr(args, "upgrade", False))):
                 return 1
             return 0 if _cua_driver_contract_status().get("ready") else 1
@@ -123,9 +90,7 @@ def build_computer_use_parser(subparsers) -> None:
             import subprocess
             from hermes_cli.tools_config import _cua_driver_contract_status
             from tools.computer_use.cua_backend import (
-                cua_driver_update_check,
-                resolve_cua_driver_cmd,
-            )
+                cua_driver_update_check, resolve_cua_driver_cmd)
             # Must match the runtime resolver: Desktop/TUI processes can omit
             # ~/.local/bin even though the official installer put the driver there.
             path = resolve_cua_driver_cmd()
@@ -156,13 +121,11 @@ def build_computer_use_parser(subparsers) -> None:
                 if not contract.get("ready"):
                     print(
                         "  ⚠ Repair required: "
-                        + (contract.get("reason") or "runtime contract is incomplete")
-                    )
+                        + (contract.get("reason") or "runtime contract is incomplete"))
                     if override:
                         print(
                             "    Update the binary selected by HERMES_CUA_DRIVER_CMD, or unset "
-                            "the override and run: hermes computer-use install --upgrade"
-                        )
+                            "the override and run: hermes computer-use install --upgrade")
                     else:
                         print("    Run: hermes computer-use install")
                     return 1
@@ -188,8 +151,7 @@ def build_computer_use_parser(subparsers) -> None:
             code = run_doctor(
                 include=list(getattr(args, "include", []) or []),
                 skip=list(getattr(args, "skip", []) or []),
-                json_output=bool(getattr(args, "json", False)),
-            )
+                json_output=bool(getattr(args, "json", False)))
             sys.exit(code)
         if action == "permissions":
             perms_action = getattr(args, "computer_use_perms_action", None)

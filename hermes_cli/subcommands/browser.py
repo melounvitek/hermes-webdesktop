@@ -15,27 +15,20 @@ def build_browser_parser(subparsers) -> None:
             "close-profile terminates the browser process tree holding your "
             "default profile so Hermes can copy it — DESTRUCTIVE (unsaved tabs "
             "in that browser are lost). The agent runs this only after you "
-            "approve closing the browser."
-        ),
-    )
+            "approve closing the browser."))
     browser_subparsers = browser_parser.add_subparsers(dest="browser_action")
     browser_close = browser_subparsers.add_parser(
         "close-profile",
         help="Close the browser locking your real profile (asks nothing — "
-             "run only with the user's explicit OK; loses unsaved tabs)",
-    )
+             "run only with the user's explicit OK; loses unsaved tabs)")
     browser_close.add_argument(
         "--browser",
-        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)",
-    )
+        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)")
 
     def _dispatch_browser(_args):
         from hermes_cli.browser_connect import (
-            UNSUPPORTED_CHANNEL,
-            close_browser_holding_profile,
-            detect_default_chromium,
-            real_profile_data_dir,
-        )
+            UNSUPPORTED_CHANNEL, close_browser_holding_profile, detect_default_chromium,
+            real_profile_data_dir)
 
         action = getattr(_args, "browser_action", None)
         if action != "close-profile":

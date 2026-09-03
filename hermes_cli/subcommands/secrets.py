@@ -12,22 +12,14 @@ def build_secrets_parser(subparsers) -> None:
             "Pull API keys from an external secret manager at process startup "
             "instead of storing them in ~/.hermes/.env.  Supports Bitwarden "
             "Secrets Manager and 1Password.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"
-        ),
-    )
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/"))
     secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
 
     secrets_bw = secrets_subparsers.add_parser(
-        "bitwarden",
-        aliases=["bw"],
-        help="Bitwarden Secrets Manager integration",
-    )
+        "bitwarden", aliases=["bw"], help="Bitwarden Secrets Manager integration")
 
     secrets_op = secrets_subparsers.add_parser(
-        "onepassword",
-        aliases=["op", "1password"],
-        help="1Password (op:// references) integration",
-    )
+        "onepassword", aliases=["op", "1password"], help="1Password (op:// references) integration")
 
     # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
     # which loads cryptography._rust.pyd.  On Windows this maps the native

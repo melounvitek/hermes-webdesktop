@@ -30,42 +30,22 @@ Examples:
 """,
     )
     logs_parser.add_argument(
-        "log_name",
-        nargs="?",
-        default="agent",
+        "log_name", nargs="?", default="agent",
         help="Log to view: agent (default), errors, gateway, gui, or 'list' to show available files",
     )
     logs_parser.add_argument(
         "-n",
-        "--lines",
-        type=int,
-        default=50,
-        help="Number of lines to show (default: 50)",
-    )
+        "--lines", type=int, default=50, help="Number of lines to show (default: 50)")
     logs_parser.add_argument(
         "-f",
-        "--follow",
-        action="store_true",
-        help="Follow the log in real time (like tail -f)",
-    )
+        "--follow", action="store_true", help="Follow the log in real time (like tail -f)")
     logs_parser.add_argument(
-        "--level",
-        metavar="LEVEL",
-        help="Minimum log level to show (DEBUG, INFO, WARNING, ERROR)",
-    )
+        "--level", metavar="LEVEL", help="Minimum log level to show (DEBUG, INFO, WARNING, ERROR)")
     logs_parser.add_argument(
-        "--session",
-        metavar="ID",
-        help="Filter lines containing this session ID substring",
-    )
+        "--session", metavar="ID", help="Filter lines containing this session ID substring")
     logs_parser.add_argument(
-        "--since",
-        metavar="TIME",
-        help="Show lines since TIME ago (e.g. 1h, 30m, 2d)",
-    )
+        "--since", metavar="TIME", help="Show lines since TIME ago (e.g. 1h, 30m, 2d)")
     logs_parser.add_argument(
-        "--component",
-        metavar="NAME",
-        help="Filter by component: gateway, agent, tools, cli, cron, gui",
-    )
+        "--component", metavar="NAME",
+        help="Filter by component: gateway, agent, tools, cli, cron, gui")
     logs_parser.set_defaults(func=cmd_logs)
