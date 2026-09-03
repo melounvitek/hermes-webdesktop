@@ -154,10 +154,8 @@ def _resolve_trust_policy(plugin_id: str) -> _TrustPolicy:
     allowed_models, allow_any_model = _coerce_allowlist(llm_cfg.get("allowed_models"))
     allowed_providers, allow_any_provider = _coerce_allowlist(llm_cfg.get("allowed_providers"))
     return _TrustPolicy(
-        plugin_id=plugin_id,
-        allowed_providers=allowed_providers,
-        allow_any_provider=allow_any_provider,
-        allowed_models=allowed_models,
+        plugin_id=plugin_id, allowed_providers=allowed_providers,
+        allow_any_provider=allow_any_provider, allowed_models=allowed_models,
         allow_any_model=allow_any_model,
         **{name: bool(llm_cfg.get(name, False)) for name in _OVERRIDE_FLAGS},
     )
@@ -238,10 +236,7 @@ def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
 
 
 def _check_task(
-    policy: _TrustPolicy,
-    *,
-    plugin_id: str,
-    requested_task: Optional[str],
+    policy: _TrustPolicy, *, plugin_id: str, requested_task: Optional[str],
 ) -> Optional[str]:
     """Validate a plugin's requested auxiliary ``task`` key.
 
@@ -321,13 +316,8 @@ def _image_part(norm: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _build_structured_messages(
-    *,
-    instructions: str,
-    inputs: Sequence[PluginLlmInput],
-    json_mode: bool,
-    json_schema: Optional[Any],
-    schema_name: Optional[str],
-    system_prompt: Optional[str],
+    *, instructions: str, inputs: Sequence[PluginLlmInput], json_mode: bool,
+    json_schema: Optional[Any], schema_name: Optional[str], system_prompt: Optional[str],
 ) -> List[Dict[str, Any]]:
     """OpenAI-style messages for a structured call: optional system message (prompt +
     JSON-only directive), then a user message whose first text part is the
@@ -453,10 +443,7 @@ def _main_config_value(reader: str, default: str) -> str:
 
 
 def _resolve_attribution(
-    *,
-    provider_override: Optional[str],
-    model_override: Optional[str],
-    response: Any,
+    *, provider_override: Optional[str], model_override: Optional[str], response: Any,
     route_info: Optional[Dict[str, str]] = None,
 ) -> tuple[str, str]:
     """``(provider, model)`` to record on the result.
@@ -511,10 +498,7 @@ class PluginLlm:
     caller) → ``_finish`` (result + audit log)."""
 
     def __init__(
-        self,
-        *,
-        plugin_id: str,
-        policy_loader: Optional[Callable[[str], _TrustPolicy]] = None,
+        self, *, plugin_id: str, policy_loader: Optional[Callable[[str], _TrustPolicy]] = None,
         sync_caller: Optional[Callable[..., Any]] = None,
         async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
     ) -> None:
@@ -526,18 +510,11 @@ class PluginLlm:
     # -- public API -----------------------------------------------------------
 
     def complete(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-        agent_id: Optional[str] = None,
-        profile: Optional[str] = None,
-        purpose: Optional[str] = None,
-        task: Optional[str] = None,
+        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None,
+        model: Optional[str] = None, temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None, timeout: Optional[float] = None,
+        agent_id: Optional[str] = None, profile: Optional[str] = None,
+        purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmCompleteResult:
         """Run a host-owned chat completion against the user's active model.
 
@@ -548,23 +525,13 @@ class PluginLlm:
         return self._finish("complete", agent, kw, self._invoke_sync(kw), purpose)
 
     def complete_structured(
-        self,
-        *,
-        instructions: str,
-        input: Sequence[PluginLlmInput],
-        json_schema: Optional[Any] = None,
-        json_mode: bool = False,
-        schema_name: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-        agent_id: Optional[str] = None,
-        profile: Optional[str] = None,
-        purpose: Optional[str] = None,
-        task: Optional[str] = None,
+        self, *, instructions: str, input: Sequence[PluginLlmInput],
+        json_schema: Optional[Any] = None, json_mode: bool = False,
+        schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
+        provider: Optional[str] = None, model: Optional[str] = None,
+        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None, agent_id: Optional[str] = None,
+        profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmStructuredResult:
         """Run a bounded host-owned structured completion.
 
@@ -576,41 +543,24 @@ class PluginLlm:
         return self._finish("complete_structured", agent, kw, self._invoke_sync(kw), purpose, spec)
 
     async def acomplete(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-        agent_id: Optional[str] = None,
-        profile: Optional[str] = None,
-        purpose: Optional[str] = None,
-        task: Optional[str] = None,
+        self, messages: List[Dict[str, Any]], *, provider: Optional[str] = None,
+        model: Optional[str] = None, temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None, timeout: Optional[float] = None,
+        agent_id: Optional[str] = None, profile: Optional[str] = None,
+        purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmCompleteResult:
         """Async sibling of :meth:`complete`."""
         agent, kw = self._gate(provider, model, agent_id, profile, task, messages, temperature, max_tokens, timeout)
         return self._finish("acomplete", agent, kw, await self._invoke_async(kw), purpose)
 
     async def acomplete_structured(
-        self,
-        *,
-        instructions: str,
-        input: Sequence[PluginLlmInput],
-        json_schema: Optional[Any] = None,
-        json_mode: bool = False,
-        schema_name: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        provider: Optional[str] = None,
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        timeout: Optional[float] = None,
-        agent_id: Optional[str] = None,
-        profile: Optional[str] = None,
-        purpose: Optional[str] = None,
-        task: Optional[str] = None,
+        self, *, instructions: str, input: Sequence[PluginLlmInput],
+        json_schema: Optional[Any] = None, json_mode: bool = False,
+        schema_name: Optional[str] = None, system_prompt: Optional[str] = None,
+        provider: Optional[str] = None, model: Optional[str] = None,
+        temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None, agent_id: Optional[str] = None,
+        profile: Optional[str] = None, purpose: Optional[str] = None, task: Optional[str] = None,
     ) -> PluginLlmStructuredResult:
         """Async sibling of :meth:`complete_structured`."""
         spec = _structured_spec("acomplete_structured", instructions, input, system_prompt, json_mode, json_schema, schema_name)
@@ -620,16 +570,9 @@ class PluginLlm:
     # -- shared core ----------------------------------------------------------
 
     def _gate(
-        self,
-        provider: Optional[str],
-        model: Optional[str],
-        agent_id: Optional[str],
-        profile: Optional[str],
-        task: Optional[str],
-        messages: Optional[List[Dict[str, Any]]],
-        temperature: Optional[float],
-        max_tokens: Optional[int],
-        timeout: Optional[float],
+        self, provider: Optional[str], model: Optional[str], agent_id: Optional[str],
+        profile: Optional[str], task: Optional[str], messages: Optional[List[Dict[str, Any]]],
+        temperature: Optional[float], max_tokens: Optional[int], timeout: Optional[float],
         spec: Optional[Dict[str, Any]] = None,
     ) -> tuple[Optional[str], Dict[str, Any]]:
         """Trust gate (task first, then overrides), then — for a structured ``spec`` —
@@ -648,25 +591,14 @@ class PluginLlm:
             messages = _build_structured_messages(**spec)
             extra_body = _json_response_format(json_mode=spec["json_mode"], json_schema=spec["json_schema"])
         return eff_agent, dict(
-            messages=messages,
-            provider_override=eff_provider,
-            model_override=eff_model,
-            profile_override=eff_profile,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
-            extra_body=extra_body,
-            task=eff_task,
+            messages=messages, provider_override=eff_provider, model_override=eff_model,
+            profile_override=eff_profile, temperature=temperature, max_tokens=max_tokens,
+            timeout=timeout, extra_body=extra_body, task=eff_task,
         )
 
     def _finish(
-        self,
-        name: str,
-        agent_id: Optional[str],
-        kw: Dict[str, Any],
-        invoked: tuple[str, str, Any],
-        purpose: Optional[str],
-        spec: Optional[Dict[str, Any]] = None,
+        self, name: str, agent_id: Optional[str], kw: Dict[str, Any], invoked: tuple[str, str, Any],
+        purpose: Optional[str], spec: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Build the result object + audit dict and emit the INFO audit line."""
         real_provider, real_model, response = invoked
@@ -701,15 +633,9 @@ class PluginLlm:
             merged_extra.setdefault("metadata", {})["auth_profile"] = kw["profile_override"]
         route_info: Optional[Dict[str, str]] = {} if kw["task"] else None
         return dict(
-            task=kw["task"],
-            provider=kw["provider_override"],
-            model=kw["model_override"],
-            messages=kw["messages"],
-            temperature=kw["temperature"],
-            max_tokens=kw["max_tokens"],
-            timeout=kw["timeout"],
-            extra_body=merged_extra or None,
-            route_info=route_info,
+            task=kw["task"], provider=kw["provider_override"], model=kw["model_override"],
+            messages=kw["messages"], temperature=kw["temperature"], max_tokens=kw["max_tokens"],
+            timeout=kw["timeout"], extra_body=merged_extra or None, route_info=route_info,
         ), route_info
 
     @staticmethod
@@ -740,10 +666,7 @@ class PluginLlm:
 
 
 def make_plugin_llm_for_test(
-    *,
-    plugin_id: str,
-    policy: _TrustPolicy,
-    sync_caller: Optional[Callable[..., Any]] = None,
+    *, plugin_id: str, policy: _TrustPolicy, sync_caller: Optional[Callable[..., Any]] = None,
     async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> PluginLlm:
     """:class:`PluginLlm` with an injected policy and caller (no config.yaml, no

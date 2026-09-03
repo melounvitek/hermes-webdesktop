@@ -98,8 +98,7 @@ def _redact_trace_accounting(acct: Any) -> Any:
     if not isinstance(acct, _RefAccounting):
         return acct
     return replace(
-        acct,
-        messages=_redact_trace_messages(acct.messages),
+        acct, messages=_redact_trace_messages(acct.messages),
         output=_redact_reference_text(acct.output),
     )
 
@@ -297,10 +296,7 @@ def _with_cache_disabled(runtime: dict[str, Any], cache_disabled: Any) -> dict[s
 
 
 def _maybe_apply_moa_cache_control(
-    messages: list[dict[str, Any]],
-    runtime: dict[str, Any],
-    *,
-    cache_disabled: bool | None = None,
+    messages: list[dict[str, Any]], runtime: dict[str, Any], *, cache_disabled: bool | None = None,
     cache_ttl: str | None = None,
 ) -> list[dict[str, Any]]:
     """Apply cache_control to an advisor/aggregator request when its route honors it.
@@ -328,10 +324,8 @@ def _maybe_apply_moa_cache_control(
         model = runtime.get("model") or ""
         # blank_cache_policy_stub is the only sanctioned stub (carries _cache_disabled).
         should_cache, native_layout = anthropic_prompt_cache_policy(
-            blank_cache_policy_stub(cache_disabled),
-            provider=provider,
-            base_url=runtime.get("base_url") or "",
-            api_mode=runtime.get("api_mode") or "",
+            blank_cache_policy_stub(cache_disabled), provider=provider,
+            base_url=runtime.get("base_url") or "", api_mode=runtime.get("api_mode") or "",
             model=model,
         )
         if not should_cache:
@@ -369,11 +363,8 @@ def _price_reference_response(
             usage = CanonicalUsage()
     try:
         cost = estimate_usage_cost(
-            slot.get("model") or "",
-            usage,
-            provider=runtime.get("provider"),
-            base_url=runtime.get("base_url"),
-            api_key=runtime.get("api_key"),
+            slot.get("model") or "", usage, provider=runtime.get("provider"),
+            base_url=runtime.get("base_url"), api_key=runtime.get("api_key"),
         )
         return usage, cost.amount_usd, cost.status, cost.source
     except Exception:  # pragma: no cover - defensive
@@ -381,14 +372,9 @@ def _price_reference_response(
 
 
 def _run_reference(
-    slot: dict[str, Any],
-    ref_messages: list[dict[str, Any]],
-    *,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
-    reference_timeout: float | None = None,
-    context_length_cache: Any = None,
-    cache_disabled: bool | None = None,
+    slot: dict[str, Any], ref_messages: list[dict[str, Any]], *, temperature: float | None = None,
+    max_tokens: int | None = None, reference_timeout: float | None = None,
+    context_length_cache: Any = None, cache_disabled: bool | None = None,
     cache_ttl: str | None = None,
 ) -> tuple[str, str, Any]:
     """Call one reference model; return ``(label, text, accounting)``. Never raises:
@@ -396,8 +382,7 @@ def _run_reference(
     label = _slot_label(slot)
     runtime = _slot_runtime(slot)
     trace_fields = {
-        "model": slot.get("model"),
-        "provider": runtime.get("provider") or slot.get("provider"),
+        "model": slot.get("model"), "provider": runtime.get("provider") or slot.get("provider"),
         "temperature": temperature,
     }
     # The advisory view already stripped the agent's system prompt; this is the only one.
@@ -405,10 +390,7 @@ def _run_reference(
     try:
         # Trim to THIS model's window (advisors may be smaller than the aggregator).
         trimmed = _trim_messages_for_reference(
-            messages,
-            slot,
-            runtime,
-            reserve_output_tokens=max_tokens,
+            messages, slot, runtime, reserve_output_tokens=max_tokens,
             context_length_cache=context_length_cache,
         )
         # The advisory view is append-only across iterations, so cache_control lets
@@ -427,21 +409,15 @@ def _run_reference(
             # user's current turn, so mirror the main agent's x-initiator header.
             extra_headers = {"x-initiator": "user"}
         response = call_llm(
-            task="moa_reference",
-            messages=trimmed,
-            temperature=temperature,
+            task="moa_reference", messages=trimmed, temperature=temperature,
             max_tokens=slot_max_tokens if slot_max_tokens is not None else max_tokens,
-            timeout=reference_timeout,
-            reasoning_config=_slot_reasoning_config(slot),
-            extra_headers=extra_headers,
-            **runtime,
+            timeout=reference_timeout, reasoning_config=_slot_reasoning_config(slot),
+            extra_headers=extra_headers, **runtime,
         )
         output_text = _extract_text(response) or "(empty response)"
         acct = _RefAccounting(
-            *_price_reference_response(response, slot, runtime),
-            messages=trimmed,
-            output=output_text,
-            **trace_fields,
+            *_price_reference_response(response, slot, runtime), messages=trimmed,
+            output=output_text, **trace_fields,
         )
         return label, output_text, acct
     except Exception as exc:
@@ -460,12 +436,8 @@ _REFERENCE_TRIM_SAFETY_FRACTION = 0.10
 
 
 def _trim_messages_for_reference(
-    messages: list[dict[str, Any]],
-    slot: dict[str, str],
-    runtime: dict[str, Any],
-    *,
-    reserve_output_tokens: int | None = None,
-    context_length_cache: Any = None,
+    messages: list[dict[str, Any]], slot: dict[str, str], runtime: dict[str, Any], *,
+    reserve_output_tokens: int | None = None, context_length_cache: Any = None,
 ) -> list[dict[str, Any]]:
     """Trim an advisory request to fit a reference model's context window.
 
@@ -495,10 +467,8 @@ def _trim_messages_for_reference(
     else:
         try:
             context_length = get_model_context_length(
-                model=model,
-                base_url=str(runtime.get("base_url") or ""),
-                api_key=str(runtime.get("api_key") or ""),
-                provider=provider,
+                model=model, base_url=str(runtime.get("base_url") or ""),
+                api_key=str(runtime.get("api_key") or ""), provider=provider,
             )
         except Exception:
             logger.debug("MoA reference context-length resolution failed for %s", _slot_label(slot))
@@ -560,9 +530,7 @@ def _placeholder_output(slot: dict[str, Any], note: str) -> tuple[str, str, Any]
 
 
 def _settle_interrupted(
-    futures: dict[Any, int],
-    results: list,
-    reference_models: list[dict[str, Any]],
+    futures: dict[Any, int], results: list, reference_models: list[dict[str, Any]],
     late_accounting_sink: Any,
 ) -> None:
     """Fill every unfinished slot after a user interrupt: cancel never-dispatched
@@ -592,15 +560,9 @@ def _settle_interrupted(
 
 
 def _run_references_parallel(
-    reference_models: list[dict[str, Any]],
-    ref_messages: list[dict[str, Any]],
-    *,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
-    progress_callback: Any = None,
-    reference_timeout: float | None = None,
-    agent: Any = None,
-    late_accounting_sink: Any = None,
+    reference_models: list[dict[str, Any]], ref_messages: list[dict[str, Any]], *,
+    temperature: float | None = None, max_tokens: int | None = None, progress_callback: Any = None,
+    reference_timeout: float | None = None, agent: Any = None, late_accounting_sink: Any = None,
 ) -> list[tuple[str, str, Any]]:
     """Fan out all reference models in parallel; ``(label, text, _RefAccounting)`` per
     slot in ``reference_models`` order.
@@ -635,15 +597,10 @@ def _run_references_parallel(
                 continue
             futures[
                 executor.submit(
-                    propagate_context_to_thread(_run_reference),
-                    slot,
-                    ref_messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reference_timeout=reference_timeout,
-                    context_length_cache=ctx_len_cache,
-                    cache_disabled=cache_disabled,
-                    cache_ttl=cache_ttl,
+                    propagate_context_to_thread(_run_reference), slot, ref_messages,
+                    temperature=temperature, max_tokens=max_tokens,
+                    reference_timeout=reference_timeout, context_length_cache=ctx_len_cache,
+                    cache_disabled=cache_disabled, cache_ttl=cache_ttl,
                 )
             ] = idx
 
@@ -871,16 +828,10 @@ def _slot_labels(slots: list[dict[str, Any]]) -> str:
 
 
 def aggregate_moa_context(
-    *,
-    user_prompt: str,
-    api_messages: list[dict[str, Any]],
-    reference_models: list[dict[str, Any]],
-    aggregator: dict[str, Any],
-    temperature: float | None = None,
-    aggregator_temperature: float | None = None,
-    reference_max_tokens: int | None = None,
-    reference_timeout: float | None = None,
-    degraded_reference_policy: str = "loud",
+    *, user_prompt: str, api_messages: list[dict[str, Any]], reference_models: list[dict[str, Any]],
+    aggregator: dict[str, Any], temperature: float | None = None,
+    aggregator_temperature: float | None = None, reference_max_tokens: int | None = None,
+    reference_timeout: float | None = None, degraded_reference_policy: str = "loud",
     agent: Any = None,
 ) -> str:
     """Run configured reference models and synthesize their advice (one-shot /moa).
@@ -891,12 +842,8 @@ def aggregate_moa_context(
     """
     reference_models = [slot for slot in reference_models if slot.get("enabled", True)]
     reference_outputs = _run_references_parallel(
-        reference_models,
-        _reference_messages(api_messages),
-        temperature=temperature,
-        max_tokens=reference_max_tokens,
-        reference_timeout=reference_timeout,
-        agent=agent,
+        reference_models, _reference_messages(api_messages), temperature=temperature,
+        max_tokens=reference_max_tokens, reference_timeout=reference_timeout, agent=agent,
     )
     successful_outputs, failed_labels = _split_references(reference_outputs)
 
@@ -944,15 +891,11 @@ def aggregate_moa_context(
         # a third independent MoA call path that otherwise re-bills its full input.
         agg_messages = _maybe_apply_moa_cache_control(
             [{"role": "user", "content": synth_prompt}],
-            _with_cache_disabled(agg_runtime, cache_disabled),
-            cache_ttl=cache_ttl,
+            _with_cache_disabled(agg_runtime, cache_disabled), cache_ttl=cache_ttl,
         )
         response = call_llm(
-            task="moa_aggregator",
-            messages=agg_messages,
-            temperature=aggregator_temperature,
-            reasoning_config=_aggregator_reasoning_config(aggregator),
-            **agg_runtime,
+            task="moa_aggregator", messages=agg_messages, temperature=aggregator_temperature,
+            reasoning_config=_aggregator_reasoning_config(aggregator), **agg_runtime,
         )
         synthesis = _extract_text(response)
     except Exception as exc:
@@ -990,21 +933,17 @@ def _completed_response_as_stream_chunk(response: Any) -> Any:
             for index, tc in enumerate(raw_tool_calls)
         ]
     delta = SimpleNamespace(
-        content=getattr(message, "content", None),
-        tool_calls=tool_call_deltas,
+        content=getattr(message, "content", None), tool_calls=tool_call_deltas,
         reasoning_content=getattr(message, "reasoning_content", None),
         reasoning=getattr(message, "reasoning", None),
         reasoning_details=getattr(message, "reasoning_details", None),
     )
     choice = SimpleNamespace(
-        index=getattr(first_choice, "index", 0),
-        delta=delta,
+        index=getattr(first_choice, "index", 0), delta=delta,
         finish_reason=getattr(first_choice, "finish_reason", None) or "stop",
     )
     return SimpleNamespace(
-        id=getattr(response, "id", None),
-        model=getattr(response, "model", None),
-        choices=[choice],
+        id=getattr(response, "id", None), model=getattr(response, "model", None), choices=[choice],
         usage=getattr(response, "usage", None),
     )
 
@@ -1029,10 +968,7 @@ def _attach_reference_guidance(agg_messages: list[dict[str, Any]], guidance: str
     agg_messages.append({"role": "user", "content": guidance})
 
 
-def peel_reference_guidance(
-    messages: list[dict[str, Any]],
-    guidance: Any,
-) -> list[dict[str, Any]]:
+def peel_reference_guidance(messages: list[dict[str, Any]], guidance: Any) -> list[dict[str, Any]]:
     """Exact inverse of ``_attach_reference_guidance`` (the three attach shapes), so a
     cache breakpoint never lands on the turn-varying guidance. Inputs are not mutated."""
     if not guidance or not messages:
@@ -1150,8 +1086,7 @@ class MoAChatCompletions:
             if agg_output is None and aggregator_output_fallback:
                 agg_output = aggregator_output_fallback
             save_moa_turn(
-                session_id=session_id,
-                preset_name=pending.get("preset", ""),
+                session_id=session_id, preset_name=pending.get("preset", ""),
                 reference_outputs=pending.get("reference_outputs", []),
                 aggregator_label=pending.get("aggregator_label", ""),
                 aggregator_model=agg_slot.get("model"),
@@ -1189,10 +1124,7 @@ class MoAChatCompletions:
         return {**prepared, "messages": agg_messages}
 
     def _plan_aggregator_cache(
-        self,
-        agg_messages: list[dict[str, Any]],
-        tools: Any,
-        guidance: Any,
+        self, agg_messages: list[dict[str, Any]], tools: Any, guidance: Any,
         agg_runtime: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], Any]:
         """Cache-breakpoint the aggregator request for its destination.
@@ -1294,9 +1226,7 @@ class MoAChatCompletions:
         return agg_response
 
     def _fanout_cache_key(
-        self,
-        preset: dict[str, Any],
-        ref_messages: list[dict[str, Any]],
+        self, preset: dict[str, Any], ref_messages: list[dict[str, Any]],
         reference_models: list[dict[str, Any]],
     ) -> tuple:
         """Turn-scoped reference cache key per the preset's fan-out cadence.
@@ -1353,13 +1283,9 @@ class MoAChatCompletions:
         )
 
     def _run_fanout(
-        self,
-        preset: dict[str, Any],
-        ref_messages: list[dict[str, Any]],
-        reference_models: list[dict[str, Any]],
-        aggregator: dict[str, Any],
-        aggregator_temperature: Any,
-        cache_key: tuple,
+        self, preset: dict[str, Any], ref_messages: list[dict[str, Any]],
+        reference_models: list[dict[str, Any]], aggregator: dict[str, Any],
+        aggregator_temperature: Any, cache_key: tuple,
     ) -> list[tuple[str, str, Any]]:
         """Cache-MISS path of ``create``: run the advisors, account, trace and emit.
 
@@ -1372,14 +1298,11 @@ class MoAChatCompletions:
             self._emit("moa.progress", refs_done=done, refs_total=total, label=label)
 
         reference_outputs = _run_references_parallel(
-            reference_models,
-            ref_messages,
+            reference_models, ref_messages,
             temperature=_preset_temperature(preset, "reference_temperature"),
-            max_tokens=preset.get("reference_max_tokens"),
-            progress_callback=_progress,
+            max_tokens=preset.get("reference_max_tokens"), progress_callback=_progress,
             reference_timeout=float(raw_reference_timeout) if raw_reference_timeout else None,
-            agent=self._agent,
-            late_accounting_sink=self._record_late_reference_accounting,
+            agent=self._agent, late_accounting_sink=self._record_late_reference_accounting,
         )
         if any(text == _INTERRUPTED_REFERENCE_NOTE for _lbl, text, _acct in reference_outputs):
             # An interrupted fan-out is a partial snapshot: never cache it (a HIT
@@ -1402,10 +1325,8 @@ class MoAChatCompletions:
         else:
             trace_refs = list(reference_outputs)
         self._pending_trace = {
-            "preset": self.preset_name,
-            "reference_outputs": trace_refs,
-            "aggregator_slot": aggregator,
-            "aggregator_temperature": aggregator_temperature,
+            "preset": self.preset_name, "reference_outputs": trace_refs,
+            "aggregator_slot": aggregator, "aggregator_temperature": aggregator_temperature,
         }
         # Derived from the privacy-redacted trace_refs.
         try:
@@ -1422,29 +1343,21 @@ class MoAChatCompletions:
         ref_count = len(reference_outputs)
         for idx, (label, text, _accounting) in enumerate(reference_outputs, start=1):
             self._emit(
-                "moa.reference",
-                index=idx,
-                count=ref_count,
-                label=label,
+                "moa.reference", index=idx, count=ref_count, label=label,
                 text=_redact_reference_text(text) if privacy_mode else text,
             )
         if ref_count:
             # Phase transition: fan-out complete, aggregator about to act.
             agg_label = _slot_label(aggregator)
             self._emit(
-                "moa.phase",
-                phase="aggregator",
-                refs_done=ref_count,
-                refs_total=ref_count,
+                "moa.phase", phase="aggregator", refs_done=ref_count, refs_total=ref_count,
                 aggregator=agg_label,
             )
             self._emit("moa.aggregating", aggregator=agg_label, ref_count=ref_count)
         return reference_outputs
 
     def _build_guidance(
-        self,
-        reference_outputs: list[tuple[str, str, Any]],
-        aggregator: dict[str, Any],
+        self, reference_outputs: list[tuple[str, str, Any]], aggregator: dict[str, Any],
         degraded_reference_policy: str,
     ) -> str | None:
         """Render the reference block attached to the aggregator prompt (None = nothing)."""
@@ -1531,9 +1444,7 @@ class MoAChatCompletions:
             _attach_reference_guidance(agg_messages, guidance)
 
         prepared_request = {
-            "messages": agg_messages,
-            "guidance": guidance,
-            "aggregator": aggregator,
+            "messages": agg_messages, "guidance": guidance, "aggregator": aggregator,
             "aggregator_temperature": aggregator_temperature,
         }
         if api_kwargs.pop("_moa_prepare_only", False):
@@ -1591,10 +1502,8 @@ def build_moa_facade(agent, preset_name: Any = None) -> MoAClient:
         primary, secondary, extra_map = spec
         try:
             cb(
-                event,
-                str(kwargs.get(primary) or ""),
-                str(kwargs.get(secondary) or "") if secondary else None,
-                None,
+                event, str(kwargs.get(primary) or ""),
+                str(kwargs.get(secondary) or "") if secondary else None, None,
                 **{out: kwargs.get(src) for out, src in extra_map.items()},
             )
         except Exception:

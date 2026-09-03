@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 __all__ = ["splice_provider_projection"]
 
 
-def splice_provider_projection(
-    agent: Any, response: Any, messages: list[dict[str, Any]]
-) -> int:
+def splice_provider_projection(agent: Any, response: Any, messages: list[dict[str, Any]]) -> int:
     """Append the provider's projected history rows and tick the nudge counter.
 
     Returns the number of rows spliced. Tolerates absent/garbage attributes so a

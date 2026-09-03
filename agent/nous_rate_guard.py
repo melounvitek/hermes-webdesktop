@@ -54,9 +54,7 @@ def _parse_reset_seconds(headers: Optional[Mapping[str, str]]) -> Optional[float
 
 
 def record_nous_rate_limit(
-    *,
-    headers: Optional[Mapping[str, str]] = None,
-    error_context: Optional[dict[str, Any]] = None,
+    *, headers: Optional[Mapping[str, str]] = None, error_context: Optional[dict[str, Any]] = None,
     default_cooldown: float = 300.0,
 ) -> None:
     """Record that Nous Portal is rate-limited in the shared state file.
@@ -121,9 +119,7 @@ def _is_exhausted(remaining: Optional[int], reset: Optional[float]) -> bool:
 
 
 def is_genuine_nous_rate_limit(
-    *,
-    headers: Optional[Mapping[str, str]] = None,
-    last_known_state: Optional[Any] = None,
+    *, headers: Optional[Mapping[str, str]] = None, last_known_state: Optional[Any] = None,
 ) -> bool:
     """Decide whether a 429 from Nous Portal is a real account rate limit.
 
@@ -154,9 +150,7 @@ def _parse_buckets_from_headers(
     return result
 
 
-def _has_exhausted_bucket(
-    buckets: Mapping[str, tuple[Optional[int], Optional[float]]],
-) -> bool:
+def _has_exhausted_bucket(buckets: Mapping[str, tuple[Optional[int], Optional[float]]]) -> bool:
     return any(_is_exhausted(remaining, reset) for remaining, reset in buckets.values())
 
 

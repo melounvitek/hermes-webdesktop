@@ -39,13 +39,8 @@ class ProviderRegistry(Generic[P]):
     """
 
     def __init__(
-        self,
-        *,
-        label: str,
-        provider_cls: type,
-        logger: logging.Logger,
-        normalize: Callable[[str], str] = strip_key,
-        builtin_names: FrozenSet[str] = frozenset(),
+        self, *, label: str, provider_cls: type, logger: logging.Logger,
+        normalize: Callable[[str], str] = strip_key, builtin_names: FrozenSet[str] = frozenset(),
         on_builtin_collision: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.label = label
@@ -168,25 +163,16 @@ class ProviderRegistry(Generic[P]):
         """Bind the historical module-level API (+ ``_providers``/``_scoped_providers``/
         ``_lock`` test hooks) into a ``*_registry`` module namespace."""
         namespace.update(
-            _providers=self._providers,
-            _scoped_providers=self._scoped_providers,
-            _lock=self._lock,
-            register_provider=self.register,
-            list_providers=self.list_providers,
-            get_provider=self.get_provider,
-            snapshot_registration=self.snapshot_registration,
+            _providers=self._providers, _scoped_providers=self._scoped_providers, _lock=self._lock,
+            register_provider=self.register, list_providers=self.list_providers,
+            get_provider=self.get_provider, snapshot_registration=self.snapshot_registration,
             restore_registration=self.restore_registration,
-            registry_generation=self.registry_generation,
-            _reset_for_tests=self.reset_for_tests,
+            registry_generation=self.registry_generation, _reset_for_tests=self.reset_for_tests,
         )
 
 
 def is_available_safe(
-    provider: Any,
-    logger: logging.Logger,
-    fmt: str,
-    *,
-    level: int = logging.DEBUG,
+    provider: Any, logger: logging.Logger, fmt: str, *, level: int = logging.DEBUG,
     exc_info: bool = False,
 ) -> bool:
     """``bool(provider.is_available())`` that treats a raising provider as unavailable."""

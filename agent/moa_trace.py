@@ -55,10 +55,8 @@ def _slot_trace(acct: Any, label: str) -> dict[str, Any]:
     input messages and output (not the truncated display preview)."""
     usage = getattr(acct, "usage", None)
     return {
-        "label": label,
-        **{f: getattr(acct, f, None) for f in _ACCT_FIELDS},
-        "input_messages": getattr(acct, "messages", None),
-        "output": getattr(acct, "output", None),
+        "label": label, **{f: getattr(acct, f, None) for f in _ACCT_FIELDS},
+        "input_messages": getattr(acct, "messages", None), "output": getattr(acct, "output", None),
         "usage": {f: getattr(usage, f, 0) for f in _USAGE_FIELDS} if usage is not None else {},
         **{f: getattr(acct, f, None) for f in _COST_FIELDS},
     }
@@ -76,16 +74,9 @@ def slot_metrics(acct: Any, label: str, output: Any = None) -> dict[str, Any]:
 
 
 def save_moa_turn(
-    *,
-    session_id: Optional[str],
-    preset_name: str,
-    reference_outputs: list[tuple[str, str, Any]],
-    aggregator_label: str,
-    aggregator_model: Optional[str],
-    aggregator_provider: Optional[str],
-    aggregator_temperature: Any,
-    aggregator_input_messages: Any,
-    aggregator_output: Optional[str],
+    *, session_id: Optional[str], preset_name: str, reference_outputs: list[tuple[str, str, Any]],
+    aggregator_label: str, aggregator_model: Optional[str], aggregator_provider: Optional[str],
+    aggregator_temperature: Any, aggregator_input_messages: Any, aggregator_output: Optional[str],
     aggregator_streamed: bool,
 ) -> None:
     """Append one full MoA turn record to the session's trace JSONL, if enabled.
@@ -113,14 +104,10 @@ def save_moa_turn(
             "preset": preset_name,
             "references": [_slot_trace(acct, label) for label, _text, acct in reference_outputs],
             "aggregator": {
-                "label": aggregator_label,
-                "model": aggregator_model,
-                "provider": aggregator_provider,
-                "temperature": aggregator_temperature,
-                "input_messages": aggregator_input_messages,
-                "output": aggregator_output,
-                "streamed": aggregator_streamed,
-                "output_location": output_location,
+                "label": aggregator_label, "model": aggregator_model,
+                "provider": aggregator_provider, "temperature": aggregator_temperature,
+                "input_messages": aggregator_input_messages, "output": aggregator_output,
+                "streamed": aggregator_streamed, "output_location": output_location,
             },
         }
         with path.open("a", encoding="utf-8") as f:
