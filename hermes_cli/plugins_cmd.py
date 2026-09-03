@@ -706,13 +706,11 @@ def _resolve_index_name(identifier: str, console) -> tuple[str, Optional[str]]:
                 f"community index ({source}). Candidates:")
             for c in candidates:
                 console.print(f"  {c.name}  →  {c.install_identifier}")
-            console.print("Re-run with the exact name or the owner/repo identifier.")
-        else:
-            console.print(
-                f"[red]Error:[/red] Plugin '{identifier}' was not found in the "
-                f"community index ({source}). Use `hermes plugins search <term>` to "
-                "browse, or install directly with an owner/repo identifier.")
-        sys.exit(1)
+            _fail(console, "Re-run with the exact name or the owner/repo identifier.")
+        _fail(console, (
+            f"[red]Error:[/red] Plugin '{identifier}' was not found in the "
+            f"community index ({source}). Use `hermes plugins search <term>` to "
+            "browse, or install directly with an owner/repo identifier."))
 
     pinned_ref: Optional[str] = None
     if entry.ref and _EXACT_COMMIT_RE.fullmatch(entry.ref):
@@ -1095,15 +1093,6 @@ def _declared_capabilities_for_key(key: str) -> list:
     return _declared_capabilities_from_manifest(_read_manifest(Path(entry[4])), entry[0])
 
 
-def _print_capability_list(console, capabilities: list) -> None:
-    """Render the consent screen body: one line per capability."""
-    from hermes_cli.plugin_capabilities import CAPABILITY_REGISTRY
-    for cap in capabilities:
-        spec = CAPABILITY_REGISTRY.get(cap)
-        desc = spec.description if spec else ""
-        console.print(f"    [bold]{cap}[/bold] — {desc}")
-
-
 def _run_capability_consent(
     console,
     plugin_id: str,
@@ -1118,7 +1107,7 @@ def _run_capability_consent(
     or in ANY non-interactive context — they stay ungranted (fail closed) and the plugin must
     degrade via ``ctx.has_capability()``. Consent + audit, NOT a sandbox.
     """
-    from hermes_cli.plugin_capabilities import pending_capabilities, record_consent
+    from hermes_cli.plugin_capabilities import CAPABILITY_REGISTRY, pending_capabilities, record_consent
     pending = pending_capabilities(plugin_id, declared)
     if not pending:
         # Refresh the consent hash so a later declaration change is detected.
@@ -1128,7 +1117,9 @@ def _run_capability_consent(
 
     verb = "requests" if context == "install" else "now requests"
     console.print(f"\n  [yellow]Plugin [bold]{plugin_id}[/bold] {verb} the following capabilities:[/yellow]")
-    _print_capability_list(console, pending)
+    for cap in pending:
+        spec = CAPABILITY_REGISTRY.get(cap)
+        console.print(f"    [bold]{cap}[/bold] — {spec.description if spec else ''}")
     console.print(
         "  [dim]Granting trusts the plugin author with these host surfaces. "
         "This is consent, not a sandbox — plugins run as regular Python "
@@ -1481,7 +1472,8 @@ _PROVIDER_CATEGORY_SPECS = (
     ("Memory Provider", "built-in", "", lambda: _get_current_memory_provider(),
      lambda: _discover_memory_providers(), lambda v: _save_memory_provider(v)),
     ("Context Engine", "compressor", "compressor", lambda: _get_current_context_engine(),
-     lambda: _discover_context_engines(), lambda v: _save_context_engine(v)))
+     lambda: _discover_context_engines(), lambda v: _save_context_engine(v)),
+)
 
 
 def _configure_category_spec(spec) -> bool:
@@ -1510,8 +1502,7 @@ def cmd_show(name: str) -> None:
     match = _find_plugin_entry(name)
     if match is None:
         console.print(f"[red]Plugin '{name}' not found.[/red]")
-        console.print("[dim]List installed plugins:[/dim] hermes plugins list")
-        sys.exit(1)
+        _fail(console, "[dim]List installed plugins:[/dim] hermes plugins list")
 
     pname, version, description, source, dir_path, key = match
     manifest = _read_manifest(Path(dir_path)) if dir_path else {}

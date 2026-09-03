@@ -50,17 +50,6 @@ class PackPluginEntry:
             return f"{self.repo}/{self.subdir}" if self.subdir else self.repo
         return None
 
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {}
-        if self.name:
-            d["name"] = self.name
-        if self.repo:
-            d["repo"] = self.repo
-        d["ref"] = self.ref
-        if self.subdir:
-            d["subdir"] = self.subdir
-        return d
-
 
 @dataclass
 class PluginPack:
@@ -75,18 +64,6 @@ class PluginPack:
     config: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Skill-hub ids. Parsed + displayed, NOT installed (documented seam).
     skills: List[str] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {"name": self.name}
-        for key in ("description", "author", "version"):
-            if getattr(self, key):
-                d[key] = getattr(self, key)
-        d["plugins"] = [p.to_dict() for p in self.plugins]
-        if self.config:
-            d["config"] = self.config
-        if self.skills:
-            d["skills"] = list(self.skills)
-        return d
 
 
 # ---------------------------------------------------------------------------
