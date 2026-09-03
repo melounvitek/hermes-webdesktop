@@ -257,13 +257,12 @@ def _has_function_response(content: Dict[str, Any]) -> bool:
 
 
 def _merge_alternating(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Alternation contract for generateContent: 1) adjacent same-role contents merge
-    (else HTTP 400 "multiturn requests [must] alternate"); 2) EXCEPT never fuse a human
-    user text turn into a preceding user content that only carries functionResponse
-    parts (or vice versa) — Gemini 3 accepts the fold but reads the text as a
-    continuation of the tool result and returns an empty candidate (parallel
-    functionResponse + functionResponse still merge); 3) the split pair stays API-valid
-    via an interposed placeholder model turn."""
+    """Alternation contract for generateContent: 1) adjacent same-role contents merge (else HTTP 400
+    "multiturn requests [must] alternate"); 2) EXCEPT never fuse a human user text turn into a preceding
+    user content that only carries functionResponse parts (or vice versa) — Gemini 3 accepts the fold but
+    reads the text as a continuation of the tool result and returns an empty candidate (parallel
+    functionResponse + functionResponse still merge); 3) the split pair stays API-valid via an interposed
+    placeholder model turn."""
     merged: List[Dict[str, Any]] = []
     for content in contents:
         prev = merged[-1] if merged else None
@@ -350,9 +349,8 @@ def _normalize_thinking_config(config: Any) -> Optional[Dict[str, Any]]:
 
 
 def _thinking_requests_output_headroom(thinking_config: Any) -> bool:
-    """True when Gemini will spend output tokens on thinking: thought tokens bill against
-    ``maxOutputTokens``, so a global 4096/16384 cap can be consumed entirely by high
-    thinking, leaving ``finishReason=MAX_TOKENS`` with no answer."""
+    """True when Gemini will spend output tokens on thinking: thought tokens bill against ``maxOutputTokens``,
+    so a global 4096/16384 cap can be consumed entirely by high thinking (``finishReason=MAX_TOKENS``, no answer)."""
     normalized = _normalize_thinking_config(thinking_config) or {}
     budget, has_level = normalized.get("thinkingBudget"), "thinkingLevel" in normalized
     if normalized.get("includeThoughts") is False:

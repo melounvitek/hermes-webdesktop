@@ -306,9 +306,7 @@ def _fixture(remaining: str, subscription: str, limit: Optional[str] = None, pur
     if limit is not None:
         d["denominator_kind"] = "subscription_cap"
     d["paid_access"] = paid
-    if reason is not None:
-        d["disabled_reason"] = reason
-    return d
+    return d if reason is None else {**d, "disabled_reason": reason}
 
 
 _DEV_FIXTURES: dict[str, dict] = {
@@ -326,9 +324,8 @@ _DEV_FIXTURES: dict[str, dict] = {
 
 
 def dev_fixture_credits_state() -> Optional[CreditsState]:
-    """Fixture CreditsState for HERMES_DEV_CREDITS_FIXTURE, or None (unknown name / unset).
-    Prod-leak guard: applies ONLY when HERMES_DEV_CREDITS is also on, so a stray
-    fixture env var can never surface fabricated balances on a real account."""
+    """Fixture CreditsState for HERMES_DEV_CREDITS_FIXTURE, or None (unknown name / unset). Prod-leak guard:
+    applies ONLY when HERMES_DEV_CREDITS is also on, so a stray fixture env var never surfaces fabricated balances."""
     name = os.environ.get("HERMES_DEV_CREDITS_FIXTURE", "").strip()
     if not name or not is_truthy_value(os.environ.get("HERMES_DEV_CREDITS")):
         return None
@@ -346,9 +343,8 @@ def dev_fixture_credits_state() -> Optional[CreditsState]:
 
 
 def _credits_state_from_account(info) -> Optional[CreditsState]:
-    """Map a NousPortalAccountInfo into a header-shaped CreditsState for the seed.
-    Float account dollars → micros plus a DISPLAY *_usd (formatting account floats
-    is allowed; parsing a server *_usd is not). Fail-open → None."""
+    """Map a NousPortalAccountInfo into a header-shaped CreditsState for the seed. Float account dollars →
+    micros plus a DISPLAY *_usd (formatting account floats is allowed; parsing a server *_usd is not). Fail-open → None."""
     try:
         acc = getattr(info, "paid_service_access_info", None)
         sub = getattr(info, "subscription", None)
@@ -373,9 +369,8 @@ def _credits_state_from_account(info) -> Optional[CreditsState]:
 
 
 def _hydrate_seed_state(agent, state) -> None:
-    """Install a seed CreditsState on the agent and fire the notice policy once.
-    Primes the crossing gate: the cold-start snapshot IS the first observation, so
-    a session opening in a band warns immediately. Safe from a worker thread."""
+    """Install a seed CreditsState on the agent and fire the notice policy once. Primes the crossing gate:
+    the cold-start snapshot IS the first observation, so a session opening in a band warns immediately."""
     agent._credits_state = state
     if getattr(agent, "_credits_session_start_micros", None) is None:
         agent._credits_session_start_micros = state.remaining_micros
@@ -387,10 +382,9 @@ def _hydrate_seed_state(agent, state) -> None:
 
 
 def seed_credits_at_session_start(agent) -> bool:
-    """Hydrate agent._credits_state from the portal account (or a dev fixture) and
-    fire the notice policy so warnings show at session OPEN (TUI/desktop "ready" and
-    plain-CLI first-turn setup). Idempotent once a seed or real header populated
-    _credits_state. Returns True iff it seeded this call. Never raises."""
+    """Hydrate agent._credits_state from the portal account (or a dev fixture) and fire the notice policy so
+    warnings show at session OPEN (TUI/desktop "ready" and plain-CLI first-turn setup). Idempotent once a seed
+    or real header populated _credits_state. Returns True iff it seeded this call. Never raises."""
     try:
         if getattr(agent, "provider", "") != "nous" or getattr(agent, "_credits_state", None) is not None:
             return False
