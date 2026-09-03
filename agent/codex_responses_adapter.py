@@ -168,8 +168,15 @@ def _iter_content_parts(content: list) -> Iterator[tuple[str, Any]]:
                 yield "image", part
 
 
-def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
-    image_part: Dict[str, Any] = {"type": "input_image", "image_url": url}
+def _input_image_part(part: Dict[str, Any], *, keep_empty_url: bool) -> Optional[Dict[str, Any]]:
+    """``input_image`` from a chat/Responses image part (``image_url`` may be a str or ``{url, detail}``);
+    None for an empty url unless ``keep_empty_url``."""
+    url, detail = part.get("image_url"), part.get("detail")
+    if isinstance(url, dict):
+        url, detail = url.get("url"), url.get("detail", detail)
+    if not _nonempty_str(url) and not keep_empty_url:
+        return None
+    image_part: Dict[str, Any] = {"type": "input_image", "image_url": str(url or "")}
     if _nonblank(detail):
         image_part["detail"] = detail.strip()
     return image_part
@@ -177,15 +184,10 @@ def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
 
 def _image_part_for_role(part: Dict[str, Any], role: str, *, keep_empty_url: bool) -> Optional[Dict[str, Any]]:
     """Responses image part for ``role``: assistant → text placeholder (an assistant
-    ``input_image`` 400s every replay); user → ``input_image`` (None for an empty url unless kept)."""
+    ``input_image`` 400s every replay); user → ``input_image``."""
     if role == "assistant":
         return {"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER}
-    url, detail = part.get("image_url"), part.get("detail")  # ``image_url`` may be a str or ``{url, detail}``
-    if isinstance(url, dict):
-        url, detail = url.get("url"), url.get("detail", detail)
-    if _nonempty_str(url):
-        return _input_image_part(url, detail)
-    return _input_image_part(str(url or ""), detail) if keep_empty_url else None
+    return _input_image_part(part, keep_empty_url=keep_empty_url)
 
 
 def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> List[Dict[str, Any]]:
@@ -197,8 +199,9 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
     for kind, payload in _iter_content_parts(_as_list(content)):
-        part = {"type": text_type, "text": payload} if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
-        if part is not None:
+        if kind == "text":
+            converted.append({"type": text_type, "text": payload})
+        elif (part := _image_part_for_role(payload, role, keep_empty_url=False)) is not None:
             converted.append(part)
     return converted
 
@@ -217,11 +220,8 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
     parts = list(_iter_content_parts(content))
     text_bits = [payload for kind, payload in parts if kind == "text"]
     image_count = len(parts) - len(text_bits)
-    summary = sep.join(text_bits).strip()
-    if image_count:
-        note = f"[{image_count} image{'s' if image_count != 1 else ''}]"
-        summary = f"{note} {summary}" if summary else note
-    return summary
+    note = f"[{image_count} image{'s' if image_count != 1 else ''}]" if image_count else ""
+    return " ".join(bit for bit in (note, sep.join(text_bits).strip()) if bit)
 
 
 # --- ID helpers ---------------------------------------------------------------
@@ -336,10 +336,7 @@ def _message_item(
 ) -> Dict[str, Any]:
     """Assistant ``message`` item; ``id``/``phase`` are added only when non-empty."""
     item: Dict[str, Any] = {"type": "message", "role": "assistant", "status": status, "content": content}
-    if item_id:
-        item["id"] = item_id
-    if phase:
-        item["phase"] = phase
+    item.update({k: v for k, v in (("id", item_id), ("phase", phase)) if v})
     return item
 
 
@@ -426,8 +423,8 @@ def _replay_tool_call_items(msg: Dict[str, Any], *, start_index: int) -> List[Di
     return replayed
 
 
-def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Convert a tool-role message to ``function_call_output`` (None if unpairable)."""
+def _tool_output_items(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert a tool-role message to ``[function_call_output]`` (``[]`` if unpairable)."""
     raw_tool_call_id = msg.get("tool_call_id")
     call_id, tool_response_item_id = _split_responses_tool_id(raw_tool_call_id)
     if not _nonblank(call_id):
@@ -437,14 +434,14 @@ def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if call_id is None and _nonblank(raw_tool_call_id):
             call_id = raw_tool_call_id.strip()
     if not _nonblank(call_id):
-        return None
+        return []
     # ``output`` may be a string or an ``input_text``/``input_image`` array.
     tool_content = msg.get("content")
     output_value: Any = (
         (_chat_content_to_responses_parts(tool_content, role="user") or "")
         if isinstance(tool_content, list) else str(tool_content or "")
     )
-    return {"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}
+    return [{"type": "function_call_output", "call_id": _clamp_responses_call_id(call_id), "output": output_value}]
 
 
 def _chat_messages_to_responses_input(
@@ -478,9 +475,7 @@ def _chat_messages_to_responses_input(
             continue
         role = msg.get("role")
         if role == "tool":
-            tool_item = _tool_output_item(msg)
-            if tool_item is not None:
-                emit([tool_item], msg)
+            emit(_tool_output_items(msg), msg)
             continue
         if role not in {"user", "assistant"}:
             continue
@@ -579,26 +574,22 @@ class _PreflightCtx(NamedTuple):
     seen_ids: set
 
 
-def _require_call_id(item: Dict[str, Any], idx: int, kind: str) -> str:
-    call_id = item.get("call_id")
-    if not _nonblank(call_id):
-        raise ValueError(f"Codex Responses input[{idx}] {kind} is missing call_id.")
-    return call_id.strip()
-
-
 def _preflight_function_call(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
-    call_id = _require_call_id(item, idx, "function_call")
-    name = item.get("name")
+    call_id, name = item.get("call_id"), item.get("name")
+    if not _nonblank(call_id):
+        raise ValueError(f"Codex Responses input[{idx}] function_call is missing call_id.")
     if not _nonblank(name):
         raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
     return {
-        "type": "function_call", "call_id": call_id, "name": _sanitize_replayed_fn_name(name),
+        "type": "function_call", "call_id": call_id.strip(), "name": _sanitize_replayed_fn_name(name),
         "arguments": ctx.sanitize_text(_coerce_arguments(item.get("arguments", "{}"))),
     }
 
 
 def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
-    call_id = _require_call_id(item, idx, "function_call_output")
+    call_id = item.get("call_id")
+    if not _nonblank(call_id):
+        raise ValueError(f"Codex Responses input[{idx}] function_call_output is missing call_id.")
     output = item.get("output", "")
     if isinstance(output, list):
         # Multimodal tool result: keep recognised input_text/input_image parts, drop the rest (4xx otherwise).
@@ -608,11 +599,11 @@ def _preflight_function_call_output(item: Dict[str, Any], idx: int, ctx: _Prefli
             if ptype == "input_text" and _nonempty_str(part.get("text")):
                 cleaned.append({"type": "input_text", "text": ctx.sanitize_text(part["text"])})
             elif ptype == "input_image" and _nonempty_str(part.get("image_url")):
-                cleaned.append(_input_image_part(part["image_url"], part.get("detail")))
+                cleaned.append(_input_image_part(part, keep_empty_url=False))
         output_value: Any = cleaned or ""
     else:
         output_value = ctx.sanitize_text(_str_or_empty(output))
-    return {"type": "function_call_output", "call_id": call_id, "output": output_value}
+    return {"type": "function_call_output", "call_id": call_id.strip(), "output": output_value}
 
 
 def _preflight_encrypted(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Optional[Dict[str, Any]]:
@@ -674,13 +665,12 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) 
         if isinstance(part, str):
             if part:
                 validated.append({"type": text_type, "text": ctx.sanitize_text(part)})
-            continue
-        if not isinstance(part, dict):
+        elif not isinstance(part, dict):
             raise ValueError(f"Codex Responses input[{idx}].content[{part_idx}] must be an object or string.")
-        ptype = _part_type(part)
-        if ptype in _TEXT_PART_TYPES:
+        elif (ptype := _part_type(part)) in _TEXT_PART_TYPES:
             text = part.get("text", "")
-            validated.append({"type": text_type, "text": ctx.sanitize_text(text if isinstance(text, str) else str(text or ""))})
+            text = text if isinstance(text, str) else str(text or "")
+            validated.append({"type": text_type, "text": ctx.sanitize_text(text)})
         elif ptype in _IMAGE_PART_TYPES:
             validated.append(_image_part_for_role(part, role, keep_empty_url=True))
         else:
@@ -744,10 +734,10 @@ _PREFLIGHT_OPTIONAL_FIELDS: tuple[tuple[str, Callable[[Any], bool], Optional[Cal
     ("timeout", lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < float("inf"), float),
     ("temperature", lambda v: isinstance(v, (int, float)), float),
     # Cache routing/retention and tool-dispatch hints pass through as-is.
-    ("tool_choice", lambda v: v is not None, None),
-    ("parallel_tool_calls", lambda v: v is not None, None),
-    ("prompt_cache_key", lambda v: v is not None, None),
-    ("prompt_cache_retention", lambda v: v is not None, None),
+    *(
+        (key, lambda v: v is not None, None)
+        for key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key", "prompt_cache_retention")
+    ),
     # Native compaction directive; eligibility is resolved in agent/native_compaction.py.
     ("context_management", lambda v: isinstance(v, list) and bool(v), None),
 )
@@ -766,7 +756,8 @@ def _optional_dict(api_kwargs: Dict[str, Any], key: str) -> Optional[Dict[str, A
 
 
 def _preflight_codex_api_kwargs(
-    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False, sanitize_harmony_tokens: bool = False,
+    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False,
+    sanitize_harmony_tokens: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
@@ -782,7 +773,9 @@ def _preflight_codex_api_kwargs(
     input_items = _preflight_codex_input_items(
         api_kwargs.get("input"), is_github_responses=is_github_responses, sanitize_harmony_tokens=sanitize_harmony_tokens,
     )
-    normalized: Dict[str, Any] = {"model": model.strip(), "instructions": instructions, "input": input_items, "store": False}
+    normalized: Dict[str, Any] = {
+        "model": model.strip(), "instructions": instructions, "input": input_items, "store": False,
+    }
     tools = api_kwargs.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
@@ -834,12 +827,8 @@ def _preflight_codex_api_kwargs(
 
 def _text_chunks(parts: Any, types: Optional[set] = None) -> List[str]:
     """Non-empty ``.text`` of each part (optionally filtered by ``.type``); [] if not a list."""
-    return [
-        text for text in (
-            getattr(part, "text", None) for part in _as_list(parts) if types is None or getattr(part, "type", None) in types
-        )
-        if _nonempty_str(text)
-    ]
+    selected = [part for part in _as_list(parts) if types is None or getattr(part, "type", None) in types]
+    return [text for text in (getattr(part, "text", None) for part in selected) if _nonempty_str(text)]
 
 
 def _extract_responses_message_text(item: Any) -> str:
@@ -944,7 +933,9 @@ class _OutputScan:
                 if raw_item is not None:
                     self.reasoning_items_raw.append(raw_item)
                     if item_type == "compaction":
-                        logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
+                        logger.info(
+                            "Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]),
+                        )
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
@@ -992,7 +983,9 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
             content = []
         else:
             raise RuntimeError("Responses API returned no output items")
-        output = response.output = [SimpleNamespace(type="message", role="assistant", status="completed", content=content)]
+        response.output = output = [
+            SimpleNamespace(type="message", role="assistant", status="completed", content=content),
+        ]
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
     scan = _OutputScan(response_status)
@@ -1035,6 +1028,13 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         reasoning_content=None, reasoning_details=None,
         codex_reasoning_items=scan.reasoning_items_raw or None, codex_message_items=scan.message_items_raw or None,
     )
+    # Reasoning-only: for Codex/xAI/GitHub, status=completed means "still thinking" →
+    # incomplete so the continuation retries. Other backends trust response.status —
+    # forcing incomplete there stalls for minutes on a legitimately final state.
+    reasoning_only = (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text
+    trusted_final = (
+        response_status == "completed" and issuer_kind not in ("codex_backend", "xai_responses", "github_responses")
+    )
     if tool_calls:
         finish_reason = "tool_calls"
     elif response_incomplete_content_filter:
@@ -1043,16 +1043,9 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         leaked_tool_call_text
         or scan.saw_streaming_or_item_incomplete
         or ((scan.has_incomplete_items or scan.saw_commentary_phase) and not scan.saw_final_answer_phase)
+        or (reasoning_only and not trusted_final)
     ):
         finish_reason = "incomplete"
-    elif (scan.reasoning_items_raw or reasoning_parts or scan.saw_reasoning_item) and not final_text:
-        # Reasoning-only: for Codex/xAI/GitHub, status=completed means "still thinking" →
-        # incomplete so the continuation retries. Other backends trust response.status —
-        # forcing incomplete there stalls for minutes on a legitimately final state.
-        trusted_final = (
-            response_status == "completed" and issuer_kind not in ("codex_backend", "xai_responses", "github_responses")
-        )
-        finish_reason = "stop" if trusted_final else "incomplete"
     else:
         finish_reason = "stop"
     return assistant_message, finish_reason
