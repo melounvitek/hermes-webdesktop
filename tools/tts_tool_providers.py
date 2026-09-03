@@ -297,8 +297,8 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     xai_config = tts_config.get("xai") or {}
     voice_id = str(xai_config.get("voice_id", DEFAULT_XAI_VOICE_ID)).strip() or DEFAULT_XAI_VOICE_ID
     language = str(xai_config.get("language", DEFAULT_XAI_LANGUAGE)).strip() or DEFAULT_XAI_LANGUAGE
-    sample_rate = int(xai_config.get("sample_rate", DEFAULT_XAI_SAMPLE_RATE))
-    bit_rate = int(xai_config.get("bit_rate", DEFAULT_XAI_BIT_RATE))
+    sample_rate, bit_rate = (int(xai_config.get("sample_rate", DEFAULT_XAI_SAMPLE_RATE)),
+                             int(xai_config.get("bit_rate", DEFAULT_XAI_BIT_RATE)))
     auto_speech_tags = xai_config.get("auto_speech_tags", xai_config.get("speech_tags"))
     if _config_bool(auto_speech_tags, DEFAULT_XAI_AUTO_SPEECH_TAGS):
         text = _apply_xai_auto_speech_tags(text)
@@ -565,9 +565,8 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     gemini_config = _section(tts_config, "gemini")
     model = str(gemini_config.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
     voice = str(gemini_config.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
-    base_url = str(
-        gemini_config.get("base_url") or origin.get_env_value("GEMINI_BASE_URL") or DEFAULT_GEMINI_TTS_BASE_URL
-    ).strip().rstrip("/")
+    base_url = str(gemini_config.get("base_url") or origin.get_env_value("GEMINI_BASE_URL")
+                   or DEFAULT_GEMINI_TTS_BASE_URL).strip().rstrip("/")
     persona_prompt = _read_gemini_persona_prompt(gemini_config)
     tts_script = text
     if _gemini_audio_tags_enabled(gemini_config, model):

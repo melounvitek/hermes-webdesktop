@@ -145,9 +145,7 @@ def acquire_tts_lease(lease: str, tts_config: Optional[Dict[str, Any]] = None) -
     with _tts_lease_lock:
         _tts_leases.add(lease)
         holders = len(_tts_leases)
-    result = _origin().warm_tts_provider(tts_config)
-    result["leases"] = holders
-    return result
+    return {**_origin().warm_tts_provider(tts_config), "leases": holders}
 
 
 def release_tts_lease(lease: str) -> Dict[str, Any]:
