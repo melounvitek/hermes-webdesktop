@@ -25,7 +25,6 @@ logger = logging.getLogger("tools.computer_use.cua_backend")
 _CUA_DRIVER_BUNDLE_ID = "com.trycua.driver"
 _CUA_DRIVER_TEAM_IDS = ("4YEC26S9KF", "YCK386LBJ7")
 
-
 def _resolve_cua_driver_app_path(driver_cmd: str) -> Optional[str]:
     """Return the CuaDriver.app bundle that CARRIES *driver_cmd*, if any. Derived from the
     resolved binary path only — no /Applications fallback, which could be a DIFFERENT install
@@ -37,7 +36,6 @@ def _resolve_cua_driver_app_path(driver_cmd: str) -> Optional[str]:
     candidate = resolved[: marker_index + len(".app")]
     executable = os.path.join(candidate, "Contents", "MacOS", "cua-driver")
     return candidate if os.path.isfile(executable) and os.access(executable, os.X_OK) else None
-
 
 def _validate_cua_driver_app_signature(app_path: str) -> None:
     """Fail closed unless *app_path* is the genuinely-signed CuaDriver.app. ``/usr/bin/open``
@@ -73,7 +71,6 @@ def _validate_cua_driver_app_signature(app_path: str) -> None:
         f"{_CUA_DRIVER_TEAM_IDS!r}; refusing to launch it. (Set computer_use.allow_unsigned_driver: "
         "true in config.yaml only for local unsigned driver builds.)")
 
-
 def _embedded_daemon_spawn_command(driver_cmd: str, serve_args: List[str], *, platform: str,
                                    app_path: Optional[str] = None) -> List[str]:
     """Build the private-daemon launch while preserving macOS TCC identity."""
@@ -85,7 +82,6 @@ def _embedded_daemon_spawn_command(driver_cmd: str, serve_args: List[str], *, pl
                            "Run `hermes computer-use install` to restore it.")
     _validate_cua_driver_app_signature(resolved_app)
     return ["/usr/bin/open", "-n", "-g", "-a", resolved_app, "--args", *serve_args]
-
 
 def _wait_or_kill(process: Any) -> None:
     """Wait 5s for a graceful exit, then terminate (2s), then kill."""

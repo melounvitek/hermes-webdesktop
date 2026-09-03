@@ -32,7 +32,6 @@ _ELEMENT_LINE_RE = re.compile(
 A parenthesised pure-digit group is an ORDER index, not a label, and is excluded so the id=
 label wins. Group 1 index, group 2 role, groups 3-6 the label in whichever form matched."""
 
-
 def _mcp_field(obj, snake: str, camel: str, default=None):
     """Read an MCP model field across the 1.x -> 2.x rename: mcp 2.0 exposes snake_case
     attributes and keeps camelCase only as a serialization alias, so ``getattr(result,
@@ -44,7 +43,6 @@ def _mcp_field(obj, snake: str, camel: str, default=None):
         return value
     value = getattr(obj, camel, _MISSING)
     return default if value is _MISSING else value
-
 
 def _action_result_from(name: str, ok: bool, message: str, meta: Dict[str, Any],
                         structured: Dict[str, Any], *, requested_delivery: Optional[str] = None) -> ActionResult:
@@ -72,11 +70,9 @@ def _action_result_from(name: str, ok: bool, message: str, meta: Dict[str, Any],
         code=_typed(_pick("code") or _pick("reason_code"), str),
     )
 
-
 def _z_index_uninformative(windows: List[Dict[str, Any]]) -> bool:
     """True when every window shares the same z_index (common on Linux/X11)."""
     return len({w.get("z_index", 0) for w in windows}) <= 1
-
 
 def _parse_xprop_net_active_window(stdout: str) -> Optional[int]:
     """Parse ``xprop -root _NET_ACTIVE_WINDOW`` stdout into a window id: the ``window id #
@@ -85,7 +81,6 @@ def _parse_xprop_net_active_window(stdout: str) -> Optional[int]:
     match = re.search(r"window id # (0x[0-9a-fA-F]+)", text) or re.search(r"(0x[0-9a-fA-F]+)", text)
     return int(match.group(1), 16) if match else None
 
-
 def _is_real_app_window(w: Dict[str, Any]) -> bool:
     """Return False for desktop/shell helper windows that capture as empty."""
     title = w.get("title", "")
@@ -93,7 +88,6 @@ def _is_real_app_window(w: Dict[str, Any]) -> bool:
         title.startswith(p) or title.lower().startswith(p.lower())
         for p in _NON_APP_WINDOW_TITLE_PREFIXES
     )
-
 
 def _parse_elements_from_tree(markdown: str) -> List[UIElement]:
     """Parse UIElements from get_window_state AX-tree markdown — last-resort fallback for
@@ -109,7 +103,6 @@ def _parse_elements_from_tree(markdown: str) -> List[UIElement]:
         )
         for m in _ELEMENT_LINE_RE.finditer(markdown)
     ]
-
 
 def _parse_elements_from_structured(raw_elements: List[Dict[str, Any]]) -> List[UIElement]:
     """Read the canonical ``structuredContent.elements`` array: ``element_index``, ``role``,
@@ -137,22 +130,18 @@ def _parse_elements_from_structured(raw_elements: List[Dict[str, Any]]) -> List[
         ))
     return elements
 
-
 def _image_dimensions_from_bytes(raw: bytes) -> Tuple[int, int]:
     """Best-effort PNG/JPEG dimension sniff; ``(0, 0)`` when unreadable or non-positive."""
     dims = image_dimensions_from_bytes(raw)
     return dims if dims and dims[0] > 0 and dims[1] > 0 else (0, 0)
-
 
 def _split_tree_text(full_text: str) -> Tuple[str, str]:
     """Split get_window_state text into (summary_line, tree_markdown)."""
     summary, _, tree = full_text.partition("\n")
     return summary, tree
 
-
 _MODIFIER_NAMES = frozenset({"cmd", "command", "shift", "option", "alt", "ctrl", "control", "fn"})
 _KEY_ALIASES = {"command": "cmd", "alt": "option", "control": "ctrl"}
-
 
 def _parse_key_combo(keys: str) -> Tuple[Optional[str], List[str]]:
     """Parse 'cmd+s' / 'ctrl-alt-t' into (key, modifiers); last non-modifier wins."""
@@ -165,7 +154,6 @@ def _parse_key_combo(keys: str) -> Tuple[Optional[str], List[str]]:
         else:
             key = part
     return key, modifiers
-
 
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
     """Flatten an mcp CallToolResult into ``{data, images, image_mime_types, structuredContent,
@@ -198,7 +186,6 @@ def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
         "isError": _mcp_field(mcp_result, "is_error", "isError", False) is True,
     }
 
-
 def _image_from_tool_result(out: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
     """Pull ``(b64, mime_type)`` out of a flattened tool result. cua-driver delivers screenshots
     as an MCP ``image`` part (``out["images"]``) or as ``screenshot_png_b64`` in structuredContent
@@ -213,7 +200,6 @@ def _image_from_tool_result(out: Dict[str, Any]) -> tuple[Optional[str], Optiona
         return b64, (structured.get("screenshot_mime_type") or structured.get("mime_type") or None)
     return None, None
 
-
 def _positive_int(value: Any) -> Optional[int]:
     """Return a positive integer, rejecting booleans and malformed values."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
@@ -223,7 +209,6 @@ def _positive_int(value: Any) -> Optional[int]:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
-
 
 def _is_placeholder_id(value: Any) -> bool:
     """True when *value* is a schema-filler id (``0`` / negative) rather than a target: some
@@ -235,7 +220,6 @@ def _is_placeholder_id(value: Any) -> bool:
         return int(value) <= 0
     except ValueError:
         return False
-
 
 def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalise cua-driver ``list_windows`` entries, dropping unusable ones. Every downstream
@@ -262,7 +246,6 @@ def _ingest_windows(raw_windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         })
     return windows
 
-
 def _windows_from_tool_result(out: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Return list_windows payloads across cua-driver result shapes: structuredContent.windows,
     then ``windows`` / ``_legacy_windows`` in the text payload, then on the envelope itself."""
@@ -276,7 +259,6 @@ def _windows_from_tool_result(out: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if isinstance(value, list) and value:
                     return value
     return []
-
 
 def _apps_from_windows(windows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     apps: List[Dict[str, Any]] = []
