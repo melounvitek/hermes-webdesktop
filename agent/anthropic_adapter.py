@@ -570,7 +570,6 @@ def build_anthropic_kwargs(
     ``fast_mode`` adds ``extra_body.speed="fast"`` plus the fast-mode beta on native Anthropic only."""
     system, anthropic_messages = convert_messages_to_anthropic(messages, base_url=base_url, model=model)
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
-
     # Nous Portal routes on its own catalog ids (``anthropic/claude-opus-4.8``); normalizing would
     # make the model unresolvable there (prefix AND dots kept).
     if not _is_nous_portal_endpoint(base_url):
@@ -579,15 +578,12 @@ def build_anthropic_kwargs(
     effective_max_tokens = _resolve_anthropic_messages_max_tokens(max_tokens, model, context_length=context_length)
     if context_length and effective_max_tokens > context_length:
         effective_max_tokens = max(context_length - 1, 1)
-
     to_wire = _oauth_wire_namer(anthropic_tools) if is_oauth else None
     if to_wire:
         system = _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_wire)
-
     kwargs: Dict[str, Any] = {"model": model, "messages": anthropic_messages, "max_tokens": effective_max_tokens}
     if system:
         kwargs["system"] = system
-
     if anthropic_tools:
         kwargs["tools"] = anthropic_tools
         if tool_choice == "none":
@@ -598,27 +594,20 @@ def build_anthropic_kwargs(
             kwargs["tool_choice"] = _TOOL_CHOICE_MAP.get(tool_choice) or {
                 "type": "tool", "name": to_wire(tool_choice) if to_wire else tool_choice
             }
-
     if reasoning_config and isinstance(reasoning_config, dict):
         kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens))
-
     # Safety net so upstream 4.6 -> 4.7 migrations don't need coordinated edits everywhere callers
     # (auxiliary_client, ...) set sampling params.
     if _forbids_sampling_params(model):
         for key in ("temperature", "top_p", "top_k"):
             kwargs.pop(key, None)
-
     # Fast mode: native Anthropic only — third-party providers reject the unknown beta/param and
     # Anthropic scopes it to the Claude API (not Bedrock/Vertex/Foundry). Per-request extra_headers
     # OVERRIDE the client-level anthropic-beta header, so rebuild the full beta list.
     if fast_mode and not _is_third_party_anthropic_endpoint(base_url) and _supports_fast_mode(model):
         kwargs.setdefault("extra_body", {})["speed"] = "fast"
-        betas = list(_common_betas_for_base_url(base_url, drop_context_1m_beta=drop_context_1m_beta))
-        if is_oauth:
-            betas.extend(_OAUTH_ONLY_BETAS)
-        betas.append(_FAST_MODE_BETA)
-        kwargs["extra_headers"] = _beta_header(betas)
-
+        betas = _common_betas_for_base_url(base_url, drop_context_1m_beta=drop_context_1m_beta)
+        kwargs["extra_headers"] = _beta_header(betas + (_OAUTH_ONLY_BETAS if is_oauth else []) + [_FAST_MODE_BETA])
     return kwargs
 
 
@@ -633,9 +622,7 @@ def sanitize_anthropic_kwargs(api_kwargs: Any, *, log_prefix: str = "") -> Any:
     and dispatch): a Responses-shaped payload reaching ``messages.stream()`` dies with a
     non-retryable TypeError that takes the whole turn and fallback chain with it. Mutates and
     returns ``api_kwargs``; logs a WARNING so the race stays visible."""
-    if not isinstance(api_kwargs, dict):
-        return api_kwargs
-    leaked = _RESPONSES_ONLY_KWARGS.intersection(api_kwargs)
+    leaked = _RESPONSES_ONLY_KWARGS.intersection(api_kwargs) if isinstance(api_kwargs, dict) else ()
     if leaked:
         for key in leaked:
             del api_kwargs[key]
@@ -655,18 +642,16 @@ def _is_stream_unavailable_error(exc: Exception) -> bool:
     err_lower = str(exc).lower()
     if "stream" in err_lower and "not supported" in err_lower:
         return True
-    if "invokemodelwithresponsestream" in err_lower:
-        from agent.bedrock_adapter import is_streaming_access_denied_error
+    if "invokemodelwithresponsestream" not in err_lower:
+        return False
+    from agent.bedrock_adapter import is_streaming_access_denied_error
 
-        return is_streaming_access_denied_error(exc)
-    return False
+    return is_streaming_access_denied_error(exc)
 
 
 def _stream_final_message(stream_fn, api_kwargs, log_prefix, on_stream_event, on_response):
     """``messages.stream()`` -> final Message, ticking the best-effort callbacks."""
-    stream_kwargs = dict(api_kwargs)
-    stream_kwargs.pop("stream", None)
-    with stream_fn(**stream_kwargs) as stream:
+    with stream_fn(**{k: v for k, v in api_kwargs.items() if k != "stream"}) as stream:
         if callable(on_response):
             try:
                 on_response(getattr(stream, "response", None))
@@ -700,7 +685,6 @@ def create_anthropic_message(
     ``on_response(httpx_response)`` exposes headers the parsed Message drops (Nous Portal's
     ``x-nous-credits-*`` balance family)."""
     sanitize_anthropic_kwargs(api_kwargs, log_prefix=log_prefix)
-
     messages_api = getattr(client, "messages", None)
     stream_fn = getattr(messages_api, "stream", None)
     if prefer_stream and callable(stream_fn):
@@ -714,7 +698,4 @@ def create_anthropic_message(
             logger.debug(
                 "%sAnthropic Messages stream unavailable; falling back to messages.create(): %s", log_prefix, exc
             )
-
-    create_kwargs = dict(api_kwargs)
-    create_kwargs.pop("stream", None)
-    return messages_api.create(**create_kwargs)
+    return messages_api.create(**{k: v for k, v in api_kwargs.items() if k != "stream"})

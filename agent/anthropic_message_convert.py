@@ -130,9 +130,7 @@ def normalize_model_name(model: str, preserve_dots: bool = False) -> str:
 
 def _sanitize_tool_id(tool_id: str) -> str:
     """Anthropic requires ids matching [a-zA-Z0-9_-]; replace the rest, never empty."""
-    if not tool_id:
-        return "tool_0"
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id) or "tool_0"
+    return (re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id) if tool_id else "") or "tool_0"
 
 
 def _tool_use_block(tool_id: Any, name: Any, tool_input: Any) -> Dict[str, Any]:
@@ -165,11 +163,9 @@ def _normalize_tool_input_schema(schema: Any) -> Dict[str, Any]:
 def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
     """Convert OpenAI tool definitions to Anthropic format. Duplicate names are dropped with a
     warning (Anthropic hard-400s on them); ``cache_control`` on the OpenAI tool dict is forwarded."""
-    if not tools:
-        return []
     result = []
     seen_names: set = set()
-    for t in tools:
+    for t in tools or []:
         fn = t.get("function", {})
         name = fn.get("name", "")
         if name and name in seen_names:
@@ -178,8 +174,7 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
         if name:
             seen_names.add(name)
         anthropic_tool: Dict[str, Any] = {
-            "name": name,
-            "description": fn.get("description", ""),
+            "name": name, "description": fn.get("description", ""),
             "input_schema": _normalize_tool_input_schema(fn.get("parameters") or {}),
         }
         result.append(_carry_cache_control(anthropic_tool, t, copy=True))
@@ -201,11 +196,8 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
     """Convert one OpenAI-style content part to an Anthropic block (None -> dropped)."""
     if part is None:
         return None
-    if isinstance(part, str):
-        return _text_block(part)
     if not isinstance(part, dict):
-        return _text_block(str(part))
-
+        return _text_block(part if isinstance(part, str) else str(part))
     ptype = part.get("type")
     if ptype in ("input_text", "text"):
         # Rebuild from whitelisted fields only: stored SDK text blocks carry output-only siblings
@@ -217,7 +209,6 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
         block = {"type": "image", "source": _image_source_from_openai_url(url)}
     else:
         block = dict(part)
-
     cache_control = _cache_control_of(part)
     if cache_control is not None:
         block.setdefault("cache_control", dict(cache_control))
@@ -228,12 +219,9 @@ def _to_plain_data(value: Any, *, _depth: int = 0, _path: Optional[set] = None) 
     """Recursively convert SDK objects to plain Python data. ``_path`` tracks ids on the *current*
     recursion path (shared but non-cyclic objects convert normally while true cycles stringify);
     depth is capped at 20."""
-    if _depth > 20:
-        return str(value)
-    if _path is None:
-        _path = set()
+    _path = set() if _path is None else _path
     obj_id = id(value)
-    if obj_id in _path:
+    if _depth > 20 or obj_id in _path:
         return str(value)
 
     def rec(v):
@@ -282,10 +270,8 @@ def _convert_content_to_anthropic(content: Any) -> Any:
 def _content_parts_to_anthropic_blocks(parts: Any) -> List[Dict[str, Any]]:
     """Tool-message content parts -> tool_result inner blocks (text + image only, the types
     Anthropic accepts there). Used for multimodal tool results."""
-    if not isinstance(parts, list):
-        return []
     out: List[Dict[str, Any]] = []
-    for block in map(_convert_content_part_to_anthropic, parts):
+    for block in map(_convert_content_part_to_anthropic, parts if isinstance(parts, list) else []):
         if not block:
             continue
         btype, text_val, src = block.get("type"), block.get("text"), block.get("source")
@@ -315,9 +301,7 @@ def _replay_text(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def _replay_thinking(b: Dict[str, Any]) -> Dict[str, Any]:
     out = {"type": "thinking", "thinking": b.get("thinking", "")}
-    if b.get("signature"):
-        out["signature"] = b["signature"]
-    return out
+    return {**out, "signature": b["signature"]} if b.get("signature") else out
 
 
 def _replay_redacted_thinking(b: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -456,19 +440,16 @@ def _tool_result_content(m: Dict[str, Any]) -> Any:
             multimodal_blocks = [_text_block(str(content["text_summary"]))]
     elif isinstance(content, list):
         converted = _content_parts_to_anthropic_blocks(content)
-        if any(b.get("type") == "image" for b in converted):
+        if _has_block_type(converted, {"image"}):
             multimodal_blocks = converted
     if multimodal_blocks is None:  # back-compat: blocks stashed under a private key
         stashed = m.get("_anthropic_content_blocks")
         if isinstance(stashed, list) and stashed:
             text_content = content if isinstance(content, str) and content.strip() else None
             multimodal_blocks = [_text_block(text_content)] + stashed if text_content else list(stashed)
-
     if multimodal_blocks:
         return multimodal_blocks
-    if isinstance(content, str):
-        return content or "(no output)"
-    return json.dumps(content) if content else "(no output)"
+    return (content if isinstance(content, str) else json.dumps(content) if content else "") or "(no output)"
 
 
 def _convert_tool_message_to_result(result: List[Dict[str, Any]], m: Dict[str, Any]) -> None:
@@ -480,9 +461,9 @@ def _convert_tool_message_to_result(result: List[Dict[str, Any]], m: Dict[str, A
     }
     _carry_cache_control(tool_result, m, copy=True)
     last = result[-1] if result else {}
-    if last.get("role") == "user" and isinstance(last.get("content"), list) and last["content"] \
-            and last["content"][0].get("type") == "tool_result":
-        last["content"].append(tool_result)
+    last_content = last.get("content") if last.get("role") == "user" else None
+    if isinstance(last_content, list) and last_content and last_content[0].get("type") == "tool_result":
+        last_content.append(tool_result)
     else:
         result.append({"role": "user", "content": [tool_result]})
 
@@ -544,16 +525,13 @@ def _concat_content(prev: Any, curr: Any) -> Any:
     promoted to block lists."""
     if isinstance(prev, str) and isinstance(curr, str):
         return prev + "\n" + curr
-    if isinstance(prev, str):
-        prev = [_text_block(prev)]
-    if isinstance(curr, str):
-        curr = [_text_block(curr)]
-    return prev + curr
+    as_blocks = lambda c: [_text_block(c)] if isinstance(c, str) else c  # noqa: E731
+    return as_blocks(prev) + as_blocks(curr)
 
 
 def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Merge consecutive same-role messages to enforce alternation. Returns a new list."""
-    fixed = []
+    fixed: List[Dict[str, Any]] = []
     for m in result:
         if not (fixed and fixed[-1]["role"] == m["role"]):
             fixed.append(m)
@@ -584,8 +562,7 @@ def _keep_valid_latest_thinking(content: List[Any], signature_dead: bool) -> Lis
         if signed and not signature_dead:
             new_content.append(b)
         elif (signature_dead or not is_redacted) and b.get("thinking"):
-            new_content.append(_text_block(b["thinking"]))  # demote to plain text
-        # else: redacted_thinking without data — unverifiable, dropped
+            new_content.append(_text_block(b["thinking"]))  # demote to plain text; dataless redacted dropped
     return new_content
 
 
@@ -721,24 +698,20 @@ def convert_messages_to_anthropic(
     reasoning_content-derived blocks, which Kimi requires even when empty."""
     system = None
     result: List[Dict[str, Any]] = []
-
     for m in messages:
         role = m.get("role", "user")
-        content = m.get("content", "")
         if role == "system":
-            system = _convert_system_content(content)
+            system = _convert_system_content(m.get("content", ""))
         elif role == "assistant":
             result.append(_convert_assistant_message(m))
         elif role == "tool":
             _convert_tool_message_to_result(result, m)
         else:
-            result.append(_convert_user_message(content))
-
+            result.append(_convert_user_message(m.get("content", "")))
     _strip_orphaned_tool_blocks(result)
     result = _merge_consecutive_roles(result)
     _ensure_leading_user_turn(result)
     _manage_thinking_signatures(result, base_url, model)
     _evict_old_screenshots(result)
     _scrub_blank_text_blocks(result)
-
     return system, result
