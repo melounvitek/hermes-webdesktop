@@ -419,10 +419,10 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
     """Merge ``params["ui_meta"]`` key-wise into profile.yaml (None deletes). 64KB cap (rides
     every roster paint). ``ui_meta_expected_revisions``: per-key CAS, any mismatch rejects the
     whole write; revisions survive deletion so a stale client cannot recreate a removed key."""
+    applied["ui_meta"] = False
     try:
         incoming = params["ui_meta"]
         if len(json.dumps(incoming)) > 65536:
-            applied["ui_meta"] = False
             return
         expected = params.get("ui_meta_expected_revisions")
         if expected is not None and not isinstance(expected, dict):
@@ -437,7 +437,6 @@ def _configure_ui_meta(profile_dir, params, applied) -> None:
                 if not isinstance(wanted, int) or isinstance(wanted, bool) or wanted < 0 or wanted != actual:
                     conflicts[key] = {"expected": wanted, "actual": actual}
             if conflicts:
-                applied["ui_meta"] = False
                 applied["ui_meta_conflicts"] = conflicts
                 applied["ui_meta_revisions"] = {key: revisions.get(key, 0) for key in incoming}
                 return
