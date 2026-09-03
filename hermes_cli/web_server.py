@@ -85,7 +85,6 @@ _log = logging.getLogger(__name__)
 
 
 from hermes_cli.web_server_lifecycle import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
-    _process_start_marker,
     PORT_IN_USE_EXIT_CODE,
     _dashboard_forwarded_allow_ips,
     _eager_reconcile_own_session_db,
@@ -355,27 +354,26 @@ async def _lifespan(app: "FastAPI"):
             _terminate_desktop_managed_gateway()
 
 
-def _get_chat_argv_lock(app: "FastAPI") -> asyncio.Lock:
-    """Return the chat-argv resolution lock from app.state.
+def _app_state_default(app: "FastAPI", name: str, factory):
+    """Return ``app.state.<name>``, lazily creating it for non-``with`` TestClient usages.
 
-    Mirrors :func:`_get_event_state`: prefers the lifespan-initialised Lock
-    (created on the correct event loop) but lazily initialises it for
-    non-``with`` TestClient usages.
+    The lifespan normally initialises these on the running event loop (an
+    asyncio.Lock created at import time binds to whatever loop was active then).
     """
     try:
-        return app.state.chat_argv_lock
+        return getattr(app.state, name)
     except AttributeError:
-        app.state.chat_argv_lock = asyncio.Lock()
-        return app.state.chat_argv_lock
+        value = factory()
+        setattr(app.state, name, value)
+        return value
+
+
+def _get_chat_argv_lock(app: "FastAPI") -> asyncio.Lock:
+    return _app_state_default(app, "chat_argv_lock", asyncio.Lock)
 
 
 def _get_pty_active_session_files(app: "FastAPI") -> dict[str, Path]:
-    """Return channel -> active-session-file state for dashboard PTYs."""
-    try:
-        return app.state.pty_active_session_files
-    except AttributeError:
-        app.state.pty_active_session_files = {}
-        return app.state.pty_active_session_files
+    return _app_state_default(app, "pty_active_session_files", dict)
 
 
 app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
@@ -807,53 +805,31 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
     the enabled/disabled check for a request that auth already let through.
     """
     path = request.url.path
-    if path.startswith("/api/plugins/"):
-        # Only gate authenticated requests. Unauthenticated ones fall
-        # through so auth_middleware / the OAuth gate return 401 first and
-        # this route can't be used as a plugin-name oracle.
-        _authed = (
-            getattr(request.state, "token_authenticated", False)
-            or getattr(request.app.state, "auth_required", False)
-            or _has_valid_session_token(request)
-            or _has_valid_query_token(request, path)
-        )
-        if _authed:
-            # Extract plugin name from /api/plugins/<name>/...
-            parts = path.split("/")
-            # parts: ['', 'api', 'plugins', '<name>', ...]
-            if len(parts) >= 4:
-                plugin_name = parts[3]
-                if plugin_name:
-                    try:
-                        from hermes_cli.plugins_cmd import (
-                            _get_enabled_set,
-                            _get_disabled_set,
-                        )
-                        enabled_set = _get_enabled_set()
-                        disabled_set = _get_disabled_set()
-                    except Exception:
-                        enabled_set = set()
-                        disabled_set = set()
-                    # Determine plugin source.  Check the cached plugin list;
-                    # if not found, assume user plugin (safe default — blocks).
-                    plugins = _get_dashboard_plugins()
-                    plugin = next(
-                        (p for p in plugins if p.get("name") == plugin_name),
-                        None,
-                    )
-                    source = plugin.get("source") if plugin else "user"
-                    if source == "user":
-                        if plugin_name in disabled_set or plugin_name not in enabled_set:
-                            return JSONResponse(
-                                status_code=404,
-                                content={"detail": "Plugin not found"},
-                            )
-                    elif source == "bundled":
-                        if plugin_name in disabled_set:
-                            return JSONResponse(
-                                status_code=404,
-                                content={"detail": "Plugin not found"},
-                            )
+    # parts: ['', 'api', 'plugins', '<name>', ...]
+    parts = path.split("/")
+    plugin_name = parts[3] if path.startswith("/api/plugins/") and len(parts) >= 4 else ""
+    # Only gate authenticated requests. Unauthenticated ones fall through so
+    # auth_middleware / the OAuth gate return 401 first and this route can't
+    # be used as a plugin-name oracle.
+    if plugin_name and (
+        getattr(request.state, "token_authenticated", False)
+        or getattr(request.app.state, "auth_required", False)
+        or _has_valid_session_token(request)
+        or _has_valid_query_token(request, path)
+    ):
+        try:
+            from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+            enabled_set = _get_enabled_set()
+            disabled_set = _get_disabled_set()
+        except Exception:
+            enabled_set = set()
+            disabled_set = set()
+        # Source from the cached plugin list; unknown => user plugin (safe default — blocks).
+        plugin = next((p for p in _get_dashboard_plugins() if p.get("name") == plugin_name), None)
+        source = plugin.get("source") if plugin else "user"
+        blocked = plugin_name in disabled_set or (source == "user" and plugin_name not in enabled_set)
+        if blocked and source in ("user", "bundled"):
+            return JSONResponse(status_code=404, content={"detail": "Plugin not found"})
     return await call_next(request)
 
 
@@ -1046,10 +1022,8 @@ async def _dashboard_selftest_loop() -> None:
 from hermes_cli.web_server_config import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
     CONFIG_SCHEMA,
     _AUX_TASK_SLOTS,
-    _SCHEMA_OVERRIDES,
     _apply_main_model_assignment,
     _apply_model_assignment_sync,
-    _build_schema_from_config,
     _dashboard_code_skew_guard,
     _denormalize_config_from_web,
     _memory_provider_options,
@@ -1062,88 +1036,16 @@ from hermes_cli.web_server_config import (  # noqa: E402,F401 — re-exported; r
 
 from hermes_cli.web_models import (  # noqa: F401
     ConfigUpdate,
-    EnvVarUpdate,
-    EnvVarDelete,
-    EnvVarReveal,
-    MemoryProviderConfigUpdate,
-    MemoryProviderSetupRequest,
-    CustomEndpointUpdate,
-    MessagingPlatformUpdate,
-    TelegramOnboardingStart,
-    TelegramOnboardingApply,
     WhatsAppOnboardingStart,
     WhatsAppOnboardingApply,
-    AudioTranscriptionRequest,
-    ManagedFileUpload,
-    ChatImageUpload,
-    ManagedDirectoryCreate,
-    ManagedFileDelete,
-    ModelAssignment,
     MoaModelSlot,
-    _MoaReferenceControls,
     MoaPresetPayload,
     MoaConfigPayload,
-    FsWriteText,
-    GitPathBody,
-    GitFileBody,
-    GitCommitBody,
-    GitWorktreeAddBody,
-    GitWorktreeRemoveBody,
-    GitBranchSwitchBody,
-    CuratorPause,
-    LearningNodeRef,
-    LearningNodeEdit,
-    DebugShareRequest,
-    TTSSpeakRequest,
-    TTSLeaseRequest,
-    OAuthSubmitBody,
     BulkDeleteSessions,
-    SessionImport,
-    SessionRename,
-    SessionPrune,
     CronJobCreate,
     CronJobUpdate,
     AutomationBlueprintInstantiate,
     MCPServerCreate,
-    MCPServersReplace,
-    MCPEnabledToggle,
-    MCPCatalogInstall,
-    PairingApprove,
-    PairingRevoke,
-    WebhookCreate,
-    WebhookEnabledToggle,
-    CredentialPoolAdd,
-    MemoryProviderSelect,
-    MemoryReset,
-    BackupRequest,
-    ImportRequest,
-    HookCreate,
-    HookDelete,
-    SkillInstallRequest,
-    SkillUninstallRequest,
-    SkillsUpdateRequest,
-    ProfileCreate,
-    ProfileRename,
-    ProfileSoulUpdate,
-    ProfileActiveUpdate,
-    ProfileDescriptionUpdate,
-    ProfileModelUpdate,
-    ProfileDescribeAuto,
-    SkillToggle,
-    SkillCreate,
-    SkillContentUpdate,
-    ToolsetToggle,
-    ToolsetProviderSelect,
-    ToolsetModelSelect,
-    ToolsetEnvUpdate,
-    ToolsetPostSetup,
-    TerminalBackendSelect,
-    RawConfigUpdate,
-    ThemeSetBody,
-    FontSetBody,
-    _AgentPluginInstallBody,
-    _PluginProvidersPutBody,
-    _PluginVisibilityBody,
 )
 
 
@@ -1199,7 +1101,6 @@ from hermes_cli.web_server_gateway import (  # noqa: E402,F401 — re-exported; 
 
 
 from hermes_cli.web_server_files import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
-    _canonical_path,
     _dashboard_local_update_managed_externally,
     _fs_path,
     _managed_file_entry,
@@ -1216,7 +1117,6 @@ from hermes_cli.web_routers import files as _files_routes  # noqa: E402
 
 app.include_router(_files_routes.router)
 from hermes_cli.web_routers.files import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_media,
     upload_managed_file_stream,
 )
 
@@ -1241,27 +1141,6 @@ app.include_router(_git_routes.router)
 from hermes_cli.web_routers import local_models as _local_models_routes  # noqa: E402
 
 app.include_router(_local_models_routes.router)
-from hermes_cli.web_routers.git import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    git_status_route,
-    git_worktrees_route,
-    git_branches_route,
-    git_base_branches_route,
-    git_review_list_route,
-    git_review_diff_route,
-    git_file_diff_route,
-    git_commit_context_route,
-    git_rev_parse_route,
-    git_ship_info_route,
-    git_stage_route,
-    git_unstage_route,
-    git_revert_route,
-    git_commit_route,
-    git_push_route,
-    git_create_pr_route,
-    git_worktree_add_route,
-    git_worktree_remove_route,
-    git_branch_switch_route,
-)
 
 
 # Stable install identity for /api/status. One random opaque id per physical
@@ -1395,9 +1274,6 @@ app.include_router(_actions_routes.router)
 from hermes_cli.web_routers import audio as _audio_routes  # noqa: E402
 
 app.include_router(_audio_routes.router)
-from hermes_cli.web_routers.audio import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    speak_text,
-)
 
 
 # Collapses repeated identical ElevenLabs voice-list failures (the desktop
@@ -1428,18 +1304,11 @@ app.include_router(_actions_routes.status_router)
 from hermes_cli.web_routers import sessions as _sessions_routes  # noqa: E402
 
 app.include_router(_sessions_routes.list_router)
-from hermes_cli.web_routers.sessions import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_sessions,
-)
 
 
 from hermes_cli.web_routers import profiles as _profiles_routes  # noqa: E402
 
 app.include_router(_profiles_routes.sessions_router)
-from hermes_cli.web_routers.profiles import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_profiles_sessions,
-    get_profiles_sessions_sidebar,
-)
 
 
 app.include_router(_sessions_routes.search_router)
@@ -1452,7 +1321,6 @@ from hermes_cli.web_server_memory import (  # noqa: E402,F401 — re-exported; r
     _coerce_bool,
     _dependency_importable,
     _discover_memory_provider_statuses,
-    _env_lookup,
     _field_default,
     _field_is_set,
     _field_value,
@@ -1463,7 +1331,6 @@ from hermes_cli.web_server_memory import (  # noqa: E402,F401 — re-exported; r
     _memory_provider_setup_manifest,
     _normalize_memory_provider_name,
     _normalize_memory_provider_schema,
-    _read_json_file,
     _read_memory_provider_existing_values,
     _require_memory_provider_ready,
     _run_setup_command,
@@ -1478,17 +1345,12 @@ app.include_router(_memory_providers_routes.router)
 from hermes_cli.web_routers import config_env as _config_env_routes  # noqa: E402
 
 app.include_router(_config_env_routes.config_router)
-from hermes_cli.web_routers.config_env import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_config,
-    get_schema,
-)
 
 
 from hermes_cli.web_routers import models as _models_routes  # noqa: E402
 
 app.include_router(_models_routes.router)
 from hermes_cli.web_routers.models import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_model_info,
     get_model_options,
     get_recommended_default_model,
     set_moa_models,
@@ -1559,7 +1421,6 @@ from hermes_cli.web_server_oauth import (  # noqa: E402,F401 — re-exported; ro
     _minimax_poller,
     _nous_poller,
     _oauth_profile_name,
-    _oauth_session_profile,
     _oauth_sessions,
     _oauth_sessions_lock,
     _truncate_token,
@@ -1574,7 +1435,6 @@ from hermes_cli.web_routers.oauth import (  # noqa: E402,F401 — legacy re-expo
     _codex_full_login_worker,
     _new_oauth_session,
     _resolve_provider_status,
-    start_oauth_login,
 )
 
 
@@ -1594,15 +1454,11 @@ from hermes_cli.web_server_sessions import (  # noqa: E402,F401 — re-exported;
 app.include_router(_sessions_routes.manage_router)
 from hermes_cli.web_routers.sessions import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     bulk_delete_sessions_endpoint,
-    import_sessions_endpoint,
     count_empty_sessions_endpoint,
     delete_empty_sessions_endpoint,
-    get_session_stats,
-    get_session_detail,
     get_session_latest_descendant,
     get_session_messages,
     delete_session_endpoint,
-    rename_session_endpoint,
     export_session_endpoint,
     prune_sessions_endpoint,
 )
@@ -1639,17 +1495,12 @@ from hermes_cli.web_routers import cron as _cron_routes  # noqa: E402
 app.include_router(_cron_routes.router)
 from hermes_cli.web_routers.cron import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     list_cron_jobs,
-    get_cron_job,
-    list_cron_job_runs,
     create_cron_job,
-    get_cron_delivery_targets,
     update_cron_job,
     pause_cron_job,
     resume_cron_job,
     trigger_cron_job,
     delete_cron_job,
-    cron_fire_webhook,
-    list_cron_blueprints,
     instantiate_blueprint,
     _normalize_dashboard_cron_updates,
 )
@@ -1666,19 +1517,6 @@ from hermes_cli.web_server_mcp import (  # noqa: E402,F401 — re-exported; rout
 from hermes_cli.web_routers import mcp as _mcp_routes  # noqa: E402
 
 app.include_router(_mcp_routes.router)
-from hermes_cli.web_routers.mcp import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    list_mcp_servers,
-    add_mcp_server,
-    replace_mcp_servers,
-    remove_mcp_server,
-    test_mcp_server,
-    auth_mcp_server,
-    mcp_oauth_flow_status,
-    mcp_oauth_callback,
-    set_mcp_server_enabled,
-    list_mcp_catalog,
-    install_mcp_catalog_entry,
-)
 
 
 _ACTION_LOG_FILES.setdefault("computer-use-grant", "action-computer-use-grant.log")
@@ -1688,15 +1526,9 @@ from hermes_cli.web_routers import ops as _ops_routes  # noqa: E402
 
 app.include_router(_ops_routes.router)
 from hermes_cli.web_routers.ops import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    delete_webhook,
-    list_checkpoints,
     list_credential_pool,
-    prune_checkpoints,
-    run_backup,
     run_doctor,
     run_import,
-    run_security_audit,
-    start_gateway,
 )
 
 
@@ -1713,62 +1545,17 @@ from hermes_cli.web_routers.ops import (  # noqa: E402,F401 — legacy re-export
 from hermes_cli.web_routers import skills as _skills_routes  # noqa: E402
 
 app.include_router(_skills_routes.hub_router)
-from hermes_cli.web_routers.skills import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    install_skill_hub,
-    uninstall_skill_hub,
-    update_skills_hub,
-    list_skills_hub_sources,
-    search_skills_hub,
-    preview_skill_hub,
-    scan_skill_hub,
-)
 
 
 app.include_router(_profiles_routes.router)
-from hermes_cli.web_routers.profiles import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    list_profiles_endpoint,
-    create_profile_endpoint,
-    get_active_profile_endpoint,
-    set_active_profile_endpoint,
-    get_profile_setup_command,
-    open_profile_terminal_endpoint,
-    rename_profile_endpoint,
-    delete_profile_endpoint,
-    get_profile_soul,
-    update_profile_soul,
-    update_profile_description_endpoint,
-    update_profile_model_endpoint,
-    describe_profile_auto_endpoint,
-)
 
 
 app.include_router(_skills_routes.router)
-from hermes_cli.web_routers.skills import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_skills,
-    toggle_skill,
-    get_skill_content,
-    create_skill,
-    update_skill_content,
-)
 
 
 from hermes_cli.web_routers import tools as _tools_routes  # noqa: E402
 
 app.include_router(_tools_routes.router)
-from hermes_cli.web_routers.tools import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
-    get_toolsets,
-    toggle_toolset,
-    get_toolset_config,
-    get_toolset_models,
-    select_toolset_model,
-    select_toolset_provider,
-    save_toolset_env,
-    run_toolset_post_setup,
-    get_terminal_backends,
-    select_terminal_backend,
-    get_computer_use_status,
-    grant_computer_use_permissions,
-)
 
 
 from hermes_cli.web_routers import analytics as _analytics_routes  # noqa: E402
@@ -1789,7 +1576,6 @@ from hermes_cli.web_server_chat import (  # noqa: E402,F401 — re-exported; rou
     _LOOPBACK_HOSTS,
     _PTY_BRIDGE_AVAILABLE,
     _RESIZE_RE,
-    _WILDCARD_HOSTS,
     _active_session_file_for_channel,
     _build_gateway_ws_url,
     _build_sidecar_url,
@@ -1820,8 +1606,6 @@ from hermes_cli.web_routers.chat_ws import (  # noqa: E402,F401 — legacy re-ex
 
 from hermes_cli.web_server_dashboard import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
     _BUILTIN_DASHBOARD_THEMES,
-    _THEME_COMPONENT_BUCKETS,
-    _THEME_NAMED_ASSET_KEYS,
     _discover_dashboard_plugins,
     _discover_user_themes,
     _invalidate_plugins_hub_cache,
@@ -1840,7 +1624,6 @@ from hermes_cli.web_routers import dashboard_ui as _dashboard_ui_routes  # noqa:
 app.include_router(_dashboard_ui_routes.router)
 from hermes_cli.web_routers.dashboard_ui import (  # noqa: E402,F401 — legacy re-exports; tests call these via web_server.<name>
     post_agent_plugin_install,
-    serve_plugin_asset,
 )
 
 
@@ -1871,6 +1654,91 @@ app.include_router(_dashboard_auth_router)
 mount_spa(app)
 
 
+def _no_auth_provider_message(host: str) -> str:
+    """Actionable SystemExit text for a gated bind with no registered auth provider.
+
+    Names the exact trigger: on a loopback bind the ONLY trigger is
+    dashboard.public_url, so print the offending URL and the remove-it exit.
+    Bundled providers expose ``LAST_SKIP_REASON`` so an installed-but-
+    unconfigured provider is not reported as merely "no providers".
+    """
+    skip_reasons: list[str] = []
+    try:
+        from plugins.dashboard_auth import nous as _nous_plugin
+
+        if _nous_plugin.LAST_SKIP_REASON:
+            skip_reasons.append(f"  • nous: {_nous_plugin.LAST_SKIP_REASON}")
+    except Exception:
+        pass
+
+    if host in _LOOPBACK_HOST_VALUES:
+        public_url = ""
+        try:
+            from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+            public_url = resolve_public_url()
+        except Exception:
+            pass
+        gate_reason = (
+            f"dashboard.public_url is set to "
+            f"{public_url or '<a non-loopback URL>'} — an "
+            f"operator-declared external URL engages the auth gate "
+            f"even on a loopback bind"
+        )
+        fix_hint = (
+            "If this dashboard should be LOCAL-ONLY (no reverse "
+            "proxy), remove dashboard.public_url from config.yaml "
+            "(and unset HERMES_DASHBOARD_PUBLIC_URL) to restore the "
+            "unauthenticated loopback mode.\n"
+        )
+    else:
+        gate_reason = f"the auth gate engages on non-loopback binds ({host})"
+        fix_hint = ""
+
+    fix_hint += (
+        "Configure an auth provider before exposing the dashboard:\n"
+        "  • Password: set dashboard.basic_auth.username + "
+        "password_hash in config.yaml\n"
+        "    (hash with: python -c \"from "
+        "plugins.dashboard_auth.basic import hash_password; "
+        "print(hash_password('your-password'))\")\n"
+        "  • OAuth: run `hermes dashboard register` (Nous Portal) or "
+        "install a DashboardAuthProvider plugin.\n"
+        "There is no unauthenticated public-dashboard option. For "
+        "local-only use, bind 127.0.0.1 and leave dashboard.public_url "
+        "unset; a configured external public URL requires auth even "
+        "when a local reverse proxy reaches a loopback backend."
+    )
+    # Credentials exist but the bundled provider is disabled (#54489). Basic
+    # auth needs a username AND a credential; a half-configured block is silent.
+    try:
+        from hermes_cli.config import load_config as _load_cfg
+        from hermes_cli.plugins_cmd import _BASIC_AUTH_PLUGIN_KEYS
+
+        cfg = _load_cfg()
+        ba = (cfg.get("dashboard") or {}).get("basic_auth") or {}
+        disabled = (cfg.get("plugins") or {}).get("disabled") or []
+        has_creds = bool(ba.get("username")) and bool(ba.get("password_hash") or ba.get("password"))
+        if has_creds and (set(disabled) & _BASIC_AUTH_PLUGIN_KEYS):
+            fix_hint = (
+                "The 'basic' dashboard-auth plugin is in "
+                "plugins.disabled but dashboard.basic_auth is "
+                "configured.\n"
+                "Remove 'basic' from plugins.disabled (or run "
+                "`hermes plugins enable basic`), then restart the "
+                "dashboard.\n\n"
+            ) + fix_hint
+    except Exception:
+        pass
+    msg = (
+        f"Refusing to bind dashboard to {host} — {gate_reason}, "
+        f"but no auth providers are registered.\n\n"
+    )
+    if skip_reasons:
+        msg += "Bundled providers reported these issues:\n" + "\n".join(skip_reasons) + "\n\n"
+    return msg + fix_hint
+
+
 def _configure_auth_gate(
     host: str,
     allow_public: bool,
@@ -1880,22 +1748,19 @@ def _configure_auth_gate(
     """Resolve the trusted public hosts + auth-gate flag onto ``app.state``.
 
     Fails closed (``SystemExit`` with an actionable message) when the gate
-    engages but no dashboard auth provider is registered."""
-    # A configured browser-facing URL is also the exact Host/Origin trust
-    # declaration for reverse-proxy deployments. Resolve it once at startup so
-    # request middleware never reloads config. Any non-loopback public hostname
-    # engages the auth gate even when the backend itself remains on loopback;
-    # otherwise the SPA's local session token would become remotely reachable.
+    engages but no dashboard auth provider is registered.
+    """
+    # dashboard.public_url is also the exact Host/Origin trust declaration for
+    # reverse-proxy deployments; resolved once so middleware never reloads
+    # config. A non-loopback public hostname engages the gate even on a loopback
+    # backend, else the SPA's local session token becomes remotely reachable.
     app.state.trusted_public_hosts = _dashboard_public_hosts()
-    # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
-    # WS-auth paths can branch on it consistently. It also decides whether to
-    # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
+    # auth_required drives middleware, SPA-token injection, WS auth, the
+    # startup refusal, the gate-on banner and uvicorn proxy_headers.
     if _desktop_loopback_auth_exempt(host, ssh_session_token, ssh_owner_nonce):
-        # A configured dashboard.public_url describes the operator's PUBLIC
-        # deployment, not this private Desktop-owned loopback backend (#96490).
-        # Desktop authenticates with the per-spawn session token; forcing the
-        # ticket-only gate here broke every Desktop boot while the actual
-        # public dashboard — a separate non-loopback process — stayed gated.
+        # public_url describes the operator's PUBLIC deployment, not this
+        # Desktop-owned loopback backend (#96490), which authenticates with the
+        # per-spawn session token the ticket-only gate would refuse.
         app.state.auth_required = should_require_auth(host)
         _log.info(
             "Desktop-owned loopback backend: dashboard.public_url does not "
@@ -1903,14 +1768,10 @@ def _configure_auth_gate(
             "keeps its own gate.",
         )
     else:
-        app.state.auth_required = should_require_dashboard_auth(
-            host, app.state.trusted_public_hosts
-        )
+        app.state.auth_required = should_require_dashboard_auth(host, app.state.trusted_public_hosts)
 
-    # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
-    # the hermes-0day MCP-persistence campaign abused unauthenticated public
-    # dashboards). If a caller still passes it, warn that it is now a no-op
-    # rather than silently changing their expectation of an open bind.
+    # ``--insecure`` no longer disables the gate (June 2026 hermes-0day
+    # hardening); warn that it is a no-op rather than silently ignore it.
     if allow_public and host not in _LOOPBACK_HOST_VALUES:
         _log.warning(
             "--insecure no longer bypasses dashboard authentication. A "
@@ -1921,115 +1782,10 @@ def _configure_auth_gate(
         )
 
     if app.state.auth_required:
-        # The gate engages on every non-loopback bind. Require at least one
-        # provider to be registered, else fail closed — there is no longer an
-        # escape hatch that serves the dashboard without authentication.
+        # No escape hatch serves a gated dashboard without a provider.
         from hermes_cli.dashboard_auth import list_providers
         if not list_providers():
-            # Surface the *specific* reason any bundled provider declined
-            # to register (e.g. missing HERMES_DASHBOARD_OAUTH_CLIENT_ID).
-            # Each provider plugin that ships with Hermes Agent exposes a
-            # module-level ``LAST_SKIP_REASON`` string for this purpose;
-            # without it the operator would only see "no providers" which
-            # is misleading when the provider IS installed but unconfigured.
-            skip_reasons: list[str] = []
-            try:
-                from plugins.dashboard_auth import nous as _nous_plugin
-
-                if _nous_plugin.LAST_SKIP_REASON:
-                    skip_reasons.append(
-                        f"  • nous: {_nous_plugin.LAST_SKIP_REASON}"
-                    )
-            except Exception:
-                pass
-
-            # Name the exact reason the gate engaged. When the bind itself is
-            # loopback the ONLY trigger is dashboard.public_url — an operator
-            # (or a stale config.yaml entry) declared external exposure. Say
-            # so explicitly, print the offending URL, and give the two exits:
-            # configure auth, or remove public_url to restore local-only mode.
-            if host in _LOOPBACK_HOST_VALUES:
-                _public_url_for_msg = ""
-                try:
-                    from hermes_cli.dashboard_auth.prefix import (
-                        resolve_public_url as _rpu,
-                    )
-
-                    _public_url_for_msg = _rpu()
-                except Exception:
-                    pass
-                _gate_reason = (
-                    f"dashboard.public_url is set to "
-                    f"{_public_url_for_msg or '<a non-loopback URL>'} — an "
-                    f"operator-declared external URL engages the auth gate "
-                    f"even on a loopback bind"
-                )
-                _local_only_hint = (
-                    "If this dashboard should be LOCAL-ONLY (no reverse "
-                    "proxy), remove dashboard.public_url from config.yaml "
-                    "(and unset HERMES_DASHBOARD_PUBLIC_URL) to restore the "
-                    "unauthenticated loopback mode.\n"
-                )
-            else:
-                _gate_reason = (
-                    f"the auth gate engages on non-loopback binds ({host})"
-                )
-                _local_only_hint = ""
-
-            _fix_hint = (
-                _local_only_hint
-                + "Configure an auth provider before exposing the dashboard:\n"
-                "  • Password: set dashboard.basic_auth.username + "
-                "password_hash in config.yaml\n"
-                "    (hash with: python -c \"from "
-                "plugins.dashboard_auth.basic import hash_password; "
-                "print(hash_password('your-password'))\")\n"
-                "  • OAuth: run `hermes dashboard register` (Nous Portal) or "
-                "install a DashboardAuthProvider plugin.\n"
-                "There is no unauthenticated public-dashboard option. For "
-                "local-only use, bind 127.0.0.1 and leave dashboard.public_url "
-                "unset; a configured external public URL requires auth even "
-                "when a local reverse proxy reaches a loopback backend."
-            )
-            # Hint when credentials exist but the bundled provider is blocked
-            # (#54489).
-            try:
-                from hermes_cli.config import load_config as _load_cfg
-                from hermes_cli.plugins_cmd import _BASIC_AUTH_PLUGIN_KEYS
-
-                _cfg = _load_cfg()
-                _ba = (_cfg.get("dashboard") or {}).get("basic_auth") or {}
-                _disabled = (_cfg.get("plugins") or {}).get("disabled") or []
-                # Basic auth only activates with a username AND a credential
-                # (plaintext password or password_hash); don't fire the hint on
-                # a half-configured block.
-                _has_creds = bool(_ba.get("username")) and bool(
-                    _ba.get("password_hash") or _ba.get("password")
-                )
-                if _has_creds and (set(_disabled) & _BASIC_AUTH_PLUGIN_KEYS):
-                    _fix_hint = (
-                        "The 'basic' dashboard-auth plugin is in "
-                        "plugins.disabled but dashboard.basic_auth is "
-                        "configured.\n"
-                        "Remove 'basic' from plugins.disabled (or run "
-                        "`hermes plugins enable basic`), then restart the "
-                        "dashboard.\n\n"
-                    ) + _fix_hint
-            except Exception:
-                pass
-            if skip_reasons:
-                raise SystemExit(
-                    f"Refusing to bind dashboard to {host} — {_gate_reason}, "
-                    f"but no auth providers are registered.\n\n"
-                    f"Bundled providers reported these issues:\n"
-                    + "\n".join(skip_reasons)
-                    + "\n\n"
-                    + _fix_hint
-                )
-            raise SystemExit(
-                f"Refusing to bind dashboard to {host} — {_gate_reason}, "
-                f"but no auth providers are registered.\n\n" + _fix_hint
-            )
+            raise SystemExit(_no_auth_provider_message(host))
         _log.info(
             "Dashboard binding to %s with auth gate enabled. Providers: %s",
             host,
@@ -2038,46 +1794,25 @@ def _configure_auth_gate(
 
 
 def _build_uvicorn_server(host: str, port: int):
-    """Build the uvicorn ``Config`` + ``Server`` for this bind (reads
-    ``app.state.auth_required``; see the comments for each knob)."""
+    """Build the uvicorn ``Config`` + ``Server`` for this bind (reads ``app.state.auth_required``).
+
+    uvicorn.Server is driven directly (not uvicorn.run) so startup is split from
+    the main loop: after startup() the socket is bound and held by uvicorn, so the
+    OS-assigned port can be read with no pre-bind-then-close TOCTOU. Explicit
+    taken ports are caught by the #93608 preflight probe; uvicorn's own bind
+    error stays the fallback for races.
+    """
     import uvicorn
 
-    # ── Start uvicorn with direct Server API ─────────────────────────
-    # We use uvicorn.Server directly (not uvicorn.run) so we can split
-    # startup from the main loop.  After startup() the socket is actually
-    # bound — we read the OS-assigned port from the live socket, print
-    # HERMES_DASHBOARD_READY, open the browser, *then* serve.
-    #
-    # This eliminates the TOCTOU of the old pre-bind-then-close approach
-    # (bind port 0 → close → uvicorn rebind): the socket is held by
-    # uvicorn the entire time, so no other process can steal the port.
-    #
-    # For explicit non-zero ports, a taken port is detected by the #93608
-    # preflight probe below (BACKEND_PORT_IN_USE sentinel + distinct exit
-    # code); uvicorn's own bind error remains the fallback for races.
-    # Loopback binds are the Desktop case: a single local client, no reverse
-    # proxy in front. uvicorn's ws keepalive ping runs ON the same event loop
-    # as agent turns, and a single synchronous GIL-holding call on a worker
-    # thread (e.g. a regex/scrub over a large model output, or a long
-    # delegate_task subagent turn) can starve that loop for *minutes* — the
-    # loop cannot process the incoming pong, so uvicorn declares the socket
-    # dead and closes it, dropping an otherwise-healthy local connection
-    # (#53773: "event loop stalled 226.3s"; #48445/#50005). A longer timeout
-    # only raises the threshold — a multi-minute stall sails past any finite
-    # window. The keepalive ping exists to detect *half-open* connections
-    # (reverse-proxy 524, dropped tunnels), which cannot happen on loopback:
-    # there is no network or proxy in the path, and a dead local client tears
-    # the socket down with a real FIN/RST that starlette surfaces as
-    # WebSocketDisconnect regardless of the ping. So on loopback the ping
-    # provides ~no liveness value while actively killing recoverable stalls —
-    # disable it entirely. Non-loopback binds sit behind a Cloudflare Tunnel
-    # (idle timeout ~100s) where half-open IS a real failure mode, so keep the
-    # ping at 20/20 to detect it promptly and stay under the tunnel's idle
-    # window.
-    _is_loopback = host in ("127.0.0.1", "localhost", "::1")
-    # Non-loopback ping cadence is config-driven (dashboard.ws_ping_interval /
-    # dashboard.ws_ping_timeout, #79635); the 20/20 defaults keep the
-    # Cloudflare-Tunnel-friendly behaviour when unset or invalid.
+    # WS keepalive ping runs ON the agent event loop; a GIL-holding worker call
+    # can starve it for minutes, so uvicorn misses the pong and drops a healthy
+    # local socket (#53773/#48445/#50005). The ping only detects half-open
+    # connections (proxy 524, dropped tunnels), impossible on loopback where a
+    # dead client sends a real FIN/RST -> WebSocketDisconnect. So: no ping on
+    # loopback; non-loopback sits behind a Cloudflare Tunnel (~100s idle) and
+    # keeps a config-driven cadence (dashboard.ws_ping_interval/_timeout,
+    # #79635) defaulting to 20/20.
+    _is_loopback = host in _LOOPBACK_HOST_VALUES
     try:
         _dash_cfg = load_config().get("dashboard") or {}
     except Exception:
@@ -2091,30 +1826,26 @@ def _build_uvicorn_server(host: str, port: int):
 
     config = uvicorn.Config(
         app, host=host, port=port, log_level="warning",
-        # proxy_headers defaults to False so _ws_client_is_allowed sees
-        # the real connection peer rather than X-Forwarded-For's rewritten
-        # value (which would defeat the loopback gate when behind a reverse
-        # proxy).  When the OAuth gate is active we are explicitly running
-        # behind a TLS terminator (Fly.io) and need X-Forwarded-Proto to
-        # decide cookie Secure flags, so we flip proxy_headers on for that
-        # mode.
+        # Off by default so _ws_client_is_allowed sees the real peer, not
+        # X-Forwarded-For. Gated mode runs behind a TLS terminator and needs
+        # X-Forwarded-Proto for cookie Secure flags.
         proxy_headers=bool(app.state.auth_required),
-        # Keep uvicorn's loopback-only default unless the operator explicitly
-        # trusts the address or bounded network of an upstream proxy. This is
-        # what lets a separate-container TLS terminator supply HTTPS/client
-        # metadata without accepting spoofed X-Forwarded-* headers from every
-        # caller.
+        # Loopback-only unless the operator trusts a bounded upstream proxy, so
+        # spoofed X-Forwarded-* from arbitrary callers is never honoured.
         forwarded_allow_ips=_dashboard_forwarded_allow_ips(_dash_cfg),
-        # Half-open detection for public binds only (see above). Loopback
-        # disables the protocol ping (None) so an event-loop stall can never
-        # trigger a false disconnect; a genuinely dead local client is still
-        # reaped via the WebSocketDisconnect → disconnect/reap path.
         ws_ping_interval=None if _is_loopback else _ws_ping_setting("ws_ping_interval"),
         ws_ping_timeout=None if _is_loopback else _ws_ping_setting("ws_ping_timeout"),
         ws_max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES,
     )
-    server = uvicorn.Server(config)
-    return config, server
+    return config, uvicorn.Server(config)
+
+
+def _best_effort(what: str, fn) -> None:
+    """Run a best-effort startup step; any failure (import included) is a debug line."""
+    try:
+        fn()
+    except Exception as exc:
+        _log.debug("%s skipped: %s", what, exc)
 
 
 def _on_server_started(
@@ -2127,109 +1858,72 @@ def _on_server_started(
     initial_profile: str,
     start_mcp_discovery_after_bind: bool,
 ) -> None:
-    """Post-bind arming, run on the serving loop right after ``server.startup()``:
-    reap prior corpses, watchdog, process identity, READY announcement,
-    browser open, deferred MCP discovery, loop-noise filter, loop heartbeat."""
-    # Parent-death watchdog. The desktop spawns us and is supposed to
-    # SIGTERM us on quit, but a crash / SIGKILL / update handoff that
-    # exits before reaping leaves us orphaned (ppid→1) yet still
-    # serving — leaking the whole backend + its MCP child subtree
-    # (each MCP watchdog is parented to THIS process, so os._exit here
-    # cascades their teardown). Same pattern as
-    # Clear corpses left by a previous unclean Desktop exit before we
-    # stack another backend + MCP tree (EMFILE / missing tabs).
-    # Parent-death watchdog only protects *this* process going forward.
-    if os.getenv("HERMES_DESKTOP") == "1":
-        try:
-            from hermes_cli.dashboard_procs import (
-                _reap_orphaned_desktop_local_serves,
-            )
+    """Post-bind arming on the serving loop right after ``server.startup()``.
 
-            _reap_orphaned_desktop_local_serves()
-        except Exception as exc:
-            _log.debug("orphan desktop-local serve reap skipped: %s", exc)
+    Reap prior corpses, parent-death watchdog, process identity, READY
+    announcement, browser open, deferred MCP discovery, loop-noise filter,
+    loop heartbeat.
+    """
+    # Clear corpses from a previous unclean Desktop exit (crash/SIGKILL/update
+    # handoff leaves an orphaned backend + its MCP subtree) before stacking a
+    # new tree (EMFILE / missing tabs). The watchdog only protects *this*
+    # process going forward.
+    def _reap_desktop_serves() -> None:
+        from hermes_cli.dashboard_procs import _reap_orphaned_desktop_local_serves
 
-    # Same sweep for stdio MCP helper children (#61514): ledger-
-    # identified helpers whose recorded spawner is provably dead are
-    # corpses from a prior unclean exit — reap them before this
-    # backend stacks a fresh MCP tree on top. Positive identity only
-    # (spawn ledger + spawner_is_dead); a helper whose spawner is
-    # alive or unprovable is never touched.
-    try:
+        _reap_orphaned_desktop_local_serves()
+
+    def _reap_mcp_helpers() -> None:
         from hermes_cli.process_identity import reap_orphaned_mcp_helpers
 
         reap_orphaned_mcp_helpers()
-    except Exception as exc:
-        _log.debug("orphan MCP helper reap skipped: %s", exc)
 
-    # tui_gateway/slash_worker.py::_start_parent_death_watchdog. No-op
-    # for standalone `hermes serve` (no HERMES_PARENT_PID env).
+    if os.getenv("HERMES_DESKTOP") == "1":
+        _best_effort("orphan desktop-local serve reap", _reap_desktop_serves)
+    # Same sweep for stdio MCP helpers (#61514): positive identity only (spawn
+    # ledger + spawner provably dead); anything alive or unprovable is untouched.
+    _best_effort("orphan MCP helper reap", _reap_mcp_helpers)
+
+    # No-op for standalone `hermes serve` (no HERMES_PARENT_PID).
     _start_parent_death_watchdog()
 
     actual_port = _read_bound_port(server, fallback=port)
     app.state.bound_port = actual_port
 
-    # Positive process identity: record (pid, create_time, purpose,
-    # spawner) in the machine spawn ledger and — on Windows — attach
-    # to a kill-on-close job so this backend's whole child tree dies
-    # with it. Both best-effort; failures degrade to legacy behavior.
-    # Registered AFTER the bind so the entry carries the ACTUAL port
-    # (ephemeral binds included) — the structured host/port/profile
-    # is what lets `hermes update` relaunch a manually-started serve
-    # on its real endpoint instead of dropping it (#63206).
-    try:
-        from hermes_cli.process_identity import (
-            attach_self_to_kill_on_close_job,
-            register_self,
-        )
+    # Positive process identity in the machine spawn ledger (+ Windows
+    # kill-on-close job). Registered AFTER the bind so the entry carries the
+    # ACTUAL port — what lets `hermes update` relaunch a manually-started serve
+    # on its real endpoint (#63206).
+    def _register_identity() -> None:
+        from hermes_cli.process_identity import attach_self_to_kill_on_close_job, register_self
 
         register_self(
             "serve" if headless else "dashboard",
-            detail={
-                "host": host,
-                "port": actual_port,
-                "profile": initial_profile or "",
-            },
+            detail={"host": host, "port": actual_port, "profile": initial_profile or ""},
         )
         attach_self_to_kill_on_close_job()
-    except Exception as exc:
-        _log.debug("process-identity registration skipped: %s", exc)
+
+    _best_effort("process-identity registration", _register_identity)
 
     _write_dashboard_ready_file(actual_port)
-    # Port-discovery sentinel parsed by the desktop spawn. `serve` is a
-    # plain backend, not a dashboard, so it announces a neutral token;
-    # `dashboard` keeps the legacy one. The desktop matches either.
+    # Port-discovery sentinel parsed by the Desktop spawn (matches either
+    # token). Written to fd 1: tui_gateway.server redirects sys.stdout to
+    # stderr at import, and the Desktop watches child.stdout (#96282).
     ready_token = "HERMES_BACKEND_READY" if headless else "HERMES_DASHBOARD_READY"
-    # tui_gateway.server (imported above for the flush-on-SIGTERM
-    # handlers, #94724) redirects sys.stdout→sys.stderr at import time
-    # to keep stray prints off the JSON-RPC protocol stream. fd 1 is
-    # still the real stdout — and the Desktop spawn watches
-    # child.stdout for this sentinel — so write to the fd, not to the
-    # (redirected) sys.stdout, or the desktop times out after 90s
-    # against a perfectly healthy backend (#96282).
     _write_machine_sentinel_line(f"{ready_token} port={actual_port}")
     if headless:
-        # No SPA, and the JSON-RPC/WS endpoints are auth-gated — don't
-        # advertise a paste-and-connect URL, just announce the bind.
-        # flush: on a piped stdout (Desktop spawn) this line is
-        # block-buffered and can surface MINUTES after the flushed
-        # READY sentinel above, which reads as a slow boot in
-        # support bundles when the backend was actually up.
+        # Auth-gated JSON-RPC/WS only — announce the bind, not a URL. flush:
+        # a piped stdout otherwise surfaces this minutes after the sentinel.
         print(f"  Hermes backend listening on {host}:{actual_port}", flush=True)
     else:
         print(f"  Hermes Web UI → http://{host}:{actual_port}")
     _maybe_open_browser(host, actual_port, open_browser, initial_profile)
 
     if start_mcp_discovery_after_bind:
-        # Deferred from cmd_dashboard for Desktop `serve` (see there).
-        # Not started at the bind itself either: the ~350ms `mcp` SDK
-        # import holds the GIL, and at bind time the renderer is doing
-        # its WebSocket handshake + first hydration reads against this
-        # loop (measured: starting it here gave back most of the
-        # READY gain as a slower connect). One second later the shell
-        # is painted and idle. An agent build inside that second fires
-        # the deferred start itself (wait_for_mcp_discovery), so its
-        # bounded join and the late-binding refresh are unchanged.
+        # Desktop `serve`: the ~350ms `mcp` SDK import holds the GIL while the
+        # renderer does its WS handshake + first hydration reads, so arm it one
+        # second later when the shell is painted and idle. An agent build inside
+        # that second fires the deferred start itself (wait_for_mcp_discovery).
         try:
             from hermes_cli.mcp_startup import defer_background_mcp_discovery
 
@@ -2241,28 +1935,18 @@ def _on_server_started(
         except Exception:
             _log.debug("Deferred MCP discovery arm failed", exc_info=True)
 
-    # Collapse the peer-hangup teardown flood (#50005). When the Desktop
-    # forcibly closes its WebSocket mid-write, asyncio logs a full
-    # traceback per pending connection-lost callback — 50+ identical
-    # WinError 10054 (ConnectionResetError) lines per disconnect on
-    # Windows. This filter downgrades exactly that class to one debug
-    # line and passes every other loop error through unchanged.
-    try:
+    # Collapse the peer-hangup teardown flood (#50005): 50+ identical WinError
+    # 10054 tracebacks per Desktop disconnect become one debug line.
+    def _install_noise_filter() -> None:
         from tui_gateway.loop_noise import install_loop_noise_filter
 
         install_loop_noise_filter(asyncio.get_running_loop())
-    except Exception as exc:  # pragma: no cover - best-effort
-        _log.debug("loop noise filter install skipped: %s", exc)
 
-    # ── Loop heartbeat watchdog (CF-1) ───────────────────────────
-    # Confirm the GIL-pressure hypothesis in production. Re-arm a 2s
-    # tick and measure the drift between when it *should* fire and
-    # when it actually does: a healthy loop drifts ~0, but a turn that
-    # holds the GIL blocks the loop and the next tick fires late by the
-    # stall duration. We log that so a stalled-loop WS drop is
-    # diagnosable from the gateway log. Uses loop.time() (monotonic)
-    # for drift, and call_later (not a task) so it dies with the loop —
-    # nothing to cancel on shutdown.
+    _best_effort("loop noise filter install", _install_noise_filter)
+
+    # Loop heartbeat watchdog (CF-1): a 2s call_later tick whose drift equals
+    # any GIL stall, so a stalled-loop WS drop is diagnosable from the log.
+    # call_later (not a task) dies with the loop — nothing to cancel.
     _hb_interval = 2.0
     _hb_stall_threshold = 5.0
     _hb_loop = asyncio.get_running_loop()
@@ -2271,48 +1955,26 @@ def _on_server_started(
         now = _hb_loop.time()
         drift = now - expected
         if drift > _hb_stall_threshold:
-            _log.warning(
-                "event loop stalled %.1fs (GIL pressure suspected)",
-                drift,
-            )
-        _hb_loop.call_later(
-            _hb_interval, _loop_heartbeat, now + _hb_interval
-        )
+            _log.warning("event loop stalled %.1fs (GIL pressure suspected)", drift)
+        _hb_loop.call_later(_hb_interval, _loop_heartbeat, now + _hb_interval)
 
-    _hb_loop.call_later(
-        _hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval
-    )
+    _hb_loop.call_later(_hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval)
 
 
 def _run_serve(serve, config, host: str, port: int) -> None:
-    """Drive ``serve()`` on the loop uvicorn expects; translate the two known
-    exits (Ctrl+C -> clean return, probe-to-bind port race -> sentinel + exit code)."""
-    # On POSIX, keep the long-standing ``asyncio.run(_serve())`` runner —
-    # Python's default loop there is already a SelectorEventLoop (or uvloop when
-    # uvicorn[standard] installs it), which is exactly what uvicorn serves on.
-    # Uvicorn's ``capture_signals()`` restores the original SIGINT handler and
-    # re-raises the captured signal after a graceful shutdown, which otherwise
-    # leaks a noisy KeyboardInterrupt traceback for the normal foreground
-    # dashboard Ctrl+C path. Treat that one signal as a clean user-requested
-    # shutdown; other serve-time errors still propagate.
-    #
-    # On Windows it is broken: ``asyncio.run`` defaults to a ProactorEventLoop,
-    # but uvicorn's socket-serving stack assumes a SelectorEventLoop on win32
-    # (``uvicorn/loops/asyncio.py`` forces it, and ``uvicorn.Server.run`` threads
-    # ``config.get_loop_factory()`` into its runner for exactly this reason).
-    # Driving uvicorn on the proactor loop makes ``server.startup()`` bind a
-    # socket that never accepts — the dashboard / desktop backend prints
-    # "Skipping web UI build" and then hangs forever with the port LISTENING but
-    # no TCP handshake completing (#50641). So *only on Windows* we mirror
-    # uvicorn's own machinery and run on the loop factory it picks.
+    """Drive ``serve()`` on the loop uvicorn expects.
+
+    POSIX keeps ``asyncio.run`` (already a SelectorEventLoop / uvloop). On
+    Windows ``asyncio.run`` defaults to a ProactorEventLoop, on which uvicorn
+    binds a socket that never accepts (#50641), so mirror uvicorn's own runner +
+    loop factory there (hand-installed selector policy for uvicorn < 0.36).
+    Ctrl+C -> clean return; probe-to-bind port race -> sentinel + exit code.
+    """
     runner = asyncio.run
     runner_kwargs: dict = {}
     if sys.platform == "win32":
-        # Windows-only path. Resolve the runner + loop factory FIRST (and fall back
-        # to a hand-installed Windows selector policy only when uvicorn predates the
-        # loop-factory API, < 0.36). The actual serve call is then OUTSIDE this
-        # import try/except so genuine serve-time errors (port in use) propagate
-        # normally instead of being swallowed and double-run.
+        # Resolved FIRST; the serve call is outside this try so genuine
+        # serve-time errors (port in use) propagate instead of double-running.
         try:
             from uvicorn._compat import asyncio_run as runner
 
@@ -2327,20 +1989,16 @@ def _run_serve(serve, config, host: str, port: int) -> None:
             except Exception:
                 pass
 
-    # Clean Ctrl+C contract on both platforms: ``capture_signals()`` re-raises
-    # the captured signal after the graceful shutdown has already completed.
-    # For console Ctrl+C the re-raised SIGINT lands as ``KeyboardInterrupt`` —
-    # a clean user-requested exit. (Re-raised SIGTERM/SIGBREAK keep their
-    # default terminate disposition and never reach this except.)
+    # ``capture_signals()`` re-raises the captured signal after graceful
+    # shutdown; console Ctrl+C lands as KeyboardInterrupt = clean exit.
+    # (Re-raised SIGTERM/SIGBREAK keep their terminate disposition.)
     try:
         runner(serve(), **runner_kwargs)
     except KeyboardInterrupt:
         return
     except SystemExit as exc:
-        # Probe-to-bind race (#93608): another process grabbed the port
-        # between our preflight probe and uvicorn's real bind. uvicorn's
-        # bind_socket() exits 1 — re-check the bind and translate a
-        # confirmed conflict into the sentinel + distinct exit code.
+        # Probe-to-bind race (#93608): uvicorn's bind_socket() exits 1 — re-check
+        # and translate a confirmed conflict into the sentinel + distinct code.
         if exc.code == 1 and _port_bind_conflict(host, port):
             _report_port_in_use(host, port)
             raise SystemExit(PORT_IN_USE_EXIT_CODE) from None
@@ -2360,29 +2018,20 @@ def start_server(
 ):
     """Start the web UI server.
 
-    ``initial_profile`` (when set) is appended to the auto-opened browser
-    URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
-    — used when a profile alias (``<profile> dashboard``) routes to the
-    machine dashboard.
-
-    ``headless`` is the ``serve`` path: the JSON-RPC/WS backend with no UI
-    build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
-    the banner announces the bind rather than a browser URL.
-
-    ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
-    bootstrap state. Neither is persisted or exported to child processes.
-
-    ``start_mcp_discovery_after_bind`` (Desktop ``serve``) defers the
-    background MCP discovery thread until the ready sentinel has been written,
-    so its SDK import cannot hold the GIL against the pre-bind import path.
+    ``initial_profile`` is appended to the auto-opened URL as ``?profile=<name>``
+    (profile alias ``<profile> dashboard``). ``headless`` is the ``serve`` path:
+    JSON-RPC/WS backend, no UI build, no SPA mount (``HERMES_SERVE_HEADLESS``).
+    ``ssh_session_token``/``ssh_owner_nonce`` are process-local Desktop SSH
+    bootstrap state, never persisted or exported to children.
+    ``start_mcp_discovery_after_bind`` (Desktop ``serve``) defers MCP discovery
+    until the ready sentinel is written so its SDK import can't hold the GIL
+    against the pre-bind path.
     """
     _apply_ssh_session_token(ssh_session_token or "")
     _apply_ssh_owner_nonce(ssh_owner_nonce)
 
-    # Raise RLIMIT_NOFILE for dashboard-mode starts that don't route through
-    # the `serve` path in main.py (which applies the same floor). Canonical
-    # policy lives in resource_limits; #81547's motivating leak (iterdir fds)
-    # is fixed above, this covers legitimate high fd demand.
+    # Dashboard-mode starts don't route through main.py's `serve` path, which
+    # applies the same RLIMIT_NOFILE floor (policy in resource_limits, #81547).
     from hermes_cli.resource_limits import apply_nofile_soft_limit
 
     apply_nofile_soft_limit()
@@ -2398,18 +2047,16 @@ def start_server(
 
     _configure_auth_gate(host, allow_public, ssh_session_token, ssh_owner_nonce)
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
+    # host_header_middleware validates Host against this (DNS rebinding,
+    # GHSA-ppp5-vxwm-4cf7).
     app.state.bound_host = host
 
     config, server = _build_uvicorn_server(host, port)
 
-    # Flush-on-kill guard (#94724 item 2): install chaining SIGTERM/SIGINT
-    # handlers that first persist in-memory session transcripts to state.db
-    # (bounded, best-effort) before the normal shutdown story runs. Installed
-    # on the main thread BEFORE uvicorn's capture_signals() so uvicorn saves
-    # these as the "original" handlers and re-raises into them after its own
-    # graceful shutdown — kills outside the serve window are covered too.
+    # Flush-on-kill guard (#94724): chaining SIGTERM/SIGINT handlers persist
+    # in-memory transcripts to state.db before shutdown. Installed BEFORE
+    # uvicorn's capture_signals() so uvicorn re-raises into them as the
+    # "original" handlers — kills outside the serve window are covered too.
     try:
         from tui_gateway.server import install_exit_flush_signal_handlers
 
@@ -2417,19 +2064,16 @@ def start_server(
     except Exception as exc:
         _log.debug("exit-flush signal handlers not installed: %s", exc)
 
-    # ── #93608: machine-readable port-conflict detection ──────────────
-    # uvicorn's own bind_socket() would catch the EADDRINUSE and exit 1
-    # with a bare ERROR line — indistinguishable from "backend broken".
-    # Probe the exact bind first so a conflict surfaces as the stable
-    # BACKEND_PORT_IN_USE sentinel + a distinct exit code instead.
-    # ``--port 0`` (ephemeral) is skipped by the probe and unaffected.
+    # #93608: uvicorn's bind_socket() would exit 1 with a bare ERROR line,
+    # indistinguishable from "backend broken". Probe first so a conflict
+    # surfaces as the BACKEND_PORT_IN_USE sentinel + distinct exit code.
+    # ``--port 0`` is skipped by the probe.
     if _port_bind_conflict(host, port):
         _report_port_in_use(host, port)
         raise SystemExit(PORT_IN_USE_EXIT_CODE)
 
     async def _serve():
-        # Split startup from main_loop so we can read the bound port
-        # after the socket is live (ephemeral port discovery).
+        # startup split from main_loop so the bound (ephemeral) port is readable.
         if not config.loaded:
             config.load()
         server.lifespan = config.lifespan_class(config)
