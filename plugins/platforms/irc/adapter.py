@@ -128,7 +128,6 @@ class IRCAdapter(BasePlatformAdapter):
         self.allowed_users: list = extra.get("allowed_users", [])
         # IRC nicks are case-insensitive — normalise for lookups
         self._allowed_users_lower: set = {u.lower() for u in self.allowed_users if isinstance(u, str)}
-
         max_msg = extra.get("max_message_length")
         if max_msg is None:
             with contextlib.suppress(Exception):
@@ -295,14 +294,11 @@ class IRCAdapter(BasePlatformAdapter):
             if params:
                 self._current_nick = params[0]  # server may confirm our nick
         elif command == "433":  # ERR_NICKNAMEINUSE — retry: hermes_, hermes_1, hermes_2...
-            base = self.nickname.rstrip("_0123456789")
             suffix_match = re.search(r"_(\d+)$", self._current_nick)
             if suffix_match:
-                self._current_nick = f"{base}_{int(suffix_match.group(1)) + 1}"
-            elif self._current_nick == self.nickname:
-                self._current_nick = self.nickname + "_"
+                self._current_nick = f"{self.nickname.rstrip('_0123456789')}_{int(suffix_match.group(1)) + 1}"
             else:
-                self._current_nick = self.nickname + "_1"
+                self._current_nick = self.nickname + ("_" if self._current_nick == self.nickname else "_1")
             await self._send_raw(f"NICK {self._current_nick}")
         elif command == "PRIVMSG" and len(params) >= 2:
             await self._handle_privmsg(_extract_nick(msg["prefix"]), params[0], params[1])
@@ -336,8 +332,8 @@ class IRCAdapter(BasePlatformAdapter):
         """Build a MessageEvent and hand it to the base class handler."""
         if not self._message_handler:
             return
-        source = self.build_source(chat_id=chat_id, chat_name=chat_id, chat_type=chat_type,
-                                   user_id=user_id, user_name=user_name)
+        source = self.build_source(chat_id=chat_id, chat_name=chat_id, chat_type=chat_type, user_id=user_id,
+                                   user_name=user_name)
         await self.handle_message(MessageEvent(text=text, message_type=MessageType.TEXT, source=source,
                                                message_id=_ms_id(), timestamp=datetime.datetime.now()))
 
@@ -356,11 +352,9 @@ def validate_config(config) -> bool:
 
 
 def interactive_setup() -> None:
-    """Interactive `hermes gateway setup` flow (lazy-imports hermes_cli so the plugin imports in non-CLI contexts)."""
+    """`hermes gateway setup` flow (lazy hermes_cli imports keep the plugin importable outside the CLI)."""
     from hermes_cli.setup import (
-        prompt, prompt_yes_no, save_env_value, get_env_value,
-        print_header, print_info, print_warning, print_success,
-    )
+        prompt, prompt_yes_no, save_env_value, get_env_value, print_header, print_info, print_warning, print_success)
 
     print_header("IRC")
     existing_server = get_env_value("IRC_SERVER")
@@ -397,29 +391,28 @@ def interactive_setup() -> None:
     elif get_env_value("IRC_PORT"):
         save_env_value("IRC_PORT", "")  # user cleared the prompt; drop the override
 
-    if not _required("Bot nickname (e.g. hermes-bot)", "IRC_NICKNAME", get_env_value("IRC_NICKNAME") or "", "Nickname"):
-        return
-    if not _required("Channel to join (e.g. #hermes — comma-separate for multiple)", "IRC_CHANNEL",
-                     get_env_value("IRC_CHANNEL") or "", "Channel"):
-        return
+    for label, env, what in (("Bot nickname (e.g. hermes-bot)", "IRC_NICKNAME", "Nickname"),
+                             ("Channel to join (e.g. #hermes — comma-separate for multiple)", "IRC_CHANNEL", "Channel")):
+        if not _required(label, env, get_env_value(env) or "", what):
+            return
 
     print()
     print_info("🔑 Optional authentication")
     print_info("   Leave blank to skip.")
     for question, label, env in (
         ("Configure a server password (PASS command)?", "Server password", "IRC_SERVER_PASSWORD"),
-        ("Identify with NickServ on connect?", "NickServ password", "IRC_NICKSERV_PASSWORD"),
-    ):
+        ("Identify with NickServ on connect?", "NickServ password", "IRC_NICKSERV_PASSWORD")):
         if prompt_yes_no(question, False):
             secret = prompt(label, password=True)
             if secret:
                 save_env_value(env, secret)
 
     print()
-    print_info("🔒 Access control: restrict who can message the bot")
-    print_info("   IRC nicks are not authenticated — anyone can claim any nick.")
-    print_info("   For public channels, pair with NickServ-only mode on your network")
-    print_info("   if you want stronger identity guarantees.")
+    for line in ("🔒 Access control: restrict who can message the bot",
+                 "   IRC nicks are not authenticated — anyone can claim any nick.",
+                 "   For public channels, pair with NickServ-only mode on your network",
+                 "   if you want stronger identity guarantees."):
+        print_info(line)
     if prompt_yes_no("Allow all users in the channel to talk to the bot?", False):
         save_env_value("IRC_ALLOW_ALL_USERS", "true")
         save_env_value("IRC_ALLOWED_USERS", "")
@@ -446,23 +439,18 @@ def is_connected(config) -> bool:
 
 
 def _env_enablement() -> dict | None:
-    """Seed ``PlatformConfig.extra`` from env vars BEFORE adapter construction.
-
-    Returns ``None`` when IRC isn't minimally configured (caller skips auto-enabling).
-    The special ``home_channel`` key becomes a ``HomeChannel`` on the PlatformConfig.
-    """
+    """Seed ``PlatformConfig.extra`` from env vars BEFORE adapter construction; ``None`` when IRC isn't
+    minimally configured (caller skips auto-enabling). ``home_channel`` becomes a ``HomeChannel``."""
     server = _get_scoped_secret("IRC_SERVER", "").strip()
     channel = _get_scoped_secret("IRC_CHANNEL", "").strip()
     if not (server and channel):
         return None
     seed: dict = {"server": server, "channel": channel}
-    if port := _get_scoped_secret("IRC_PORT", "").strip():
-        with contextlib.suppress(ValueError):
-            seed["port"] = int(port)
-    if nickname := _get_scoped_secret("IRC_NICKNAME", "").strip():
-        seed["nickname"] = nickname
-    if use_tls := _get_scoped_secret("IRC_USE_TLS", "").strip().lower():
-        seed["use_tls"] = use_tls in _TRUTHY
+    for env, key, conv in (("IRC_PORT", "port", int), ("IRC_NICKNAME", "nickname", str),
+                           ("IRC_USE_TLS", "use_tls", lambda v: v.lower() in _TRUTHY)):
+        if raw := _get_scoped_secret(env, "").strip():
+            with contextlib.suppress(ValueError):  # non-numeric IRC_PORT is dropped, not fatal
+                seed[key] = conv(raw)
     # Passwords also live in extra for back-compat with config.yaml users; env wins at construct time.
     for env, key in (("IRC_SERVER_PASSWORD", "server_password"), ("IRC_NICKSERV_PASSWORD", "nickserv_password")):
         if _get_scoped_secret(env):
@@ -486,14 +474,92 @@ def _sa_error(detail: str) -> Dict[str, Any]:
     return {"error": f"IRC standalone send: {detail}"}
 
 
+class _StandaloneConn:
+    """Raw line I/O for ``_standalone_send``; ``pump`` answers PINGs while waiting for a numeric."""
+
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.reader, self.writer = reader, writer
+        self._loop = asyncio.get_running_loop()
+
+    async def raw(self, line: str) -> None:
+        self.writer.write(_encode_line(line))
+        await self.writer.drain()
+
+    async def pump(self, timeout: float, on_msg):
+        """Feed commands to ``on_msg`` until it returns non-None; None on timeout, ``_EOF`` on close."""
+        deadline = self._loop.time() + timeout
+        while True:
+            remaining = deadline - self._loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                raw_line = await asyncio.wait_for(self.reader.readuntil(b"\r\n"), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            except asyncio.IncompleteReadError:
+                return _EOF
+            msg = _parse_irc_message(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
+            if msg["command"] == "PING":
+                await self.raw(f"PONG :{msg['params'][0] if msg['params'] else ''}")
+                continue
+            result = await on_msg(msg["command"])
+            if result is not None:
+                return result
+
+    async def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.writer.close()
+            await asyncio.wait_for(self.writer.wait_closed(), timeout=5.0)
+
+
+async def _sa_register(conn: _StandaloneConn, nick_base: str, server_password: str) -> Optional[Dict[str, Any]]:
+    """PASS/NICK/USER and wait for 001, retrying nick collisions; returns an error dict or None on success."""
+    nick_attempts = 0
+    standalone_nick = f"{nick_base}-cron"[:30]
+
+    async def _on_registration(cmd: str):
+        nonlocal nick_attempts, standalone_nick
+        if cmd in {"432", "433"}:
+            nick_attempts += 1
+            if nick_attempts > 5:
+                return _sa_error("too many nick collisions")
+            # Build from the stable base, not the mutated nick, so the suffix stays bounded.
+            standalone_nick = f"{nick_base}-cron-{nick_attempts}"[:30]
+            await conn.raw(f"NICK {standalone_nick}")
+        elif cmd in {"464", "465"}:
+            return _sa_error(f"server rejected client ({cmd})")
+        return True if cmd == "001" else None
+
+    if server_password:
+        await conn.raw(f"PASS {_strip_irc_control_chars(server_password)}")
+    await conn.raw(f"NICK {standalone_nick}")
+    await conn.raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
+    registered = await conn.pump(15.0, _on_registration)
+    if registered is True:
+        return None
+    if registered is None:
+        return _sa_error("registration timeout (no RPL_WELCOME)")
+    return _sa_error("server closed connection during registration") if registered is _EOF else registered
+
+
+async def _sa_join(conn: _StandaloneConn, target: str) -> Optional[Dict[str, Any]]:
+    """JOIN a channel target (+n channels drop PRIVMSG from non-members); error dict only on explicit rejection."""
+    async def _on_join(cmd: str):
+        if cmd in {"403", "405", "471", "473", "474", "475"}:
+            return _sa_error(f"JOIN {target} rejected ({cmd})")
+        return True if cmd in {"366", "JOIN"} else None
+
+    await conn.raw(f"JOIN {target}")
+    # No JOIN ack within 5s (or EOF): proceed anyway, the server may still deliver.
+    joined = await conn.pump(5.0, _on_join)
+    return joined if isinstance(joined, dict) else None
+
+
 async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
                            media_files: Optional[List[str]] = None, force_document: bool = False) -> Dict[str, Any]:
-    """Open an ephemeral IRC connection, send a PRIVMSG, and quit (out-of-process cron delivery).
-
-    Used by ``tools/send_message_tool._send_via_adapter`` when the gateway isn't in this process.
-    Uses a distinct ``-cron`` nick so it never collides with the live gateway adapter.
-    ``thread_id``/``media_files`` are accepted for signature parity only.
-    """
+    """Open an ephemeral IRC connection, send a PRIVMSG, and quit (out-of-process cron delivery via
+    ``send_message_tool``). Uses a distinct ``-cron`` nick so it never collides with the live gateway adapter.
+    ``thread_id``/``media_files`` are accepted for signature parity only."""
     extra = getattr(pconfig, "extra", {}) or {}
     server, channel = _server_channel(pconfig)
     if not server or not channel:
@@ -514,7 +580,6 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         return _sa_error("chat_id contains illegal IRC characters")
     # Cap the base to 24 chars so collision retries stay within the 30-char NICKLEN most networks enforce.
     nick_base = nickname.rstrip("_0123456789-")[:24] or "hermes-bot"
-    standalone_nick = f"{nick_base}-cron"[:30]
     plain = IRCAdapter._strip_markdown(message)
     ssl_ctx = ssl.create_default_context() if use_tls else None
     try:
@@ -523,86 +588,26 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         raise
     except Exception as e:
         return {"error": f"IRC standalone connect failed: {e}"}
-
-    async def _raw(line: str) -> None:
-        writer.write(_encode_line(line))
-        await writer.drain()
-
-    loop = asyncio.get_running_loop()
-
-    async def _pump(deadline: float, on_msg):
-        """Feed lines to ``on_msg`` until it returns non-None; answers PINGs. None on timeout/EOF."""
-        while True:
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            try:
-                raw_line = await asyncio.wait_for(reader.readuntil(b"\r\n"), timeout=remaining)
-            except asyncio.TimeoutError:
-                return None
-            except asyncio.IncompleteReadError:
-                return _EOF
-            msg = _parse_irc_message(raw_line.decode("utf-8", errors="replace").rstrip("\r\n"))
-            if msg["command"] == "PING":
-                await _raw(f"PONG :{msg['params'][0] if msg['params'] else ''}")
-                continue
-            result = await on_msg(msg["command"])
-            if result is not None:
-                return result
-
-    nick_attempts = 0
-
-    async def _on_registration(cmd: str):
-        nonlocal nick_attempts, standalone_nick
-        if cmd in {"432", "433"}:
-            nick_attempts += 1
-            if nick_attempts > 5:
-                return _sa_error("too many nick collisions")
-            # Build from the stable base, not the mutated nick, so the suffix stays bounded.
-            standalone_nick = f"{nick_base}-cron-{nick_attempts}"[:30]
-            await _raw(f"NICK {standalone_nick}")
-        elif cmd in {"464", "465"}:
-            return _sa_error(f"server rejected client ({cmd})")
-        return True if cmd == "001" else None
-
-    async def _on_join(cmd: str):
-        if cmd in {"403", "405", "471", "473", "474", "475"}:
-            return _sa_error(f"JOIN {target} rejected ({cmd})")
-        return True if cmd in {"366", "JOIN"} else None
-
+    conn = _StandaloneConn(reader, writer)
     try:
-        if server_password:
-            await _raw(f"PASS {_strip_irc_control_chars(server_password)}")
-        await _raw(f"NICK {standalone_nick}")
-        await _raw(f"USER {standalone_nick} 0 * :Hermes Agent (cron)")
-        registered = await _pump(loop.time() + 15.0, _on_registration)
-        if registered is None:
-            return _sa_error("registration timeout (no RPL_WELCOME)")
-        if registered is _EOF:
-            return _sa_error("server closed connection during registration")
-        if registered is not True:
-            return registered
+        if error := await _sa_register(conn, nick_base, server_password):
+            return error
         if nickserv_password:
-            await _raw(f"PRIVMSG NickServ :IDENTIFY {_strip_irc_control_chars(nickserv_password)}")
+            await conn.raw(f"PRIVMSG NickServ :IDENTIFY {_strip_irc_control_chars(nickserv_password)}")
             await asyncio.sleep(2)
-        # JOIN before PRIVMSG: ``+n`` channels silently drop PRIVMSG from non-members.
-        # Do not JOIN bare nicks (DM target) or server queries.
-        if _is_irc_channel(target):
-            await _raw(f"JOIN {target}")
-            # No JOIN ack within 5s (or EOF): proceed anyway, the server may still deliver.
-            joined = await _pump(loop.time() + 5.0, _on_join)
-            if isinstance(joined, dict):
-                return joined
+        # JOIN before PRIVMSG; never JOIN bare nicks (DM target) or server queries.
+        if _is_irc_channel(target) and (error := await _sa_join(conn, target)):
+            return error
         # Bytes-aware per-line splitting (same algorithm as IRCAdapter._split_message),
         # with control-character stripping per line to block CRLF injection from content.
         paragraphs = [q for q in (_strip_irc_control_chars(p).rstrip() for p in plain.split("\n")) if q]
         lines = _split_lines(paragraphs, _privmsg_budget(target))
         for line in lines:
-            await _raw(f"PRIVMSG {target} :{line}")
+            await conn.raw(f"PRIVMSG {target} :{line}")
             await asyncio.sleep(0.3)
         if not lines:
             return _sa_error("empty message after stripping")
-        await _raw("QUIT :delivered")
+        await conn.raw("QUIT :delivered")
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(reader.read(1024), timeout=2.0)
         return {"success": True, "message_id": _ms_id()}
@@ -612,9 +617,7 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
         logger.debug("IRC standalone send raised", exc_info=True)
         return {"error": f"IRC standalone send failed: {e}"}
     finally:
-        with contextlib.suppress(Exception):
-            writer.close()
-            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+        await conn.close()
 
 
 def register(ctx):
@@ -643,6 +646,4 @@ def register(ctx):
             "— use plain text only. Messages are limited to ~450 characters per "
             "line (long messages are automatically split). In channels, users "
             "address you by prefixing your nick. Keep responses concise and "
-            "conversational."
-        ),
-    )
+            "conversational."))
