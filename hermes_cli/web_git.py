@@ -236,6 +236,7 @@ def repo_status(cwd: str) -> dict | None:
 
 
 def _review_result(cwd: str, files: list[dict], base: str | None) -> dict:
+    """Sorted rows; untracked rows with no counts get their insertion count filled in."""
     files.sort(key=lambda f: f["path"])
     for file in files:
         if file["status"] == "?" and file["added"] == 0 and file["removed"] == 0:
