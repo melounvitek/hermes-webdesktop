@@ -28,10 +28,8 @@ class ExpensiveModelWarning:
 
 
 def _to_decimal(value: object) -> Optional[Decimal]:
-    if value is None:
-        return None
     try:
-        return Decimal(str(value))
+        return None if value is None else Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
 
@@ -45,11 +43,7 @@ def _pricing_from_model_info(
 ) -> tuple[Optional[Decimal], Optional[Decimal], str]:
     if model_info is None or not model_info.has_cost_data():
         return None, None, ""
-    return (
-        _to_decimal(model_info.cost_input),
-        _to_decimal(model_info.cost_output),
-        "models.dev",
-    )
+    return _to_decimal(model_info.cost_input), _to_decimal(model_info.cost_output), "models.dev"
 
 
 def _known_models_dev_provider(provider: Optional[str]) -> Optional[str]:
@@ -64,7 +58,6 @@ def _can_trust_model_info_pricing(
     expected_provider = _known_models_dev_provider(provider)
     if not expected_provider or model_info is None:
         return False
-
     actual_provider = str(getattr(model_info, "provider_id", "") or "").strip().lower()
     return not actual_provider or actual_provider == expected_provider
 
@@ -92,11 +85,8 @@ def expensive_model_warning(
     api_key: Optional[str] = None,
     model_info: Optional[ModelInfo] = None,
 ) -> Optional[ExpensiveModelWarning]:
-    """Return a warning payload when known pricing exceeds safety thresholds.
-
-    The guard only triggers when pricing is known. Callers should use this after model resolution so
-    aliases and provider-specific model IDs have settled.
-    """
+    """Warning payload when KNOWN pricing exceeds the safety thresholds (never fires on unknown
+    pricing). Call after model resolution so aliases / provider-specific ids have settled."""
     model = (model_name or "").strip()
     if not model:
         return None
@@ -104,7 +94,6 @@ def expensive_model_warning(
     input_cost: Optional[Decimal] = None
     output_cost: Optional[Decimal] = None
     source = ""
-
     if _can_trust_model_info_pricing(provider, model_info):
         input_cost, output_cost, source = _pricing_from_model_info(model_info)
 
@@ -115,9 +104,7 @@ def expensive_model_warning(
         try:
             from agent.models_dev import get_model_info
 
-            input_cost, output_cost, source = _pricing_from_model_info(
-                get_model_info(provider, model)
-            )
+            input_cost, output_cost, source = _pricing_from_model_info(get_model_info(provider, model))
         except Exception:
             pass
 
@@ -125,21 +112,13 @@ def expensive_model_warning(
         try:
             from agent.usage_pricing import get_pricing_entry
 
-            entry = get_pricing_entry(
-                model,
-                provider=provider,
-                base_url=base_url,
-                api_key=api_key,
-            )
+            entry = get_pricing_entry(model, provider=provider, base_url=base_url, api_key=api_key)
         except Exception:
             entry = None
         if entry is not None:
-            input_cost = entry.input_cost_per_million
-            output_cost = entry.output_cost_per_million
-            source = entry.source
+            input_cost, output_cost, source = entry.input_cost_per_million, entry.output_cost_per_million, entry.source
 
     is_known_gpt55_pro_confusion = model.lower() == GPT55_PRO_OPENROUTER_ID
-
     over_input = input_cost is not None and input_cost > INPUT_COST_WARNING_THRESHOLD
     over_output = output_cost is not None and output_cost > OUTPUT_COST_WARNING_THRESHOLD
     if not over_input and not over_output and not is_known_gpt55_pro_confusion:
