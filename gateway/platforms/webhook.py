@@ -89,6 +89,16 @@ def _timestamp_age(raw: str) -> Optional[int]:
         return None
 
 
+def _is_known_platform(name: str) -> bool:
+    """Cross-platform delivery target: built-in names or plugin-registered platforms."""
+    if name in _BUILTIN_DELIVER_PLATFORMS:
+        return True
+    with suppress(Exception):
+        from gateway.platform_registry import platform_registry
+        return platform_registry.is_registered(name)
+    return False
+
+
 def _json_error(message: str, status: int) -> "web.Response":
     return web.json_response({"error": message}, status=status)
 
@@ -267,13 +277,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return SendResult(success=True)
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
-        # Cross-platform delivery: built-in names or plugin-registered platforms.
-        _is_known_platform = deliver_type in _BUILTIN_DELIVER_PLATFORMS
-        if not _is_known_platform:
-            with suppress(Exception):
-                from gateway.platform_registry import platform_registry
-                _is_known_platform = platform_registry.is_registered(deliver_type)
-        if self.gateway_runner and _is_known_platform:
+        if self.gateway_runner and _is_known_platform(deliver_type):
             return await self._deliver_cross_platform(deliver_type, content, delivery)
         logger.warning("[webhook] Unknown deliver type: %s", deliver_type)
         return SendResult(success=False, error=f"Unknown deliver type: {deliver_type}")
@@ -281,18 +285,15 @@ class WebhookAdapter(BasePlatformAdapter):
     def _prune_delivery_info(self, now: float) -> None:
         """Drop delivery_info entries older than the idempotency TTL (bounds the dict
         by ``rate_limit * TTL`` even when runs never produce a final response)."""
-        if len(self._delivery_info_order) < len(self._delivery_info_created):
-            self._delivery_info_order = deque(
-                (created_at, key)
-                for key, created_at in sorted(self._delivery_info_created.items(), key=lambda item: item[1])
-            )
+        created = self._delivery_info_created
+        if len(self._delivery_info_order) < len(created):
+            self._delivery_info_order = deque((at, key) for key, at in sorted(created.items(), key=lambda kv: kv[1]))
         cutoff = now - self._idempotency_ttl
         while self._delivery_info_order and self._delivery_info_order[0][0] < cutoff:
             created_at, key = self._delivery_info_order.popleft()
-            if self._delivery_info_created.get(key) != created_at:
-                continue
-            self._delivery_info.pop(key, None)
-            self._delivery_info_created.pop(key, None)
+            if created.get(key) == created_at:
+                self._delivery_info.pop(key, None)
+                created.pop(key, None)
 
     def _prune_seen_deliveries(self, now: float) -> None:
         """Occasionally prune expired delivery IDs without scanning every POST."""
