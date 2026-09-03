@@ -50,9 +50,7 @@ def _bounded_user_message(message: str) -> str:
     text = (message or "").strip()
     if len(text) <= _MAX_INPUT_CHARS:
         return text
-    head = text[:3_000].rstrip()
-    tail = text[-900:].lstrip()
-    return f"{head}\n\n[... middle omitted ...]\n\n{tail}"
+    return f"{text[:3_000].rstrip()}\n\n[... middle omitted ...]\n\n{text[-900:].lstrip()}"
 
 
 def _extract_response_text(response: Any) -> str:
@@ -62,10 +60,10 @@ def _extract_response_text(response: Any) -> str:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        texts = (part.get("text") if isinstance(part, dict) else getattr(part, "text", None) for part in content)
-        return "".join(t for t in texts if isinstance(t, str))
-    return ""
+    if not isinstance(content, list):
+        return ""
+    texts = (part.get("text") if isinstance(part, dict) else getattr(part, "text", None) for part in content)
+    return "".join(t for t in texts if isinstance(t, str))
 
 
 def _normalize_rewrite(text: str) -> str:
