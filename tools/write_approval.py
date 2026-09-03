@@ -45,10 +45,9 @@ def write_approval_enabled(subsystem: str) -> bool:
         return False
     try:
         from hermes_cli.config import load_config, cfg_get
-        raw = cfg_get(load_config(), subsystem, CONFIG_KEY, default=False)
+        return _normalize_enabled(cfg_get(load_config(), subsystem, CONFIG_KEY, default=False))
     except Exception:
         return False
-    return _normalize_enabled(raw)
 
 
 def _normalize_enabled(value: Any) -> bool:
@@ -71,6 +70,11 @@ def _pending_path(subsystem: str, pending_id: str) -> Path:
 
 def _read_record(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _pending_files(subsystem: str) -> list:
+    d = _pending_dir(subsystem)
+    return list(d.glob("*.json")) if d.exists() else []
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin: str) -> Dict[str, Any]:
@@ -97,11 +101,8 @@ def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin
 
 def list_pending(subsystem: str) -> List[Dict[str, Any]]:
     """Return all pending records for ``subsystem``, oldest first."""
-    d = _pending_dir(subsystem)
-    if not d.exists():
-        return []
     records: List[Dict[str, Any]] = []
-    for p in d.glob("*.json"):
+    for p in _pending_files(subsystem):
         try:
             records.append(_read_record(p))
         except Exception:
@@ -133,9 +134,8 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
-    d = _pending_dir(subsystem)
     try:
-        return sum(1 for _ in d.glob("*.json")) if d.exists() else 0
+        return len(_pending_files(subsystem))
     except Exception:
         return 0
 
@@ -183,11 +183,11 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
     if subsystem == SKILLS or current_origin() == "background_review":
         return _staged(subsystem)
     granted = _prompt_inline_memory_approval(inline_summary, inline_detail)
-    if granted is True:
+    if granted is None:
+        return _staged(MEMORY)
+    if granted:
         return GateDecision(allow=True)
-    if granted is False:
-        return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
-    return _staged(MEMORY)
+    return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
 
 
 def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
@@ -209,9 +209,8 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     except Exception as e:
         logger.error("Inline memory approval prompt failed: %s", e)
         return None
-    if choice in {"once", "session"}:
-        return True
-    return False if choice == "deny" else None  # unknown outcome → stage rather than drop
+    # unknown outcome → stage rather than drop
+    return {"once": True, "session": True, "deny": False}.get(choice)
 
 
 # --- Skill-specific helpers (gist + diff for the review affordances) ---
@@ -272,8 +271,7 @@ def skill_pending_diff(record: Dict[str, Any]) -> str:
         return f"({action} on '{name}')"
 
     # patch/write_file target a file inside the skill; edit always targets SKILL.md.
-    target_label = "SKILL.md"
-    current = ""
+    target_label, current = "SKILL.md", ""
     skill_dir = _find_skill_path(name)
     if skill_dir:
         if action != "edit":
@@ -284,13 +282,11 @@ def skill_pending_diff(record: Dict[str, Any]) -> str:
         except Exception:
             current = ""
 
-    if action == "edit":
-        new = payload.get("content") or ""
-    elif action == "patch":
+    if action == "patch":
         old_s, new_s = payload.get("old_string") or "", payload.get("new_string") or ""
         new = current.replace(old_s, new_s) if current else f"(patch {old_s!r} → {new_s!r})"
     else:
-        new = payload.get("file_content") or ""
+        new = payload.get("content" if action == "edit" else "file_content") or ""
     diff = difflib.unified_diff(current.splitlines(keepends=True), new.splitlines(keepends=True),
                                 fromfile=f"a/{target_label}", tofile=f"b/{target_label}")
     return "".join(diff) or "(no textual change)"

@@ -41,7 +41,7 @@ class _Engine:
         """Clear any internal audio/feature buffer (called on every (re)start)."""
 
     def close(self) -> None:
-        pass
+        """Release engine resources (called once on stop)."""
 
 
 def _looks_like_path(value: str) -> bool:
@@ -103,11 +103,8 @@ class _OpenWakeWordEngine(_Engine):
         return "onnx"
 
     def process(self, frame) -> bool:
-        scores = self._model.predict(frame)
-        if not any(score >= self._threshold for score in scores.values()):
-            self._confirm_streak = 0
-            return False
-        self._confirm_streak += 1
+        hit = any(score >= self._threshold for score in self._model.predict(frame).values())
+        self._confirm_streak = self._confirm_streak + 1 if hit else 0
         if self._confirm_streak < self._confirm_needed:
             return False
         self._confirm_streak = 0
@@ -185,8 +182,8 @@ class _SherpaKwsEngine(_Engine):
             for prof, p in ww.enrolled_profile_phrases().items():
                 phrase_map.setdefault(p.strip(), prof)
         phrases = list(phrase_map)
-        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"),
-                            tokens_type="bpe", bpe_model=str(d / "bpe.model"))
+        tokens = text2token([p.upper() for p in phrases], tokens=str(d / "tokens.txt"), tokens_type="bpe",
+                            bpe_model=str(d / "bpe.model"))
         # sherpa keyword entries reject spaces in the @display-name; underscore them and
         # map display → profile for match routing.
         self._display_to_profile: Dict[str, str] = {}
@@ -198,7 +195,6 @@ class _SherpaKwsEngine(_Engine):
             kw.write(" ".join(toks) + f" @{display}\n")
         kw.close()
         self._keywords_file = kw.name
-        self.last_match: Optional[tuple[str, str]] = None
 
         # Shared 0..1 sensitivity → sherpa keywords_threshold. 0.5 lands on sherpa's
         # recommended 0.25; a stricter 0.35 missed ~12% of true positives in live TTS
@@ -226,10 +222,8 @@ class _SherpaKwsEngine(_Engine):
             self._spotter.decode_stream(self._stream)
             result = self._spotter.get_result(self._stream)
             if result:
-                fired = True
-                display = str(result)
-                self.last_match = (display.replace("_", " ").lower(),
-                                   self._display_to_profile.get(display, ""))
+                fired, display = True, str(result)
+                self.last_match = (display.replace("_", " ").lower(), self._display_to_profile.get(display, ""))
                 self._spotter.reset_stream(self._stream)  # one utterance must not fire repeatedly
         return fired
 
