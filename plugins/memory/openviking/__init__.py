@@ -206,10 +206,14 @@ def _atexit_commit_sessions():
     if provider is None:
         return
     _last_active_provider = None
-    with suppress(Exception):  # best-effort at shutdown time
-        provider.on_session_end([])
-    with suppress(Exception):
-        provider._release_run_lock()
+    try:
+        with suppress(Exception):  # best-effort at shutdown time
+            provider.on_session_end([])
+    finally:
+        # ``finally`` (as on main): the run lock is released even when on_session_end
+        # dies of a BaseException (KeyboardInterrupt during atexit).
+        with suppress(Exception):
+            provider._release_run_lock()
 
 
 atexit.register(_atexit_commit_sessions)

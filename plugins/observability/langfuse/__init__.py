@@ -920,7 +920,8 @@ def on_session_finalize(*, session_id: str = "", reason: str = "", **_: Any) -> 
         keys = [k for k in _TRACE_STATE if not session_id or k == session_id or any(f in k for f in fragments)]
     for key in keys:
         _finish_trace(key)
-    _flush(client)
+    with _failsafe("finalize flush"):
+        client.flush()
 
     # Shut down only at true process exit (not /new, /reset, session expiry: the
     # cached client must keep exporting). Doing it while modules are intact keeps

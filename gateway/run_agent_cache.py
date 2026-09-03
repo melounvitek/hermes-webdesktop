@@ -596,13 +596,15 @@ class GatewayAgentCacheMixin:
         )
 
     def _spawn_release_thread(self, target, args: tuple, name: str, *, inline_fallback: bool) -> None:
-        """Run a release on a daemon thread; ``inline_fallback`` runs it inline when no thread can start (interpreter shutdown)."""
+        """Run a release on a daemon thread. ``inline_fallback`` runs it inline (best-effort) when no
+        thread can start (interpreter shutdown); otherwise a spawn failure propagates, as on main."""
         try:
             threading.Thread(target=target, args=args, daemon=True, name=name).start()
         except Exception:
-            if inline_fallback:
-                with suppress(Exception):
-                    target(*args)
+            if not inline_fallback:
+                raise
+            with suppress(Exception):
+                target(*args)
 
     def _finalizable_unexpired_session_entry(self, key: str):
         """Session-store entry for ``key`` when the expiry watcher will still finalize it; None when
@@ -760,7 +762,12 @@ class GatewayAgentCacheMixin:
             "Agent cache pressure: anon RSS %dMB over budget %dMB — evicting %d LRU session(s): %s",
             rss_mb, bounds.memory_high_mb, evicted_count, ", ".join(key for key, _ in plan),
         )
-        self._spawn_release_thread(self._release_pressure_batch, (plan,), "agent-cache-pressure", inline_fallback=True)
+        try:
+            threading.Thread(target=self._release_pressure_batch, args=(plan,), daemon=True,
+                             name="agent-cache-pressure").start()
+        except Exception:
+            # Thread spawn failed (interpreter shutdown): release inline, unguarded (as on main).
+            self._release_pressure_batch(plan)
         # _release_pressure_batch drains `plan` in place (so the trim runs with no lingering agent
         # refs) — len(plan) is 0 once the daemon thread finishes, hence the pre-captured count.
         return evicted_count
