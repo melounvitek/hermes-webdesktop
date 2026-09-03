@@ -19,7 +19,6 @@ from hermes_cli.session_recovery import (
 
 # Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
 SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_")
-
 MESSAGE_ROLES = frozenset({"user", "assistant", "tool", "system"})
 
 # Values observed in sessions.source across gateway platforms and tooling.
@@ -37,7 +36,6 @@ SESSION_MODEL_USAGE_NFIELD = 18
 # Plausible unix-epoch window for started_at heuristics on legacy layouts.
 _EPOCH_LOW = 1_000_000_000.0   # 2001
 _EPOCH_HIGH = 4_000_000_000.0  # 2096
-
 SQLITE3_CLI_GUIDANCE = (
     "A last-resort page-level salvage is available when a `.recover`-capable `sqlite3` command-line shell is "
     "installed: its `.recover` command can rebuild rows into lost_and_found tables even when the table schemas are "
@@ -281,7 +279,8 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                         # Pre-modern layout with unknown column order: salvage identity + timing only.
                         row_values = (
                             cells[0], cells[1] if _looks_like_source(cells[1]) else "recovered",
-                            _heuristic_started_at(cells), "[best-effort recovered] legacy session row (layout unknown)",
+                            _heuristic_started_at(cells),
+                            "[best-effort recovered] legacy session row (layout unknown)",
                         )
                         inserted = dest.execute(
                             "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",

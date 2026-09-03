@@ -20,12 +20,10 @@ from hermes_state import (FTS_STORAGE_VERSION, SCHEMA_VERSION, SessionDB, _db_op
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-
 _CANONICAL_TABLES = (
     "system_prompts", "sessions", "messages", "session_model_usage", "compression_locks", "gateway_routing",
     "async_delegations",
 )
-
 _TOPIC_TABLES = ("telegram_dm_topic_mode", "telegram_dm_topic_bindings")
 
 
@@ -40,9 +38,7 @@ def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
 _AUXILIARY_TABLE_SCHEMAS: dict[str, Callable[[sqlite3.Connection], None]] = {
     "delivery_obligations": _init_delivery_ledger_schema,
 }
-
 _AUXILIARY_TABLES = tuple(_AUXILIARY_TABLE_SCHEMAS)
-
 _INVENTORY_TABLES = (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES)
 
 # Derived-index / optional-schema markers: a fresh destination regenerates these, never copies them.
@@ -50,7 +46,6 @@ _GENERATED_META_KEYS = frozenset({
     "fts_storage_version", "fts_optimize_available", "fts_rebuild_high_water", "fts_rebuild_progress",
     "fts_cjk_stale", "fts_cjk_rebuild_high_water", "fts_cjk_rebuild_progress", "telegram_dm_topic_schema_version",
 })
-
 _SIDECAR_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _MINIMUM_SPACE_HEADROOM = 256 * 1024 * 1024
 _MAX_SALVAGE_RANGE_QUERIES = 10_000
