@@ -980,15 +980,12 @@ def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base
 
 
 def _restore_runtime_capabilities(agent, rt: Dict[str, Any]) -> None:
-    if "runtime_capabilities" in rt:
-        raw = rt["runtime_capabilities"]
-        if not isinstance(raw, dict):
-            logger.warning("Ignoring malformed runtime capabilities snapshot")
-        else:
-            agent.runtime_capabilities = dict(raw)
-    elif isinstance(rt.get("capabilities"), dict):
-        # Snapshots written by the initial capability propagation patch.
-        agent.runtime_capabilities = dict(rt["capabilities"])
+    # ``capabilities`` is the legacy key from the initial capability propagation patch.
+    raw = rt["runtime_capabilities"] if "runtime_capabilities" in rt else rt.get("capabilities")
+    if isinstance(raw, dict):
+        agent.runtime_capabilities = dict(raw)
+    elif "runtime_capabilities" in rt:
+        logger.warning("Ignoring malformed runtime capabilities snapshot")
 
 
 def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, load_primary_pool, prefetched_pool, prefetched) -> None:
@@ -1010,13 +1007,8 @@ def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, lo
             )
     agent._credential_pool_entry_id = None
     pool = getattr(agent, "_credential_pool", None)
-    if pool is None or not pool.has_available():
-        return
-    entry = pool.select()
-    if entry is None:
-        return
-    entry_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
-    if not entry_key:
+    entry = pool.select() if pool is not None and pool.has_available() else None
+    if entry is None or not (getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")):
         return
     if matches_primary(entry):
         # _swap_credential rebuilds the client and reapplies base-url-scoped headers.
@@ -1064,12 +1056,9 @@ def restore_primary_runtime(agent) -> bool:
         return False
     agent._restore_wait_logged = False
     fallback_route = getattr(agent, "_provider_fallback_route", None)
-    if isinstance(fallback_route, (list, tuple)) and len(fallback_route) == 2:
-        previous_model = str(fallback_route[0] or "unknown")
-        previous_provider = str(fallback_route[1] or "unknown")
-    else:
-        previous_model = str(getattr(agent, "model", "") or "unknown")
-        previous_provider = str(getattr(agent, "provider", "") or "unknown")
+    if not (isinstance(fallback_route, (list, tuple)) and len(fallback_route) == 2):
+        fallback_route = (getattr(agent, "model", ""), getattr(agent, "provider", ""))
+    previous_model, previous_provider = (str(v or "unknown") for v in fallback_route)
     provider_fallback_active = bool(getattr(agent, "_provider_fallback_active", False))
     try:
         _apply_primary_runtime_fields(agent, rt)
@@ -1183,9 +1172,7 @@ def dump_api_request_debug(
 ) -> Optional[Path]:
     """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
     try:
-        body = copy.deepcopy(api_kwargs)
-        body.pop("timeout", None)
-        body = {k: v for k, v in body.items() if v is not None}
+        body = {k: v for k, v in copy.deepcopy(api_kwargs).items() if v is not None and k != "timeout"}
         api_key = None
         try:
             api_key = getattr(agent.client, "api_key", None)
@@ -1193,12 +1180,9 @@ def dump_api_request_debug(
             _ra().logger.debug("Could not extract API key for debug dump: %s", e)
         endpoint = "/responses" if agent.api_mode == "codex_responses" else "/chat/completions"
         dump_payload: Dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(),
-            "session_id": agent.session_id,
-            "reason": reason,
+            "timestamp": datetime.now().isoformat(), "session_id": agent.session_id, "reason": reason,
             "request": {
-                "method": "POST",
-                "url": f"{agent.base_url.rstrip('/')}{endpoint}",
+                "method": "POST", "url": f"{agent.base_url.rstrip('/')}{endpoint}",
                 "headers": {
                     "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
                     "Content-Type": "application/json",
@@ -1752,16 +1736,13 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
                     "MiniMax OAuth: failed to install per-request token provider "
                     "on switch (%s); using static bearer.", _mm_exc,
                 )
-        agent.api_key = effective_key
-        agent._anthropic_api_key = effective_key
+        agent.api_key = agent._anthropic_api_key = effective_key
         agent._anthropic_base_url = base_url or getattr(agent, "_anthropic_base_url", None)
         agent._anthropic_client = build_anthropic_client(
             effective_key, agent._anthropic_base_url,
             timeout=get_provider_request_timeout(agent.provider, agent.model),
         )
-        agent._is_anthropic_oauth = (
-            _is_oauth_token(effective_key) if (is_native_anthropic and isinstance(effective_key, str)) else False
-        )
+        agent._is_anthropic_oauth = bool(is_native_anthropic and isinstance(effective_key, str) and _is_oauth_token(effective_key))
         agent.client = None
         agent._client_kwargs = {}
         return
@@ -1794,8 +1775,7 @@ def _swap_switch_runtime(agent, new_model, new_provider, api_key, base_url, api_
     # Clear the per-config override so the new model's context window is re-resolved.
     agent._config_context_length = None
     agent.model = new_model
-    agent.provider = new_provider
-    agent.requested_provider = new_provider
+    agent.provider = agent.requested_provider = new_provider
     # Re-read reasoning_echo so the flag reflects the new primary model (see _reasoning_echo_opt_in).
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
     # Empty base_url while the provider changes means upstream resolution failed; falling back to
@@ -2144,19 +2124,12 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
             tool_name = tool_name[:_idx]
     if not tool_name:
         return None
-
-    def _norm(s: str) -> str:
-        return s.lower().replace("-", "_").replace(" ", "_")
-
-    def _camel_snake(s: str) -> str:
-        return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
+    _norm = lambda s: s.lower().replace("-", "_").replace(" ", "_")  # noqa: E731
+    _camel_snake = lambda s: re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()  # noqa: E731
 
     def _strip_tool_suffix(s: str) -> str | None:
         lc = s.lower()
-        for suffix in ("_tool", "-tool", "tool"):
-            if lc.endswith(suffix):
-                return s[: -len(suffix)].rstrip("_-")
-        return None
+        return next((s[: -len(sfx)].rstrip("_-") for sfx in ("_tool", "-tool", "tool") if lc.endswith(sfx)), None)
     # Cheap fast-paths first.
     lowered = tool_name.lower()
     if lowered in agent.valid_tool_names:
@@ -2189,27 +2162,25 @@ _EMPTY_HEAL_ESCALATE_AFTER = 3
 _EMPTY_HEAL_WINDOW_S = 600.0
 _empty_heal_log_state: Dict[str, Dict[str, Any]] = {}
 _empty_heal_log_lock = threading.Lock()
-
-# Sessions already given the one-time user notice; separate from the windowed log state so the user
-# is told ONCE per session (out-of-band, never in conversation context).
+# Sessions already told ONCE (out-of-band, never in conversation context); kept apart from the
+# windowed log state so a new window never re-arms the notice.
 _empty_heal_user_notified: set = set()
-
-# One-shot pending notices keyed by session, drained by the conversation loop via
-# ``consume_pending_sanitizer_heal_notice`` and delivered via the status/warning callback.
+# One-shot pending notices keyed by session, drained via ``consume_pending_sanitizer_heal_notice``
+# and delivered via the status/warning callback.
 _empty_heal_pending_notice: Dict[str, str] = {}
 
 
 def _content_has_payload(content: Any) -> bool:
     if isinstance(content, str):
         return bool(content.strip())
-    if isinstance(content, list):
-        # Any typed block counts, as long as a text block is not itself blank.
-        return any(
-            (block.get("type") != "text" or (isinstance(block.get("text"), str) and block["text"].strip()))
-            if isinstance(block, dict) else bool(block)
-            for block in content
-        )
-    return content not in (None, "")
+    if not isinstance(content, list):
+        return content not in (None, "")
+    # Any typed block counts, as long as a text block is not itself blank.
+    return any(
+        (block.get("type") != "text" or (isinstance(block.get("text"), str) and block["text"].strip()))
+        if isinstance(block, dict) else bool(block)
+        for block in content
+    )
 
 
 def _msg_has_payload(msg: Dict[str, Any]) -> bool:
