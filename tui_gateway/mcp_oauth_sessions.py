@@ -1,14 +1,11 @@
 """Session-backed MCP OAuth flows for the gateway (mcp.servers.oauth.*).
 
-Mirrors the dashboard's *provider* OAuth model: ``start`` kicks off a background
-worker and returns ``{session_id, auth_url, flow}``; ``poll`` reports
-``{status: pending|approved|error}`` until tokens land on disk. No OAuth logic is
-reimplemented — the token machinery is ``hermes mcp login``'s
-(``_probe_single_server`` under ``force_interactive_oauth``) and ``DashboardOAuthFlow``
-is the thread-safe bridge; the only new piece is a loopback HTTP listener feeding
-``deliver_callback``. Remote-backend variant: the client binds its OWN loopback
-listener, passes ``client_redirect_uri`` to ``start`` and relays the redirect via
-``deliver_callback_flow``; state verification stays server-side either way.
+``start`` kicks off a background worker and returns ``{session_id, auth_url, flow}``;
+``poll`` reports ``{status: pending|approved|error}`` until tokens land on disk. No OAuth
+logic is reimplemented: ``hermes mcp login``'s probe under ``force_interactive_oauth``
+plus ``DashboardOAuthFlow`` as the bridge; the only new piece is a loopback listener
+feeding ``deliver_callback``. Remote backends: the client hosts the listener, passes
+``client_redirect_uri`` and relays via ``deliver_callback_flow`` (state check stays here).
 """
 
 from __future__ import annotations

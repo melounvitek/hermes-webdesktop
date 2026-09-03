@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import threading
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 
 # Child-session live mirror: a delegated child's activity reaches the gateway only
@@ -204,11 +202,9 @@ def _available_personalities(cfg: dict | None = None) -> dict:
 
 
 def _validate_personality(value: str, cfg: dict | None = None) -> tuple[str, str]:
-    """Resolve a requested personality to (name, prompt) or raise ValueError.
-
-    Same contract as hermes_cli.personality.resolve_personality, but goes through
-    the module-level _available_personalities so tests keep a single patch point.
-    """
+    """Resolve a requested personality to (name, prompt) or raise ValueError. Same
+    contract as hermes_cli.personality.resolve_personality, but goes through the
+    module-level _available_personalities so tests keep a single patch point."""
     from hermes_cli.personality import normalize_personality_name, render_personality_prompt
 
     name = normalize_personality_name(value)
@@ -230,12 +226,10 @@ def _prompt_text(value) -> str:
 
 def _apply_personality_to_session(
     sid: str, session: dict, new_prompt: str, personality: str = "") -> tuple[bool, dict | None]:
-    """Apply a personality change to a live session without resetting history.
-
-    Updates the ephemeral system prompt in place (appended at API-call time, so
-    prompt-cache hits survive) and injects a pivot marker so the model stops
-    pattern-matching its earlier tone. Returns (history_reset=False, info).
-    """
+    """Apply a personality change to a live session without resetting history: the
+    ephemeral system prompt is updated in place (appended at API-call time, so
+    prompt-cache hits survive) plus a pivot marker so the model stops pattern-matching
+    its earlier tone. Returns (history_reset=False, info)."""
     if not session:
         return False, None
     session["personality"] = personality
@@ -287,9 +281,8 @@ def _parse_tui_skills_env() -> list[str]:
 
 
 def _load_fallback_model():
-    """Configured fallback chain for TUI-created agents, via the shared
-    ``get_fallback_chain`` (parity with HermesCLI/gateway: ``fallback_providers``
-    first in order, legacy ``fallback_model`` merged after, deduped)."""
+    """Configured fallback chain via the shared ``get_fallback_chain`` (parity with
+    HermesCLI/gateway: ``fallback_providers`` first, legacy ``fallback_model`` merged after)."""
     from hermes_cli.fallback_config import get_fallback_chain
 
     return get_fallback_chain(_load_cfg())
@@ -308,36 +301,26 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
     def g(name, default=None):
         return getattr(agent, name, default)
 
-    return {
-        "base_url": g("base_url") or None,
-        "api_key": g("api_key") or None,
-        "provider": g("provider") or None,
-        "api_mode": g("api_mode") or None,
-        "acp_command": g("acp_command") or None,
-        "acp_args": g("acp_args") or None,
-        "model": g("model") or _resolve_model(),
-        "max_iterations": _cfg_max_turns(cfg, 25),
+    kwargs = {k: g(k) or None for k in (
+        "base_url", "api_key", "provider", "api_mode", "acp_command", "acp_args", "ephemeral_system_prompt")}
+    kwargs.update({k: g(k) for k in (
+        "providers_allowed", "providers_ignored", "providers_order", "provider_sort",
+        "provider_data_collection", "openrouter_min_coding_score")})
+    kwargs.update(
+        model=g("model") or _resolve_model(),
+        max_iterations=_cfg_max_turns(cfg, 25),
         # Detached tasks declare platform="tui" (no UI sid for renderer-routed
         # events), so resolve toolsets against it — never GUI schema they can't use.
-        "enabled_toolsets": g("enabled_toolsets") or _load_enabled_toolsets("tui"),
-        "quiet_mode": True,
-        "verbose_logging": False,
-        "ephemeral_system_prompt": g("ephemeral_system_prompt") or None,
-        "providers_allowed": g("providers_allowed"),
-        "providers_ignored": g("providers_ignored"),
-        "providers_order": g("providers_order"),
-        "provider_sort": g("provider_sort"),
-        "provider_require_parameters": g("provider_require_parameters", False),
-        "provider_data_collection": g("provider_data_collection"),
-        "openrouter_min_coding_score": g("openrouter_min_coding_score"),
-        "session_id": task_id,
-        "reasoning_config": g("reasoning_config")
-        or _load_reasoning_config(str(g("model", "") or "")),
-        "service_tier": g("service_tier") or _load_service_tier(),
-        "request_overrides": dict(g("request_overrides", {}) or {}),
-        "platform": "tui",
-        "session_db": _get_db(),
-        "fallback_model": _agent_fallback_model(agent)}
+        enabled_toolsets=g("enabled_toolsets") or _load_enabled_toolsets("tui"),
+        quiet_mode=True, verbose_logging=False,
+        provider_require_parameters=g("provider_require_parameters", False),
+        session_id=task_id,
+        reasoning_config=g("reasoning_config") or _load_reasoning_config(str(g("model", "") or "")),
+        service_tier=g("service_tier") or _load_service_tier(),
+        request_overrides=dict(g("request_overrides", {}) or {}),
+        platform="tui", session_db=_get_db(), fallback_model=_agent_fallback_model(agent),
+    )
+    return kwargs
 
 
 def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
@@ -347,10 +330,9 @@ def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_chars: int = 1200) -> list[dict]:
-    """Distill recent parent history for the ephemeral preview-restart agent, which
-    otherwise would guess app/server/cwd/port from the bare URL + console logs.
-    Keeps the last ``max_messages`` (always back to the last user turn); tool
-    results are truncated so file dumps don't blow the context window."""
+    """Distill recent parent history for the ephemeral preview-restart agent (else it
+    guesses app/server/cwd/port from the bare URL). Keeps the last ``max_messages``
+    (always back to the last user turn); tool results truncated to ``max_tool_chars``."""
     try:
         with session["history_lock"]:
             history = list(session.get("history", []) or [])

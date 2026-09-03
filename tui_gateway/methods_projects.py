@@ -63,12 +63,35 @@ def _require_project(pdb, conn, params: dict):
     return proj
 
 
-def _project_ok(rid, pdb, conn, pid) -> dict:
-    return _ok(rid, {"project": pdb.get_project(conn, pid).to_dict()})
+def _pick(params: dict, *keys: str) -> dict:
+    return {k: params.get(k) for k in keys}
 
 
-def _path_param(params: dict) -> str:
-    return str(params.get("path") or "")
+# Per-project mutators: (rpc suffix, pdb function, takes params['path'], extra kwargs).
+# Each resolves ``params['id']`` (5062 when missing), mutates, and answers with the
+# refreshed project.
+_PROJECT_MUTATORS = (
+    ("update", "update_project", False,
+     lambda p: _pick(p, "name", "description", "icon", "color", "board_slug")),
+    ("add_folder", "add_folder", True,
+     lambda p: {"label": p.get("label"), "is_primary": bool(p.get("is_primary"))}),
+    ("remove_folder", "remove_folder", True, lambda p: {}),
+    ("set_primary", "set_primary", True, lambda p: {}),
+)
+
+
+def _register_project_mutator(suffix: str, fn_name: str, takes_path: bool, kwargs_of) -> None:
+    @_projects_method(f"projects.{suffix}")
+    def _(rid, params, pdb, conn) -> dict:
+        proj = _require_project(pdb, conn, params)
+        args = (str(params.get("path") or ""),) if takes_path else ()
+        getattr(pdb, fn_name)(conn, proj.id, *args, **kwargs_of(params))
+        return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
+
+
+for _spec in _PROJECT_MUTATORS:
+    _register_project_mutator(*_spec)
+del _spec
 
 
 @_projects_method("projects.list")
@@ -84,47 +107,12 @@ def _(rid, params, pdb, conn) -> dict:
 @_projects_method("projects.create")
 def _(rid, params, pdb, conn) -> dict:
     pid = pdb.create_project(
-        conn, name=str(params.get("name") or ""), slug=params.get("slug"),
-        folders=params.get("folders") or [], primary_path=params.get("primary_path"),
-        description=params.get("description"), icon=params.get("icon"), color=params.get("color"),
-        board_slug=params.get("board_slug"))
+        conn, name=str(params.get("name") or ""), folders=params.get("folders") or [],
+        **_pick(params, "slug", "primary_path", "description", "icon", "color", "board_slug"))
     if params.get("use"):
         pdb.set_active(conn, pid)
     proj = pdb.get_project(conn, pid)
     return _ok(rid, {"project": proj.to_dict() if proj else None})
-
-
-@_projects_method("projects.update")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.update_project(
-        conn, proj.id, name=params.get("name"), description=params.get("description"),
-        icon=params.get("icon"), color=params.get("color"), board_slug=params.get("board_slug"))
-    return _project_ok(rid, pdb, conn, proj.id)
-
-
-@_projects_method("projects.add_folder")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.add_folder(
-        conn, proj.id, _path_param(params), label=params.get("label"),
-        is_primary=bool(params.get("is_primary")),
-    )
-    return _project_ok(rid, pdb, conn, proj.id)
-
-
-@_projects_method("projects.remove_folder")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.remove_folder(conn, proj.id, _path_param(params))
-    return _project_ok(rid, pdb, conn, proj.id)
-
-
-@_projects_method("projects.set_primary")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.set_primary(conn, proj.id, _path_param(params))
-    return _project_ok(rid, pdb, conn, proj.id)
 
 
 @_projects_method("projects.archive")
@@ -136,8 +124,7 @@ def _(rid, params, pdb, conn) -> dict:
 
 @_projects_method("projects.delete")
 def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.delete_project(conn, proj.id)
+    pdb.delete_project(conn, _require_project(pdb, conn, params).id)
     return _ok(rid, _projects_payload(conn))
 
 
@@ -155,14 +142,10 @@ def _(rid, params, pdb, conn) -> dict:
 
 
 def _non_workspace_dirs() -> set[str]:
-    """Directories that are never a workspace: ``/``, the user's home, and the dir
-    homes live in (``/home``, ``/Users``, ``C:\\Users``).
-
-    Both POSIX spellings are excluded on every host because both are reachable as
-    a cwd anywhere (macOS ships an empty ``/home`` autofs stub; containers/remote
-    shells hand back Linux paths). Promoting one mints a catch-all project, and
-    ``/home`` renders as a second "home" row next to the Home bucket.
-    """
+    """Never-a-workspace dirs: ``/``, the user's home, and the dir homes live in. Both
+    POSIX spellings are excluded on every host (macOS ships an empty ``/home`` autofs
+    stub; containers/remote shells hand back Linux paths) — promoting one mints a
+    catch-all project and ``/home`` renders as a second "home" row beside Home."""
     home = os.path.realpath(os.path.expanduser("~"))
     candidates = (os.sep, home, os.path.dirname(home), "/home", "/Users")
     return {os.path.normcase(os.path.realpath(path)) for path in candidates if path}
@@ -246,18 +229,11 @@ def _repo_discovery_policy_is_default(policy: dict) -> bool:
 
 
 def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
-    """Backend-side disk scan of the discovery policy roots into the discovery cache.
-
-    The desktop's native scan only sees the local filesystem; on a remote gateway
-    the host must scan its own disk so zero-session repos still appear. Walk each
-    root (bounded), record ``.git``-bearing dirs. Best-effort: failures log and
-    leave the cache untouched.
-
-    Returns True only when the scan is authoritative (every root walked to
-    completion, cap not hit) — only then is the cache write ``replace=True``. A
-    partial/errored scan must MERGE, never wipe, so a failed remote refresh can't
-    blank the sidebar.
-    """
+    """Backend-side disk scan of the policy roots into the discovery cache (the desktop's
+    native scan only sees the local filesystem). Best-effort: failures log and leave
+    the cache untouched. Returns True only when the scan is authoritative (every root
+    walked to completion, cap not hit) — only then is the cache write ``replace=True``;
+    a partial/errored scan must MERGE, never wipe, or a failed refresh blanks the sidebar."""
     from hermes_cli import projects_db as pdb
     roots = policy.get("roots") or []
     excludes = policy.get("exclude_paths") or []
@@ -310,14 +286,10 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
 
 def _discover_repos_payload(
     db, *, conn=None, backfill: bool = True, include_cached: bool = True) -> list[dict]:
-    """Merge filesystem-scanned repos (cached) with session-derived repo roots.
-
-    Repo-first: the disk scan surfaces repos with zero sessions; session-derived
-    roots cover repos outside the scan roots. Both are junk-filtered and carry
-    session totals. ``conn`` reuses an open projects.db connection; ``backfill``
-    persists resolved roots onto session rows — kept OFF the per-turn tree path
-    (grouping uses the live git resolver) and done only on explicit refresh.
-    """
+    """Merge filesystem-scanned repos (cached; may have zero sessions) with
+    session-derived roots, junk-filtered, with session totals. ``conn`` reuses an open
+    projects.db connection; ``backfill`` persists resolved roots onto session rows —
+    kept OFF the per-turn tree path and done only on explicit refresh."""
     repos: dict[str, dict] = {}
 
     def _agg(root: str) -> dict:
@@ -393,11 +365,8 @@ def _project_tree_inputs(
     db, session_limit: int, *, include_discovered: bool
 ) -> tuple[list[dict], list[dict], list[dict], str | None]:
     """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
-
-    ``include_discovered`` is the zero-session-repo overview tier; the drill-in
-    view skips it (its project already has sessions), avoiding the distinct-cwd
-    scan + git probes on that per-turn path.
-    """
+    ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it,
+    avoiding the distinct-cwd scan + git probes on that per-turn path."""
     rows = db.list_sessions_rich(
         limit=session_limit,
         offset=0,

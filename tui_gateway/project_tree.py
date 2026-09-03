@@ -458,14 +458,11 @@ def build_tree(
     exists: Optional[Exists] = None) -> dict:
     """Build the authoritative project tree -> ``{"projects", "scoped_session_ids"}``.
 
-    ``projects`` are ``Project.to_dict()`` shapes; ``sessions`` projected row dicts;
-    ``discovered_repos`` ``{"root", "label", "sessions", "last_active"}``. ``is_junk_root``
-    flags git roots that must never become an AUTO project (bare home, HERMES_HOME);
-    ``is_junk_cwd`` is the narrower policy for non-git folders. User-created projects
-    are honored regardless. ``exists`` keeps a DELETED workspace from becoming a
-    phantom AUTO project; omit it (remote backends) to keep every candidate.
-    ``hydrate`` False (overview) empties lane ``sessions`` but keeps counts and adds
-    up to ``preview_limit`` ``previewSessions``; True (drill-in) keeps full rows.
+    ``is_junk_root`` flags git roots that must never become an AUTO project (bare home,
+    HERMES_HOME); ``is_junk_cwd`` is the narrower policy for non-git folders; explicit
+    projects are honored regardless. ``exists`` keeps a DELETED workspace from becoming
+    a phantom AUTO project (omit on remote backends). ``hydrate`` False (overview) empties
+    lane ``sessions`` but keeps counts + ``preview_limit`` ``previewSessions``.
     """
     active_projects = [p for p in projects if not p.get("archived")]
     _junk = is_junk_root or (lambda _root: False)

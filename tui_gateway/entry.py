@@ -64,6 +64,16 @@ def _stamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _mcp_startup_call(name: str, *args, default=None, **kwargs):
+    """Call ``hermes_cli.mcp_startup.<name>`` (lazy import); ``default`` on any failure."""
+    try:
+        from hermes_cli import mcp_startup
+
+        return getattr(mcp_startup, name)(*args, **kwargs)
+    except Exception:
+        return default
+
+
 def _append_crash_log(header: str, dump=None) -> None:
     """Best-effort ``=== header ===`` entry in the crash log; ``dump(f)`` adds detail."""
     with suppress(Exception):
@@ -165,13 +175,8 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     """
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
-        try:
-            from hermes_cli.mcp_startup import _resolve_discovery_timeout
-
-            bound = _resolve_discovery_timeout(timeout)
-        except Exception:
-            bound = timeout if timeout is not None else 0.75
-        thread.join(timeout=bound)
+        fallback = timeout if timeout is not None else 0.75
+        thread.join(timeout=_mcp_startup_call("_resolve_discovery_timeout", timeout, default=fallback))
         return
     # Shared-owner path. Re-invoke the idempotent spawn first so a previous
     # zero-connected run gets its retry instead of latching the process MCP-less.
@@ -186,10 +191,7 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
         start_background_mcp_discovery(logger=logger, thread_name="tui-mcp-discovery")
     except Exception:
         logger.debug("TUI MCP discovery retry-spawn failed", exc_info=True)
-    with suppress(Exception):
-        from hermes_cli.mcp_startup import wait_for_mcp_discovery as _startup_wait
-
-        _startup_wait(timeout)
+    _mcp_startup_call("wait_for_mcp_discovery", timeout)
 
 
 def mcp_discovery_in_flight() -> bool:
@@ -200,12 +202,7 @@ def mcp_discovery_in_flight() -> bool:
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
         return True
-    try:
-        from hermes_cli.mcp_startup import mcp_discovery_in_flight as _startup_in_flight
-
-        return _startup_in_flight()
-    except Exception:
-        return False
+    return _mcp_startup_call("mcp_discovery_in_flight", default=False)
 
 
 def join_mcp_discovery(timeout: float | None = None) -> bool:
@@ -217,13 +214,7 @@ def join_mcp_discovery(timeout: float | None = None) -> bool:
     if thread is not None:
         thread.join(timeout=timeout)
         entry_done = not thread.is_alive()
-    try:
-        from hermes_cli.mcp_startup import join_mcp_discovery as _startup_join
-
-        startup_done = _startup_join(timeout=timeout)
-    except Exception:
-        startup_done = True
-    return entry_done and startup_done
+    return entry_done and _mcp_startup_call("join_mcp_discovery", timeout=timeout, default=True)
 
 
 # Spurious stdin-EOF recovery tracker (shared open-file-description O_NONBLOCK flip).
@@ -242,11 +233,10 @@ def ensure_mcp_discovery_started() -> None:
 
     ``main()`` calls this for stdio; WS/Desktop skip ``main()``, so
     ``server._start_agent_build`` also calls it AFTER binding the session profile's
-    HERMES_HOME — the shared owner captures that context-local override, so
-    discovery reads the SELECTED profile's ``mcp_servers``. Delegating keeps the
-    process-wide start lock, retry-after-zero-connected allowance and
-    interactive-OAuth suppression. MCP registration is process-global: the FIRST
-    profile to build an agent wins the discovery slot.
+    HERMES_HOME (the shared owner captures that override, so discovery reads the
+    SELECTED profile's ``mcp_servers``). Delegating keeps the process-wide start lock,
+    retry-after-zero-connected allowance and interactive-OAuth suppression. MCP
+    registration is process-global: the FIRST profile to build an agent wins.
     """
     global _mcp_discovery_enabled
 
