@@ -1,13 +1,10 @@
-"""Krea image generation backend.
+"""Krea image generation backend (``Krea 2`` Medium / Large / Medium Turbo).
 
-Exposes Krea's ``Krea 2`` family (Medium, Large, Medium Turbo) as an
-:class:`ImageGenProvider`. Krea's API is asynchronous: submit returns a
-``job_id`` polled at ``GET /jobs/{job_id}``; ``generate()`` hides that
-(submit, poll every 2s with light backoff, cache the result URL locally).
-
-Selection: ``model`` kwarg → ``KREA_IMAGE_MODEL`` → ``image_gen.krea.model`` →
-``image_gen.model`` (when one of our IDs) → :data:`DEFAULT_MODEL`.
-Docs: https://docs.krea.ai/developers/krea-2/overview
+Krea's API is asynchronous: submit returns a ``job_id`` polled at ``GET
+/jobs/{job_id}``; ``generate()`` hides that (submit, poll every 2s with light
+backoff, cache the result URL locally). Selection: ``model`` kwarg →
+``KREA_IMAGE_MODEL`` → ``image_gen.krea.model`` → ``image_gen.model`` (when one
+of our IDs) → :data:`DEFAULT_MODEL`. Docs: https://docs.krea.ai/developers/krea-2/overview
 """
 
 from __future__ import annotations
@@ -22,8 +19,8 @@ import requests
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_url_image, success_response
 from plugins.image_gen._common import (
-    ErrorFn, StaticImageGenProvider, collect_source_images, error_factory, load_image_gen_config,
-    post_json, prompt_required_error, resolve_static_model,
+    ErrorFn, StaticImageGenProvider, collect_source_images, error_factory, load_image_gen_config, post_json,
+    prompt_required_error, resolve_static_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,28 +32,19 @@ BASE_URL = "https://api.krea.ai"
 # 2K native anyway.
 _MODELS: Dict[str, Dict[str, Any]] = {
     "krea-2-medium": {
-        "display": "Krea 2 Medium",
-        "speed": "~15-25s",
+        "display": "Krea 2 Medium", "speed": "~15-25s",
         "strengths": "Illustration, anime, painting, expressive styles. Faster + cheaper.",
-        "price": "$0.030 (text) / $0.035 (style refs) / $0.040 (moodboards)",
-        "path": "medium",
-        "upscale": False,
+        "price": "$0.030 (text) / $0.035 (style refs) / $0.040 (moodboards)", "path": "medium", "upscale": False,
     },
     "krea-2-large": {
-        "display": "Krea 2 Large",
-        "speed": "~25-60s",
+        "display": "Krea 2 Large", "speed": "~25-60s",
         "strengths": "Photorealism, raw textured looks (motion blur, grain), expressive styles.",
-        "price": "$0.060 (text) / $0.065 (style refs) / $0.070 (moodboards)",
-        "path": "large",
-        "upscale": False,
+        "price": "$0.060 (text) / $0.065 (style refs) / $0.070 (moodboards)", "path": "large", "upscale": False,
     },
     "krea-2-medium-turbo": {
-        "display": "Krea 2 Medium Turbo",
-        "speed": "~8-15s",
+        "display": "Krea 2 Medium Turbo", "speed": "~8-15s",
         "strengths": "Fastest Krea 2 — medium quality at lower latency / cost.",
-        "price": "$0.015 (text) / $0.0175 (style refs)",
-        "path": "medium-turbo",
-        "upscale": False,
+        "price": "$0.015 (text) / $0.0175 (style refs)", "path": "medium-turbo", "upscale": False,
     },
 }
 
@@ -98,6 +86,8 @@ _POLL_FAILURES: Dict[str, Tuple[str, Callable[[str, Any], str]]] = {
         f"{int(_POLL_TIMEOUT_SECONDS)}s (last status: {detail or 'unknown'})"
     )),
 }
+# Managed gateway prices base text-to-image and URL style references only.
+_MANAGED_UNSUPPORTED = (("trained styles (LoRAs)", "styles"), ("moodboards", "moodboards"))
 
 
 def _load_krea_config() -> Dict[str, Any]:
@@ -112,8 +102,8 @@ def _krea_section() -> Dict[str, Any]:
 
 def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
     return resolve_static_model(
-        _MODELS, DEFAULT_MODEL, env_var="KREA_IMAGE_MODEL", config_key="krea",
-        explicit=explicit, config=_load_krea_config(),
+        _MODELS, DEFAULT_MODEL, env_var="KREA_IMAGE_MODEL", config_key="krea", explicit=explicit,
+        config=_load_krea_config(),
     )
 
 
@@ -177,23 +167,20 @@ def _headers(auth_token: str, *, managed: bool, json_body: bool) -> Dict[str, st
 
 
 def _submit_error_message(resp: Any, exc: Exception) -> str:
+    fallback = resp.text[:300] if resp is not None else str(exc)
     try:
         body = resp.json() if resp is not None else {}
-        return (
-            body.get("error", {}).get("message")
-            if isinstance(body.get("error"), dict)
-            else body.get("message") or body.get("detail")
-        ) or (resp.text[:300] if resp is not None else str(exc))
+        error = body.get("error")
+        message = error.get("message") if isinstance(error, dict) else body.get("message") or body.get("detail")
+        return message or fallback
     except Exception:  # noqa: BLE001
-        return resp.text[:300] if resp is not None else str(exc)
+        return fallback
 
 
 def _is_terminal(job: Any) -> bool:
     """``completed_at`` is a backstop terminal marker even when ``status`` is an
     unfamiliar enum (Krea adds pending states — backlogged/scheduled/sampling — over time)."""
-    return isinstance(job, dict) and (
-        job.get("status") in _TERMINAL_STATES or bool(job.get("completed_at"))
-    )
+    return isinstance(job, dict) and (job.get("status") in _TERMINAL_STATES or bool(job.get("completed_at")))
 
 
 def _poll_krea_job(
@@ -291,17 +278,12 @@ def _enhance_image(
     caller falls back to the original image — an upscale failure must never
     destroy an already-successful generation.
     """
-    payload: Dict[str, Any] = {
-        "image_url": image_url,
-        "image_scaling_factor": _ENHANCE_SCALE_FACTOR,
-        # The original prompt guides detail; default ai_strength (0.4) adds
-        # detail without redrawing the composition.
-        "prompt": prompt,
-    }
+    # The original prompt guides detail; default ai_strength (0.4) adds detail
+    # without redrawing the composition.
+    payload = {"image_url": image_url, "image_scaling_factor": _ENHANCE_SCALE_FACTOR, "prompt": prompt}
     try:
         resp = requests.post(
-            f"{base_url}{_ENHANCE_PATH}",
-            headers=_headers(auth_token, managed=managed, json_body=True),
+            f"{base_url}{_ENHANCE_PATH}", headers=_headers(auth_token, managed=managed, json_body=True),
             json=payload, timeout=30,
         )
         resp.raise_for_status()
@@ -367,8 +349,8 @@ def _build_payload(
 
 
 def _submit_job(
-    base_url: str, auth_token: str, model_path: str, payload: Dict[str, Any],
-    managed: bool, model_id: str, fail: ErrorFn,
+    base_url: str, auth_token: str, model_path: str, payload: Dict[str, Any], managed: bool, model_id: str,
+    fail: ErrorFn,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """POST the generation request; ``(job_id, None)`` or ``(None, error)``."""
     submit_body, failure = post_json(
@@ -384,14 +366,10 @@ def _submit_job(
             # Portal, or the gateway's shared key hit its concurrency cap (429).
             if managed and 400 <= status < 500:
                 hint = (
-                    "Krea's shared-key concurrency cap was hit — retry shortly."
-                    if status == 429
-                    else (
-                        f"Model '{model_id}' may not be enabled/priced on the "
-                        "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
-                        "Krea directly, or pick a different model via "
-                        "`hermes tools` → Image Generation."
-                    )
+                    "Krea's shared-key concurrency cap was hit — retry shortly." if status == 429 else
+                    f"Model '{model_id}' may not be enabled/priced on the Nous Portal's Krea gateway. "
+                    "Set KREA_API_KEY to use Krea directly, or pick a different model via "
+                    "`hermes tools` → Image Generation."
                 )
                 return None, fail(
                     f"Nous Subscription Krea gateway rejected '{model_id}' "
@@ -428,6 +406,14 @@ def _terminal_result_url(
     return result_image_url, None
 
 
+def _upscale_requested(explicit: Any, meta: Dict[str, Any]) -> bool:
+    """Precedence: explicit kwarg > ``image_gen.krea.upscale`` config > per-model catalog default."""
+    if isinstance(explicit, bool):
+        return explicit
+    cfg_upscale = _krea_section().get("upscale")
+    return cfg_upscale if isinstance(cfg_upscale, bool) else bool(meta.get("upscale", False))
+
+
 class KreaImageGenProvider(StaticImageGenProvider):
     """Krea ``Krea 2`` foundation image model backend (Medium + Large)."""
 
@@ -448,9 +434,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
 
     def capabilities(self) -> Dict[str, Any]:
         return {
-            "modalities": ["text", "image"],
-            "max_reference_images": _MAX_STYLE_REFERENCES,
-            "supports_upscale": True,
+            "modalities": ["text", "image"], "max_reference_images": _MAX_STYLE_REFERENCES, "supports_upscale": True,
         }
 
     def generate(
@@ -461,9 +445,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
-        style_refs = _collect_style_refs(
-            image_url, reference_image_urls, kwargs.get("image_style_references")
-        )
+        style_refs = _collect_style_refs(image_url, reference_image_urls, kwargs.get("image_style_references"))
         if not prompt:
             return prompt_required_error("krea", aspect)
 
@@ -492,11 +474,10 @@ class KreaImageGenProvider(StaticImageGenProvider):
         fail = error_factory("krea", aspect, model=model_id, prompt=prompt)
         payload = _build_payload(prompt, krea_ar, creativity, style_refs, kwargs)
 
-        # The managed gateway only prices base text-to-image and URL style
-        # references; LoRAs and moodboards are rejected there, so fail fast
+        # LoRAs and moodboards are rejected by the managed gateway, so fail fast
         # with guidance instead of a raw 400.
         if managed is not None:
-            for what, arg in (("trained styles (LoRAs)", "styles"), ("moodboards", "moodboards")):
+            for what, arg in _MANAGED_UNSUPPORTED:
                 if arg in payload:
                     return fail(
                         f"Managed Krea (Nous Subscription) does not support {what}. "
@@ -505,7 +486,9 @@ class KreaImageGenProvider(StaticImageGenProvider):
                     )
 
         # 1. Submit job.
-        job_id, err = _submit_job(base_url, auth_token, meta["path"], payload, managed is not None, model_id, fail)
+        job_id, err = _submit_job(
+            base_url, auth_token, meta["path"], payload, managed is not None, model_id, fail,
+        )
         if err is not None:
             return err
 
@@ -529,17 +512,9 @@ class KreaImageGenProvider(StaticImageGenProvider):
         if err is not None:
             return err
 
-        # Krea Enhance pass. Precedence: explicit kwarg > ``image_gen.krea.upscale``
-        # config > per-model catalog default. Best-effort: failure falls back to
-        # the original image rather than failing the generation.
+        # Krea Enhance pass — best-effort: failure falls back to the original image.
         upscaled = False
-        upscale_requested = kwargs.get("upscale")
-        if not isinstance(upscale_requested, bool):
-            cfg_upscale = _krea_section().get("upscale")
-            upscale_requested = (
-                cfg_upscale if isinstance(cfg_upscale, bool) else bool(meta.get("upscale", False))
-            )
-        if upscale_requested:
+        if _upscale_requested(kwargs.get("upscale"), meta):
             enhanced_url = _enhance_image(
                 base_url, auth_token, result_image_url, prompt, managed=managed is not None,
             )
@@ -554,17 +529,12 @@ class KreaImageGenProvider(StaticImageGenProvider):
             image_ref = str(save_url_image(result_image_url, prefix=f"krea_{model_id}"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Krea image URL %s could not be cached (%s); falling back to bare URL.",
-                result_image_url, exc,
+                "Krea image URL %s could not be cached (%s); falling back to bare URL.", result_image_url, exc,
             )
             image_ref = result_image_url
-
         extra: Dict[str, Any] = {
-            "krea_aspect_ratio": krea_ar,
-            "resolution": DEFAULT_RESOLUTION,
-            "creativity": creativity,
-            "job_id": job_id,
-            "upscaled": upscaled,
+            "krea_aspect_ratio": krea_ar, "resolution": DEFAULT_RESOLUTION, "creativity": creativity,
+            "job_id": job_id, "upscaled": upscaled,
         }
         if upscaled:
             extra["upscale_factor"] = _ENHANCE_SCALE_FACTOR
