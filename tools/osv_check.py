@@ -36,13 +36,10 @@ def _cache_get(key) -> Tuple[bool, Optional[str]]:
     """Return (hit, result) for a fresh cache entry."""
     with _cache_lock:
         entry = _cache.get(key)
-        if entry is None:
-            return False, None
-        expiry, result = entry
-        if time.monotonic() >= expiry:
-            del _cache[key]
-            return False, None
-        return True, result
+        if entry is not None and time.monotonic() < entry[0]:
+            return True, entry[1]
+        _cache.pop(key, None)  # absent or expired
+        return False, None
 
 
 def _cache_put(key, result: Optional[str]) -> None:
@@ -86,15 +83,14 @@ def check_package_for_malware(command: str, args: list) -> Optional[str]:
     if malware:
         ids = ", ".join(m["id"] for m in malware[:3])
         summaries = "; ".join(m.get("summary", m["id"])[:100] for m in malware[:3])
-        result = f"BLOCKED: Package '{package}' ({ecosystem}) has known malware advisories: {ids}. Details: {summaries}"
+        result = (f"BLOCKED: Package '{package}' ({ecosystem}) has known malware "
+                  f"advisories: {ids}. Details: {summaries}")
     _cache_put(cache_key, result)
     return result
 
 
 _ECOSYSTEM_BY_COMMAND = {
-    "npx": "npm", "npx.cmd": "npm",
-    "uvx": "PyPI", "uvx.cmd": "PyPI", "pipx": "PyPI",
-}
+    "npx": "npm", "npx.cmd": "npm", "uvx": "PyPI", "uvx.cmd": "PyPI", "pipx": "PyPI"}
 
 
 def _infer_ecosystem(command: str) -> Optional[str]:
@@ -160,8 +156,7 @@ def _query_osv(package: str, ecosystem: str, version: Optional[str] = None) -> l
         _OSV_ENDPOINT,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "User-Agent": "hermes-agent-osv-check/1.0"},
-        method="POST",
-    )
+        method="POST")
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         result = json.loads(resp.read())
     return [v for v in result.get("vulns", []) if v.get("id", "").startswith("MAL-")]

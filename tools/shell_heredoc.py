@@ -27,8 +27,7 @@ _INERT_HEREDOC_CONSUMER_RE = re.compile(
     r"(?:env\s+)?"
     r"(?:[A-Za-z0-9_./-]+/)?"
     r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
-    re.IGNORECASE,
-)
+    re.IGNORECASE)
 
 
 def _span_end(command: str, cursor: int, closer: str) -> int:
@@ -196,7 +195,8 @@ def _scan_heredoc_command_unit(command: str, start: int):
     return len(command), specs, unknown_operator, has_list_operator
 
 
-def _find_heredoc_close(command: str, body_start: int, delimiter: str, strip_tabs: bool) -> int | None:
+def _find_heredoc_close(
+        command: str, body_start: int, delimiter: str, strip_tabs: bool) -> int | None:
     """Return the position after an exact shell heredoc terminator line."""
     cursor = body_start
     while True:
@@ -222,7 +222,8 @@ def strip_inert_heredoc_bodies(command: str) -> str:
     command_start = 0
 
     while command_start <= last_opener_index:
-        command_end, specs, unknown_operator, has_list_operator = _scan_heredoc_command_unit(command, command_start)
+        command_end, specs, unknown_operator, has_list_operator = (
+            _scan_heredoc_command_unit(command, command_start))
         if unknown_operator:
             return command
         if not specs:

@@ -34,13 +34,11 @@ def open_preview_tool(url: str, label: str = "") -> str:
     if not target:
         return tool_error(
             "url is required — a web URL (https://…), a localhost dev server, or a "
-            "file path to show in the preview pane."
-        )
+            "file path to show in the preview pane.")
     label = (label or "").strip()
     return desktop_ui.emit_or_error(
         "preview.open",
         {"url": target, "label": label},
         "Failed to open the preview pane: ",
         "The preview pane is only available in the Hermes desktop app.",
-        {"success": True, "url": target, "label": label},
-    )
+        {"success": True, "url": target, "label": label})

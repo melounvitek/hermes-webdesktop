@@ -77,9 +77,7 @@ registry.register(
     toolset="desktop_ui",
     schema=READ_TERMINAL_SCHEMA,
     handler=lambda args, **kw: read_terminal_tool(
-        start_line=args.get("start_line"),
-        count=args.get("count"),
-        callback=kw.get("callback"),
+        start_line=args.get("start_line"), count=args.get("count"), callback=kw.get("callback")
     ),
     emoji="🖥️",
 )

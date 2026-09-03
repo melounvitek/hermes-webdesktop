@@ -30,15 +30,13 @@ __all__ = [
     "ExtractionError",
     "extract_document_bytes",
     "extract_document_text",
-    "is_extractable_document",
-]
+    "is_extractable_document"]
 
 EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx"})
 # Formats handled only when the optional anydoc converter is installed.
 ANYDOC_EXTENSIONS = frozenset({
     ".doc", ".docm", ".ppt", ".pps", ".pot", ".pptx", ".pptm", ".ppsx", ".ppsm",
-    ".xls", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub", ".pdf",
-})
+    ".xls", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub", ".pdf"})
 # anydoc loads the whole file through its Rust core with no streaming, and the
 # read_file char budget only applies after conversion — cap the input size.
 MAX_ANYDOC_BYTES = 50 * 1024 * 1024
@@ -73,18 +71,16 @@ _anydoc_failed_at: Optional[float] = None
 
 
 def _anydoc() -> Optional[Any]:
-    """Lazily import the optional anydoc converter; None when unavailable.
-
-    A failed load is retried after :data:`ANYDOC_RETRY_SECONDS` rather than disabling
-    extraction for the rest of the process (one transient pip/network blip must not stick).
-    """
+    """Lazily import the optional anydoc converter; None when unavailable. A failed load is
+    retried after ANYDOC_RETRY_SECONDS so one transient pip/network blip does not stick."""
     global _anydoc_module, _anydoc_failed_at
     if _anydoc_module is not _ANYDOC_UNSET:
         return _anydoc_module
     with _anydoc_lock:
         if _anydoc_module is not _ANYDOC_UNSET:
             return _anydoc_module
-        if _anydoc_failed_at is not None and time.monotonic() - _anydoc_failed_at < ANYDOC_RETRY_SECONDS:
+        if (_anydoc_failed_at is not None
+                and time.monotonic() - _anydoc_failed_at < ANYDOC_RETRY_SECONDS):
             return None
         try:
             from tools.lazy_deps import ensure as _lazy_ensure
@@ -155,8 +151,7 @@ def _anydoc_missing_error(path: str) -> str:
         "attempt failed; retried every 5 minutes). Fix: `pip install "
         "firecrawl-anydoc` in Hermes's environment, or convert the file "
         "yourself via terminal (e.g. libreoffice --headless --convert-to "
-        "txt)."
-    )
+        "txt).")
 
 
 def _hosted_ocr_config() -> tuple:
@@ -172,7 +167,6 @@ def _hosted_ocr_config() -> tuple:
     enabled = api_key is not None
     with contextlib.suppress(Exception):
         from hermes_cli.config import load_config_readonly
-
         cfg = load_config_readonly()
         section = cfg.get("file_tools") if isinstance(cfg, dict) else None
         if isinstance(section, dict) and section.get("hosted_ocr") is False:
@@ -187,33 +181,25 @@ def hosted_ocr_available() -> bool:
 
 
 def _needs_ocr_warning(path: str, pages, hosted_error: str = "") -> str:
-    """Result text when anydoc raises NeedsOcrError and hosted OCR is off/failed.
-
-    Hints at CHECKING for an OCR skill (never names one — none is guaranteed to
-    exist) and never advertises the hosted_ocr config knob.
-    """
+    """Result text when anydoc raises NeedsOcrError and hosted OCR is off/failed. Hints at
+    CHECKING for an OCR skill (never names one) and never advertises the hosted_ocr knob."""
     page_list = ", ".join(str(p) for p in pages) if pages else "unknown"
     msg = (
         f"[NEEDS OCR: pages {page_list} of this PDF are scanned images "
-        "with no text layer — their content is MISSING below. "
-    )
+        "with no text layer — their content is MISSING below. ")
     if hosted_error:
         msg += f"Hosted OCR was attempted and failed ({hosted_error}). "
     msg += (
         "If the missing pages matter: render just those pages with "
         f"`pdftoppm -jpeg -r 150 -f <first> -l <last> '{path}' /tmp/page` "
         "and inspect via vision_analyze, or check whether an OCR skill is "
-        "available (skills_list)."
-    )
+        "available (skills_list).")
     return msg + "]\n"
 
 
 def _finalize_anydoc_text(text: Any, path: str, pdf_note: Callable[[], str]) -> str:
-    """Normalize converter output and, for PDFs, PREPEND the coverage note.
-
-    Prepended because read_file paginates: a footer on a long document would sit on a page
-    the model may never fetch. Covers PARTIAL gaps that convert without NeedsOcrError.
-    """
+    """Normalize converter output and, for PDFs, PREPEND the coverage note (read_file
+    paginates: a footer may never be fetched). Covers PARTIAL gaps without NeedsOcrError."""
     if not isinstance(text, str) or not text.strip():
         raise ExtractionError("Document contains no extractable text")
     text = text.rstrip("\n") + "\n"
@@ -231,8 +217,8 @@ def _ocr_scanned_pdf(mod: Any, path: str, exc: BaseException) -> str:
     hosted_error = ""
     if enabled:
         try:
-            kwargs = {"ocr": "hosted", **{k: v for k, v in (("api_key", api_key), ("api_url", api_url)) if v}}
-            return mod.to_markdown(path, **kwargs).rstrip("\n") + "\n"
+            extra = {k: v for k, v in (("api_key", api_key), ("api_url", api_url)) if v}
+            return mod.to_markdown(path, ocr="hosted", **extra).rstrip("\n") + "\n"
         except Exception as hosted_exc:  # noqa: BLE001
             hosted_error = f"{type(hosted_exc).__name__}: {hosted_exc}"
     # No route / disabled / hosted failed: whole doc is scans — the warning IS the result.
@@ -277,10 +263,9 @@ def _extract_anydoc_bytes(data: bytes, path: str) -> str:
     return _finalize_anydoc_text(text, path, lambda: _pdf_coverage_note_from_bytes(data, path))
 
 
-# ── Scanned-PDF coverage detection ──────────────────────────────────
-# Text-layer extractors return nothing for scanned pages, so a mostly-scanned PDF
-# converts "successfully" into headers with empty bodies — silent data loss the model
-# cannot detect. Count per-page text via pdftotext (form-feed separated) and warn.
+# ── Scanned-PDF coverage detection: text-layer extractors return nothing for scanned
+# pages, so a mostly-scanned PDF converts "successfully" into headers with empty bodies —
+# silent data loss. Count per-page text via pdftotext (form-feed separated) and warn.
 PDF_EMPTY_PAGE_CHARS = 20  # fewer extracted chars than this = empty page
 # Warn when empty pages reach both MIN_EMPTY and MIN_RATIO, or ABSOLUTE_EMPTY alone.
 PDF_COVERAGE_MIN_EMPTY = 2
@@ -297,7 +282,8 @@ def _pdf_page_texts(path: str) -> Optional[list[str]]:
     if shutil.which("pdftotext") is None:
         return None
     try:
-        proc = subprocess.run(["pdftotext", path, "-"], capture_output=True, timeout=PDF_PAGE_SCAN_TIMEOUT)
+        proc = subprocess.run(
+            ["pdftotext", path, "-"], capture_output=True, timeout=PDF_PAGE_SCAN_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
@@ -308,21 +294,15 @@ def _pdf_page_texts(path: str) -> Optional[list[str]]:
     return pages or None
 
 
-def _group_ranges(pages: list[int]) -> list[list[int]]:
-    """Group sorted 1-based page numbers into [start, end] runs."""
-    ranges: list[list[int]] = []
-    for p in pages:
+def _gap_map(counts: list[int], texts: list[str], empty: list[int]) -> str:
+    """Per-gap breakdown, each empty range labeled with the last text seen before
+    it (usually a section header), so the agent can pick WHICH gaps to OCR."""
+    ranges: list[list[int]] = []  # sorted 1-based page numbers -> [start, end] runs
+    for p in empty:
         if ranges and p == ranges[-1][1] + 1:
             ranges[-1][1] = p
         else:
             ranges.append([p, p])
-    return ranges
-
-
-def _gap_map(counts: list[int], texts: list[str], empty: list[int]) -> str:
-    """Per-gap breakdown, each empty range labeled with the last text seen before
-    it (usually a section header), so the agent can pick WHICH gaps to OCR."""
-    ranges = _group_ranges(empty)
     lines: list[str] = []
     for a, b in ranges[:PDF_GAP_MAP_MAX_ENTRIES]:
         label = ""
@@ -341,20 +321,17 @@ def _gap_map(counts: list[int], texts: list[str], empty: list[int]) -> str:
 
 
 def _pdf_coverage_note(path: str, display_path: Optional[str] = None) -> str:
-    """Warning header when many PDF pages produced no text, else ''.
-
-    ``path`` is scanned with pdftotext (may be a host temp file); ``display_path``
-    is what the recovery command shows — the path the agent's terminal can see.
-    """
+    """Warning header when many PDF pages produced no text, else ''. ``path`` is scanned
+    (may be a host temp file); ``display_path`` is what the recovery command shows."""
     texts = _pdf_page_texts(path)
     if not texts or len(texts) < 2:
         return ""
     counts = [len(page.strip()) for page in texts]
     empty = [i + 1 for i, n in enumerate(counts) if n < PDF_EMPTY_PAGE_CHARS]
     total = len(counts)
-    if len(empty) < PDF_COVERAGE_MIN_EMPTY:
-        return ""
-    if len(empty) / total < PDF_COVERAGE_MIN_RATIO and len(empty) < PDF_COVERAGE_ABSOLUTE_EMPTY:
+    if len(empty) < PDF_COVERAGE_MIN_EMPTY or (
+        len(empty) / total < PDF_COVERAGE_MIN_RATIO and len(empty) < PDF_COVERAGE_ABSOLUTE_EMPTY
+    ):
         return ""
     shown = display_path or path
     return (
@@ -370,8 +347,7 @@ def _pdf_coverage_note(path: str, display_path: Optional[str] = None) -> str:
         f"`pdftoppm -jpeg -r 150 -f <first> -l <last> '{shown}' /tmp/page` "
         "and inspect each image with the vision_analyze tool, or use the "
         "ocr-and-documents skill (marker-pdf) for bulk OCR of large "
-        "ranges.]\n"
-    )
+        "ranges.]\n")
 
 
 def _pdf_coverage_note_from_bytes(data: bytes, display_path: str) -> str:
@@ -407,7 +383,6 @@ def _clean_stream_text(text: str) -> str:
     """Strip ANSI escapes and collapse ``\\r`` progress-bar rewrites: Jupyter renders only
     the final frame of a ``\\r``-redrawn line (tqdm), so keep the text after the last ``\\r``."""
     from tools.ansi_strip import strip_ansi
-
     lines = []
     for line in strip_ansi(text).replace("\r\n", "\n").split("\n"):
         frames = [frame for frame in line.split("\r") if frame]
@@ -424,12 +399,9 @@ _V3_MIME_KEYS = (("png", "image/png"), ("jpeg", "image/jpeg"), ("svg", "image/sv
 
 
 def _notebook_output_text(output: Any) -> str:
-    """Render one notebook output as compact text.
-
-    Keeps stream text, tracebacks, and textual results; replaces token-heavy payloads
-    (base64 images, HTML, widget state) with short sized placeholders. Handles nbformat
-    v4 and legacy v3 (``pyout``/``pyerr``) shapes.
-    """
+    """Render one notebook output as compact text: stream text, tracebacks and textual
+    results kept; token-heavy payloads (images, HTML, widgets) become sized placeholders.
+    Handles nbformat v4 and legacy v3 (``pyout``/``pyerr``) shapes."""
     if not isinstance(output, dict):
         return ""
     otype = output.get("output_type")
@@ -440,7 +412,8 @@ def _notebook_output_text(output: Any) -> str:
         traceback = output.get("traceback")
         tb_text = ""
         if isinstance(traceback, list):
-            tb_text = _clean_stream_text("\n".join(line for line in traceback if isinstance(line, str)))
+            tb_text = _clean_stream_text(
+                "\n".join(line for line in traceback if isinstance(line, str)))
         header = f"Error: {output.get('ename', '')}: {output.get('evalue', '')}".rstrip(": ")
         return f"{header}\n{tb_text}".rstrip()
     if otype not in {"execute_result", "display_data", "pyout"}:
@@ -464,9 +437,11 @@ def _notebook_output_text(output: Any) -> str:
                 return body
     for mime, value in data.items():
         if isinstance(mime, str) and mime.startswith("image/"):
-            return f"[{mime} output — {_human_size(_base64_bytes(_source_text(value)))}, omitted]"
+            size = _base64_bytes(_source_text(value))
+            return f"[{mime} output — {_human_size(size)}, omitted]"
     if "text/html" in data:
-        return f"[text/html output — {len(_source_text(data['text/html'])):,} chars, omitted]"
+        html = _source_text(data["text/html"])
+        return f"[text/html output — {len(html):,} chars, omitted]"
     mimes = ", ".join(str(m) for m in data) or "unknown"
     return f"[{mimes} output — omitted]"
 
@@ -505,8 +480,7 @@ def _extract_notebook(path: str) -> str:
         cells = [
             (f".worksheets[{wi}].cells[{ci}].outputs", cell)
             for wi, ws in enumerate(nb.get("worksheets", [])) if isinstance(ws, dict)
-            for ci, cell in enumerate(ws.get("cells", []))
-        ]
+            for ci, cell in enumerate(ws.get("cells", []))]
     if not cells:
         raise ExtractionError("Notebook contains no cells")
 
@@ -533,7 +507,7 @@ def _extract_notebook(path: str) -> str:
 
 @contextlib.contextmanager
 def _open_zip(path: str, kind: str) -> Iterator[zipfile.ZipFile]:
-    """Open an OOXML package, mapping bad-zip/OS failures (also from the body) to ExtractionError."""
+    """Open an OOXML package; bad-zip/OS failures (also from the body) become ExtractionError."""
     try:
         with zipfile.ZipFile(path) as zf:
             yield zf
@@ -560,18 +534,12 @@ def _zip_xml(zf: zipfile.ZipFile, name: str, optional: bool = False) -> Any:
 def _extract_docx(path: str) -> str:
     with _open_zip(path, "DOCX") as zf:
         root = _zip_xml(zf, "word/document.xml")
-
     w = f"{{{_NS_W}}}"
+    breaks = {f"{w}tab": "\t", f"{w}br": "\n", f"{w}cr": "\n"}
     lines: list[str] = []
     for para in root.iter(f"{w}p"):
-        buf: list[str] = []
-        for node in para.iter():
-            if node.tag == f"{w}t":
-                buf.append(node.text or "")
-            elif node.tag == f"{w}tab":
-                buf.append("\t")
-            elif node.tag in {f"{w}br", f"{w}cr"}:
-                buf.append("\n")
+        buf = [(node.text or "") if node.tag == f"{w}t" else breaks.get(node.tag, "")
+               for node in para.iter()]
         lines.extend("".join(buf).split("\n"))
     if not any(line.strip() for line in lines):
         raise ExtractionError("DOCX contains no extractable text")
@@ -579,15 +547,21 @@ def _extract_docx(path: str) -> str:
 
 
 def _extract_xlsx(path: str) -> str:
+    s, r, pr = f"{{{_NS_S}}}", f"{{{_NS_REL}}}", f"{{{_NS_PKG_REL}}}"
     with _open_zip(path, "XLSX") as zf:
         names = set(zf.namelist())
-        shared = _shared_strings(zf)
-        rels = _workbook_rels(zf)
+        sst = _zip_xml(zf, "xl/sharedStrings.xml", optional=True)
+        shared = [] if sst is None else [
+            "".join(t.text or "" for t in item.iter(f"{s}t")) for item in sst.iter(f"{s}si")]
+        rels_root = _zip_xml(zf, "xl/_rels/workbook.xml.rels", optional=True)
+        rels = {} if rels_root is None else {
+            rel.get("Id", ""): rel.get("Target", "")
+            for rel in rels_root.iter(f"{pr}Relationship") if rel.get("Id")}
         out: list[str] = []
-        for name, state, rid in _workbook_sheets(zf):
-            if state in {"hidden", "veryHidden"}:
+        for sheet in _zip_xml(zf, "xl/workbook.xml").iter(f"{s}sheet"):
+            if sheet.get("state", "visible") in {"hidden", "veryHidden"}:
                 continue
-            target = rels.get(rid, "").lstrip("/")
+            target = rels.get(sheet.get(f"{r}id", ""), "").lstrip("/")
             part = posixpath.normpath(target if target.startswith("xl/") else f"xl/{target}")
             if part not in names:
                 continue
@@ -595,7 +569,7 @@ def _extract_xlsx(path: str) -> str:
                 rows = _sheet_rows(zf.read(part), shared)
             except ET.ParseError:
                 continue
-            out.append(f"# ── Sheet: {name} ──")
+            out.append(f"# ── Sheet: {sheet.get('name', 'Sheet')} ──")
             out.extend("\t".join(row) for row in rows)
             if not rows:
                 out.append("(empty)")
@@ -604,31 +578,6 @@ def _extract_xlsx(path: str) -> str:
     if not out:
         raise ExtractionError("XLSX has no visible sheets with content")
     return "\n".join(out).rstrip("\n") + "\n"
-
-
-def _shared_strings(zf: zipfile.ZipFile) -> list[str]:
-    root = _zip_xml(zf, "xl/sharedStrings.xml", optional=True)
-    if root is None:
-        return []
-    s = f"{{{_NS_S}}}"
-    return ["".join(t.text or "" for t in item.iter(f"{s}t")) for item in root.iter(f"{s}si")]
-
-
-def _workbook_sheets(zf: zipfile.ZipFile) -> list[tuple[str, str, str]]:
-    root = _zip_xml(zf, "xl/workbook.xml")
-    s, r = f"{{{_NS_S}}}", f"{{{_NS_REL}}}"
-    return [
-        (sheet.get("name", "Sheet"), sheet.get("state", "visible"), sheet.get(f"{r}id", ""))
-        for sheet in root.iter(f"{s}sheet")
-    ]
-
-
-def _workbook_rels(zf: zipfile.ZipFile) -> dict[str, str]:
-    root = _zip_xml(zf, "xl/_rels/workbook.xml.rels", optional=True)
-    if root is None:
-        return {}
-    rel_tag = f"{{{_NS_PKG_REL}}}Relationship"
-    return {rel.get("Id", ""): rel.get("Target", "") for rel in root.iter(rel_tag) if rel.get("Id")}
 
 
 def _col_index(ref: str) -> int:
@@ -674,14 +623,9 @@ def _cell_value(cell: ET.Element, shared: list[str], s: str) -> str:
         return "" if inline is None else "".join(t.text or "" for t in inline.iter(f"{s}t"))
     if typ == "b":
         return "TRUE" if value.strip() in {"1", "true", "TRUE"} else "FALSE"
-    if typ == "e":
-        return value or "#ERROR"
-    return value
+    return (value or "#ERROR") if typ == "e" else value
 
 
 # Extension -> stdlib extractor; anydoc formats fall through in extract_document_text.
 _STDLIB_EXTRACTORS: dict[str, Callable[[str], str]] = {
-    ".ipynb": _extract_notebook,
-    ".docx": _extract_docx,
-    ".xlsx": _extract_xlsx,
-}
+    ".ipynb": _extract_notebook, ".docx": _extract_docx, ".xlsx": _extract_xlsx}
