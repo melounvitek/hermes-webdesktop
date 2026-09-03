@@ -158,14 +158,6 @@ class MCPServerTransportMixin:
 
     # ------------------------------------------------------------------ stdio
 
-    def _resolve_stdio_config(self, config: dict):
-        """``(command, args, safe_env)`` from config, with the command resolved against the safe env."""
-        command = config.get("command")
-        if not command:
-            raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
-        command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
-        return command, config.get("args", []), safe_env
-
     def _track_spawned_children(self, new_pids: Set[int]) -> None:
         """Ledger the freshly spawned stdio children (pids, pgids, machine spawn ledger)."""
         new_pgids = _capture_pgids(new_pids)
@@ -192,8 +184,7 @@ class MCPServerTransportMixin:
                 if _pid_exists(pid) or _pgroup_alive(_stdio_pgids.get(pid)):
                     _orphan_stdio_pids.add(pid)
                     _orphan_stdio_pid_servers[pid] = self.name
-                else:
-                    # Nothing to reap — drop the pgid so PID reuse can't surface stale pgroup state.
+                else:  # nothing to reap — drop the pgid so PID reuse can't surface stale pgroup state
                     _stdio_pgids.pop(pid, None)
 
     async def _run_stdio(self, config: dict):
@@ -205,7 +196,11 @@ class MCPServerTransportMixin:
         if not _core._ensure_mcp_sdk():
             raise ImportError(f"MCP server '{self.name}' requires the 'mcp' Python SDK, but "
                               "it is not installed. Run `hermes setup` to install MCP support, then retry.")
-        command, args, safe_env = self._resolve_stdio_config(config)
+        command = config.get("command")
+        if not command:
+            raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
+        command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
+        args = config.get("args", [])
         await _osv_malware_preflight(self.name, command, args)
         # Parent-death watchdog so kill -9 / crash can't leave the child tree running (POSIX-only).
         # AFTER the OSV preflight so the check inspects the real package.
