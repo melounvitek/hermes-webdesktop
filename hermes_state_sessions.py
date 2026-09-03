@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.session_activity import (
-    ActivityProvenance, bound_activity_description, build_activity_snapshot, normalize_activity_provenance,
+    ActivityProvenance, bound_activity_description, normalize_activity_provenance,
 )
 from hermes_state_common import (
     _LISTABLE_CHILD_SQL, _PREVIEW_ELIGIBLE_SQL, _PREVIEW_RAW_SELECT, _RECOVERABLE_END_REASONS,
@@ -548,16 +548,6 @@ class SessionSessionsMixin:
             "UPDATE sessions SET last_activity_description = ?, last_activity_provenance = ? WHERE id = ?",
             ("", ActivityProvenance.UNKNOWN.value, session_id), patience_s=self._ACTIVITY_WRITE_PATIENCE_S,
         )
-
-    def get_session_activity(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Return the durable activity snapshot for *session_id*, or None."""
-        row = self.get_session(session_id) if session_id else None
-        if not row:
-            return None
-        return build_activity_snapshot(**{
-            key: row.get(key)
-            for key in ("last_activity_at", "last_activity_description", "last_activity_provenance")
-        })
 
     def update_session_meta(
         self, session_id: str, model_config_json: str, model: Optional[str] = None,

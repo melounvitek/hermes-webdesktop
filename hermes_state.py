@@ -342,10 +342,9 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
     path = sessions_dir / f"{sid}.jsonl"
     with path.open("a", encoding="utf-8") as handle:
         for msg in messages:
-            if isinstance(msg, dict):
-                handle.write(json.dumps(msg, ensure_ascii=False, default=str) + "\n")
-            elif msg is not None:
-                handle.write(json.dumps({"content": str(msg)}, ensure_ascii=False) + "\n")
+            if msg is not None:
+                record = msg if isinstance(msg, dict) else {"content": str(msg)}
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     return path
 
 
@@ -379,32 +378,23 @@ class SessionDB(
     # optimize); attempt-counted budgets destroyed turns on a healthy store. Transcript
     # writes (failure aborts the turn) get the long budget; observation-only activity
     # writes sit on the response-critical path and get a sub-second one.
-    _WRITE_PATIENCE_S = 20.0
-    _TRANSCRIPT_WRITE_PATIENCE_S = 60.0
-    _ACTIVITY_WRITE_PATIENCE_S = 0.5
+    _WRITE_PATIENCE_S, _TRANSCRIPT_WRITE_PATIENCE_S, _ACTIVITY_WRITE_PATIENCE_S = 20.0, 60.0, 0.5
     # A live compression lock gets a short wait (compression publishes in seconds),
     # but the lease is a correctness boundary: a writer still locked out afterwards
     # is refused rather than landing a stale turn in a wedged compression.
     _COMPRESSION_BUSY_WAIT_S = 5.0
-    _WRITE_RETRY_MIN_S = 0.020   # 20ms
-    _WRITE_RETRY_MAX_S = 0.150   # 150ms
+    _WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S = 0.020, 0.150  # fast jitter for the first _SLOW_AFTER_S
     _WRITE_RETRY_SLOW_AFTER_S = 2.0
-    _WRITE_RETRY_SLOW_MIN_S = 0.250  # 250ms
-    _WRITE_RETRY_SLOW_MAX_S = 1.000  # 1s
+    _WRITE_RETRY_SLOW_MIN_S, _WRITE_RETRY_SLOW_MAX_S = 0.250, 1.000
     # PASSIVE WAL checkpoint every N successful writes.
     _CHECKPOINT_EVERY_N_WRITES = 50
     # Bounded FTS ``'merge'`` (ms of lock each) instead of ``'optimize'`` (9-18s per
     # index on a 10GB DB — longer than a writer's patience); up to
     # _FTS_MERGE_COMMANDS_PER_PASS per index, stopping on no-progress.
-    _FTS_MERGE_EVERY_N_WRITES = 1000
-    _FTS_MERGE_MAX_PAGES_PER_INDEX = 500
-    _FTS_MERGE_COMMANDS_PER_PASS = 4
+    _FTS_MERGE_EVERY_N_WRITES, _FTS_MERGE_MAX_PAGES_PER_INDEX, _FTS_MERGE_COMMANDS_PER_PASS = 1000, 500, 4
     # Imports cap lower than exports: an import holds one BEGIN IMMEDIATE.
-    _IMPORT_MAX_SESSIONS = 500
-    _IMPORT_MAX_MESSAGES_PER_SESSION = 10_000
-    _IMPORT_MAX_TOTAL_MESSAGES = 50_000
-    _IMPORT_MAX_SESSION_BYTES = 5 * 1024 * 1024
-    _IMPORT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+    _IMPORT_MAX_SESSIONS, _IMPORT_MAX_MESSAGES_PER_SESSION, _IMPORT_MAX_TOTAL_MESSAGES = 500, 10_000, 50_000
+    _IMPORT_MAX_SESSION_BYTES, _IMPORT_MAX_TOTAL_BYTES = 5 * 1024 * 1024, 25 * 1024 * 1024
     # Accounting workers retire when idle so a bound-method target can't keep an
     # abandoned SessionDB (and its descriptors) alive.
     _TOKEN_WRITER_IDLE_SECONDS = 30.0
@@ -475,17 +465,14 @@ class SessionDB(
         # the likeliest trigger is transient EMFILE, and a permanent flag would
         # demote every reader to the writer lock forever.
         self._read_open_failed_at = 0.0
-        self._wal_active = False
-        self._write_count = 0
+        self._wal_active, self._write_count = False, 0
         # File identity of the opened state.db, compared on every write so an out-of-band
         # replace cannot limp through in-place surgery (inode: mv/new-file; application_id: cp).
         self._db_file_identity: Optional[tuple] = None
         self._db_file_application_id: int = 0
         self._db_sidecar_identity: Dict[str, tuple] = {}
         self._db_replaced = self._db_wal_generation_lost = False
-        # Sticky quarantine (see StateDbCorruptError); never cleared.
-        self._db_corrupt = False
-        self._db_corrupt_reason = ""
+        self._db_corrupt, self._db_corrupt_reason = False, ""  # sticky quarantine (StateDbCorruptError)
         self._fts_usermerge_floor_applied = False  # one-shot usermerge-floor write guard
         self._fts_enabled = self._fts_stale = self._trigram_available = False
         # _fts_cjk_loaded: tokenizer present on the writer connection;
@@ -784,14 +771,13 @@ class SessionDB(
         # A reopen resolves the PATH again: a replaced file would be written through
         # stale WAL/shm assumptions; a quarantined handle must never hand a fresh
         # connection (and its close-time checkpoint) to a damaged file.
-        self._halt_if_db_replaced()
-        if self._db_corrupt:
+        if self._db_corrupt and not (self._db_replaced or self._db_file_was_replaced()):
             raise self._corrupt_error(
                 f"state.db connection for {self.db_path} is quarantined after "
                 f"structural corruption; refusing to reopen for a {context} "
                 "after close(). "
             )
-        self._halt_if_wal_generation_lost()
+        self._halt_if_db_generation_changed()
         logger.warning(
             "state.db connection for %s was closed while a %s was still in "
             "flight — reopening (teardown/worker race, #94736)", self.db_path, context,
@@ -997,14 +983,6 @@ class SessionDB(
         disk_app = _read_sqlite_application_id(self.db_path)
         return bool(disk_app and disk_app != recorded_app)
 
-    def _halt_if_db_replaced(self) -> None:
-        """Stop writes and raise when the file was replaced; never run in-file
-        repair on a new generation."""
-        if self._db_replaced or self._db_file_was_replaced():
-            self._db_replaced = True
-            logger.error(_STATE_DB_REPLACED_MSG)
-            raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
-
     def _wal_generation_was_lost(self) -> bool:
         """True when the WAL/SHM generation this handle opened is gone. Recorded
         generation: pure stat (no /proc walk on healthy writes). Empty identity
@@ -1032,18 +1010,18 @@ class SessionDB(
             self._db_sidecar_identity = current_identity
         return False
 
-    def _halt_if_wal_generation_lost(self) -> None:
-        """Stop writes when the WAL/SHM generation is gone; never mint or keep
-        committing on a split WAL."""
+    def _halt_if_db_generation_changed(self) -> None:
+        """Stop writes (logging once) when the file was replaced or its WAL/SHM generation
+        is gone: never run in-file repair on a new generation, never keep committing on a
+        split WAL. Both flags are sticky."""
+        if self._db_replaced or self._db_file_was_replaced():
+            self._db_replaced = True
+            logger.error(_STATE_DB_REPLACED_MSG)
+            raise StateDbReplacedError(_STATE_DB_REPLACED_MSG)
         if self._db_wal_generation_lost or self._wal_generation_was_lost():
             self._db_wal_generation_lost = True
             logger.error(_DELETED_WAL_GENERATION_MSG)
             raise DeletedWalGenerationError(_DELETED_WAL_GENERATION_MSG)
-
-    def _halt_if_db_generation_changed(self) -> None:
-        """Halt (logging) when the file or its WAL generation is no longer ours."""
-        self._halt_if_db_replaced()
-        self._halt_if_wal_generation_lost()
 
     def _raise_if_db_replaced(self) -> None:
         """Sticky-flag fast path (no log spam on every write), then the live probe."""
@@ -1138,11 +1116,11 @@ class SessionDB(
         db_path = os.path.abspath(os.fspath(self.db_path))
         watched = {_canonical_sqlite_path(db_path + suffix) for suffix in ("", "-wal", "-shm")}
         holders: List[Tuple[int, str]] = []
-        # Linux: readlink /proc/<pid>/fd directly; psutil.open_files() stats the
-        # literal path and silently drops "state.db-wal (deleted)" entries.
-        if sys.platform.startswith("linux"):
-            try:
-                own_pid = os.getpid()
+        own_pid = os.getpid()
+        try:
+            if sys.platform.startswith("linux"):
+                # readlink /proc/<pid>/fd directly; psutil.open_files() stats the
+                # literal path and silently drops "state.db-wal (deleted)" entries.
                 for pid in (int(p) for p in os.listdir("/proc") if p.isdigit()):
                     if pid == own_pid:
                         continue
@@ -1156,37 +1134,28 @@ class SessionDB(
                             holders.append((pid, f"uninspectable holder: {cmdline[:80]}"))
                         continue
                     holders.extend((pid, t) for t in targets if _canonical_sqlite_path(t) in watched)
-            except Exception as exc:
-                return self._foreign_holder_scan_failed(holders, exc)
-            return holders
-        # macOS / BSD: psutil.open_files() (no "(deleted)" suffix convention there;
-        # AccessDenied -> None -> empty iteration is acceptable on macOS).
-        try:
-            for process in psutil.process_iter(["pid", "open_files"]):
-                pid = int(process.info["pid"])
-                if pid == os.getpid():
-                    continue
-                for opened in process.info.get("open_files") or ():
-                    path = getattr(opened, "path", "")
-                    if path and _canonical_sqlite_path(path) in watched:
-                        holders.append((pid, path))
+            else:
+                # macOS / BSD: psutil.open_files() (no "(deleted)" suffix convention there;
+                # AccessDenied -> None -> empty iteration is acceptable on macOS).
+                for process in psutil.process_iter(["pid", "open_files"]):
+                    pid = int(process.info["pid"])
+                    if pid == own_pid:
+                        continue
+                    for opened in process.info.get("open_files") or ():
+                        path = getattr(opened, "path", "")
+                        if path and _canonical_sqlite_path(path) in watched:
+                            holders.append((pid, path))
         except Exception as exc:
-            return self._foreign_holder_scan_failed(holders, exc)
+            logger.warning(
+                "Could not prove state.db has no foreign holders; "
+                "deferring automatic FTS maintenance: %s", exc,
+            )
+            return holders or [(-1, f"open-file scan failed: {exc}")]
         return holders
 
-    @staticmethod
-    def _foreign_holder_scan_failed(
-        holders: List[Tuple[int, str]], exc: Exception,
-    ) -> List[Tuple[int, str]]:
-        logger.warning(
-            "Could not prove state.db has no foreign holders; deferring automatic FTS maintenance: %s", exc,
-        )
-        return holders or [(-1, f"open-file scan failed: {exc}")]
-
     def _try_wal_checkpoint(self) -> None:
-        """Best-effort PASSIVE WAL checkpoint; never raises. PASSIVE never blocks
-        writers; the old TRUNCATE strategy corrupted B-trees on 65K+ page
-        databases under exclusive-lock I/O pressure."""
+        """Best-effort PASSIVE WAL checkpoint; never raises. PASSIVE never blocks writers;
+        TRUNCATE corrupted B-trees on 65K+ page databases under exclusive-lock I/O pressure."""
         if self._db_corrupt:
             return  # quarantined: never checkpoint over a damaged image
         try:
@@ -1198,14 +1167,12 @@ class SessionDB(
             logger.warning("WAL checkpoint (PASSIVE) failed: %s", exc)
 
     def __enter__(self) -> "SessionDB":
-        """``with SessionDB(path) as db:`` closes on exit; owners must release
-        deterministically ("eventually after a GC cycle" is not a release policy)."""
+        """``with SessionDB(path) as db:`` closes on exit; owners must release deterministically."""
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        """Close the handle; never suppress the caller's exception."""
         self.close()
-        return False
+        return False  # never suppress the caller's exception
 
     def close(self):
         """Drain queued token deltas, then a PASSIVE checkpoint on writable handles
@@ -1259,22 +1226,20 @@ class SessionDB(
     # order, coalescing consecutive deltas whose route fields are EQUAL (so the merged
     # UPDATE equals applying them sequentially). Exact readers call flush_token_counts().
     _TOKEN_DELTA_SUM_FIELDS = (
-        "input_tokens", "output_tokens", "cache_read_tokens",
-        "cache_write_tokens", "reasoning_tokens", "api_call_count",
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+        "api_call_count",
     )
     _TOKEN_DELTA_COST_FIELDS = ("estimated_cost_usd", "actual_cost_usd")
     _TOKEN_DELTA_ROUTE_FIELDS = (
-        "model", "cost_status", "cost_source", "pricing_version",
-        "billing_provider", "billing_base_url", "billing_mode",
+        "model", "cost_status", "cost_source", "pricing_version", "billing_provider", "billing_base_url",
+        "billing_mode",
     )
 
     MAX_TITLE_LENGTH = 100
 
     # Title provenance, lowest to highest authority: auto-titling may only replace a
     # strictly lower-authority title (``derived`` -> ``llm`` once; never a user-typed name).
-    TITLE_SOURCE_DERIVED = "derived"
-    TITLE_SOURCE_LLM = "llm"
-    TITLE_SOURCE_USER = "user"
+    TITLE_SOURCE_DERIVED, TITLE_SOURCE_LLM, TITLE_SOURCE_USER = "derived", "llm", "user"
     _TITLE_SOURCE_RANK = {TITLE_SOURCE_DERIVED: 0, TITLE_SOURCE_LLM: 1, TITLE_SOURCE_USER: 2}
 
     # Bot Mode's canonical chat is resolved by exact-title lookup: the title IS the
