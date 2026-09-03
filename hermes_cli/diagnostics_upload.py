@@ -1,11 +1,8 @@
 """Client for uploading ``hermes debug share`` bundles to Nous-internal S3.
 
-1. POST {NAS_BASE}/api/diagnostics/upload-url → {uploadUrl, viewUrl, id, ...}. The request body
-   carries ``sizeBytes``; NAS signs it into the presigned URL's ``ContentLength``, so the PUT must
-   send exactly that many bytes.
-2. PUT <uploadUrl> (the gzipped bundle, Content-Type application/gzip).
-
-NAS is stateless — the object's existence in S3 is the only state, so there is no confirm step.
+1. POST {NAS_BASE}/api/diagnostics/upload-url → {uploadUrl, viewUrl, id, ...}; the body carries ``sizeBytes``,
+   which NAS signs into the presigned URL's ``ContentLength``, so the PUT must send exactly that many bytes.
+2. PUT <uploadUrl> (gzipped bundle, Content-Type application/gzip). NAS is stateless — no confirm step.
 """
 
 import json
@@ -14,11 +11,8 @@ import urllib.request
 
 # Overridable via env so the feature can be pointed at staging / a local dev NAS instance.
 NAS_BASE = os.environ.get("HERMES_DIAGNOSTICS_BASE_URL", "https://portal.nousresearch.com")
-
-# Network timeouts (seconds); the PUT carries the gzipped log bundle so it gets a more generous window.
 _REQUEST_TIMEOUT = 30
-_UPLOAD_TIMEOUT = 120
-
+_UPLOAD_TIMEOUT = 120  # the PUT carries the gzipped log bundle, so a more generous window
 _USER_AGENT = "hermes-agent/debug-share"
 
 
@@ -26,8 +20,7 @@ def _urlopen_checked(req: urllib.request.Request, *, timeout: int, what: str):
     """Open *req*; raise ``RuntimeError`` on non-2xx and return the response body bytes."""
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = getattr(resp, "status", None)
-        if status is None:
-            status = resp.getcode()
+        status = resp.getcode() if status is None else status
         if not (200 <= status < 300):
             raise RuntimeError(f"{what} failed: HTTP {status}")
         return resp.read()
@@ -42,7 +35,6 @@ def request_upload_url(content_type: str = "application/gzip", size_bytes: int |
     payload: dict = {"contentType": content_type}
     if size_bytes is not None:
         payload["sizeBytes"] = int(size_bytes)
-
     req = urllib.request.Request(
         f"{NAS_BASE}/api/diagnostics/upload-url",
         data=json.dumps(payload).encode("utf-8"),
@@ -50,12 +42,10 @@ def request_upload_url(content_type: str = "application/gzip", size_bytes: int |
         headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": _USER_AGENT},
     )
     body = _urlopen_checked(req, timeout=_REQUEST_TIMEOUT, what="diagnostics upload-url request").decode("utf-8")
-
     try:
         result = json.loads(body)
     except (ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"diagnostics upload-url returned non-JSON response: {body[:200]}") from exc
-
     if not isinstance(result, dict) or not result.get("uploadUrl"):
         raise RuntimeError(f"diagnostics upload-url response missing 'uploadUrl': {body[:200]}")
     return result

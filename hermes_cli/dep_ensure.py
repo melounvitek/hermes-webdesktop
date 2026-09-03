@@ -1,9 +1,5 @@
-"""Lazy dependency bootstrapper for non-Python runtime deps.
-
-Detection and prompting live here (cross-platform ``shutil.which``, instant, Python-controlled UX);
-install.sh / install.ps1 remain the *installation* backend because they hold the battle-tested OS
-and package-manager logic.
-"""
+"""Lazy dependency bootstrapper for non-Python runtime deps. Detection and prompting live here (cross-platform,
+instant, Python-controlled UX); install.sh / install.ps1 remain the *installation* backend."""
 from __future__ import annotations
 
 import platform
@@ -53,11 +49,7 @@ def _has_npx_agent_browser() -> bool:
     check can't diverge from what browser tools actually find.
     """
     try:
-        from tools.browser_tool import (
-            _find_agent_browser,
-            _is_npx_agent_browser_sentinel,
-            _requires_real_termux_browser_install,
-        )
+        from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
         browser_cmd = _find_agent_browser(validate=False)
     except Exception:
         return False
@@ -65,7 +57,7 @@ def _has_npx_agent_browser() -> bool:
 
 
 def _has_hermes_agent_browser() -> bool:
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_hermes_home  # late import: tests patch hermes_constants.get_hermes_home
     home = get_hermes_home()
     if _IS_WINDOWS:  # npm -g --prefix puts .cmd shims directly in the prefix dir
         return (home / "node" / "agent-browser.cmd").is_file()
@@ -77,9 +69,7 @@ def _has_hermes_agent_browser() -> bool:
     )
 
 
-def _find_install_script(
-    package_dir: Path | None = None, repo_root: Path | None = None
-) -> tuple[Path | None, str | None]:
+def _find_install_script(package_dir: Path | None = None, repo_root: Path | None = None) -> tuple[Path | None, str | None]:
     """Locate the install script — bundled in wheel or in git checkout."""
     package_dir = package_dir or Path(__file__).parent
     repo_root = repo_root or package_dir.parent
@@ -97,11 +87,8 @@ def _find_install_script(
 def ensure_dependency(dep: str, interactive: bool = True) -> bool:
     """Ensure a non-Python dependency is available. Returns True if available."""
     check = _DEP_CHECKS.get(dep)
-    if check is None:  # unknown dep — don't silently forward to install script
-        return False
-    if check():
-        return True
-
+    if check is None or check():  # unknown dep — don't silently forward to install script
+        return check is not None
     script, shell = _find_install_script()
     desc = _DEP_DESCRIPTIONS.get(dep, dep)
     if script is None:
@@ -109,7 +96,6 @@ def ensure_dependency(dep: str, interactive: bool = True) -> bool:
             print(f"  {desc} is not installed and no install script was found.")
             print(f"  Install {dep} manually and try again.")
         return False
-
     if interactive and sys.stdin.isatty():
         try:
             reply = input(f"{desc} is not installed. Install now? [Y/n] ").strip().lower()
@@ -117,7 +103,6 @@ def ensure_dependency(dep: str, interactive: bool = True) -> bool:
             return False
         if reply not in ("", "y", "yes"):
             return False
-
     if shell == "powershell":
         from hermes_constants import get_hermes_home
         ps_bin = shutil.which("powershell") or shutil.which("pwsh")
@@ -125,13 +110,8 @@ def ensure_dependency(dep: str, interactive: bool = True) -> bool:
             if interactive:
                 print("  PowerShell not found. Install PowerShell or run install.ps1 manually.")
             return False
-        cmd = [
-            ps_bin, "-ExecutionPolicy", "Bypass", "-File", str(script),
-            "-Ensure", dep, "-HermesHome", str(get_hermes_home()),
-        ]
+        cmd = [ps_bin, "-ExecutionPolicy", "Bypass", "-File", str(script), "-Ensure", dep, "-HermesHome", str(get_hermes_home())]
     else:
         cmd = ["bash", str(script), "--ensure", dep]
-
-    run_env = hermes_subprocess_env(inherit_credentials=False)
-    run_env["IS_INTERACTIVE"] = "false"
+    run_env = {**hermes_subprocess_env(inherit_credentials=False), "IS_INTERACTIVE": "false"}
     return subprocess.run(cmd, env=run_env).returncode == 0 and check()

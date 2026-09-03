@@ -20,13 +20,10 @@ def resolve_entry_api_key(entry: dict[str, Any] | None) -> str | None:
     """
     if not isinstance(entry, dict):
         return None
-    inline = str(entry.get("api_key") or "").strip()
-    if inline:
+    if inline := str(entry.get("api_key") or "").strip():
         return inline
-    key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
-    if key_env:
+    if key_env := str(entry.get("key_env") or entry.get("api_key_env") or "").strip():
         from agent.secret_scope import get_secret
-
         return (get_secret(key_env) or "").strip() or None
     return None
 

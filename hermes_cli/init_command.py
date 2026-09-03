@@ -31,15 +31,11 @@ def build_init_prompt(cwd: str, existing_file: str | None = None, extra: str = "
     """Build the ``/init`` prompt; ``existing_file`` (current AGENTS.md) switches to merge discipline,
     ``extra`` is the user's free text after ``/init``."""
     extra = (extra or "").strip()
-
+    update = existing_file is not None
     parts: list[str] = [
         "[/init] The user wants you to "
-        + (
-            "UPDATE the existing AGENTS.md project-instructions file"
-            if existing_file is not None
-            else "generate an AGENTS.md project-instructions file"
-        )
-        + f" for the project at: {cwd}\n",
+        + ("UPDATE the existing" if update else "generate an")
+        + f" AGENTS.md project-instructions file for the project at: {cwd}\n",
         "AGENTS.md is the instruction file coding agents (Hermes included) "
         "load as project context every session. It should teach an agent how "
         "to work in THIS repo: what the project is, how to set up, the exact "
@@ -54,17 +50,12 @@ def build_init_prompt(cwd: str, existing_file: str | None = None, extra: str = "
         "don't guess them.\n"
         "2. Write the file to "
         f"{cwd.rstrip('/')}/AGENTS.md with `write_file`"
-        + (
-            " — but this is an UPDATE, so follow the merge discipline below."
-            if existing_file is not None
-            else "."
-        )
+        + (" — but this is an UPDATE, so follow the merge discipline below." if update else ".")
         + "\n"
         "3. Confirm to the user the exact path you wrote and summarize in one "
         "or two lines what the file covers.\n",
     ]
-
-    if existing_file is not None:
+    if update:
         parts.append(
             "MERGE DISCIPLINE — an AGENTS.md already exists (its current "
             "content is below). Do NOT overwrite or regenerate it from "
@@ -79,15 +70,12 @@ def build_init_prompt(cwd: str, existing_file: str | None = None, extra: str = "
             f"{existing_file}\n"
             "EXISTING_AGENTS_MD\n"
         )
-
     parts.append(_QUALITY_BAR)
-
     if extra:
         parts.append(
             "\nUSER NOTES — honor these while authoring (they override the "
             f"defaults above where they conflict):\n{extra}"
         )
-
     return "\n".join(parts)
 
 

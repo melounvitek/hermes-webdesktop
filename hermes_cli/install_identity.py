@@ -16,8 +16,7 @@ from hermes_constants import get_default_hermes_root
 _INSTALL_ID_FILENAME = "install_id"
 _INSTALL_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _INSTALL_ID_CACHE: dict[str, Optional[str]] = {"root": None, "value": None}
-_INSTALL_ID_LOCK = threading.Lock()
-_INSTALL_ID_PUBLICATION_LOCK = threading.Lock()
+_INSTALL_ID_LOCK, _INSTALL_ID_PUBLICATION_LOCK = threading.Lock(), threading.Lock()
 
 
 @contextlib.contextmanager
@@ -28,7 +27,6 @@ def _install_id_file_lock(root: Path):
     try:
         if windows:
             import msvcrt
-
             if os.fstat(fd).st_size == 0:
                 os.write(fd, b"\0")
                 os.fsync(fd)
@@ -36,19 +34,16 @@ def _install_id_file_lock(root: Path):
             msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
         else:
             import fcntl
-
             fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         try:
             if windows:
                 import msvcrt
-
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
-
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
@@ -92,12 +87,10 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
     existing, mint = _read_existing(path)
     if not mint:
         return existing
-
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError:
         return None
-
     try:
         # Windows byte-range locks can report a same-process lock conflict instead of waiting for
         # another thread. Serialize threads here, then retain the file lock as the cross-process
@@ -106,7 +99,6 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
             existing, mint = _read_existing(path)
             if not mint:
                 return existing
-
             minted = uuid.uuid4().hex
             fd, tmp_name = tempfile.mkstemp(dir=str(root), prefix=".install_id-")
             try:
@@ -120,7 +112,6 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_name)
                 raise
-
             committed = path.read_text(encoding="utf-8").strip().lower()
             return committed if _INSTALL_ID_RE.fullmatch(committed) else None
     except OSError:
@@ -135,8 +126,8 @@ def get_install_id(*, cache: dict[str, Optional[str]] | None = None) -> Optional
 
     def _cached() -> Optional[str]:
         cached = target_cache.get("value")
-        return cached if cached and target_cache.get("root") in (None, root_key) else None
 
+        return cached if cached and target_cache.get("root") in (None, root_key) else None
     if value := _cached():
         return value
     with _INSTALL_ID_LOCK:

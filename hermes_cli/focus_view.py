@@ -1,31 +1,22 @@
-"""Focus view — a display-only reduced-output mode.
+"""Focus view — display-only reduced output: "just my prompt and the answer, and tell me what you hid".
 
-``/focus`` = "just show me my prompt and the answer — and tell me what you hid". Turning focus ON
-snaps ``tool_progress_mode`` to ``"off"`` and remembers the configured mode so the *existing*
-suppression path does the hiding; OFF restores that mode verbatim. On top, focus adds a per-turn
-hidden-line count with a recovery hint and a persistent ``focus`` status-bar segment.
+ON snaps ``tool_progress_mode`` to ``"off"`` and remembers the configured mode so the *existing* suppression
+path does the hiding; OFF restores it verbatim. Focus adds a per-turn hidden-line count with a recovery
+hint and a persistent ``focus`` status-bar segment.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-# Config key used by the sibling display toggles (/battery, /timestamps, /footer).
-FOCUS_CONFIG_KEY = "display.focus_view"
-
-#: Tool-progress mode focus view snaps to — the SAME value ``/verbose off`` uses so both share one
-#: suppression path.
+FOCUS_CONFIG_KEY = "display.focus_view"  # plain boolean under ``display``, like /battery /timestamps /footer
+#: The SAME value ``/verbose off`` uses so both features share one suppression path.
 FOCUS_TOOL_PROGRESS_MODE = "off"
-
 #: Modes in which the CLI commits a per-tool scrollback line. Mirrors the gate in
 #: ``HermesCLI._on_tool_progress`` so the hidden-line counter and the renderer never drift apart.
 TOOL_PROGRESS_VISIBLE_MODES = frozenset({"new", "all", "verbose"})
-
-#: Valid tool-progress modes (``log`` is a gateway-only extra step).
-TOOL_PROGRESS_MODES = ("off", "new", "all", "verbose")
-
-#: Status-bar label. Short on purpose — the bar is width-constrained.
-FOCUS_STATUSBAR_LABEL = "◉ focus"
+TOOL_PROGRESS_MODES = ("off", "new", "all", "verbose")  # ``log`` is a gateway-only extra step
+FOCUS_STATUSBAR_LABEL = "◉ focus"  # short on purpose — the bar is width-constrained
 
 # /focus argument words -> (action, target); bare /focus toggles like /footer, /battery, /timestamps.
 _FOCUS_WORDS = {
@@ -76,9 +67,7 @@ def format_hidden_line(count: int) -> Optional[str]:
         n = int(count)
     except (TypeError, ValueError):
         return None
-    if n <= 0:
-        return None
-    return f"⋯ {n} {'tool line' if n == 1 else 'tool lines'} hidden · /focus off to show"
+    return f"⋯ {n} {'tool line' if n == 1 else 'tool lines'} hidden · /focus off to show" if n > 0 else None
 
 
 def focus_statusbar_segment(enabled: bool) -> str:

@@ -1,11 +1,9 @@
 """Session heartbeats — recurring re-entry prompts for the current session.
 
-Deliberately session-scoped and in-process (the CLI or gateway process must be running); the
-durable cross-process scheduling surface remains ``hermes cron`` / the ``cronjob`` tool.
-
-Invariants (mirrors goals.py): injection is a plain user message — no system-prompt mutation, no
-toolset swap, so prompt caching stays intact. A real user message always wins: heartbeats only fire
-into an idle session with an empty input queue.
+Deliberately session-scoped and in-process (CLI or gateway must be running); durable cross-process
+scheduling remains ``hermes cron``. Invariants (mirrors goals.py): injection is a plain user message —
+no system-prompt mutation or toolset swap, so prompt caching stays intact — and a real user message
+always wins: heartbeats only fire into an idle session with an empty input queue.
 """
 
 from __future__ import annotations
@@ -19,10 +17,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Floor: re-entering more often than once a minute is a busy-loop, not a heartbeat.
-MIN_INTERVAL_SECONDS = 60
-# How often drivers poll for due heartbeats. Not user-facing.
-POLL_SECONDS = 5.0
+MIN_INTERVAL_SECONDS = 60  # floor: re-entering more often than once a minute is a busy-loop, not a heartbeat
+POLL_SECONDS = 5.0  # how often drivers poll for due heartbeats; not user-facing
 
 HEARTBEAT_PROMPT_TEMPLATE = (
     "[Heartbeat — recurring instruction, fires every {interval}]\n"
@@ -33,25 +29,20 @@ HEARTBEAT_PROMPT_TEMPLATE = (
 )
 
 _INTERVAL_RE = re.compile(
-    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$",
-    re.IGNORECASE,
+    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$", re.IGNORECASE
 )
 
 _UNIT_SECONDS = {
-    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-    "d": 86400, "day": 86400, "days": 86400,
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1),
+    **dict.fromkeys(("m", "min", "mins", "minute", "minutes"), 60),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), 3600),
+    **dict.fromkeys(("d", "day", "days"), 86400),
 }
 
 # field -> (coercer, default used when the stored value is missing/falsy)
 _STATE_FIELDS = {
-    "prompt": (str, ""),
-    "interval_seconds": (int, 0),
-    "status": (str, "active"),
-    "created_at": (float, 0.0),
-    "last_fired_at": (float, 0.0),
-    "fire_count": (int, 0),
+    "prompt": (str, ""), "interval_seconds": (int, 0), "status": (str, "active"),
+    "created_at": (float, 0.0), "last_fired_at": (float, 0.0), "fire_count": (int, 0),
 }
 
 
@@ -71,10 +62,8 @@ def parse_interval(text: str) -> Optional[int]:
 def format_interval(seconds: int) -> str:
     """Human-readable interval (``600`` → ``10m``)."""
     seconds = int(seconds)
-    for unit, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
-        if seconds % unit == 0:
-            return f"{seconds // unit}{suffix}"
-    return f"{seconds}s"
+    units = ((86400, "d"), (3600, "h"), (60, "m"))
+    return next((f"{seconds // unit}{suffix}" for unit, suffix in units if seconds % unit == 0), f"{seconds}s")
 
 
 @dataclass
@@ -99,8 +88,7 @@ class HeartbeatState:
     def is_due(self, now: Optional[float] = None) -> bool:
         if self.status != "active" or not self.prompt or self.interval_seconds <= 0:
             return False
-        now = now if now is not None else time.time()
-        return (now - (self.last_fired_at or self.created_at)) >= self.interval_seconds
+        return ((time.time() if now is None else now) - (self.last_fired_at or self.created_at)) >= self.interval_seconds
 
     def render_prompt(self) -> str:
         return HEARTBEAT_PROMPT_TEMPLATE.format(interval=format_interval(self.interval_seconds), prompt=self.prompt)
@@ -110,7 +98,6 @@ def _get_session_db() -> Optional[Any]:
     """Persistence goes through the goals module's per-HERMES_HOME cached SessionDB (one shared connection)."""
     try:
         from hermes_cli.goals import _get_session_db as _goals_db
-
         return _goals_db()
     except Exception as exc:  # pragma: no cover
         logger.debug("HeartbeatManager: SessionDB bootstrap failed (%s)", exc)
@@ -142,7 +129,6 @@ def save_heartbeat(session_id: str, state: HeartbeatState) -> None:
     db = _get_session_db()
     if db is None:
         from hermes_cli.goals import _warn_dropped_write
-
         _warn_dropped_write("HeartbeatManager", "heartbeat", session_id)
         return
     try:

@@ -42,12 +42,11 @@ def collapse_repeated_input_artifacts(text: str, min_repeats: int = 4) -> str:
         index -= len(marker)
     if repeat_count < min_repeats:
         return text
-    start = index
-    if start >= 2 and text[start - 2 : start] == "[e":
-        start -= 2
-    elif start >= 1 and text[start - 1] == "[":
-        start -= 1
-    return text[:start]
+    if index >= 2 and text[index - 2 : index] == "[e":
+        index -= 2
+    elif index >= 1 and text[index - 1] == "[":
+        index -= 1
+    return text[:index]
 
 
 def sanitize_user_prompt_text(text: str) -> str:
