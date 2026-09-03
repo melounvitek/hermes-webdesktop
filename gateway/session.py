@@ -46,10 +46,8 @@ def _hash_sender_id(value: str) -> str:
 
 def _hash_chat_id(value: str) -> str:
     """Hash the numeric portion of a chat ID, preserving a ``platform:`` prefix."""
-    colon = value.find(":")
-    if colon > 0:
-        return f"{value[:colon]}:{_hash_id(value[colon + 1:])}"
-    return _hash_id(value)
+    prefix, sep, rest = value.partition(":")
+    return f"{prefix}:{_hash_id(rest)}" if sep and prefix else _hash_id(value)
 
 
 def _is_path_unsafe(value: object, *, strict: bool = True) -> bool:
@@ -57,7 +55,7 @@ def _is_path_unsafe(value: object, *, strict: bool = True) -> bool:
 
     Session ids become filenames, so the strict form rejects ``..``, ANY path separator, and a
     leading Windows drive letter. ``strict=False`` is for *logical* session keys, where interior
-    ``/`` is legitimate (Google Chat ``spaces/<id>/threads/<id>``): only a *leading* one is rejected.
+    ``/`` is legitimate (Google Chat ``spaces/<id>/threads/<id>``): only a *leading* one is refused.
     """
     if not value:
         return False
@@ -127,9 +125,8 @@ class SessionSource:
         """Human-readable description of the source."""
         if self.platform == Platform.LOCAL:
             return "CLI terminal"
-        desc = self._describe(
-            self.chat_type, self.user_name or self.user_id or "user", self.chat_name or self.chat_id
-        )
+        user, chat = self.user_name or self.user_id or "user", self.chat_name or self.chat_id
+        desc = self._describe(self.chat_type, user, chat)
         return f"{desc}, thread: {self.thread_id}" if self.thread_id else desc
 
     # Wire layout (order matters for byte-stable JSON): always-present, then truthy-only
@@ -371,16 +368,13 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
     user/chat IDs become deterministic hashes for the LLM only; routing keeps the originals.
     """
     src = context.source
-    _is_pii_safe = src.platform in _PII_SAFE_PLATFORMS
-    if not _is_pii_safe:
+    if redact_pii and src.platform not in _PII_SAFE_PLATFORMS:
         try:
             from gateway.platform_registry import platform_registry
             entry = platform_registry.get(src.platform.value)
-            if entry and entry.pii_safe:
-                _is_pii_safe = True
+            redact_pii = bool(entry and entry.pii_safe)
         except Exception:
-            pass
-    redact_pii = redact_pii and _is_pii_safe
+            redact_pii = False
 
     def _chat_label(chat_id: str) -> str:
         return _hash_chat_id(chat_id) if redact_pii else chat_id
@@ -397,15 +391,12 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
     if src.platform == Platform.LOCAL:
         lines.append(f"**Source:** {platform_name} (the machine running this agent)")
     else:
+        desc = src.description
         if redact_pii:
             # Safe description without raw IDs (note: no thread suffix).
-            desc = SessionSource._describe(
-                src.chat_type,
-                src.user_name or (_hash_sender_id(src.user_id) if src.user_id else "user"),
-                src.chat_name or _chat_label(src.chat_id),
-            )
-        else:
-            desc = src.description
+            user = src.user_name or (_hash_sender_id(src.user_id) if src.user_id else "user")
+            chat = src.chat_name or _chat_label(src.chat_id)
+            desc = SessionSource._describe(src.chat_type, user, chat)
         lines.append(f"**Source:** {platform_name} ({_format_untrusted_prompt_value(desc)})")
 
     if src.chat_topic:
@@ -535,8 +526,8 @@ class SessionEntry:
     # sanitize_model_override). Persisted so a restart keeps the chosen model.
     model_override: Optional[Dict[str, str]] = None
 
-    # Fields (de)serialized verbatim, in wire order; ``from_dict`` reads them with
-    # ``data.get(name, <dataclass default>)``.
+    # Fields (de)serialized verbatim, in wire order (``from_dict`` reads them with
+    # ``data.get(name, <dataclass default>)``), split around the three ISO-datetime/token keys.
     _PLAIN_FIELDS = (
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
         "total_tokens", "last_prompt_tokens", "estimated_cost_usd", "cost_status",
@@ -580,15 +571,13 @@ class SessionEntry:
                 platform = Platform(data["platform"])
             except ValueError as e:
                 logger.debug("Unknown platform value %r: %s", data["platform"], e)
-
-        active_turn_started_at = _parse_iso(data.get("active_turn_started_at"))
-        active_turn_token = data.get("active_turn_token")
-        if not isinstance(active_turn_token, str) or not active_turn_token:
+        token = data.get("active_turn_token")
+        started_at = _parse_iso(data.get("active_turn_started_at"))
+        if not isinstance(token, str) or not token:
             # The pair is written atomically; a partial/malformed pair must not auto-resume.
-            active_turn_token = active_turn_started_at = None
+            token = started_at = None
 
-        session_key = data["session_key"]
-        session_id = data["session_id"]
+        session_key, session_id = data["session_key"], data["session_id"]
         # CWE-22: session_id becomes a filename (strict); session_key allows interior ``/``.
         if _is_path_unsafe(session_id):
             raise ValueError("Invalid session_id: potential directory traversal detected")
@@ -601,11 +590,12 @@ class SessionEntry:
         return cls(
             session_key=session_key, session_id=session_id,
             created_at=datetime.fromisoformat(data["created_at"]),
-            updated_at=datetime.fromisoformat(data["updated_at"]), origin=origin,
+            updated_at=datetime.fromisoformat(data["updated_at"]),
+            origin=origin,
             display_name=data.get("display_name"), platform=platform,
             chat_type=data.get("chat_type", "dm"), metadata=dict(data.get("metadata") or {}),
             last_resume_marked_at=_parse_iso(data.get("last_resume_marked_at")),
-            active_turn_token=active_turn_token, active_turn_started_at=active_turn_started_at,
+            active_turn_token=token, active_turn_started_at=started_at,
             model_override=sanitize_model_override(data.get("model_override")), **plain,
         )
 
