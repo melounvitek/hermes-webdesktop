@@ -27,37 +27,25 @@ _DONE = object()
 class StreamingTTSConsumer:
     """Consumes LLM text deltas and produces streaming PCM audio for an adapter."""
 
-    def __init__(
-        self,
-        adapter: Any,
-        chat_id: str,
-        tts_config: Dict[str, Any],
-        loop: asyncio.AbstractEventLoop,
-        *,
-        metadata: Optional[Dict[str, Any]] = None,
-        audio_format: Optional[AudioFormat] = None,
-    ) -> None:
+    def __init__(self, adapter: Any, chat_id: str, tts_config: Dict[str, Any],
+                 loop: asyncio.AbstractEventLoop, *, metadata: Optional[Dict[str, Any]] = None,
+                 audio_format: Optional[AudioFormat] = None) -> None:
         from tools.tts_streaming import SentenceChunker, resolve_streaming_provider
-
         self._adapter, self._chat_id, self._loop, self._metadata = adapter, chat_id, loop, metadata
         # Resolved once; None => inactive, gateway falls back to whole-file TTS.
         self._streamer = resolve_streaming_provider(tts_config)
         self._chunker = SentenceChunker()
-        if self._streamer is not None:
-            self._audio_format = AudioFormat(**{
-                f: int(getattr(self._streamer, f, getattr(AudioFormat, f)))
-                for f in ("sample_rate", "channels", "sample_width")
-            })
-        else:
-            self._audio_format = audio_format or AudioFormat()
+        self._audio_format = audio_format or AudioFormat() if self._streamer is None else (
+            AudioFormat(**{f: int(getattr(self._streamer, f, getattr(AudioFormat, f)))
+                           for f in ("sample_rate", "channels", "sample_width")})
+        )
         # Thread-safe queue of completed clauses plus the _DONE/_ABORT sentinels.
         self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=256)
         self._handle: Optional[StreamingTTSHandle] = None
+        self._task: Optional[asyncio.Task] = None  # drain task, created once by start()
         self._completed = self._partial = self._aborted = False
         self._finished = self._dropped = self._suppress_whole_file = False
-        self._task: Optional[asyncio.Task] = None
-        self._lock = threading.Lock()
-        self._strip_markdown = None  # lazily imported to avoid import cycles
+        self._lock, self._strip_markdown = threading.Lock(), None  # stripper lazily imported
 
     active = property(lambda self: self._streamer is not None)  # usable streaming provider
     completed = property(lambda self: self._completed)  # streaming audio fully delivered
@@ -82,21 +70,19 @@ class StreamingTTSConsumer:
         """Receive a text delta from the agent. Non-blocking."""
         if self._aborted or not self.active or self._finished:
             return
-        self._enqueue_clauses(
-            self._chunker.feed(text), "streaming TTS queue full, dropping clause", log_errors=True
-        )
+        self._enqueue_clauses(self._chunker.feed(text), "streaming TTS queue full, dropping clause",
+                              log_errors=True)
 
     def finish(self) -> None:
-        """Signal end-of-text, flush the chunker tail, then enqueue ``_DONE`` after all flushed
+        """Signal end-of-text: flush the chunker tail, then enqueue ``_DONE`` after all flushed
         clauses so the drain loop ends deterministically without racing a late ``on_delta``."""
         if self._finished:
             return
         self._finished = True
         if self._aborted or not self.active:
             return
-        self._enqueue_clauses(
-            self._chunker.flush(), "streaming TTS queue full while flushing tail", log_errors=False
-        )
+        self._enqueue_clauses(self._chunker.flush(), "streaming TTS queue full while flushing tail",
+                              log_errors=False)
         # The load-bearing _DONE sentinel must never be lost: evict clauses until it fits.
         while not self._put_sentinel(_DONE, mark_dropped=True):
             pass
@@ -104,11 +90,9 @@ class StreamingTTSConsumer:
     def _put_sentinel(self, sentinel, *, mark_dropped: bool) -> bool:
         """Try to enqueue a sentinel, evicting one queued item when the queue is full. Returns True
         when the caller should stop retrying: enqueued, or (abort path) nothing left to evict."""
-        try:
+        with contextlib.suppress(queue.Full):
             self._queue.put_nowait(sentinel)
             return True
-        except queue.Full:
-            pass
         try:
             self._queue.get_nowait()
         except queue.Empty:
@@ -135,9 +119,8 @@ class StreamingTTSConsumer:
         if not self.active:
             return False
         if not self._adapter.supports_streaming_tts(self._chat_id, self._audio_format):
-            logger.debug(
-                "adapter %s does not support streaming TTS", getattr(self._adapter, "name", "?"),
-            )
+            name = getattr(self._adapter, "name", "?")
+            logger.debug("adapter %s does not support streaming TTS", name)
             return False
         try:
             self._handle = await self._adapter.begin_streaming_tts(
@@ -148,39 +131,33 @@ class StreamingTTSConsumer:
             self._handle = None
         return self._handle is not None
 
-    async def _drain(self) -> bool:
-        """Synthesise queued clauses until a sentinel/abort; False when a clause failed."""
-        while not self._aborted:
-            try:
-                item = await asyncio.to_thread(self._queue.get, True, 0.1)
-            except queue.Empty:
-                continue
-            if item is _ABORT or item is _DONE or self._aborted:
-                break
-            if not isinstance(item, str):
-                continue
-            try:
-                await self._synthesise_and_write(item)
-            except Exception as exc:
-                logger.warning("streaming TTS clause failed: %s", exc)
-                self._settle(failed=True)
-                await self._safe_abort(str(exc))
-                return False
-        return True
-
     async def _run(self) -> None:
-        """Drain clauses from the queue, synthesise, and write to the adapter."""
+        """Drain clauses until a sentinel/abort, synthesise + write each, then finalise the stream;
+        a clause or finalise failure settles the outcome flags and aborts the adapter stream."""
         if not await self._open_handle():
             return
         self._suppress_whole_file = False
         try:
-            if not await self._drain():
-                return
+            while not self._aborted:
+                try:
+                    item = await asyncio.to_thread(self._queue.get, True, 0.1)
+                except queue.Empty:
+                    continue
+                if item is _ABORT or item is _DONE or self._aborted:
+                    break
+                if not isinstance(item, str):
+                    continue
+                try:
+                    await self._synthesise_and_write(item)
+                except Exception as exc:
+                    logger.warning("streaming TTS clause failed: %s", exc)
+                    self._settle(failed=True)
+                    await self._safe_abort(str(exc))
+                    return
             if not self._aborted and self._handle is not None:
                 try:
-                    await self._adapter.finish_streaming_tts(
-                        self._handle, interrupted=self._aborted,
-                    )
+                    handle, interrupted = self._handle, self._aborted
+                    await self._adapter.finish_streaming_tts(handle, interrupted=interrupted)
                 except Exception as exc:
                     logger.debug("finish_streaming_tts error: %s", exc)
                     self._settle(failed=True)
@@ -199,8 +176,13 @@ class StreamingTTSConsumer:
         """Synthesise one clause via the streamer and write PCM chunks."""
         if self._handle is None or self._handle.aborted or self._streamer is None:
             return
-        cleaned = self._strip_markdown_for_tts(clause)
-        if not cleaned.strip():
+        if self._strip_markdown is None:  # lazy import: tools.tts_tool would cycle at module load
+            try:
+                from tools.tts_tool import _strip_markdown_for_tts as _strip
+                self._strip_markdown = _strip
+            except ImportError:
+                self._strip_markdown = lambda t: t  # noqa: E731
+        if not (cleaned := self._strip_markdown(clause).strip()):
             return
         iterator = iter(self._streamer.stream(cleaned))
         while True:
@@ -213,18 +195,7 @@ class StreamingTTSConsumer:
             was_audible = self._handle.audible
             await self._adapter.write_streaming_tts(self._handle, chunk)
             if not was_audible:
-                self._handle.audible = True
-                self._suppress_whole_file = True
-
-    def _strip_markdown_for_tts(self, text: str) -> str:
-        """Lazy-import and apply the TTS markdown stripper."""
-        if self._strip_markdown is None:
-            try:
-                from tools.tts_tool import _strip_markdown_for_tts as _strip
-                self._strip_markdown = _strip
-            except ImportError:
-                self._strip_markdown = lambda t: t  # noqa: E731
-        return self._strip_markdown(text).strip()
+                self._handle.audible = self._suppress_whole_file = True
 
     async def _safe_abort(self, reason: str) -> None:
         """Abort the adapter stream, swallowing errors (idempotent)."""
@@ -244,10 +215,7 @@ class StreamingTTSConsumer:
                 return
             self._aborted = True
         # The load-bearing _ABORT sentinel must reach the queue even when full: evict to make room.
-        for _attempt in range(3):
-            if self._put_sentinel(_ABORT, mark_dropped=False):
-                break
-        else:
+        if not any(self._put_sentinel(_ABORT, mark_dropped=False) for _ in range(3)):
             logger.debug("streaming TTS _ABORT sentinel could not be enqueued")
         if self._handle is not None and not self._handle.aborted:
             with contextlib.suppress(Exception):
