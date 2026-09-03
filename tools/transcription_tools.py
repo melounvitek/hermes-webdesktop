@@ -144,10 +144,7 @@ def is_stt_enabled(stt_config: Optional[dict] = None) -> bool:
 
 
 def _resolve_stt_language(
-    provider_key: str,
-    stt_config: Optional[Dict[str, Any]] = None,
-    *,
-    extra_keys: tuple = (),
+    provider_key: str, stt_config: Optional[Dict[str, Any]] = None, *, extra_keys: tuple = ()
 ) -> Optional[str]:
     """Resolve the language hint for an STT provider; first non-empty wins.
 
@@ -437,8 +434,7 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
                 # stt.local.device / compute_type let users pin a configuration
                 # where ``auto`` mis-detects; the loader keeps the CUDA→CPU fallback.
                 _local_model = _load_local_whisper_model(
-                    model_name,
-                    device=local_cfg.get("device", "auto"),
+                    model_name, device=local_cfg.get("device", "auto"),
                     compute_type=local_cfg.get("compute_type", "auto"),
                 )
                 _local_model_name = model_name
@@ -458,11 +454,7 @@ def _replace_cached_model_on_cpu(model_name: str):
 
 
 def _transcribe_local(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     if not _HAS_FASTER_WHISPER and not _try_lazy_install_stt():
@@ -531,9 +523,7 @@ def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
 
 
 def _transcribe_prepared_audio(
-    file_path: str,
-    model: Optional[str] = None,
-    source: Optional[str] = None,
+    file_path: str, model: Optional[str] = None, source: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe a validated audio file with the configured STT provider.
 
@@ -610,10 +600,7 @@ def _builtin_model_name(provider: str, stt_config: Dict[str, Any], model: Option
 
 
 def _dispatch_stt_provider(
-    file_path: str,
-    provider: str,
-    stt_config: Dict[str, Any],
-    model: Optional[str] = None,
+    file_path: str, provider: str, stt_config: Dict[str, Any], model: Optional[str] = None,
     source: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Route *file_path* to the handler for *provider* (built-in > command > plugin)."""
@@ -654,10 +641,8 @@ def _dispatch_stt_provider(
     # ``stt.<provider>`` like built-ins; the ``model`` argument overrides it.
     plugin_cfg = _get_stt_section(stt_config, provider)
     plugin_result = _dispatch_to_plugin_provider(
-        file_path, provider, stt_config,
-        model=model or plugin_cfg.get("model"),
-        language=language or _resolve_stt_language(provider, stt_config),
-        prompt=prompt,
+        file_path, provider, stt_config, model=model or plugin_cfg.get("model"),
+        language=language or _resolve_stt_language(provider, stt_config), prompt=prompt,
     )
     if plugin_result is not None:
         return plugin_result
@@ -688,9 +673,7 @@ def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, A
 
 
 def transcribe_audio(
-    file_path: str,
-    model: Optional[str] = None,
-    source: Optional[str] = None,
+    file_path: str, model: Optional[str] = None, source: Optional[str] = None
 ) -> Dict[str, Any]:
     """Safely validate, preprocess supported inputs, and dispatch transcription.
 
@@ -726,8 +709,7 @@ def transcribe_audio(
 
 
 def transcribe_audio_local_fallback(
-    file_path: str,
-    model: Optional[str] = None,
+    file_path: str, model: Optional[str] = None
 ) -> Dict[str, Any]:
     """Try an already-installed local STT backend without changing config.
 

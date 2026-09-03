@@ -249,11 +249,7 @@ def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any]) -> str:
 
 
 def _transcribe_local_command(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     from tools.transcription_tools import _prepare_local_audio, _resolve_stt_language

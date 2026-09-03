@@ -91,11 +91,7 @@ def _sdk_prompt_kwargs(language: Optional[str], prompt: Optional[str]) -> Dict[s
 
 
 def _transcribe_groq(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe using Groq Whisper API (free tier available).
 
@@ -129,13 +125,8 @@ def _transcribe_groq(
 
 
 def _transcribe_openai(
-    file_path: str,
-    model_name: str,
-    *,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    provider_label: str = "openai",
-    language: Optional[str] = None,
+    file_path: str, model_name: str, *, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, provider_label: str = "openai", language: Optional[str] = None,
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
@@ -216,11 +207,7 @@ def _transcribe_openai(
 
 
 def _transcribe_mistral(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe with the ``mistralai`` SDK (``/v1/audio/transcriptions``); requires ``MISTRAL_API_KEY``."""
     from tools.transcription_tools import _resolve_provider_key, _resolve_stt_language
@@ -288,13 +275,8 @@ def _rest_transcript(response, label: str, extract_detail, extract_text):
 
 
 def _rest_provider(
-    file_path: str,
-    provider: str,
-    label: str,
-    post: Callable[[], Any],
-    extract_detail,
-    extract_text,
-    log: Callable[[str, Dict[str, Any]], None],
+    file_path: str, provider: str, label: str, post: Callable[[], Any], extract_detail,
+    extract_text, log: Callable[[str, Dict[str, Any]], None],
 ) -> Dict[str, Any]:
     """Shared REST flow: ``post()`` -> envelope/transcript -> ``log(text, body)`` -> ok; exceptions -> ``_cloud_failure``."""
     try:
@@ -308,11 +290,7 @@ def _rest_provider(
 
 
 def _transcribe_xai(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe via xAI ``POST /v1/stt`` (multipart). Supports ITN, diarization, word timestamps."""
     from tools.transcription_tools import _load_stt_config, _resolve_stt_language, get_env_value
@@ -390,10 +368,8 @@ def _transcribe_xai(
         )
 
     return _rest_provider(
-        file_path, "xai", "xAI STT", _post,
-        lambda body: body.get("error", {}).get("message", ""),
-        lambda body: body.get("text", "").strip(),
-        _log,
+        file_path, "xai", "xAI STT", _post, lambda body: body.get("error", {}).get("message", ""),
+        lambda body: body.get("text", "").strip(), _log,
     )
 
 
@@ -405,11 +381,7 @@ def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
 
 
 def _transcribe_elevenlabs(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe using ElevenLabs Scribe STT API."""
     from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _resolve_stt_language, get_env_value
@@ -450,11 +422,7 @@ def _transcribe_elevenlabs(
 
 
 def _transcribe_deepinfra(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Resolve DeepInfra credentials/model (shared ``hermes_cli.models`` helpers), then delegate to :func:`_transcribe_openai`."""
     from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _transcribe_openai

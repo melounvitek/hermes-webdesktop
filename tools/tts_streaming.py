@@ -154,8 +154,7 @@ _PROVIDER_PRIORITY: List[str] = ["elevenlabs", "gemini", "openai", "xai"]
 
 
 def resolve_streaming_provider(
-    tts_config: Dict,
-    preferred: Optional[str] = None,
+    tts_config: Dict, preferred: Optional[str] = None
 ) -> Optional[StreamingTTSProvider]:
     """Return a ready streamer for the *configured* provider, else ``None``.
 

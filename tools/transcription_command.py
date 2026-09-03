@@ -76,12 +76,8 @@ def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
 
 
 def _transcribe_command_stt(
-    file_path: str,
-    provider_name: str,
-    config: Dict[str, Any],
-    stt_config: Dict[str, Any],
-    model_override: Optional[str] = None,
-    language_override: Optional[str] = None,
+    file_path: str, provider_name: str, config: Dict[str, Any], stt_config: Dict[str, Any],
+    model_override: Optional[str] = None, language_override: Optional[str] = None,
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
@@ -153,13 +149,8 @@ def _unregistered_stt_provider_error(provider: str) -> Dict[str, Any]:
 
 
 def _dispatch_to_plugin_provider(
-    file_path: str,
-    provider: str,
-    stt_config: Optional[Dict[str, Any]] = None,
-    *,
-    model: Optional[str] = None,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, provider: str, stt_config: Optional[Dict[str, Any]] = None, *,
+    model: Optional[str] = None, language: Optional[str] = None, prompt: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Route to a plugin-registered transcription provider; None when no plugin claims the name.
 
@@ -257,13 +248,8 @@ def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Option
 
 
 def _apply_pre_transcription_hook(
-    *,
-    file_path: str,
-    provider: str,
-    model: Optional[str],
-    language: Optional[str],
-    prompt: Optional[str],
-    source: Optional[str],
+    *, file_path: str, provider: str, model: Optional[str], language: Optional[str],
+    prompt: Optional[str], source: Optional[str],
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Fire the ``pre_transcription`` plugin hook and merge its results.
 
