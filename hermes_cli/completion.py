@@ -1,7 +1,5 @@
-"""Shell completion script generation for hermes CLI.
-
-Walks the live argparse parser tree, so completion scripts never go stale; no extra dependencies.
-"""
+"""Shell completion script generation for hermes CLI. Walks the live argparse parser tree, so
+completion scripts never go stale; no extra dependencies."""
 
 from __future__ import annotations
 
@@ -13,7 +11,6 @@ def _walk(parser: argparse.ArgumentParser) -> dict[str, Any]:
     """Recursively extract subcommands and flags from a parser."""
     flags: list[str] = []
     subcommands: dict[str, Any] = {}
-
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             # _choices_actions has one entry per canonical name (aliases omitted).
@@ -38,8 +35,7 @@ _PROFILE_NAME_ACTIONS = ("use", "delete", "show", "alias", "rename", "export")
 
 
 def _sorted_subcommands(parser: argparse.ArgumentParser) -> list[tuple[str, dict[str, Any]]]:
-    tree = _walk(parser)
-    return sorted(tree["subcommands"].items())
+    return sorted(_walk(parser)["subcommands"].items())
 
 
 def generate_bash(parser: argparse.ArgumentParser) -> str:
@@ -70,7 +66,6 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
                 f"            COMPREPLY=($(compgen -W \"{words}\" -- \"$cur\"))\n"
                 f"            return\n"
                 f"            ;;")
-
     cases_str = "\n".join(cases)
     return f"""# Hermes Agent bash completion
 # Add to ~/.bashrc:
@@ -228,7 +223,6 @@ def generate_fish(parser: argparse.ArgumentParser) -> str:
         " -d 'Profile name' -xa '(__hermes_profiles)'",
         "",
         "# Top-level subcommands"]
-
     for cmd, info in subcommands:
         lines.append(
             f"complete -c hermes -f "
