@@ -994,10 +994,9 @@ def _translate_docker_container_media_path(candidate: Path, session_key: str = "
         return None
     # Longest container-prefix match; equal-length prefixes are tried in insertion order.
     candidate_posix = candidate.as_posix()
-    matched = [
-        (host_root, container_root, len(prefix)) for host_root, container_root in mounts
-        for prefix in (container_root.as_posix().rstrip("/") or "/",)
-        if candidate_posix == prefix or candidate_posix.startswith(prefix + "/")]
+    matched = [(host_root, container_root, len(prefix)) for host_root, container_root in mounts
+               for prefix in (container_root.as_posix().rstrip("/") or "/",)
+               if candidate_posix == prefix or candidate_posix.startswith(prefix + "/")]
     if not matched:
         _warn_unresolved_docker_media(candidate, session_key, "no mounted prefix matches")
         return None
@@ -3809,8 +3808,8 @@ class BasePlatformAdapter(ABC):
             platform=self.platform, chat_id=str(chat_id), chat_name=chat_name, chat_type=chat_type,
             user_id=_opt(user_id), user_name=user_name, thread_id=_opt(thread_id),
             chat_topic=(chat_topic or "").strip() or None, user_id_alt=user_id_alt,
-            chat_id_alt=chat_id_alt, is_bot=is_bot, scope_id=_opt(scope_id),
-            guild_id=_opt(guild_id), parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
+            chat_id_alt=chat_id_alt, is_bot=is_bot, scope_id=_opt(scope_id), guild_id=_opt(guild_id),
+            parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
         profile, profile_route_rejected = None, False  # profile from configured routes, if any
         if self.gateway_runner is not None:
             from gateway.profile_routing import ProfileRouteRejected
@@ -3821,10 +3820,9 @@ class BasePlatformAdapter(ABC):
             except Exception:
                 logger.warning("Profile resolution failed for %s/%s, defaulting to active profile",
                                self.platform, chat_id, exc_info=True)
-        source = SessionSource(
-            **fields, profile=profile, role_authorized=role_authorized,
-            auto_thread_created=auto_thread_created,
-            auto_thread_initial_name=auto_thread_initial_name)
+        source = SessionSource(**fields, profile=profile, role_authorized=role_authorized,
+                               auto_thread_created=auto_thread_created,
+                               auto_thread_initial_name=auto_thread_initial_name)
         # Transport-only, kept out of to_dict(): the receiving adapter is authoritative this turn
         # even if profile_routes picks another runtime; the reject flag is consumed before auth.
         source._transport_adapter_ref = weakref.ref(self)
