@@ -60,23 +60,21 @@ class _ThreadRoutingStream:
             else:
                 self._state.silenced.pop(ident, None)
 
-    def write(self, data):  # type: ignore[no-untyped-def]
+    def _forward(self, name: str, fallback, *args):  # type: ignore[no-untyped-def]
+        """Call ``name`` on the current target; a dead target yields ``fallback(*args)`` instead of raising."""
         try:
-            return self._target().write(data)
+            return getattr(self._target(), name)(*args)
         except Exception:
-            return len(data) if isinstance(data, str) else 0
+            return fallback(*args)
+
+    def write(self, data):  # type: ignore[no-untyped-def]
+        return self._forward("write", lambda d: len(d) if isinstance(d, str) else 0, data)
 
     def flush(self):  # type: ignore[no-untyped-def]
-        try:
-            return self._target().flush()
-        except Exception:
-            return None
+        return self._forward("flush", lambda: None)
 
     def writelines(self, lines):  # type: ignore[no-untyped-def]
-        try:
-            return self._target().writelines(lines)
-        except Exception:
-            return None
+        return self._forward("writelines", lambda _l: None, lines)
 
     def isatty(self) -> bool:
         try:

@@ -20,10 +20,9 @@ __all__ = ["StreamingThinkScrubber"]
 class StreamingThinkScrubber:
     """Stateful scrubber for streaming reasoning/thinking blocks.
 
-    State: ``_in_block`` (inside an open block; text discarded), ``_buf``
-    (held-back partial-tag tail), ``_last_emitted_ended_newline`` (True iff the
-    last emission ended with ``\\n`` or nothing has been emitted yet — decides
-    whether an open tag at buffer position 0 sits at a block boundary).
+    State: ``_in_block`` (inside an open block; text discarded), ``_buf`` (held-back partial-tag
+    tail), ``_last_emitted_ended_newline`` (True iff the last emission ended with ``\\n`` or nothing
+    was emitted yet — decides whether an open tag at buffer position 0 sits at a block boundary).
     """
 
     _OPEN_TAG_NAMES: Tuple[str, ...] = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
@@ -31,7 +30,8 @@ class StreamingThinkScrubber:
     # Lowercased literal tags so the hot path does string ops, not regex per feed().
     _OPEN_TAGS: Tuple[str, ...] = tuple(f"<{name.lower()}>" for name in _OPEN_TAG_NAMES)
     _CLOSE_TAGS: Tuple[str, ...] = tuple(f"</{name.lower()}>" for name in _OPEN_TAG_NAMES)
-    _MAX_TAG_LEN: int = max(len(tag) for tag in _OPEN_TAGS + _CLOSE_TAGS)
+    _ALL_TAGS: Tuple[str, ...] = _OPEN_TAGS + _CLOSE_TAGS
+    _MAX_TAG_LEN: int = max(len(tag) for tag in _ALL_TAGS)
     # Orphan close tag plus trailing whitespace (matches _strip_think_blocks case 3).
     _ORPHAN_CLOSE_RE = re.compile(
         "(?:" + "|".join(re.escape(t) for t in _CLOSE_TAGS) + r")[ \t\n\r]*", re.IGNORECASE
@@ -54,11 +54,7 @@ class StreamingThinkScrubber:
             self._last_emitted_ended_newline = text.endswith("\n")
 
     def feed(self, text: str) -> str:
-        """Feed one delta; return the scrubbed visible portion.
-
-        Returns "" when the whole delta is reasoning content or is held back
-        pending resolution of a partial tag at the boundary.
-        """
+        """Feed one delta; return the scrubbed visible portion ("" when it is all reasoning or held back)."""
         if not text:
             return ""
         buf = self._buf + text
@@ -94,10 +90,7 @@ class StreamingThinkScrubber:
 
             # No resolvable tag: hold back any partial-tag prefix at the tail
             # so a tag split across deltas isn't missed, then emit the rest.
-            held = max(
-                self._max_partial_suffix(buf, self._OPEN_TAGS),
-                self._max_partial_suffix(buf, self._CLOSE_TAGS),
-            )
+            held = self._max_partial_suffix(buf, self._ALL_TAGS)
             self._emit(out, buf[:-held] if held else buf)
             self._buf = buf[-held:] if held else ""
             break
@@ -105,13 +98,10 @@ class StreamingThinkScrubber:
         return "".join(out)
 
     def flush(self) -> str:
-        """End-of-stream flush.
-
-        Inside an unterminated block the held-back content is discarded (leaking partial
-        reasoning is worse than a truncated answer); otherwise the tail is emitted verbatim.
-        Always resets the boundary flag: intra-turn retries flush then stream again without
-        ``reset()``, and a stale False flag made the new stream's opening ``<think>`` look mid-line.
-        """
+        """End-of-stream flush: inside an unterminated block the held-back content is discarded (leaking
+        partial reasoning is worse than a truncated answer), otherwise the tail is emitted verbatim.
+        Always resets the boundary flag — intra-turn retries flush then stream again without ``reset()``,
+        and a stale False flag made the new stream's opening ``<think>`` look mid-line."""
         tail = "" if self._in_block else self._buf
         self._buf = ""
         self._in_block = False
@@ -128,10 +118,7 @@ class StreamingThinkScrubber:
         return min(hits) if hits else (-1, 0)
 
     def _find_earliest_closed_pair(self, buf: str):
-        """Return (start_idx, end_idx) of the earliest ``<tag>...</tag>`` pair, else None.
-
-        Case-insensitive and non-greedy (closest close after the open wins); the earliest open tag wins.
-        """
+        """(start_idx, end_idx) of the earliest ``<tag>...</tag>`` pair (non-greedy, case-insensitive), else None."""
         buf_lower = buf.lower()
         best: "tuple[int, int] | None" = None
         for open_tag, close_tag in zip(self._OPEN_TAGS, self._CLOSE_TAGS):
@@ -156,12 +143,9 @@ class StreamingThinkScrubber:
         return best_idx, best_len
 
     def _is_block_boundary(self, buf: str, idx: int, already_emitted: list[str]) -> bool:
-        """True iff position *idx* in *buf* is a block boundary.
-
-        Boundary = position 0 with the prior emission ending in a newline (or nothing emitted
-        yet), or any position whose preceding text on the current line is whitespace-only
-        (when no newline precedes it in *buf*, the prior emission must also have ended with a newline).
-        """
+        """True iff *idx* is a block boundary: position 0 after a newline-terminated (or no) prior emission,
+        or any position whose preceding text on the current line is whitespace-only (when no newline
+        precedes it in *buf*, the prior emission must also have ended with a newline)."""
         prior_newline = (
             already_emitted[-1].endswith("\n") if already_emitted else self._last_emitted_ended_newline
         )
@@ -175,10 +159,7 @@ class StreamingThinkScrubber:
 
     @classmethod
     def _max_partial_suffix(cls, buf: str, tags: Tuple[str, ...]) -> int:
-        """Longest buf-suffix that is a strict prefix of any tag (case-insensitive).
-
-        Full-length matches are real tags handled elsewhere, not held-back partials.
-        """
+        """Longest buf-suffix that is a strict prefix of any tag (full matches are real tags, handled elsewhere)."""
         buf_lower = buf.lower()
         for i in range(min(len(buf_lower), cls._MAX_TAG_LEN - 1), 0, -1):
             suffix = buf_lower[-i:]
