@@ -1132,7 +1132,8 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         return
     try:
         from hermes_cli.config import load_config as _load_full_config
-        _hermes_home_maint = get_hermes_home()
+        from hermes_constants import get_hermes_home as _get_hermes_home  # lazy: tests patch it
+        _hermes_home_maint = _get_hermes_home()
 
         # One-time repairs, each latched in state_meta once it has run.
         for meta_key, repair, done_msg, skip_msg in (
@@ -2628,8 +2629,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._interactive_turn = False  # only run()-loop turns; keeps the summary line off -Q
 
         _ump = display.get("user_message_preview", {})
-        if not isinstance(_ump, dict):
-            _ump = {}
+        _ump = _ump if isinstance(_ump, dict) else {}
         self.user_message_preview_first_lines = max(1, _int_or(_ump.get("first_lines", 2), 2))
         self.user_message_preview_last_lines = max(0, _int_or(_ump.get("last_lines", 2), 2))
 
@@ -2653,22 +2653,20 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._init_prompt_and_reasoning(reasoning)
 
     def _init_model_and_provider(self, model, provider, api_key, base_url):
-        """Priority: CLI args > env vars > config file. Returns the raw ``model`` config section."""
+        """Priority: CLI args > env vars > config file."""
         # LLM_MODEL/OPENAI_MODEL env vars are deliberately NOT checked (multi-agent setups
         # would stomp each other through the environment).
-        _model_config = CLI_CONFIG.get("model", {})
-        _raw_default = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
+        _model_config = CLI_CONFIG["model"]
         # A dict-valued default carries its own provider, which must feed requested_provider
         # instead of being replaced by the merged model.provider (typically "auto").
-        _config_model, _nested_provider = _split_model_config_default(_raw_default)
-        _DEFAULT_CONFIG_MODEL = ""
+        _config_model, _nested_provider = _split_model_config_default(
+            _model_config.get("default") or _model_config.get("model") or ""
+        )
         # resume must not clobber an explicit -m with the session's stored model.
         self._explicit_model_override = bool(model)
-        self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
-        _cfg_provider = CLI_CONFIG["model"].get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER")
-        _startup_provider_override = ""
-        _startup_base_url_override = ""
-        _startup_api_key_override = ""
+        self.model = model or _config_model or ""
+        _cfg_provider = _model_config.get("provider") or os.getenv("HERMES_INFERENCE_PROVIDER")
+        _startup_provider_override = _startup_base_url_override = _startup_api_key_override = ""
         if self.model:
             from hermes_cli.model_switch import resolve_startup_model_route
 
@@ -2688,25 +2686,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # real provider never sees the unknown model; the prefix wins over --provider.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
         _env_mt = os.environ.get("HERMES_MAX_TOKENS")
-        if _env_mt:
-            self.max_tokens = _int_or(_env_mt, None)
-        elif isinstance(_model_config, dict):
-            _mt = _model_config.get("max_tokens")
-            self.max_tokens = _mt if isinstance(_mt, int) else None
-        else:
-            self.max_tokens = None
-        if self.model == _DEFAULT_CONFIG_MODEL:
-            _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
+        _mt = _model_config.get("max_tokens")
+        self.max_tokens = _int_or(_env_mt, None) if _env_mt else (_mt if isinstance(_mt, int) else None)
+        if self.model == "":  # auto-detect from a local server
+            _base_url = _model_config.get("base_url") or ""
             if base_url_hostname(_base_url) in ("localhost", "127.0.0.1"):
                 from hermes_cli.runtime_provider import _auto_detect_local_model
-                _detected = _auto_detect_local_model(_base_url)
-                if _detected:
-                    self.model = _detected
+                self.model = _auto_detect_local_model(_base_url) or self.model
         # Provider normalisation may silently override the default but must warn for an
         # explicit choice (a config model equal to the global fallback is NOT explicit).
-        self._model_is_default = not model and (
-            not _config_model or _config_model == _DEFAULT_CONFIG_MODEL
-        )
+        self._model_is_default = not model and not _config_model
 
         # --api-key wins; otherwise a URL-bearing startup alias carries its own credential.
         self._explicit_api_key = api_key or _startup_api_key_override or None
@@ -2740,7 +2729,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.acp_command: Optional[str] = None
         self.acp_args: list[str] = []
         self.base_url = (
-            base_url or _startup_base_url_override or CLI_CONFIG["model"].get("base_url", "")
+            base_url or _startup_base_url_override or _model_config.get("base_url", "")
             or os.getenv("OPENROUTER_BASE_URL", "")
         ) or None
         # Key matches the resolved base_url; re-resolved by _ensure_runtime_credentials().
@@ -2748,22 +2737,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         if not (self.base_url and base_url_host_matches(self.base_url, "openrouter.ai")):
             _keys = _keys[::-1]
         self.api_key = api_key or os.getenv(_keys[0]) or os.getenv(_keys[1])
-        return _model_config
 
     def _init_turn_limits(self, max_turns, run_budget):
         """max_turns: CLI arg > config > env var > default; run budget: CLI flag > config."""
         # resolve_turn_limit() accepts "none"/"unlimited" (-> sys.maxsize) alongside ints.
+        # KEEP the root-level CLI_CONFIG["max_turns"] fallback: it is never migrated on disk
+        # and other config paths may bypass the load-time fold.
         from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-        if max_turns is not None:
-            self.max_turns = _resolve_turn_limit(max_turns)
-        elif CLI_CONFIG["agent"].get("max_turns") is not None:
-            self.max_turns = _resolve_turn_limit(CLI_CONFIG["agent"]["max_turns"])
-        elif CLI_CONFIG.get("max_turns") is not None:
-            # KEEP: root-level max_turns is never migrated on disk; other config paths may
-            # bypass the load-time fold, so this is the only safety net.
-            self.max_turns = _resolve_turn_limit(CLI_CONFIG["max_turns"])
-        else:
-            self.max_turns = _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
+        self.max_turns = _resolve_turn_limit(next(
+            (v for v in (max_turns, CLI_CONFIG["agent"].get("max_turns"), CLI_CONFIG.get("max_turns")) if v is not None),
+            os.getenv("HERMES_MAX_ITERATIONS"),
+        ))
         self.run_budget_seconds = run_budget if run_budget is not None else CLI_CONFIG["agent"].get("run_budget_seconds")
 
     def _init_toolsets(self, toolsets):
@@ -2822,8 +2806,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._provider_data_collection = pr.get("data_collection")
 
         # OpenRouter Pareto Code router coding-score floor; out-of-range = unset.
-        _or_cfg = CLI_CONFIG.get("openrouter", {}) or {}
-        _raw_score = _or_cfg.get("min_coding_score")
+        _raw_score = (CLI_CONFIG.get("openrouter", {}) or {}).get("min_coding_score")
         self._openrouter_min_coding_score: Optional[float] = None
         if _raw_score not in {None, ""}:
             try:
@@ -2840,31 +2823,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # A signature change across turns (/model, credential rotation) rebuilds the agent.
         self._active_agent_route_signature = None
         self.agent: Optional[Any] = None  # initialized on first use
-        self._tool_callbacks_installed = False
-        self._tirith_security_checked = False
+        self._tool_callbacks_installed = self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
 
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
-        self._resumed = False
         # Per-prompt elapsed timer shown in the status bar.
         self._prompt_start_time: Optional[float] = None
         self._prompt_duration: float = 0.0
         self._last_turn_finished_at: Optional[float] = None
         self._init_session_store()
         self._pending_title: Optional[str] = None
-        if resume:
-            self.session_id = resume
-            self._resumed = True
-        else:
-            timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
-            short_uuid = uuid.uuid4().hex[:6]
-            self.session_id = f"{timestamp_str}_{short_uuid}"
+        self._resumed = bool(resume)
+        self.session_id = resume or f"{self.session_start.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         getattr(self, "_write_terminal_breadcrumb", lambda: None)()
 
         self._history_file = _hermes_home / ".hermes_history"
         self._last_invalidate: float = 0.0  # throttles UI repaints
-        self._app = None
         self._init_ui_state()
 
     def _init_session_store(self):
@@ -2897,12 +2872,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _init_ui_state(self):
         """Per-run mutable UI state; must exist before any chat() call since -q never goes through run()."""
-        self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
+        self._agent_running = self._should_exit = False
         self._last_turn_interrupted = False  # /goal never auto-queues on a Ctrl+C'd turn
         self._terminal_io_broken = False  # stdout EIO: freeze UI paints instead of spinning
-        self._should_exit = False
         self._delete_session_on_exit = False  # /exit --delete
         # /update: relaunch() runs from run() after prompt_toolkit restored terminal modes.
         self._pending_relaunch: list[str] | None = None
@@ -2910,28 +2884,25 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Blocking-prompt overlays (clarify / sudo / approval / slash-confirm / model picker).
         self._clarify_state = self._clarify_multi_base = None
         self._clarify_freetext = False
-        self._clarify_deadline = 0
         self._clarify_prefill = ""
         self._sudo_state = self._modal_input_snapshot = self._approval_state = None
-        self._sudo_deadline = self._approval_deadline = 0
-        self._approval_lock = threading.Lock()
         self._slash_confirm_state = self._model_picker_state = None
-        self._slash_confirm_deadline = 0
+        self._clarify_deadline = self._sudo_deadline = self._approval_deadline = self._slash_confirm_deadline = 0
+        self._approval_lock = threading.Lock()
         try:  # composer placeholder chosen once so it stays stable on screen
             from hermes_cli.tips import get_random_composer_placeholder
             self._composer_placeholder = get_random_composer_placeholder()
         except Exception:
             self._composer_placeholder = ""
-        self._command_palette_state = None
+        self._command_palette_state = self._secret_state = None
         self._pending_resume_sessions = None  # armed by a bare `/resume`; the next bare number selects
-        self._pending_agent_seed = self._secret_state = None  # one-shot seed from a slash handler
+        self._pending_agent_seed = None  # one-shot seed from a slash handler
         self._secret_deadline = 0
-        self._spinner_text: str = ""
         self._tool_start_time: float = 0.0
         self._pending_tool_info: dict = {}  # function_name -> [(preview, args)] for stacked scrollback
+        self._spinner_text = self._command_status = ""
         self._last_scrollback_tool: str = ""  # "new" mode dedup
         self._command_running = self._command_blocks_input = False
-        self._command_status = ""
         # Petdex mascot (display.pet): kitty placeholders on kitty/Ghostty, half-blocks elsewhere.
         self._pet_renderer = self._pet_anim_thread = None
         self._pet_slug = self._pet_kitty_pending = ""
@@ -2942,9 +2913,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._pet_kitty_cache: dict = {}
         self._pet_kitty_image_id = self._pet_frame_idx = 0
         self._pet_lock = threading.Lock()
-        self._pet_cfg_checked: float = 0.0
+        self._pet_cfg_checked = self._pet_event_until = 0.0
         self._pet_event: str = ""
-        self._pet_event_until: float = 0.0
         self._pet_reasoning = self._pet_turn_error = False
         self._attached_images: list[Path] = []
         self._image_counter = 0
@@ -2965,10 +2935,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._voice_lock = threading.Lock()
         self._voice_mode = self._voice_tts = self._voice_recording = False
         self._voice_processing = self._voice_continuous = False
-        self._voice_recorder = None
+        self._voice_recorder = self._voice_tts_stop = None
         self._voice_tts_done = threading.Event()
         self._voice_tts_done.set()
-        self._voice_tts_stop = None
         self._voice_barge_capture = threading.Event()  # barge monitor is capturing the interruption
         self._voice_last_tts_text = ""  # echo guard
         self._voice_barge_phase = None  # "generation" | "playback"
@@ -2979,16 +2948,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # stamp a fresh status bar over one the terminal just reflowed into scrollback.
         self._status_bar_suppressed_after_resize = self._resize_recovery_pending = False
         self._resize_recovery_lock = threading.Lock()
-        self._resize_recovery_timer = None
-        self._status_bar_unsuppress_timer = None  # debounced clear of that suppression
+        self._resize_recovery_timer = self._status_bar_unsuppress_timer = None  # latter: debounced un-suppress
         self._last_resize_width = None  # width change (reflow, needs viewport clear) vs rows-only
 
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
 
         # Cache-hit baseline, reset on model switch / compression so the bar shows the current regime.
-        self._cache_hit_baseline_prompt = self._cache_hit_baseline_read = 0
-        self._cache_hit_baseline_compressions = 0
+        self._cache_hit_baseline_prompt = self._cache_hit_baseline_read = self._cache_hit_baseline_compressions = 0
         self._cache_hit_baseline_model: Optional[str] = None
 
     def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
@@ -3009,10 +2976,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             logger.warning("Failed to claim active session slot: %s", exc)
             return True
         if message:
-            if stderr:
-                print(message, file=sys.stderr)
-            else:
-                self._console_print(f"[bold red]{message}[/]")
+            print(message, file=sys.stderr) if stderr else self._console_print(f"[bold red]{message}[/]")
             return False
         self._active_session_lease = lease
         try:
@@ -3322,53 +3286,54 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
     def _run_quick_command(self, base_cmd: str, qcmd: dict, user_args: str) -> bool:
         """User-defined quick command (config.yaml): ``exec`` runs a shell snippet, ``alias`` re-dispatches."""
         qtype = qcmd.get("type")
-        if qtype == "exec":
-            import subprocess
-            exec_cmd = qcmd.get("command", "")
-            if not exec_cmd:
-                self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
-                return True
-            try:
-                # shell=True is intentional (user-authored config snippets, never LLM controlled);
-                # the env is sanitized because this process holds every API key.
-                from tools.environments.local import build_subprocess_env
-                from hermes_cli._subprocess_compat import windows_hide_flags
-                result = subprocess.run(
-                    exec_cmd, shell=True, capture_output=True,
-                    text=True, encoding="utf-8", errors="replace", timeout=30, env=build_subprocess_env(),
-                    creationflags=windows_hide_flags(),
-                )
-                output = result.stdout.strip() or result.stderr.strip()
-                if output:
-                    from agent.redact import redact_sensitive_text
-                    self._console_print(_rich_text_from_ansi(redact_sensitive_text(output)))
-                else:
-                    self._console_print("[dim]Command returned no output[/]")
-            except subprocess.TimeoutExpired:
-                self._console_print("[bold red]Quick command timed out (30s)[/]")
-            except Exception as e:
-                self._console_print(f"[bold red]Quick command error: {e}[/]")
-        elif qtype == "alias":
+        if qtype == "alias":
             target = qcmd.get("target", "").strip()
             if target:
                 target = target if target.startswith("/") else f"/{target}"
                 return self.process_command(f"{target} {user_args}".strip())
             self._console_print(f"[bold red]Quick command '{base_cmd}' has no target defined[/]")
-        else:
+            return True
+        if qtype != "exec":
             self._console_print(f"[bold red]Quick command '{base_cmd}' has unsupported type (supported: 'exec', 'alias')[/]")
+            return True
+        import subprocess
+        exec_cmd = qcmd.get("command", "")
+        if not exec_cmd:
+            self._console_print(f"[bold red]Quick command '{base_cmd}' has no command defined[/]")
+            return True
+        try:
+            # shell=True is intentional (user-authored config snippets, never LLM controlled);
+            # the env is sanitized because this process holds every API key.
+            from tools.environments.local import build_subprocess_env
+            from hermes_cli._subprocess_compat import windows_hide_flags
+            result = subprocess.run(
+                exec_cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env=build_subprocess_env(), creationflags=windows_hide_flags(),
+            )
+            output = result.stdout.strip() or result.stderr.strip()
+            if output:
+                from agent.redact import redact_sensitive_text
+                self._console_print(_rich_text_from_ansi(redact_sensitive_text(output)))
+            else:
+                self._console_print("[dim]Command returned no output[/]")
+        except subprocess.TimeoutExpired:
+            self._console_print("[bold red]Quick command timed out (30s)[/]")
+        except Exception as e:
+            self._console_print(f"[bold red]Quick command error: {e}[/]")
         return True
 
     def _run_plugin_slash_command(self, base_cmd: str, user_args: str) -> None:
         from hermes_cli.plugins import get_plugin_command_handler, resolve_plugin_command_result
 
         plugin_handler = get_plugin_command_handler(base_cmd.lstrip("/"))
-        if plugin_handler:
-            try:
-                result = resolve_plugin_command_result(plugin_handler(user_args))
-                if result:
-                    _cprint(str(result))
-            except Exception as e:
-                _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
+        if not plugin_handler:
+            return
+        try:
+            result = resolve_plugin_command_result(plugin_handler(user_args))
+            if result:
+                _cprint(str(result))
+        except Exception as e:
+            _cprint(f"\033[1;31mPlugin command error: {e}{_RST}")
 
     def _queue_skill_message(self, msg) -> None:
         if hasattr(self, '_pending_input'):
@@ -3419,11 +3384,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         all_known = set(COMMANDS) | set(skill_commands) | set(skill_bundles)
         matches = [c for c in all_known if c.startswith(typed_base)]
         if len(matches) > 1:
-            exact = [c for c in matches if c == typed_base]
-            if len(exact) == 1:
-                matches = exact
+            if typed_base in matches:
+                matches = [typed_base]
             else:
-                # Unique shortest match wins: /qui → /quit (5) over /quint-pipeline (15)
+                # Unique shortest match wins: /qui -> /quit (5) over /quint-pipeline (15)
                 min_len = min(len(c) for c in matches)
                 shortest = [c for c in matches if len(c) == min_len]
                 if len(shortest) == 1:
@@ -3536,8 +3500,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             user_input = user_input.text
         is_seeded_query = isinstance(user_input, _SeededQueryMessage)
         if is_seeded_query:
-            seeded = user_input
-            user_input = (seeded.text, seeded.images) if seeded.images else seeded.text
+            user_input = (user_input.text, user_input.images) if user_input.images else user_input.text
         return user_input, is_voice_input, is_seeded_query
 
     def _tui_process_one_input(self, user_input):
@@ -3594,10 +3557,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             n = len(submit_images)
             _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
 
-        self._agent_running = True
-        self._interactive_turn = True
-        self._pet_turn_error = False
-        self._pet_reasoning = False
+        self._agent_running = self._interactive_turn = True
+        self._pet_turn_error = self._pet_reasoning = False
         self._turn_summary_begin()
         self._app.invalidate()
         try:
@@ -3622,12 +3583,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_after_turn(self):
         """Post-turn bookkeeping after chat() returns (normal, error, or interrupt)."""
-        self._agent_running = False
-        self._spinner_text = ""
+        self._agent_running = self._pet_reasoning = False
+        self._spinner_text = self._last_scrollback_tool = ""
         self._tool_start_time = 0.0
         self._pending_tool_info.clear()
-        self._last_scrollback_tool = ""
-        self._pet_reasoning = False
         self._pet_react_turn_end()
         self._turn_summary_emit()
         self._interactive_turn = False
@@ -3731,14 +3690,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self._display_resumed_history()
 
         _welcome_skin = None  # stays None when the skin engine failed
+        _welcome_text = "Welcome to Hermes Agent! Type your message or /help for commands."
+        _welcome_color = "#FFF8DC"
         try:
             from hermes_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
-            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Hermes Agent! Type your message or /help for commands.")
-            _welcome_color = _welcome_skin.get_color("banner_text", "#FFF8DC")
+            _welcome_text = _welcome_skin.get_branding("welcome", _welcome_text)
+            _welcome_color = _welcome_skin.get_color("banner_text", _welcome_color)
         except Exception:
-            _welcome_text = "Welcome to Hermes Agent! Type your message or /help for commands."
-            _welcome_color = "#FFF8DC"
+            pass
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
         self._tui_startup_prewarm_and_warnings(_welcome_skin)
@@ -3888,8 +3848,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             )
             return False
         if sys.platform == "darwin":
+            import selectors as _selectors
             try:
-                import selectors as _selectors
                 if hasattr(_selectors, "KqueueSelector"):
                     _kq = _selectors.KqueueSelector()
                     try:
@@ -3899,7 +3859,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                         _kq.close()
             except (OSError, ValueError, KeyError):
                 import asyncio as _aio_probe
-                import selectors as _selectors
 
                 class _SelectEventLoopPolicy(_aio_probe.DefaultEventLoopPolicy):
                     def new_event_loop(self):
@@ -4023,9 +3982,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             cleanup_temp_recordings()
         except Exception:
             pass
-        set_sudo_password_callback(None)
-        set_approval_callback(None)
-        set_secret_capture_callback(None)
+        for _unset in (set_sudo_password_callback, set_approval_callback, set_secret_capture_callback):
+            _unset(None)
         # On SIGHUP/SIGTERM the agent thread may be reaped before its own persistence runs.
         self._persist_active_session_before_close()
 
@@ -4090,13 +4048,10 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
     if not task_id:
         return
-    worker_run_id = None
     raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
-    if raw_run_id:
-        try:
-            worker_run_id = int(raw_run_id)
-        except ValueError:
-            logger.warning("invalid HERMES_KANBAN_RUN_ID=%r", raw_run_id)
+    worker_run_id = _int_or(raw_run_id, None) if raw_run_id else None
+    if raw_run_id and worker_run_id is None:
+        logger.warning("invalid HERMES_KANBAN_RUN_ID=%r", raw_run_id)
 
     from hermes_cli import kanban_db as _kb
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
@@ -4405,24 +4360,25 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
     _wt_thread = threading.Thread(target=_create_worktree, name="worktree-setup", daemon=True)
     _wt_thread.start()
 
+    def _worktree_maintenance(repo: str) -> None:
+        _prune_stale_worktrees(repo)
+        _maintain_pack_health(repo)
+
     def _join_worktree() -> Optional[Dict[str, str]]:
         _wt_thread.join(timeout=120)
         info = _wt_result.get("info")
-        if info:
-            global _active_worktree
-            _active_worktree = info
-            os.environ["TERMINAL_CWD"] = info["path"]
-            atexit.register(_cleanup_worktree, info)
-            # GC stale worktrees AFTER _setup_worktree so they never race on git's worktree
-            # metadata (the new tree is immune: <24h age gate + live pid lock); then repack
-            # once refs are final so lookups stay fast on multi-agent boxes.
-            _repo = _git_repo_root()
-            if _repo:
-                def _worktree_maintenance(repo: str) -> None:
-                    _prune_stale_worktrees(repo)
-                    _maintain_pack_health(repo)
-
-                threading.Thread(target=_worktree_maintenance, args=(_repo,), name="worktree-prune", daemon=True).start()
+        if not info:
+            return info
+        global _active_worktree
+        _active_worktree = info
+        os.environ["TERMINAL_CWD"] = info["path"]
+        atexit.register(_cleanup_worktree, info)
+        # GC stale worktrees AFTER _setup_worktree so they never race on git's worktree
+        # metadata (the new tree is immune: <24h age gate + live pid lock); then repack
+        # once refs are final so lookups stay fast on multi-agent boxes.
+        _repo = _git_repo_root()
+        if _repo:
+            threading.Thread(target=_worktree_maintenance, args=(_repo,), name="worktree-prune", daemon=True).start()
         return info
 
     return _join_worktree
