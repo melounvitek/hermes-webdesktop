@@ -178,44 +178,36 @@ def _scrub_surrogates(value: Any) -> Any:
     return _sanitize_surrogates(value) if isinstance(value, str) else value
 
 
-# Billing buckets that aren't a routable provider identity: a session that
-# persisted only one of these (never ran /model) falls back to the config default.
-# Shared by session_gateway_runtime and tui_gateway.server so they cannot drift.
+# Billing buckets that aren't a routable provider identity: a session that persisted only
+# one of these (never ran /model) falls back to the config default. Shared by
+# session_gateway_runtime and tui_gateway.server so they cannot drift.
 _BARE_BILLING_PROVIDERS = frozenset({"auto", "custom"})
 
 T = TypeVar("T")
 
-DEFAULT_DB_PATH = get_hermes_home() / "state.db"
+# Import-time snapshot lets _default_db_path() detect a re-pointed DEFAULT_DB_PATH
+# (tests monkeypatch the constant directly).
+DEFAULT_DB_PATH = _IMPORT_DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-# Back off from read-only opens after one fails: not retried per query, but short
-# enough that transient fd pressure doesn't strand the read pool.
+# Back off from read-only opens after one fails: not per query, but short enough that
+# transient fd pressure doesn't strand the read pool.
 _READ_OPEN_RETRY_SECONDS = 60.0
-
-# Transient SQLITE_IOERR retry budget for READ-ONLY opens: a WAL writer's
-# checkpoint/reset/frame flush surfaces "disk I/O error" to a concurrent mode=ro
-# reader for a millisecond-wide window (ro cannot do the -shm recovery). Never
-# for writable opens: a writer owns the transition, so an IOERR there is real.
-_READ_ONLY_IOERR_RETRY_ATTEMPTS = 3
-_READ_ONLY_IOERR_RETRY_BACKOFF_S = 0.05
-
-# Import-time snapshot so _default_db_path() can detect a re-pointed
-# DEFAULT_DB_PATH (tests monkeypatch the constant directly).
-_IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
+# Transient SQLITE_IOERR retry budget for READ-ONLY opens: a WAL writer's checkpoint/reset/
+# frame flush surfaces "disk I/O error" to a concurrent mode=ro reader for a millisecond-wide
+# window (ro cannot do the -shm recovery). Never for writable opens: there an IOERR is real.
+_READ_ONLY_IOERR_RETRY_ATTEMPTS, _READ_ONLY_IOERR_RETRY_BACKOFF_S = 3, 0.05
 
 
 def _default_db_path() -> Path:
     """Default state DB path at CALL time: a re-pointed ``DEFAULT_DB_PATH`` wins,
     else ``get_hermes_home()`` is resolved fresh so a runtime HERMES_HOME redirect
     works regardless of import order."""
-    if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
-        return DEFAULT_DB_PATH
-    return get_hermes_home() / "state.db"
+    return DEFAULT_DB_PATH if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH else get_hermes_home() / "state.db"
 
 
-# Live-DB guard knobs live HERE (not in hermes_state_guard): the hermetic conftest
-# monkeypatches ``hermes_state._STATE_DB_GUARD_BYPASS`` (escape hatch for
-# ``@pytest.mark.live_system_guard_bypass``) and ``_EXTRA_DENY_ROOTS`` (the
-# pre-sandbox root, so custom-HERMES_HOME deployments are covered too).
+# Live-DB guard knobs live HERE (not in hermes_state_guard): the hermetic conftest monkeypatches
+# ``hermes_state._STATE_DB_GUARD_BYPASS`` (``@pytest.mark.live_system_guard_bypass`` escape hatch)
+# and ``_EXTRA_DENY_ROOTS`` (the pre-sandbox root, so custom-HERMES_HOME deployments are covered).
 _STATE_DB_GUARD_BYPASS = False
 _STATE_DB_GUARD_EXTRA_DENY_ROOTS: Tuple[Path, ...] = ()
 
@@ -320,13 +312,12 @@ def format_session_db_unavailable(prefix: str = "Session database not available"
     return f"{prefix}: {cause}{hint if any(m in cause.lower() for m in _WAL_INCOMPAT_MARKERS) else ''}."
 
 
-# Auto-repair at most once per DB path per process (no repair loops; serialises
-# concurrent web_server / gateway opens on the same malformed file).
+# Auto-repair at most once per DB path per process (no repair loops; serialises concurrent
+# web_server / gateway opens on the same malformed file).
 _repair_attempted_paths: set[str] = set()
 _repair_attempt_lock = threading.Lock()
-
-# Cross-process schema-surgery lock timeout (``_repair_attempt_lock`` covers one
-# interpreter only); sized for the slowest legitimate holder (VACUUM, multi-GB DB).
+# Cross-process schema-surgery lock timeout (``_repair_attempt_lock`` covers one interpreter
+# only); sized for the slowest legitimate holder (VACUUM, multi-GB DB).
 _REPAIR_LOCK_TIMEOUT_SECONDS = 120.0
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -348,9 +339,8 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
     return path
 
 
-# Process-wide shared SessionDB registry (hermes_state_registry): long-lived
-# in-process callers share ONE writer connection per resolved path via
-# get_shared_session_db(); one-shots use SessionDB() with their own close().
+# Process-wide shared SessionDB registry: long-lived in-process callers share ONE writer
+# connection per resolved path via get_shared_session_db(); one-shots use SessionDB() + close().
 from hermes_state_registry import (  # noqa: F401  (re-export)
     close_shared_session_dbs, get_shared_session_db, release_or_close,
 )

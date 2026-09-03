@@ -183,6 +183,16 @@ _SAME_KEY_NAMESPACE_SQL = (
 )
 
 
+# Upsert tail of _insert_session_row: every routing/metadata column keeps the value an
+# earlier writer set (whitespace is part of the SQL text).
+_UPSERT_KEEP_EXISTING_SQL = ",\n".join(
+    f"                       {col} = COALESCE(sessions.{col}, excluded.{col})" for col in (
+        "session_key", "chat_id", "chat_type", "thread_id", "parent_session_id", "cwd", "profile_name",
+        "git_repo_root", "origin_json", "display_name",
+    )
+)
+
+
 def _inherit_col_sql(col: str, extra: str = "") -> str:
     """``col = COALESCE(sessions.col, (SELECT p.col FROM parent))`` (whitespace is part of the SQL text)."""
     pad = " " * (30 + len(col))
@@ -301,16 +311,7 @@ class SessionSessionsMixin:
                            THEN NULL
                            ELSE sessions.system_prompt
                        END,
-                       session_key = COALESCE(sessions.session_key, excluded.session_key),
-                       chat_id = COALESCE(sessions.chat_id, excluded.chat_id),
-                       chat_type = COALESCE(sessions.chat_type, excluded.chat_type),
-                       thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
-                       parent_session_id = COALESCE(sessions.parent_session_id, excluded.parent_session_id),
-                       cwd = COALESCE(sessions.cwd, excluded.cwd),
-                       profile_name = COALESCE(sessions.profile_name, excluded.profile_name),
-                       git_repo_root = COALESCE(sessions.git_repo_root, excluded.git_repo_root),
-                       origin_json = COALESCE(sessions.origin_json, excluded.origin_json),
-                       display_name = COALESCE(sessions.display_name, excluded.display_name)""",
+""" + _UPSERT_KEEP_EXISTING_SQL,
                 (
                     session_id, source, user_id, session_key, chat_id, chat_type, thread_id, model,
                     json.dumps(model_config) if model_config else None, system_prompt_hash,
