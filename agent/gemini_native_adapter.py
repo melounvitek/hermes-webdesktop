@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -97,8 +98,7 @@ def probe_gemini_tier(
     if not key:
         return "unknown"
     base = str(base_url or DEFAULT_GEMINI_BASE_URL).strip().rstrip("/") or DEFAULT_GEMINI_BASE_URL
-    if base.lower().endswith("/openai"):
-        base = base[: -len("/openai")]
+    base = re.sub(r"/openai\Z", "", base, flags=re.IGNORECASE)
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
@@ -222,11 +222,10 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any], include_ids: bool 
 
 
 def _looks_like_json_schema(node: Any) -> bool:
-    """True if a parsed value contains a JSON-Schema ``$ref`` pointer (``#/...``): Gemini 3
-    resolves ``$ref``/``$defs`` inside functionResponse.response and rejects unknown
-    pointers with HTTP 400, so a tool result that is itself a JSON Schema (e.g.
-    ``tool_describe`` output) must be forwarded as opaque text. False positives only
-    lose the structured shape, never the content."""
+    """True if a parsed value contains a JSON-Schema ``$ref`` pointer (``#/...``): Gemini 3 resolves
+    ``$ref``/``$defs`` inside functionResponse.response and rejects unknown pointers with HTTP 400, so a
+    tool result that is itself a JSON Schema (e.g. ``tool_describe`` output) is forwarded as opaque text.
+    False positives only lose the structured shape, never the content."""
     if isinstance(node, dict):
         return any(
             (key == "$ref" and isinstance(value, str) and value.startswith("#/")) or _looks_like_json_schema(value)
@@ -299,9 +298,7 @@ def _build_gemini_contents(
             system_text_parts.append(_coerce_content_to_text(msg.get("content")))
             continue
         if role in {"tool", "function"}:
-            part = _translate_tool_result_to_gemini(
-                msg, tool_name_by_call_id=tool_name_by_call_id, include_ids=include_tool_call_ids, is_gemini3=is_gemini3
-            )
+            part = _translate_tool_result_to_gemini(msg, tool_name_by_call_id, include_tool_call_ids, is_gemini3=is_gemini3)
             contents.append({"role": "user", "parts": [part]})
             continue
         parts = _extract_multimodal_parts(msg.get("content"))
@@ -586,8 +583,7 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     status = response.status_code
     body_text = (_response_text(response) if body_text is None else body_text) or ""
     err_obj = _error_object(body_text)
-    err_status = str(err_obj.get("status") or "").strip()
-    err_message = str(err_obj.get("message") or "").strip()
+    err_status, err_message = (str(err_obj.get(k) or "").strip() for k in ("status", "message"))
     reason, metadata = _error_info(err_obj)
     try:
         retry_after: Optional[float] = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
@@ -635,10 +631,8 @@ class GeminiNativeClient:
 
     def close(self) -> None:
         self.is_closed = True
-        try:
+        with contextlib.suppress(Exception):
             self._http.close()
-        except Exception:
-            pass
 
     def _headers(self) -> Dict[str, str]:
         return {"Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,

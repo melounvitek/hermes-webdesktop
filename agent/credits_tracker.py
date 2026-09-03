@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Mapping, Optional
 
 from utils import is_truthy_value
@@ -96,8 +97,7 @@ GRANT_UNSPENT_MIN_MICROS = 10_000
 
 
 def new_credits_latch() -> dict:
-    """Fresh notice latch for :func:`evaluate_credits_notices`. Every producer must
-    build it here so a new gate key lands everywhere at once."""
+    """Fresh notice latch for :func:`evaluate_credits_notices`; every producer builds it here so a new gate key lands everywhere."""
     return {"active": set(), "seen_below_90": False, "usage_band": None, "seen_grant_unspent": False}
 
 
@@ -224,33 +224,33 @@ def evaluate_credits_notices(
     return (to_show, to_clear)
 
 
-# Header contract: (field, header, kind[, default]). micros: required int >= 0 ("signed": may be
-# negative); usd: the server's formatted string, ^-?\d+\.\d{2}$; bool: optional "true"/"false" STRING.
-# Handled inline below: subscription-limit-* (PAIRED/optional), tool-pool-micros (optional),
+# Header contract: (field, kind[, default-when-absent]); a field is REQUIRED unless it has a default.
+# Header name = ``x-nous-credits-<field>`` (``x-nous-<field>`` for tool_pool_*), underscores → dashes.
+# micros: int >= 0 ("signed": may be negative); usd: the server's formatted string ^-?\d+\.\d{2}$
+# (never re-parsed); bool: "true"/"false" STRING. Handled inline: subscription-limit-* (PAIRED/optional),
 # denominator-kind ("subscription_cap" | "none"), disabled-reason (omitted when null).
 _HEADER_FIELDS: tuple[tuple, ...] = (
-    ("remaining_micros", "x-nous-credits-remaining-micros", "micros"),
-    ("subscription_micros", "x-nous-credits-subscription-micros", "signed"),
-    ("rollover_micros", "x-nous-credits-rollover-micros", "micros"),
-    ("purchased_micros", "x-nous-credits-purchased-micros", "micros"),
-    ("as_of_ms", "x-nous-credits-as-of-ms", "micros"),
-    ("remaining_usd", "x-nous-credits-remaining-usd", "usd"),
-    ("subscription_usd", "x-nous-credits-subscription-usd", "usd"),
-    ("purchased_usd", "x-nous-credits-purchased-usd", "usd"),
-    ("paid_access", "x-nous-credits-paid-access", "bool", True),  # absent → fail-open (assume access)
-    ("tool_pool_gated_off", "x-nous-tool-pool-gated-off", "bool", False),
+    ("remaining_micros", "micros"), ("subscription_micros", "signed"), ("rollover_micros", "micros"),
+    ("purchased_micros", "micros"), ("as_of_ms", "micros"), ("tool_pool_micros", "micros", 0),
+    ("remaining_usd", "usd"), ("subscription_usd", "usd"), ("purchased_usd", "usd"),
+    ("paid_access", "bool", True),  # absent → fail-open (assume access)
+    ("tool_pool_gated_off", "bool", False),
 )
 
 
-def _parse_field(kind: str, raw: Optional[str], default: Any = None) -> Any:
-    """One header value → field value, or ``_SENTINEL`` on a contract violation."""
+def _header_name(field: str) -> str:
+    return "x-nous-" + ("" if field.startswith("tool_pool_") else "credits-") + field.replace("_", "-")
+
+
+def _parse_field(kind: str, raw: Optional[str], default: Any = _SENTINEL) -> Any:
+    """One header value → field value; ``default`` when absent, ``_SENTINEL`` on a contract violation."""
+    if raw is None:
+        return default
     if kind in ("micros", "signed"):
         val = _safe_int(raw)
         return _SENTINEL if val is _SENTINEL or (kind == "micros" and val < 0) else val
     if kind == "usd":
-        return raw if raw is not None and _USD_RE.match(raw) else _SENTINEL
-    if raw is None:
-        return default
+        return raw if _USD_RE.match(raw) else _SENTINEL
     flag = raw.strip().lower()
     return _SENTINEL if flag not in ("true", "false") else flag == "true"
 
@@ -277,11 +277,8 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
                 logger.warning("credits header version %d unsupported, ignoring — update Hermes", version_val)
             return None
         fields: dict[str, Any] = {
-            name: _parse_field(kind, lowered.get(key), *default) for name, key, kind, *default in _HEADER_FIELDS
+            name: _parse_field(kind, lowered.get(_header_name(name)), *default) for name, kind, *default in _HEADER_FIELDS
         }
-        # tool_pool_micros is OPTIONAL: absent → 0; present-but-invalid → miss.
-        tp_raw = lowered.get("x-nous-tool-pool-micros")
-        fields["tool_pool_micros"] = 0 if tp_raw is None else _parse_field("micros", tp_raw)
         lim_micros_raw = lowered.get("x-nous-credits-subscription-limit-micros")
         lim_usd_raw = lowered.get("x-nous-credits-subscription-limit-usd")
         if lim_micros_raw is not None and lim_usd_raw is not None:
@@ -308,7 +305,6 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
 def _fixture(remaining: str, subscription: str, limit: Optional[str] = None, purchased: Optional[str] = None,
              *, paid: bool = True, reason: Optional[str] = None) -> dict:
     """Fixture spec from *_usd strings; micros derived exactly (Decimal)."""
-    from decimal import Decimal
     d: dict = {}
     for field, usd in (("remaining", remaining), ("subscription", subscription),
                        ("subscription_limit", limit), ("purchased", purchased)):
