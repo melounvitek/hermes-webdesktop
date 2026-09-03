@@ -99,8 +99,7 @@ def _parse_bool(value: Any) -> Optional[bool]:
 
 def _sync_config_bool(env_var: str, config_key: str, *, default: bool) -> bool:
     """``env_var`` -> ``sync.<config_key>`` -> default."""
-    env_val = _parse_bool(os.getenv(env_var))
-    if env_val is not None:
+    if (env_val := _parse_bool(os.getenv(env_var))) is not None:
         return env_val
     cfg_val = _parse_bool(_sync_config(config_key))
     return default if cfg_val is None else cfg_val
@@ -162,9 +161,7 @@ def is_sync_eligible(skill_name: str) -> bool:
         from agent.skill_utils import is_external_skill_path
     except Exception:
         return False
-    if is_bundled(skill_name) or is_hub_installed(skill_name):
-        return False
-    skill_dir = _find_skill_dir(skill_name)
+    skill_dir = None if is_bundled(skill_name) or is_hub_installed(skill_name) else _find_skill_dir(skill_name)
     if skill_dir is None or is_external_skill_path(skill_dir):
         return False
     rel = _rel_to_skills_dir(skill_dir)
@@ -379,8 +376,7 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     if client is None:
         return dict(_NO_BASE_URL)
     owner = identity["owner"]
-    if skill_names is None:
-        skill_names = list_synced_skill_names()
+    skill_names = list_synced_skill_names() if skill_names is None else skill_names
     if not skill_names:
         return {"ok": True, "reason": "no skills opted into sync", "noop": True}
 

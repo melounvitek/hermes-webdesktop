@@ -106,9 +106,8 @@ def _compile() -> dict[str, List[Tuple[re.Pattern, str]]]:
     for pattern, pid, scope in _PATTERNS:
         if scope not in _SCOPE_SETS:
             raise ValueError(f"threat_patterns: unknown scope {scope!r} for pattern {pid!r}")
-        entry = (re.compile(pattern, re.IGNORECASE), pid)
         for s in _SCOPE_SETS[scope]:
-            compiled[s].append(entry)
+            compiled[s].append((re.compile(pattern, re.IGNORECASE), pid))
     return compiled
 
 

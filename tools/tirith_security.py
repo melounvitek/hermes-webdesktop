@@ -106,12 +106,6 @@ def _warn_once(key: str, message: str, *args) -> None:
     logger.warning(message, *args)
 
 
-def _reset_spawn_warning_state() -> None:
-    """Clear the warn-once set so a failure after a fresh (re)install surfaces again."""
-    with _warned_lock:
-        _warned_messages.clear()
-
-
 def _cached_path() -> str | None:
     """The path resolved on a previous call, or None if unresolved (None) / failed (_INSTALL_FAILED)."""
     return _resolved_path or None
@@ -165,8 +159,9 @@ def _mark_install_failed(reason: str = ""):
 
 
 def _clear_install_failed():
-    """Remove the failure marker and reset warn-once state after a successful install."""
-    _reset_spawn_warning_state()
+    """Remove the failure marker and reset warn-once state (so a failure after a reinstall surfaces again)."""
+    with _warned_lock:
+        _warned_messages.clear()
     with suppress(OSError):
         os.unlink(_failure_marker_path())
 

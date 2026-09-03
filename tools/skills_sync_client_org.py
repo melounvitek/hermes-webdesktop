@@ -157,11 +157,15 @@ def org_skill_is_locally_modified(skill_rel_path: str, org_id: str) -> bool:
     return bool(recorded) and _skill_dir_fingerprint(dest) != recorded
 
 
+def _active_org_id() -> Optional[str]:
+    from agent.skill_utils import read_active_org_id
+    return read_active_org_id(_ssc()._skills_dir())
+
+
 def list_locally_modified_org_skills(org_id: Optional[str] = None) -> List[str]:
     """Org skills with local edits that upstream has not seen."""
     try:
-        from agent.skill_utils import read_active_org_id
-        org_id = org_id or read_active_org_id(_ssc()._skills_dir())
+        org_id = org_id or _active_org_id()
         if not org_id:
             return []
         return sorted(rel for rel in _read_org_baseline(org_id) if org_skill_is_locally_modified(rel, org_id))
@@ -174,14 +178,11 @@ def list_org_skill_names() -> List[str]:
     """Skill names present in the local org mirror (empty when none pulled)."""
     names: List[str] = []
     try:
-        from agent.skill_utils import read_active_org_id
-        org_id = read_active_org_id(_ssc()._skills_dir())
+        org_id = _active_org_id()
         root = _mirror_root(org_id) if org_id else None
         if root and root.is_dir():
-            for skill_md in root.rglob("SKILL.md"):
-                rel = skill_md.parent.relative_to(root)
-                if rel.parts:
-                    names.append(str(rel).replace("\\", "/"))
+            names = [str(rel).replace("\\", "/") for rel in (p.parent.relative_to(root) for p in root.rglob("SKILL.md"))
+                     if rel.parts]
     except Exception as e:
         logger.debug("skills_sync_client: org skill listing failed: %s", e)
     return sorted(names)
