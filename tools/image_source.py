@@ -71,7 +71,6 @@ async def resolve_image_source(src: str, ctx: ResolveContext, *, permitted: tupl
             "file path, a file:// URI, or a data: URL.",
             src=s,
         )
-
     # Everything else is a filesystem path — including bare relative names like "pic.png"
     # (a path-shape gate here regressed them once).
     candidate = s[len("file://"):] if s.lower().startswith("file://") else s
@@ -117,7 +116,6 @@ def _http_block_reason(url: str) -> Optional[str]:
     ``_download_image`` re-checks per attempt and against the final redirect target (intentional)."""
     from tools.url_safety import is_safe_url
     from tools.website_policy import check_website_access
-
     if not is_safe_url(url):
         return "blocked: unsafe or private URL"
     blocked = check_website_access(url)
@@ -129,7 +127,6 @@ def _http_block_reason(url: str) -> Optional[str]:
 async def _download_to_bytes(url: str) -> bytes:
     import tempfile
     from tools.vision_tools import _download_image
-
     with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tf:
         tmp = Path(tf.name)
     try:
@@ -173,9 +170,7 @@ def _permitted_host_read_target(p: Path, ctx: ResolveContext) -> Optional[Path]:
             return p.resolve()
         except Exception:  # noqa: BLE001 — unresolved path: let is_file() fail downstream
             return p
-
     from tools.credential_files import from_agent_visible_cache_path
-
     try:
         real = Path(from_agent_visible_cache_path(str(p))).resolve()
     except Exception:  # noqa: BLE001 — cannot resolve -> not a safe host read
@@ -222,7 +217,6 @@ async def _resolve_container_fallback(
     error so "no such file" / "permission denied" / "never came up" are distinguishable.
     """
     import shlex
-
     _ensure_container_env(ctx.task_id)
     env = _get_active_env(ctx.task_id)
     if env is None:
@@ -230,12 +224,10 @@ async def _resolve_container_fallback(
             f"'{p}' is not reachable inside the sandbox and no active sandbox "
             f"session is available to read it",
             src=src, origin="container")
-
     # Bound the read INSIDE the sandbox: head -c caps at ingest-limit+1 (+1 distinguishes "at the
     # cap" from "over") so /dev/zero can't stream unbounded base64 into host memory. The input
     # redirect avoids argv (leading-dash paths); tr -d instead of GNU-only base64 -w0 (BusyBox).
     cmd = f"head -c {_MAX_INGEST_BYTES + 1} < {shlex.quote(str(p))} | base64 | tr -d '\\n'"
-
     last_res: dict = {"returncode": 1, "output": ""}
     for attempt in range(2):
         last_res = await asyncio.to_thread(env.execute, cmd)
@@ -263,10 +255,8 @@ def _finalize(
     """Chokepoint: 50MB ingest cap + type check. Images by magic bytes; video (opt-in) by
     extension + mp4 sniff — enough because every downstream consumer re-validates."""
     from tools.vision_tools import _detect_image_mime_type_from_bytes
-
     if len(data) > _MAX_INGEST_BYTES:
         raise SourceTooLarge("media exceeds size limit", src=src, origin=origin)
-
     sniffed = _detect_image_mime_type_from_bytes(data)
     if sniffed is not None:
         if "image" not in permitted:
@@ -288,7 +278,6 @@ def _detect_video_mime(data: bytes, src: str) -> Optional[str]:
     offset 4 (covers extensionless data: URLs / query-string URLs)."""
     from urllib.parse import urlsplit
     from tools.vision_tools import _detect_video_mime_type
-
     path_part = urlsplit(src).path if _SCHEME_RE.match(src) else src
     by_extension = _detect_video_mime_type(Path(path_part))
     if by_extension is not None:

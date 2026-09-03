@@ -59,7 +59,6 @@ class _ManagedFalSyncClient:
     def __init__(self, fal_client: Any, *, key: str, queue_run_origin: str):
         sync_client_class = _require(getattr(fal_client, "SyncClient", None), "fal_client.SyncClient")
         client_module = _require(getattr(fal_client, "client", None), "fal_client.client")
-
         self._queue_url_format = _normalize_fal_queue_url_format(queue_run_origin)
         self._sync_client = sync_client_class(key=key)
         self._http_client = getattr(self._sync_client, "_client", None)
@@ -69,7 +68,6 @@ class _ManagedFalSyncClient:
         self._add_hint_header = getattr(client_module, "add_hint_header", None)
         self._add_priority_header = getattr(client_module, "add_priority_header", None)
         self._add_timeout_header = getattr(client_module, "add_timeout_header", None)
-
         _require(self._http_client, "fal_client.SyncClient._client")
         if self._maybe_retry_request is None or self._raise_for_status is None:
             raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
@@ -85,7 +83,6 @@ class _ManagedFalSyncClient:
             url += "/" + path.lstrip("/")
         if webhook_url is not None:
             url += "?" + urlencode({"fal_webhook": webhook_url})
-
         request_headers = dict(headers or {})
         if hint is not None and self._add_hint_header is not None:
             self._add_hint_header(hint, request_headers)
@@ -97,13 +94,11 @@ class _ManagedFalSyncClient:
             if self._add_timeout_header is None:
                 raise RuntimeError("fal_client.client.add_timeout_header is required for timeout requests")
             self._add_timeout_header(start_timeout, request_headers)
-
         response = self._maybe_retry_request(
             self._http_client, "POST", url, json=arguments,
             timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers,
         )
         self._raise_for_status(response)
-
         data = response.json()
         return self._request_handle_class(
             request_id=data["request_id"], response_url=data["response_url"],
