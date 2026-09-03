@@ -1254,9 +1254,7 @@ def _pid_marker_names_self(target_pid: int, target_start_time: Any) -> bool:
     if target_pid != os.getpid():
         return False
     our_start_time = _get_process_start_time(target_pid)
-    if target_start_time is None or our_start_time is None:
-        return True
-    return target_start_time == our_start_time
+    return None in (target_start_time, our_start_time) or target_start_time == our_start_time
 
 
 def _consume_pid_marker_for_self(path: Path, *, ttl_s: int) -> bool:
