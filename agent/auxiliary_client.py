@@ -1477,6 +1477,230 @@ def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
     return text_parts, tool_calls_raw, usage
 
 
+def _close_quietly(target: Any, failure_note: Optional[str]) -> None:
+    """Call ``target.close()`` if present; a failure is debug-logged under ``failure_note`` (silent when None)."""
+    close = getattr(target, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            if failure_note:
+                logger.debug("Codex auxiliary: %s", failure_note, exc_info=True)
+
+
+class _CodexStreamGuard:
+    """Progress-aware deadline + FD-safe timeout watchdog for one Codex aux stream attempt.
+
+    Three regimes: (1) the first substantive payload must arrive within
+    ``no_progress_timeout`` or we fail fast into the caller's retry/fallback chain
+    (a dead or keepalive-only zombie stream must not hold the whole budget);
+    (2) each substantive event re-arms that window (keepalive/lifecycle frames do
+    NOT, mirroring commit-fence gating) so a live stream is never killed by an
+    absolute total; (3) a hard ceiling from ``_aux_stream_total_ceiling`` still
+    terminates a pathological drip.
+    """
+
+    def __init__(self, client: Any, total_timeout: Optional[float]):
+        self._client = client
+        self.total_timeout = total_timeout
+        self._start = time.monotonic()
+        self.no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+        if total_timeout is not None:
+            self.no_progress_timeout = min(self.no_progress_timeout, float(total_timeout))
+        self.hard_deadline = self._start + _aux_stream_total_ceiling(total_timeout)
+        # The waiting host's absolute deadline clamps the ceiling so the watchdog Timer
+        # severs the socket the instant the host stops waiting — a stream blocked
+        # between events can't be stopped by a per-event check.
+        host_deadline = _current_aux_stream_deadline()
+        if isinstance(host_deadline, (int, float)) and host_deadline < self.hard_deadline:
+            self.hard_deadline = float(host_deadline)
+        self._deadline_lock = threading.Lock()
+        self._progress_deadline = self._start + self.no_progress_timeout
+        self.saw_content = threading.Event()
+        self.timed_out = threading.Event()
+        # Set only when the timeout WON (not when the owner hard-cancelled first):
+        # tells the owner's ``finally`` the shared client's FDs still need a real close.
+        self.timeout_release_pending = threading.Event()
+        self.stream_finished = threading.Event()
+        self._timer = None
+        # The owner may return on hard cancel while this attempt is still blocked in
+        # the SDK stream. Timer threads don't inherit the worker's thread-local
+        # protection state, so freeze the hard-cancel source before creating the timer.
+        self._protected_cancel_check = (
+            _capture_aux_cancel_check() if _aux_interrupt_protected() else None
+        )
+        self._attempt_stream_lock = threading.Lock()
+        self._attempt_stream: Any = None
+        # The request-driving thread owns the transport FDs — see _close_client_on_timeout.
+        self._owner_tid = threading.get_ident()
+
+    def effective_deadline(self) -> float:
+        with self._deadline_lock:
+            return min(self.hard_deadline, self._progress_deadline)
+
+    def cancel_requested(self) -> bool:
+        """True when the frozen hard-cancel source says the owner already cancelled."""
+        return callable(self._protected_cancel_check) and _captured_aux_cancel_requested(
+            self._protected_cancel_check
+        )
+
+    def adopt_stream(self, stream: Any) -> None:
+        with self._attempt_stream_lock:
+            self._attempt_stream = stream
+
+    def release_stream(self, stream: Any) -> None:
+        """Owner-side: close the attempt stream silently and forget it."""
+        _close_quietly(stream, None)
+        with self._attempt_stream_lock:
+            self._attempt_stream = None
+
+    def close_attempt_stream(self, failure_note: str) -> None:
+        """Closes only this attempt's stream — never the process-shared client."""
+        with self._attempt_stream_lock:
+            stream = self._attempt_stream
+        _close_quietly(stream, failure_note)
+
+    def record_progress(self) -> None:
+        """Substantive payload re-arms the no-progress window; the hard ceiling never moves."""
+        with self._deadline_lock:
+            self._progress_deadline = time.monotonic() + self.no_progress_timeout
+
+    def timeout_message(self) -> str:
+        elapsed = time.monotonic() - self._start
+        if time.monotonic() >= self.hard_deadline:
+            return (
+                "Codex auxiliary Responses stream exceeded "
+                f"{self.hard_deadline - self._start:.1f}s hard ceiling"
+            )
+        if not self.saw_content.is_set():
+            return (
+                "Codex auxiliary Responses stream produced no output "
+                f"within {float(self.no_progress_timeout):.1f}s "
+                f"(no-progress timeout, {elapsed:.1f}s elapsed)"
+            )
+        return (
+            "Codex auxiliary Responses stream stalled: no new output "
+            f"for {float(self.no_progress_timeout):.1f}s "
+            f"({elapsed:.1f}s elapsed)"
+        )
+
+    def _close_client_on_timeout(self) -> None:
+        begin_timeout_cleanup = getattr(
+            self._protected_cancel_check, "begin_timeout_cleanup", None
+        )
+        if callable(begin_timeout_cleanup):
+            timeout_won = bool(begin_timeout_cleanup())
+        else:
+            timeout_won = not self.cancel_requested()
+        # Publish transport timeout only after the attempt-local decision is
+        # fixed, so owner polling cannot observe completion in between.
+        self.timed_out.set()
+        if not timeout_won:
+            # Owner already hard-cancelled. The OpenAI client is process-shared, so
+            # never close/evict it here; wake only this attempt's stream if
+            # responses.create() returned one, else rely on the bounded SDK timeout.
+            self.close_attempt_stream("cancelled attempt stream close during timeout failed")
+            return
+        # FD-ownership contract: only the thread driving the request may ``close()``
+        # this client's FDs. From a stranger thread (the watchdog Timer) only
+        # ``shutdown()`` is FD-safe — ``close()`` releases the raw TLS fd while the
+        # owner's OpenSSL BIO still caches it, the kernel recycles it (e.g. into a
+        # SQLite handle), and the owner's TLS flush corrupts that file. The owner
+        # does the real close in its ``finally``.
+        self.timeout_release_pending.set()
+        if threading.get_ident() == self._owner_tid:
+            _close_quietly(self._client, "client close during timeout failed")
+        else:
+            try:
+                from agent.agent_runtime_helpers import force_close_tcp_sockets
+
+                shutdown_count = force_close_tcp_sockets(self._client)
+                logger.info(
+                    "Codex auxiliary client aborted (timeout, tcp_force_closed=%d, "
+                    "deferred_close=stranger_thread)",
+                    shutdown_count,
+                )
+            except Exception:
+                logger.debug("Codex auxiliary: client abort during timeout failed", exc_info=True)
+            # Socket shutdown only wakes a reader on a REAL transport; the owner may
+            # be blocked inside the SDK's event stream (or a socketless test double).
+            # Closing the attempt-owned stream releases it without touching shared FDs.
+            self.close_attempt_stream("attempt stream close during stranger-thread timeout failed")
+        # The aux client cache wraps this same client; drop the entry so the next
+        # aux call doesn't reuse the dead transport and fail fast.
+        try:
+            _evict_cached_client_instance(self._client)
+        except Exception:
+            logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
+
+    def check_cancelled(self) -> None:
+        if self.total_timeout is not None and time.monotonic() >= self.effective_deadline():
+            if not self.timed_out.is_set():
+                self._close_client_on_timeout()
+            raise TimeoutError(self.timeout_message())
+        try:
+            from tools.interrupt import is_interrupted
+            # Protected atomic aux tasks (compression) must not abort on a mid-flight
+            # gateway interrupt (would trigger a degraded fallback marker). Explicit
+            # host cancellation has its own exception; timeouts still fire and
+            # unprotected aux tasks remain interruptible.
+            if _aux_interrupt_cancel_requested():
+                raise AuxiliaryExplicitCancellation()
+            if is_interrupted() and not _aux_interrupt_protected():
+                raise InterruptedError("Codex auxiliary Responses stream interrupted")
+        except InterruptedError:
+            raise
+        except Exception:
+            # Interrupt state is best-effort UX; never a new failure mode.
+            pass
+
+    def _watchdog_fire(self) -> None:
+        # Re-armable: if progress moved the deadline forward, reschedule instead of
+        # killing a live stream.
+        remaining = self.effective_deadline() - time.monotonic()
+        if remaining > 0:
+            if self.timed_out.is_set() or self.stream_finished.is_set():
+                return
+            self._arm_timer(remaining)
+            return
+        self._close_client_on_timeout()
+
+    def _arm_timer(self, delay: float) -> None:
+        t = threading.Timer(delay, self._watchdog_fire)
+        t.daemon = True
+        self._timer = t
+        t.start()
+
+    def start(self) -> None:
+        """Arm the watchdog (when a total timeout exists) and run the first cancel check."""
+        if self.total_timeout:
+            self._arm_timer(max(self.effective_deadline() - time.monotonic(), 0.0))
+        self.check_cancelled()
+
+    def on_event(self, _event: Any) -> None:
+        # TTFP telemetry records every frame, but forward progress (compression
+        # commit fence, no-progress window) counts only substantive payloads —
+        # keepalives must not re-arm, so a zombie stream dies at the same window
+        # as a dead connection.
+        if _codex_event_has_content(_event):
+            self.record_progress()
+            self.saw_content.set()
+            _notify_aux_provider_response()
+        else:
+            _notify_aux_timing_response()
+        self.check_cancelled()
+
+    def finish(self) -> None:
+        """Owner ``finally``: stop the watchdog and release FDs a stranger-thread timeout only shut down."""
+        self.stream_finished.set()
+        if self._timer is not None:
+            self._timer.cancel()
+        # Gated on timeout_release_pending, NOT timed_out: after a hard-cancel the
+        # shared client must stay usable for other sessions.
+        if self.timeout_release_pending.is_set():
+            _close_quietly(self._client, "owner-thread close after timeout failed")
+
+
 class _CodexCompletionsAdapter:
     """Drop-in shim routing chat.completions.create() kwargs through Codex Responses streaming."""
 
@@ -1484,42 +1708,130 @@ class _CodexCompletionsAdapter:
         self._client = real_client
         self._model = model
 
-    def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
-        """Translate chat.completions kwargs into Responses API kwargs; returns ``(resp_kwargs, model, timeout)``."""
-        messages = kwargs.get("messages", [])
-        model = kwargs.get("model", self._model)
-
-        # Split system/instructions from replayable messages, then use the
-        # SINGLE shared chat->Responses converter (agent/transports/codex.py).
-        # A private loop here let role="tool" leak into Responses input[],
-        # which the API rejects; the shared converter encodes tool history
-        # as function_call/function_call_output so all paths stay identical.
-        from agent.codex_responses_adapter import _chat_messages_to_responses_input
+    def _host_flags(self) -> Tuple[str, bool, bool, bool]:
+        """``(base_url, is_xai, is_github_copilot, is_github_any)`` for the wrapped client."""
         from utils import base_url_host_matches
+
+        host = str(getattr(self._client, "base_url", "") or "")
+        is_xai = base_url_host_matches(host, "x.ai") or base_url_host_matches(host, "api.x.ai")
+        is_copilot = base_url_host_matches(host, "githubcopilot.com")
+        return host, is_xai, is_copilot, is_copilot or base_url_host_matches(host, "models.github.ai")
+
+    def _responses_input(self, messages: List[Dict[str, Any]], is_github: bool) -> Tuple[str, List[Any]]:
+        """Split system → ``instructions`` and convert the rest via the SINGLE shared chat→Responses converter.
+
+        A private loop here once let role="tool" leak into Responses input[] (API
+        rejects it); the shared converter encodes tool history as
+        function_call/function_call_output so all paths stay identical.
+        """
+        from agent.codex_responses_adapter import _chat_messages_to_responses_input
 
         instructions = "You are a helpful assistant."
         replay_messages: List[Dict[str, Any]] = []
         for msg in messages:
-            role = msg.get("role", "user")
             content = msg.get("content") or ""
-            if role == "system":
+            if msg.get("role", "user") == "system":
                 instructions = content if isinstance(content, str) else str(content)
             else:
                 replay_messages.append(msg)
-
-        # Copilot binds replayed codex_message_items ids to a backend connection
-        # that doesn't survive credential rotation (HTTP 401 on replay); this
-        # adapter bypasses build_kwargs so it needs the same guard.
-        _host_for_input = str(getattr(self._client, "base_url", "") or "")
-        _is_github_for_input = base_url_host_matches(_host_for_input, "githubcopilot.com")
-        # Aux calls never send ``context_management`` (native compaction is a
-        # main-turn feature), so never replay or emit a compaction checkpoint.
-        input_items = _chat_messages_to_responses_input(
+        # Copilot binds replayed codex_message_items ids to a backend connection that
+        # doesn't survive credential rotation (401 on replay) — same guard as build_kwargs.
+        # Aux calls never send ``context_management`` (main-turn feature): no compaction checkpoint.
+        return instructions, _chat_messages_to_responses_input(
             replay_messages,
-            is_github_responses=_is_github_for_input,
+            is_github_responses=is_github,
             native_compaction_eligible=False,
         )
 
+    @staticmethod
+    def _apply_extra_body(resp_kwargs: Dict[str, Any], extra_body: Any, model: str, is_xai: bool) -> None:
+        """Translate extra_body service_tier/reasoning into top-level Responses fields (mirrors codex.py::build_kwargs)."""
+        if not isinstance(extra_body, dict):
+            return
+        # service_tier (fast mode) is a top-level Responses field; xAI's endpoint rejects it.
+        service_tier = extra_body.get("service_tier")
+        if isinstance(service_tier, str) and service_tier.strip() and not is_xai:
+            resp_kwargs["service_tier"] = service_tier.strip()
+        reasoning_cfg = extra_body.get("reasoning")
+        # ``enabled: False`` leaves reasoning/include unset (Codex still thinks by default).
+        if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("enabled") is not False:
+            # Truthy-only: Codex 400s on e.g. {"effort": null}, so falsy → default.
+            # Shared per-model clamp with the main transport ("max" is gpt-5.6-only;
+            # "minimal"/"ultra" always rejected).
+            from agent.reasoning_effort import clamp_effort, codex_supported_efforts
+
+            effort = clamp_effort(reasoning_cfg.get("effort") or "medium", codex_supported_efforts(model))
+            resp_kwargs["reasoning"] = {"effort": effort, "summary": "auto"}
+            resp_kwargs["include"] = ["reasoning.encrypted_content"]
+
+    @staticmethod
+    def _responses_tools(tools: Any) -> List[Dict[str, Any]]:
+        """chat.completions function tools → Responses tool entries (sanitized copies)."""
+        # xAI Responses rejects ``pattern``/``format`` JSON Schema keywords (400);
+        # strip for chat_completion_helpers.py parity. Deep-copy first — sanitizers
+        # mutate inner dicts in place and would strip the caller's tool registry.
+        try:
+            import copy as _copy
+            from tools.schema_sanitizer import strip_pattern_and_format, strip_slash_enum
+            tools = _copy.deepcopy(list(tools))
+            tools, _ = strip_pattern_and_format(tools)
+            tools, _ = strip_slash_enum(tools)
+        except Exception as exc:
+            logger.warning(
+                "Auxiliary client: failed to sanitize tool schemas for "
+                "Codex/xAI Responses path: %s", exc,
+            )
+        converted = []
+        for t in tools:
+            fn = t.get("function", {}) if isinstance(t, dict) else {}
+            name = fn.get("name")
+            if name:
+                converted.append({
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                })
+        return converted
+
+    @staticmethod
+    def _apply_prompt_cache(resp_kwargs: Dict[str, Any], model: str, host: str, skip_key: bool) -> None:
+        """Stable prompt-cache routing, mirroring codex.py::build_kwargs (else aux calls stay cache-cold).
+
+        Key is content-addressed from the static prefix (instructions + tool
+        schemas) so it survives across turns, scoped by the owning conversation
+        (rotation-stable logical scope, else the physical session id). ``skip_key``
+        where the main transport does: xAI takes it in extra_body, GitHub opts out.
+        """
+        try:
+            from agent.transports.codex import (
+                _cache_scope_from_session_id,
+                _content_cache_key,
+                _default_prompt_cache_retention_for_request,
+            )
+
+            if not skip_key and "prompt_cache_key" not in resp_kwargs:
+                scope = _cache_scope_from_session_id(
+                    _runtime_main_value("cache_scope")
+                    or _runtime_main_value("session_id")
+                )
+                cache_key = _content_cache_key(resp_kwargs["instructions"], resp_kwargs.get("tools"), scope)
+                if cache_key:
+                    resp_kwargs["prompt_cache_key"] = cache_key
+            if "prompt_cache_retention" not in resp_kwargs:
+                cache_retention = _default_prompt_cache_retention_for_request(model, host)
+                if cache_retention:
+                    resp_kwargs["prompt_cache_retention"] = cache_retention
+        except Exception:
+            logger.debug(
+                "Codex auxiliary: prompt_cache_key derivation skipped", exc_info=True
+            )
+
+    def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
+        """Translate chat.completions kwargs into Responses API kwargs; returns ``(resp_kwargs, model, timeout)``."""
+        model = kwargs.get("model", self._model)
+        host, is_xai, is_copilot, is_github = self._host_flags()
+        instructions, input_items = self._responses_input(kwargs.get("messages", []), is_copilot)
         resp_kwargs: Dict[str, Any] = {
             # Codex only knows the base slug; strip the Hermes ``-900k`` picker suffix.
             "model": _strip_codex_ctx_variant(model),
@@ -1527,422 +1839,78 @@ class _CodexCompletionsAdapter:
             "input": input_items or [{"role": "user", "content": ""}],
             "store": False,
         }
-
-        # Forward the chat.completions timeout; otherwise a Codex stream can
-        # sit behind a dead-looking CLI until the user force-interrupts.
+        # Forward the chat.completions timeout; otherwise a Codex stream can sit
+        # behind a dead-looking CLI until the user force-interrupts.
         timeout = kwargs.get("timeout")
         if timeout is not None:
             resp_kwargs["timeout"] = timeout
-
         # The Codex endpoint rejects max_output_tokens/temperature (400) — omit.
-
-        # Translate extra_body.reasoning into Responses top-level reasoning +
-        # include, mirroring agent/transports/codex.py::build_kwargs().
-        extra_body = kwargs.get("extra_body") or {}
-        if isinstance(extra_body, dict):
-            # service_tier (fast mode) is a top-level Responses field; xAI's
-            # Responses endpoint rejects it — same xAI-only guard as main transport.
-            service_tier = extra_body.get("service_tier")
-            client_base_url = str(getattr(self._client, "base_url", "") or "")
-            is_xai_responses = (
-                base_url_host_matches(client_base_url, "x.ai")
-                or base_url_host_matches(client_base_url, "api.x.ai")
-            )
-            if (
-                isinstance(service_tier, str)
-                and service_tier.strip()
-                and not is_xai_responses
-            ):
-                resp_kwargs["service_tier"] = service_tier.strip()
-
-            reasoning_cfg = extra_body.get("reasoning")
-            if isinstance(reasoning_cfg, dict):
-                if reasoning_cfg.get("enabled") is False:
-                    # Explicitly disabled — leave reasoning/include unset. Codex
-                    # still thinks by default; we honor intent where the API allows.
-                    pass
-                else:
-                    # Truthy-only (mirrors build_kwargs): Codex 400s on
-                    # e.g. {"effort": null}, so falsy falls back to default.
-                    effort = reasoning_cfg.get("effort") or "medium"
-                    # Shared per-model clamp with the main Codex transport
-                    # ("max" is gpt-5.6-only; "minimal"/"ultra" always rejected).
-                    from agent.reasoning_effort import (
-                        clamp_effort,
-                        codex_supported_efforts,
-                    )
-
-                    effort = clamp_effort(effort, codex_supported_efforts(model))
-                    resp_kwargs["reasoning"] = {
-                        "effort": effort,
-                        "summary": "auto",
-                    }
-                    resp_kwargs["include"] = ["reasoning.encrypted_content"]
-
-        # Tools for auxiliary callers (e.g. skills_hub) that pass function schemas
+        self._apply_extra_body(resp_kwargs, kwargs.get("extra_body") or {}, model, is_xai)
         tools = kwargs.get("tools")
         if tools:
-            # xAI Responses rejects ``pattern``/``format`` JSON Schema keywords
-            # (400); strip to match chat_completion_helpers.py parity. Deep-copy
-            # first — sanitizers mutate inner dicts in place and would
-            # permanently strip the caller's tool registry.
-            try:
-                import copy as _copy
-                from tools.schema_sanitizer import (
-                    strip_pattern_and_format,
-                    strip_slash_enum,
-                )
-                tools = _copy.deepcopy(list(tools))
-                tools, _ = strip_pattern_and_format(tools)
-                tools, _ = strip_slash_enum(tools)
-            except Exception as exc:
-                logger.warning(
-                    "Auxiliary client: failed to sanitize tool schemas for "
-                    "Codex/xAI Responses path: %s", exc,
-                )
-            converted = []
-            for t in tools:
-                fn = t.get("function", {}) if isinstance(t, dict) else {}
-                name = fn.get("name")
-                if not name:
-                    continue
-                converted.append({
-                    "type": "function",
-                    "name": name,
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                })
+            converted = self._responses_tools(tools)
             if converted:
                 resp_kwargs["tools"] = converted
-
-        # Stable prompt-cache routing, mirroring agent/transports/codex.py::build_kwargs;
-        # without it aux Responses calls (MoA aggregator etc.) stay cache-cold while the
-        # main transport is warm. Key is content-addressed from the static prefix
-        # (instructions + tool schemas) so it survives across turns. Skip the top-level
-        # field where the main transport does: xAI takes it in extra_body, GitHub/Copilot opts out.
-        try:
-            from agent.transports.codex import (
-                _cache_scope_from_session_id,
-                _content_cache_key,
-                _default_prompt_cache_retention_for_request,
-            )
-            from utils import base_url_host_matches
-
-            _host_src = str(getattr(self._client, "base_url", "") or "")
-            _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
-            _is_github = (
-                base_url_host_matches(_host_src, "githubcopilot.com")
-                or base_url_host_matches(_host_src, "models.github.ai")
-            )
-            if not _is_xai and not _is_github and "prompt_cache_key" not in resp_kwargs:
-                # Scope by the owning conversation so unrelated sessions with the
-                # same instructions/tools don't share a cache slot; prefer the
-                # rotation-stable logical scope, fall back to the physical session id.
-                _scope = _cache_scope_from_session_id(
-                    _runtime_main_value("cache_scope")
-                    or _runtime_main_value("session_id")
-                )
-                _cache_key = _content_cache_key(instructions, resp_kwargs.get("tools"), _scope)
-                if _cache_key:
-                    resp_kwargs["prompt_cache_key"] = _cache_key
-            if "prompt_cache_retention" not in resp_kwargs:
-                _cache_retention = _default_prompt_cache_retention_for_request(
-                    model,
-                    _host_src,
-                )
-                if _cache_retention:
-                    resp_kwargs["prompt_cache_retention"] = _cache_retention
-        except Exception:
-            logger.debug(
-                "Codex auxiliary: prompt_cache_key derivation skipped", exc_info=True
-            )
+        self._apply_prompt_cache(resp_kwargs, model, host, is_xai or is_github)
         return resp_kwargs, model, timeout
+
+    def _stream_final_response(self, resp_kwargs: Dict[str, Any], model: str, guard: _CodexStreamGuard) -> Any:
+        """Drive ``responses.create(stream=True)`` under ``guard``; returns the assembled final Responses object."""
+        # Low-level ``responses.create(stream=True)`` and assemble the final response
+        # ourselves from ``response.output_item.done``: the high-level ``responses.stream()``
+        # rebuilds from ``response.completed.response.output``, which the Codex backend
+        # returns as ``null`` (NoneType crash inside the SDK).
+        from agent.codex_runtime import (
+            _bypass_sdk_request_transform,
+            _consume_codex_event_stream,
+        )
+
+        stream_kwargs = dict(resp_kwargs)
+        stream_kwargs["stream"] = True
+        # Keep bulk wire payload out of the SDK's GIL-holding request transform.
+        stream_kwargs = _bypass_sdk_request_transform(stream_kwargs)
+        event_stream = self._client.responses.create(**stream_kwargs)
+        guard.adopt_stream(event_stream)
+        # The timer may fire while responses.create() is blocked; if the cancelled
+        # attempt had no stream to close then, close it now that it is attempt-owned
+        # — never touch the shared client.
+        if guard.timed_out.is_set() and guard.cancel_requested():
+            guard.close_attempt_stream("late cancelled attempt stream close failed")
+        try:
+            # Some Codex-compatible hosts accept ``stream=True`` but return a completed
+            # Responses object (not iterable) — don't hand it to the consumer.
+            if hasattr(event_stream, "output"):
+                return event_stream
+            return _consume_codex_event_stream(
+                event_stream,
+                model=str(resp_kwargs.get("model") or model),
+                on_event=guard.on_event,
+            )
+        finally:
+            guard.release_stream(event_stream)
 
     def create(self, **kwargs) -> Any:
         resp_kwargs, model, timeout = self._build_responses_kwargs(kwargs)
-
-        # Stream and collect the response
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
-        # Progress-aware deadlines, three regimes: (1) first substantive payload must
-        # arrive within ``no_progress_timeout`` or we fail fast into the caller's
-        # retry/fallback chain — a dead or keepalive-only zombie stream must not hold
-        # the whole compression budget; (2) each substantive event re-arms that window
-        # (keepalive/lifecycle frames do NOT, mirroring commit-fence gating), so a live
-        # stream producing tokens is never killed by an absolute total; (3) a hard
-        # ceiling from ``_aux_stream_total_ceiling`` still terminates a pathological drip.
-        _start_monotonic = time.monotonic()
-        no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
-        if total_timeout is not None:
-            no_progress_timeout = min(no_progress_timeout, float(total_timeout))
-        hard_deadline = _start_monotonic + _aux_stream_total_ceiling(total_timeout)
-        # The waiting host's absolute deadline (aux_stream_deadline) clamps the hard
-        # ceiling so the watchdog Timer severs the socket the instant the host stops
-        # waiting — a stream blocked between events can't be stopped by a per-event check.
-        _host_deadline = _current_aux_stream_deadline()
-        if isinstance(_host_deadline, (int, float)) and _host_deadline < hard_deadline:
-            hard_deadline = float(_host_deadline)
-        deadline_lock = threading.Lock()
-        progress_deadline = [_start_monotonic + no_progress_timeout]
-        saw_content = threading.Event()
-        timed_out = threading.Event()
-        # Set only when the timeout WON (not when the owner hard-cancelled first):
-        # tells the owner's ``finally`` the shared client's FDs still need a real close.
-        timeout_release_pending = threading.Event()
-        stream_finished = threading.Event()
-        timeout_timer: List[Optional[threading.Timer]] = [None]
-        # A protected provider call may outlive its owning compression attempt
-        # (owner returns on hard cancel while this adapter is still blocked in the
-        # SDK stream). Timer threads don't inherit this worker's thread-local
-        # protection state, so freeze the hard-cancel source before creating the timer.
-        protected_cancel_check = (
-            _capture_aux_cancel_check() if _aux_interrupt_protected() else None
-        )
-        attempt_stream_lock = threading.Lock()
-        attempt_stream: List[Any] = []
-        # The request-driving thread owns the transport FDs — see _close_client_on_timeout.
-        owner_tid = threading.get_ident()
-
-        def _effective_deadline() -> float:
-            with deadline_lock:
-                return min(hard_deadline, progress_deadline[0])
-
-        def _close_shared_client(failure_note: str) -> None:
-            close = getattr(self._client, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.debug("Codex auxiliary: %s", failure_note, exc_info=True)
-
-        def _close_attempt_stream(failure_note: str) -> None:
-            # Closes only this attempt's stream — never the process-shared client.
-            with attempt_stream_lock:
-                stream = attempt_stream[0] if attempt_stream else None
-            close_stream = getattr(stream, "close", None)
-            if callable(close_stream):
-                try:
-                    close_stream()
-                except Exception:
-                    logger.debug("Codex auxiliary: %s", failure_note, exc_info=True)
-
-        def _record_stream_progress() -> None:
-            # Substantive payload re-arms the no-progress window; hard ceiling never moves.
-            with deadline_lock:
-                progress_deadline[0] = time.monotonic() + no_progress_timeout
-
-        def _timeout_message() -> str:
-            elapsed = time.monotonic() - _start_monotonic
-            if time.monotonic() >= hard_deadline:
-                return (
-                    "Codex auxiliary Responses stream exceeded "
-                    f"{hard_deadline - _start_monotonic:.1f}s hard ceiling"
-                )
-            if not saw_content.is_set():
-                return (
-                    "Codex auxiliary Responses stream produced no output "
-                    f"within {float(no_progress_timeout):.1f}s "
-                    f"(no-progress timeout, {elapsed:.1f}s elapsed)"
-                )
-            return (
-                "Codex auxiliary Responses stream stalled: no new output "
-                f"for {float(no_progress_timeout):.1f}s "
-                f"({elapsed:.1f}s elapsed)"
-            )
-
-        def _close_client_on_timeout() -> None:
-            begin_timeout_cleanup = getattr(
-                protected_cancel_check, "begin_timeout_cleanup", None
-            )
-            if callable(begin_timeout_cleanup):
-                timeout_won = bool(begin_timeout_cleanup())
-            else:
-                timeout_won = not (
-                    callable(protected_cancel_check)
-                    and _captured_aux_cancel_requested(protected_cancel_check)
-                )
-            # Publish transport timeout only after the attempt-local decision is
-            # fixed, so owner polling cannot observe completion in between.
-            timed_out.set()
-            if not timeout_won:
-                # Owner already hard-cancelled. The OpenAI client is process-shared,
-                # so never close/evict it here (would disrupt unrelated sessions);
-                # wake only this attempt's stream if responses.create() returned one,
-                # otherwise rely on the bounded SDK/provider timeout.
-                _close_attempt_stream("cancelled attempt stream close during timeout failed")
-                return
-            # FD-ownership contract: only the thread driving the request may
-            # ``close()`` this client's FDs. From a stranger thread (the watchdog
-            # Timer) only ``shutdown()`` is FD-safe — ``close()`` releases the raw
-            # TLS fd while the owner's OpenSSL BIO still caches it, the kernel
-            # recycles it (e.g. into a SQLite handle), and the owner's TLS flush
-            # corrupts that file. The owner does the real close in its ``finally``.
-            timeout_release_pending.set()
-            if threading.get_ident() == owner_tid:
-                _close_shared_client("client close during timeout failed")
-            else:
-                try:
-                    from agent.agent_runtime_helpers import force_close_tcp_sockets
-
-                    shutdown_count = force_close_tcp_sockets(self._client)
-                    logger.info(
-                        "Codex auxiliary client aborted (timeout, tcp_force_closed=%d, "
-                        "deferred_close=stranger_thread)",
-                        shutdown_count,
-                    )
-                except Exception:
-                    logger.debug("Codex auxiliary: client abort during timeout failed", exc_info=True)
-                # Socket shutdown only wakes a reader on a REAL transport; the owner
-                # may be blocked inside the SDK's event stream (or a socketless test
-                # double). Closing the attempt-owned stream releases it without
-                # touching the shared client's FDs.
-                _close_attempt_stream("attempt stream close during stranger-thread timeout failed")
-            # The aux client cache wraps this same ``self._client``; drop the entry
-            # so the next aux call doesn't reuse the dead transport and fail fast.
-            try:
-                _evict_cached_client_instance(self._client)
-            except Exception:
-                logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
-
-        def _check_cancelled() -> None:
-            if total_timeout is not None and time.monotonic() >= _effective_deadline():
-                if not timed_out.is_set():
-                    _close_client_on_timeout()
-                raise TimeoutError(_timeout_message())
-            try:
-                from tools.interrupt import is_interrupted
-                # Protected atomic aux tasks (compression) must not abort on a
-                # mid-flight gateway interrupt (would trigger a degraded fallback
-                # marker). Explicit host cancellation has its own exception; timeouts
-                # still fire and unprotected aux tasks remain interruptible.
-                if _aux_interrupt_cancel_requested():
-                    raise AuxiliaryExplicitCancellation()
-                if is_interrupted() and not _aux_interrupt_protected():
-                    raise InterruptedError("Codex auxiliary Responses stream interrupted")
-            except (InterruptedError, AuxiliaryExplicitCancellation):
-                raise
-            except Exception:
-                # Interrupt state is best-effort UX; never a new failure mode.
-                pass
-
-        def _watchdog_fire() -> None:
-            # Re-armable: if progress moved the deadline forward, reschedule
-            # instead of killing a live stream.
-            remaining = _effective_deadline() - time.monotonic()
-            if remaining > 0:
-                if timed_out.is_set() or stream_finished.is_set():
-                    return
-                t = threading.Timer(remaining, _watchdog_fire)
-                t.daemon = True
-                timeout_timer[0] = t
-                t.start()
-                return
-            _close_client_on_timeout()
-
+        guard = _CodexStreamGuard(self._client, total_timeout)
         try:
-            if total_timeout:
-                timeout_timer[0] = threading.Timer(
-                    max(_effective_deadline() - time.monotonic(), 0.0),
-                    _watchdog_fire,
-                )
-                timeout_timer[0].daemon = True
-                timeout_timer[0].start()
-            _check_cancelled()
-
-            # Use low-level ``responses.create(stream=True)`` and assemble the final
-            # response ourselves from ``response.output_item.done``: the high-level
-            # ``responses.stream()`` helper reconstructs from
-            # ``response.completed.response.output``, which the Codex backend has
-            # returned as ``null`` (crashing the SDK with a NoneType TypeError).
-            from agent.codex_runtime import (
-                _bypass_sdk_request_transform,
-                _consume_codex_event_stream,
-            )
-
-            stream_kwargs = dict(resp_kwargs)
-            stream_kwargs["stream"] = True
-            # Keep bulk wire payload out of the SDK's GIL-holding request transform.
-            stream_kwargs = _bypass_sdk_request_transform(stream_kwargs)
-
-            def _on_each_event(_event: Any) -> None:
-                # Per event: TTFP telemetry records every frame, but forward
-                # progress (compression commit fence, no-progress window) counts
-                # only substantive payloads — keepalives must not re-arm, so a
-                # zombie stream dies at the same window as a dead connection.
-                if _codex_event_has_content(_event):
-                    _record_stream_progress()
-                    saw_content.set()
-                    _notify_aux_provider_response()
-                else:
-                    _notify_aux_timing_response()
-                _check_cancelled()
-
-            event_stream = self._client.responses.create(**stream_kwargs)
-            with attempt_stream_lock:
-                attempt_stream.append(event_stream)
-            # The timer may fire while responses.create() is blocked; if the
-            # cancelled attempt had no stream to close then, close it now that it
-            # is attempt-owned — never touch the shared client.
-            if (
-                timed_out.is_set()
-                and callable(protected_cancel_check)
-                and _captured_aux_cancel_requested(protected_cancel_check)
-            ):
-                close_fn = getattr(event_stream, "close", None)
-                if callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception:
-                        logger.debug(
-                            "Codex auxiliary: late cancelled attempt stream close failed",
-                            exc_info=True,
-                        )
-            try:
-                # Some Codex-compatible hosts accept ``stream=True`` but return a
-                # completed Responses object (not iterable) — don't hand it to the consumer.
-                if hasattr(event_stream, "output"):
-                    final = event_stream
-                else:
-                    final = _consume_codex_event_stream(
-                        event_stream,
-                        model=str(resp_kwargs.get("model") or model),
-                        on_event=_on_each_event,
-                    )
-            finally:
-                close_fn = getattr(event_stream, "close", None)
-                if callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception:
-                        pass
-                with attempt_stream_lock:
-                    attempt_stream.clear()
-
+            guard.start()
+            final = self._stream_final_response(resp_kwargs, model, guard)
             if final is None:
                 raise RuntimeError("Codex auxiliary Responses stream did not return a final response")
-
             text_parts, tool_calls_raw, usage = _parse_codex_final_response(final)
         except Exception as exc:
-            if timed_out.is_set():
-                raise TimeoutError(_timeout_message()) from exc
+            if guard.timed_out.is_set():
+                raise TimeoutError(guard.timeout_message()) from exc
             logger.debug("Codex auxiliary Responses API call failed: %s", exc)
             raise
         finally:
-            stream_finished.set()
-            _t = timeout_timer[0]
-            if _t is not None:
-                _t.cancel()
-            # A stranger-thread timeout only shut sockets down; the owning thread
-            # releases the FDs here. Gated on timeout_release_pending, NOT timed_out:
-            # after a hard-cancel the shared client must stay usable for other sessions.
-            if timeout_release_pending.is_set():
-                _close_shared_client("owner-thread close after timeout failed")
+            guard.finish()
 
-        content = "".join(text_parts).strip() or None
-
-        # Build a response that looks like chat.completions
+        # Shape the result like chat.completions.
         message = SimpleNamespace(
             role="assistant",
-            content=content,
+            content="".join(text_parts).strip() or None,
             tool_calls=tool_calls_raw or None,
         )
         choice = SimpleNamespace(
@@ -1950,11 +1918,7 @@ class _CodexCompletionsAdapter:
             message=message,
             finish_reason="stop" if not tool_calls_raw else "tool_calls",
         )
-        return SimpleNamespace(
-            choices=[choice],
-            model=model,
-            usage=usage,
-        )
+        return SimpleNamespace(choices=[choice], model=model, usage=usage)
 
 
 class _ChatShim:
@@ -1979,8 +1943,7 @@ class _AsyncAuxiliaryClientBase:
     """Async-compatible wrapper matching AsyncOpenAI.chat.completions.create().
 
     Mirrors ``_real_client`` (when the sync wrapper has one) so cache eviction by
-    leaf OpenAI client drops this async entry too; otherwise it keeps reusing a
-    closed transport.
+    leaf OpenAI client drops this async entry too instead of reusing a closed transport.
     """
 
     def __init__(self, sync_wrapper: Any):
@@ -1995,10 +1958,7 @@ _AsyncAnthropicCompletionsAdapter = _AsyncCompletionsAdapter  # imported by test
 
 
 class CodexAuxiliaryClient:
-    """OpenAI-client-compatible wrapper routing through the Codex Responses API.
-
-    Exposes .api_key/.base_url for introspection by async wrappers.
-    """
+    """OpenAI-client-compatible wrapper routing through the Codex Responses API (.api_key/.base_url for introspection)."""
 
     def __init__(self, real_client: OpenAI, model: str):
         self._real_client = real_client
@@ -2020,30 +1980,22 @@ def _translate_anthropic_response_format(
     """Merge an OpenAI response format into Anthropic ``output_config``."""
     if not isinstance(response_format, dict):
         return
-
     format_type = response_format.get("type")
     if format_type == "json_schema":
         json_schema = response_format.get("json_schema")
         if not isinstance(json_schema, dict) or "schema" not in json_schema:
             return
-        native_format = {
-            "type": "json_schema",
-            "schema": json_schema["schema"],
-        }
+        schema = json_schema["schema"]
     elif format_type == "json_object":
         # Anthropic SDK has no schema-less JSON mode; only ``json_schema``.
-        native_format = {
-            "type": "json_schema",
-            "schema": {"type": "object"},
-        }
+        schema = {"type": "object"}
     else:
         return
-
     output_config = anthropic_kwargs.get("output_config")
     if not isinstance(output_config, dict):
         output_config = {}
         anthropic_kwargs["output_config"] = output_config
-    output_config["format"] = native_format
+    output_config["format"] = {"type": "json_schema", "schema": schema}
 
 
 class _AnthropicCompletionsAdapter:
@@ -2059,9 +2011,9 @@ class _AnthropicCompletionsAdapter:
         self._client = real_client
         self._model = model
         self._is_oauth = is_oauth
-        # Prefer the caller-supplied URL; fall back to the SDK client's host only
-        # for Nous Portal — a blanket fallback would flip MiniMax/Zhipu aux
-        # adapters to third-party handling (stripping thinking signatures).
+        # Prefer the caller-supplied URL; fall back to the SDK client's host only for
+        # Nous Portal — a blanket fallback would flip MiniMax/Zhipu aux adapters to
+        # third-party handling (stripping thinking signatures).
         self._base_url = base_url or None
         if not self._base_url:
             candidate = str(getattr(real_client, "base_url", "") or "") or None
@@ -2074,77 +2026,32 @@ class _AnthropicCompletionsAdapter:
                 except Exception:
                     pass
 
-    def create(self, **kwargs) -> Any:
-        from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
-        from agent.transports import get_transport
-
-        messages = kwargs.get("messages", [])
-        model = kwargs.get("model", self._model)
-        tools = kwargs.get("tools")
-        tool_choice = kwargs.get("tool_choice")
-        reasoning_config = kwargs.get("_reasoning_config")
-        # ZAI's Anthropic endpoint rejects max_tokens on vision models (code 1210);
-        # callers signal this via _skip_zai_max_tokens.
-        _skip_mt = kwargs.pop("_skip_zai_max_tokens", False)
-        if _skip_mt:
-            max_tokens = None
-        else:
-            max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
-        temperature = kwargs.get("temperature")
-
-        normalized_tool_choice = None
+    @staticmethod
+    def _normalize_tool_choice(tool_choice: Any) -> Optional[str]:
+        """OpenAI tool_choice (str or dict) → Anthropic-style name/mode string."""
         if isinstance(tool_choice, str):
-            normalized_tool_choice = tool_choice
-        elif isinstance(tool_choice, dict):
+            return tool_choice
+        if isinstance(tool_choice, dict):
             choice_type = str(tool_choice.get("type", "")).lower()
             if choice_type == "function":
-                normalized_tool_choice = tool_choice.get("function", {}).get("name")
-            elif choice_type in {"auto", "required", "none"}:
-                normalized_tool_choice = choice_type
+                return tool_choice.get("function", {}).get("name")
+            if choice_type in {"auto", "required", "none"}:
+                return choice_type
+        return None
 
-        # Reasoning priority: explicit per-call _reasoning_config (MoA per-slot)
-        # wins over extra_body.reasoning; build_anthropic_kwargs translates to ``thinking``.
-        _reasoning_cfg = reasoning_config
-        if _reasoning_cfg is None:
-            _eb = kwargs.get("extra_body")
-            if isinstance(_eb, dict):
-                _rc = _eb.get("reasoning")
-                if isinstance(_rc, dict):
-                    _reasoning_cfg = _rc
+    @staticmethod
+    def _merge_caller_extra_body(anthropic_kwargs: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
+        """Translate response_format (top-level and extra_body form) and pass vendor extra_body fields through.
 
-        anthropic_kwargs = build_anthropic_kwargs(
-            model=model,
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens,
-            reasoning_config=_reasoning_cfg,
-            tool_choice=normalized_tool_choice,
-            is_oauth=self._is_oauth,
-            # Portal routes on ``anthropic/<slug>`` ids and replays signed thinking
-            # keyed off base_url; omitting it breaks Portal model resolution.
-            base_url=self._base_url,
-        )
-        # Opus 4.7+ rejects non-default temperature/top_p/top_k; build_anthropic_kwargs
-        # also strips these as a safety net — keep both layers.
-        if temperature is not None:
-            from agent.anthropic_adapter import _forbids_sampling_params
-            if not _forbids_sampling_params(model):
-                anthropic_kwargs["temperature"] = temperature
-
-        # Pass caller extra_body through (documented Anthropic SDK passthrough for
-        # vendor fields), merged over build_anthropic_kwargs' own extra_body.
-        # Excluded: ``reasoning`` and ``response_format`` (already TRANSLATED to
-        # native fields — forwarding raw would 400 on strict gateways) and
-        # ``_``-prefixed private Hermes plumbing.
-        caller_extra_body = kwargs.get("extra_body")
-        # A top-level ``response_format`` kwarg gets the same translation as the
-        # extra_body form (previously silently dropped by the kwarg allow-list);
-        # when both are present the extra_body form wins.
+        A top-level ``response_format`` gets the same translation as the extra_body
+        form; when both are present the extra_body form wins. Passthrough excludes
+        ``reasoning``/``response_format`` (already TRANSLATED to native fields —
+        forwarding raw would 400 on strict gateways) and ``_``-prefixed Hermes plumbing.
+        """
         top_level_response_format = kwargs.get("response_format")
         if top_level_response_format is not None:
-            _translate_anthropic_response_format(
-                anthropic_kwargs, top_level_response_format,
-            )
+            _translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
+        caller_extra_body = kwargs.get("extra_body")
         if caller_extra_body and isinstance(caller_extra_body, dict):
             _translate_anthropic_response_format(
                 anthropic_kwargs, caller_extra_body.get("response_format"),
@@ -2160,52 +2067,82 @@ class _AnthropicCompletionsAdapter:
                     existing = {}
                 anthropic_kwargs["extra_body"] = {**existing, **passthrough}
 
+    def create(self, **kwargs) -> Any:
+        from agent.anthropic_adapter import build_anthropic_kwargs, create_anthropic_message
+        from agent.transports import get_transport
+
+        model = kwargs.get("model", self._model)
+        # ZAI's Anthropic endpoint rejects max_tokens on vision models (code 1210);
+        # callers signal this via _skip_zai_max_tokens.
+        if kwargs.pop("_skip_zai_max_tokens", False):
+            max_tokens = None
+        else:
+            max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
+        temperature = kwargs.get("temperature")
+        # Reasoning priority: explicit per-call _reasoning_config (MoA per-slot) wins
+        # over extra_body.reasoning; build_anthropic_kwargs translates to ``thinking``.
+        reasoning_cfg = kwargs.get("_reasoning_config")
+        if reasoning_cfg is None:
+            _eb = kwargs.get("extra_body")
+            _rc = _eb.get("reasoning") if isinstance(_eb, dict) else None
+            if isinstance(_rc, dict):
+                reasoning_cfg = _rc
+
+        anthropic_kwargs = build_anthropic_kwargs(
+            model=model,
+            messages=kwargs.get("messages", []),
+            tools=kwargs.get("tools"),
+            max_tokens=max_tokens,
+            reasoning_config=reasoning_cfg,
+            tool_choice=self._normalize_tool_choice(kwargs.get("tool_choice")),
+            is_oauth=self._is_oauth,
+            # Portal routes on ``anthropic/<slug>`` ids and replays signed thinking
+            # keyed off base_url; omitting it breaks Portal model resolution.
+            base_url=self._base_url,
+        )
+        # Opus 4.7+ rejects non-default temperature/top_p/top_k; build_anthropic_kwargs
+        # also strips these as a safety net — keep both layers.
+        if temperature is not None:
+            from agent.anthropic_adapter import _forbids_sampling_params
+            if not _forbids_sampling_params(model):
+                anthropic_kwargs["temperature"] = temperature
+        self._merge_caller_extra_body(anthropic_kwargs, kwargs)
+
         response = create_anthropic_message(
             self._client,
             anthropic_kwargs,
-            # Record provider-response timing every event, but tick forward
-            # progress only for substantive payloads so keepalives can't hold a
-            # stalled summary open. None keeps the fast get_final_message path.
+            # Record provider-response timing every event, but tick forward progress
+            # only for substantive payloads so keepalives can't hold a stalled summary
+            # open. None keeps the fast get_final_message path.
             on_stream_event=(
                 _anthropic_aux_stream_event_hook()
                 if _aux_progress_active()
                 else None
             ),
         )
-        _transport = get_transport("anthropic_messages")
-        _nr = _transport.normalize_response(
+        _nr = get_transport("anthropic_messages").normalize_response(
             response, strip_tool_prefix=self._is_oauth
         )
-
-        # ToolCall already duck-types as OpenAI shape via properties.
-        assistant_message = SimpleNamespace(
-            content=_nr.content,
-            tool_calls=_nr.tool_calls,
-            reasoning=_nr.reasoning,
-        )
-        finish_reason = _nr.finish_reason
-
         usage = None
         if hasattr(response, "usage") and response.usage:
             prompt_tokens = getattr(response.usage, "input_tokens", 0) or 0
             completion_tokens = getattr(response.usage, "output_tokens", 0) or 0
-            total_tokens = getattr(response.usage, "total_tokens", 0) or (prompt_tokens + completion_tokens)
             usage = SimpleNamespace(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                total_tokens=total_tokens,
+                total_tokens=getattr(response.usage, "total_tokens", 0) or (prompt_tokens + completion_tokens),
             )
-
+        # ToolCall already duck-types as OpenAI shape via properties.
         choice = SimpleNamespace(
             index=0,
-            message=assistant_message,
-            finish_reason=finish_reason,
+            message=SimpleNamespace(
+                content=_nr.content,
+                tool_calls=_nr.tool_calls,
+                reasoning=_nr.reasoning,
+            ),
+            finish_reason=_nr.finish_reason,
         )
-        return SimpleNamespace(
-            choices=[choice],
-            model=model,
-            usage=usage,
-        )
+        return SimpleNamespace(choices=[choice], model=model, usage=usage)
 
 
 class AnthropicAuxiliaryClient:
@@ -2239,7 +2176,6 @@ class _BedrockCompletionsAdapter:
     def create(self, **kwargs) -> Any:
         from agent.bedrock_adapter import call_converse
 
-        messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
         max_tokens = kwargs.get("max_tokens") or kwargs.get("max_completion_tokens")
         # OpenAI accepts ``stop`` as str or list; Converse requires a list.
@@ -2264,12 +2200,11 @@ class _BedrockCompletionsAdapter:
         response = call_converse(
             region=self._region,
             model=model,
-            messages=messages,
+            messages=kwargs.get("messages", []),
             tools=kwargs.get("tools"),
-            # Omitted/None cap → None so Bedrock uses the model max, matching the
-            # no-cap-by-default policy of every other aux wire. Truthiness (not
-            # ``is None``) is deliberate: it mirrors the Anthropic shim, so an
-            # explicit 0 means "no cap" on both wires.
+            # Omitted/None cap → None so Bedrock uses the model max (no-cap-by-default
+            # like every other aux wire). Truthiness, not ``is None``, mirrors the
+            # Anthropic shim: an explicit 0 means "no cap" on both wires.
             max_tokens=int(max_tokens) if max_tokens else None,
             temperature=kwargs.get("temperature"),
             top_p=kwargs.get("top_p"),
