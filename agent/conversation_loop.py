@@ -279,17 +279,12 @@ def _moa_reference_metrics_for_hook(agent: Any) -> Any:
 
 
 def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text: str) -> None:
-    """Append a provider-safe checkpoint and correction to the live turn.
-
-    Keeps only the *visible* text (demoted to plain text) then adds the correction as a
-    real user message, so role alternation holds and cached messages stay byte-identical.
-    INVARIANT: raw chain-of-thought never enters replayable content — inlined CoT reads
-    as a prefill jailbreak and bricks the session with empty-response storms.
-    INVARIANT: the interruption scaffold is replay text, carried only in the user
+    """Append a provider-safe checkpoint and correction to the live turn so role alternation
+    holds and cached messages stay byte-identical. INVARIANTS: raw chain-of-thought never enters
+    replayable content (inlined CoT reads as a prefill jailbreak and bricks the session with
+    empty-response storms); the interruption scaffold is replay text carried only in the user
     correction's ``api_content``; an on-screen-empty placeholder is ``display_kind=hidden``."""
-    visible = agent._strip_think_blocks(
-        getattr(agent, "_current_streamed_assistant_text", "") or ""
-    ).strip()
+    visible = agent._strip_think_blocks(getattr(agent, "_current_streamed_assistant_text", "") or "").strip()
 
     checkpoint_parts = [_INTERRUPT_SCAFFOLD_MARKER]
     if visible:
@@ -474,51 +469,42 @@ def _billing_or_entitlement_message(
             "/model <model> --provider <provider>."
         )
         if unverified:
-            lines = [
-                f"{provider_label} reported that your Claude subscription usage may be "
-                f"exhausted for {model_label} (included quota + extra-usage credits) — "
-                "but this specific error is not proof of a billing problem.",
-                "If https://claude.ai/settings/usage still shows quota remaining, this is "
-                "probably NOT a billing problem: on a Claude subscription (OAuth) token "
-                "Anthropic returns this same message when its content filter rejects part "
-                "of the request — typically a phrase in the system prompt.",
-                "If usage really is exhausted: wait for the billing cycle to reset, or add "
-                "extra usage at https://claude.ai/settings/usage",
+            return "\n".join([
+                f"{provider_label} reported that your Claude subscription usage may be exhausted for "
+                f"{model_label} (included quota + extra-usage credits) — but this specific error is "
+                "not proof of a billing problem.",
+                "If https://claude.ai/settings/usage still shows quota remaining, this is probably NOT "
+                "a billing problem: on a Claude subscription (OAuth) token Anthropic returns this same "
+                "message when its content filter rejects part of the request — typically a phrase in "
+                "the system prompt.",
+                "If usage really is exhausted: wait for the billing cycle to reset, or add extra usage "
+                "at https://claude.ai/settings/usage",
                 switch,
                 # The exhaustion latch replays the stored error without a request.
-                "Retry with a fresh credential state: `hermes auth reset anthropic`. Until "
-                "that cooldown clears, this error can be replayed from cache without "
-                "contacting the API.",
-            ]
-        else:
-            lines = [
-                f"{provider_label} reported that your Claude subscription usage is "
-                f"exhausted for {model_label} (included quota + extra-usage credits).",
-                "Options: wait for the billing cycle to reset, or add extra usage at "
-                "https://claude.ai/settings/usage",
-                switch,
-            ]
-        return "\n".join(lines)
+                "Retry with a fresh credential state: `hermes auth reset anthropic`. Until that "
+                "cooldown clears, this error can be replayed from cache without contacting the API.",
+            ])
+        return "\n".join([
+            f"{provider_label} reported that your Claude subscription usage is exhausted for "
+            f"{model_label} (included quota + extra-usage credits).",
+            "Options: wait for the billing cycle to reset, or add extra usage at https://claude.ai/settings/usage",
+            switch,
+        ])
 
     # Provider-agnostic billing URL so every text surface shows the same actionable link.
     try:
         from agent.billing_links import build_billing_block
         _link = build_billing_block(provider=provider, base_url=base_url, model=model)
-        if _link.provider_label:
-            provider_label = _link.provider_label
+        provider_label = _link.provider_label or provider_label
         billing_url = _link.billing_url
     except Exception:
         billing_url = None
-
-    lines = [
-        f"{provider_label} reported that billing, credits, or account "
-        f"entitlement is exhausted for {model_label}.",
+    return "\n".join([
+        f"{provider_label} reported that billing, credits, or account entitlement is exhausted for {model_label}.",
         "Add credits or update billing with that provider, then retry.",
-    ]
-    if billing_url:
-        lines.append(f"{provider_label} billing: {billing_url}")
-    lines.append("You can switch providers temporarily with /model <model> --provider <provider>.")
-    return "\n".join(lines)
+        *([f"{provider_label} billing: {billing_url}"] if billing_url else []),
+        "You can switch providers temporarily with /model <model> --provider <provider>.",
+    ])
 
 
 def _billing_block_dict(
@@ -630,9 +616,7 @@ def _bot_chat_prompt_stale(agent, stored_prompt: str) -> bool:
                 title = str(agent._session_db.get_session_title(agent.session_id) or "").strip()
             except Exception:
                 title = ""
-        return title == BOT_CHAT_TITLE and bool(
-            stored_bot_chat_prompt_needs_upgrade(stored_prompt, home)
-        )
+        return title == BOT_CHAT_TITLE and bool(stored_bot_chat_prompt_needs_upgrade(stored_prompt, home))
     except Exception:
         return False
 
@@ -770,27 +754,24 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
 def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
     """Return False when the persisted runtime-identity lines are stale."""
 
+    lines = prompt.splitlines()
+
     def line_value(label: str) -> str:
         """Last matching line wins — safe ONLY for volatile-tier fields at the END of the
         prompt (embedded project context could shadow earlier fields; see ``host_info_value``)."""
         prefix = f"{label}:"
-        value = ""
-        for line in prompt.splitlines():
-            if line.startswith(prefix):
-                value = line[len(prefix):].strip()
-        return value
+        matches = [line[len(prefix):].strip() for line in lines if line.startswith(prefix)]
+        return matches[-1] if matches else ""
 
     def host_info_value(label: str) -> str:
         """Read a field from the prompt's own host-info block, anchored on the FIRST ``User
         home directory:`` line so a user's ``AGENTS.md`` row cannot force a rebuild every turn."""
         prefix = f"{label}:"
-        lines = prompt.splitlines()
         for idx, line in enumerate(lines):
-            if not line.startswith("User home directory:"):
-                continue
-            for candidate in lines[idx + 1: idx + 4]:
-                if candidate.startswith(prefix):
-                    return candidate[len(prefix):].strip()
+            if line.startswith("User home directory:"):
+                for candidate in lines[idx + 1: idx + 4]:
+                    if candidate.startswith(prefix):
+                        return candidate[len(prefix):].strip()
         return ""
 
     # Model/provider identity, then cwd drift, then runtime-surface drift (reusing a
@@ -911,10 +892,7 @@ def _clone_message_for_send(msg):
     message for the per-call API copy, so send-path rewrites never reach the persisted
     transcript (#80498). Cheaper than deepcopy: messages are JSON-shaped and acyclic."""
     if isinstance(msg, dict):
-        return {
-            k: _clone_message_for_send(v) if isinstance(v, (dict, list)) else v
-            for k, v in msg.items()
-        }
+        return {k: _clone_message_for_send(v) if isinstance(v, (dict, list)) else v for k, v in msg.items()}
     if isinstance(msg, list):
         return [_clone_message_for_send(v) if isinstance(v, (dict, list)) else v for v in msg]
     return msg
@@ -1005,26 +983,22 @@ def _compression_deferred_result(
     if reason == "transient_block":
         block = getattr(agent, "_compression_blocked_transient", None)
         logger.info(
-            "turn deferred: compression transiently blocked (%s) "
-            "(session=%s) — not counting as compression exhaustion",
-            block if isinstance(block, str) else "unknown guard", session,
+            "turn deferred: compression transiently blocked (%s) (session=%s) — not counting as "
+            "compression exhaustion", block if isinstance(block, str) else "unknown guard", session,
         )
         _final = (
-            "Context compression is temporarily paused after a recent "
-            "failed attempt. Please retry in a moment — compression will "
-            "resume automatically (or run /compress to force a retry now)."
+            "Context compression is temporarily paused after a recent failed attempt. Please retry "
+            "in a moment — compression will resume automatically (or run /compress to force a retry now)."
         )
     else:
         holder = getattr(agent, "_compression_skipped_due_to_lock", None)
         logger.info(
-            "turn deferred: compression lock held by another path "
-            "(session=%s holder=%s) — not counting as compression exhaustion",
-            session, holder if isinstance(holder, str) else "unconfirmed",
+            "turn deferred: compression lock held by another path (session=%s holder=%s) — not "
+            "counting as compression exhaustion", session, holder if isinstance(holder, str) else "unconfirmed",
         )
         _final = (
-            "Context compression is already running for this session. "
-            "Please retry in a moment — your next message will be processed "
-            "once the concurrent compression finishes."
+            "Context compression is already running for this session. Please retry in a moment — "
+            "your next message will be processed once the concurrent compression finishes."
         )
     try:
         agent._flush_status_buffer()
@@ -1053,10 +1027,8 @@ def _provider_overflow_exhausted_result(
     )
     agent._persist_session(messages, conversation_history)
     return _partial_turn_result(
-        "Context length exceeded: compression could not reduce the rebuilt "
-        "request below the safe threshold.",
-        messages, api_call_count,
-        failed=True, compression_exhausted=True,
+        "Context length exceeded: compression could not reduce the rebuilt request below the safe threshold.",
+        messages, api_call_count, failed=True, compression_exhausted=True,
         turn_exit_reason="context_compression_exhausted",
     )
 
@@ -1159,31 +1131,25 @@ def _redecorate_prompt_cache_for_provider(
     elif agent._use_prompt_caching:
         _ensure_cached_system_prompt_static(agent, system_message=system_message)
         static = getattr(agent, "_cached_system_prompt_static", None)
-        direct_tool_cache = getattr(
-            agent, "_direct_native_anthropic_tool_cache_capability", lambda: False
-        )()
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
         plan = build_prompt_cache_plan(
             messages,
             planned_tools,
             # Clamp per-destination: a configured 1h regresses to 5m on
             # Qwen/Alibaba routes, whose context cache is 5m-only (#84733).
-            cache_ttl=effective_cache_ttl(
-                agent._cache_ttl,
-                provider=agent.provider,
-                model=agent.model,
-            ),
+            cache_ttl=effective_cache_ttl(agent._cache_ttl, provider=agent.provider, model=agent.model),
             native_anthropic=agent._use_native_cache_layout,
             static_system_prefix=static if isinstance(static, str) else None,
-            direct_native_tool_cache=direct_tool_cache,
+            direct_native_tool_cache=getattr(
+                agent, "_direct_native_anthropic_tool_cache_capability", lambda: False
+            )(),
             # LiteLLM-style envelope routes forward part-level markers into
             # tool_result.content[] → non-retryable 400 (#89886).
             tool_part_markers=envelope_tool_part_cache_markers_supported(
                 getattr(agent, "provider", ""), getattr(agent, "base_url", "")
             ),
         )
-        messages = plan.messages
-        planned_tools = plan.tools
+        messages, planned_tools = plan.messages, plan.tools
 
     if tools_for_api is None:
         return messages, prepared
@@ -1342,9 +1308,9 @@ class _LoopState:
     active_system_prompt: Any
     current_turn_user_idx: Any
     _preflight_compression_blocked: Any
-    # Per-turn compression attempt cap shared by the pre-API gate, 413 handlers and post-tool
-    # compaction: a consecutive-ineffective-attempt backstop, rearmed only after a provider
-    # response reports a prompt below threshold.
+    # Compression attempt cap shared by the pre-API gate, 413 handlers and post-tool compaction:
+    # a consecutive-ineffective-attempt backstop, rearmed only after a provider response
+    # reports a prompt below threshold.
     max_compression_attempts: Any
     api_call_count: int = 0
     final_response: Any = None
@@ -1352,26 +1318,24 @@ class _LoopState:
     failed: bool = False
     codex_ack_continuations: int = 0
     length_continue_retries: int = 0
-    # Total outer-loop exceptions this turn (#92450) — see _MAX_OUTER_LOOP_ERRORS.
-    _outer_error_count: int = 0
+    _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
     truncated_response_parts: List[str] = field(default_factory=list)
     compression_attempts: int = 0
     _last_preflight_pressure: Optional[int] = None
-    # A provider overflow outweighs the rough-estimate calibration that defers preflight
-    # after compaction: stay armed until the rebuilt request is below the threshold.
+    # A provider overflow outweighs the rough-estimate calibration that defers preflight after
+    # compaction: stays armed until the rebuilt request is below the threshold.
     _provider_overflow_recovery_pending: bool = False
-    # Armed when a compression host-timeout ends the turn; finalize reuses the gateway
-    # context-recovery contract (error/partial/compression_exhausted) (#98722).
+    # A compression host-timeout ended the turn; finalize reuses the gateway context-recovery
+    # contract (error/partial/compression_exhausted) (#98722).
     _compression_timeout_exhausted: bool = False
-    _turn_exit_reason: str = "unknown"  # Diagnostic: why the loop ended
-    # Last answer held back by a verification gate (best user-facing result if the continuation
-    # exhausts the budget) and whether it was already streamed as interim; ``_response_was_previewed``
+    _turn_exit_reason: str = "unknown"  # diagnostic: why the loop ended
+    # Answer held back by a verification gate (best user-facing result if the continuation
+    # exhausts the budget) and whether it was streamed as interim; ``_response_was_previewed``
     # is set ONLY if it becomes the final response (#65919).
     _pending_verification_response: Any = None
     _pending_verification_response_previewed: bool = False
-    # If pre-API compression fires after MoA advisors ran, retain their guidance and
-    # rebase it onto the compacted transcript next iteration — no second fan-out.
+    # MoA guidance retained across a pre-API compression, rebased next iteration (no second fan-out).
     pending_moa_prepared_request: Any = None
     # Per-iteration slots.
     request_logger: Any = None
@@ -1410,12 +1374,8 @@ def _run_phase(fn, agent, state: _LoopState, **extra):
     the caller can act on ``.action`` / ``.result``."""
     params = _PHASE_PARAMS.get(fn)
     if params is None:
-        params = _PHASE_PARAMS[fn] = tuple(
-            p for p in inspect.signature(fn).parameters if p != "agent"
-        )
-    verdict = fn(agent, **{
-        name: extra[name] if name in extra else getattr(state, name) for name in params
-    })
+        params = _PHASE_PARAMS[fn] = tuple(p for p in inspect.signature(fn).parameters if p != "agent")
+    verdict = fn(agent, **{n: extra[n] if n in extra else getattr(state, n) for n in params})
     latched = _LATCHED_VERDICT_FIELDS.get(getattr(fn, "__name__", ""), ())
     for f in fields(verdict):
         if f.name in ("action", "result"):
