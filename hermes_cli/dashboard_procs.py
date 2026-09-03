@@ -453,12 +453,24 @@ def _detect_concurrent_hermes_instances(
         return []
     seed = int(exclude_pid) if exclude_pid is not None else os.getpid()
     exclude_pids: set[int] = {seed}
-    with contextlib.suppress(Exception):  # psutil may be partially stubbed in tests
+    # Broad ``except Exception`` guards against partially-stubbed psutil in unit tests; this helper is
+    # documented as "never raises". Only the per-ancestor exe()/pid reads skip that ancestor; anything
+    # else aborts the whole walk (BASE semantics).
+    try:
         for ancestor in psutil.Process(seed).parents():
-            with contextlib.suppress(Exception):
+            try:
                 anc_exe = ancestor.exe()
-                if anc_exe and _norm_exe(anc_exe) in shim_paths:
+            except Exception:
+                continue
+            if not anc_exe:
+                continue
+            if _norm_exe(anc_exe) in shim_paths:
+                try:
                     exclude_pids.add(int(ancestor.pid))
+                except Exception:
+                    continue
+    except Exception:
+        pass
     matches: list[tuple[int, str]] = []
     try:
         proc_iter = psutil.process_iter(["pid", "exe", "name"])
