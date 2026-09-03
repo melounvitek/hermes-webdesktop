@@ -29,14 +29,8 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "MAX_SAFE_TIMEOUT_S",
-    "BoundedResult",
-    "DeadlineExpired",
-    "clamp_timeout",
-    "resolve_timeout",
-    "run_bounded_async",
-    "run_bounded_sync",
-    "kill_process_tree",
+    "MAX_SAFE_TIMEOUT_S", "BoundedResult", "DeadlineExpired", "clamp_timeout", "resolve_timeout",
+    "run_bounded_async", "run_bounded_sync", "kill_process_tree",
 ]
 
 # One year: semantically "unbounded" yet far below any platform time_t limit (#83220).
@@ -138,12 +132,7 @@ def _lookup_dotted(section: dict, key: str) -> Any:
     return node
 
 
-def resolve_timeout(
-    key: str,
-    *,
-    default: Optional[float],
-    env_var: Optional[str] = None,
-) -> Optional[float]:
+def resolve_timeout(key: str, *, default: Optional[float], env_var: Optional[str] = None) -> Optional[float]:
     """Resolve a timeout (seconds): dotted ``timeouts.<key>`` > ``env_var`` > ``default``; the winner
     goes through :func:`clamp_timeout`, invalid config/env values fall through with a warning."""
     raw = _lookup_dotted(_timeouts_section(), key)
@@ -201,14 +190,11 @@ async def _run_abandon_cleanup(on_abandon: Callable[[], Awaitable[Any]]) -> None
 
 def _dump_blocked_loop_diagnostics(label: str, timeout_s: float) -> None:
     logger.warning(
-        "[deadline] %r deadline (%.0fs) expired but the event loop has not "
-        "processed the expiry after a further %.0fs — the loop thread appears "
-        "BLOCKED in a synchronous call, which is why no asyncio timeout can "
-        "fire. Dumping all thread stacks to stderr to identify the blocking "
-        "frame.",
-        label,
-        timeout_s,
-        _LOOP_BLOCKED_DUMP_GRACE_S,
+        "[deadline] %r deadline (%.0fs) expired but the event loop has not processed the expiry "
+        "after a further %.0fs — the loop thread appears BLOCKED in a synchronous call, which is "
+        "why no asyncio timeout can fire. Dumping all thread stacks to stderr to identify the "
+        "blocking frame.",
+        label, timeout_s, _LOOP_BLOCKED_DUMP_GRACE_S,
     )
     try:
         faulthandler.dump_traceback(all_threads=True)

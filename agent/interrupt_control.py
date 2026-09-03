@@ -81,12 +81,8 @@ class InterruptControlMixin:
     """interrupt()/hard_interrupt()/clear_interrupt()/steer()/redirect() (see module docstring)."""
 
     def interrupt(
-        self,
-        message: Optional[str] = None,
-        *,
-        hard_cancel: bool = False,
-        tool_reason: Optional[str] = None,
-        require_generation: Optional[int] = None,
+        self, message: Optional[str] = None, *, hard_cancel: bool = False,
+        tool_reason: Optional[str] = None, require_generation: Optional[int] = None,
     ) -> bool:
         """Request the agent to interrupt its current tool-calling loop (call from another thread).
 
@@ -106,8 +102,7 @@ class InterruptControlMixin:
         # Tool cancellation attribution stays separate from _interrupt_message, which may carry the user's
         # full next message.
         tool_interrupt_reason = (
-            (tool_reason or "explicit stop requested")
-            if hard_cancel
+            (tool_reason or "explicit stop requested") if hard_cancel
             else ("user sent a new message" if message else "user interrupt")
         )
 
@@ -115,22 +110,21 @@ class InterruptControlMixin:
             self._interrupt_requested = True
             self._interrupt_message = message
             self._tool_interrupt_reason = tool_interrupt_reason
-            if hard_cancel:
-                _hard_event = getattr(self, "_hard_interrupt_requested", None)
-                if _hard_event is not None:
-                    _hard_event.set()
+            _hard_event = getattr(self, "_hard_interrupt_requested", None) if hard_cancel else None
+            if _hard_event is not None:
+                _hard_event.set()
+
+        def _fence():  # re-read each time: a finished commit may replace or clear the slot
+            return vars(self).get("_active_compression_commit_fence") if hard_cancel else None
 
         # A hard stop and redirect share one lock so /stop cannot race with an accepted correction and
         # accidentally turn itself into a retry. The blocking in-flight-commit wait runs BEFORE the atomic
         # claim edge (redirect lock still held); the destructive pending-commit cancel runs AFTER the claim
         # survives (#99758 P1).
         with _ic_lock(self, "_pending_redirect_lock"):
-            if hard_cancel:
-                _fence_cancel_before_commit(
-                    vars(self).get("_active_compression_commit_fence"),
-                    when_in_flight=True,
-                    failure_log="Compression hard-cancel fence wait failed",
-                )
+            _fence_cancel_before_commit(
+                _fence(), when_in_flight=True, failure_log="Compression hard-cancel fence wait failed"
+            )
             if require_generation is None:
                 # No claim to race: publish WITHOUT the liveness lock (bare AIAgent stand-ins in other
                 # suites lack the liveness seam and would AttributeError).
@@ -144,12 +138,9 @@ class InterruptControlMixin:
                         return False
                     self._turn_liveness_abort_claim = None
                     _publish_interrupt_state()
-            if hard_cancel:
-                _fence_cancel_before_commit(
-                    vars(self).get("_active_compression_commit_fence"),
-                    when_in_flight=False,
-                    failure_log="Compression hard-cancel fence admission failed",
-                )
+            _fence_cancel_before_commit(
+                _fence(), when_in_flight=False, failure_log="Compression hard-cancel fence admission failed"
+            )
             self._pending_redirect = None
 
         # Codex watches a private interrupt event rather than Hermes' per-thread flag.
@@ -187,12 +178,7 @@ class InterruptControlMixin:
             print("\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
         return True
 
-    def hard_interrupt(
-        self,
-        message: Optional[str] = None,
-        *,
-        tool_reason: Optional[str] = None,
-    ) -> None:
+    def hard_interrupt(self, message: Optional[str] = None, *, tool_reason: Optional[str] = None) -> None:
         """Explicit stop preserving the ``interrupt()`` ABI (frontends feature-detect this and fall back to
         legacy ``interrupt()`` for third-party agents). Bypasses dynamic dispatch: legacy subclasses may
         override interrupt(message=None) without hard_cancel."""
@@ -205,8 +191,7 @@ class InterruptControlMixin:
             if preserve_redirect and not getattr(self, "_pending_redirect", None):
                 return False
             self._interrupt_requested = False
-            self._interrupt_message = None
-            self._tool_interrupt_reason = None
+            self._interrupt_message = self._tool_interrupt_reason = None
             getattr(self, "_hard_interrupt_requested", threading.Event()).clear()
             if not preserve_redirect:
                 self._pending_redirect = None
