@@ -250,13 +250,9 @@ class _VikingClient:
         if self._agent:
             h["X-OpenViking-Actor-Peer"] = self._agent
         if include_tenant:
-            if self._account:
-                h["X-OpenViking-Account"] = self._account
-            if self._user:
-                h["X-OpenViking-User"] = self._user
+            h.update({k: v for k, v in (("X-OpenViking-Account", self._account), ("X-OpenViking-User", self._user)) if v})
         if self._api_key:
-            h["X-API-Key"] = self._api_key
-            h["Authorization"] = "Bearer " + self._api_key
+            h.update({"X-API-Key": self._api_key, "Authorization": "Bearer " + self._api_key})
         return h
 
     @staticmethod
@@ -867,11 +863,10 @@ def _identity_failure(identity: str, subject: str, *, unhealthy_status: str = "s
     """Human message for a non-identified probe result, or "" when identified."""
     if identity in _OPENVIKING_IDENTIFIED_STATES:
         return ""
-    if identity == "unhealthy":
-        return f"{subject} responded but reported unhealthy {unhealthy_status}."
-    if identity == "legacy-unverified":
-        return f"{legacy_subject or subject} {_LEGACY_OPENVIKING_IDENTITY_DETAIL}"
-    return f"{subject} responded, but its /health response is not valid OpenViking."
+    return {
+        "unhealthy": f"{subject} responded but reported unhealthy {unhealthy_status}.",
+        "legacy-unverified": f"{legacy_subject or subject} {_LEGACY_OPENVIKING_IDENTITY_DETAIL}",
+    }.get(identity, f"{subject} responded, but its /health response is not valid OpenViking.")
 
 
 def _validate_openviking_reachability(endpoint: str) -> tuple[bool, str]:
@@ -893,18 +888,15 @@ def _validate_openviking_reachability(endpoint: str) -> tuple[bool, str]:
 def _validate_openviking_setup_values(values: dict, *, require_api_key: bool = False) -> tuple[bool, str, Optional[str]]:
     """-> (ok, message, role) where role is 'root' / 'user' / None (no key)."""
     try:
-        _normalize_openviking_url(values.get("endpoint"))
+        endpoint = _normalize_openviking_url(values.get("endpoint"))
     except _OpenVikingEndpointError as exc:
         return False, str(exc), None
     api_key = _clean_config_value(values.get("api_key"))
     if require_api_key and not api_key:
         return False, "Remote OpenViking configs require an API key.", None
     try:
-        client = _VikingClient(
-            _normalize_openviking_url(values.get("endpoint")), api_key,
-            account=_clean_config_value(values.get("account")), user=_clean_config_value(values.get("user")),
-            agent=_clean_config_value(values.get("agent")) or _DEFAULT_AGENT,
-        )
+        client = _VikingClient(endpoint, api_key, account=_clean_config_value(values.get("account")), user=_clean_config_value(values.get("user")),
+                               agent=_clean_config_value(values.get("agent")) or _DEFAULT_AGENT)
         identity, health = _probe_openviking_identity(client)
         if identity == "invalid":
             return False, "Server /health response is not valid OpenViking.", None
@@ -955,16 +947,15 @@ def _describe_local_port_listener(host: str, port: int) -> str:
     try:
         import psutil
 
-        wildcard_hosts = {"0.0.0.0", "::", "::0"}
-        aliases = {host.lower()}
+        accepted_hosts = {"0.0.0.0", "::", "::0", host.lower()}  # wildcard binds + the probed host
         if host.lower() == "localhost":
-            aliases.update({"127.0.0.1", "::1"})
+            accepted_hosts.update({"127.0.0.1", "::1"})
         for conn in psutil.net_connections(kind="inet"):
             if conn.status != psutil.CONN_LISTEN or not conn.laddr:
                 continue
             listener_host = str(conn.laddr.ip if hasattr(conn.laddr, "ip") else conn.laddr[0]).lower()
             listener_port = int(conn.laddr.port if hasattr(conn.laddr, "port") else conn.laddr[1])
-            if listener_port != port or (listener_host not in wildcard_hosts and listener_host not in aliases):
+            if listener_port != port or listener_host not in accepted_hosts:
                 continue
             if conn.pid is None:
                 break
@@ -1221,21 +1212,21 @@ class _TurnUpload:
         try:
             retry_client = self.provider._new_client()
             self.post(retry_client)
+            return
         except Exception as retry_error:
-            if retry_client is None or not self.batch_messages or self.next_index >= len(self.batch_messages):
+            if retry_client is None or self.next_index >= len(self.batch_messages):
                 logger.warning("OpenViking sync_turn failed: %s", retry_error)
                 return
             logger.warning("OpenViking structured sync retry failed; writing %d remaining messages individually: %s",
                            len(self.batch_messages) - self.next_index, retry_error)
-            try:
-                path = f"/api/v1/sessions/{self.sid}/messages"
-                while self.next_index < len(self.batch_messages):
-                    payload = self.batch_messages[self.next_index]
-                    self._trace("POST %s message_index=%d payload=%s", path, self.next_index, json.dumps(payload, ensure_ascii=False))
-                    retry_client.post(path, payload)
-                    self.next_index += 1
-            except Exception as fallback_error:
-                logger.warning("OpenViking sync_turn failed during individual-message fallback: %s", fallback_error)
+        try:
+            path = f"/api/v1/sessions/{self.sid}/messages"
+            for payload in self.batch_messages[self.next_index:]:
+                self._trace("POST %s message_index=%d payload=%s", path, self.next_index, json.dumps(payload, ensure_ascii=False))
+                retry_client.post(path, payload)
+                self.next_index += 1
+        except Exception as fallback_error:
+            logger.warning("OpenViking sync_turn failed during individual-message fallback: %s", fallback_error)
 
 
 class OpenVikingMemoryProvider(MemoryProvider):
@@ -1257,36 +1248,30 @@ class OpenVikingMemoryProvider(MemoryProvider):
         # shares the resolved user and a /reload invalidates it.
         self._user_space_cache: Optional[tuple[Any, str]] = None
         self._run_id = uuid.uuid4().hex
-        self._run_lock_file: Optional[Any] = None
-        self._run_lock_path: Optional[Path] = None
+        self._run_lock_file = self._run_lock_path = None
         # Until initialize() resolves the baseline, _ensure_client() must not
         # re-resolve from the environment (a hand-wired test client would be discarded).
         self._env_refresh_enabled = False
-        # Guards (_session_id, _turn_count): sync_turn increments on the sync
-        # executor while on_session_end/_switch snapshot+reset on the caller thread.
-        self._session_state_lock = threading.Lock()
+        # _session_state_lock guards (_session_id, _turn_count): sync_turn increments on the
+        # sync executor while on_session_end/_switch snapshot+reset on the caller thread.
+        # _client_refresh_lock: settings + _client are one published state; refreshes are
+        # serialized. _conn_snapshot is the last identity that passed health, published as ONE
+        # tuple so lock-free background writers never see torn fields or a failed endpoint;
+        # _failed_refresh = (settings key, monotonic ts) of the last failure -> cooldown gate.
+        (self._session_state_lock, self._inflight_lock, self._deferred_commit_lock, self._committed_session_lock,
+         self._client_refresh_lock, self._runtime_start_lock, self._memory_write_lock) = (threading.Lock() for _ in range(7))
         # Writers keyed by the sid they POST under so a commit can drain all of them.
         self._inflight_writers: Dict[str, Set[threading.Thread]] = {}
-        self._inflight_lock = threading.Lock()
         self._deferred_commit_sids: Set[str] = set()
         self._deferred_commit_threads: Set[threading.Thread] = set()
-        self._deferred_commit_lock = threading.Lock()
         self._committed_session_ids: Set[str] = set()
-        self._committed_session_lock = threading.Lock()
         self._pending_marked_sids: Set[str] = set()
-        # Settings + _client are one published state; refreshes are serialized. The
-        # snapshot is the last identity that passed health, published as ONE tuple so
-        # lock-free background writers never see torn fields or a failed endpoint;
-        # _failed_refresh = (settings key, monotonic ts) of the last failure -> cooldown gate.
-        self._client_refresh_lock = threading.Lock()
-        self._conn_snapshot: Optional[tuple] = None
-        self._failed_refresh: Optional[tuple] = None
-        self._runtime_start_lock = threading.Lock()
-        self._runtime_start_thread: Optional[threading.Thread] = None
-        self._runtime_start_pending = False
-        self._memory_write_lock = threading.Lock()
         self._memory_write_threads: Set[threading.Thread] = set()
         self._profile_prefetched_sessions: Set[str] = set()
+        self._conn_snapshot: Optional[tuple] = None
+        self._failed_refresh: Optional[tuple] = None
+        self._runtime_start_thread: Optional[threading.Thread] = None
+        self._runtime_start_pending = False
         self._shutting_down = False  # finalizers stop issuing network writes
 
     @property
@@ -2251,7 +2236,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._run_lock_file = self._flock_open(path)
             self._run_lock_path = path
         except Exception as e:
-            self._run_lock_path = None
             with suppress(Exception):
                 path.unlink(missing_ok=True)
             logger.debug("Could not acquire OpenViking run lock %s: %s", path, e)
@@ -2659,9 +2643,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         result = self._unwrap_result(self._client.get(f"/api/v1/fs/{ {'tree': 'tree', 'stat': 'stat'}.get(action, 'ls') }", params={"uri": path}))
 
         if action in {"list", "tree"}:
-            raw_entries = result
-            if isinstance(result, dict):
-                raw_entries = result.get("entries") or result.get("items") or result.get("children") or []
+            raw_entries = (result.get("entries") or result.get("items") or result.get("children") or []) if isinstance(result, dict) else result
             if isinstance(raw_entries, list):
                 entries = [{
                     "name": e.get("rel_path") or e.get("name") or (e.get("uri", "").rsplit("/", 1)[-1] if e.get("uri", "") else ""),
