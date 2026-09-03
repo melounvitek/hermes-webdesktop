@@ -1,14 +1,10 @@
-"""Generic webhook platform adapter: aiohttp server that validates HMAC-signed POSTs
-(GitHub, GitLab, Svix, Linear, generic), renders payloads into agent prompts, and
-routes responses back (github_comment or any gateway platform).
-
-Routes live under platforms.webhook.extra.routes: events (header filter), secret
-(REQUIRED; "INSECURE_NO_AUTH" skips validation, loopback bind only), prompt template,
-skills, deliver/deliver_extra, deliver_only (rendered prompt IS the message). Per-route
-rate limiting, idempotency cache for provider retries, body-size caps checked before
-reading. Generic HMAC V2 binds a timestamp for replay protection; body-only V1 is
-deprecated but accepted with a warning.
-"""
+"""Generic webhook platform adapter: aiohttp server that validates HMAC-signed POSTs (GitHub,
+GitLab, Svix, Linear, generic), renders payloads into agent prompts, and routes responses back
+(github_comment or any gateway platform). Routes live under platforms.webhook.extra.routes:
+events (header filter), secret (REQUIRED; "INSECURE_NO_AUTH" skips validation, loopback only),
+prompt template, skills, deliver/deliver_extra, deliver_only (rendered prompt IS the message).
+Per-route rate limiting, idempotency cache, body-size caps checked before reading. Generic HMAC
+V2 binds a timestamp for replay protection; body-only V1 is deprecated but accepted with a warning."""
 
 import asyncio
 import base64
@@ -678,18 +674,14 @@ class WebhookAdapter(BasePlatformAdapter):
         svix = [_header(name) for name in ("svix-id", "svix-timestamp", "svix-signature")]
         if any(svix):
             return _validate_svix_signature(body, secret, *svix)
-        # Linear: linear-signature = hex HMAC-SHA256 of the raw body (no timestamp binding).
-        linear_sig = _header("linear-signature")
-        if linear_sig:
-            return _hmac_str_equal(linear_sig, _hex_hmac(secret, body))
-        # GitHub: X-Hub-Signature-256 = sha256=<hex>
-        gh_sig = headers.get("X-Hub-Signature-256", "")
-        if gh_sig:
-            return _hmac_str_equal(gh_sig, "sha256=" + _hex_hmac(secret, body))
-        # GitLab: X-Gitlab-Token = <plain secret>
-        gl_token = headers.get("X-Gitlab-Token", "")
-        if gl_token:
-            return _hmac_str_equal(gl_token, secret)
+        # Linear (any header case): hex HMAC of the body. GitHub: sha256=<hex>. GitLab: plain token.
+        for provided, expected in (
+            (_header("linear-signature"), lambda: _hex_hmac(secret, body)),
+            (headers.get("X-Hub-Signature-256", ""), lambda: "sha256=" + _hex_hmac(secret, body)),
+            (headers.get("X-Gitlab-Token", ""), lambda: secret),
+        ):
+            if provided:
+                return _hmac_str_equal(provided, expected())
         route_name = request.match_info.get("route_name", "")
         # Generic V2: X-Webhook-Signature-V2 = hex HMAC-SHA256 of "<timestamp>.<body>",
         # X-Webhook-Timestamp required. Presence of the V2 header COMMITS to V2 — it
