@@ -1,9 +1,8 @@
 """Origin-module lookup shared by the ``tools.browser_tool_*`` extraction modules.
 
-Extracted code must keep reading its origin's symbols (helpers, module state,
-``logger``) *through* ``tools.browser_tool`` so ``patch("tools.browser_tool.X")``
-in tests is honoured. The extraction modules must not import ``tools.browser_tool``
-at import time (cycle), so they call :func:`origin_module` lazily per call.
+Extracted code must read its origin's symbols *through* ``tools.browser_tool`` so
+``patch("tools.browser_tool.X")`` is honoured, and must not import it at import time
+(cycle) — hence the lazy :func:`origin_module` and the :data:`origin` proxy.
 """
 
 import sys
@@ -13,9 +12,8 @@ _ORIGIN_NAME = "tools.browser_tool"
 
 
 class _NamespaceView:
-    """Live attribute view over a module namespace whose module object is gone (a
-    test purged ``sys.modules`` after importing the origin): the old code still runs
-    with its own globals, so reads/writes must hit *those*, not a fresh re-import."""
+    """Live view over a module namespace whose module object is gone (a test purged
+    ``sys.modules``): the old code still runs with its own globals, so hit *those*."""
 
     __slots__ = ("_g",)
 
@@ -43,15 +41,11 @@ def _module_for_globals(g: dict):
 
 
 def origin_module(_depth: int = 2):
-    """Return the ``tools.browser_tool`` instance the *calling* moved function belongs to.
-
-    Resolution order, mirroring what in-file code would see: (1) the nearest
-    enclosing frame executing ``tools.browser_tool`` code — binds to that exact
-    module copy even after a test purged/reloaded ``sys.modules``; (2) a
-    ``tools.browser_tool`` module referenced from a calling frame's globals;
-    (3) ``sys.modules`` / the ``tools`` package attribute / a fresh import.
-    ``_depth`` is the frame of the moved function's caller.
-    """
+    """The ``tools.browser_tool`` instance the *calling* moved function belongs to, mirroring
+    what in-file code would see: (1) the nearest enclosing frame executing origin code (the
+    exact module copy, even after a test purged/reloaded ``sys.modules``); (2) an origin
+    module referenced from a calling frame's globals; (3) ``sys.modules`` / ``tools``
+    package attribute / fresh import. ``_depth`` is the frame of the moved function's caller."""
     try:
         start = sys._getframe(_depth)
     except ValueError:  # called directly by the interpreter (atexit callback)
@@ -78,9 +72,8 @@ def origin_module(_depth: int = 2):
 
 
 class _OriginProxy:
-    """Module-level ``_bt`` stand-in: every attribute read/write forwards to the
-    origin module resolved at that moment, so moved functions need no per-call
-    ``_bt = _origin()`` line."""
+    """Module-level ``_bt`` stand-in: every attribute read/write forwards to the origin
+    module resolved at that moment."""
 
     __slots__ = ()
 

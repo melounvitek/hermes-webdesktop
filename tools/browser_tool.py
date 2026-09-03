@@ -200,11 +200,9 @@ def _browser_cfg(key: str, default, parse, log_label: str):
 
 
 def _cached_browser_cfg(cache_name: str, flag_name: str, key: str, default, parse, log_label: str):
-    """Process-cached ``_browser_cfg`` read (cache cleared by ``cleanup_all_browsers``).
-
-    The value is stored BEFORE the resolved flag flips so a concurrent reader can
-    never observe ``resolved=True`` with a ``None`` cache.
-    """
+    """Process-cached ``_browser_cfg`` read (cleared by ``cleanup_all_browsers``). The value is
+    stored BEFORE the resolved flag flips so a concurrent reader never sees ``resolved=True``
+    with a ``None`` cache."""
     g = globals()
     if g[flag_name] and g[cache_name] is not None:
         return g[cache_name]
@@ -315,11 +313,8 @@ _PRIVATE_HOST_SUFFIXES = (".localhost", ".local", ".lan", ".internal")
 
 def _url_is_private(url: str) -> bool:
     """True when the URL's host is (or resolves to) a private/LAN/loopback/CGNAT address.
-
-    Routing oracle only: DNS failures are NOT private (fall through to the
-    configured backend, which surfaces the DNS error). Obvious names short-circuit
-    the DNS hop; bare ``localhost`` resolves via /etc/hosts otherwise.
-    """
+    Routing oracle only: DNS failures are NOT private (the configured backend surfaces the
+    error); obvious names short-circuit the DNS hop."""
     import ipaddress
     import socket
     from urllib.parse import urlparse
@@ -350,13 +345,10 @@ def _url_is_private(url: str) -> bool:
 
 
 def _navigation_session_key(task_id: str, url: str) -> str:
-    """Session key that should handle ``url`` for ``task_id``.
-
-    ``f"{task_id}::local"`` (hybrid routing: local Chromium sidecar while the cloud
-    session keeps serving public URLs) only when ALL hold: cloud provider
-    configured, ``browser.auto_local_for_private_urls`` on, private URL, no CDP
-    override (it owns the whole session), Camofox off (already local-only).
-    """
+    """Session key that should handle ``url`` for ``task_id``: ``f"{task_id}::local"`` (hybrid
+    local sidecar while the cloud session keeps serving public URLs) only when ALL hold —
+    cloud provider configured, ``browser.auto_local_for_private_urls`` on, private URL, no
+    CDP override (it owns the whole session), Camofox off (already local-only)."""
     if task_id is None:
         task_id = "default"
     hybrid = (
@@ -387,10 +379,8 @@ def _session_info_owned_by_task(session_info: Dict[str, Any], task_id: str, sess
 
 def _last_session_key(task_id: str) -> str:
     """Session key a non-nav tool must use: the one that served the task's last navigation.
-
-    If that session was cleaned up or its ownership no longer matches, fail closed by
-    dropping the stale binding rather than recreating or mutating the wrong browser.
-    """
+    If it was cleaned up or ownership no longer matches, fail closed by dropping the stale
+    binding rather than recreating or mutating the wrong browser."""
     if task_id is None:
         task_id = "default"
     recorded_key = _last_active_session_key.get(task_id)
@@ -686,15 +676,11 @@ def _secret_url_error(url: str) -> Optional[dict]:
 
 
 def _url_policy_error(url: str, *, auto_local: bool = False) -> Optional[dict]:
-    """Backend-aware URL checks on an already-normalized URL; None if allowed.
-
-    Ordered floors: (1) credential-like query params refused for cloud backends
-    (third-party readers), allowed for local and the hybrid sidecar; (2) cloud
-    metadata / IMDS refused UNCONDITIONALLY for every backend (a local Chromium on
-    a cloud VM still reaches the host IMDS); (3) private addresses refused unless
-    local, auto-routed to the sidecar, or ``browser.allow_private_urls``;
-    (4) website policy allow/deny lists.
-    """
+    """Backend-aware URL checks on an already-normalized URL; None if allowed. Ordered floors:
+    (1) credential-like query params refused for cloud backends (third-party readers);
+    (2) cloud metadata / IMDS refused UNCONDITIONALLY (a local Chromium on a cloud VM still
+    reaches the host IMDS); (3) private addresses refused unless local, sidecar-routed, or
+    ``browser.allow_private_urls``; (4) website policy allow/deny lists."""
     local = _is_local_backend()
     sensitive_query_key = _sensitive_query_param_name(url)
     if sensitive_query_key and not local and not auto_local:
@@ -737,13 +723,10 @@ _BOT_DETECTION_TITLE_PATTERNS = (
 
 
 def _post_redirect_block(nav_session_key: str, url: str, final_url: str, auto_local_this_nav: bool) -> Optional[str]:
-    """Post-redirect SSRF check; blocked JSON payload or None.
-
-    A redirect onto a private/internal address would let later snapshots read
-    internal content, so the page is navigated to about:blank first. The metadata
-    floor fires for every backend; the private-address check is skipped for local
-    backends, the hybrid sidecar, and ``browser.allow_private_urls``.
-    """
+    """Post-redirect SSRF check; blocked JSON payload or None. The page is moved to about:blank
+    first so later snapshots can't read the internal content. The metadata floor fires for
+    every backend; the private-address check is skipped for local, the sidecar, and
+    ``browser.allow_private_urls``."""
     if not final_url or final_url == url:
         return None
     if _is_always_blocked_url(final_url):
@@ -762,11 +745,8 @@ def _post_redirect_block(nav_session_key: str, url: str, final_url: str, auto_lo
 
 
 def _snapshot_fields(snap_result: Dict[str, Any]) -> Dict[str, Any]:
-    """``snapshot`` + ``element_count`` response fields from a successful snapshot result.
-
-    Oversized snapshots truncate at line boundaries; the full tree is stored to
-    cache/web with a read_file paging note (same pattern as web_extract — no LLM).
-    """
+    """``snapshot`` + ``element_count`` fields from a successful snapshot result; oversized
+    snapshots truncate at line boundaries with the full tree stored for read_file paging."""
     data = snap_result.get("data", {})
     snapshot_text = data.get("snapshot", "")
     refs = data.get("refs", {})
@@ -795,11 +775,8 @@ def _attach_auto_snapshot(response: Dict[str, Any], nav_session_key: str) -> Non
 
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """Navigate to ``url``; JSON with title, compact snapshot and, on first nav, stealth features.
-
-    Hybrid routing decides BEFORE the safety checks whether this URL goes to a local
-    Chromium sidecar; the cloud provider never sees the URL then, so the
-    private-address checks are relaxed for it.
-    """
+    Hybrid routing decides BEFORE the safety checks whether this URL goes to a local sidecar
+    (the cloud provider never sees it then, so the private-address checks are relaxed)."""
     url, safety_error = _secret_url_error_normalized(url)
     if safety_error is not None:
         return json.dumps(safety_error)
@@ -1103,12 +1080,9 @@ def _eval_result_or_blocked(effective_task_id: str, parsed: Any, result: Dict[st
 
 def _eval_supervisor_fast_path(effective_task_id: str, expression: str) -> Optional[str]:
     """``Runtime.evaluate`` on the CDP supervisor's persistent WebSocket (no subprocess cost).
-
-    Returns tool JSON when the supervisor gave a definitive answer (a value, a
-    blocked private page, or a real JS-side exception — NOT retried through the
-    subprocess, that would just reproduce it slower), or None to fall through to the
-    subprocess path (no supervisor, supervisor-side failure, import error).
-    """
+    Tool JSON when the supervisor gave a definitive answer (value, blocked page, or a real
+    JS-side exception — NOT retried via subprocess, that would just reproduce it slower);
+    None to fall through to the subprocess path."""
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
         supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
@@ -1147,12 +1121,9 @@ def _eval_failure_response(result: Dict[str, Any]) -> str:
 
 
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
-    """Evaluate a JavaScript expression in the page context and return the result.
-
-    Private-network guard, both halves gated on the same condition: the literal
-    pre-scan closes direct fetches (``fetch('http://127.0.0.1/...')`` never updates
-    ``location.href``); the post-eval page-URL recheck closes navigate-then-read.
-    """
+    """Evaluate JS in the page context. Private-network guard in two halves: the literal
+    pre-scan closes direct fetches (they never update ``location.href``); the post-eval
+    page-URL recheck closes navigate-then-read."""
     effective_task_id = _last_session_key(task_id or "default")
 
     if _eval_ssrf_guard_active(effective_task_id):
@@ -1309,13 +1280,9 @@ def _capture_vision_screenshot(effective_task_id: str, annotate: bool, screensho
 
 
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
-    """Screenshot the current page for visual inspection (CAPTCHAs, images, layouts).
-
-    Native-vision models get the screenshot attached to the conversation (multimodal
-    tool-result envelope); otherwise the auxiliary vision model returns a text
-    analysis. The file is saved persistently and its path returned (MEDIA:<path>).
-    ``annotate`` overlays numbered [N] labels on interactive elements.
-    """
+    """Screenshot the current page for visual inspection. Native-vision models get the image
+    attached to the conversation; otherwise the auxiliary vision model returns a text
+    analysis. The file is kept and its path returned (MEDIA:<path>)."""
     if _is_camofox_mode():
         return _camofox("camofox_vision", question, annotate, task_id)
 
@@ -1324,14 +1291,12 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
     screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
     effective_task_id = _last_session_key(task_id or "default")
-
     blocked = _blocked_private_page_content(effective_task_id)
     if blocked is not None:
         return blocked
 
     _lp_prerouted, _lp_fallback_warning, screenshot_path = _lightpanda_vision_preroute(
-        effective_task_id, annotate, screenshot_path,
-    )
+        effective_task_id, annotate, screenshot_path)
     result: Dict[str, Any] = {}
     try:
         screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -1340,11 +1305,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             effective_task_id, annotate, screenshot_path, _lp_prerouted)
         if error is not None:
             return error
-
-        # Native image routing for the active main model: attach the screenshot
-        # directly instead of describing it through an aux vision LLM (no information loss).
+        # Native image routing: attach the screenshot directly instead of describing it
+        # through an aux vision LLM (no information loss).
         from tools.vision_tools import _should_use_native_vision_fast_path
-
         if _should_use_native_vision_fast_path():
             return _native_vision_result(screenshot_path, question, annotate, result, _lp_fallback_warning)
 
@@ -1355,10 +1318,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         if annotate and result.get("data", {}).get("annotations"):
             response_data["annotations"] = result["data"]["annotations"]
         return _dumps(response_data)
-
     except Exception as e:
-        # Keep a captured screenshot — the failure is in the analysis, not the
-        # capture, and deleting it loses evidence. The 24-hour cleanup bounds disk growth.
+        # Keep a captured screenshot — the failure is in the analysis, not the capture,
+        # and deleting it loses evidence. The 24-hour cleanup bounds disk growth.
         logger.warning("browser_vision failed: %s", e, exc_info=True)
         error_info = _err(f"Error during vision analysis: {str(e)}")
         if screenshot_path.exists():
