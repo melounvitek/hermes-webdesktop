@@ -3,8 +3,7 @@
 The image bakes ``/etc/hermes/image-provenance.json`` outside ``$HERMES_HOME`` and the checkout, so a
 bind-mounted checkout cannot hide the build fact and env/config cannot forge it. Absence preserves every
 source/package install path. Presence fails closed: an unreadable, non-regular, or malformed marker still
-means image-managed — an integrity defect, never permission to mutate the image in place.
-"""
+means image-managed — an integrity defect, never permission to mutate the image in place."""
 
 from __future__ import annotations
 
@@ -49,9 +48,7 @@ def _optional_string(payload: dict, name: str) -> Optional[str]:
 
 def read_image_provenance(marker_path: Optional[Path] = None) -> Optional[ImageProvenance]:
     """Read the baked marker without consulting environment or config. Never raises.
-
-    ``marker_path`` is a dependency-injection seam for tests and alternate image builders.
-    """
+    ``marker_path`` is a dependency-injection seam for tests and alternate image builders."""
     path = IMAGE_PROVENANCE_PATH
     try:
         path = Path(marker_path) if marker_path is not None else path

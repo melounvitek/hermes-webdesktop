@@ -18,9 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 _WRAPPER_TAG_RE = re.compile(
     r"^<(?:user_instructions|environment_context|recommended_plugins|"
     r"skills_instructions|permissions[_-]instructions|turn_context|"
-    r"command-name|command-message|local-command-stdout|system-reminder)\b",
-    re.IGNORECASE,
-)
+    r"command-name|command-message|local-command-stdout|system-reminder)\b", re.IGNORECASE)
 
 _TITLE_MAX = 60
 _SOURCE_LABELS = {"claude": "Claude Code", "codex": "Codex CLI"}
@@ -41,24 +39,34 @@ class ForeignSession:
 
     @property
     def label(self) -> str:
-        name = _SOURCE_LABELS.get(self.source, self.source)
         title = (self.title_guess or "").strip() or self.path.stem
-        return f"[{name}] {title[:_TITLE_MAX]}"
+        return f"[{_SOURCE_LABELS.get(self.source, self.source)}] {title[:_TITLE_MAX]}"
 
 
 def _read_json_lines(path: Path):
     """Yield parsed JSON objects, silently skipping unparseable lines."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line) if line.strip() else None
-                except ValueError:
-                    continue
-                if isinstance(obj, dict):
-                    yield obj
-    except OSError:
-        return
+    with contextlib.suppress(OSError), open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                yield obj
+
+
+def _block_text(block: Any) -> str:
+    """Plain text of one content block; tool_result, thinking/reasoning and unknown types yield ''."""
+    if isinstance(block, str):
+        return block
+    if not isinstance(block, dict):
+        return ""
+    btype = block.get("type")
+    if btype in ("text", "input_text", "output_text"):
+        return text if isinstance(text := block.get("text"), str) else ""
+    if btype == "tool_use":  # Claude Code assistant block
+        return f"[ran tool: {block.get('name') or 'tool'}]"
+    return "[image]" if btype == "image" else ""
 
 
 def _flatten_blocks(content: Any) -> str:
@@ -67,22 +75,7 @@ def _flatten_blocks(content: Any) -> str:
         return content
     if not isinstance(content, list):
         return ""
-    parts: List[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif not isinstance(block, dict):
-            continue
-        # tool_result (tool output echoed into a user message), thinking/reasoning and unknown
-        # block types are skipped.
-        elif (btype := block.get("type")) in ("text", "input_text", "output_text"):
-            if isinstance(text := block.get("text"), str) and text:
-                parts.append(text)
-        elif btype == "tool_use":  # Claude Code assistant block
-            parts.append(f"[ran tool: {block.get('name') or 'tool'}]")
-        elif btype == "image":
-            parts.append("[image]")
-    return "\n\n".join(p for p in (s.strip() for s in parts) if p)
+    return "\n\n".join(p for p in (_block_text(b).strip() for b in content) if p)
 
 
 def _merge_turns(raw_turns: List[Tuple[str, str]]) -> List[Dict[str, str]]:
@@ -104,11 +97,12 @@ def _merge_turns(raw_turns: List[Tuple[str, str]]) -> List[Dict[str, str]]:
     return merged
 
 
-def _message_turn(role: Any, content: Any) -> Optional[Tuple[str, str]]:
-    """Normalize one message into a ``(role, text)`` turn, or None when it is not importable."""
+def _message_turn(message: Any) -> Optional[Tuple[str, str]]:
+    """Normalize one message dict into a ``(role, text)`` turn, or None when it is not importable."""
+    role = message.get("role") if isinstance(message, dict) else None
     if role not in ("user", "assistant"):
         return None
-    text = _flatten_blocks(content)
+    text = _flatten_blocks(message.get("content"))
     return None if not text or (role == "user" and _WRAPPER_TAG_RE.match(text.lstrip())) else (role, text)
 
 
@@ -132,19 +126,15 @@ def parse_claude_session(path: Path) -> Dict[str, Any]:
     for obj in _read_json_lines(path):
         otype = obj.get("type")
         if otype == "summary":
-            s = obj.get("summary")
-            if isinstance(s, str) and s.strip():
+            if isinstance(s := obj.get("summary"), str) and s.strip():
                 summary = s.strip()
-            continue
-        if otype not in ("user", "assistant") or obj.get("isSidechain") or obj.get("isMeta"):
-            continue
-        if cwd is None and isinstance(obj.get("cwd"), str):
-            cwd = obj["cwd"]
-        if session_id is None and isinstance(obj.get("sessionId"), str):
-            session_id = obj["sessionId"]
-        message = obj.get("message")
-        if isinstance(message, dict) and (turn := _message_turn(message.get("role"), message.get("content"))):
-            turns.append(turn)
+        elif otype in ("user", "assistant") and not (obj.get("isSidechain") or obj.get("isMeta")):
+            if cwd is None and isinstance(obj.get("cwd"), str):
+                cwd = obj["cwd"]
+            if session_id is None and isinstance(obj.get("sessionId"), str):
+                session_id = obj["sessionId"]
+            if turn := _message_turn(obj.get("message")):
+                turns.append(turn)
     return _parsed(turns, cwd, session_id, summary)
 
 
@@ -153,27 +143,22 @@ def parse_codex_session(path: Path) -> Dict[str, Any]:
     turns: List[Tuple[str, str]] = []
     cwd = session_id = None
     for obj in _read_json_lines(path):
-        otype = obj.get("type")
-        payload = obj.get("payload")
+        otype, payload = obj.get("type"), obj.get("payload")
         if not isinstance(payload, dict):
             continue
         if otype == "session_meta":
             if isinstance(payload.get("cwd"), str):
                 cwd = payload["cwd"]
-            sid = payload.get("session_id") or payload.get("id")
-            if isinstance(sid, str):
+            if isinstance(sid := payload.get("session_id") or payload.get("id"), str):
                 session_id = sid
-            continue
-        if otype != "response_item":
-            continue
-        ptype = payload.get("type")
-        if ptype == "message":  # developer/system payloads never imported
-            if turn := _message_turn(payload.get("role"), payload.get("content")):
+        elif otype == "response_item":
+            ptype = payload.get("type")
+            if ptype == "message" and (turn := _message_turn(payload)):  # developer/system payloads skipped
                 turns.append(turn)
-        elif ptype in ("custom_tool_call", "function_call", "local_shell_call"):
-            # Assistant activity; merged into neighbours later. Tool outputs / reasoning skipped.
-            name = payload.get("name") or payload.get("tool") or "tool"
-            turns.append(("assistant", f"[ran tool: {name}]"))
+            elif ptype in ("custom_tool_call", "function_call", "local_shell_call"):
+                # Assistant activity; merged into neighbours later. Tool outputs / reasoning skipped.
+                name = payload.get("name") or payload.get("tool") or "tool"
+                turns.append(("assistant", f"[ran tool: {name}]"))
     return _parsed(turns, cwd, session_id)
 
 
@@ -204,8 +189,7 @@ def _list_sessions(source: str, root: Optional[Path]) -> List[ForeignSession]:
 def import_foreign_session(source: str, path, db=None) -> str:
     """Import one foreign session into the Hermes SessionDB; returns the new Hermes session id.
 
-    Raises ``ValueError`` on unknown source or a session with no usable conversation turns.
-    """
+    Raises ``ValueError`` on unknown source or a session with no usable conversation turns."""
     source = (source or "").strip().lower().lstrip("@")
     if source not in _SOURCE_LABELS:
         raise ValueError(f"Unknown foreign session source: {source!r}")
@@ -239,10 +223,8 @@ def import_foreign_session(source: str, path, db=None) -> str:
                 db.close()
 
 
-def gather_foreign_sessions(
-    source: Optional[str] = None, *, claude_root: Optional[Path] = None, codex_root: Optional[Path] = None,
-    limit: int = 25,
-) -> List[ForeignSession]:
+def gather_foreign_sessions(source: Optional[str] = None, *, claude_root: Optional[Path] = None,
+                            codex_root: Optional[Path] = None, limit: int = 25) -> List[ForeignSession]:
     """List foreign sessions across sources, newest first."""
     sessions = [s for name, root in (("claude", claude_root), ("codex", codex_root)) if source in (None, name)
                 for s in _list_sessions(name, root)]
@@ -273,11 +255,10 @@ def pick_foreign_session(source: Optional[str] = None, *, limit: int = 25) -> Op
     except ValueError:
         print(f"Not a number: {raw}")
         return None
-    if idx is None:
-        return None
-    if 1 <= idx <= len(sessions):
+    if idx is not None and 1 <= idx <= len(sessions):
         return sessions[idx - 1]
-    print(f"Out of range: {idx}")
+    if idx is not None:
+        print(f"Out of range: {idx}")
     return None
 
 
@@ -301,8 +282,7 @@ def run_sessions_import(args, db=None) -> Optional[str]:
             return None
         chosen_path = Path(path)
     else:
-        picked = pick_foreign_session(source)
-        if picked is None:
+        if (picked := pick_foreign_session(source)) is None:
             return None
         source, chosen_path = picked.source, picked.path
     try:
@@ -310,7 +290,6 @@ def run_sessions_import(args, db=None) -> Optional[str]:
     except ValueError as e:
         print(f"Error: {e}")
         return None
-    label = _SOURCE_LABELS.get(source, source)
-    print(f"✓ Imported {label} session as {session_id}")
+    print(f"✓ Imported {_SOURCE_LABELS.get(source, source)} session as {session_id}")
     print(f"  Continue it with:  hermes --resume {session_id}")
     return session_id

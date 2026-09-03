@@ -17,37 +17,27 @@ _DEP_CHECKS = {
     # find_node_executable() rather than a bare which(): $HERMES_HOME/node is not on PATH, so
     # which() would report Node missing on a managed install and trigger a redundant re-install.
     "node": lambda: find_node_executable("node") is not None,
-    "browser": lambda: (
-        agent_browser_runnable(shutil.which("agent-browser"))
-        or _has_system_browser()
-        or _has_hermes_agent_browser()
-        or _has_npx_agent_browser()
-    ),
+    "browser": lambda: (agent_browser_runnable(shutil.which("agent-browser")) or _has_system_browser()
+                        or _has_hermes_agent_browser() or _has_npx_agent_browser()),
     "ripgrep": lambda: shutil.which("rg") is not None,
     "ffmpeg": lambda: shutil.which("ffmpeg") is not None,
 }
 
-_DEP_DESCRIPTIONS = {
-    "node": "Node.js (required for browser tools and TUI)",
-    "browser": "Browser engine (Chromium, for web browsing tools)",
-    "ripgrep": "ripgrep (fast file search)",
-    "ffmpeg": "ffmpeg (TTS voice messages)",
-}
+_DEP_DESCRIPTIONS = {"node": "Node.js (required for browser tools and TUI)",
+                     "browser": "Browser engine (Chromium, for web browsing tools)",
+                     "ripgrep": "ripgrep (fast file search)", "ffmpeg": "ffmpeg (TTS voice messages)"}
 
 
 def _has_system_browser() -> bool:
-    names = (
-        ("chrome", "msedge", "chromium") if _IS_WINDOWS
-        else ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
-    )
+    names = ("chrome", "msedge", "chromium") if _IS_WINDOWS else (
+        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome")
     return any(shutil.which(name) for name in names)
 
 
 def _has_npx_agent_browser() -> bool:
     """agent-browser resolves lazily via npx on the default install, invisible to the PATH/managed-dir
     probes above. Mirror tools.browser_tool.check_browser_requirements's Termux carve-out so this
-    check can't diverge from what browser tools actually find.
-    """
+    check can't diverge from what browser tools actually find."""
     try:
         from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
         browser_cmd = _find_agent_browser(validate=False)
@@ -61,12 +51,9 @@ def _has_hermes_agent_browser() -> bool:
     home = get_hermes_home()
     if _IS_WINDOWS:  # npm -g --prefix puts .cmd shims directly in the prefix dir
         return (home / "node" / "agent-browser.cmd").is_file()
-    # install.sh installs into $HERMES_HOME/node/bin/ via npm -g --prefix; legacy git-clone
-    # installs used node_modules/.bin/.
-    return (
-        (home / "node" / "bin" / "agent-browser").is_file()
-        or (home / "node_modules" / ".bin" / "agent-browser").is_file()
-    )
+    # install.sh installs into $HERMES_HOME/node/bin/ via npm -g --prefix; legacy git clones used node_modules/.bin/.
+    return ((home / "node" / "bin" / "agent-browser").is_file()
+            or (home / "node_modules" / ".bin" / "agent-browser").is_file())
 
 
 def _find_install_script(package_dir: Path | None = None, repo_root: Path | None = None) -> tuple[Path | None, str | None]:
@@ -78,8 +65,7 @@ def _find_install_script(package_dir: Path | None = None, repo_root: Path | None
         candidates.reverse()
     for script_name, shell in candidates:
         for base in (package_dir, repo_root):
-            script = base / "scripts" / script_name
-            if script.is_file():
+            if (script := base / "scripts" / script_name).is_file():
                 return script, shell
     return None, None
 

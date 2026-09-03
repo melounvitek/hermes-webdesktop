@@ -1,10 +1,9 @@
 """Session heartbeats — recurring re-entry prompts for the current session.
 
-Deliberately session-scoped and in-process (CLI or gateway must be running); durable cross-process
-scheduling remains ``hermes cron``. Invariants (mirrors goals.py): injection is a plain user message —
-no system-prompt mutation or toolset swap, so prompt caching stays intact — and a real user message
-always wins: heartbeats only fire into an idle session with an empty input queue.
-"""
+Session-scoped and in-process (CLI or gateway must be running); durable cross-process scheduling stays
+``hermes cron``. Invariants (mirrors goals.py): injection is a plain user message — no system-prompt
+mutation or toolset swap, so prompt caching stays intact — and a real user message always wins:
+heartbeats only fire into an idle session with an empty input queue."""
 
 from __future__ import annotations
 
@@ -21,16 +20,13 @@ MIN_INTERVAL_SECONDS = 60  # floor: re-entering more often than once a minute is
 POLL_SECONDS = 5.0  # how often drivers poll for due heartbeats; not user-facing
 
 HEARTBEAT_PROMPT_TEMPLATE = (
-    "[Heartbeat — recurring instruction, fires every {interval}]\n"
-    "{prompt}\n\n"
+    "[Heartbeat — recurring instruction, fires every {interval}]\n{prompt}\n\n"
     "If there is nothing meaningful to do or report for this instruction "
-    "right now, reply briefly that nothing has changed and stop — do not "
-    "invent work."
+    "right now, reply briefly that nothing has changed and stop — do not invent work."
 )
 
 _INTERVAL_RE = re.compile(
-    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$", re.IGNORECASE
-)
+    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$", re.IGNORECASE)
 
 _UNIT_SECONDS = {
     **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1),
@@ -49,8 +45,7 @@ _STATE_FIELDS = {
 def parse_interval(text: str) -> Optional[int]:
     """Parse ``10m`` / ``every 2h`` / ``every 90 minutes`` into seconds.
 
-    None when the text is not an interval; values below ``MIN_INTERVAL_SECONDS`` return -1 so
-    callers can distinguish "not an interval" from "too small".
+    None when not an interval; below ``MIN_INTERVAL_SECONDS`` returns -1 so callers can tell "too small" apart.
     """
     m = _INTERVAL_RE.match(text) if text else None
     if not m:
@@ -88,7 +83,7 @@ class HeartbeatState:
     def is_due(self, now: Optional[float] = None) -> bool:
         if self.status != "active" or not self.prompt or self.interval_seconds <= 0:
             return False
-        return ((time.time() if now is None else now) - (self.last_fired_at or self.created_at)) >= self.interval_seconds
+        return (time.time() if now is None else now) - (self.last_fired_at or self.created_at) >= self.interval_seconds
 
     def render_prompt(self) -> str:
         return HEARTBEAT_PROMPT_TEMPLATE.format(interval=format_interval(self.interval_seconds), prompt=self.prompt)
@@ -113,14 +108,12 @@ def load_heartbeat(session_id: str) -> Optional[HeartbeatState]:
     except Exception as exc:
         logger.debug("HeartbeatManager: get_meta failed: %s", exc)
         return None
-    if not raw:
-        return None
     try:
-        state = HeartbeatState.from_json(raw)
+        state = HeartbeatState.from_json(raw) if raw else None
     except Exception as exc:
         logger.warning("HeartbeatManager: could not parse stored heartbeat for %s: %s", session_id, exc)
         return None
-    return None if state.status == "cleared" else state
+    return None if state is None or state.status == "cleared" else state
 
 
 def save_heartbeat(session_id: str, state: HeartbeatState) -> None:
@@ -140,9 +133,8 @@ def save_heartbeat(session_id: str, state: HeartbeatState) -> None:
 class HeartbeatManager:
     """Per-session heartbeat state + due-tick decisions; the surface CLI + gateway talk to.
 
-    Drivers (CLI thread / gateway task) call :meth:`due_prompt` on a poll cadence while the session
-    is idle; a non-None return is the user-role message to inject. Firing is recorded immediately so
-    a slow turn can't double-fire.
+    Drivers (CLI thread / gateway task) call :meth:`due_prompt` on a poll cadence while the session is
+    idle; a non-None return is the user-role message to inject.
     """
 
     def __init__(self, session_id: str):
@@ -178,10 +170,10 @@ class HeartbeatManager:
         interval_seconds = int(interval_seconds)
         if interval_seconds < MIN_INTERVAL_SECONDS:
             raise ValueError(f"interval must be at least {MIN_INTERVAL_SECONDS}s")
-        state = HeartbeatState(prompt=prompt, interval_seconds=interval_seconds, status="active", created_at=time.time())
-        self._state = state
-        save_heartbeat(self.session_id, state)
-        return state
+        self._state = HeartbeatState(prompt=prompt, interval_seconds=interval_seconds, status="active",
+                                     created_at=time.time())
+        save_heartbeat(self.session_id, self._state)
+        return self._state
 
     def _set_status(self, status: str, *, reanchor: bool = False) -> Optional[HeartbeatState]:
         if not self._state:
@@ -200,17 +192,16 @@ class HeartbeatManager:
         return self._set_status("active", reanchor=True)
 
     def clear(self) -> bool:
-        if self._set_status("cleared") is None:
-            return False
+        cleared = self._set_status("cleared") is not None
         self._state = None
-        return True
+        return cleared
 
     def due_prompt(self, now: Optional[float] = None) -> Optional[str]:
         """Return the injection prompt if the heartbeat is due, else None.
 
-        Records the fire immediately (before the turn runs) so overlapping polls or a long turn can
-        never double-fire the same tick. Missed ticks coalesce into one — the anchor resets to NOW,
-        not to the theoretical schedule.
+        The fire is recorded immediately (before the turn runs) so overlapping polls or a long turn can never
+        double-fire the same tick. Missed ticks coalesce: the anchor resets to NOW, not the theoretical
+        schedule.
         """
         s = self._state
         if s is None or not s.is_due(now):
@@ -222,10 +213,9 @@ class HeartbeatManager:
 
 
 def migrate_heartbeat_to_session(old_session_id: str, new_session_id: str) -> bool:
-    """Carry a heartbeat across a compression session rotation.
+    """Carry a heartbeat across a compression session rotation (copy to child, archive parent, never raise).
 
-    Same shape as ``goals.migrate_goal_to_session`` — copy to the child, archive the parent row,
-    never raise.
+    Same shape as ``goals.migrate_goal_to_session``.
     """
     if not old_session_id or not new_session_id or old_session_id == new_session_id:
         return False
