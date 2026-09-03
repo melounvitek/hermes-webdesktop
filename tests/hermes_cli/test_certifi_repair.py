@@ -79,8 +79,6 @@ class TestUpdateProbeScriptChecksBundle:
     def _run_probe_script(self, monkeypatch, tmp_path, bundle_path):
         """Extract the generated probe script and run it in-process against a
         fake certifi that points at bundle_path."""
-        from hermes_cli import main as main_mod
-
         captured = {}
 
         def fake_run(cmd, **kwargs):
@@ -93,9 +91,9 @@ class TestUpdateProbeScriptChecksBundle:
 
             return _R()
 
-        monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(main_install_repair.subprocess, "run", fake_run)
         monkeypatch.setattr(
-            main_mod, "_resolve_install_target_python", lambda *a, **k: sys.executable
+            main_install_repair, "_resolve_install_target_python", lambda *a, **k: sys.executable
         )
         main_install_repair._detect_broken_lazy_refresh_imports(["pip"])
         script = captured["script"]

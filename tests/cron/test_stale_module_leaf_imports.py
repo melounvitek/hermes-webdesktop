@@ -27,10 +27,13 @@ def test_primary_client_ignores_stale_auxiliary_router(monkeypatch):
         captured.update(kwargs)
         return object()
 
+    from agent import process_bootstrap
+
+    monkeypatch.setattr(process_bootstrap, "OpenAI", fake_openai)
     monkeypatch.setattr(
         agent_runtime_helpers,
         "_ra",
-        lambda: SimpleNamespace(OpenAI=fake_openai, logger=logging.getLogger(__name__)),
+        lambda: SimpleNamespace(logger=logging.getLogger(__name__)),
     )
     agent = SimpleNamespace(
         provider="openai-codex",
