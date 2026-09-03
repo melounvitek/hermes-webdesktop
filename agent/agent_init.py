@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
+from agent.agent_runtime_helpers import _ra
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import StreamingContextScrubber
 from agent.session_activity import ActivityProvenance
@@ -69,12 +70,6 @@ def _warn_memory_provider_unavailable(name: str, reason: str = "") -> None:
         name,
         f" {reason}" if reason else "",
     )
-
-
-def _ra():
-    """Lazy ``run_agent`` so ``patch("run_agent.OpenAI")`` & co. reach this code path."""
-    import run_agent
-    return run_agent
 
 
 # Canonicalize an endpoint URL for model-route identity comparisons.
