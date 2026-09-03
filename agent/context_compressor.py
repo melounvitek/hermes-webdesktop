@@ -319,7 +319,6 @@ def _looks_like_compaction_summary(msg: Dict[str, Any], content: str) -> bool:
 def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
     """Last-resort shrink: drop the synthetic todo snapshot, keeping only a pruned-skill reload notice if present."""
     from agent.conversation_compression import _PRUNED_SKILL_RELOAD_NOTICE_HEADER
-
     for i in range(len(out) - 1, -1, -1):
         msg = out[i]
         if not isinstance(msg, dict) or not (msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user"):
@@ -1438,7 +1437,6 @@ def _today_for_prompt() -> str:
     """Date-only (user tz) for temporal anchoring; "" when the clock fails. Cache-safe: the summary is outside the prefix."""
     try:
         from hermes_time import now as _hermes_now
-
         return _hermes_now().strftime("%Y-%m-%d")
     except Exception:  # pragma: no cover - clock resolution is best-effort
         return ""
@@ -1909,7 +1907,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             }
             if not refresh:
                 return local_state
-
         session_db = getattr(self, "_session_db", None)
         getter = getattr(session_db, "get_compression_failure_cooldown", None) if session_db else None
         if not getattr(self, "_session_id", "") or getter is None:
@@ -1926,21 +1923,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._last_cooldown_refresh_was_authoritative = True
         remaining_seconds = float(state.get("remaining_seconds") or 0.0) if state else 0.0
         if remaining_seconds <= 0:
+            # Local cooldown never reached the DB, so an empty row is not evidence it was cleared; keep local.
+            if refresh and local_state is not None and self._cooldown_persist_failed:
+                return local_state
             if refresh:
-                if local_state is not None and self._cooldown_persist_failed:
-                    # Local cooldown never reached the DB, so an empty row is not evidence it was cleared; keep local.
-                    return local_state
-                self._summary_failure_cooldown_until = 0.0
-                self._last_summary_error = None
+                self._summary_failure_cooldown_until, self._last_summary_error = 0.0, None
             return None
-
         # Hygiene-only cooldowns share the column but are not a 429/aux fault; the in-agent compressor may run.
+        # A hygiene write may have overwritten an aux-model row; drop the in-memory cooldown too.
         if _is_hygiene_preagent_only_cooldown(state.get("error")):
-            # A hygiene write may have overwritten an aux-model row; drop the in-memory cooldown too.
-            self._summary_failure_cooldown_until = 0.0
-            self._last_summary_error = None
+            self._summary_failure_cooldown_until, self._last_summary_error = 0.0, None
             return None
-
         self._summary_failure_cooldown_until = now_mono + remaining_seconds
         self._last_summary_error = state.get("error")
         self._cooldown_persist_failed = False
@@ -1950,15 +1943,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         }
 
     def _record_compression_failure_cooldown(self, cooldown_seconds: float, error: Optional[str]) -> None:
-        now_mono = time.monotonic()
-        new_mono = now_mono + float(cooldown_seconds)
         # Never shorten a longer live deadline; record the latest error text only.
-        if new_mono > self._summary_failure_cooldown_until:
-            self._summary_failure_cooldown_until = new_mono
+        self._summary_failure_cooldown_until = max(self._summary_failure_cooldown_until, time.monotonic() + float(cooldown_seconds))
         self._last_summary_error = error
-        remaining = max(0.0, self._summary_failure_cooldown_until - time.monotonic())
-        cooldown_until = time.time() + remaining
-
+        cooldown_until = time.time() + max(0.0, self._summary_failure_cooldown_until - time.monotonic())
         if not getattr(self, "_session_db", None) or not getattr(self, "_session_id", ""):
             return
         # A store without the recorder or a failed write both leave the durable row unauthoritative.
@@ -1977,10 +1965,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if ContextCompressor._compression_cancelled(self):
             logger.info("Skipping compression cooldown clear: host already cancelled this compression attempt")
             return
-        self._summary_failure_cooldown_until = 0.0
-        self._last_summary_error = None
-        self._consecutive_timeout_failures = 0
-        self._cooldown_persist_failed = False
+        self._summary_failure_cooldown_until, self._last_summary_error = 0.0, None
+        self._consecutive_timeout_failures, self._cooldown_persist_failed = 0, False
         ContextCompressor._durable_write(self, "clear_compression_failure_cooldown", "compression failure cooldown clear")
 
     def _compression_cancelled(self) -> bool:
@@ -2015,7 +2001,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._tail_token_budget = None
         _ = self.tail_token_budget  # eager recompute, same timing as before
         self.max_summary_tokens = min(int(context_length * 0.05), _SUMMARY_TOKENS_CEILING)
-
         # Calibration state is only valid for the model that produced it: carried to a smaller window it would let
         # should_defer_preflight_to_real_usage() suppress a compaction the new model needs. 0 (not the -1 sentinel)
         # means "no real usage yet -> use the rough estimate" so post-response should_compress still fires.
@@ -2136,11 +2121,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._micro_compact_defrag_threshold_tokens = 2000
         # Set when _defrag_rolling_summary pops _DB_PERSISTED_MARKER in place; finalize_turn resets the flush cursor.
         self._flush_scan_cursor_invalidated: bool = False
-        self._micro_compact_passes = self._micro_compact_tokens_saved_total = 0
+        self._micro_compact_passes = self._micro_compact_tokens_saved_total = self._micro_compact_turns_since_pass = 0
         # Cadence dial: how often the cache-breaking pass is paid. 1 = every turn.
         self._micro_compact_every_n_turns: int = 1
-        self._micro_compact_turns_since_pass: int = 0
-
         # Deferred: get_model_context_length() may issue a sync HTTP probe that must not block construction.
         # Floor and cap are applied on first resolution (see _resolve_context_length / threshold_tokens).
         self._config_context_length = config_context_length
@@ -2189,7 +2172,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             else:
                 self.last_rough_tokens_when_real_prompt_fit = 0
             self._pending_request_rough_tokens = 0
-
             # Anti-thrash verdict lives HERE: effectiveness is "prompt under threshold" per the provider's real count,
             # not "messages shrank"; should_compress() runs twice per turn with mixed measures and would reset it.
             if self._verify_compaction_cleared_threshold:
@@ -2464,8 +2446,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         def _protected_region_tokens() -> int:
             return sum(_estimate_msg_budget_tokens(result[i]) for i in range(start, len(result)))
 
-        demoted = 0
-        pressure_hits = 0
+        demoted = pressure_hits = 0
 
         def _shrink_at(i: int) -> None:
             # Each helper no-ops on the other role, so both may run unconditionally.
@@ -2485,9 +2466,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # If the recent floor is still dominated by huge tool bodies, demote all but the newest.
         if _protected_region_tokens() > soft_ceiling:
             last_tool_idx = next((i for i in range(len(result) - 1, -1, -1) if result[i].get("role") == "tool"), None)
-            for i in range(start, len(result)):
-                if i != last_tool_idx:
-                    _shrink_at(i)
+            for i in (i for i in range(start, len(result)) if i != last_tool_idx):
+                _shrink_at(i)
             # Last resort: the newest body alone may exceed the soft budget; summarize it.
             if (
                 last_tool_idx is not None and last_tool_idx >= prune_boundary and _protected_region_tokens() > soft_ceiling
@@ -2557,13 +2537,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         pruned_msgs, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None, min_prune_chars=self.proactive_prune_min_result_chars,
         )
-        if not pruned_count:
-            # No-op contract: return the INPUT object so callers can gate on `result is not input`.
-            return messages, 0
+        # No-op contract: return the INPUT object so callers can gate on `result is not input`.
         # Prompt-cache hysteresis: commit only when the reclaim is meaningful.
         after = sum(_estimate_msg_budget_tokens(m) for m in pruned_msgs)
         reclaimed = max(0, before - after)
-        if reclaimed < self.proactive_prune_min_reclaim_tokens:
+        if not pruned_count or reclaimed < self.proactive_prune_min_reclaim_tokens:
             return messages, 0
         # Require a full trigger-sized regrowth before the next cache-breaking rewrite.
         runway = max(reclaimed, self.proactive_prune_tokens, self.proactive_prune_min_reclaim_tokens)
@@ -2575,9 +2553,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                     model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: next_rearm_tokens},
                 )
             except Exception as exc:
-                logger.warning(
-                    "Proactive tool-result prune DB commit failed; keeping the original transcript: %s", exc,
-                )
+                logger.warning("Proactive tool-result prune DB commit failed; keeping the original transcript: %s", exc)
                 return messages, 0
             # Shared post-commit stamp site with the in-place commit and micro-compaction sync.
             stamp_db_persisted_markers(pruned_msgs)
@@ -2614,7 +2590,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Serialize turns into labeled, redacted text for the summarizer."""
         # Lazy import: agent_runtime_helpers pulls heavy transitive imports.
         from agent.agent_runtime_helpers import strip_think_blocks
-
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
@@ -2626,7 +2601,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
             if role == "assistant" and content:
                 content = strip_think_blocks(None, content)
-
             if len(content) > self._CONTENT_MAX:
                 content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
             if role == "tool":
@@ -2677,7 +2651,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 del last_dropped_turns[:-8]
             if len(text) > 600:
                 text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
-
             if role == "user" and text and not synthetic_user:
                 user_asks.append(text)
             elif role == "assistant":
@@ -2782,12 +2755,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         demoted = 0
         for i in range(tail_start, len(messages)):
             msg = messages[i]
-            if msg.get("role") != "tool" or i in protected:
-                continue
             content = msg.get("content")
-            if not isinstance(content, str) or len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content:
+            if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
                 continue
-            if _is_summary_stub(content):
+            if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
                 continue
             result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id))
             demoted += 1
@@ -2840,9 +2811,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if len(content) <= cls._SUMMARY_INPUT_MAX_CHARS:
             return content
         n = max(2, cls._SAMPLED_INPUT_SLICES)
-        gaps = n - 1
         marker_template = "\n\n...[{elided:,} chars elided — recover via session_search]...\n\n"
-        marker_reserve = len(marker_template.format(elided=len(content))) * gaps
+        marker_reserve = len(marker_template.format(elided=len(content))) * (n - 1)
         budget = max(cls._SUMMARY_INPUT_MAX_CHARS - marker_reserve, n)
         slice_len = budget // n
         stride = len(content) / n
@@ -3247,7 +3217,6 @@ Write only the summary body. Do not include any preamble or prefix."""
             _EMPTY_TOOL_RESPONSE_NUDGE, _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX, _LENGTH_CONTINUATION_NETWORK_STUB,
             _LENGTH_CONTINUATION_OUTPUT_LIMIT,
         )
-
         return text in {
             COMPRESSION_CONTINUATION_USER_CONTENT, _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
             MAX_ITERATIONS_SUMMARY_REQUEST, _CODEX_INCOMPLETE_NUDGE, _CODEX_ACK_CONTINUATION_NUDGE,
@@ -3355,7 +3324,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         summary; this grounds it in the exact compacted turns."""
         # Reuse the runtime's real-user predicate so scaffolding rows can never anchor.
         from agent.conversation_compression import _is_real_user_message
-
         for msg in reversed(messages):
             if msg.get("role") != "user" or not _is_real_user_message(msg):
                 continue
@@ -3444,7 +3412,6 @@ Write only the summary body. Do not include any preamble or prefix."""
                     found_delimiter = True
                     break
                 prior_blocks.append(item.copy() if isinstance(item, dict) else item)
-
             if not found_delimiter:
                 # Legacy end-marker form: live content follows the marker inside/after one part.
                 for index, item in enumerate(content):
@@ -3459,14 +3426,13 @@ Write only the summary body. Do not include any preamble or prefix."""
             # Strip the PRIOR CONTEXT header from the first block that carries it.
             for index, item in enumerate(prior_blocks):
                 text = _part_text(item)
-                if not isinstance(text, str) or not text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-                    continue
-                leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
-                if leading:
-                    prior_blocks[index] = _with_part_text(item, leading)
-                else:
-                    prior_blocks.pop(index)
-                break
+                if isinstance(text, str) and text.lstrip().startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+                    leading = text.lstrip()[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
+                    if leading:
+                        prior_blocks[index] = _with_part_text(item, leading)
+                    else:
+                        prior_blocks.pop(index)
+                    break
             return _unwrapped(prior_blocks) if prior_blocks else None
         return None
 
@@ -3485,7 +3451,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Remove orphaned tool results and strip orphaned tool_calls after compression.
         Stubs would be dropped by repair_message_sequence when call_id != id."""
         from agent.agent_runtime_helpers import _classify_tool_call_orphans
-
         _, result_call_ids, orphaned_result_msgs, missing_tool_calls = _classify_tool_call_orphans(messages)
         orphaned_results = {id(m) for m in orphaned_result_msgs}
         if orphaned_results:
@@ -3662,7 +3627,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Whether the route replays stale thinking every turn; tail walks and preflight MUST agree or compaction loops."""
         try:
             from agent.message_sanitization import stale_thinking_reaches_wire
-
             return stale_thinking_reaches_wire(
                 *(getattr(self, attr, "") or "" for attr in ("api_mode", "provider", "model", "base_url"))
             )
@@ -3974,14 +3938,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Alternate against head first, then tail; None (all-exempt head) means "user".
         summary_role = "user" if last_head_role in {None, "assistant", "tool"} or force_user_leading else "assistant"
         merge_into_tail = False
-        # Flip on a tail collision only if that doesn't collide with the head.
+        # Flip on a tail collision only if that doesn't collide with the head. All-exempt head pins "user";
+        # flipping would open the visible sequence with "assistant". Neither alternates: merge into the first tail row.
         if first_tail_role is not None and summary_role == first_tail_role:
             flipped = "assistant" if summary_role == "user" else "user"
-            # All-exempt head pins "user"; flipping would open the visible sequence with "assistant".
             if flipped != last_head_role and last_head_role is not None and not force_user_leading:
                 summary_role = flipped
             else:
-                # Neither role alternates: merge the summary into the first tail message instead.
                 merge_into_tail = bool(tail_messages)
         return summary_role, merge_into_tail, force_user_leading, first_tail_visible_idx
 
@@ -4002,8 +3965,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 _MERGED_PRIOR_CONTEXT_HEADER + "\n", prepend=True,
             )
         # Frontends use this to detect a summary-prefixed message.
-        msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
-        msg[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = bool(self._summary_has_user_turn)
+        msg[COMPRESSED_SUMMARY_METADATA_KEY], msg[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] = True, bool(self._summary_has_user_turn)
         # Rewritten content: drop the stale api_content sidecar so replay can't resend pre-merge bytes.
         drop_stale_api_content(msg)
 
@@ -4041,7 +4003,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         # rate-limited, #70782). debug, not warning: compression must never fail because of a trim.
         try:
             from hermes_cli.mem_trim import trim_memory
-
             trim_memory(reason="post-compression")
         except Exception as exc:
             logger.debug("post-compression memory trim failed: %s: %s", type(exc).__name__, exc)
