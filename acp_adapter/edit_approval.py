@@ -58,11 +58,11 @@ def reset_edit_approval_requester(token: Token) -> None:
 
 def _read_text_if_exists(path: str) -> str | None:
     p = Path(path).expanduser()
-    if not p.exists():
-        return None
-    if not p.is_file():
+    if p.is_file():
+        return p.read_text(encoding="utf-8", errors="replace")
+    if p.exists():
         raise OSError(f"Cannot edit non-file path: {path}")
-    return p.read_text(encoding="utf-8", errors="replace")
+    return None
 
 
 def _required_path(arguments: dict[str, Any]) -> str:
@@ -92,8 +92,7 @@ def _proposal_for_patch_replace(arguments: dict[str, Any]) -> EditProposal:
     from tools.fuzzy_match import fuzzy_find_and_replace
 
     new_text, match_count, _strategy, error = fuzzy_find_and_replace(
-        old_text, str(old_string), str(new_string), bool(arguments.get("replace_all", False)),
-    )
+        old_text, str(old_string), str(new_string), bool(arguments.get("replace_all", False)))
     if error or match_count == 0:
         raise ValueError(error or f"Could not find match for old_string in {path}")
     return EditProposal("patch", path, old_text, new_text, dict(arguments))
@@ -154,10 +153,8 @@ def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | Non
     if policy == AUTO_APPROVE_WORKSPACE:
         # tempfile.gettempdir() is the real temp root on every platform
         # (``/private/tmp`` on macOS since resolve() follows the symlink).
-        if path.is_relative_to(Path(tempfile.gettempdir()).resolve(strict=False)):
-            return True
-        if cwd:
-            return path.is_relative_to(Path(cwd).expanduser().resolve(strict=False))
+        return path.is_relative_to(Path(tempfile.gettempdir()).resolve(strict=False)) or (
+            bool(cwd) and path.is_relative_to(Path(cwd).expanduser().resolve(strict=False)))
     return False
 
 
@@ -225,8 +222,6 @@ def make_acp_edit_approval_requester(
                      PermissionOption(option_id="deny", kind="reject_once", name="Deny")],
             timeout=timeout, what="Edit approval request",
         )
-        if response is None:
-            return False
         outcome = getattr(response, "outcome", None)
         return getattr(outcome, "outcome", None) == "selected" and getattr(outcome, "option_id", None) == "allow_once"
 

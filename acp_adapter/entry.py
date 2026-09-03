@@ -52,8 +52,7 @@ class _BenignProbeMethodFilter(logging.Filter):
         if not isinstance(exc, RequestError) or getattr(exc, "code", None) != -32601:
             return True
         data = getattr(exc, "data", None)
-        method = data.get("method") if isinstance(data, dict) else None
-        return method not in _BENIGN_PROBE_METHODS
+        return not (isinstance(data, dict) and data.get("method") in _BENIGN_PROBE_METHODS)
 
 
 def _setup_logging() -> None:
@@ -61,9 +60,8 @@ def _setup_logging() -> None:
     from agent.redact import RedactingFormatter
 
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(RedactingFormatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    handler.setFormatter(RedactingFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                                            datefmt="%Y-%m-%d %H:%M:%S"))
     handler.addFilter(_BenignProbeMethodFilter())
     root = logging.getLogger()
     root.handlers.clear()
@@ -166,8 +164,7 @@ def main(argv: list[str] | None = None) -> None:
         if getattr(args, flag):
             return action()
     if args.setup_browser:
-        rc = _run_setup_browser(assume_yes=args.assume_yes)
-        if rc != 0:
+        if rc := _run_setup_browser(assume_yes=args.assume_yes):
             sys.exit(rc)
         return
 

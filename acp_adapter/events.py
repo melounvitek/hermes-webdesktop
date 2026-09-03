@@ -146,7 +146,7 @@ def make_step_cb(
     """Create a ``step_callback(api_call_count: int, prev_tools: list)`` for AIAgent."""
 
     def _step(api_call_count: int, prev_tools: Any = None) -> None:
-        if not prev_tools or not isinstance(prev_tools, list):
+        if not isinstance(prev_tools, list):
             return
         for tool_info in prev_tools:
             tool_name = result = function_args = None
@@ -168,10 +168,8 @@ def make_step_cb(
                 tc_id, tool_name, result=str(result) if result is not None else None,
                 function_args=function_args or meta.get("args"), snapshot=meta.get("snapshot"),
             ))
-            if tool_name == "todo":
-                plan_update = _build_plan_update_from_todo_result(result)
-                if plan_update is not None:
-                    _send_update(conn, session_id, loop, plan_update)
+            if tool_name == "todo" and (plan_update := _build_plan_update_from_todo_result(result)) is not None:
+                _send_update(conn, session_id, loop, plan_update)
             if not queue:
                 tool_call_ids.pop(tool_name, None)
 

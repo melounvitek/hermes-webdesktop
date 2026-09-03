@@ -25,9 +25,9 @@ def _permission_option_supports_kind(kind: str) -> bool:
     """Return whether the installed ACP SDK accepts a permission option kind."""
     try:
         PermissionOption(option_id="__probe__", kind=kind, name="probe")
+        return True
     except Exception:
         return False
-    return True
 
 
 def _build_permission_options(
@@ -105,9 +105,8 @@ def make_approval_callback(request_permission_fn: Callable, loop: asyncio.Abstra
 
     def _callback(command: str, description: str, *, allow_permanent: bool = True,
                   allow_session: bool = True, smart_denied: bool = False, **_: object) -> str:
-        options = _build_permission_options(
-            allow_permanent=allow_permanent, allow_session=allow_session, smart_denied=smart_denied,
-        )
+        options = _build_permission_options(allow_permanent=allow_permanent, allow_session=allow_session,
+                                            smart_denied=smart_denied)
         response, timed_out = await_permission(
             request_permission_fn, loop, session_id, tool_call=_build_permission_tool_call(command, description),
             options=options, timeout=timeout, what="Permission request",
