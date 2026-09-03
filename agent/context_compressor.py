@@ -161,9 +161,7 @@ def _is_summary_access_or_quota_error(exc: Exception) -> bool:
     if any(marker in err_text for marker in _SUMMARY_MISSING_CREDENTIAL_MARKERS):
         return True
 
-    status = getattr(exc, "status_code", None) or getattr(
-        getattr(exc, "response", None), "status_code", None
-    )
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
     if status in {401, 402, 403}:
         return True
 
@@ -329,9 +327,7 @@ def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:
 
 # Explicit end boundary: weak models otherwise read quoted headers as fresh
 # user input or replay an assistant-role summary as their own output.
-_SUMMARY_END_MARKER = (
-    "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
-)
+_SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
 
 # Merged-into-tail case: prior tail content is kept BEFORE the summary inside
 # these delimiters, so the summary prefix is not at content start.
@@ -2264,8 +2260,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._record_ineffective_compression_verdict(self._ineffective_compression_count + 1)
         if not self.quiet_mode:
             logger.warning(
-                "Compaction rejected before commit (would grow the "
-                "transcript); ineffective_compression_count=%d",
+                "Compaction rejected before commit (would grow the transcript); ineffective_compression_count=%d",
                 self._ineffective_compression_count,
             )
 
@@ -2307,8 +2302,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         local_remaining = self._summary_failure_cooldown_until - now_mono
         if local_remaining > 0:
             local_state = {
-                "cooldown_until": time.time() + local_remaining,
-                "remaining_seconds": local_remaining,
+                "cooldown_until": time.time() + local_remaining, "remaining_seconds": local_remaining,
                 "error": self._last_summary_error,
             }
             if not refresh:
@@ -2525,11 +2519,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         return floored
 
     def __init__(
-        self, model: str, threshold_percent: float = 0.50, protect_first_n: int = 3,
-        protect_last_n: int = 20, summary_target_ratio: float = 0.20, quiet_mode: bool = False,
-        summary_model_override: str = None, base_url: str = "", api_key: str = "",
-        config_context_length: int | None = None, provider: str = "", api_mode: str = "",
-        abort_on_summary_failure: bool = False, max_tokens: int | None = None,
+        self, model: str, threshold_percent: float = 0.50, protect_first_n: int = 3, protect_last_n: int = 20,
+        summary_target_ratio: float = 0.20, quiet_mode: bool = False, summary_model_override: str = None,
+        base_url: str = "", api_key: str = "", config_context_length: int | None = None, provider: str = "",
+        api_mode: str = "", abort_on_summary_failure: bool = False, max_tokens: int | None = None,
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1,
@@ -3074,8 +3067,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 )
             except Exception as exc:
                 logger.warning(
-                    "Proactive tool-result prune DB commit failed; keeping the original transcript: %s",
-                    exc,
+                    "Proactive tool-result prune DB commit failed; keeping the original transcript: %s", exc,
                 )
                 return messages, 0
             # Shared post-commit stamp site with the in-place commit and micro-compaction sync.
@@ -3336,9 +3328,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if _LEAN_USER_MESSAGES_HEADING not in summary:
             summary += _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))
         if _LEAN_RECOVERY_HEADING not in summary:
-            summary += _build_recovery_footer(
-                getattr(self, "_session_id", "") or "", len(turns_to_summarize),
-            )
+            summary += _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))
         return summary
 
     @classmethod
@@ -3891,8 +3881,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             or re.search(r"\bUser\s+asked\s*:", summary, re.IGNORECASE)
         ):
             raise RuntimeError(
-                "Context compression summary invented user attribution for a "
-                "session with no user-authored turns"
+                "Context compression summary invented user attribution for a session with no user-authored turns",
             )
 
     @classmethod
@@ -4719,8 +4708,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         if compressed:
             # None = all-exempt head: the summary opens the visible sequence and must be "user".
             last_head_role = next(
-                (r for r in (_template_visible_role(m) for m in reversed(compressed)) if r is not None),
-                None,
+                (r for r in (_template_visible_role(m) for m in reversed(compressed)) if r is not None), None,
             )
         first_tail_role = None
         first_tail_visible_idx: Optional[int] = None
