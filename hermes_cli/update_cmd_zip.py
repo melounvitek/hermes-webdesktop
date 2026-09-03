@@ -192,7 +192,6 @@ def _extract_zip_safely(zip_path: str, tmp_dir: str) -> None:
     symlinks, and a compromised mirror could use them to plant files anywhere."""
     import stat as _stat
     import zipfile
-
     with zipfile.ZipFile(zip_path, "r") as zf:
         tmp_dir_real = os.path.realpath(tmp_dir)
         for member in zf.infolist():
@@ -213,7 +212,6 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
 
     import tempfile
     from urllib.request import urlretrieve
-
     print("→ Downloading latest version...")
     tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
     try:
@@ -324,7 +322,6 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
     )
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
-
     # Keep managed uv current — runs `uv self update` if we already have one.
     update_managed_uv()
 
@@ -337,7 +334,6 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
         # Same UV-env isolation as the main update path: a user-level UV_PYTHON_INSTALL_DIR / UV_PYTHON
         # from unrelated software must not steer which interpreter uv resolves here.
         from hermes_cli.managed_uv import managed_python_env
-
         uv_env = managed_python_env()
         uv_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
         if _m()._is_termux_env(uv_env):
@@ -439,7 +435,6 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # Seed the model-catalog disk cache from the fresh checkout (same rationale as _cmd_update_impl). Non-fatal.
     with _best_effort('Model catalog seed during zip update failed: %s'):
         from hermes_cli.model_catalog import seed_cache_from_checkout
-
         if seed_cache_from_checkout(_m().PROJECT_ROOT):
             print("  ✓ Model catalog cache refreshed from checkout")
 
@@ -460,6 +455,5 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     _finish_dashboard_update_cleanup(node_failures)
     with _best_effort('Update receipt finalize (zip path) failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
-
         finalize_update_receipt("success" if update_complete and not node_failures else "partial")
     return update_complete

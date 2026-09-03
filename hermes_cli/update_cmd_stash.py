@@ -61,14 +61,8 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
             # Non-zero but entry created: push saved everything yet couldn't delete some
             # untracked files (e.g. root-owned dir). Not a failure — continue.
             _print_nonempty(push.stderr)
-            print(
-                "  ⚠ Some untracked files could not be removed from the "
-                "working tree (permission denied)."
-            )
-            print(
-                "    They were still saved to the stash and were left in "
-                "place — the update will continue."
-            )
+            print("  ⚠ Some untracked files could not be removed from the working tree (permission denied).")
+            print("    They were still saved to the stash and were left in place — the update will continue.")
             # A partially-failed push also skips cleanup of TRACKED modifications;
             # they'd break the following pull. Safe to reset: all is in the stash.
             subprocess.run(git_cmd + ["reset", "--hard", "HEAD"], cwd=cwd, capture_output=True)
@@ -78,9 +72,7 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
             if push.stderr.strip():
                 print(f"  {push.stderr.strip().splitlines()[0]}")
             print("  Commit, stash, or clean up your local changes manually, then re-run `hermes update`.")
-            raise subprocess.CalledProcessError(
-                push.returncode, push.args, output=push.stdout, stderr=push.stderr
-            )
+            raise subprocess.CalledProcessError(push.returncode, push.args, output=push.stdout, stderr=push.stderr)
 
     return stash_ref
 
@@ -102,7 +94,6 @@ def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
     Deliberately NOT a GC: a stash may be the only copy of the user's work, so Hermes never drops one.
     """
     from hermes_cli.update_cmd import _git_run
-
     try:
         stash_list = _git_run(git_cmd, ["stash", "list", "--format=%gd %s"], cwd)
         if stash_list.returncode != 0:
@@ -227,9 +218,7 @@ def _reject_unsafe_stash_restore(
             print(f"    {line}")
 
     current_untracked = _git_untracked_paths(git_cmd, cwd)
-    restored_untracked = (
-        current_untracked - preexisting_untracked if current_untracked is not None else set()
-    )
+    restored_untracked = (current_untracked - preexisting_untracked if current_untracked is not None else set())
     reset = _git_quiet(git_cmd, ["reset", "--hard", "HEAD"], cwd)
     clean = None
     if restored_untracked:
@@ -336,10 +325,7 @@ def _restore_stashed_changes(
 
     restored_python = _restored_python_paths(git_cmd, cwd)
     if restored_python is None:
-        reject(
-            "restored Python source discovery",
-            "could not determine which restored Python files require validation",
-        )
+        reject("restored Python source discovery", "could not determine which restored Python files require validation")
     syntax_ok, failing_path, syntax_error = _validate_python_files_syntax(cwd, restored_python)
     if not syntax_ok:
         reject(failing_path or "restored Python source", syntax_error)

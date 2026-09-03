@@ -56,7 +56,6 @@ _SQLITE_WAL_BUG_DETAIL = "SQLite {} still has the WAL-reset corruption bug"
 def _load_updates_cfg() -> dict:
     """``updates`` section of config.yaml; ``{}`` on any failure."""
     from hermes_cli.config import load_config
-
     cfg = load_config() or {}
     updates = cfg.get("updates", {}) if isinstance(cfg, dict) else {}
     return updates if isinstance(updates, dict) else {}
@@ -116,7 +115,6 @@ def _print_curator_first_run_notice() -> None:
     disable it first. Silent on steady state."""
     try:
         from agent import curator
-
         if not curator.is_enabled():
             return
         state = curator.load_state()
@@ -148,10 +146,7 @@ def _print_fts_optimize_available_notice() -> None:
     """
     try:
         from hermes_cli.config import load_config
-
-        mode = str(
-            ((load_config() or {}).get("sessions") or {}).get("fts_optimize_notice", "advise")
-        ).strip().lower()
+        mode = str(((load_config() or {}).get("sessions") or {}).get("fts_optimize_notice", "advise")).strip().lower()
     except Exception:
         mode = "advise"
     if mode == "off":
@@ -246,7 +241,6 @@ def _print_curator_recent_run_notice() -> None:
     ``last_run_summary_shown_at``. Silent when never run, already shown, or no rename info."""
     try:
         from agent import curator
-
         state = curator.load_state()
     except Exception:
         return
@@ -352,7 +346,6 @@ def _read_project_version() -> str | None:
     from hermes_cli.update_cmd import _m
     try:
         import tomllib
-
         with open(_m().PROJECT_ROOT / "pyproject.toml", "rb") as fh:  # windows-footgun: ok — binary mode, tomllib requires bytes
             version = tomllib.load(fh).get("project", {}).get("version")
         return str(version) if version else None
@@ -376,13 +369,8 @@ def _post_update_sqlite_runtime_status():
     from hermes_cli.update_cmd import _m
     from hermes_constants import project_venv_dir
     from hermes_cli.sqlite_runtime import probe_sqlite_runtime
-
     venv_dir = project_venv_dir(_m().PROJECT_ROOT)
-    python = (
-        venv_python_path(venv_dir, windows=_m()._is_windows())
-        if venv_dir is not None
-        else Path(sys.executable)
-    )
+    python = (venv_python_path(venv_dir, windows=_m()._is_windows()) if venv_dir is not None else Path(sys.executable))
     info = probe_sqlite_runtime(python)
     return info is not None and not info.wal_reset_vulnerable, info
 
@@ -403,10 +391,7 @@ def _print_verified_update_completion(message: str) -> bool:
         return True
     print()
     print(f"⚠ Update partially complete — {_SQLITE_WAL_BUG_DETAIL.format(sqlite_info.sqlite_version_string)}.")
-    print(
-        "  Rebuild the Hermes venv with a uv-managed Python, restart Hermes, "
-        "then verify with `hermes doctor`."
-    )
+    print("  Rebuild the Hermes venv with a uv-managed Python, restart Hermes, then verify with `hermes doctor`.")
     return False
 
 
@@ -423,12 +408,7 @@ def _clear_stale_sqlite_sidecars(db_path: Path) -> None:
         db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
 
 
-def _print_update_summary(
-    *,
-    node_failures: list,
-    desktop_build_ok: bool,
-    pre_update_version: str | None,
-) -> bool:
+def _print_update_summary(*, node_failures: list, desktop_build_ok: bool, pre_update_version: str | None) -> bool:
     """Final banner. A failed Desktop rebuild is non-fatal but must not print ``✓ Update complete!``."""
     from hermes_cli.update_cmd import _post_update_sqlite_runtime_status, _update_complete_message
     sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
@@ -473,7 +453,6 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
     """
     from hermes_cli.backup import _foreign_db_holder_pids, verify_sqlite_integrity
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
-
     holders = _foreign_db_holder_pids(state_path)
     if holders:
         print(
@@ -504,7 +483,6 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
     Never raises: a guard that crashes the update tail is worse than what it detects."""
     try:
         from hermes_cli.backup import _quick_snapshot_root, verify_sqlite_integrity
-
         state_path = home / "state.db"
         if not state_path.exists():
             return
@@ -545,7 +523,6 @@ def _verify_and_restore_state_dbs_post_update() -> None:
     _verify_and_restore_one_state_db(home, label="default home")
     with _best_effort('Sibling-profile state.db guard sweep failed: %s'):
         from hermes_cli.backup import _sibling_profile_homes
-
         for name, profile_home in _sibling_profile_homes(home):
             _verify_and_restore_one_state_db(profile_home, label=f"profile {name}")
 
@@ -553,7 +530,6 @@ def _verify_and_restore_state_dbs_post_update() -> None:
 def _print_bundled_skills_sync_report() -> None:
     """Run ``sync_skills`` (copies new, updates changed, respects user deletions) and print its summary."""
     from tools.skills_sync import sync_skills
-
     result = sync_skills(quiet=True)
     if result["copied"]:
         print(f"  + {len(result['copied'])} new: {', '.join(result['copied'])}")
@@ -565,10 +541,7 @@ def _print_bundled_skills_sync_report() -> None:
     if result.get("cleaned"):
         print(f"  − {len(result['cleaned'])} removed from manifest")
     if result.get("relocated"):
-        print(
-            f"  → {len(result['relocated'])} moved to new upstream paths: "
-            f"{', '.join(result['relocated'])}"
-        )
+        print(f"  → {len(result['relocated'])} moved to new upstream paths: {', '.join(result['relocated'])}")
     if not result["copied"] and not result.get("updated"):
         print("  ✓ Skills are up to date")
 
@@ -716,7 +689,6 @@ def _verify_state_db_after_snapshot(snapshot_id: str) -> None:
     gateway, Windows filter driver) can corrupt it and we'd otherwise exit 0 silently."""
     from hermes_cli.backup import _quick_snapshot_root, verify_sqlite_integrity
     from hermes_cli.config import get_hermes_home
-
     _src_path = get_hermes_home() / "state.db"
     if not _src_path.exists():
         return
@@ -736,10 +708,7 @@ def _verify_state_db_after_snapshot(snapshot_id: str) -> None:
         print("  ✓ Snapshot copy is valid — continuing update.")
         print("    If state.db is lost after update it will be auto-restored.")
     else:
-        print(
-            "  ✗ Snapshot copy ALSO failed integrity — "
-            "the source was already corrupted before the backup."
-        )
+        print("  ✗ Snapshot copy ALSO failed integrity — the source was already corrupted before the backup.")
     print()
 
 
@@ -747,7 +716,6 @@ def _run_quick_snapshots() -> Optional[str]:
     """Quick snapshot of the root home plus every sibling profile; returns the root snapshot id."""
     from hermes_cli.update_cmd import _record_update_step
     from hermes_cli.backup import create_quick_snapshot
-
     snapshot_id = create_quick_snapshot(
         label="pre-update",
         keep=_PRE_UPDATE_SNAPSHOT_KEEP,
@@ -761,7 +729,6 @@ def _run_quick_snapshots() -> Optional[str]:
     # under its own state-snapshots/. Best-effort per profile.
     with _best_effort('Sibling profile snapshots failed: %s'):
         from hermes_cli.backup import create_pre_update_snapshots_all_profiles
-
         _sibling_snaps = create_pre_update_snapshots_all_profiles(
             keep=_PRE_UPDATE_SNAPSHOT_KEEP,
             max_file_size=_PRE_UPDATE_SNAPSHOT_MAX_FILE_SIZE,
@@ -774,7 +741,6 @@ def _run_quick_snapshots() -> Optional[str]:
                 ", ".join(f"{k}={v}" for k, v in sorted(_sibling_snaps.items())),
             )
             import hermes_cli.update_cmd_config as _cfg
-
             # The reader lives in update_cmd_config; write ITS module global, not ours.
             _cfg._LAST_SIBLING_SNAPSHOTS = _sibling_snaps
     return snapshot_id
@@ -816,11 +782,9 @@ def _run_full_backup() -> None:
         size_bytes = 0
 
     from hermes_cli.sizefmt import format_bytes
-
     # display_hermes_home so the user sees ~/.hermes/...
     try:
         from hermes_constants import get_hermes_home, display_hermes_home
-
         display_path = f"{display_hermes_home()}/{out_path.relative_to(get_hermes_home())}"
     except Exception:
         display_path = str(out_path)
@@ -890,7 +854,6 @@ def _sync_profiles_after_update() -> None:
     # HERMES_HOME, so sync_skills()'s module-level HERMES_HOME cache can't skew it.
     with suppress(Exception):
         from hermes_cli.profiles import list_profiles, seed_profile_skills
-
         all_profiles = list_profiles()
         if all_profiles:
             print()
@@ -905,18 +868,13 @@ def _sync_profiles_after_update() -> None:
     # keep the credentials they were effectively using.
     with suppress(Exception):
         from hermes_cli.profiles import backfill_profile_envs
-
         backfilled = backfill_profile_envs(quiet=True)
         if backfilled:
             print()
-            print(
-                f"→ Seeded .env for {len(backfilled)} profile(s) "
-                f"(copied from default): {', '.join(backfilled)}"
-            )
+            print(f"→ Seeded .env for {len(backfilled)} profile(s) (copied from default): {', '.join(backfilled)}")
 
     with suppress(Exception):
         from plugins.memory.honcho.cli import sync_honcho_profiles_quiet
-
         synced = sync_honcho_profiles_quiet()
         if synced:
             print(f"\n-> Honcho: synced {synced} profile(s)")
@@ -933,7 +891,6 @@ def _refresh_cua_driver_after_update() -> None:
         refresh_cua_driver and sys.platform in ("darwin", "win32", "linux") and shutil.which("cua-driver")
     ):
         from hermes_cli.tools_config import install_cua_driver
-
         print()
         print("→ Refreshing cua-driver (Computer Use)...")
         # require_confirmed_update: install only when check-update positively reports a
@@ -951,7 +908,6 @@ def _print_post_update_notices_and_self_heals() -> None:
         # Windows launchers into the managed bin dir: in-checkout launchers were swept by the
         # autostash (--include-untracked) and updates never run install.ps1. No-op on POSIX.
         from hermes_cli._install_repair import migrate_windows_bin_path
-
         migrate_windows_bin_path(_m().PROJECT_ROOT)
 
     for message, step in (
@@ -982,7 +938,6 @@ def _run_post_update_maintenance(
     the update summary (verdict returned), and best-effort notices/self-heals. Every step is
     isolated so none can fail the update."""
     from hermes_cli.update_cmd import _check_and_apply_config_migration, _m
-
     # macOS TCC: Desktop bundles are re-signed each update, so old grants can go stale
     # (toggle ON, yet macOS re-prompts with no Allow button). Tell users how to re-grant.
     if sys.platform == "darwin" and had_desktop_app_before_update:
@@ -998,7 +953,6 @@ def _run_post_update_maintenance(
     # macOS TCC interpreter anchor; boot-gated — a failed probe leaves the venv untouched.
     try:
         from hermes_cli.macos_tcc_anchor import ensure_tcc_anchor
-
         ensure_tcc_anchor()
     except Exception:
         logger.debug("macOS TCC anchor refresh skipped", exc_info=True)
@@ -1010,7 +964,6 @@ def _run_post_update_maintenance(
     # Seed the model-catalog cache from the checkout instead of a bot-gated, flaky fetch.
     with _best_effort('Model catalog seed during update failed: %s'):
         from hermes_cli.model_catalog import seed_cache_from_checkout
-
         if seed_cache_from_checkout(_m().PROJECT_ROOT):
             print("  ✓ Model catalog cache refreshed from checkout")
 

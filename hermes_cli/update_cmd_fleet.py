@@ -68,7 +68,6 @@ def _current_checkout_sha() -> str | None:
     from hermes_cli.update_cmd import _capture_head_sha, _m
     try:
         from hermes_cli.build_info import get_code_identity
-
         sha = (get_code_identity(refresh=True) or {}).get("sha")
         return str(sha) if sha else None
     except Exception:
@@ -96,7 +95,6 @@ def _receipt_reports_stale_runtime(expected_sha: str | None = None) -> bool:
     from hermes_cli.update_cmd import _current_checkout_sha
     try:
         from hermes_cli.update_receipt import read_latest_receipt
-
         receipt = read_latest_receipt()
     except Exception:
         receipt = None
@@ -139,11 +137,7 @@ def _pending_fleet_restart_needed() -> bool:
 def _warn_pending_fleet_restart(*, startup: bool = False) -> None:
     """Print the specific interrupted-update fleet-restart warning."""
     stream = sys.stderr if startup else sys.stdout
-    print(
-        "⚠ A previous `hermes update` pulled new code but did not "
-        "restart running gateways.",
-        file=stream,
-    )
+    print("⚠ A previous `hermes update` pulled new code but did not restart running gateways.", file=stream)
     print("  Gateways may still be serving pre-update modules (mixed sys.modules).", file=stream)
     if startup:
         print("  Run `hermes update` or `hermes gateway restart`.", file=stream)
@@ -246,7 +240,6 @@ def _run_pending_fleet_restart() -> bool:
         if is_windows():
             try:
                 from hermes_cli import gateway_windows
-
                 if gateway_windows.is_installed():
                     gateway_windows.restart()
             except Exception as exc:
@@ -295,12 +288,7 @@ def _apply_pending_fleet_restart_catchup() -> None:
 
 def _systemctl(cmd: list, *, timeout: float):
     """Run a systemctl (or sudo systemctl) invocation, capturing utf-8 text with a timeout."""
-    return subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True, encoding="utf-8", errors="replace",
-        timeout=timeout,
-    )
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _systemctl_reset_and_restart(manage_cmd: list, svc_name: str):
@@ -355,7 +343,6 @@ def _service_unit_supports_graceful_sigusr1_restart(svc_name: str) -> bool:
 def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
     """Print an explicit incomplete-update warning for unrestarted units."""
     from hermes_cli.gateway import is_macos
-
     if not failed_units:
         return
     ordered = list(dict.fromkeys(failed_units))  # de-dup, discovery order
@@ -398,7 +385,6 @@ def _restart_launchd_gateway_after_update(*, supervision_verify: bool = True) ->
         launchd_restart,
         wait_for_launchd_gateway_supervision,
     )
-
     current_label = get_launchd_label()
     try:
         if not get_launchd_plist_path().exists():
@@ -439,11 +425,7 @@ def _restart_launchd_gateway_after_update(*, supervision_verify: bool = True) ->
     return [], [current_label]
 
 
-def _restart_macos_launchd_gateways(
-    restarted_services: list,
-    failed_or_stale_units: list,
-    drain_budget: float,
-) -> None:
+def _restart_macos_launchd_gateways(restarted_services: list, failed_or_stale_units: list, drain_budget: float) -> None:
     """Restart every launchd-managed gateway after an update (macOS).
 
     The pull is shared across profiles, so every ``ai.hermes.gateway*`` LaunchAgent
@@ -460,7 +442,6 @@ def _restart_macos_launchd_gateways(
         _locate_launchd_gateway_service,
         _wait_for_launchd_service_pid,
     )
-
     _restarted, _failed = _restart_launchd_gateway_after_update(supervision_verify=True)
     restarted_services.extend(_restarted)
     failed_or_stale_units.extend(_failed)
@@ -479,9 +460,7 @@ def _restart_macos_launchd_gateways(
             if old_pid is not None and old_pid > 0:
                 print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
                 graceful_ok = _graceful_restart_via_sigusr1(old_pid, drain_timeout=drain_budget)
-            if graceful_ok and _wait_for_launchd_service_pid(
-                label, old_pid=old_pid, timeout=10.0, domain=domain
-            ):
+            if graceful_ok and _wait_for_launchd_service_pid(label, old_pid=old_pid, timeout=10.0, domain=domain):
                 # KeepAlive already respawned it on new code — a kickstart would kill it.
                 restarted_services.append(label)
                 continue
@@ -517,7 +496,6 @@ def _surviving_gateway_pids_after_failed_restart():
     """
     try:
         from hermes_cli.gateway import find_gateway_pids
-
         return list(find_gateway_pids(all_profiles=True))
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("Could not probe for surviving gateways after update: %s", exc)
@@ -552,9 +530,7 @@ _SERVE_SKIP_REASON = (
 )
 
 
-def _gateway_recovery_partition(
-    plan, *, skip_profiles: set[str] | None = None
-) -> tuple[dict[str, str], list[dict]]:
+def _gateway_recovery_partition(plan, *, skip_profiles: set[str] | None = None) -> tuple[dict[str, str], list[dict]]:
     """Partition pre-update runtimes into fresh-restart candidates and skips.
 
     Uses only the pre-checkout inventory: re-importing ``hermes_cli.gateway`` in the
@@ -586,9 +562,7 @@ def _gateway_recovery_partition(
                 reason = _DESKTOP_SERVE_SKIP_REASON if supervisor == "desktop" else _SERVE_SKIP_REASON
             else:
                 continue
-            skipped.append(
-                {"profile": profile, "kind": str(kind), "supervisor": str(supervisor), "reason": reason}
-            )
+            skipped.append({"profile": profile, "kind": str(kind), "supervisor": str(supervisor), "reason": reason})
     return candidates, skipped
 
 
@@ -631,7 +605,6 @@ def _drain_or_signal_gateway_for_update(pid: int, drain_budget: float, label: st
         _request_gateway_self_restart,
         probe_gateway_loop_liveness,
     )
-
     if _is_pid_ancestor_of_current_process(pid):
         print(
             f"  → {label}: update is running inside this gateway's "
@@ -640,10 +613,7 @@ def _drain_or_signal_gateway_for_update(pid: int, drain_budget: float, label: st
         )
         return _request_gateway_self_restart(pid)
     if probe_gateway_loop_liveness(pid) == GATEWAY_LOOP_WEDGED:
-        print(
-            f"  ⚠ {label}: gateway event loop is unresponsive — "
-            "skipping drain, forcing a bounded stop..."
-        )
+        print(f"  ⚠ {label}: gateway event loop is unresponsive — skipping drain, forcing a bounded stop...")
         _escalate_wedged_gateway(pid)
         return True
     print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
@@ -785,16 +755,13 @@ def _restart_one_systemd_gateway_unit(
     )
 
 
-def _restart_systemd_gateway_units(
-    restarted_services, failed_or_stale_units, restarted_scoped_units, drain_budget
-):
+def _restart_systemd_gateway_units(restarted_services, failed_or_stale_units, restarted_scoped_units, drain_budget):
     """Restart every active hermes-gateway*/hermes-serve* systemd unit (user + system).
 
     Settled units → ``restarted_services`` (bare) and ``restarted_scoped_units``
     (``scope/name``); failures → ``failed_or_stale_units``. Per-unit timeouts isolated.
     """
     from hermes_cli.gateway import supports_systemd_services, _ensure_user_systemd_env
-
     if not supports_systemd_services():
         return
     _manage_cmd_cache: dict = {}
@@ -859,7 +826,6 @@ class _GatewayRestartOutcome:
         """Best-effort ``record_gateway_restart`` from the current bookkeeping."""
         with suppress(Exception):
             from hermes_cli.update_receipt import record_gateway_restart
-
             record_gateway_restart(
                 restarted_services=self.restarted_services,
                 relaunched_profiles=self.relaunched_profiles,
@@ -884,7 +850,6 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
         _get_service_pids,
         _wait_for_gateway_exit,
     )
-
     # Exclude just-restarted service PIDs so we don't kill what systemd/launchd spawned.
     service_pids = _get_service_pids(all_profiles=True)
     manual_pids = find_gateway_pids(exclude_pids=service_pids, all_profiles=True)
@@ -939,9 +904,7 @@ def _restart_manual_gateways(out: _GatewayRestartOutcome, _drain_budget) -> None
         if out.externally_supervised_profiles:
             names = ", ".join(out.externally_supervised_profiles)
             print(f"  ✓ Handed gateway profile(s) back to their external supervisor: {names}")
-        unmapped_count = (
-            len(out.killed_pids) - len(out.relaunched_profiles) - len(out.externally_supervised_profiles)
-        )
+        unmapped_count = (len(out.killed_pids) - len(out.relaunched_profiles) - len(out.externally_supervised_profiles))
         if unmapped_count:
             print(f"  → Stopped {unmapped_count} manual gateway process(es)")
             print("    Restart manually: hermes gateway run")
@@ -955,7 +918,6 @@ def _force_kill_stuck_gateways(killed_pids) -> None:
     moment, then SIGKILL remaining pre-update PIDs."""
     with _best_effort('Post-restart survivor sweep failed: %s'):
         from hermes_cli.gateway import find_gateway_pids, _get_service_pids
-
         _time.sleep(3.0)
         _surviving = find_gateway_pids(exclude_pids=_get_service_pids(all_profiles=True), all_profiles=True)
         # Only PIDs we already tried to kill; newer ones are left alone.
@@ -964,7 +926,6 @@ def _force_kill_stuck_gateways(killed_pids) -> None:
             print()
             print(f"  ⚠ {len(_stuck)} gateway process(es) ignored SIGTERM — force-killing")
             from gateway.status import get_process_start_time, terminate_pid
-
             for pid in _stuck:
                 with suppress(ProcessLookupError, PermissionError, OSError):
                     # taskkill /T /F on Windows (no SIGKILL there), SIGKILL on POSIX.
@@ -984,7 +945,6 @@ def _recover_after_restart_phase_abort(
         _warn_stale_serve_runtimes,
         _write_gateway_update_exit_code,
     )
-
     logger.debug("Gateway restart during update failed: %s", e)
     out.phase_errors.append(str(e))
     # Restart output never printed: assume stale unless provably no gateway runs.
@@ -1052,7 +1012,6 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
     every planned gateway is verifiably covered.
     """
     from hermes_cli.update_cmd import _m, _write_gateway_update_exit_code
-
     # All bookkeeping is declared before the try so abort recovery and fleet reconciliation
     # can read it even if the phase raises early. ``pre_restart_gateway_pids`` stays empty
     # until we are about to stop/drain, so an early exception has nothing to fail closed on,
@@ -1087,13 +1046,11 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
             _get_service_pids,
             _wait_for_gateway_exit,
         )
-
         # Drain budget covers ``restart_after_turn_timeout`` and stop()'s
         # ``restart_drain_timeout`` so a gateway waiting on a turn isn't hard-killed;
         # units without SIGUSR1 wiring just time out into ``systemctl restart``.
         try:
             from hermes_cli.gateway import _get_restart_exit_wait_budget
-
             _drain_budget = max(float(_get_restart_exit_wait_budget()), 45.0)
         except Exception:
             _drain_budget = 45.0
@@ -1112,9 +1069,7 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
         # macOS: EVERY ai.hermes.gateway* LaunchAgent (systemd parity).
         if is_macos():
             with suppress(FileNotFoundError, ImportError):
-                _restart_macos_launchd_gateways(
-                    out.restarted_services, out.failed_or_stale_units, _drain_budget
-                )
+                _restart_macos_launchd_gateways(out.restarted_services, out.failed_or_stale_units, _drain_budget)
 
         _restart_manual_gateways(out, _drain_budget)
 
@@ -1137,12 +1092,7 @@ def _restart_gateway_fleet_after_update(_pre_update_plan, gateway_mode: bool):
 def _print_legacy_units_warning() -> None:
     """Legacy hermes.service fights hermes-gateway.service over the bot token; warn on
     every update until migrated."""
-    from hermes_cli.gateway import (
-        has_legacy_hermes_units,
-        _find_legacy_hermes_units,
-        supports_systemd_services,
-    )
-
+    from hermes_cli.gateway import (has_legacy_hermes_units, _find_legacy_hermes_units, supports_systemd_services)
     if not (supports_systemd_services() and has_legacy_hermes_units()):
         return
     print()
@@ -1170,7 +1120,6 @@ def _collect_fleet_snapshot(restart, rows_expected: bool) -> list:
     instead of no row at all.
     """
     from hermes_cli.update_receipt import collect_fleet_versions
-
     if not rows_expected:
         return collect_fleet_versions(pre_restart_pids=restart.pre_restart_gateway_pids)
     _fleet_deadline = _time.monotonic() + 30.0
@@ -1183,14 +1132,7 @@ def _collect_fleet_snapshot(restart, rows_expected: bool) -> list:
             return snapshot
 
 
-def _verify_fleet_after_update(
-    restart,
-    *,
-    _pre_update_plan,
-    _windows_gateway_resume,
-    node_failures,
-    update_complete,
-):
+def _verify_fleet_after_update(restart, *, _pre_update_plan, _windows_gateway_resume, node_failures, update_complete):
     """Post-restart verification: legacy-unit warning, dashboard cleanup, stale serve
     probe, fleet version matrix, plan-vs-execution reconciliation, receipt finalize.
 
@@ -1230,7 +1172,6 @@ def _verify_fleet_after_update(
     _fleet_snapshot: list = []
     with _best_effort('Fleet version verification failed: %s'):
         from hermes_cli.update_receipt import print_fleet_version_matrix
-
         # Cross-platform "rows expected" signal: (restarted_services or killed_pids)
         # never fires on Windows (pause/resume populates neither), so a healthy
         # resumed gateway yielded zero rows and exit 0.
@@ -1257,11 +1198,7 @@ def _verify_fleet_after_update(
     # unaccounted one is a silent miss and escalates like a STALE/DOWN row.
     with _best_effort('Runtime-outcome reconciliation failed: %s'):
         if _pre_update_plan is not None and _pre_update_plan.runtimes:
-            from hermes_cli.update_inventory import (
-                match_runtime_outcomes,
-                report_unaccounted_runtimes,
-            )
-
+            from hermes_cli.update_inventory import (match_runtime_outcomes, report_unaccounted_runtimes)
             _runtime_outcomes = match_runtime_outcomes(
                 _pre_update_plan,
                 restarted_services=restart.restarted_services,
@@ -1280,13 +1217,11 @@ def _verify_fleet_after_update(
                 restart.incomplete = True
             with suppress(Exception):
                 import hermes_cli.update_receipt as _ur
-
                 if _ur._current is not None:
                     _ur._current.data["runtime_outcomes"] = _runtime_outcomes
 
     with _best_effort('Update receipt finalize failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
-
         _receipt_path = finalize_update_receipt(
             "partial" if restart.incomplete or not update_complete else "success",
             fleet=_fleet_snapshot,

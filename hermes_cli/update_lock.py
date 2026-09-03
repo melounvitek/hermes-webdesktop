@@ -44,7 +44,6 @@ def update_marker_path() -> Path:
     value into the updater's env, so a profile-scoped path would be one the other owners never look at.
     """
     from hermes_constants import get_process_hermes_home
-
     return get_process_hermes_home() / MARKER_NAME
 
 
@@ -60,7 +59,6 @@ def _pid_alive(pid: int) -> bool:
         return False
     try:
         from gateway.status import _pid_exists
-
         return bool(_pid_exists(pid))
     except Exception as exc:
         logger.debug("Could not probe pid %s: %s", pid, exc)
@@ -88,7 +86,6 @@ def _is_ancestor_pid(pid: int) -> bool:
         return False
     try:
         import psutil
-
         return any(parent.pid == pid for parent in psutil.Process().parents())
     except Exception as exc:
         logger.debug("Could not walk process ancestry for pid %s: %s", pid, exc)
