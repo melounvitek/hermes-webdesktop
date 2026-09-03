@@ -1470,7 +1470,7 @@ _NOUS_PORTAL_ALLOWED_HOSTS: FrozenSet[str] = frozenset({
 
 # Per-process memo for resolve_nous_access_token: startup runs one check_fn per managed tool and
 # each would trigger its own ~15s blocking refresh of an expired token; a short-TTL memo collapses
-# the burst into one round-trip. Callers needing freshness use force_fresh / refresh_nous_oauth_pure.
+# the burst into one round-trip. Callers needing freshness use force_fresh/refresh_nous_oauth_pure.
 _RESOLVE_TOKEN_CACHE_LOCK = threading.Lock()
 _RESOLVE_TOKEN_CACHE: "tuple[float, str] | None" = None
 _RESOLVE_TOKEN_CACHE_TTL_S = 5.0
@@ -1783,7 +1783,7 @@ def _external_process_spec(
     """``(command, args, base_url, resolved_command, command_env_vars)`` for an ACP provider.
 
     Launch details come from the provider's own profile (copilot-acp: HERMES_COPILOT_ACP_COMMAND /
-    COPILOT_CLI_PATH / HERMES_COPILOT_ACP_ARGS), so out-of-tree providers describe their own binary."""
+    COPILOT_CLI_PATH / HERMES_COPILOT_ACP_ARGS), so out-of-tree providers describe their binary."""
     base_url = _provider_env_base_url(pconfig) or pconfig.inference_base_url
     try:
         from providers import get_provider_profile as _get_provider_profile
