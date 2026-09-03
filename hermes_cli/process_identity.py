@@ -159,9 +159,7 @@ def _read_ledger(path: Path) -> Optional[list[dict]]:
         parsed = json.loads(text)
     except (ValueError, TypeError):
         return None
-    if not isinstance(parsed, list):
-        return None
-    return [e for e in parsed if isinstance(e, dict)]
+    return [e for e in parsed if isinstance(e, dict)] if isinstance(parsed, list) else None
 
 
 def _read_ledger_or_quarantine(path: Path) -> Optional[list[dict]]:
@@ -290,9 +288,7 @@ def register_child(pid: int, purpose: str, *, project_root: Optional[Path] = Non
         pid = int(pid)
     except (TypeError, ValueError):
         return False
-    if pid <= 0:
-        return False
-    child_create = _process_create_time(pid)
+    child_create = _process_create_time(pid) if pid > 0 else None
     if child_create is None:
         return False
     entry = _new_entry(pid, child_create, purpose, project_root, os.getpid(), _process_create_time())
@@ -321,7 +317,7 @@ def ledger_entries(*, project_root: Optional[Path] = None) -> list[dict]:
 
 
 def spawner_is_dead(entry: dict) -> Optional[bool]:
-    """Is the recorded spawner of this entry provably gone?"""
+    """Is the recorded spawner of this entry provably gone? ``None`` when unrecorded/unprovable."""
     spawner_pid = entry.get("spawner_pid")
     if not isinstance(spawner_pid, int) or spawner_pid <= 0:
         return None
@@ -344,10 +340,8 @@ def reap_orphaned_mcp_helpers(*, project_root: Optional[Path] = None, kill_fn=No
     own_pid = os.getpid()
     for entry in entries:
         try:
-            if entry.get("purpose") != "mcp-helper":
-                continue
             pid = entry.get("pid")
-            if not isinstance(pid, int) or pid <= 0 or pid == own_pid:
+            if entry.get("purpose") != "mcp-helper" or not isinstance(pid, int) or pid <= 0 or pid == own_pid:
                 continue
             if spawner_is_dead(entry) is not True:
                 continue  # live or unprovable spawner → never touch
@@ -425,9 +419,7 @@ def attach_self_to_kill_on_close_job() -> bool:
         info.BasicLimitInformation.LimitFlags = (
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK
         )
-        ok = kernel32.SetInformationJobObject(
-            job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
-        )
+        ok = kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info))
         if not ok or not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
             kernel32.CloseHandle(job)
             return False
