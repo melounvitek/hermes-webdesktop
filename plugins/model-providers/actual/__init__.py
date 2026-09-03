@@ -2,35 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import logging
 import os
-from urllib.parse import urlparse
-import urllib.request
 
 from providers import register_provider
-from providers.base import ProviderProfile, _profile_user_agent
-
-logger = logging.getLogger(__name__)
+from providers.base import ProviderProfile
 
 DEFAULT_ACTUAL_BASE_URL = "https://api.actual.inc/v1"
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-
-
-def _normalize_actual_base_url(base_url: str) -> str:
-    """Append /v1 to a bare hosted or local host; pass anything else through."""
-    url = str(base_url or "").strip().rstrip("/")
-    if not url:
-        return DEFAULT_ACTUAL_BASE_URL
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        path = parsed.path.rstrip("/")
-    except Exception:
-        return url
-    if (host == "api.actual.inc" or host in _LOCAL_HOSTS) and path in {"", "/"}:
-        return url + "/v1"
-    return url
 
 
 class ActualProfile(ProviderProfile):
@@ -40,24 +17,11 @@ class ActualProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        from hermes_cli.urllib_security import open_credentialed_url
+        """ACTUAL_BASE_URL wins over the caller's base_url; bare hosts get ``/v1`` appended."""
+        from hermes_cli.auth import normalize_actual_base_url
 
-        base_url = _normalize_actual_base_url(
-            os.getenv("ACTUAL_BASE_URL", "").strip() or base_url or self.base_url
-        )
-        req = urllib.request.Request(base_url + "/models")
-        if api_key:
-            req.add_header("Authorization", f"Bearer {api_key}")
-        req.add_header("Accept", "application/json")
-        req.add_header("User-Agent", _profile_user_agent())
-        try:
-            with open_credentialed_url(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-            items = data if isinstance(data, list) else data.get("data", [])
-            return [m["id"] for m in items if isinstance(m, dict) and "id" in m]
-        except Exception as exc:
-            logger.debug("fetch_models(actual): %s", exc)
-            return None
+        base_url = normalize_actual_base_url(os.getenv("ACTUAL_BASE_URL", "").strip() or base_url or self.base_url)
+        return super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
 
 
 actual = ActualProfile(

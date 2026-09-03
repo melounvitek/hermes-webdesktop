@@ -1,18 +1,12 @@
 """Ramp Router (router.com) provider profile: Responses-only LLM gateway.
 
-Wire notes (verified live against api.router.com):
-* Responses API is the native wire; ``/chat/completions`` is only a thin shim.
-  ``api_mode="codex_responses"`` plus the ``api.router.com`` host mandate in
-  ``hermes_cli/providers.py`` keep every path on it.
-* The catalog is account-scoped (BYOK accounts see extra IDs), so this profile
-  ships no ``fallback_models`` — the picker relies on ``fetch_models()``.
-* Router 400s on ``reasoning.effort`` levels outside a model's published
-  vocabulary and on any reasoning field for non-reasoning models. The efforts
-  map from ``GET /v1/models`` is cached (memory + disk mirror, background
-  warmer; never HTTP on the request hot path) and fed to the codex transport's
-  clamp via ``supported_reasoning_efforts``.
-* ``store: false``, ``prompt_cache_key``, encrypted reasoning replay, tools and
-  streaming pass through unchanged — no Router-specific request surgery.
+Wire notes (verified live): the Responses API is the native wire (``api_mode=
+"codex_responses"`` + the ``api.router.com`` host mandate in ``hermes_cli/providers.py``);
+the catalog is account-scoped so there are no ``fallback_models`` (picker uses
+``fetch_models()``); Router 400s on ``reasoning.effort`` levels outside a model's
+published vocabulary and on any reasoning field for non-reasoning models, so the
+efforts map from ``GET /v1/models`` is cached (memory + disk mirror, background
+warmer; never HTTP on the request hot path) and fed to the codex transport's clamp.
 """
 
 from __future__ import annotations
@@ -51,8 +45,8 @@ def _base_url() -> str:
 
 
 def _resolve_api_key() -> str:
-    """Resolve the Router key (documented var, then alias), preferring dotenv;
-    plain os.environ is the fallback when the dotenv resolver is unavailable or raises."""
+    """Router key (documented var, then alias), preferring dotenv; plain os.environ
+    is the fallback when the dotenv resolver is unavailable or raises."""
     resolvers: list = [lambda var: os.environ.get(var, "")]
     try:
         from hermes_cli.config import get_env_value_prefer_dotenv
@@ -81,10 +75,9 @@ def _dig(obj: Any, *keys: str) -> Any:
 def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
     """Parse a ``/v1/models`` ``data`` array into the efforts map (None if unusable).
 
-    Ladder-unknown levels are dropped: clamp_effort ignores them, so an
-    all-unknown vocabulary would pass the effort through unclamped to a Router
-    400. ``supported=True`` with no recognized level leaves the model out
-    (unknown) so the transport keeps its default clamp behavior.
+    Ladder-unknown levels are dropped: clamp_effort ignores them, so an all-unknown
+    vocabulary would pass the effort through unclamped to a Router 400. ``supported=True``
+    with no recognized level leaves the model out (unknown -> transport default clamp).
     """
     if not isinstance(items, list):
         return None
@@ -166,9 +159,7 @@ def _seed_efforts(items: Any) -> Optional[dict[str, list[str]]]:
     return parsed
 
 
-def _fetch_catalog_items(
-    *, api_key: str = "", base_url: str = "", timeout: float = 8.0
-) -> Optional[list]:
+def _fetch_catalog_items(*, api_key: str = "", base_url: str = "", timeout: float = 8.0) -> Optional[list]:
     """Fetch the raw ``/v1/models`` ``data`` array. None on any failure."""
     import urllib.request
 
@@ -179,8 +170,7 @@ def _fetch_catalog_items(
     if key:
         req.add_header("Authorization", f"Bearer {key}")
     req.add_header("Accept", "application/json")
-    # Router's WAF rejects the default Python-urllib UA.
-    req.add_header("User-Agent", _profile_user_agent())
+    req.add_header("User-Agent", _profile_user_agent())  # Router's WAF rejects the default urllib UA
     try:
         with open_credentialed_url(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode())
@@ -244,7 +234,7 @@ class RouterProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: Optional[str] = None, base_url: Optional[str] = None, timeout: float = 8.0
     ) -> Optional[list[str]]:
-        """Fetch the live, key-scoped catalog; the same payload seeds the caps cache.
+        """Live, key-scoped catalog; the same payload seeds the caps cache.
         Deduped but not sorted: Router's listing order is deliberate presentation."""
         items = _fetch_catalog_items(api_key=api_key or "", base_url=base_url or "", timeout=timeout)
         if items is None:
@@ -279,8 +269,7 @@ router = RouterProfile(
     default_headers={"User-Agent": f"Hermes-Agent/{_HERMES_VERSION}"},
     supports_vision=True,
     default_aux_model="gpt-5.4-mini",
-    # Empty on purpose: model IDs are account-scoped; the picker uses fetch_models().
-    fallback_models=(),
+    fallback_models=(),  # account-scoped IDs; the picker uses fetch_models()
 )
 
 register_provider(router)

@@ -37,13 +37,9 @@ def _anthropic_reasoning_is_mandatory(model: str | None) -> bool:
 
 def _sticky_key(session_id: str | None) -> str | None:
     """Declared routing scope, then ambient conversation, then explicit session_id.
-
     Aux call sites (compression, titles, vision, MoA…) pass no ``session_id``,
-    so the ambient lineage ROOT keeps them pinned to their conversation.
-    """
-    return _cache_scope_from_session_id(
-        get_affinity_scope() or get_conversation_context() or session_id
-    )
+    so the ambient lineage ROOT keeps them pinned to their conversation."""
+    return _cache_scope_from_session_id(get_affinity_scope() or get_conversation_context() or session_id)
 
 
 class OpenRouterProfile(ProviderProfile):
@@ -51,11 +47,8 @@ class OpenRouterProfile(ProviderProfile):
 
     @staticmethod
     def _clamp_reasoning_to_catalog(cfg: dict[str, Any], model: str | None) -> dict[str, Any]:
-        """Clamp ``cfg["effort"]`` to the nearest LOWER catalog-advertised level.
-
-        No-op when the catalog is unreachable, the model is unlisted, or no
-        supported_efforts list is published (None = all levels accepted).
-        """
+        """Clamp ``cfg["effort"]`` to the nearest LOWER catalog-advertised level. No-op when the
+        catalog is unreachable, the model is unlisted, or no supported_efforts list is published."""
         effort = cfg.get("effort")
         if not effort or cfg.get("enabled") is False:
             return cfg
@@ -80,8 +73,8 @@ class OpenRouterProfile(ProviderProfile):
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        """Fetch from the public OpenRouter catalog (no auth). Tool-call filtering
-        happens in hermes_cli/models.py, which the picker reaches first."""
+        """Public OpenRouter catalog (no auth), cached per process. Tool-call
+        filtering happens in hermes_cli/models.py, which the picker reaches first."""
         global _CACHE  # noqa: PLW0603
         if _CACHE is not None:
             return _CACHE
@@ -104,7 +97,6 @@ class OpenRouterProfile(ProviderProfile):
         prefs = context.get("provider_preferences")
         if prefs:
             body["provider"] = prefs
-
         # Pareto Code router plugin is only meaningful for openrouter/pareto-code.
         score = context.get("openrouter_min_coding_score")
         if (context.get("model") or "") == "openrouter/pareto-code" and score is not None and score != "":
@@ -143,7 +135,6 @@ class OpenRouterProfile(ProviderProfile):
                 extra_body["reasoning"] = self._clamp_reasoning_to_catalog(dict(reasoning_config), model)
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
-
         # xAI's prompt cache is pinned per backend server via this header.
         grok_conv_id = _sticky_key(session_id)
         if grok_conv_id and model and model.startswith(("x-ai/grok-", "xai/grok-")):

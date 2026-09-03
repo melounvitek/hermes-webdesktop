@@ -17,50 +17,38 @@ _COMMANDCODE_BASE = "https://api.commandcode.ai/provider/v1"
 _COMMANDCODE_MODELS_URL = f"{_COMMANDCODE_BASE}/models"
 
 
-def _fetch_commandcode_models(
-    timeout: float = 10.0,
-    base_url: str | None = None,
-) -> list[str] | None:
-    """Fetch model IDs from the public (unauthenticated) /models endpoint.
-
-    The picker passes base_url unconditionally, so only a value differing from
-    the default counts as a customised endpoint.
-    """
-    caller_base = (base_url or "").strip().rstrip("/")
-    custom = caller_base and caller_base != _COMMANDCODE_BASE
-    models_url = caller_base + "/models" if custom else _COMMANDCODE_MODELS_URL
-    try:
-        req = urllib.request.Request(models_url)
-        req.add_header("Accept", "application/json")
-        req.add_header("User-Agent", _profile_user_agent())
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-        return [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
-    except Exception as exc:
-        logger.debug("fetch_models(commandcode): %s", exc)
-        return None
-
-
 class CommandCodeProfile(ProviderProfile):
     """CommandCode — OpenAI-compatible chat completions endpoint."""
 
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
-        return _fetch_commandcode_models(timeout=timeout, base_url=base_url)
+        """Public (unauthenticated) /models endpoint. The picker passes base_url
+        unconditionally, so only a value differing from the default is a custom endpoint."""
+        caller_base = (base_url or "").strip().rstrip("/")
+        custom = caller_base and caller_base != _COMMANDCODE_BASE
+        models_url = caller_base + "/models" if custom else _COMMANDCODE_MODELS_URL
+        try:
+            req = urllib.request.Request(models_url)
+            req.add_header("Accept", "application/json")
+            req.add_header("User-Agent", _profile_user_agent())
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+            return [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
+        except Exception as exc:
+            logger.debug("fetch_models(commandcode): %s", exc)
+            return None
 
 
-class CommandCodeAnthropicProfile(ProviderProfile):
+class CommandCodeAnthropicProfile(CommandCodeProfile):
     """CommandCode — Anthropic Messages API-compatible endpoint."""
 
     def fetch_models(
         self, *, api_key: str | None = None, base_url: str | None = None, timeout: float = 8.0
     ) -> list[str] | None:
         """Public /models endpoint, filtered to Anthropic-family models."""
-        all_models = _fetch_commandcode_models(timeout=timeout, base_url=base_url)
-        if all_models is None:
-            return None
-        return [m for m in all_models if m.startswith("claude-")]
+        all_models = super().fetch_models(api_key=api_key, base_url=base_url, timeout=timeout)
+        return None if all_models is None else [m for m in all_models if m.startswith("claude-")]
 
 
 commandcode = CommandCodeProfile(
