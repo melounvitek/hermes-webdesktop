@@ -388,22 +388,21 @@ class StreamTransportMixin:
         """
         if not self._native_stream_opened and text:
             try:
-                if await self._send_seed_frame():
-                    self._native_stream_opened = True
-                    self._awaiting_reopen_after_boundary = False
-                    # Paired with the boundary-finalize INFO: typing-reappear latency.
-                    logger.info(
-                        "[latency] Re-opened native stream after boundary "
-                        "(turn=%s, waited for first delta)",
-                        self._turn_id,
-                    )
-                else:
-                    self._use_native_streaming = False
+                seeded = await self._send_seed_frame()
             except Exception as e:
                 logger.debug("Re-seed failed, disabling native streaming: %s", e)
+                seeded = False
+            if not seeded:
                 self._use_native_streaming = False
-        if not self._use_native_streaming:
-            return None
+                return None
+            self._native_stream_opened = True
+            self._awaiting_reopen_after_boundary = False
+            # Paired with the boundary-finalize INFO: typing-reappear latency.
+            logger.info(
+                "[latency] Re-opened native stream after boundary "
+                "(turn=%s, waited for first delta)",
+                self._turn_id,
+            )
 
         # WeCom renders each finalize as a separate bubble: only the turn-final and
         # boundaries close the stream, not segment breaks.

@@ -620,11 +620,7 @@ class GatewayStreamConsumer(
                 ):
                     # Overflow split.  Native streaming bypasses this: the adapter
                     # truncates against the stream protocol's own limit.
-                    if (
-                        not self._use_native_streaming
-                        and self._len_fn(self._accumulated) > self._safe_limit
-                        and self._message_id is None
-                    ):
+                    if not self._use_native_streaming and self._first_send_overflows():
                         if await self._split_first_send(tick) == "return":
                             return
                         continue
@@ -866,13 +862,15 @@ class GatewayStreamConsumer(
             self._signal_flush(tick.flush_event)
         return "continue"
 
+    def _overflows(self) -> bool:
+        return self._len_fn(self._accumulated) > self._safe_limit
+
+    def _first_send_overflows(self) -> bool:
+        return self._message_id is None and self._overflows()
+
     async def _seal_overflow_heads(self) -> None:
         """Existing message overflowing: seal it with the head, start a new message for the rest."""
-        while (
-            self._len_fn(self._accumulated) > self._safe_limit
-            and self._message_id is not None
-            and self._edit_supported
-        ):
+        while self._overflows() and self._message_id is not None and self._edit_supported:
             cp_budget = _custom_unit_to_cp(self._accumulated, self._safe_limit, self._len_fn)
             split_at = self._accumulated.rfind("\n", 0, cp_budget)
             if split_at < cp_budget // 2:

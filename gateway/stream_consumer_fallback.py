@@ -339,10 +339,8 @@ class StreamFallbackMixin:
 
     async def _try_strip_cursor(self) -> None:
         """Best-effort edit removing a stuck cursor when entering fallback mode."""
-        if not self._message_id or self._message_id == "__no_edit__":
-            return
         prefix = self._visible_prefix()
-        if not prefix.strip():
+        if not self._has_real_preview() or not prefix.strip():
             return
         with contextlib.suppress(Exception):  # never block the fallback path
             result = await self._edit_message(message_id=self._message_id, content=prefix)
