@@ -66,19 +66,18 @@ class CreditsState:
 
     @property
     def depleted(self) -> bool:
-        """Keyed off ``paid_access == False`` ONLY — ``remaining_micros == 0`` is a
-        false positive when the balance is zero but access is live (renewal pending)."""
+        """``paid_access == False`` ONLY — ``remaining_micros == 0`` is a false positive
+        when the balance is zero but access is live (renewal pending)."""
         return not self.paid_access
 
     @property
     def used_fraction(self) -> Optional[float]:
-        """Fraction of the subscription cap consumed in [0.0, 1.0]; None without a
-        computable denominator. Guarded on the LIMIT FIELD (the real denominator),
-        not ``denominator_kind`` (metadata)."""
-        if not isinstance(self.subscription_limit_micros, int) or self.subscription_limit_micros <= 0:
+        """Fraction of the subscription cap consumed in [0.0, 1.0]; None without a computable
+        denominator. Guarded on the LIMIT FIELD (the real denominator), not ``denominator_kind``."""
+        lim = self.subscription_limit_micros
+        if not isinstance(lim, int) or lim <= 0:
             return None
-        used = self.subscription_limit_micros - self.subscription_micros
-        return max(0.0, min(1.0, used / self.subscription_limit_micros))
+        return max(0.0, min(1.0, (lim - self.subscription_micros) / lim))
 
 
 # ── Credits policy constants. Switching notices sticky→TTL later also needs a
@@ -154,9 +153,7 @@ def evaluate_credits_notices(
     Returns ``(to_show, to_clear)``; caller emits to_clear FIRST, then to_show."""
     to_show: list[AgentNotice] = []
     to_clear: list[str] = []
-    uf = state.used_fraction
-    active = latch["active"]
-
+    uf, active = state.used_fraction, latch["active"]
     # Crossing latch: band notices fire only once uf was observed below the LOWEST
     # band, so a session opening mid-range doesn't fire on its first observation
     # (the cold-start seed primes this when it WANTS an open-high warning).
@@ -185,16 +182,13 @@ def evaluate_credits_notices(
             to_clear.append(CREDITS_USAGE_KEY)
             active.discard(CREDITS_USAGE_KEY)
         if target_band is not None:
-            # Absolute dollars used (a bare "N%" is only meaningful against a Nous
-            # cap): cap − remaining, clamped [0, cap]; "$?" if a producer set the
-            # limit without its *_usd. Re-emits on band change only.
+            # Absolute dollars used (a bare "N%" is only meaningful against a Nous cap): cap − remaining,
+            # clamped [0, cap]; "$?" if a producer set the limit without its *_usd. Re-emits on band change only.
             level = current_band[1]  # type: ignore[index]  (current_band set when target_band set)
             lim = state.subscription_limit_micros or 0
             used_usd = f"{max(0, min(lim, lim - state.subscription_micros)) / 1_000_000:.2f}" if lim else "?"
-            glyph = "⚠" if level == "warn" else "•"
-            to_show.append(_sticky_notice(
-                f"{glyph} You've used ${used_usd} of your ${state.subscription_limit_usd or '?'} cap", level, CREDITS_USAGE_KEY
-            ))
+            text = f"{'⚠' if level == 'warn' else '•'} You've used ${used_usd} of your ${state.subscription_limit_usd or '?'} cap"
+            to_show.append(_sticky_notice(text, level, CREDITS_USAGE_KEY))
             active.add(CREDITS_USAGE_KEY)
         latch["usage_band"] = target_band
 
