@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -162,7 +163,7 @@ class SessionPersistenceMixin:
         # plus the marker test-and-append must be one critical section.
         from agent.agent_runtime_helpers import note_turn_persisted
 
-        def _persist_and_drain() -> None:
+        with getattr(self, "_session_persist_lock", None) or nullcontext():
             self._drop_trailing_empty_response_scaffolding(messages)
             self._session_messages = messages
             self._save_session_log(messages)
@@ -171,13 +172,6 @@ class SessionPersistenceMixin:
             if self._session_db is not None:
                 self._session_db.flush_token_counts()
             note_turn_persisted(self)
-
-        persist_lock = getattr(self, "_session_persist_lock", None)
-        if persist_lock is None:
-            _persist_and_drain()
-            return
-        with persist_lock:
-            _persist_and_drain()
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -214,10 +208,7 @@ class SessionPersistenceMixin:
         conversation_history: Optional[List[Dict]] = None,
     ):
         """Serialize direct and turn-boundary session flushes per agent."""
-        persist_lock = getattr(self, "_session_persist_lock", None)
-        if persist_lock is None:
-            return self._flush_messages_to_session_db_unlocked(messages, conversation_history)
-        with persist_lock:
+        with getattr(self, "_session_persist_lock", None) or nullcontext():
             return self._flush_messages_to_session_db_unlocked(messages, conversation_history)
 
     # --- flush phases (called only by _flush_messages_to_session_db_unlocked) ---

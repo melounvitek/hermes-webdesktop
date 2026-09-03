@@ -146,13 +146,13 @@ class _Record:
     result: Optional[SubagentResult] = None
 
 
+@dataclasses.dataclass
 class _Registry:
     """Thread-safe terminal-retention registry; never returns live records."""
 
-    def __init__(self) -> None:
-        self.lock = threading.RLock()
-        self.records: dict[str, _Record] = {}
-        self.correlations: dict[tuple[Optional[str], str], str] = {}
+    lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    records: dict[str, _Record] = dataclasses.field(default_factory=dict)
+    correlations: dict[tuple[Optional[str], str], str] = dataclasses.field(default_factory=dict)
 
 
 _REGISTRY = _Registry()
@@ -183,6 +183,10 @@ def get_active_subagent_parent() -> Any:
 
 def _opt_str(value: Any) -> bool:
     return value is None or isinstance(value, str)
+
+
+def _session_id_of(agent: Any) -> Optional[str]:
+    return str(getattr(agent, "session_id", "") or "") or None
 
 
 def _finite_number(value: Any) -> bool:
@@ -237,7 +241,7 @@ class SubagentLifecycleService:
         if parent is None:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
         self._validate_request(request, parent)
-        parent_session_id = str(getattr(parent, "session_id", "") or "") or None
+        parent_session_id = _session_id_of(parent)
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
         correlation_key = (parent_session_id, request.correlation_id or "")
@@ -354,9 +358,7 @@ class SubagentLifecycleService:
         expected = self._capability(handle.subagent_id, handle.parent_session_id, handle.created_at)
         if not hmac.compare_digest(handle.capability, expected):
             return None
-        parent = self._parent_agent_resolver()
-        active_parent_id = str(getattr(parent, "session_id", "") or "") or None
-        if active_parent_id != handle.parent_session_id:
+        if _session_id_of(self._parent_agent_resolver()) != handle.parent_session_id:
             return None
         with _REGISTRY.lock:
             return _REGISTRY.records.get(handle.subagent_id)
@@ -366,18 +368,13 @@ class SubagentLifecycleService:
         """Retain terminal snapshots for a bounded period, never live work."""
         cutoff = time.time() - _TERMINAL_RETENTION_SECONDS
         expired = [
-            subagent_id
-            for subagent_id, record in _REGISTRY.records.items()
-            if record.result is not None
-            and record.completed_at is not None
-            and record.completed_at < cutoff
+            sid for sid, record in _REGISTRY.records.items()
+            if record.result is not None and record.completed_at is not None and record.completed_at < cutoff
         ]
         for subagent_id in expired:
-            record = _REGISTRY.records.pop(subagent_id)
-            if record.handle.correlation_id:
-                _REGISTRY.correlations.pop(
-                    (record.handle.parent_session_id, record.handle.correlation_id), None
-                )
+            handle = _REGISTRY.records.pop(subagent_id).handle
+            if handle.correlation_id:
+                _REGISTRY.correlations.pop((handle.parent_session_id, handle.correlation_id), None)
 
     def _run(self, record: _Record, goal: str, parent: Any) -> None:
         with _REGISTRY.lock:
