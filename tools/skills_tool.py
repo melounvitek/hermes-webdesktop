@@ -21,21 +21,14 @@ from hermes_cli.config import cfg_get
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS, is_skill_support_path as _is_skill_support_path)
 from tools.skills_tool_setup import (  # noqa: F401
-    SkillReadinessStatus, _ENV_VAR_NAME_RE, _REMOTE_ENV_BACKENDS, _build_setup_note,
-    _capture_required_environment_variables, _collect_prerequisite_values,
-    _gateway_setup_hint, _get_required_environment_variables, _get_terminal_backend_name,
-    _is_env_var_persisted, _is_gateway_surface, _is_remote_env_backend,
-    _normalize_prerequisite_values, _normalize_setup_metadata,
-    _remaining_required_environment_names)
+    SkillReadinessStatus, _build_setup_note, _capture_required_environment_variables,
+    _get_required_environment_variables, _get_terminal_backend_name, _is_env_var_persisted,
+    _is_remote_env_backend)
 from tools.skills_tool_plugin import (  # noqa: F401
-    MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _available_skill_files,
-    _fail, _json, _mark_background_review_read, _plugin_skill_linked_files,
-    _preprocess_skill, _read_skill_text, _safe_frontmatter, _serve_plugin_skill,
-    _serve_skill_file, _truncate_description)
-from tools.skills_tool_dedup import (  # noqa: F401
-    _SKILL_VIEW_DEDUP_CAP, _SKILL_VIEW_DEDUP_MESSAGE, _check_skill_view_dedup,
-    _record_skill_view, _skill_view_fingerprint, _skill_view_tracker,
-    _skill_view_tracker_lock, reset_skill_view_dedup)
+    MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _fail, _json,
+    _mark_background_review_read, _preprocess_skill, _read_skill_text, _safe_frontmatter,
+    _serve_plugin_skill, _serve_skill_file, _truncate_description)
+from tools.skills_tool_dedup import _check_skill_view_dedup, _record_skill_view, reset_skill_view_dedup  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -434,17 +427,19 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
     """Resolve required env vars / credential files (prompting for secrets where the surface
     allows) and register what's available for sandboxes. Returns ``(fields, extras)``: fields go
     before ``_source_path`` in the skill_view result, extras after — key order is tool output."""
-    legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
-    required_env_vars = _get_required_environment_variables(frontmatter, legacy_env_vars)
+    required_env_vars = _get_required_environment_variables(frontmatter)
     backend = _get_terminal_backend_name()
     env_snapshot = load_env()
     missing_required_env_vars = [
         e for e in required_env_vars
         if not e.get("optional") and not _is_env_var_persisted(e["name"], env_snapshot)]
     capture_result = _capture_required_environment_variables(skill_name, missing_required_env_vars)
-    if missing_required_env_vars:
+    if missing_required_env_vars:  # re-read: a successful capture persisted into .env
         env_snapshot = load_env()
-    remaining = _remaining_required_environment_names(required_env_vars, capture_result, env_snapshot=env_snapshot)
+    still_missing = set(capture_result["missing_names"])
+    remaining = [
+        e["name"] for e in required_env_vars if not e.get("optional")
+        and (e["name"] in still_missing or not _is_env_var_persisted(e["name"], env_snapshot))]
     setup_needed = bool(remaining)
     # Only vars actually set pass through to sandboxed execution (execute_code, terminal).
     if available_env_names := [e["name"] for e in required_env_vars if e["name"] not in remaining]:

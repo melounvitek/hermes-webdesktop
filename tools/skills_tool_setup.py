@@ -1,15 +1,15 @@
 """Skill readiness: required env vars, secret capture, and setup notes.
 
-Split out of ``tools.skills_tool``; every name is re-imported there. Module
-state (``_secret_capture_callback``, ``load_env``) stays in ``tools.skills_tool``
-and is read lazily at call time so test patches on the origin module are honored.
+Split out of ``tools.skills_tool`` (names re-imported there). Module state
+(``_secret_capture_callback``, ``load_env``) stays in ``tools.skills_tool`` and is read
+lazily at call time so test patches on the origin module are honored.
 """
 
 import logging
 import os
 import re
 from enum import Enum
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from hermes_constants import display_hermes_home
 from utils import env_var_enabled
@@ -28,10 +28,8 @@ class SkillReadinessStatus(str, Enum):
 
 def _is_remote_env_backend(backend: str) -> bool:
     """Built-in remote backends plus plugin backends declaring is_remote."""
-    if backend in _REMOTE_ENV_BACKENDS:
-        return True
-    if not backend or backend == "local":
-        return False
+    if backend in _REMOTE_ENV_BACKENDS or not backend or backend == "local":
+        return backend in _REMOTE_ENV_BACKENDS
     try:
         from agent.terminal_env_registry import provider_flag
         return bool(provider_flag(backend, "is_remote", False))
@@ -39,19 +37,13 @@ def _is_remote_env_backend(backend: str) -> bool:
         return False
 
 
-def _normalize_prerequisite_values(value: Any) -> List[str]:
+def _legacy_env_vars(frontmatter: Dict[str, Any]) -> List[str]:
+    """``prerequisites.env_vars`` (legacy form): a single string or a list."""
+    prereqs = frontmatter.get("prerequisites")
+    value = prereqs.get("env_vars") if isinstance(prereqs, dict) else None
     if not value:
         return []
     return [str(item) for item in ([value] if isinstance(value, str) else value) if str(item).strip()]
-
-
-def _collect_prerequisite_values(frontmatter: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    prereqs = frontmatter.get("prerequisites")
-    if not isinstance(prereqs, dict) or not prereqs:
-        return [], []
-    return (
-        _normalize_prerequisite_values(prereqs.get("env_vars")),
-        _normalize_prerequisite_values(prereqs.get("commands")))
 
 
 def _as_dict_list(raw: Any) -> list:
@@ -84,8 +76,7 @@ def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
     return {"help": _clean_str(setup.get("help")), "collect_secrets": collect_secrets}
 
 
-def _get_required_environment_variables(
-    frontmatter: Dict[str, Any], legacy_env_vars: List[str] | None = None) -> List[Dict[str, Any]]:
+def _get_required_environment_variables(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Merge required_environment_variables, setup.collect_secrets and legacy
     prerequisites.env_vars into one deduped, validated list (first entry wins)."""
     setup = _normalize_setup_metadata(frontmatter)
@@ -95,9 +86,7 @@ def _get_required_environment_variables(
     entries += [
         {"name": i.get("env_var"), "prompt": i.get("prompt"), "help": i.get("provider_url") or setup.get("help")}
         for i in setup["collect_secrets"]]
-    if legacy_env_vars is None:
-        legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
-    entries += [{"name": v} for v in legacy_env_vars]
+    entries += [{"name": v} for v in _legacy_env_vars(frontmatter)]
     for entry in entries:
         env_name = str(entry.get("name") or entry.get("env_var") or "").strip()
         if not env_name or env_name in required or not _ENV_VAR_NAME_RE.match(env_name):
@@ -161,26 +150,9 @@ def _get_terminal_backend_name() -> str:
     return str(os.getenv("TERMINAL_ENV", "local")).strip().lower() or "local"
 
 
-def _env_snapshot_or_load(env_snapshot):
-    if env_snapshot is not None:
-        return env_snapshot
-    from tools import skills_tool as _st
-    return _st.load_env()
-
-
-def _is_env_var_persisted(var_name: str, env_snapshot: Dict[str, str] | None = None) -> bool:
-    env_snapshot = _env_snapshot_or_load(env_snapshot)
+def _is_env_var_persisted(var_name: str, env_snapshot: Dict[str, str]) -> bool:
+    """Set (non-empty) in the .env snapshot, else in the process environment."""
     return bool(env_snapshot[var_name] if var_name in env_snapshot else os.getenv(var_name))
-
-
-def _remaining_required_environment_names(
-    required_env_vars: List[Dict[str, Any]], capture_result: Dict[str, Any], *,
-    env_snapshot: Dict[str, str] | None = None) -> List[str]:
-    missing_names = set(capture_result["missing_names"])
-    env_snapshot = _env_snapshot_or_load(env_snapshot)
-    return [
-        e["name"] for e in required_env_vars if not e.get("optional")
-        and (e["name"] in missing_names or not _is_env_var_persisted(e["name"], env_snapshot))]
 
 
 def _gateway_setup_hint() -> str:
