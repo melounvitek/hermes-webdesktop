@@ -7,40 +7,30 @@ import contextlib
 import math
 import os
 import socket
-from typing import Optional
+
+
+def _notify_socket() -> str:
+    return os.environ.get("NOTIFY_SOCKET", "").strip() if hasattr(socket, "AF_UNIX") else ""
 
 
 def notify(message: str) -> bool:
-    """Send one nonblocking sd_notify datagram when systemd configured it.
-
-    Failures are non-fatal: a missing socket or an older platform must never
-    prevent the gateway from starting.
-    """
-    address = os.environ.get("NOTIFY_SOCKET", "").strip()
-    if not address or not isinstance(message, str) or not message or not hasattr(socket, "AF_UNIX"):
+    """Send an sd_notify datagram if systemd configured it; failures never block gateway startup."""
+    if not (address := _notify_socket()) or not isinstance(message, str) or not message:
         return False
     try:
-        payload = message.encode("utf-8")
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
-            # A full receiver buffer must not stall the gateway event loop.
-            sender.setblocking(False)
-            # systemd's ``@abstract`` notation -> Python's leading-NUL address form.
+            sender.setblocking(False)  # a full receiver buffer must not stall the event loop
+            # systemd's ``@abstract`` notation -> Python's leading-NUL address form
             sender.connect("\0" + address[1:] if address.startswith("@") else address)
-            sender.send(payload)
+            sender.send(message.encode("utf-8"))
         return True
     except (OSError, UnicodeError, ValueError):
         return False
 
 
-def watchdog_interval_seconds() -> Optional[float]:
-    """Return systemd's configured watchdog interval in seconds."""
-    if not os.environ.get("NOTIFY_SOCKET", "").strip() or not hasattr(socket, "AF_UNIX"):
-        return None
-    raw = os.environ.get("WATCHDOG_USEC", "").strip()
-    if not raw:
-        return None
+def watchdog_interval_seconds() -> float | None:
     try:
-        interval = float(raw) / 1_000_000.0
+        interval = float(os.environ.get("WATCHDOG_USEC", "") if _notify_socket() else "") / 1e6
     except (TypeError, ValueError):
         return None
     return interval if math.isfinite(interval) and interval > 0 else None
@@ -49,39 +39,25 @@ def watchdog_interval_seconds() -> Optional[float]:
 class SystemdWatchdog:
     """Feed systemd while the asyncio event loop continues to make progress."""
 
-    def __init__(self, *, config_enabled: bool = True, lag_tolerance_seconds: Optional[float] = None) -> None:
+    def __init__(self, *, config_enabled: bool = True, lag_tolerance_seconds: float | None = None):
         self._config_enabled = bool(config_enabled)
         self.interval_seconds = watchdog_interval_seconds()
         self._lag_tolerance_seconds = lag_tolerance_seconds
-        self._task: Optional[asyncio.Task[None]] = None
-        self._unhealthy = False
-        self._stopping = False
-        self._stopping_notified = False
+        self._task: asyncio.Task[None] | None = None
+        self._unhealthy = self._stopping = self._stopping_notified = False
 
-    @property
-    def enabled(self) -> bool:
-        return self._config_enabled and self.interval_seconds is not None
-
-    @property
-    def unhealthy(self) -> bool:
-        return self._unhealthy
-
-    @property
-    def task(self) -> Optional[asyncio.Task[None]]:
-        return self._task
+    enabled = property(lambda self: self._config_enabled and self.interval_seconds is not None)
+    unhealthy = property(lambda self: self._unhealthy)
+    task = property(lambda self: self._task)
 
     def _lag_tolerance(self) -> float:
         default = max(0.1, (self.interval_seconds or 0.0) * 0.25)
-        if self._lag_tolerance_seconds is None:
-            return default
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             value = float(self._lag_tolerance_seconds)
-        except (TypeError, ValueError):
-            return default
-        return max(0.0, value) if math.isfinite(value) else default
+            return max(0.0, value) if math.isfinite(value) else default
+        return default
 
     def start(self) -> bool:
-        """Start the loop-progress sampler when systemd watchdog is enabled."""
         if not self.enabled:
             return False
         if self._task is not None and not self._task.done():
@@ -90,18 +66,13 @@ class SystemdWatchdog:
             asyncio.get_running_loop()
         except RuntimeError:
             return False
-        self._stopping = False
-        self._unhealthy = False
-        self._stopping_notified = False
+        self._stopping = self._unhealthy = self._stopping_notified = False
         self._task = asyncio.create_task(self._run(), name="hermes-systemd-watchdog")
         return True
 
     def ready(self, status: str = "Gateway running") -> bool:
-        """Tell systemd that startup completed and the gateway is ready."""
-        if not self.enabled:
-            return False
         safe_status = str(status or "Gateway running").replace("\n", " ")
-        return notify(f"READY=1\nSTATUS={safe_status}")
+        return self.enabled and notify(f"READY=1\nSTATUS={safe_status}")
 
     def record_tick(self, *, scheduled_at: float, now: float) -> bool:
         """Feed systemd only when the event loop woke within its lag budget."""
@@ -119,10 +90,9 @@ class SystemdWatchdog:
         return True
 
     async def _run(self) -> None:
-        interval = self.interval_seconds
-        if interval is None:
+        if self.interval_seconds is None:
             return
-        cadence = max(0.01, interval / 2.0)
+        cadence = max(0.01, self.interval_seconds / 2.0)
         loop = asyncio.get_running_loop()
         scheduled_at = loop.time() + cadence
         with contextlib.suppress(asyncio.CancelledError):
@@ -140,8 +110,7 @@ class SystemdWatchdog:
         self._stopping = True
         task = self._task
         if task is not None and task is not asyncio.current_task():
-            if not task.done():
-                task.cancel()
+            task.cancel()  # no-op on a finished task
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._task = None
