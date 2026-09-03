@@ -923,8 +923,7 @@ def _aggregator_alias_error(
         and target_provider in _AGGREGATOR_PROVIDERS):
         return ""
     authed = get_authenticated_provider_slugs(
-        current_provider=current_provider, user_providers=user_providers, custom_providers=custom_providers,
-    )
+        current_provider=current_provider, user_providers=user_providers, custom_providers=custom_providers)
     if target_provider in authed:
         return ""
     suggestions = [s for s in authed if s.startswith(explicit_norm) and s != explicit_norm]
@@ -937,14 +936,9 @@ def _aggregator_alias_error(
 
 def _aggregator_catalog_match(new_model: str, catalog: list) -> str | None:
     """Exact (case-insensitive) match on full id, then on the bare part after ``vendor/``."""
-    new_model_lower = new_model.lower()
-    for mid in catalog:
-        if mid.lower() == new_model_lower:
-            return mid
-    for mid in catalog:
-        if "/" in mid and mid.split("/", 1)[1].lower() == new_model_lower:
-            return mid
-    return None
+    wanted = new_model.lower()
+    return next((mid for mid in catalog if mid.lower() == wanted), None) or next(
+        (mid for mid in catalog if "/" in mid and mid.split("/", 1)[1].lower() == wanted), None)
 
 
 def _config_declares_model(
