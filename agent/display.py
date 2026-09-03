@@ -28,8 +28,7 @@ _MAX_INLINE_DIFF_LINES = 80
 
 def _display_url(value: Any) -> str:
     """Extract a display-only URL without assuming model argument types."""
-    if isinstance(value, dict):
-        value = value.get("url") or value.get("href")
+    value = (value.get("url") or value.get("href")) if isinstance(value, dict) else value
     return value.strip() if isinstance(value, str) else ""
 
 
@@ -312,12 +311,8 @@ def redact_browser_typed_text_for_display(value: Any, typed_text: Any) -> Any:
     reaching logs, callbacks, the model, or chat history. Forced regardless of
     ``security.redact_secrets``: a leaked typed credential is a security boundary.
     """
-    if typed_text is None:
-        return value
-    needle = str(typed_text)
-    if needle == "":
-        return value
-    redacted = redact_sensitive_text(needle, force=True)
+    needle = "" if typed_text is None else str(typed_text)
+    redacted = redact_sensitive_text(needle, force=True) if needle else needle
     if redacted == needle:
         return value
     if isinstance(value, str):
@@ -344,13 +339,8 @@ def _delegate_task_goals(tasks: Any, *, per_goal_len: int) -> list[str]:
     """One truncated goal string per dict task (``?`` when missing)."""
     if not isinstance(tasks, list):
         return []
-    goals: list[str] = []
-    for task in tasks:
-        if isinstance(task, dict):
-            raw_goal = task.get("goal")
-            goal = "?" if raw_goal is None else _oneline(str(raw_goal))
-            goals.append(_truncate_preview(goal or "?", per_goal_len))
-    return goals
+    raw_goals = (task.get("goal") for task in tasks if isinstance(task, dict))
+    return [_truncate_preview(("?" if g is None else _oneline(str(g))) or "?", per_goal_len) for g in raw_goals]
 
 
 def _browser_exec_step_label(args: dict, max_chars: int = 80) -> str | None:
@@ -402,13 +392,9 @@ def _preview_delegate_task(args: dict, max_len: int) -> str | None:
 
 
 def _preview_process_manage(args: dict, _max_len: int) -> str | None:
-    action, sid, data, timeout_val = (args.get(k, d) for k, d in (("action", ""), ("session_id", ""), ("data", ""), ("timeout", None)))
-    parts = [
-        str(action) if action else "",
-        str(sid)[:16] if sid else "",
-        f'"{_oneline(str(data)[:20])}"' if data else "",
-        f"{timeout_val}s" if timeout_val and action == "wait" else "",
-    ]
+    action, sid, data, timeout_val = (args.get(k) for k in ("action", "session_id", "data", "timeout"))
+    parts = [str(action) if action else "", str(sid)[:16] if sid else "",
+             f'"{_oneline(str(data)[:20])}"' if data else "", f"{timeout_val}s" if timeout_val and action == "wait" else ""]
     return " ".join(p for p in parts if p) or None
 
 
@@ -476,18 +462,14 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if not args:
         return None
     args = redact_tool_args_for_display(tool_name, args) or args
-
     builder = _PREVIEW_BUILDERS.get(tool_name)
     if builder is not None:
         return builder(args, max_len)
-
     key = _PRIMARY_ARGS.get(tool_name) or next((k for k in _FALLBACK_PREVIEW_KEYS if k in args), None)
     if not key or key not in args:
         return None
     value = args[key]
-    if isinstance(value, list):
-        value = value[0] if value else ""
-    preview = _oneline(str(value))
+    preview = _oneline(str((value[0] if value else "") if isinstance(value, list) else value))
     return _tail_trunc(preview, max_len) if preview else None
 
 
@@ -549,25 +531,21 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
         return None
     verb = _TOOL_VERBS.get(tool_name)
     phrase = f"is {verb[0].lower()}{verb[1:]}" if verb else f"is using {tool_name}"
-    if args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW:
-        preview = build_tool_preview(tool_name, args, max_len=None)
-        if preview:
-            # Previews can contain newlines (terminal commands); keep the first line.
-            phrase = f"{phrase}{tool_verb_connector(tool_name)}{preview.splitlines()[0].strip()}"
-    if len(phrase) > max_len - 1:
-        return phrase[: max_len - 2].rstrip() + "…"
-    return phrase + "…"
+    preview = build_tool_preview(tool_name, args, max_len=None) if args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW else None
+    if preview:  # previews can contain newlines (terminal commands); keep the first line
+        phrase = f"{phrase}{tool_verb_connector(tool_name)}{preview.splitlines()[0].strip()}"
+    return phrase[: max_len - 2].rstrip() + "…" if len(phrase) > max_len - 1 else phrase + "…"
 
 
 def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Human-phrased label ("Searching the web for ...") for curated built-ins; other
     tools (or labels disabled) get the raw preview, so it is a drop-in for build_tool_preview."""
     verb = get_tool_verb(tool_name)
-    if not verb:
-        return build_tool_preview(tool_name, args, max_len=max_len)
-    if tool_name in _TOOL_VERBS_NO_PREVIEW:
+    if verb and tool_name in _TOOL_VERBS_NO_PREVIEW:
         return verb
     preview = build_tool_preview(tool_name, args, max_len=max_len)
+    if not verb:
+        return preview
     return f"{verb}{tool_verb_connector(tool_name)}{preview}" if preview else verb
 
 

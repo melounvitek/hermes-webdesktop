@@ -70,19 +70,14 @@ def _is_custom_endpoint(provider: Optional[str]) -> bool:
 
 
 def _looks_like_stream_drop(message: str) -> bool:
-    msg = message.lower()
-    return any(fragment in msg for fragment in _STREAM_DROP_FRAGMENTS)
+    return any(fragment in message.lower() for fragment in _STREAM_DROP_FRAGMENTS)
 
 
 def _surface(layer: str, code: str, retryable: bool, provider: str = "", model: str = "") -> dict:
-    out = {"layer": layer, "code": code, "retryable": bool(retryable)}
     # Identity captured at classification time, so clients report the session
     # that actually failed — not whatever the composer points at later.
-    if provider:
-        out["provider"] = provider
-    if model:
-        out["model"] = model
-    return out
+    identity = {k: v for k, v in (("provider", provider), ("model", model)) if v}
+    return {"layer": layer, "code": code, "retryable": bool(retryable), **identity}
 
 
 def _disk_full(candidate: Any) -> bool:
