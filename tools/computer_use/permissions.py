@@ -1,13 +1,9 @@
-"""Cross-platform Computer Use readiness + macOS permission helpers.
-
-"Ready to drive" differs per platform: macOS needs explicit TCC grants (Accessibility + Screen
-Recording) via cua-driver ``permissions status`` / ``permissions grant``; Windows/Linux have no TCC
-toggles, so readiness == driver health. The grants attach to cua-driver's OWN identity
-(``com.trycua.driver``), not Hermes, so ``grant`` launches CuaDriver via LaunchServices for correct
-dialog attribution. ``cua-driver doctor --json`` is the universal signal; ``computer_use_status``
-folds it with the macOS detail into one payload for the desktop card, the ``permissions`` CLI and
-``/api/tools/computer-use/status``.
-"""
+"""Cross-platform Computer Use readiness + macOS permission helpers. "Ready to drive" differs per platform: macOS
+needs explicit TCC grants (Accessibility + Screen Recording) via cua-driver ``permissions status`` / ``permissions
+grant``; Windows/Linux have no TCC toggles, so readiness == driver health. The grants attach to cua-driver's OWN
+identity (``com.trycua.driver``), not Hermes, so ``grant`` launches CuaDriver via LaunchServices for correct dialog
+attribution. ``cua-driver doctor --json`` is the universal signal; ``computer_use_status`` folds it with the macOS
+detail into one payload for the desktop card, the ``permissions`` CLI and ``/api/tools/computer-use/status``."""
 
 from __future__ import annotations
 
@@ -15,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import suppress
 from typing import Any, Dict, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
@@ -23,8 +20,7 @@ _RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})  # mirrors the tool
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
 def _child_env() -> Dict[str, str]:
-    """cua-driver child env (telemetry policy + provider secrets stripped); degrades to
-    ``os.environ`` on import error so probes never break."""
+    """cua-driver child env (telemetry policy + provider secrets stripped); ``os.environ`` on import error."""
     try:
         from tools.computer_use.cua_backend import sanitized_cua_driver_env
         return sanitized_cua_driver_env()
@@ -48,8 +44,8 @@ def _doctor(binary: str) -> Optional[Dict[str, Any]]:
         data = None
     if not isinstance(data, dict):
         return None
-    return {"ok": bool(data.get("ok")), "checks": [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
-                                                    for p in data.get("probes", []) if isinstance(p, dict)]}
+    checks = [{k: str(p.get(k, "")) for k in ("label", "status", "message")} for p in data.get("probes", []) if isinstance(p, dict)]
+    return {"ok": bool(data.get("ok")), "checks": checks}
 
 def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
     """Fold ``cua-driver permissions status --json`` booleans (+ ``source``) into ``out``."""
@@ -66,10 +62,9 @@ def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
                 out["source"] = data["source"]
 
 def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
-    """Unified, OS-aware Computer Use readiness for the desktop card. ``ready`` is the single signal
-    the UI keys off: on macOS it's both TCC grants; elsewhere it's driver health (no TCC model).
-    ``None`` means unknown (binary missing / probe failed). ``can_grant`` is macOS-only.
-    Key order is an API payload contract."""
+    """OS-aware readiness for the desktop card; key order is an API payload contract. ``ready`` is the single signal the
+    UI keys off: macOS = both TCC grants, elsewhere = driver health (no TCC model); ``None`` = unknown (binary missing /
+    probe failed). ``can_grant`` is macOS-only."""
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd  # same resolver as the tool itself
     plat, binary = sys.platform, resolve_cua_driver_cmd(driver_cmd)
     out: Dict[str, Any] = {"platform": plat, "platform_supported": plat in _RUNTIME_PLATFORMS,
@@ -77,10 +72,8 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
                            "checks": [], "source": None, "error": None, **{k: None for k in _BOOLS}}
     if not binary:
         return out
-    try:
+    with suppress(Exception):
         out["version"] = (_run(binary, "--version", timeout=5).stdout or "").strip() or None
-    except Exception:
-        pass
     doctor = _doctor(binary)
     if doctor is not None:
         out["checks"] = doctor["checks"]
@@ -93,8 +86,8 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     return out
 
 def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
-    """Run ``cua-driver permissions grant`` (macOS); stream its output. Returns the driver's exit
-    code (0 ok), 2 if the binary is missing, 64 on a non-macOS platform (no TCC model to grant)."""
+    """Run ``cua-driver permissions grant`` (macOS), streaming its output. Returns the driver's exit code (0 ok), 2 if
+    the binary is missing, 64 on a non-macOS platform (no TCC model to grant)."""
     if sys.platform != "darwin":
         print("Computer Use permissions are a macOS concept; nothing to grant here.")
         return 64

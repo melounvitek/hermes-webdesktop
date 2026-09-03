@@ -28,9 +28,8 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
-    """True when ``auxiliary.vision`` carries a non-default user override. Mirrors
-    ``agent.image_routing._explicit_aux_vision_override`` so the capture path and the user-attached-image
-    path agree; ``provider: "auto"``, blanks or a missing block are *not* explicit."""
+    """True when ``auxiliary.vision`` carries a non-default user override; mirrors ``agent.image_routing`` so the capture
+    and user-attached-image paths agree. ``provider: "auto"``, blanks or a missing block are *not* explicit."""
     aux = cfg.get("auxiliary") if isinstance(cfg, dict) else None
     vision = aux.get("vision") if isinstance(aux, dict) else None
     if not isinstance(vision, dict):
@@ -69,9 +68,8 @@ def _lookup_supports_vision(provider: str, model: str, cfg: Optional[Dict[str, A
         return None
 
 def _provider_accepts_multimodal_tool_result(provider: str, model: str) -> Optional[bool]:
-    """Whether *provider*+*model* carries images inside tool-result messages. Reuses
-    ``tools.vision_tools._supports_media_in_tool_results`` to stay in lockstep with the ``vision_analyze``
-    fast path; None on import failure so callers fall back to aux, not guess."""
+    """Whether *provider*+*model* carries images inside tool-result messages; reuses ``tools.vision_tools`` to stay in
+    lockstep with the ``vision_analyze`` fast path. None on import failure so callers fall back to aux, not guess."""
     if not provider:
         return None
     try:
@@ -82,9 +80,9 @@ def _provider_accepts_multimodal_tool_result(provider: str, model: str) -> Optio
     return bool(_supports_media_in_tool_results(provider, model))
 
 def should_route_capture_to_aux_vision(provider: str, model: str, cfg: Optional[Dict[str, Any]]) -> bool:
-    """True iff the screenshot should be pre-analysed via aux vision; False keeps the multimodal
-    envelope. *provider* is the lower-case canonical id, *model* the slug as sent to the provider,
-    *cfg* the loaded ``config.yaml`` dict (or None). Steps follow the module docstring's order."""
+    """True iff the screenshot should be pre-analysed via aux vision; False keeps the multimodal envelope. *provider* is
+    the lower-case canonical id, *model* the slug sent to the provider, *cfg* the loaded ``config.yaml`` dict (or None).
+    Steps follow the module docstring's decision order."""
     if _explicit_aux_vision_override(cfg):
         return True
     user_declared = _lookup_user_declared_supports_vision(provider, model, cfg)
