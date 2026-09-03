@@ -128,29 +128,27 @@ def _auto_title_enabled() -> bool:
 
 def strip_control_wrappers(text: str) -> str:
     """Remove leading control wrappers (nested too) so a slash-command turn reduces to the prose the user typed."""
-    if not text:
-        return ""
-    current = text.strip()
+    current = (text or "").strip()
     # Bounded: each pass must remove at least one wrapper or we stop.
     for _ in range(len(_CONTROL_WRAPPERS) * 2):
-        stripped = current
-        for open_tag, close_tag in _CONTROL_WRAPPERS:
-            if not stripped.lower().startswith(open_tag):
-                continue
-            end = stripped.lower().find(close_tag)
-            if end == -1:
-                # Unterminated wrapper: drop the opening tag and keep the body.
-                stripped = stripped[len(open_tag):].strip()
-            else:
-                inner = stripped[len(open_tag):end].strip()
-                rest = stripped[end + len(close_tag):].strip()
-                # Prefer trailing prose; otherwise the wrapper body is all we have.
-                stripped = (rest or inner).strip()
-            break
+        stripped = _strip_one_wrapper(current)
         if stripped == current:
             break
         current = stripped
     return current
+
+
+def _strip_one_wrapper(text: str) -> str:
+    lowered = text.lower()
+    for open_tag, close_tag in _CONTROL_WRAPPERS:
+        if not lowered.startswith(open_tag):
+            continue
+        end = lowered.find(close_tag)
+        if end == -1:  # unterminated wrapper: drop the opening tag and keep the body
+            return text[len(open_tag):].strip()
+        # Prefer trailing prose; otherwise the wrapper body is all we have.
+        return (text[end + len(close_tag):].strip() or text[len(open_tag):end].strip()).strip()
+    return text
 
 
 def _summarize_user_message(user_message: str) -> str:
@@ -164,14 +162,12 @@ def _summarize_user_message(user_message: str) -> str:
         described = describe_skill_invocation(user_message)
     except Exception:
         logger.debug("Skill-scaffolding summary failed; titling raw", exc_info=True)
-    return strip_control_wrappers(described if described is not None else user_message)
+    return strip_control_wrappers(user_message if described is None else described)
 
 
 def is_titleable_user_message(user_message: str) -> bool:
     """False for machine-authored openers and turns that reduce to nothing once scaffolding is stripped."""
-    if not isinstance(user_message, str) or not user_message.strip():
-        return False
-    if user_message.lstrip().startswith(_MACHINE_PREFIXES):
+    if not isinstance(user_message, str) or not user_message.strip() or user_message.lstrip().startswith(_MACHINE_PREFIXES):
         return False
     return bool(_summarize_user_message(user_message).strip())
 
@@ -184,9 +180,7 @@ def derive_title(user_message: str) -> Optional[str]:
     if len(line) > MAX_DERIVED_TITLE_CHARS:
         cut = line[:MAX_DERIVED_TITLE_CHARS]
         space = cut.rfind(" ")
-        if space > MAX_DERIVED_TITLE_CHARS // 2:
-            cut = cut[:space]
-        line = cut.rstrip(" ,.;:—-") + "…"
+        line = (cut[:space] if space > MAX_DERIVED_TITLE_CHARS // 2 else cut).rstrip(" ,.;:—-") + "…"
     return line or None
 
 
