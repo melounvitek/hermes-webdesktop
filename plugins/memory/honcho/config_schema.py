@@ -1,16 +1,8 @@
 """Honcho's declared config surface — rendered by the generic desktop panel."""
 
 from plugins.memory.config_schema import (
-    KIND_BOOL,
-    KIND_JSON,
-    KIND_NUMBER,
-    KIND_SECRET,
-    KIND_SELECT,
-    KIND_TEXT,
-    STORAGE_HONCHO_HOST_BLOCK,
-    ProviderConfigSchema,
-    ProviderField,
-    ProviderFieldOption,
+    KIND_BOOL, KIND_JSON, KIND_NUMBER, KIND_SECRET, KIND_SELECT, KIND_TEXT, STORAGE_HONCHO_HOST_BLOCK,
+    ProviderConfigSchema, ProviderField, ProviderFieldOption,
 )
 
 
@@ -21,22 +13,13 @@ def _opts(*pairs: tuple[str, str]) -> tuple[ProviderFieldOption, ...]:
 # Reasoning effort levels shared by dialectic-related selects.
 _REASONING_LEVELS = _opts(("minimal", "Minimal"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("max", "Max"))
 
-_SESSION_STRATEGY_INFO = (
-    "Per session: every conversation gets its own Honcho session. "
-    "Per directory: conversations from the same working directory share one. "
-    "Per repo: conversations from the same git repo share one. "
-    "Global: everything shares a single session."
-)
-_WRITE_FREQUENCY_INFO = (
-    "async: write in the background as messages arrive. "
-    "turn: flush after each turn. session: flush when the session ends. "
-    "A number N flushes every N turns."
-)
-_RECALL_MODE_INFO = (
-    "Hybrid: auto-injected context plus on-demand memory tools. "
-    "Context only: injection without tools. "
-    "Tools only: the model queries memory explicitly, nothing is injected."
-)
+_SESSION_STRATEGY_INFO = ("Per session: every conversation gets its own Honcho session. "
+                          "Per directory: conversations from the same working directory share one. "
+                          "Per repo: conversations from the same git repo share one. Global: everything shares a single session.")
+_WRITE_FREQUENCY_INFO = ("async: write in the background as messages arrive. turn: flush after each turn. "
+                         "session: flush when the session ends. A number N flushes every N turns.")
+_RECALL_MODE_INFO = ("Hybrid: auto-injected context plus on-demand memory tools. Context only: injection without tools. "
+                     "Tools only: the model queries memory explicitly, nothing is injected.")
 
 
 def _field(key, label, kind, description, *, group, **kw) -> ProviderField:
@@ -68,16 +51,13 @@ CONFIG_SCHEMA = ProviderConfigSchema(
                inline=True, group="Identity"),
         # — Session (inline) —
         _field("sessionStrategy", "Session strategy", KIND_SELECT, "How conversations map to Honcho sessions.",
-               default="per-directory", info=_SESSION_STRATEGY_INFO,
-               options=_opts(("per-session", "Per session"), ("per-directory", "Per directory"),
-                             ("per-repo", "Per repo"), ("global", "Global")),
-               inline=True, group="Session"),
+               default="per-directory", info=_SESSION_STRATEGY_INFO, inline=True, group="Session",
+               options=_opts(("per-session", "Per session"), ("per-directory", "Per directory"), ("per-repo", "Per repo"), ("global", "Global"))),
         # — Connection —
         _field("timeout", "Request timeout", KIND_NUMBER, "Request timeout in seconds for Honcho HTTP calls. Blank uses the default.",
                aliases=("requestTimeout",), env_fallbacks=("HONCHO_TIMEOUT",), placeholder="30", group="Connection", scope="root"),
         # — Identity —
-        _field("pinUserPeer", "Pin user peer", KIND_BOOL,
-               "Pin the user peer to the peer name, ignoring gateway runtime identity. Unifies memory for single-user setups.",
+        _field("pinUserPeer", "Pin user peer", KIND_BOOL, "Pin the user peer to the peer name, ignoring gateway runtime identity. Unifies memory for single-user setups.",
                default="false", aliases=("pinPeerName",), group="Identity"),
         _field("runtimePeerPrefix", "Runtime peer prefix", KIND_TEXT, "Prefix applied to unknown gateway runtime user IDs.",
                placeholder="e.g. telegram_", group="Identity"),
@@ -116,14 +96,13 @@ CONFIG_SCHEMA = ProviderConfigSchema(
                options=_opts(("hybrid", "Hybrid"), ("context", "Context only"), ("tools", "Tools only")), group="Recall"),
         _field("contextTokens", "Context token cap", KIND_NUMBER, "Cap on auto-injected context tokens. Blank leaves it uncapped.",
                placeholder="(uncapped)", group="Recall"),
-        _field("initOnSessionStart", "Eager init", KIND_BOOL,
-               "Initialize the session eagerly in tools mode instead of on first tool call.", default="false", group="Recall"),
+        _field("initOnSessionStart", "Eager init", KIND_BOOL, "Initialize the session eagerly in tools mode instead of on first tool call.",
+               default="false", group="Recall"),
         # — Limits —
         _field("messageMaxChars", "Message max chars", KIND_NUMBER, "Max chars per message sent to Honcho.",
                placeholder="25000", group="Limits"),
         # — Observation —
-        _field("observationMode", "Observation mode", KIND_SELECT,
-               "Per-peer observation preset. Directional observes all directions; unified shares one view.",
+        _field("observationMode", "Observation mode", KIND_SELECT, "Per-peer observation preset. Directional observes all directions; unified shares one view.",
                default="directional", options=_opts(("directional", "Directional"), ("unified", "Unified")), group="Observation"),
     ),
 )
