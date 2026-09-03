@@ -3,18 +3,13 @@
 Profile / search / reasoning / context / conclude, exposed via HonchoMemoryProvider.get_tool_schemas().
 """
 
-_PEER = {
-    "type": "string",
-    "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
-}
+_PEER = {"type": "string",
+         "description": "Peer to query. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace."}
 
 
 def _tool(name: str, description: str, properties: dict, required: list) -> dict:
-    return {
-        "name": name,
-        "description": description,
-        "parameters": {"type": "object", "properties": properties, "required": required},
-    }
+    return {"name": name, "description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required}}
 
 
 PROFILE_SCHEMA = _tool(
@@ -30,14 +25,9 @@ PROFILE_SCHEMA = _tool(
     "representation + summary + recent messages); honcho_search to find "
     "specific things that were actually said; honcho_reasoning for a "
     "synthesized answer to a question.",
-    {
-        "peer": _PEER,
-        "card": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "New peer card as a list of fact strings. Omit to read the current card.",
-        },
-    },
+    {"peer": _PEER,
+     "card": {"type": "array", "items": {"type": "string"},
+              "description": "New peer card as a list of fact strings. Omit to read the current card."}},
     [],
 )
 
@@ -52,20 +42,12 @@ SEARCH_SCHEMA = _tool(
     "'what was the regimen/decision/config we settled on' — and reason "
     "over the excerpts yourself. For nuanced questions needing synthesis, "
     "use honcho_reasoning instead.",
-    {
-        "query": {
-            "type": "string",
-            "description": "What to look for — a topic, keyword, name, or natural-language description of the fact you're trying to recall.",
-        },
-        "max_tokens": {
-            "type": "integer",
-            "description": "Approximate budget for returned excerpts (default 800, max 2000). Larger budgets return more/longer ranked snippets.",
-        },
-        "peer": {
-            "type": "string",
-            "description": "Whose history to search. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace. Spans every session that peer took part in.",
-        },
-    },
+    {"query": {"type": "string",
+               "description": "What to look for — a topic, keyword, name, or natural-language description of the fact you're trying to recall."},
+     "max_tokens": {"type": "integer",
+                    "description": "Approximate budget for returned excerpts (default 800, max 2000). Larger budgets return more/longer ranked snippets."},
+     "peer": {"type": "string",
+              "description": "Whose history to search. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace. Spans every session that peer took part in."}},
     ["query"],
 )
 
@@ -83,12 +65,8 @@ REASONING_SCHEMA = _tool(
     "honcho_profile / honcho_context (no LLM). "
     "Pass reasoning_level to control depth: minimal (fast/cheap), low (default), "
     "medium, high, max (deep/expensive). Omit for the configured default.",
-    {
-        "query": {
-            "type": "string",
-            "description": "A natural language question.",
-        },
-        "reasoning_level": {
+    {"query": {"type": "string", "description": "A natural language question."},
+     "reasoning_level": {
             "type": "string",
             "description": (
                 "Override the default reasoning depth. "
@@ -113,10 +91,8 @@ REASONING_SCHEMA = _tool(
                 "Default to at least 'low' unless the query is genuinely a single "
                 "fact lookup."
             ),
-            "enum": ["minimal", "low", "medium", "high", "max"],
-        },
-        "peer": _PEER,
-    },
+            "enum": ["minimal", "low", "medium", "high", "max"]},
+     "peer": _PEER},
     ["query"],
 )
 
@@ -130,9 +106,7 @@ CONTEXT_SCHEMA = _tool(
     "search: to look up a specific past fact use honcho_search; to ask a "
     "question and get a synthesized answer use honcho_reasoning; for just the "
     "compact card use honcho_profile.",
-    {
-        "peer": _PEER,
-    },
+    {"peer": _PEER},
     [],
 )
 
@@ -151,28 +125,16 @@ CONCLUDE_SCHEMA = _tool(
     "Honcho self-heals contradictions over time. This is a WRITE tool: to read "
     "the profile use honcho_profile / honcho_context, and to search what was "
     "said use honcho_search.",
-    {
-        "conclusion": {
-            "type": "string",
-            "description": "A factual statement to persist. Provide this when creating a conclusion. Do not send it together with delete_id or list.",
-        },
-        "delete_id": {
-            "type": "string",
-            "description": "Conclusion ID to delete for PII removal. Provide this when deleting a conclusion. Do not send it together with conclusion or list. Get this id from a prior `list` call — never guess it.",
-        },
-        "list": {
-            "type": "boolean",
-            "description": "Set to true to list or search stored conclusions (with their ids) instead of creating or deleting one. Do not send together with conclusion or delete_id.",
-        },
-        "query": {
-            "type": "string",
-            "description": "Optional semantic search query, used only when `list` is true. Omit to list the most recent conclusions instead of searching.",
-        },
-        "peer": {
-            "type": "string",
-            "description": "The peer the conclusion is ABOUT. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace.",
-        },
-    },
+    {"conclusion": {"type": "string",
+                    "description": "A factual statement to persist. Provide this when creating a conclusion. Do not send it together with delete_id or list."},
+     "delete_id": {"type": "string",
+                   "description": "Conclusion ID to delete for PII removal. Provide this when deleting a conclusion. Do not send it together with conclusion or list. Get this id from a prior `list` call — never guess it."},
+     "list": {"type": "boolean",
+              "description": "Set to true to list or search stored conclusions (with their ids) instead of creating or deleting one. Do not send together with conclusion or delete_id."},
+     "query": {"type": "string",
+               "description": "Optional semantic search query, used only when `list` is true. Omit to list the most recent conclusions instead of searching."},
+     "peer": {"type": "string",
+              "description": "The peer the conclusion is ABOUT. Built-in aliases: 'user' (default), 'ai'. Or pass any peer ID from this workspace."}},
     [],
 )
 

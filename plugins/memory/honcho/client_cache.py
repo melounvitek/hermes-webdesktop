@@ -1,10 +1,9 @@
 """Per-identity Honcho client cache: cache keys, slots, and OAuth refresh hooks.
 
-One SingletonSlot per client identity, replacing the single process-wide slot
-that pinned the first profile's workspace and bearer for every later profile
-in multi-profile processes (#69123, #74065). Origin-module symbols are
-imported lazily so tests that monkeypatch ``client.resolve_config_path`` etc.
-keep intercepting.
+One SingletonSlot per client identity, so multi-profile processes don't pin the first
+profile's workspace and bearer for every later profile. Origin-module symbols are
+imported lazily so tests that monkeypatch ``client.resolve_config_path`` etc. keep
+intercepting.
 """
 
 from __future__ import annotations
@@ -49,32 +48,24 @@ def _fingerprint_basis(block: dict, key_fn) -> str:
 
 
 def _credential_fingerprint(config: HonchoClientConfig | None) -> str:
-    """Stable identity for the credential a client will be built with, or ''.
-
-    Must NOT change on in-place access-token rotation, but must change on
-    account switch so 'hermes honcho setup' yields a NEW cache identity.
-    """
+    """Stable identity for the credential a client will be built with, or ''. Must NOT change
+    on in-place access-token rotation, but must change on account switch so
+    'hermes honcho setup' yields a NEW cache identity."""
     from plugins.memory.honcho.client import _host_block
 
     try:
         if config is not None:
             basis = _fingerprint_basis(_host_block(config.raw or {}, config.host), lambda: config.api_key)
         else:
-            # Ambient: correct on main threads; bound configs are the supported
-            # path for background threads.
+            # Ambient: correct on main threads; bound configs are the supported path for background threads.
             raw, block = _ambient_host_block()
             if raw is None:
                 return ""
             from agent.secret_scope import get_secret
-
-            basis = _fingerprint_basis(
-                block, lambda: block.get("apiKey") or raw.get("apiKey") or get_secret("HONCHO_API_KEY") or ""
-            )
-        if basis:
-            return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+            basis = _fingerprint_basis(block, lambda: block.get("apiKey") or raw.get("apiKey") or get_secret("HONCHO_API_KEY") or "")
+        return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16] if basis else ""
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _ambient_host_block() -> tuple[dict | None, dict]:
@@ -89,26 +80,19 @@ def _ambient_host_block() -> tuple[dict | None, dict]:
 
 
 def _client_cache_key(config: HonchoClientConfig | None) -> tuple:
-    """Cache identity for a Honcho client build.
-
-    Explicit configs key on connection identity, provenance paths, effective
-    timeout, and the credential fingerprint (the access token itself is NOT in
-    the key — in-place rotation must stay within one slot). Ambient callers
-    (config=None) key on what from_global_config() would resolve.
-    """
+    """Cache identity for a Honcho client build. Explicit configs key on connection identity,
+    provenance paths, effective timeout, and the credential fingerprint (the access token itself
+    is NOT in the key — in-place rotation must stay within one slot). Ambient callers
+    (config=None) key on what from_global_config() would resolve."""
     from plugins.memory.honcho.client import resolve_active_host, resolve_config_path
 
     if config is not None:
-        return (
-            "explicit", config.host, config.workspace_id, config.base_url or "", config.environment,
-            str(config.config_path) if config.config_path is not None else "",
-            str(config.hermes_home) if config.hermes_home is not None else "",
-            _resolve_timeout_from_sources(config), _credential_fingerprint(config),
-        )
-    return (
-        "ambient", str(resolve_config_path()), resolve_active_host(),
-        _resolve_timeout_from_sources(None), _credential_fingerprint(None),
-    )
+        return ("explicit", config.host, config.workspace_id, config.base_url or "", config.environment,
+                str(config.config_path) if config.config_path is not None else "",
+                str(config.hermes_home) if config.hermes_home is not None else "",
+                _resolve_timeout_from_sources(config), _credential_fingerprint(config))
+    return ("ambient", str(resolve_config_path()), resolve_active_host(),
+            _resolve_timeout_from_sources(None), _credential_fingerprint(None))
 
 
 def _slot_identity(key: tuple) -> tuple:
@@ -117,12 +101,9 @@ def _slot_identity(key: tuple) -> tuple:
 
 
 def _slot_for(key: tuple) -> SingletonSlot:
-    """Return the slot for ``key``, evicting stale same-identity slots.
-
-    A same (kind, host, paths) identity with a different credential/timeout
-    drops the old slot so the replaced client stops being served; otherwise
-    credential churn leaks one pinned client per change.
-    """
+    """Slot for ``key``, evicting stale same-identity slots: a same (kind, host, paths) identity
+    with a different credential/timeout drops the old slot so the replaced client stops being
+    served; otherwise credential churn leaks one pinned client per change."""
     identity = _slot_identity(key)
     with _client_slots_lock:
         slot = _client_slots.get(key)
@@ -140,7 +121,6 @@ def _config_yaml_timeout() -> float | None:
 
     try:
         from hermes_cli.config import load_config_readonly
-
         honcho_cfg = load_config_readonly().get("honcho", {})
         if isinstance(honcho_cfg, dict):
             return _resolve_optional_float(honcho_cfg.get("timeout"), honcho_cfg.get("request_timeout"))
@@ -174,11 +154,8 @@ def _honcho_json_timeout() -> float | None:
 
 
 def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
-    """Mirror the build path's timeout resolution exactly.
-
-    Any skew between this and ``_build`` makes the staleness check disagree
-    with the built client forever and rebuild it on every call.
-    """
+    """Mirror the build path's timeout resolution exactly: any skew makes the staleness check
+    disagree with the built client forever and rebuild it on every call."""
     from plugins.memory.honcho.client import _resolve_optional_float
 
     if config is not None:
@@ -193,15 +170,11 @@ def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
 
 
 def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
-    """Refresh a near-expiry OAuth grant and point ``config.api_key`` at it.
-
-    No-op for static keys or on failure (the first 401 triggers session.py's
-    forced rotation). Refreshes against the config's BOUND path: the ambient
-    resolver on daemon threads lands on the default profile's file.
-    """
+    """Refresh a near-expiry OAuth grant and point ``config.api_key`` at it. No-op for static
+    keys or on failure (the first 401 triggers session.py's forced rotation). Refreshes against
+    the config's BOUND path: the ambient resolver on daemon threads lands on the default profile."""
     try:
         from plugins.memory.honcho import oauth
-
         token, _ = oauth.ensure_fresh_token(config.bound_config_path(), config.host)
         if token:
             config.api_key = token
@@ -210,16 +183,12 @@ def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
 
 
 def _refresh_cached_oauth(client: Honcho, config: HonchoClientConfig | None, slot: SingletonSlot | None = None) -> None:
-    """Rotate the cached client's Bearer in place when its OAuth token is stale.
-
-    If the in-place rotation can't apply (SDK shape change), the slot is reset
-    so the next acquisition rebuilds with the fresh token.
-    """
+    """Rotate the cached client's Bearer in place when its OAuth token is stale. If the in-place
+    rotation can't apply (SDK shape change), the slot is reset so the next acquisition rebuilds."""
     from plugins.memory.honcho.client import resolve_active_host, resolve_config_path
 
     try:
         from plugins.memory.honcho import oauth
-
         if config is not None:
             host, path = config.host, config.bound_config_path()
         else:
