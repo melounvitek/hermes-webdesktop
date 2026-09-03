@@ -95,6 +95,7 @@ def start_loop_liveness_watchdog(
     (``GatewayRunner._start_loop_liveness_guards``).
     """
     stop_event = threading.Event()
+
     def _wait_for_probe(probe_event: threading.Event) -> Optional[bool]:
         """True/False = probe answered / timed out; None = stop requested mid-wait."""
         deadline = time.monotonic() + probe_timeout
@@ -105,6 +106,7 @@ def start_loop_liveness_watchdog(
             if probe_event.wait(timeout=min(remaining, 0.05)):
                 return True
         return None
+
     def _watchdog() -> None:
         strikes = 0
         while not stop_event.wait(timeout=probe_interval):
@@ -271,6 +273,7 @@ def arm_shutdown_watchdog(
     delay = _coerce_float(delay_s, DEFAULT_SHUTDOWN_WATCHDOG_GRACE_S)
     if delay <= 0:
         return done
+
     def _watchdog() -> None:
         deadline = time.monotonic() + delay  # chunked wait so a late disarm is observed within ~1s
         while time.monotonic() < deadline:
@@ -383,6 +386,7 @@ async def loop_heartbeat_forever(
             "loop-scheduling witness and will not escalate on a stale heartbeat",
             exc_info=True,
         )
+
     async def _write_off_loop() -> None:
         # write_loop_heartbeat never raises, so a failure here is an executor problem and must not
         # kill the task.

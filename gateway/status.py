@@ -150,7 +150,6 @@ def _profile_label_for_home(home: Path | str) -> Optional[str]:
     if canonical.parent.name == "profiles" and _PROFILE_LABEL_RE.match(canonical.name):
         return canonical.name
     import hermes_constants
-
     default_homes = (hermes_constants.get_default_hermes_root, _get_platform_default_hermes_home)
     for default_home in default_homes:
         with contextlib.suppress(Exception):
@@ -264,7 +263,6 @@ def terminate_pid(
         # Hide flags: a bare taskkill spawn from windowless pythonw.exe would
         # flash a conhost window on every force-kill.
         from hermes_cli._subprocess_compat import windows_hide_flags
-
         try:
             result = subprocess.run(
                 ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True,
@@ -299,7 +297,6 @@ def _get_process_start_time(pid: int) -> Optional[int]:
         return int(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21])
     try:
         import psutil  # type: ignore
-
         return int(round(psutil.Process(pid).create_time() * 100))
     except Exception:
         return None
@@ -328,7 +325,6 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
                 return result.stdout.strip()
     with contextlib.suppress(Exception):
         import psutil  # type: ignore
-
         cmdline_parts = psutil.Process(pid).cmdline()
         if cmdline_parts:
             return " ".join(cmdline_parts)
@@ -481,7 +477,6 @@ def _get_code_identity_fields() -> dict[str, Any]:
     """
     try:
         from hermes_cli.build_info import get_code_identity
-
         identity = get_code_identity()
         return {"code_sha": identity.get("sha"), "code_version": identity.get("version")}
     except Exception:
@@ -644,7 +639,6 @@ def _pid_exists(pid: int) -> bool:
     pid = int(pid)
     try:
         import psutil  # type: ignore
-
         # Best-effort zombie check: status-read failures fall through to pid_exists().
         try:
             if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
@@ -688,7 +682,6 @@ def _pid_exists_win32_ctypes(pid: int) -> bool:
     """psutil-free Windows liveness probe via OpenProcess/WaitForSingleObject."""
     try:
         import ctypes
-
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         # Pin restypes: default c_int mangles WAIT_* DWORDs into negatives.
         kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -921,7 +914,6 @@ def write_runtime_status(
     _write_json_file(path, payload)
     with contextlib.suppress(Exception):
         from agent.monitoring.gateway_health import emit_runtime_status_transition
-
         emit_runtime_status_transition(previous_payload, payload)
 
 
@@ -1033,7 +1025,6 @@ def resolve_gateway_liveness(
     pid = guarded(_pid_probe, profile_dir / "gateway.pid") if scoped else guarded(_pid_probe)
     if pid is not None:
         return GatewayLiveness(running=True, pid=pid, source="pid")
-
     health_body: Optional[dict[str, Any]] = None
     if health_probe is not None:
         alive, health_body = guarded(health_probe, fallback=(False, None))
@@ -1043,7 +1034,6 @@ def resolve_gateway_liveness(
             return GatewayLiveness(
                 running=True, pid=remote_pid, source="health", health_body=health_body
             )
-
     if runtime is _UNSET:
         reader_kwargs = {"path": profile_dir / "gateway_state.json"} if scoped else {}
         runtime = guarded(_runtime_reader, **reader_kwargs)
@@ -1415,7 +1405,6 @@ def _snapshot_gateway_children(pid: int) -> list:
         return []
     try:
         import psutil  # type: ignore
-
         return psutil.Process(int(pid)).children(recursive=True)
     except Exception:
         logger.debug("Could not snapshot children of gateway PID %d", pid, exc_info=True)
@@ -1436,7 +1425,6 @@ def reap_gateway_children(children: list, *, parent_pid: int, timeout: float = 5
     reaped = 0
     try:
         import psutil  # type: ignore
-
         live = []
         for child in children:
             try:
@@ -1650,7 +1638,6 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     if _IS_WINDOWS:
         try:
             import psutil  # type: ignore
-
             exact_create_time = float(psutil.Process(pid).create_time())
         except Exception as exc:
             raise RuntimeError("exact gateway creation time is unavailable") from exc

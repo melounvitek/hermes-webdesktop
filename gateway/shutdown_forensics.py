@@ -266,6 +266,7 @@ def parse_systemd_duration_to_us(raw: str) -> Optional[int]:
     units = {"us": 1, "ms": 1_000, "s": 1_000_000, "sec": 1_000_000,
              "min": 60_000_000, "h": 3_600_000_000, "hr": 3_600_000_000}
     total_us, token, digits = 0, "", ""
+
     def _flush() -> bool:  # fold the pending digits/token pair into total_us
         nonlocal total_us, token, digits
         multiplier = units.get(token.lower()) if token else 1_000_000

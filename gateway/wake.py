@@ -53,11 +53,9 @@ async def deliver_wake(adapter: Any, *, text: str, session_id: str = "", source:
         if source is None:
             raise ValueError("deliver_wake: push-capable adapter requires a SessionSource")
         from gateway.platforms.base import MessageEvent, MessageType
-
         synth_event = MessageEvent(text=text, message_type=MessageType.TEXT, source=source, internal=True)
         await adapter.handle_message(synth_event)
         return
-
     if not session_id:
         raise ValueError(
             "deliver_wake: non-push adapter (supports_async_delivery=False) "
@@ -124,7 +122,6 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     key is a hard error rather than a wake in a fresh session nobody watches.
     """
     import aiohttp
-
     host = str(getattr(adapter, "_host", "") or "127.0.0.1")
     if host in ("0.0.0.0", "::", "*"):
         host = "127.0.0.1"  # wildcard bind — connect over loopback
@@ -136,7 +133,6 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
             "X-Hermes-Session-Id is rejected (403) on an unauthenticated API "
             "server, so the wake cannot reach the target session"
         )
-
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # bare IPv6 literal
     url = f"http://{host}:{port}/v1/chat/completions"
@@ -146,7 +142,6 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
         "messages": [{"role": "user", "content": text}],
         "stream": False,
     }
-
     last_err: Optional[BaseException] = None
     attempts = 1 + len(_RETRY_DELAYS_SECONDS)
     for attempt in range(attempts):

@@ -138,11 +138,9 @@ def resolve_status_phrase_catalog(
     catalog = _copy_catalog(_DEFAULT_PHRASES)
     hermes_home = get_hermes_home()
     _merge_phrase_paths(catalog, list(_CONVENTIONAL_RELATIVE_PATHS), base_dir=hermes_home)
-
     display = (user_config or {}).get("display") if isinstance(user_config, Mapping) else None
     if not isinstance(display, Mapping):
         return catalog
-
     sections = [display]
     platforms = display.get("platforms")
     if platform_key and isinstance(platforms, Mapping) and isinstance(platforms.get(platform_key), Mapping):
