@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import array
 import inspect
+from contextlib import suppress
 import logging
 import mimetypes
 import os
@@ -52,8 +53,7 @@ except ImportError:
     PresenceState = type("_PresenceStateStub", (), {  # type: ignore[misc,assignment]
         "ONLINE": "online", "OFFLINE": "offline", "UNAVAILABLE": "unavailable"})
     RoomCreatePreset = type("_RoomCreatePresetStub", (), {  # type: ignore[misc,assignment]
-        "PRIVATE": "private_chat", "PUBLIC": "public_chat", "TRUSTED_PRIVATE": "trusted_private_chat",
-    })
+        "PRIVATE": "private_chat", "PUBLIC": "public_chat", "TRUSTED_PRIVATE": "trusted_private_chat"})
     TrustState = type("_TrustStateStub", (), {"UNVERIFIED": 0, "VERIFIED": 1})  # type: ignore[misc,assignment]
 
 from gateway.config import Platform, PlatformConfig
@@ -91,8 +91,7 @@ def _matrix_voice_metadata_for_file(path: Path) -> Dict[str, Any]:
     if ffmpeg:
         try:
             result = _run_media_tool(
-                [ffmpeg, "-v", "error", "-i", str(path), "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
-                timeout=15)
+                [ffmpeg, "-v", "error", "-i", str(path), "-ac", "1", "-ar", "8000", "-f", "s16le", "-"], timeout=15)
             if result.returncode == 0 and result.stdout:
                 samples = array.array("h")
                 samples.frombytes(result.stdout)
@@ -130,10 +129,8 @@ def _matrix_transcode_voice_to_ogg(path: str) -> Optional[str]:
             return ogg_path
     except Exception:
         logger.debug("Matrix: voice transcode to Ogg/Opus failed for %s", path, exc_info=True)
-    try:
+    with suppress(OSError):
         os.unlink(ogg_path)
-    except OSError:
-        pass
     return None
 
 
@@ -225,9 +222,8 @@ class _MatrixHtmlSanitizer(HTMLParser):
     """Allowlist sanitizer for Matrix-compatible formatted HTML."""
 
     _ALLOWED_TAGS = {
-        "a", "b", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
-        "i", "li", "ol", "p", "pre", "s", "strike", "strong", "table", "tbody", "td", "th", "thead",
-        "tr", "ul"}
+        "a", "b", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li", "ol",
+        "p", "pre", "s", "strike", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul"}
     _VOID_TAGS = {"br", "hr"}
 
     def __init__(self) -> None:
@@ -359,13 +355,11 @@ def _resolve_max_message_length(config) -> int:
     if raw is None:
         raw = os.getenv("MATRIX_MAX_MESSAGE_LENGTH")
     if raw is None:
-        try:
+        with suppress(Exception):
             from gateway.platform_registry import platform_registry
             entry = platform_registry.get("matrix")
             if entry and entry.max_message_length:
                 raw = entry.max_message_length
-        except Exception:
-            pass
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -454,9 +448,7 @@ def _create_matrix_session(proxy_url: str | None):
             return aiohttp.ClientSession(connector=ProxyConnector.from_url(proxy_url, rdns=True))
         except ImportError:
             logger.warning(
-                "aiohttp_socks not installed — SOCKS proxy %s ignored. "
-                "Run: pip install aiohttp-socks",
-                proxy_url)
+                "aiohttp_socks not installed — SOCKS proxy %s ignored. Run: pip install aiohttp-socks", proxy_url)
             return aiohttp.ClientSession(trust_env=gateway_trust_env())
     return aiohttp.ClientSession(proxy=proxy_url)
 
@@ -543,10 +535,8 @@ def _write_matrix_recovery_key_output_file(recovery_key: str) -> Optional[Path]:
             fh.write(recovery_key)
             fh.write("\n")
     except Exception:
-        try:
+        with suppress(OSError):
             os.close(fd)
-        except OSError:
-            pass
         raise
     return path
 
@@ -584,9 +574,8 @@ def _handle_generated_matrix_recovery_key(mxid: str, recovery_key: str) -> None:
         return
     if output_path:
         logger.warning(
-            "Matrix: bootstrapped cross-signing for %s. A new recovery key was "
-            "written to %s with mode 0600. Move it to your secret store and set "
-            "MATRIX_RECOVERY_KEY for future restarts.",
+            "Matrix: bootstrapped cross-signing for %s. A new recovery key was written to %s with mode 0600. Move it "
+            "to your secret store and set MATRIX_RECOVERY_KEY for future restarts.",
             mxid, output_path)
     else:
         logger.warning(
@@ -687,9 +676,8 @@ def ensure_matrix_deps() -> bool:
             from mautrix.types import (
                 ContentURI, EventID, EventType, PresenceState, RoomCreatePreset, RoomID, TrustState, UserID)
             return {
-                "ContentURI": ContentURI, "EventID": EventID, "EventType": EventType,
-                "PresenceState": PresenceState, "RoomCreatePreset": RoomCreatePreset, "RoomID": RoomID,
-                "TrustState": TrustState, "UserID": UserID}
+                "ContentURI": ContentURI, "EventID": EventID, "EventType": EventType, "PresenceState": PresenceState,
+                "RoomCreatePreset": RoomCreatePreset, "RoomID": RoomID, "TrustState": TrustState, "UserID": UserID}
         if not ensure_and_bind("platform.matrix", _import, globals(), prompt=False):
             logger.warning(
                 "Matrix: required packages not installed (%s). Run: pip install "
@@ -745,10 +733,8 @@ class _CryptoStateStore:
         content = raw if isinstance(raw, _Enc) else _Enc.deserialize(
             raw.serialize() if hasattr(raw, "serialize") else raw)
         if hasattr(self._ss, "set_encryption_info"):
-            try:
+            with suppress(Exception):
                 await self._ss.set_encryption_info(_RID(room_id), content)
-            except Exception:
-                pass
         self._enc_info_cache[room_id] = content
         return content
 
@@ -952,18 +938,17 @@ class MatrixAdapter(BasePlatformAdapter):
         await crypto_store.delete()
         return True
 
-    async def _migrate_legacy_crypto_pickle(self, crypto_store: Any, crypto_db: Any, acct_id: str, pickle_key: str) -> bool:
+    async def _migrate_legacy_crypto_pickle(
+            self, crypto_store: Any, crypto_db: Any, acct_id: str, pickle_key: str) -> bool:
         """Re-pickle the Olm account under the current pickle key when it changed.
 
         The key embeds the device ID; an account created before MATRIX_DEVICE_ID was set
         lives under ``<acct>:default`` and later fails with BAD_ACCOUNT_KEY (silently
         disabling optional E2EE). False only when an account exists but no key opens it.
         """
-        try:
+        with suppress(Exception):
             await crypto_store.get_account()
             return True
-        except Exception:
-            pass
         from mautrix.crypto.store.asyncpg import PgCryptoStore
         for legacy_key in (f"{acct_id}:default", acct_id):
             if legacy_key == pickle_key:
@@ -998,8 +983,7 @@ class MatrixAdapter(BasePlatformAdapter):
         """Re-pickle olm/megolm sessions too — they share the key; account-only breaks key sharing."""
         import olm as olm_lib
         tables = {
-            "crypto_olm_session": olm_lib.Session,
-            "crypto_megolm_inbound_session": olm_lib.InboundGroupSession,
+            "crypto_olm_session": olm_lib.Session, "crypto_megolm_inbound_session": olm_lib.InboundGroupSession,
             "crypto_megolm_outbound_session": olm_lib.OutboundGroupSession}
         for table, session_cls in tables.items():
             rows = await crypto_db.fetch(f"SELECT session_id, session FROM {table} WHERE account_id=$1", acct_id)
@@ -1007,11 +991,9 @@ class MatrixAdapter(BasePlatformAdapter):
                 if row["session"] is None:
                     continue
                 pickled = bytes(row["session"])
-                try:
+                with suppress(Exception):
                     session_cls.from_pickle(pickled, pickle_key)
                     continue  # already readable with the current key
-                except Exception:
-                    pass
                 try:
                     session = session_cls.from_pickle(pickled, legacy_key)
                 except Exception as exc:
@@ -1051,13 +1033,11 @@ class MatrixAdapter(BasePlatformAdapter):
                     "stale. Delete %s and restart.", client.device_id, str(self._crypto_db_path))
                 return False
             logger.warning("Matrix: server has stale keys for device %s — attempting re-upload", client.device_id)
-            try:
+            with suppress(Exception):
                 await client.api.request(
                     client.api.Method.DELETE if hasattr(client.api, "Method") else "DELETE",
                     f"/_matrix/client/v3/devices/{client.device_id}")
                 logger.info("Matrix: deleted stale device %s from server", client.device_id)
-            except Exception:
-                pass
             try:
                 await olm.share_keys()
             except Exception as exc:
@@ -1116,8 +1096,7 @@ class MatrixAdapter(BasePlatformAdapter):
                     f" (device {effective_device_id})" if effective_device_id else "")
             except Exception as exc:
                 logger.error(
-                    "Matrix: whoami failed — check MATRIX_ACCESS_TOKEN and MATRIX_HOMESERVER: %s",
-                    exc, exc_info=True)
+                    "Matrix: whoami failed — check MATRIX_ACCESS_TOKEN and MATRIX_HOMESERVER: %s", exc, exc_info=True)
                 await api.session.close()
                 return False
         elif self._password and self._user_id:
@@ -1363,10 +1342,8 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.debug("Matrix: could not close crypto DB on disconnect: %s", exc)
         if self._client:
-            try:
+            with suppress(Exception):
                 await self._client.api.session.close()
-            except Exception:
-                pass
             self._client = None
         logger.info("Matrix: disconnected")
 
@@ -1384,18 +1361,16 @@ class MatrixAdapter(BasePlatformAdapter):
                 last_event_id = await self._send_room_message(chat_id, msg_content)
                 logger.info("Matrix: sent event %s to %s", last_event_id, chat_id)
             except Exception as exc:
-                # On E2EE errors, retry after sharing keys.
-                if self._encryption and getattr(self._client, "crypto", None):
-                    try:
-                        await self._client.crypto.share_keys()
-                        last_event_id = await self._send_room_message(chat_id, msg_content)
-                        logger.info("Matrix: sent event %s to %s (after key share)", last_event_id, chat_id)
-                        continue
-                    except Exception as retry_exc:
-                        logger.error("Matrix: failed to send to %s after retry: %s", chat_id, retry_exc)
-                        return SendResult(success=False, error=str(retry_exc))
-                logger.error("Matrix: failed to send to %s: %s", chat_id, exc)
-                return SendResult(success=False, error=str(exc))
+                if not (self._encryption and getattr(self._client, "crypto", None)):
+                    logger.error("Matrix: failed to send to %s: %s", chat_id, exc)
+                    return SendResult(success=False, error=str(exc))
+                try:  # E2EE error: retry once after sharing keys
+                    await self._client.crypto.share_keys()
+                    last_event_id = await self._send_room_message(chat_id, msg_content)
+                    logger.info("Matrix: sent event %s to %s (after key share)", last_event_id, chat_id)
+                except Exception as retry_exc:
+                    logger.error("Matrix: failed to send to %s after retry: %s", chat_id, retry_exc)
+                    return SendResult(success=False, error=str(retry_exc))
         return SendResult(success=True, message_id=last_event_id)
 
     async def _send_room_message(self, chat_id: str, msg_content: Dict[str, Any]) -> str:
@@ -1420,25 +1395,19 @@ class MatrixAdapter(BasePlatformAdapter):
             "auth": {
                 "access_token_present": token_present, "password_present": bool(self._password),
                 "token_preview": "***" if token_present else "", "user_id": user_id,
-                "device_id_present": bool(device_id),
-                "device_id_preview": _redact_matrix_value(device_id)},
+                "device_id_present": bool(device_id), "device_id_preview": _redact_matrix_value(device_id)},
             "sync": {
                 "connected": self._client is not None, "joined_room_count": len(self._joined_rooms),
-                "last_sync_age_seconds": max(0.0, now - self._last_sync_ts) if self._last_sync_ts else None
-            },
+                "last_sync_age_seconds": max(0.0, now - self._last_sync_ts) if self._last_sync_ts else None},
             "e2ee": {
-                "mode": self._e2ee_mode, "enabled": bool(self._encryption),
-                "deps_available": _check_e2ee_deps(),
+                "mode": self._e2ee_mode, "enabled": bool(self._encryption), "deps_available": _check_e2ee_deps(),
                 "crypto_store_path": str(self._crypto_db_path),
                 "recovery_key_configured": bool(_scoped_recovery_key().strip())},
             "policy": {
-                "allowed_user_count": len(self._allowed_user_ids),
-                "allowed_room_count": len(self._allowed_room_ids),
+                "allowed_user_count": len(self._allowed_user_ids), "allowed_room_count": len(self._allowed_room_ids),
                 "ignored_user_pattern_count": len(self._ignored_user_patterns),
-                "require_mention": self._require_mention,
-                "free_response_room_count": len(self._free_rooms),
-                "allow_room_mentions": self._allow_room_mentions,
-                "process_notices": self._process_notices,
+                "require_mention": self._require_mention, "free_response_room_count": len(self._free_rooms),
+                "allow_room_mentions": self._allow_room_mentions, "process_notices": self._process_notices,
                 "allow_public_rooms": _env_truthy("MATRIX_ALLOW_PUBLIC_ROOMS")},
             "media": {"max_media_bytes": self._max_media_bytes}}
 
@@ -1446,10 +1415,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _set_typing(self, chat_id: str, timeout: int) -> None:
         if self._client:
-            try:
+            with suppress(Exception):
                 await self._client.set_typing(RoomID(chat_id), timeout=timeout)
-            except Exception:
-                pass
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Send a typing indicator."""
@@ -1530,8 +1497,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 fetch_url = url
                 for _ in range(20):
                     async with http.get(
-                            fetch_url, timeout=_aiohttp.ClientTimeout(total=30), allow_redirects=False,
-                            **_req_kw) as resp:
+                        fetch_url, timeout=_aiohttp.ClientTimeout(total=30), allow_redirects=False, **_req_kw) as resp:
                         if resp.status in {301, 302, 303, 307, 308}:
                             location = resp.headers.get("Location")
                             if not location:
@@ -1612,10 +1578,8 @@ class MatrixAdapter(BasePlatformAdapter):
                 metadata=metadata, is_voice=True)
         finally:
             if converted_path:
-                try:
+                with suppress(OSError):
                     os.unlink(converted_path)
-                except OSError:
-                    pass
 
     async def send_video(
         self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
@@ -1674,7 +1638,10 @@ class MatrixAdapter(BasePlatformAdapter):
             f"{self._format_exec_approval(command, description)}\n\n"
             f"{scope_choices}Reply `!approve` to execute once, or `!deny` to cancel.\n\n"
             "You can also click the reaction to approve:\n" + "\n".join(reaction_legend_parts))
-        reactions = ("✅", "❌") if not allow_session else ("✅", "🌀", "❌") if not allow_permanent else ("✅", "🌀", "♾️", "❌")
+        if not allow_session:
+            reactions = ("✅", "❌")
+        else:
+            reactions = ("✅", "🌀", "❌") if not allow_permanent else ("✅", "🌀", "♾️", "❌")
 
         def _make(message_id, requester, expires_at):
             old_event = self._approval_prompt_by_session.get(session_key)
@@ -1697,7 +1664,8 @@ class MatrixAdapter(BasePlatformAdapter):
             (str(model_id), str(p.get("slug") or ""), str(p.get("name") or p.get("slug") or ""))
             for p in providers or [] for model_id in (p.get("models") or [])][:len(_MATRIX_MODEL_PICKER_REACTIONS)]
         if not flat_choices:
-            return await self.send(chat_id, "No authenticated models are available for this session.", metadata=metadata)
+            return await self.send(
+                chat_id, "No authenticated models are available for this session.", metadata=metadata)
         try:
             from hermes_cli.providers import get_label
             provider_label = get_label(current_provider)
@@ -1757,20 +1725,13 @@ class MatrixAdapter(BasePlatformAdapter):
             return self._media_too_large(len(data))
         upload_data = data
         encrypted_file = None
-        if self._encryption and getattr(self._client, "crypto", None):
-            state_store = getattr(self._client, "state_store", None)
-            if state_store:
-                try:
-                    room_encrypted = bool(await state_store.is_encrypted(RoomID(room_id)))
-                except Exception:
-                    room_encrypted = False
-                if room_encrypted:
-                    try:
-                        from mautrix.crypto.attachments import encrypt_attachment
-                        upload_data, encrypted_file = encrypt_attachment(data)
-                    except Exception as exc:
-                        logger.error("Matrix: attachment encryption failed: %s", exc)
-                        return SendResult(success=False, error=str(exc))
+        if await self._room_needs_encrypted_upload(room_id):
+            try:
+                from mautrix.crypto.attachments import encrypt_attachment
+                upload_data, encrypted_file = encrypt_attachment(data)
+            except Exception as exc:
+                logger.error("Matrix: attachment encryption failed: %s", exc)
+                return SendResult(success=False, error=str(exc))
         try:
             mxc_url = await self._client.upload_media(
                 upload_data, mime_type=content_type, filename=filename, size=len(upload_data))
@@ -1796,8 +1757,21 @@ class MatrixAdapter(BasePlatformAdapter):
         self._apply_relation_metadata(msg_content, reply_to=reply_to, metadata=metadata)
         return await self._send_content_event(room_id, msg_content)
 
+    async def _room_needs_encrypted_upload(self, room_id: str) -> bool:
+        """E2EE on, Olm machine loaded, and the state store says the room is encrypted."""
+        if not (self._encryption and getattr(self._client, "crypto", None)):
+            return False
+        state_store = getattr(self._client, "state_store", None)
+        if not state_store:
+            return False
+        try:
+            return bool(await state_store.is_encrypted(RoomID(room_id)))
+        except Exception:
+            return False
+
     def _media_too_large(self, size: int) -> SendResult:
-        return SendResult(success=False, error=f"Media file exceeds Matrix limit ({size} > {self._max_media_bytes} bytes)")
+        return SendResult(
+            success=False, error=f"Media file exceeds Matrix limit ({size} > {self._max_media_bytes} bytes)")
 
     async def _send_content_event(self, room_id: str, msg_content: Dict[str, Any]) -> SendResult:
         """Send a prebuilt m.room.message payload, mapping exceptions to SendResult."""
@@ -1968,7 +1942,8 @@ class MatrixAdapter(BasePlatformAdapter):
         room_id = str(getattr(event, "room_id", ""))
         sender = str(getattr(event, "sender", ""))
         # DEBUG-level proof the callback fires at all (silent-inbound troubleshooting).
-        logger.debug("Matrix: callback fired — event %s from %s in %s", getattr(event, "event_id", "?"), sender, room_id)
+        logger.debug(
+            "Matrix: callback fired — event %s from %s in %s", getattr(event, "event_id", "?"), sender, room_id)
         if self._is_self_sender(sender):
             return
         # Bridge/system identities must never reach the pairing flow (echo loop once paired).
@@ -2035,8 +2010,8 @@ class MatrixAdapter(BasePlatformAdapter):
             if self._require_mention and not is_free_room and not in_bot_thread:
                 if not is_mentioned and not body.startswith("/"):
                     logger.debug(
-                        "Matrix: ignoring message %s in %s — no @mention (set MATRIX_REQUIRE_MENTION=false to disable)",
-                        event_id, room_id)
+                        "Matrix: ignoring message %s in %s — no @mention "
+                        "(set MATRIX_REQUIRE_MENTION=false to disable)", event_id, room_id)
                     return None
             # thread_require_mention: even inside a bot thread require @mention — prevents
             # infinite reply loops when several bots share one thread.
@@ -2139,14 +2114,13 @@ class MatrixAdapter(BasePlatformAdapter):
         if url and not str(url).startswith("mxc://"):
             logger.warning("[Matrix] Rejecting inbound media %s with non-MXC URL", event_id)
             return
-        http_url = self._mxc_to_http(url) if url and url.startswith("mxc://") else ""
+        http_url = self._mxc_to_http(url) if url else ""
         content_info = source_content.get("info", {})
         if not isinstance(content_info, dict):
             content_info = {}
         event_mimetype = content_info.get("mimetype", "")
-        event_size = content_info.get("size")
         try:
-            event_size_int = int(event_size) if event_size is not None else 0
+            event_size_int = int(content_info.get("size") or 0)
         except (TypeError, ValueError):
             event_size_int = 0
         if event_size_int and event_size_int > self._max_media_bytes:
@@ -2160,8 +2134,7 @@ class MatrixAdapter(BasePlatformAdapter):
             if url and not str(url).startswith("mxc://"):
                 logger.warning("[Matrix] Rejecting inbound encrypted media %s with non-MXC URL", event_id)
                 return
-            if url and url.startswith("mxc://"):
-                http_url = self._mxc_to_http(url)
+            http_url = self._mxc_to_http(url) if url else ""
         is_encrypted_media = bool(file_content and isinstance(file_content, dict) and file_content.get("url"))
         msg_type, media_type, is_voice_message = self._classify_inbound_media(msgtype, event_mimetype, source_content)
         # Cache locally so downstream tools get a real file path.
@@ -2182,7 +2155,8 @@ class MatrixAdapter(BasePlatformAdapter):
             await self.handle_message(msg_event)
 
     @staticmethod
-    def _classify_inbound_media(msgtype: str, event_mimetype: str, source_content: dict) -> tuple[MessageType, str, bool]:
+    def _classify_inbound_media(
+            msgtype: str, event_mimetype: str, source_content: dict) -> tuple[MessageType, str, bool]:
         """Map a Matrix media msgtype to (MessageType, mime type, is_voice_message)."""
         if msgtype == "m.image":
             return MessageType.PHOTO, event_mimetype or "image/png", False
@@ -2257,11 +2231,9 @@ class MatrixAdapter(BasePlatformAdapter):
             # unless we leave the invite; the match is narrow so transient errors keep retrying.
             msg = str(exc).lower()
             if ("no servers" in msg) or ("room not found" in msg):
-                try:
+                with suppress(Exception):
                     await self._client.leave_room(RoomID(room_id))
                     logger.info("Matrix: declined dead invite to %s", room_id)
-                except Exception:
-                    pass
             return False
 
     def _schedule_invite_join(self, room_id: str, *, is_direct: bool = False, inviter: str = "") -> None:
@@ -2367,7 +2339,8 @@ class MatrixAdapter(BasePlatformAdapter):
         content = getattr(event, "content", None)
         if not content:
             return
-        relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else getattr(content, "relates_to", {})
+        relates_to = (content.get("m.relates_to", {}) if isinstance(content, dict)
+                      else getattr(content, "relates_to", {}))
         reacts_to = key = ""
         if isinstance(relates_to, dict):
             reacts_to = relates_to.get("event_id", "")
@@ -2457,7 +2430,8 @@ class MatrixAdapter(BasePlatformAdapter):
             return True
         value = choice_prompt.choices.get(key)
         if value is None:
-            await self._send_invalid_reaction_feedback(room_id, reacts_to, "That reaction is not one of the available choices.")
+            await self._send_invalid_reaction_feedback(
+                room_id, reacts_to, "That reaction is not one of the available choices.")
             return True
         choice_prompt.resolved = True
         self._choice_picker_prompts_by_event.pop(reacts_to, None)
@@ -2476,7 +2450,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     def _is_authorized_user(self, user_id: str) -> bool:
         """GATEWAY_ALLOW_ALL_USERS, or membership in MATRIX_ALLOWED_USERS."""
-        return _env_truthy("GATEWAY_ALLOW_ALL_USERS") or bool(self._allowed_user_ids and user_id in self._allowed_user_ids)
+        return _env_truthy("GATEWAY_ALLOW_ALL_USERS") or bool(
+            self._allowed_user_ids and user_id in self._allowed_user_ids)
 
     async def _validate_matrix_prompt_reactor(
         self, room_id: str, target_event_id: str, sender: str, prompt: Any, prompt_label: str) -> bool:
@@ -2540,8 +2515,8 @@ class MatrixAdapter(BasePlatformAdapter):
         try:
             pending = self._pending_text_batches.get(key)
             last_len = getattr(pending, "_last_chunk_len", 0) if pending else 0
-            await asyncio.sleep(
-                self._text_batch_split_delay_seconds if last_len >= self._split_threshold else self._text_batch_delay_seconds)
+            near_split = last_len >= self._split_threshold
+            await asyncio.sleep(self._text_batch_split_delay_seconds if near_split else self._text_batch_delay_seconds)
             event = self._pending_text_batches.pop(key, None)
             if not event:
                 return
@@ -2670,20 +2645,16 @@ class MatrixAdapter(BasePlatformAdapter):
         """state_store first (cached), then a direct joined_members API query."""
         state_store = getattr(self._client, "state_store", None) if self._client else None
         if state_store:
-            try:
+            with suppress(Exception):
                 members = await state_store.get_members(room_id)
                 if members is not None:
                     return len(members)
-            except Exception:
-                pass
         client = getattr(self, "_client", None)  # object.__new__-built test doubles may lack it
         if client is not None and hasattr(client, "joined_members"):
-            try:
+            with suppress(Exception):
                 resp = await client.joined_members(room_id)
                 if getattr(resp, "members", None) is not None:
                     return len(resp.members)
-            except Exception:
-                pass
         return None
 
     async def _get_room_state_value(self, room_id: str, event_type: str, key: str) -> Optional[str]:
@@ -2902,12 +2873,10 @@ class MatrixAdapter(BasePlatformAdapter):
         """Get a user's display name in a room, falling back to user_id."""
         state_store = getattr(self._client, "state_store", None) if self._client else None
         if state_store:
-            try:
+            with suppress(Exception):
                 member = await state_store.get_member(room_id, user_id)
                 if member and getattr(member, "displayname", None):
                     return member.displayname
-            except Exception:
-                pass
         if user_id.startswith("@") and ":" in user_id:
             return user_id[1:].split(":")[0]
         return user_id
@@ -2921,7 +2890,7 @@ class MatrixAdapter(BasePlatformAdapter):
     def _markdown_to_html(self, text: str) -> str:
         """Markdown → org.matrix.custom.html via ``markdown`` when installed, else the regex fallback."""
         text = _pre_sanitize_matrix_markdown(text)
-        try:
+        with suppress(ImportError):
             import markdown as _md
             md = _md.Markdown(extensions=["fenced_code", "tables", "nl2br", "sane_lists"])
             if "html_block" in md.preprocessors:
@@ -2931,8 +2900,6 @@ class MatrixAdapter(BasePlatformAdapter):
             if html.count("<p>") == 1:
                 html = html.replace("<p>", "").replace("</p>", "")
             return _sanitize_matrix_html(html)
-        except ImportError:
-            pass
         return _sanitize_matrix_html(self._markdown_to_html_fallback(text))
 
     @staticmethod
@@ -2969,8 +2936,8 @@ class MatrixAdapter(BasePlatformAdapter):
             lambda m: _protect_html(
                 f'<a href="{MatrixAdapter._sanitize_link_url(m.group(2))}">{_html_escape(m.group(1))}</a>'),
             result)
-        result = "".join(
-            p if p.startswith("\x00PROTECTED") else _html_escape(p) for p in re.split(r"(\x00PROTECTED\d+\x00)", result))
+        result = "".join(p if p.startswith("\x00PROTECTED") else _html_escape(p)
+                         for p in re.split(r"(\x00PROTECTED\d+\x00)", result))
         # Block-level transforms (line-oriented): hr, headers, blockquote, lists.
         lines = result.split("\n")
         out_lines: list = []
@@ -3041,14 +3008,11 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
         url = f"{homeserver}/_matrix/client/v3/rooms/{quote(chat_id, safe='')}/send/m.room.message/{txn_id}"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         payload = {"msgtype": "m.text", "body": message}
-        try:
+        with suppress(ImportError):
             import markdown as _md
             html = _md.markdown(message, extensions=["fenced_code", "tables"])
-            html = re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html)
             payload["format"] = "org.matrix.custom.html"
-            payload["formatted_body"] = html
-        except ImportError:
-            pass
+            payload["formatted_body"] = re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html)
         # asyncio.wait_for, not aiohttp.ClientTimeout: cron invokes this via
         # run_coroutine_threadsafe ("Timeout context manager should be used inside a task").
         async with aiohttp.ClientSession() as session:
@@ -3057,7 +3021,8 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
                     if resp.status not in {200, 201}:
                         return {"error": f"Matrix API error ({resp.status}): {await resp.text()}"}
                     data = await resp.json()
-                    return {"success": True, "platform": "matrix", "chat_id": chat_id, "message_id": data.get("event_id")}
+                    return {"success": True, "platform": "matrix", "chat_id": chat_id,
+                            "message_id": data.get("event_id")}
             try:
                 return await asyncio.wait_for(_do_send(), timeout=30)
             except asyncio.TimeoutError:
@@ -3104,32 +3069,18 @@ def interactive_setup() -> None:
             save_env_value("MATRIX_ENCRYPTION", "true")
             print_success("E2EE enabled")
         matrix_pkg = "mautrix[encryption]" if want_e2ee else "mautrix"
-        try:
-            from tools.lazy_deps import ensure as _lazy_ensure, feature_missing
-            _missing_before = feature_missing("platform.matrix")
-            if _missing_before:
-                print_info(f"Installing {matrix_pkg} (+ {len(_missing_before)} runtime deps)...")
-                try:
-                    _lazy_ensure("platform.matrix", prompt=False)
-                    print_success(f"{matrix_pkg} installed")
-                except Exception as exc:
-                    print_warning(
-                        "Install failed — run manually: pip install "
-                        "'mautrix[encryption]' asyncpg aiosqlite Markdown aiohttp-socks")
-                    print_info(f"  Error: {exc}")
-        except ImportError:
+        from tools.lazy_deps import ensure as _lazy_ensure, feature_missing
+        _missing_before = feature_missing("platform.matrix")
+        if _missing_before:
+            print_info(f"Installing {matrix_pkg} (+ {len(_missing_before)} runtime deps)...")
             try:
-                __import__("mautrix")
-            except ImportError:
-                print_info(f"Installing {matrix_pkg}...")
-                from hermes_cli.tools_config import _pip_install
-                result = _pip_install([matrix_pkg])
-                if result.returncode == 0:
-                    print_success(f"{matrix_pkg} installed")
-                else:
-                    print_warning(
-                        f"Install failed — run manually: uv pip install "
-                        f"'{matrix_pkg}' asyncpg aiosqlite Markdown aiohttp-socks")
+                _lazy_ensure("platform.matrix", prompt=False)
+                print_success(f"{matrix_pkg} installed")
+            except Exception as exc:
+                print_warning(
+                    "Install failed — run manually: pip install "
+                    "'mautrix[encryption]' asyncpg aiosqlite Markdown aiohttp-socks")
+                print_info(f"  Error: {exc}")
         print_info("🔒 Security: Restrict who can use your bot")
         print_info("   Matrix user IDs look like @username:server")
         allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
@@ -3199,9 +3150,8 @@ def register(ctx) -> None:
     ctx.register_platform(
         name="matrix", label="Matrix", adapter_factory=_build_adapter, check_fn=matrix_deps_present,
         ensure_deps_fn=ensure_matrix_deps, is_connected=_is_connected,
-        required_env=["MATRIX_HOMESERVER", "MATRIX_ACCESS_TOKEN"],
-        install_hint="pip install 'mautrix[encryption]'", setup_fn=interactive_setup,
-        apply_yaml_config_fn=_apply_yaml_config, allowed_users_env="MATRIX_ALLOWED_USERS",
+        required_env=["MATRIX_HOMESERVER", "MATRIX_ACCESS_TOKEN"], install_hint="pip install 'mautrix[encryption]'",
+        setup_fn=interactive_setup, apply_yaml_config_fn=_apply_yaml_config, allowed_users_env="MATRIX_ALLOWED_USERS",
         allow_all_env="MATRIX_ALLOW_ALL_USERS", cron_deliver_env_var="MATRIX_HOME_ROOM",
-        standalone_sender_fn=_standalone_send, max_message_length=DEFAULT_MAX_MESSAGE_LENGTH,
-        emoji="🔐", allow_update_command=True)
+        standalone_sender_fn=_standalone_send, max_message_length=DEFAULT_MAX_MESSAGE_LENGTH, emoji="🔐",
+        allow_update_command=True)
