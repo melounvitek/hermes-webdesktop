@@ -87,9 +87,7 @@ def _platform_uses_whatsapp_identity(platform: str) -> bool:
 def _normalize_user_id(platform: str, user_id: str) -> str:
     """Normalize platform-specific user IDs before persisting / comparing them."""
     raw_user_id = str(user_id or "").strip()
-    if _platform_uses_whatsapp_identity(platform):
-        return normalize_whatsapp_identifier(raw_user_id) or raw_user_id
-    return raw_user_id
+    return (normalize_whatsapp_identifier(raw_user_id) or raw_user_id) if _platform_uses_whatsapp_identity(platform) else raw_user_id
 
 
 def _user_id_aliases(platform: str, user_id: str) -> set[str]:
@@ -351,6 +349,18 @@ class PairingStore:
     def _rate_limit_path(self) -> Path:
         return self._dir / "_rate_limits.json"
 
+    def _cleanup_expired(self, platform: str) -> None:
+        """Remove expired pending codes; malformed/legacy entries (no numeric ``created_at``) count as expired."""
+        path = self._pending_path(platform)
+        pending = self._load_json(path)
+        now = time.time()
+        live = {
+            k: v for k, v in pending.items()
+            if (created := _entry_created_at(v)) is not None and (now - created) <= CODE_TTL_SECONDS
+        }
+        if len(live) != len(pending):
+            self._save_json(path, live)
+
     _load_json = staticmethod(_load_json_file)
     _save_json = staticmethod(_save_json_file)
 
@@ -567,20 +577,6 @@ class PairingStore:
         if limits.get(fail_key):
             limits[fail_key] = 0
             self._save_limits(limits)
-
-    # ----- Cleanup -----
-
-    def _cleanup_expired(self, platform: str) -> None:
-        """Remove expired pending codes; malformed/legacy entries (no numeric ``created_at``) count as expired."""
-        path = self._pending_path(platform)
-        pending = self._load_json(path)
-        now = time.time()
-        expired = [
-            entry_id for entry_id, info in pending.items()
-            if (created := _entry_created_at(info)) is None or (now - created) > CODE_TTL_SECONDS
-        ]
-        if expired:
-            self._save_json(path, {k: v for k, v in pending.items() if k not in expired})
 
     def _all_platforms(self, suffix: str) -> list:
         """Platforms that have a ``-<suffix>.json`` data file (``_``-prefixed files are shared state)."""

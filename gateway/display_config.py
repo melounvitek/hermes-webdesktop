@@ -121,21 +121,15 @@ def _norm_tristate(on: str, off: str, choices: set, extra_truthy: set = frozense
 
 
 def _norm_bool(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in _TRUTHY | {"raw", "verbose"}
-    return bool(value)
+    return value.strip().lower() in _TRUTHY | {"raw", "verbose"} if isinstance(value, str) else bool(value)
 
 
 def _norm_long_running(value: Any) -> Any:
-    if isinstance(value, str) and value.strip().lower() == "generic":
-        return "generic"
-    return _norm_bool(value)
+    return "generic" if isinstance(value, str) and value.strip().lower() == "generic" else _norm_bool(value)
 
 
 def _norm_cleanup_progress(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.lower() in _TRUTHY
-    return bool(value)
+    return value.lower() in _TRUTHY if isinstance(value, str) else bool(value)
 
 
 def _norm_choice(choices: tuple[str, ...]) -> Any:
