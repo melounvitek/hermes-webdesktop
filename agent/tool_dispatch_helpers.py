@@ -145,20 +145,19 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
     current: list = []
     reserved_paths: list[tuple[Path, bool]] = []  # (canonical_path, is_writer) for the current run
 
+    def _extend_sequential(calls: list) -> None:
+        if segments and segments[-1][0] == "sequential":
+            segments[-1][1].extend(calls)
+        else:
+            segments.append(("sequential", list(calls)))
+
     def _close_parallel() -> None:
         nonlocal current, reserved_paths
         if len(current) >= 2:
             segments.append(("parallel", current))
         elif current:
             _extend_sequential(current)
-        current = []
-        reserved_paths = []
-
-    def _extend_sequential(calls: list) -> None:
-        if segments and segments[-1][0] == "sequential":
-            segments[-1][1].extend(calls)
-        else:
-            segments.append(("sequential", list(calls)))
+        current, reserved_paths = [], []
 
     for tool_call in tool_calls:
         admission = _batch_admission(tool_call, execution_cwd)
@@ -208,21 +207,14 @@ def _extract_parallel_scope_paths(
     if tool_name not in _PATH_SCOPED_TOOLS:
         return []
 
-    raw_paths: List[str] = []
     if tool_name == "patch" and (function_args.get("mode") or "replace") == "patch":
-        raw_paths.extend(_extract_file_mutation_targets(tool_name, function_args))
+        raw_paths = _extract_file_mutation_targets(tool_name, function_args)
     else:
         raw_path = function_args.get("path")
-        if isinstance(raw_path, str) and raw_path.strip():
-            raw_paths.append(raw_path)
-        elif tool_name == "search_files":
-            raw_paths.append(".")  # its default root; reserving it beats demoting every bare search
-
+        # search_files defaults its root to the cwd; reserving it beats demoting every bare search.
+        raw_paths = [raw_path] if isinstance(raw_path, str) and raw_path.strip() else ["."] if tool_name == "search_files" else []
     # dict.fromkeys dedupes while preserving first-seen order.
-    return list(dict.fromkeys(
-        _canonical_path(raw, execution_cwd)
-        for raw in raw_paths if isinstance(raw, str) and raw.strip()
-    ))
+    return list(dict.fromkeys(_canonical_path(raw, execution_cwd) for raw in raw_paths if isinstance(raw, str) and raw.strip()))
 
 
 def _extract_parallel_scope_path(
@@ -256,13 +248,13 @@ def _is_text_part(p: Any) -> bool:
 
 def _multimodal_text_summary(value: Any) -> str:
     """Plain-text view of a tool result (logging, previews, string-only providers)."""
+    if isinstance(value, str):
+        return value
     if _is_multimodal_tool_result(value):
         if value.get("text_summary"):
             return str(value["text_summary"])
         parts = [str(p.get("text", "")) for p in value.get("content") or [] if _is_text_part(p)]
         return "\n".join(parts) if parts else "[multimodal tool result]"
-    if isinstance(value, str):
-        return value
     try:
         return json.dumps(value, default=str)
     except Exception:
@@ -327,13 +319,10 @@ def _extract_landed_file_mutation_paths(
         return targets
     if not isinstance(data, dict):
         return targets
-
     files = data.get("files_modified")
     landed = [str(p) for p in files if p] if isinstance(files, list) else []
-    if landed:
-        return landed
     resolved = data.get("resolved_path")
-    return [str(resolved)] if resolved else targets
+    return landed or ([str(resolved)] if resolved else targets)
 
 
 def _extract_error_preview(result: Any, max_len: int = 180) -> str:
@@ -364,9 +353,7 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
         return {**msg, "content": _multimodal_text_summary(content)}
     if isinstance(content, list):
         return {**msg, "content": [
-            {"type": "text", "text": "[screenshot]"}
-            if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}
-            else p
+            {"type": "text", "text": "[screenshot]"} if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"} else p
             for p in content
         ]}
     return msg
@@ -524,28 +511,12 @@ def _maybe_wrap_untrusted(name: str, content: Any) -> Any:
 
 
 __all__ = [
-    "_NEVER_PARALLEL_TOOLS",
-    "_PARALLEL_SAFE_TOOLS",
-    "_PATH_SCOPED_TOOLS",
-    "_PATH_SCOPED_READERS",
-    "_PATH_SCOPED_WRITERS",
-    "_DESTRUCTIVE_PATTERNS",
-    "_REDIRECT_OVERWRITE",
-    "_is_destructive_command",
-    "_plan_tool_batch_segments",
-    "_should_parallelize_tool_batch",
-    "_canonical_path",
-    "_extract_parallel_scope_path",
-    "_extract_parallel_scope_paths",
-    "_paths_overlap",
-    "_is_multimodal_tool_result",
-    "_multimodal_text_summary",
-    "_append_subdir_hint_to_multimodal",
-    "_extract_file_mutation_targets",
-    "_extract_landed_file_mutation_paths",
-    "_extract_error_preview",
-    "_trajectory_normalize_msg",
-    "_detect_upstream_elision",
-    "_maybe_append_elision_notice",
+    "_NEVER_PARALLEL_TOOLS", "_PARALLEL_SAFE_TOOLS", "_PATH_SCOPED_TOOLS", "_PATH_SCOPED_READERS",
+    "_PATH_SCOPED_WRITERS", "_DESTRUCTIVE_PATTERNS", "_REDIRECT_OVERWRITE", "_is_destructive_command",
+    "_plan_tool_batch_segments", "_should_parallelize_tool_batch", "_canonical_path",
+    "_extract_parallel_scope_path", "_extract_parallel_scope_paths", "_paths_overlap",
+    "_is_multimodal_tool_result", "_multimodal_text_summary", "_append_subdir_hint_to_multimodal",
+    "_extract_file_mutation_targets", "_extract_landed_file_mutation_paths", "_extract_error_preview",
+    "_trajectory_normalize_msg", "_detect_upstream_elision", "_maybe_append_elision_notice",
     "make_tool_result_message",
 ]
