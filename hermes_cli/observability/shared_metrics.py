@@ -275,23 +275,18 @@ class SharedMetricsStore:
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT
-                    period_start, metric_name, hermes_version, os_family, architecture,
+                SELECT period_start, metric_name, hermes_version, os_family, architecture,
                     install_method, dimensions_json, value, packaged_value
                 FROM counter_aggregates
-                ORDER BY
-                    period_start, hermes_version, os_family, architecture, install_method,
+                ORDER BY period_start, hermes_version, os_family, architecture, install_method,
                     metric_name, dimensions_json
                 """
             ).fetchall()
         return [
             {
-                "period_start": row["period_start"],
-                "metric_name": row["metric_name"],
-                "resource": _row_resource(row),
-                "dimensions": json.loads(row["dimensions_json"]),
-                "value": row["value"],
-                "packaged_value": row["packaged_value"],
+                "period_start": row["period_start"], "metric_name": row["metric_name"],
+                "resource": _row_resource(row), "dimensions": json.loads(row["dimensions_json"]),
+                "value": row["value"], "packaged_value": row["packaged_value"],
             }
             for row in rows
         ]
@@ -380,11 +375,9 @@ class SharedMetricsStore:
         with self._connection() as connection:
             row = connection.execute(
                 """
-                SELECT COUNT(*) AS period_count
-                FROM (
+                SELECT COUNT(*) AS period_count FROM (
                     SELECT period_start, hermes_version, os_family, architecture, install_method
-                    FROM counter_aggregates
-                    WHERE value > packaged_value
+                    FROM counter_aggregates WHERE value > packaged_value
                     GROUP BY period_start, hermes_version, os_family, architecture, install_method
                 )
                 """
@@ -414,8 +407,7 @@ class SharedMetricsStore:
         period_row = connection.execute(
             """
                 SELECT period_start, hermes_version, os_family, architecture, install_method
-                FROM counter_aggregates
-                WHERE value > packaged_value
+                FROM counter_aggregates WHERE value > packaged_value
                 ORDER BY period_start, hermes_version, os_family, architecture, install_method
                 LIMIT 1
                 """
@@ -428,8 +420,7 @@ class SharedMetricsStore:
         resource_values = tuple(resource[column] for column in _RESOURCE_COLUMNS)
         rows = connection.execute(
             """
-                SELECT metric_name, dimensions_json, value, packaged_value
-                FROM counter_aggregates
+                SELECT metric_name, dimensions_json, value, packaged_value FROM counter_aggregates
                 WHERE period_start = ? AND hermes_version = ? AND os_family = ?
                   AND architecture = ? AND install_method = ? AND value > packaged_value
                 ORDER BY metric_name, dimensions_json
@@ -468,8 +459,7 @@ class SharedMetricsStore:
         for row in rows:
             connection.execute(
                 """
-                    UPDATE counter_aggregates
-                    SET packaged_value = value
+                    UPDATE counter_aggregates SET packaged_value = value
                     WHERE period_start = ? AND metric_name = ? AND hermes_version = ?
                       AND os_family = ? AND architecture = ? AND install_method = ?
                       AND dimensions_json = ?
@@ -531,12 +521,11 @@ class SharedMetricsStore:
             package_id = str(row["package_id"])
             try:
                 (self.outbox_directory / f"{package_id}.json").unlink(missing_ok=True)
+                removable_package_ids.append(package_id)
             except OSError:
                 logger.warning(
                     "Unable to prune expired shared-metrics package %s", package_id, exc_info=True
                 )
-                continue
-            removable_package_ids.append(package_id)
 
         with self._write() as connection:
             for package_id in removable_package_ids:
@@ -548,15 +537,11 @@ class SharedMetricsStore:
             connection.execute(
                 """
                     DELETE FROM counter_aggregates
-                    WHERE period_start < ?
-                      AND value = packaged_value
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM package_outbox
-                          WHERE exported_at IS NULL
-                            AND substr(package_outbox.period_start, 1, 10)
-                                = counter_aggregates.period_start
-                      )
+                    WHERE period_start < ? AND value = packaged_value AND NOT EXISTS (
+                        SELECT 1 FROM package_outbox WHERE exported_at IS NULL
+                          AND substr(package_outbox.period_start, 1, 10)
+                              = counter_aggregates.period_start
+                    )
                     """,
                 (cutoff.date().isoformat(),),
             )
