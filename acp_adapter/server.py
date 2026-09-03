@@ -774,8 +774,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         user_text = _extract_text(prompt).strip()
         user_content = _content_blocks_to_openai_user_content(prompt)
         text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
-        has_content = bool(user_text) or (isinstance(user_content, list) and bool(user_content))
-        if not has_content:
+        if not user_text and not (isinstance(user_content, list) and user_content):
             return PromptResponse(stop_reason="end_turn")
 
         user_text, user_content = self._rewrite_prompt_for_interrupt(state, user_text, user_content, text_only_prompt)
@@ -796,13 +795,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             return PromptResponse(stop_reason="end_turn")
 
         logger.info("Prompt on session %s: %s", session_id, user_text[:100])
-
-        conn = self._conn
-        loop = asyncio.get_running_loop()
-
+        conn, loop = self._conn, asyncio.get_running_loop()
         if state.cancel_event:
             state.cancel_event.clear()
-
         cbs = self._wire_turn_callbacks(state, session_id, conn, loop)
 
         def _run_agent() -> dict:
@@ -844,8 +839,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             message_cb = make_message_cb(conn, session_id, loop)
 
             def stream_delta_cb(text: str) -> None:
-                if text:
-                    cbs.streamed = True
+                cbs.streamed = cbs.streamed or bool(text)
                 message_cb(text)
 
             cbs.stream_delta_cb = stream_delta_cb
@@ -863,8 +857,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         agent.tool_progress_callback = cbs.tool_progress_cb
         # Thought panes get provider reasoning only — no local status updates, no fake accordion.
         agent.thinking_callback = None
-        agent.reasoning_callback = cbs.reasoning_cb
-        agent.step_callback = cbs.step_cb
+        agent.reasoning_callback, agent.step_callback = cbs.reasoning_cb, cbs.step_cb
         agent.stream_delta_callback = cbs.stream_delta_cb
         return cbs
 
@@ -890,22 +883,18 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
         final_response = result.get("final_response", "")
         cancelled = bool(state.cancel_event and state.cancel_event.is_set())
-        interrupted = bool(result.get("interrupted")) or cancelled
         # The local "waiting for model" interrupt status is metadata, not prose; stop_reason carries it.
         from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 
-        suppress_interrupt_response = interrupted and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
+        suppress = (result.get("interrupted") or cancelled) and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
         # Send the final text unless already streamed — or if a plugin hook transformed it after.
-        if final_response and conn and not suppress_interrupt_response and (
-            not streamed_message or result.get("response_transformed")
-        ):
+        if final_response and conn and not suppress and (not streamed_message or result.get("response_transformed")):
             await conn.session_update(session_id, acp.update_agent_message_text(final_response))
 
         # Go idle before draining so recursive prompt() calls can acquire the session.
         with state.runtime_lock:
             state.is_running = False
             state.current_prompt_text = ""
-
         while True:
             with state.runtime_lock:
                 if not state.queued_prompts:
@@ -916,7 +905,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             await self.prompt(prompt=[TextContentBlock(type="text", text=next_prompt)], session_id=session_id)
 
         usage = None
-        if any(result.get(key) is not None for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
+        if any(result.get(k) is not None for k in ("prompt_tokens", "completion_tokens", "total_tokens")):
             usage = Usage(
                 input_tokens=result.get("prompt_tokens", 0), output_tokens=result.get("completion_tokens", 0),
                 total_tokens=result.get("total_tokens", 0), thought_tokens=result.get("reasoning_tokens"),
