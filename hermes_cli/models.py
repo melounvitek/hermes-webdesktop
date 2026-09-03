@@ -1164,11 +1164,9 @@ def _anthropic_catalog(normalized: str, force_refresh: bool) -> list[str]:
     curated = list(_PROVIDER_MODELS.get("anthropic", []))
     if not live:
         return curated
-    if cfg_base_url:
-        return live
     # The live /v1/models dump lags newly-routed curated aliases (reachable before enumerated):
     # curated first, then live-only extras, so a fresh curated model never disappears.
-    return _merge_unique(curated, live)
+    return live if cfg_base_url else _merge_unique(curated, live)
 
 
 def _openai_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]:
@@ -1184,7 +1182,7 @@ def _openai_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]
     try:
         live = fetch_api_models(api_key, base)
     except Exception:
-        return None
+        live = None
     if not live:
         return None
     if not is_official_openai_host(base):
@@ -1265,15 +1263,14 @@ def _profile_live_catalog(normalized: str) -> Optional[list[str]]:
     if not (profile and profile.auth_type == "api_key" and profile.base_url):
         return None
     api_key, base_url = _api_key_credentials(normalized)
-    if api_key:
-        live = profile.fetch_models(api_key=api_key, base_url=base_url or profile.base_url or None)
-        if live:
-            curated = list(_PROVIDER_MODELS.get(normalized, [])) or list(profile.fallback_models or ())
-            if not curated:
-                return live
-            primary, secondary = (live, curated) if normalized in _LIVE_FIRST_PICKER_PROVIDERS else (curated, live)
-            return _merge_unique(primary, secondary, key=_model_dedup_key)
-    return list(profile.fallback_models) if profile.fallback_models else None
+    live = profile.fetch_models(api_key=api_key, base_url=base_url or profile.base_url or None) if api_key else None
+    if not live:
+        return list(profile.fallback_models) if profile.fallback_models else None
+    curated = list(_PROVIDER_MODELS.get(normalized, [])) or list(profile.fallback_models or ())
+    if not curated:
+        return live
+    primary, secondary = (live, curated) if normalized in _LIVE_FIRST_PICKER_PROVIDERS else (curated, live)
+    return _merge_unique(primary, secondary, key=_model_dedup_key)
 
 
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
@@ -1289,21 +1286,18 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         models = fetcher(normalized, force_refresh)
         if models is not None:
             return models
-
     try:
         models = _profile_live_catalog(normalized)
-        if models is not None:
-            return models
     except Exception:
-        pass
+        models = None
+    if models is not None:
+        return models
 
     curated_static = list(_PROVIDER_MODELS.get(normalized, []))
-    if normalized in _MODELS_DEV_PREFERRED:
-        merged = _merge_with_models_dev(normalized, curated_static)
-        if normalized in {"xai", "xai-oauth"}:
-            return _xai_finalize_catalog(merged)
-        return merged
-    return curated_static
+    if normalized not in _MODELS_DEV_PREFERRED:
+        return curated_static
+    merged = _merge_with_models_dev(normalized, curated_static)
+    return _xai_finalize_catalog(merged) if normalized in {"xai", "xai-oauth"} else merged
 
 
 # ---------------------------------------------------------------------------
