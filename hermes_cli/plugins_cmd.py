@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import functools
-import importlib.metadata
+import importlib.metadata  # noqa: F401 — tests patch ``plugins_cmd.importlib.metadata.entry_points``
 import json
 import logging
 import os
@@ -66,6 +66,12 @@ def _console():
 
 def _is_tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _fail(console, message: str) -> None:
+    """Print *message* and exit 1."""
+    console.print(message)
+    sys.exit(1)
 
 
 def _ask_yes(prompt: str, reader=input) -> bool:
@@ -415,14 +421,10 @@ def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
     try:
         target = _sanitize_plugin_name(name, plugins_dir, allow_subdir=True)
     except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
+        _fail(console, f"[red]Error:[/red] {e}")
     if not target.exists():
         installed = ", ".join(d.name for d in plugins_dir.iterdir() if d.is_dir()) or "(none)"
-        console.print(
-            f"[red]Error:[/red] Plugin '{name}' not found in {plugins_dir}.\nInstalled plugins: {installed}",
-        )
-        sys.exit(1)
+        _fail(console, f"[red]Error:[/red] Plugin '{name}' not found in {plugins_dir}.\nInstalled plugins: {installed}")
     return target
 
 
@@ -764,9 +766,7 @@ def cmd_install(
     try:
         git_url, _subdir = _resolve_git_url(identifier)
     except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
-
+        _fail(console, f"[red]Error:[/red] {e}")
     if git_url.startswith(("http://", "file://")):
         console.print(
             "[yellow]Warning:[/yellow] Using insecure/local URL scheme. "
@@ -788,10 +788,7 @@ def cmd_install(
             identifier, force=force, ref=ref, scan_decision_cb=_interactive_scan_decision,
         )
     except PluginOperationError as e:
-        label = "Blocked" if isinstance(e, PluginScanBlocked) else "Error"
-        console.print(f"[red]{label}:[/red] {e}")
-        sys.exit(1)
-
+        _fail(console, f"[red]{'Blocked' if isinstance(e, PluginScanBlocked) else 'Error'}:[/red] {e}")
     if not _looks_like_plugin_dir(target):
         console.print(
             f"[yellow]Warning:[/yellow] {installed_name} doesn't contain plugin.yaml, "
@@ -857,9 +854,7 @@ def cmd_update(name: str) -> None:
             before_pull=lambda: console.print(f"[dim]Updating {name}...[/dim]"),
         )
     except PluginOperationError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        sys.exit(1)
-
+        _fail(console, f"[red]Error:[/red] {exc}")
     # Re-scan: an update can introduce malicious content. The pull has already mutated the
     # tree, so a dangerous verdict disables the plugin rather than leaving it active.
     if _scan_on_install_enabled():
@@ -950,8 +945,7 @@ def cmd_remove(name: str) -> None:
     try:
         _remove_plugin_core(target)
     except (OSError, PluginOperationError) as exc:
-        console.print(f"[red]Error:[/red] Could not remove plugin '{name}': {exc}")
-        sys.exit(1)
+        _fail(console, f"[red]Error:[/red] Could not remove plugin '{name}': {exc}")
     console.print()
     console.print(f"[red]✗[/red] Plugin [bold]{name}[/bold] removed from {plugins_dir}")
     console.print()
@@ -1006,6 +1000,10 @@ def _set_plugin_enabled(name: str, *, enable: bool) -> None:
     disabled = _get_disabled_set()
     (enabled.add if enable else enabled.discard)(name)
     (disabled.discard if enable else disabled.add)(name)
+    _save_plugin_sets(enabled, disabled)
+
+
+def _save_plugin_sets(enabled: set, disabled: set) -> None:
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
 
@@ -1055,17 +1053,15 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
 
     def _refuse_legacy_relay(plugin: str) -> None:
         if plugin in LEGACY_RELAY_PLUGIN_KEYS:
-            console.print(
+            _fail(console, (
                 f"[red]Plugin '{plugin}' was removed.[/red] Relay lifecycle is owned "
                 f"by Hermes core; configure {RELAY_PLUGINS_CONFIG_ENV} instead."
-            )
-            sys.exit(1)
+            ))
 
     _refuse_legacy_relay(name)
     resolved = _resolve_plugin_key_and_source(name)
     if resolved is None:
-        console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
-        sys.exit(1)
+        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
     key, source = resolved
     _refuse_legacy_relay(key)
 
@@ -1082,8 +1078,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
         manifest_name = next((e[0] for e in _discover_all_plugins() if e[5] == key), None)
         if manifest_name is not None:
             disabled.discard(manifest_name)
-        _save_enabled_set(enabled)
-        _save_disabled_set(disabled)
+        _save_plugin_sets(enabled, disabled)
         console.print(f"[green]✓[/green] Plugin [bold]{key}[/bold] enabled. Takes effect on next session.")
 
     # Built-in tool override is a privileged grant; bundled plugins are trusted.
@@ -1212,9 +1207,7 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
         rows.append((key, entry[3], declared, granted, effective))
 
     if name is not None and not rows:
-        console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
-        sys.exit(1)
-
+        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
     if not rows:
         console.print("[dim]No plugins declare or hold capabilities.[/dim]")
         return
@@ -1269,9 +1262,7 @@ def cmd_disable(name: str) -> None:
     console = _console()
     key = _resolve_plugin_key(name)
     if key is None:
-        console.print(f"[red]Plugin '{name}' is not installed or bundled.[/red]")
-        sys.exit(1)
-
+        _fail(console, f"[red]Plugin '{name}' is not installed or bundled.[/red]")
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
     if key not in enabled and key in disabled:
@@ -1280,8 +1271,7 @@ def cmd_disable(name: str) -> None:
     # Also drop a stale legacy bare-name entry so it can't keep a nested plugin loading.
     _discard_key_and_leaf(enabled, key)
     disabled.add(key)
-    _save_enabled_set(enabled)
-    _save_disabled_set(disabled)
+    _save_plugin_sets(enabled, disabled)
     console.print(
         f"[yellow]\u2298[/yellow] Plugin [bold]{key}[/bold] disabled. Takes effect on next session.",
     )
@@ -1377,27 +1367,8 @@ def _discover_all_plugins() -> list:
 def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
     """``(name, version, summary, target)`` for ``hermes_agent.plugins`` entry points — installed
     as Python packages, so they have no plugin directory."""
-    from hermes_cli.plugins import ENTRY_POINTS_GROUP
-    from hermes_cli.plugins_discovery import _select_entry_point_group
-    try:
-        group_eps = _select_entry_point_group(importlib.metadata.entry_points(), ENTRY_POINTS_GROUP)
-    except Exception as exc:
-        logger.debug("Entry-point plugin discovery failed: %s", exc)
-        return []
-    entries: list[tuple[str, str, str, str]] = []
-    for ep in group_eps:
-        dist = getattr(ep, "dist", None)
-        metadata = getattr(dist, "metadata", None)
-        if metadata is None:
-            entries.append((ep.name, "", "", ep.value))
-        else:
-            entries.append((
-                ep.name,
-                str(getattr(dist, "version", "") or ""),
-                str(metadata.get("Summary", "") or ""),
-                ep.value,
-            ))
-    return entries
+    from hermes_cli.plugins import discover_entrypoint_manifests
+    return [(m.name, m.version, m.description, m.path) for m in discover_entrypoint_manifests()]
 
 
 def _plugin_status(name: str, enabled: set, disabled: set, key: str = "") -> str:
@@ -1648,8 +1619,7 @@ def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]
 
     changed = new_enabled != _get_enabled_set() or new_disabled != disabled
     if changed:
-        _save_enabled_set(new_enabled)
-        _save_disabled_set(new_disabled)
+        _save_plugin_sets(new_enabled, new_disabled)
     return changed, new_enabled
 
 
@@ -2212,6 +2182,5 @@ def plugins_command(args) -> None:
     action = getattr(args, "plugins_action", None)
     handler = _PLUGIN_ACTIONS.get(action)
     if handler is None:
-        _console().print(f"[red]Unknown plugins action: {action}[/red]")
-        sys.exit(1)
+        _fail(_console(), f"[red]Unknown plugins action: {action}[/red]")
     handler(args)
