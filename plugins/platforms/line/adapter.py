@@ -379,6 +379,7 @@ _OUTBOUND_MEDIA = {
 
 # Inbound media kinds → cached file extension.
 _INBOUND_MEDIA_EXT = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
+_LIFECYCLE_EVENTS = frozenset({"follow", "unfollow", "join", "leave"})
 
 
 class LineAdapter(BasePlatformAdapter):
@@ -557,7 +558,7 @@ class LineAdapter(BasePlatformAdapter):
             await self._handle_message_event(event)
         elif event_type == "postback":
             await self._handle_postback_event(event)
-        elif event_type in {"follow", "unfollow", "join", "leave"}:
+        elif event_type in _LIFECYCLE_EVENTS:
             logger.info("LINE: lifecycle event %s from %s", event_type, source)
         else:
             logger.debug("LINE: ignoring event type %r", event_type)
@@ -580,8 +581,7 @@ class LineAdapter(BasePlatformAdapter):
             local_path, media_type = await self._download_media(
                 message_id, msg_type, filename=msg.get("fileName") or msg.get("file_name"))
             if local_path:
-                media_urls.append(local_path)
-                media_types.append(media_type)
+                media_urls, media_types = [local_path], [media_type]
             text = f"[{msg_type}]"
         elif msg_type == "sticker":
             keywords = msg.get("keywords") or []
@@ -593,61 +593,48 @@ class LineAdapter(BasePlatformAdapter):
         if chat_type == "dm" and self._client:  # best-effort typing indicator (DM only)
             asyncio.create_task(self._client.loading(chat_id))
         source_obj = self.build_source(
-            chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id
-        )
+            chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id)
         await self.handle_message(MessageEvent(
             text=text, message_type=_LINE_MESSAGE_TYPES.get(msg_type, MessageType.TEXT), source=source_obj,
-            raw_message=event, message_id=message_id, media_urls=media_urls, media_types=media_types,
-        ))
+            raw_message=event, message_id=message_id, media_urls=media_urls, media_types=media_types))
 
     async def _handle_postback_event(self, event: Dict[str, Any]) -> None:
-        """User tapped the slow-LLM postback button — deliver cached payload."""
-        postback = event.get("postback") or {}
-        data = postback.get("data", "") or ""
+        """User tapped the slow-LLM postback button — deliver the cached payload. READY replies (push
+        fallback) and ERROR replies settle the entry; DELIVERED / PENDING just re-issue their notice."""
         reply_token = event.get("replyToken", "")
         chat_id, _ = _resolve_chat(event.get("source") or {})
         try:
-            parsed = json.loads(data)
+            parsed = json.loads((event.get("postback") or {}).get("data", "") or "")
         except (TypeError, json.JSONDecodeError):
             return
-        if parsed.get("action") != "show_response":
-            return
-        request_id = parsed.get("request_id", "")
-        if not request_id:
-            return
-        entry = self._cache.get(request_id)
+        request_id = parsed.get("request_id", "") if parsed.get("action") == "show_response" else ""
+        entry = self._cache.get(request_id) if request_id else None
         if not self._client or not reply_token or not entry:
             return
-
-        def _settle() -> None:
-            self._cache.mark_delivered(request_id)
-            self._pending_buttons.pop(chat_id, None)
-
-        if entry.state is State.READY:
+        state = entry.state
+        if state is State.READY:
             messages = _text_messages(str(entry.payload or ""))
-            try:
-                await self._client.reply(reply_token, messages)
-                _settle()
-            except Exception as exc:
+        elif state is State.ERROR:
+            messages = [_text_message(str(entry.payload or self.interrupted_text))]
+        else:
+            messages = [_text_message(self.delivered_text if state is State.DELIVERED else self.pending_text)]
+        try:
+            await self._client.reply(reply_token, messages)
+        except Exception as exc:
+            if state is State.READY:
                 logger.warning("LINE: postback reply failed (%s); falling back to push", exc)
                 try:
                     await self._client.push(chat_id, messages)
-                    _settle()
                 except Exception as exc2:
                     logger.error("LINE: postback push fallback failed: %s", exc2)
-        elif entry.state is State.ERROR:
-            text = str(entry.payload or self.interrupted_text)
-            try:
-                await self._client.reply(reply_token, [_text_message(text)])
-                _settle()
-            except Exception as exc:
-                logger.warning("LINE: postback ERROR reply failed: %s", exc)
-        elif entry.state in (State.DELIVERED, State.PENDING):  # "already replied" / re-issue wait notice
-            text = self.delivered_text if entry.state is State.DELIVERED else self.pending_text
-            try:
-                await self._client.reply(reply_token, [_text_message(text)])
-            except Exception:
-                pass
+                    return
+            else:
+                if state is State.ERROR:
+                    logger.warning("LINE: postback ERROR reply failed: %s", exc)
+                return
+        if state in (State.READY, State.ERROR):
+            self._cache.mark_delivered(request_id)
+            self._pending_buttons.pop(chat_id, None)
 
     async def _download_media(
         self, message_id: str, msg_type: str, *, filename: Optional[str] = None
@@ -692,9 +679,7 @@ class LineAdapter(BasePlatformAdapter):
     def _consume_reply_token(self, chat_id: str) -> Tuple[str, bool]:
         """Consume a stashed reply token if present and unexpired → ``(token, used_reply)``."""
         token, expires_at = self._reply_tokens.pop(chat_id, None) or ("", 0.0)
-        if not token or time.time() >= expires_at:
-            return "", False
-        return token, True
+        return (token, True) if token and time.time() < expires_at else ("", False)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Trigger LINE's loading-animation indicator (DM only)."""
