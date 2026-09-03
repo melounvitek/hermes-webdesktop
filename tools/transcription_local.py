@@ -36,12 +36,8 @@ def _get_local_command_template() -> Optional[str]:
     if configured:
         return configured
     whisper_binary = _find_whisper_binary()
-    if whisper_binary:
-        return (
-            f"{shlex.quote(whisper_binary)} {{input_path}} --model {{model}} --output_format txt "
-            "--output_dir {output_dir} --language {language}"
-        )
-    return None
+    return (f"{shlex.quote(whisper_binary)} {{input_path}} --model {{model}} --output_format txt "
+            "--output_dir {output_dir} --language {language}") if whisper_binary else None
 
 
 def _has_local_command() -> bool:
@@ -52,7 +48,7 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
     """Return a valid faster-whisper size; cloud-only names (``whisper-1`` …) fall back to the default with a warning."""
     if not model_name:
         return DEFAULT_LOCAL_MODEL
-    if model_name in OPENAI_MODELS or model_name in GROQ_MODELS:
+    if model_name in OPENAI_MODELS | GROQ_MODELS:
         logger.warning(
             "STT model '%s' is a cloud-only name and cannot be used with the local "
             "provider. Falling back to '%s'. Set stt.local.model to a valid "
@@ -99,16 +95,14 @@ _CUDA_LIB_ERROR_MARKERS = (
 
 def _looks_like_cuda_lib_error(exc: BaseException) -> bool:
     """Heuristic: is this a missing/broken CUDA runtime library (not a legitimate runtime failure)?"""
-    msg = str(exc)
-    return any(marker in msg for marker in _CUDA_LIB_ERROR_MARKERS)
+    return any(marker in str(exc) for marker in _CUDA_LIB_ERROR_MARKERS)
 
 
 def _sysctl_value(name: str) -> str:
     """Return a sysctl value, or an empty string when unavailable."""
     try:
-        return subprocess.check_output(
-            ["/usr/sbin/sysctl", "-n", name], stderr=subprocess.DEVNULL, text=True, timeout=2,
-        ).strip()
+        return subprocess.check_output(["/usr/sbin/sysctl", "-n", name], stderr=subprocess.DEVNULL, text=True,
+                                       timeout=2).strip()
     except Exception:
         return ""
 
@@ -143,25 +137,18 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
         # Importing ctranslate2 can itself abort on Apple Silicon/Rosetta when
         # multiple Intel OpenMP runtimes are loaded — set before the import.
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
     from faster_whisper import WhisperModel
     if force_cpu:
-        logger.info(
-            "Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
-            "(int8) to avoid native device autodetection crashes"
-        )
+        logger.info("Apple Silicon/Rosetta detected — loading faster-whisper on CPU "
+                    "(int8) to avoid native device autodetection crashes")
         return WhisperModel(model_name, device="cpu", compute_type="int8")
-
     try:
         return WhisperModel(model_name, device=device, compute_type=compute_type)
     except Exception as exc:
         if not _looks_like_cuda_lib_error(exc):
             raise
-        logger.warning(
-            "faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
-            "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.",
-            exc,
-        )
+        logger.warning("faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
+                       "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.", exc)
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
@@ -180,7 +167,6 @@ def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -
     from tools.transcription_tools import _load_stt_config, _resolve_stt_language
     stt_config = stt_config if isinstance(stt_config, dict) else _load_stt_config()
     local_cfg = stt_config.get("local") or {}
-
     # ``vad: null`` in YAML means "default on".
     vad_enabled = local_cfg.get("vad", True)
     kwargs: Dict[str, Any] = {
@@ -192,30 +178,24 @@ def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -
         kwargs["vad_parameters"] = {
             "min_silence_duration_ms": _config_number(local_cfg, "vad_min_silence_ms", _VAD_MIN_SILENCE_MS_DEFAULT, int)
         }
-
     # Push the confidence gate into faster-whisper itself: its internal defaults drop
     # low-confidence segments BEFORE our post-filter sees them, so the ``stt.local``
     # threshold knobs were dead for that first gate (non-English speech decodes at
     # lower avg_logprob and was silently discarded). Same values feed both gates.
     kwargs["no_speech_threshold"], kwargs["log_prob_threshold"] = _confidence_thresholds(local_cfg)
-
     forced_lang = _resolve_stt_language("local", stt_config)
     if forced_lang:
         kwargs["language"] = forced_lang
-
     initial_prompt = local_cfg.get("initial_prompt")
     if isinstance(initial_prompt, str) and initial_prompt.strip():
         kwargs["initial_prompt"] = initial_prompt
-
     return kwargs
 
 
 def _confidence_thresholds(local_cfg: Dict[str, Any]) -> tuple[float, float]:
     """Resolve (no_speech_prob, avg_logprob) gate thresholds from config."""
-    return (
-        _config_number(local_cfg, "no_speech_prob_threshold", _NO_SPEECH_PROB_THRESHOLD_DEFAULT),
-        _config_number(local_cfg, "logprob_threshold", _LOGPROB_THRESHOLD_DEFAULT),
-    )
+    return (_config_number(local_cfg, "no_speech_prob_threshold", _NO_SPEECH_PROB_THRESHOLD_DEFAULT),
+            _config_number(local_cfg, "logprob_threshold", _LOGPROB_THRESHOLD_DEFAULT))
 
 
 def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_threshold: float) -> bool:
@@ -225,11 +205,10 @@ def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_t
     confidence, so quiet-but-real speech survives. Unknown segment shapes are never dropped.
     """
     try:
-        no_speech_prob = float(getattr(segment, "no_speech_prob"))
-        avg_logprob = float(getattr(segment, "avg_logprob"))
+        return (float(segment.no_speech_prob) > no_speech_threshold
+                and float(segment.avg_logprob) < logprob_threshold)
     except (AttributeError, TypeError, ValueError):
         return False
-    return no_speech_prob > no_speech_threshold and avg_logprob < logprob_threshold
 
 
 def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any]) -> str:
@@ -238,11 +217,9 @@ def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any]) -> str:
     kept: list[str] = []
     for segment in segments:
         if _is_hallucinated_segment(segment, no_speech_threshold, logprob_threshold):
-            logger.debug(
-                "Dropping probable hallucinated segment %r (no_speech_prob=%.3f, avg_logprob=%.3f)",
-                getattr(segment, "text", ""), getattr(segment, "no_speech_prob", float("nan")),
-                getattr(segment, "avg_logprob", float("nan")),
-            )
+            logger.debug("Dropping probable hallucinated segment %r (no_speech_prob=%.3f, avg_logprob=%.3f)",
+                         getattr(segment, "text", ""), getattr(segment, "no_speech_prob", float("nan")),
+                         getattr(segment, "avg_logprob", float("nan")))
             continue
         kept.append(segment.text.strip())
     return " ".join(kept).strip()
@@ -259,37 +236,28 @@ def _transcribe_local_command(
     command_template = _get_local_command_template()
     if not command_template:
         return _error_result(f"{LOCAL_STT_COMMAND_ENV} not configured and no local whisper binary was found")
-
     # Language: hook override > stt.local.language > stt.language > env > "en".
     language = language or _resolve_stt_language("local") or DEFAULT_LOCAL_STT_LANGUAGE
     normalized_model = _normalize_local_model(model_name)
-
     try:
         with tempfile.TemporaryDirectory(prefix="hermes-local-stt-") as output_dir:
             prepared_input, prep_error = _prepare_local_audio(file_path, output_dir)
             if prep_error:
                 return _error_result(prep_error)
-
             command = command_template.format(
                 input_path=shlex.quote(prepared_input), output_dir=shlex.quote(output_dir),
                 language=shlex.quote(language), model=shlex.quote(normalized_model),
             )
             # Scrub Hermes secrets from the child env (same policy as _run_command_stt).
             from tools.environments.local import hermes_subprocess_env
-
             _run_quiet(shlex.split(command), timeout=300, env=hermes_subprocess_env(inherit_credentials=False))
-
             txt_files = sorted(Path(output_dir).glob("*.txt"))
             if not txt_files:
                 return _error_result("Local STT command completed but did not produce a .txt transcript")
-
             transcript_text = txt_files[0].read_text(encoding="utf-8").strip()
-            logger.info(
-                "Transcribed %s via local STT command (%s, %d chars)",
-                Path(file_path).name, normalized_model, len(transcript_text),
-            )
+            logger.info("Transcribed %s via local STT command (%s, %d chars)",
+                        Path(file_path).name, normalized_model, len(transcript_text))
             return _ok_result(transcript_text, "local_command")
-
     except KeyError as e:
         return _error_result(f"Invalid {LOCAL_STT_COMMAND_ENV} template, missing placeholder: {e}")
     except subprocess.CalledProcessError as e:

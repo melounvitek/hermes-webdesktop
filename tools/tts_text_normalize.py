@@ -31,6 +31,7 @@ _MD_HR_RE = re.compile(r"^\s*[-*_]{3,}\s*$", flags=re.MULTILINE)
 _MD_TABLE_PIPE_RE = re.compile(r"\s*\|\s*")
 _URL_RE = re.compile(r"https?://\S+")
 
+_DEGREE_UNITS = (("C", "Celsius"), ("F", "Fahrenheit"))
 # Unit suffix (regex, after a digit) -> spoken word; km/h variants before the bare "m".
 _UNIT_WORDS = (
     (r"km\s*/\s*h", "kilometres per hour"), (r"km/h", "kilometres per hour"),
@@ -56,7 +57,6 @@ def strip_markdown_for_tts(text: str) -> str:
     """Strip Markdown/Telegram formatting while preserving readable words."""
     if not text:
         return ""
-
     text = html.unescape(str(text))
     text = _MD_CODE_BLOCK_RE.sub(" ", text)
     text = _MD_IMAGE_RE.sub(lambda m: f" {m.group(1)} " if m.group(1) else " ", text)
@@ -73,23 +73,20 @@ def strip_markdown_for_tts(text: str) -> str:
     text = _MD_BLOCKQUOTE_RE.sub("", text)
     text = _MD_LIST_ITEM_RE.sub("", text)
     text = _MD_HR_RE.sub("", text)
-
     # Leftover table pipes become pauses instead of a spoken "vertical bar".
-    text = _MD_TABLE_PIPE_RE.sub("; ", text)
-    return text
+    return _MD_TABLE_PIPE_RE.sub("; ", text)
 
 
 def _normalize_temperature_ranges(text: str) -> str:
     """``11-17°C`` -> ``11 to 17 degrees Celsius`` (en/em dash or hyphen; unicode minus normalized)."""
     number = r"([-+\u2212]?\d+(?:\.\d+)?)"
-    for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
+    for unit, word in _DEGREE_UNITS:
         text = re.sub(
             r"(?<!\w)" + number + r"\s*[\u2013\u2014-]\s*" + number + r"\s*°\s*" + unit + r"\b",
             lambda m, w=word: (
                 f"{m.group(1).replace(chr(0x2212), '-')} to {m.group(2).replace(chr(0x2212), '-')} degrees {w}"
             ),
-            text,
-            flags=re.IGNORECASE,
+            text, flags=re.IGNORECASE,
         )
     return text
 
@@ -98,48 +95,35 @@ def normalize_symbols_for_tts(text: str) -> str:
     """Expand common symbols/shorthand into words a TTS engine reads well."""
     if not text:
         return ""
-
-    text = str(text)
-    text = re.sub("[   ]", " ", text)  # non-breaking / thin spaces
-    text = text.replace("\u2212", "-")  # minus sign
-    text = text.replace("…", "...")  # ellipsis
+    text = re.sub("[   ]", " ", str(text))  # non-breaking / thin spaces
+    text = text.replace("\u2212", "-").replace("…", "...")  # minus sign, ellipsis
     text = _normalize_temperature_ranges(text)
-
     # Temperatures with a number first, then bare units ("measured in degrees C"),
     # then any remaining degree symbol (angles, stray cases).
-    for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
+    for unit, word in _DEGREE_UNITS:
         text = re.sub(
             r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°\s*" + unit + r"\b", r"\1 degrees " + word, text, flags=re.IGNORECASE,
         )
-    for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
+    for unit, word in _DEGREE_UNITS:
         text = re.sub(r"°\s*" + unit + r"\b", "degrees " + word, text, flags=re.IGNORECASE)
-    text = re.sub(r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°", r"\1 degrees", text)
-    text = text.replace("°", " degrees")
-
+    text = re.sub(r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°", r"\1 degrees", text).replace("°", " degrees")
     # Common weather/travel units.
     for pattern, word in _UNIT_WORDS:
         text = re.sub(r"(?<=\d)\s*" + pattern + r"\b", " " + word, text, flags=re.IGNORECASE)
-
     # Numeric rates only ("5/month" -> "5 per month").  Requiring digit-then-letter
     # keeps "and/or", "N/A", "TCP/IP" and dates like "2026/06" intact.
     text = re.sub(r"(?<=\d)\s*/\s*(?=[A-Za-z])", " per ", text)
-
     # Money and percentages. The integer part must END in a digit so a trailing
     # comma ("A$50, ...") is not swallowed into the spoken amount. Prefixed
     # currencies run first so "$" doesn't eat "NZ$".
     for symbol, word, flags in _CURRENCY_WORDS:
         text = re.sub(symbol + r"\s*([\d,]*\d(?:\.\d+)?)", r"\1 " + word, text, flags=flags)
     text = re.sub(r"(?<=\d)\s*%", " percent", text)
-
     # Operators and separators that commonly leak from formatted answers.
-    text = text.replace("&", " and ")
-    text = re.sub("[•◦▪▫]", " ", text)  # bullet glyphs
+    text = re.sub("[•◦▪▫]", " ", text.replace("&", " and "))  # bullet glyphs
     for symbol, word in (("→", " to "), ("⇒", " to "), ("≈", " about "), ("~", " about ")):
         text = text.replace(symbol, word)
-
-    text = _VARIATION_SELECTOR_RE.sub("", text)
-    text = _EMOJI_RE.sub("", text)
-    return text
+    return _EMOJI_RE.sub("", _VARIATION_SELECTOR_RE.sub("", text))
 
 
 def smooth_whitespace_for_tts(text: str) -> str:
@@ -150,7 +134,6 @@ def smooth_whitespace_for_tts(text: str) -> str:
     """
     if not text:
         return ""
-
     raw_lines = text.splitlines()
     add_sentence_pauses = sum(1 for raw_line in raw_lines if raw_line.replace(_HEAD, "").strip()) > 1
     lines: list[str] = []
@@ -180,15 +163,11 @@ def smooth_whitespace_for_tts(text: str) -> str:
         if add_sentence_pauses and line[-1] not in ".!?;:":
             line += "."
         lines.append(line)
-
     flush_pending()
-
     text = "\n".join(lines)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"([,.;:!?])([A-Za-z])", r"\1 \2", text)
-    text = re.sub(r"\.{4,}", "...", text)
+    for pattern, repl in ((r"\n{3,}", "\n\n"), (r"[ \t]{2,}", " "), (r"\s+([,.;:!?])", r"\1"),
+                          (r"([,.;:!?])([A-Za-z])", r"\1 \2"), (r"\.{4,}", "...")):
+        text = re.sub(pattern, repl, text)
     return text.strip()
 
 
@@ -219,11 +198,9 @@ def flatten_newlines_for_payload(text: str) -> str:
     """
     if not text:
         return ""
-    text = re.sub(r"\n{2,}", ". ", text)
-    text = re.sub(r"(?<=[.!?;:,])\n", " ", text)
-    text = text.replace("\n", ". ")
-    text = re.sub(r"\.\s*\.", ".", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
+    for pattern, repl in ((r"\n{2,}", ". "), (r"(?<=[.!?;:,])\n", " "), (r"\n", ". "), (r"\.\s*\.", "."),
+                          (r"[ \t]{2,}", " ")):
+        text = re.sub(pattern, repl, text)
     return text.strip()
 
 
@@ -265,7 +242,6 @@ def _strip_markdown_for_tts(text: str) -> str:
     try:
         return prepare_spoken_text(text, max_chars=None)
     except Exception:
-        pass
-    for pattern, repl in _LEGACY_TTS_STRIP_STEPS:
-        text = pattern.sub(repl, text)
-    return text.strip()
+        for pattern, repl in _LEGACY_TTS_STRIP_STEPS:
+            text = pattern.sub(repl, text)
+        return text.strip()
