@@ -1543,8 +1543,7 @@ def _lower_threshold_to_aux_context(
     ceiling exceeds the trigger and re-fires."""
     compressor = agent.context_compressor
     old_threshold = compressor.threshold_tokens
-    new_threshold = aux_context
-    compressor.threshold_tokens = new_threshold
+    new_threshold = compressor.threshold_tokens = aux_context
     summary_target_ratio = getattr(compressor, "summary_target_ratio", None)
     if isinstance(summary_target_ratio, (int, float)):
         compressor.tail_token_budget = int(new_threshold * summary_target_ratio)
@@ -1552,9 +1551,8 @@ def _lower_threshold_to_aux_context(
     if main_ctx:
         compressor.threshold_percent = new_threshold / main_ctx
     safe_pct = int((aux_context / main_ctx) * 100) if main_ctx else 50
-    # Mirror the compressor's threshold math (percent floor, output reservation,
-    # 64K floor): a suggestion it would override is silently ignored and this
-    # warning reappears every session. External engines own policy: keep it plain.
+    # Mirror the compressor's threshold math (percent floor, output reservation, 64K floor): a suggestion it
+    # would override is silently ignored and this warning reappears every session. External engines: keep it plain.
     from agent.context_compressor import ContextCompressor as _CC
     recomputed_threshold = None
     if main_ctx and isinstance(compressor, _CC):
@@ -1652,23 +1650,17 @@ def check_compression_model_feasibility(agent: Any) -> None:
         # for live catalogue probes, so pass "" rather than mint a JWT for a lookup.
         _raw_aux_key = getattr(client, "api_key", "")
         aux_api_key = "" if (callable(_raw_aux_key) and not isinstance(_raw_aux_key, str)) else str(_raw_aux_key or "")
-        aux_context = get_model_context_length(
-            aux_model,
-            base_url=aux_base_url,
-            api_key=aux_api_key,
-            config_context_length=getattr(agent, "_aux_compression_context_length_config", None),
-            # Resolve each model with its own provider so provider-specific paths (Bedrock
-            # table, OpenRouter API) hit the correct client, not the main model's.
-            provider=(
-                _aux_cfg_provider
-                if _aux_cfg_provider and _aux_cfg_provider != "auto"
-                else getattr(agent, "provider", "")
-            ),
-            custom_providers=agent._custom_providers,
+        # Resolve each model with its own provider so provider-specific paths (Bedrock table, OpenRouter API)
+        # hit the correct client, not the main model's.
+        _aux_provider = (
+            _aux_cfg_provider if _aux_cfg_provider and _aux_cfg_provider != "auto" else getattr(agent, "provider", "")
         )
-
-        # Aux model must meet MINIMUM_CONTEXT_LENGTH like the main model, else it cannot
-        # summarise a full threshold-sized window.
+        aux_context = get_model_context_length(
+            aux_model, base_url=aux_base_url, api_key=aux_api_key,
+            config_context_length=getattr(agent, "_aux_compression_context_length_config", None),
+            provider=_aux_provider, custom_providers=agent._custom_providers,
+        )
+        # Aux model must meet MINIMUM_CONTEXT_LENGTH like the main model, else it cannot summarise a full window.
         if aux_context and aux_context < MINIMUM_CONTEXT_LENGTH:
             raise ValueError(
                 f"Auxiliary compression model {aux_model} has a context "
