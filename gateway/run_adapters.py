@@ -75,20 +75,15 @@ class GatewayAdapterLifecycleMixin:
         otherwise leak; must tolerate partial-init state.
         """
         timeout = self._adapter_disconnect_timeout_secs()
+        label = platform.value if platform is not None else "adapter"
         try:
-            completed = await self._await_adapter_cleanup_with_timeout(
-                adapter.disconnect(), timeout
-            )
-            if not completed:
+            if not await self._await_adapter_cleanup_with_timeout(adapter.disconnect(), timeout):
                 logger.warning(
                     "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
-                    timeout, platform.value if platform is not None else "adapter",
+                    timeout, label,
                 )
         except Exception as e:
-            logger.debug(
-                "Defensive %s disconnect after failed connect raised: %s",
-                platform.value if platform is not None else "adapter", e,
-            )
+            logger.debug("Defensive %s disconnect after failed connect raised: %s", label, e)
 
     async def _bounded_adapter_teardown(
         self, adapter, platform, *, profile: Optional[str] = None
@@ -104,10 +99,9 @@ class GatewayAdapterLifecycleMixin:
         suffix = f" (profile: {profile})" if profile else ""
         started_at = time.monotonic()
         try:
-            cancelled = await self._await_adapter_cleanup_with_timeout(
+            if not await self._await_adapter_cleanup_with_timeout(
                 adapter.cancel_background_tasks(), timeout
-            )
-            if not cancelled:
+            ):
                 logger.warning(
                     "✗ %s background-task cancel timed out after %.1fs - forcing continue%s",
                     platform.value, timeout, suffix,
@@ -115,10 +109,7 @@ class GatewayAdapterLifecycleMixin:
         except Exception as e:
             logger.debug("✗ %s background-task cancel error%s: %s", platform.value, suffix, e)
         try:
-            disconnected = await self._await_adapter_cleanup_with_timeout(
-                adapter.disconnect(), timeout
-            )
-            if disconnected:
+            if await self._await_adapter_cleanup_with_timeout(adapter.disconnect(), timeout):
                 logger.info(
                     "✓ %s disconnected (%.2fs)%s",
                     platform.value, time.monotonic() - started_at, suffix,
@@ -266,10 +257,9 @@ class GatewayAdapterLifecycleMixin:
             else:
                 # Disconnect budget + proportional bookkeeping overhead (tests shrink the timeout).
                 outer = timeout + min(2.0, max(0.05, timeout))
-                completed = await self._await_adapter_cleanup_with_timeout(
+                if not await self._await_adapter_cleanup_with_timeout(
                     self._handle_adapter_fatal_error_impl(adapter), outer
-                )
-                if not completed:
+                ):
                     logger.error(
                         "Fatal-error handling for %s timed out after %.1fs; "
                         "ensuring reconnect queue is populated", adapter.platform.value, outer,
@@ -287,13 +277,12 @@ class GatewayAdapterLifecycleMixin:
         finally:
             platform = adapter.platform
             shutdown_event = getattr(self, "_shutdown_event", None)
-            stranded = (
+            if (
                 adapter.fatal_error_retryable
                 and platform not in self.adapters
                 and platform not in getattr(self, "_failed_platforms", {})
                 and not (shutdown_event is not None and shutdown_event.is_set())
-            )
-            if stranded:
+            ):
                 logger.error(
                     "%s adapter was lost without entering the reconnection "
                     "queue; exiting gateway so the service manager restarts it.", platform.value,
@@ -578,14 +567,14 @@ class GatewayAdapterLifecycleMixin:
         """
         if not getattr(self, "_running", False):
             return
-        if not getattr(self, "_failed_platforms", None):
+        if getattr(self, "_failed_platforms", None):
+            self._schedule_slow_reconnect_watcher_respawn(attempt=0)
+        else:
             # Nothing depends on the watcher; the enqueue path spawns a fresh one when needed.
             logger.warning(
                 "Reconnect watcher supervision exhausted with an empty retry "
                 "queue — leaving it down until a platform is queued."
             )
-            return
-        self._schedule_slow_reconnect_watcher_respawn(attempt=0)
 
     def _schedule_slow_reconnect_watcher_respawn(self, *, attempt: int) -> None:
         """Bounded slow-tier respawn of the reconnect watcher."""
@@ -636,11 +625,9 @@ class GatewayAdapterLifecycleMixin:
         Called on BOTH _queue_retryable_fatal_platform paths: the re-fatal of an already-queued
         platform is the only case where the restart budget can be exhausted.
         """
-        if not getattr(self, "_running", False):
-            return
         task = getattr(self, "_reconnect_watcher_task", None)
-        if task is not None and not task.done():
-            return  # already alive
+        if not getattr(self, "_running", False) or (task is not None and not task.done()):
+            return  # not running, or already alive
         logger.warning(
             "Reconnect watcher task is dead (done=%s) — respawning",
             task.done() if task is not None else "N/A",
