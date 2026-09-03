@@ -71,6 +71,11 @@ def _any_filter_args(args, names) -> bool:
     return any(getattr(args, a, None) is not None for a in names)
 
 
+def _export_dir(output) -> Path:
+    """``--output`` dir for multi-file exports; ``~/.hermes/session-exports`` when empty or ``-``."""
+    return Path(output).expanduser() if output and output != "-" else get_hermes_home() / "session-exports"
+
+
 def _write_output(output, text, summary) -> None:
     """Write to stdout when *output* is empty or ``-``; else to the file + print *summary*."""
     if not output or output == "-":
@@ -116,15 +121,16 @@ def _cmd_repair(args):
         print(f"  A backup is preserved at: {report['backup_path']}")
     print("  Keep state.db and the backup; do not delete them.")
     # Without this pointer the user is at a dead end; lead with --inspect-only before writing.
-    print("")
-    print("  Next step — offline recovery (never modifies the source):")
     source_hint = report.get("backup_path") or db_path
-    print(f"    hermes sessions recover --source {source_hint} \\")
-    print("        --inspect-only")
-    print("  If that reports the data is recoverable, rebuild it into")
-    print("  a NEW database (the active one is left untouched):")
-    print(f"    hermes sessions recover --source {source_hint} \\")
-    print("        --output recovered-state.db")
+    print(
+        "\n  Next step — offline recovery (never modifies the source):\n"
+        f"    hermes sessions recover --source {source_hint} \\\n"
+        "        --inspect-only\n"
+        "  If that reports the data is recoverable, rebuild it into\n"
+        "  a NEW database (the active one is left untouched):\n"
+        f"    hermes sessions recover --source {source_hint} \\\n"
+        "        --output recovered-state.db"
+    )
 
 
 def _cmd_recover(args):
@@ -134,8 +140,7 @@ def _cmd_recover(args):
     from hermes_cli.session_recovery import (
         SessionRecoveryError, inspect_session_database, recover_session_database, write_recovery_report,
     )
-    source = args.source
-    output = getattr(args, "output", None)
+    source, output = args.source, getattr(args, "output", None)
     inspect_only = bool(getattr(args, "inspect_only", False))
     allow_partial = bool(getattr(args, "allow_partial", False))
     report_path = getattr(args, "report", None)
@@ -209,30 +214,34 @@ class _RecoveryProgress:
 
 def _print_recovery_verdict(report, output, allow_partial) -> int:
     if report.get("complete"):
-        print(f"✓ Recovered database verified at: {output}")
-        print("  The active session database was not changed.")
-        print("  Review the JSON report before installing this database.")
+        print(
+            f"✓ Recovered database verified at: {output}\n"
+            "  The active session database was not changed.\n"
+            "  Review the JSON report before installing this database."
+        )
         return 0
     if allow_partial and report.get("verified"):
         counts = report.get("verification", {}).get("table_counts", {})
         if report.get("best_effort"):
-            print(f"✓ BEST-EFFORT page-level salvage verified at: {output}")
             print(
+                f"✓ BEST-EFFORT page-level salvage verified at: {output}\n"
                 "  The source table schemas were unreadable; rows were rebuilt from raw pages "
                 "via sqlite3 .recover and mapped heuristically."
             )
         else:
             print(f"✓ Partial recovery output verified at: {output}")
         sessions_n, messages_n = int(counts.get("sessions") or 0), int(counts.get("messages") or 0)
-        print(f"  Recovered {sessions_n:,} sessions and {messages_n:,} messages.")
-        print("  The active session database was not changed.")
         print(
+            f"  Recovered {sessions_n:,} sessions and {messages_n:,} messages.\n"
+            "  The active session database was not changed.\n"
             "  This output is incomplete. Review every skipped range and orphan count in the "
             "JSON report before installing it."
         )
         return 0
-    print("✗ Recovery output did not pass every verification check.")
-    print("  Do not install it. Review the JSON report for partial data or errors.")
+    print(
+        "✗ Recovery output did not pass every verification check.\n"
+        "  Do not install it. Review the JSON report for partial data or errors."
+    )
     return 1
 
 
@@ -277,14 +286,9 @@ def _cmd_list(db, args):
         key = _ws_key(s)
         return ((os.path.basename(key.rstrip("/\\")) or key) if key else "—")[:16]
 
-    def _title(s, n):
-        return (s.get("title") or "—")[:n]
-
-    def _preview(s, n):
-        return s.get("preview", "")[:n]
-
-    def _ago(s):
-        return _relative_time(s.get("last_active"))
+    _title = lambda s, n: (s.get("title") or "—")[:n]  # noqa: E731
+    _preview = lambda s, n: s.get("preview", "")[:n]  # noqa: E731
+    _ago = lambda s: _relative_time(s.get("last_active"))  # noqa: E731
 
     layouts = {  # (has_ws, has_titles): header, rule width, row formatter
         (True, True): (f"{'Title':<28} {'Workspace':<18} {'Last Active':<13} {'ID'}", 110,
@@ -345,12 +349,10 @@ def _cmd_export(db, args):
 
     if getattr(args, "only", None):
         return _export_only(args, _collect_sessions)
-    if args.format == "html":
-        return _export_html(args, _collect_sessions)
     if args.format == "trace":
         return _export_trace(db, args, filters)
-    if args.format == "jsonl":
-        return _export_jsonl(args, _collect_sessions)
+    if args.format in ("html", "jsonl"):
+        return (_export_html if args.format == "html" else _export_jsonl)(args, _collect_sessions)
     return _export_markdown(db, args, filters, _redact)
 
 
@@ -379,9 +381,8 @@ def _export_html(args, collect):
         return
     single = len(sessions) == 1
     content = generate_html_export(sessions[0]) if single else generate_multi_session_html_export(sessions)
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"Exported {len(sessions)} session{'' if single else 's'} to {args.output} (HTML)")
+    noun = "session" if single else "sessions"
+    _write_output(args.output, content, f"Exported {len(sessions)} {noun} to {args.output} (HTML)")
 
 
 def _export_jsonl(args, collect):
@@ -438,7 +439,6 @@ def _export_trace(db, args, filters):
             return None
         return build_trace_jsonl(messages, session_id=sid, model=meta.get("model") or "", cwd="", redact=redact_trace)
 
-    to_stdout = not args.output or args.output == "-"
     try:
         if len(ids) == 1:
             jsonl = _render_trace(ids[0])
@@ -447,7 +447,7 @@ def _export_trace(db, args, filters):
                 return
             _write_output(args.output, jsonl, f"Exported 1 session trace to {args.output}")
         else:
-            out_dir = (get_hermes_home() / "session-exports" if to_stdout else Path(args.output).expanduser())
+            out_dir = _export_dir(args.output)
             out_dir.mkdir(parents=True, exist_ok=True)
             exported = 0
             for sid in ids:
@@ -467,7 +467,7 @@ def _export_markdown(db, args, filters, redact):
     if args.output == "-":
         print("Markdown/QMD export writes files; stdout (-) is only supported with --format jsonl.")
         return
-    output_dir = Path(args.output).expanduser() if args.output else get_hermes_home() / "session-exports"
+    output_dir = _export_dir(args.output)
 
     def _export_one(session_id: str, *, include_lineage: bool = False):
         data = (db.export_session_lineage(session_id) if include_lineage else db.export_session(session_id))
@@ -538,10 +538,9 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
 
     message_count = sum(len(data.get("messages") or []) for data, _path in exported_items)
     suffix = "" if message_count == 1 else "s"
-    if len(exported_items) == 1:
-        print(f"Exported 1 session ({message_count} message{suffix}) to {exported_items[0][1]}")
-    else:
-        print(f"Exported {len(exported_items)} sessions ({message_count} message{suffix}) to {output_dir}")
+    n = len(exported_items)
+    where = exported_items[0][1] if n == 1 else output_dir
+    print(f"Exported {n} session{'' if n == 1 else 's'} ({message_count} message{suffix}) to {where}")
     if not args.delete_after_verified:
         return
     for data, exported_path in exported_items:
@@ -569,18 +568,14 @@ def _cmd_delete(db, args):
     _meta = db.get_session(resolved_session_id) or {}
     _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
     if not args.yes:
-        if not _confirm_prompt(
-            f"Delete session '{resolved_session_id}'{_pinned_note} "
-            "and all its messages? [y/N] "
-        ):
+        if not _confirm_prompt(f"Delete session '{resolved_session_id}'{_pinned_note} and all its messages? [y/N] "):
             print("Cancelled.")
             return
     elif _pinned_note:
         print(f"Warning: deleting a pinned session '{resolved_session_id}'.")
-    if db.delete_session(resolved_session_id, sessions_dir=_sessions_dir()):
-        print(f"Deleted session '{resolved_session_id}'.")
-    else:
+    if not db.delete_session(resolved_session_id, sessions_dir=_sessions_dir()):
         return _not_found(args.session_id)
+    print(f"Deleted session '{resolved_session_id}'.")
 
 
 #: Age floor for `prune --never-active`; generous: a young never-active row may be a chat nobody replied to yet.
@@ -593,9 +588,8 @@ def _prune_never_active_keyed(db, args):
     NULL` — never-closed rows sit outside it by construction."""
     from hermes_cli.session_filters import format_epoch, parse_duration_seconds
     older_than = getattr(args, "older_than", None)
-    if older_than is None:
-        days = _NEVER_ACTIVE_DEFAULT_DAYS
-    else:
+    days = _NEVER_ACTIVE_DEFAULT_DAYS
+    if older_than is not None:
         seconds = parse_duration_seconds(str(older_than))
         if seconds is None:
             print(
@@ -611,15 +605,11 @@ def _prune_never_active_keyed(db, args):
         return
 
     shown = candidates if args.dry_run else candidates[:15]
-    print(
-        f"{len(candidates)} never-active keyed session(s) older than "
-        f"{days:g} day(s) — no messages, tokens, tool calls or title:"
-    )
+    print(f"{len(candidates)} never-active keyed session(s) older than {days:g} day(s) "
+          "— no messages, tokens, tool calls or title:")
     for s in shown:
-        print(
-            f"  {s['id']}  {format_epoch(s.get('started_at')):<17} "
-            f"{(s.get('source') or '-'):<10} {s.get('session_key') or '-'}"
-        )
+        print(f"  {s['id']}  {format_epoch(s.get('started_at')):<17} {(s.get('source') or '-'):<10} "
+              f"{s.get('session_key') or '-'}")
     if len(candidates) > len(shown):
         print(f"  … {len(candidates) - len(shown)} more")
 
@@ -649,16 +639,12 @@ def _note_pinned_skipped(db, filters, action):
         return
     suffix = "" if skipped == 1 else "s"
     if action == "prune":
-        verb, optin = "deleted", (
-            "Pass --include-pinned to delete them anyway, or unpin "
-            "first with `hermes sessions unpin <id>`."
-        )
+        verb = "deleted"
+        optin = "Pass --include-pinned to delete them anyway, or unpin first with `hermes sessions unpin <id>`."
     else:
         verb, optin = "archived", "Unpin first with `hermes sessions unpin <id>` to include them."
-    print(
-        f"Note: {skipped} pinned session{suffix} also match these filters but "
-        f"will NOT be {verb} (pin is a keep flag). {optin}"
-    )
+    print(f"Note: {skipped} pinned session{suffix} also match these filters but will NOT be {verb} "
+          f"(pin is a keep flag). {optin}")
 
 
 def _cmd_prune_or_archive(db, args, action):
@@ -679,10 +665,8 @@ def _cmd_prune_or_archive(db, args, action):
         return 1
 
     if action == "archive" and not any(v for k, v in filters.items() if k != "older_than_days"):
-        print(
-            "Refusing to archive every ended session: pass at least one "
-            "filter (e.g. --newer-than 5h, --source cli, --title codex)."
-        )
+        print("Refusing to archive every ended session: pass at least one "
+              "filter (e.g. --newer-than 5h, --source cli, --title codex).")
         return
 
     # Prune skips archived rows unless --include-archived; archive only targets not-yet-archived rows.
@@ -697,11 +681,9 @@ def _cmd_prune_or_archive(db, args, action):
     # direct-open count would misdescribe its effect.
     skipped_open = db.count_open_prune_matches(**filters) if action == "prune" else 0
     if skipped_open:
-        suffix = "" if skipped_open == 1 else "s"
         print(
-            f"Note: {skipped_open} open session{suffix} also match these "
-            "filters but will be skipped because prune only deletes ended "
-            "sessions. Use `hermes sessions delete <id>` "
+            f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
+            "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
             "to remove one explicitly."
         )
     verb = "Delete" if action == "prune" else "Archive"
@@ -723,8 +705,7 @@ def _cmd_prune_or_archive(db, args, action):
             title = (s.get("title") or "")[:36]
             model = (s.get("model") or "-").split("/")[-1][:24]
             print(
-                f"  {s['id']}  {format_epoch(s.get('last_active')):<17} "
-                f"{s['source']:<10} {model:<24} "
+                f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
                 f"{s['message_count']:>4} msgs  {title}"
             )
         if len(candidates) > len(shown):
@@ -740,10 +721,8 @@ def _cmd_prune_or_archive(db, args, action):
     if action == "prune":
         print(f"Pruned {db.prune_sessions(sessions_dir=_sessions_dir(), **filters)} session(s).")
     else:
-        print(
-            f"Archived {db.archive_sessions(**filters)} session(s). They're hidden from listings "
-            "but fully recoverable (nothing was deleted)."
-        )
+        print(f"Archived {db.archive_sessions(**filters)} session(s). They're hidden from listings "
+              "but fully recoverable (nothing was deleted).")
 
 
 # -- titles / pins -----------------------------------------------------------
@@ -761,13 +740,12 @@ def _cmd_rename(db, args):
         print("Error: title cannot contain newlines.")
         return 1
     try:
-        if db.set_session_title(resolved_session_id, title):
-            print(f"Session '{resolved_session_id}' renamed to: {title}")
-        else:
+        if not db.set_session_title(resolved_session_id, title):
             return _not_found(args.session_id)
     except ValueError as e:
         print(f"Error: {e}")
         return 1
+    print(f"Session '{resolved_session_id}' renamed to: {title}")
 
 
 def _cmd_pin(db, args, pinning):
@@ -776,10 +754,8 @@ def _cmd_pin(db, args, pinning):
     for raw_id in args.session_ids:
         resolved = db.resolve_session_id(raw_id)
         if resolved and db.set_session_pinned(resolved, pinning):
-            verb = "Pinned" if pinning else "Unpinned"
             title = db.get_session_title(resolved)
-            suffix = f"  ({title})" if title else ""
-            print(f"{verb} session '{resolved}'.{suffix}")
+            print(f"{'Pinned' if pinning else 'Unpinned'} session '{resolved}'.{f'  ({title})' if title else ''}")
         else:
             failures += _not_found(raw_id)
     if failures:
@@ -797,12 +773,10 @@ def _cmd_pinned(db, args):
     if not pinned_rows:
         print("No pinned sessions. Pin one with: hermes sessions pin <session_id>")
         return
-    print(f"{'Title':<32} {'Last Active':<13} {'Src':<9} {'ID'}")
-    print("─" * 100)
+    print(f"{'Title':<32} {'Last Active':<13} {'Src':<9} {'ID'}\n" + "─" * 100)
     for s in pinned_rows:
         title = (s.get("title") or s.get("preview", "") or "—")[:30]
-        last_active = _relative_time(s.get("last_active"))
-        print(f"{title:<32} {last_active:<13} {(s.get('source') or '-'):<9} {s['id']}")
+        print(f"{title:<32} {_relative_time(s.get('last_active')):<13} {(s.get('source') or '-'):<9} {s['id']}")
 
 
 def _cmd_retitle_skills(db, args):
@@ -821,10 +795,8 @@ def _cmd_retitle_skills(db, args):
         print("No sessions were titled from a /skill invocation.")
         return
 
-    print(
-        f"{len(candidates)} session(s) opened with a /skill"
-        f"{'' if apply_changes else ' (dry run — pass --apply to write)'}:"
-    )
+    mode = "" if apply_changes else " (dry run — pass --apply to write)"
+    print(f"{len(candidates)} session(s) opened with a /skill{mode}:")
     changed = 0
     for row in candidates:
         session_id = row["id"]
@@ -920,7 +892,6 @@ def _cmd_optimize_storage(db, args):
     if not db.fts_optimize_available():
         print("Search index is already on the compact layout — nothing to do.")
         return
-
     before_bytes = os.path.getsize(db_path) if db_path.exists() else 0
     before_mb = before_bytes / (1024 * 1024)
 
@@ -1000,8 +971,8 @@ def _cmd_repair_routing(db, args):
         print(f"\n{len(records)} orphaned session(s) found, none unambiguously repairable. Nothing to do.")
         return
     if not getattr(args, "apply", False):
-        print(f"\n{len(adoptable)} of {len(records)} orphaned session(s) "
-              "can be repaired. Re-run with --apply to perform them.")
+        print(f"\n{len(adoptable)} of {len(records)} orphaned session(s) can be repaired. "
+              "Re-run with --apply to perform them.")
         return
     print("\nStop the gateway before applying — a running gateway still holds the old routing mapping in memory.")
     if not _confirm_prompt(f"Adopt {len(adoptable)} orphaned session(s)? [y/N] "):
@@ -1018,9 +989,8 @@ def _cmd_repair_routing(db, args):
 
 
 def _cmd_stats(db, args):
-    print(f"Total sessions: {db.session_count()}")
-    print(f"Total messages: {db.message_count()}")
-    for src in ["cli", "telegram", "discord", "whatsapp", "slack"]:
+    print(f"Total sessions: {db.session_count()}\nTotal messages: {db.message_count()}")
+    for src in ("cli", "telegram", "discord", "whatsapp", "slack"):
         c = db.session_count(source=src)
         if c > 0:
             print(f"  {src}: {c} sessions")
