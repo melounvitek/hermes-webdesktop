@@ -8,6 +8,7 @@ daemon thread, the turn-liveness watchdog wiring, and the lease-loss / stall int
 import logging
 import os
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -46,8 +47,7 @@ class DurableTurnLease:
         """Create (not start) the refresher thread and, when configured, the liveness watchdog.
 
         Lease renewal is NOT evidence of progress; a silently stalled turn would renew forever, so the
-        watchdog (policy in ``agent/turn_liveness.py``) is wired with the commit/deactivate callbacks
-        below.
+        watchdog (policy in ``agent/turn_liveness.py``) is wired with the commit/deactivate callbacks.
         """
         self.refresh_thread = threading.Thread(
             target=self.refresh_loop, name="session-turn-lease-refresh", daemon=True
@@ -67,7 +67,7 @@ class DurableTurnLease:
                 poll_s=poll_s, stop_event=self.stop,
                 activity_lock=self.agent._liveness_activity_lock(),
                 is_turn_active=self.is_turn_active, commit_abort=self.commit_liveness_abort,
-                deactivate_turn=self.deactivate_after_liveness_abort,
+                deactivate_turn=self.stop_refresher,
             ).make_thread()
 
     def start(self) -> None:
@@ -81,9 +81,14 @@ class DurableTurnLease:
             self.liveness_thread.start()
 
     def stop_refresher(self) -> None:
+        """Stop renewal and deactivate the turn. Also the watchdog's deactivate callback: a wedge the
+        hard interrupt cannot unwind must not keep the lease alive forever; TTL expiry lets
+        stale-turn cleanup reclaim the row."""
         with self._lock:
             self.turn_active = False
             self.stop.set()
+
+    deactivate_after_liveness_abort = stop_refresher
 
     def join_threads(self, timeout: float = 1.0) -> None:
         for thread in (self.refresh_thread, self.liveness_thread):
@@ -155,27 +160,16 @@ class DurableTurnLease:
             self.interrupt_message = message
         return True
 
-    def deactivate_after_liveness_abort(self) -> None:
-        """Stop lease renewal after a committed liveness abort.
-
-        A wedge the hard interrupt cannot unwind must not keep the lease alive forever; TTL expiry
-        lets stale-turn cleanup reclaim the row.
-        """
-        with self._lock:
-            self.stop.set()
-            self.turn_active = False
-
     def clear_interrupt(self) -> None:
         """Clear only the interrupt admitted by this lease's refresher/watchdog. Run AFTER join."""
         message = self.interrupt_message
         if not message:
             return
         agent = self.agent
+        # Lazy via the façade so ``patch("agent.turn_facade._set_interrupt")`` keeps intercepting.
+        from agent.turn_facade import _set_interrupt
 
-        def _clear_if_owned() -> None:
-            # Lazy via the façade so ``patch("agent.turn_facade._set_interrupt")`` keeps intercepting.
-            from agent.turn_facade import _set_interrupt
-
+        with getattr(agent, "_pending_redirect_lock", None) or nullcontext():
             if getattr(agent, "_interrupt_message", None) != message:
                 return
             agent._interrupt_requested = False
@@ -184,13 +178,6 @@ class DurableTurnLease:
             agent._interrupt_thread_signal_pending = False
             if agent._execution_thread_id is not None:
                 _set_interrupt(False, agent._execution_thread_id)
-
-        redirect_lock = getattr(agent, "_pending_redirect_lock", None)
-        if redirect_lock is None:
-            _clear_if_owned()
-        else:
-            with redirect_lock:
-                _clear_if_owned()
 
     def refresh_loop(self) -> None:
         """Renew the lease every ``refresh_interval``; a miss or error interrupts the turn.
@@ -267,10 +254,9 @@ def admit_durable_turn_lease(
     # A fresh session id has no durable transcript to race over, and callers may supply an in-memory
     # seed before the row exists — reloading would erase it. Check the concrete type: MagicMock-style
     # shims accept any attribute without the protocol.
-    exists = _durable_session_exists(db, session_id)
     if (
         getattr(agent, "_persist_disabled", False)
-        or not exists
+        or not _durable_session_exists(db, session_id)
         or not callable(getattr(type(db), "acquire_session_turn_lease", None))
     ):
         return admission
