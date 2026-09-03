@@ -299,14 +299,9 @@ def _maybe_apply_moa_cache_control(
     Returns the messages unchanged on any error.
     """
     try:
-        from agent.agent_runtime_helpers import (
-            anthropic_prompt_cache_policy,
-            blank_cache_policy_stub,
-        )
+        from agent.agent_runtime_helpers import anthropic_prompt_cache_policy, blank_cache_policy_stub
         from agent.prompt_caching import (
-            apply_anthropic_cache_control,
-            effective_cache_ttl,
-            envelope_tool_part_cache_markers_supported,
+            apply_anthropic_cache_control, effective_cache_ttl, envelope_tool_part_cache_markers_supported,
         )
 
         # Explicit kwarg > runtime snapshot (threaded from the live agent) > config.
@@ -436,10 +431,7 @@ def _trim_messages_for_reference(
     if not messages:
         return messages
 
-    from agent.model_metadata import (
-        estimate_messages_tokens_rough,
-        get_model_context_length,
-    )
+    from agent.model_metadata import estimate_messages_tokens_rough, get_model_context_length
 
     model = str(slot.get("model") or "")
     provider = str(runtime.get("provider") or slot.get("provider") or "")

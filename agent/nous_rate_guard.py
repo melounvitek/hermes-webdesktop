@@ -16,12 +16,7 @@ import time
 from typing import Any, Mapping, Optional
 from utils import atomic_write_text
 from agent.rate_limit_tracker import (
-    _BUCKET_TAGS,
-    _fmt_seconds,
-    _safe_float,
-    _safe_int,
-    has_rate_limit_headers,
-    lower_headers,
+    _BUCKET_TAGS, _fmt_seconds, _safe_float, _safe_int, has_rate_limit_headers, lower_headers,
 )
 
 logger = logging.getLogger(__name__)
