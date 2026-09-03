@@ -106,71 +106,67 @@ _install_plugin_debug_handler()
 
 VALID_HOOKS: Set[str] = {
     "pre_tool_call", "post_tool_call", "transform_terminal_output", "transform_tool_result",
-    # Return a string to replace the response text (first non-None wins) or None to leave it.
+    # transform_llm_output: return a replacement string (first non-None wins) or None.
     "transform_llm_output", "pre_llm_call", "post_llm_call",
-    # Streaming observers fired off the token path by agent.plugin_stream_hooks; payloads are
-    # immutable normalized text/lifecycle and cannot transform the stream.
+    # Streaming observers (agent.plugin_stream_hooks), off the token path; payloads are immutable
+    # normalized text/lifecycle and cannot transform the stream.
     "on_stream_start", "on_stream_delta", "on_stream_end", "on_interim_message",
-    # Fired once per turn when the agent edited code and is about to verify/finish. Return
-    # {"action": "continue", "message"} (or Claude-Code Stop shape {"decision": "block", "reason"})
-    # to keep going; anything else finishes. Bounded by agent.max_verify_nudges.
+    # pre_verify: once per turn when the agent edited code and is about to verify/finish. Return
+    # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
+    # going; anything else finishes. Bounded by agent.max_verify_nudges.
     "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
-    # Fired once per failed API call BEFORE agent/error_classifier.classify_api_error(). Kwargs:
-    # provider, model, status_code, error_type, error_code, error_message, error_body, error,
-    # approx_tokens, context_length, num_messages. Return None, or {"reason": <FailoverReason name>
-    # (required), "retryable"/"should_compress"/"should_rotate_credential"/"should_fallback": bool,
-    # "message": str, "error_context": dict}. Run-all-then-pick-first (see
-    # get_plugin_error_classification). Privacy: error_message/error_body may be unredacted.
+    # transform_api_error_classification: once per failed API call BEFORE
+    # agent/error_classifier.classify_api_error(). Kwargs: provider, model, status_code, error_type,
+    # error_code, error_message, error_body, error, approx_tokens, context_length, num_messages.
+    # Return None or {"reason": <FailoverReason name> (required), "retryable"/"should_compress"/
+    # "should_rotate_credential"/"should_fallback": bool, "message": str, "error_context": dict}.
+    # Run-all-then-pick-first (see get_plugin_error_classification). Privacy: error_message/
+    # error_body may be unredacted.
     "transform_api_error_classification", "on_session_start", "on_session_end",
     "on_session_finalize", "on_session_reset",
-    # Successful skill lifecycle facts (local skill name visible to plugins).
+    # on_skill_lifecycle: successful skill lifecycle facts (local skill name visible to plugins).
     "on_skill_lifecycle", "subagent_start", "subagent_stop",
-    # Once per incoming MessageEvent, after the internal-event guard, BEFORE auth/pairing and
-    # dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip", "reason"} -> drop;
-    # {"action": "rewrite", "text"} -> replace event.text; {"action": "allow"} / None -> normal.
+    # pre_gateway_dispatch: once per incoming MessageEvent, after the internal-event guard, BEFORE
+    # auth/pairing and dispatch. Kwargs: event, gateway, session_store. Return {"action": "skip",
+    # "reason"} -> drop; {"action": "rewrite", "text"} -> replace event.text; "allow"/None -> normal.
     "pre_gateway_dispatch",
-    # Approval observers (tools/approval.py). Return values ignored — plugins cannot veto or
-    # pre-answer (use pre_tool_call). Kwargs: command, description, pattern_key, pattern_keys,
-    # session_key, surface: "cli" | "gateway" | "smart"; post_approval_response adds choice
-    # ("once"|"session"|"always"|"deny"|"timeout"|"smart_approve"|"smart_deny") and decided_by.
+    # Approval observers (tools/approval.py); returns ignored — plugins cannot veto or pre-answer
+    # (use pre_tool_call). Kwargs: command, description, pattern_key, pattern_keys, session_key,
+    # surface: "cli"|"gateway"|"smart"; post_approval_response adds choice ("once"|"session"|
+    # "always"|"deny"|"timeout"|"smart_approve"|"smart_deny") and decided_by.
     "pre_approval_request", "post_approval_response",
-    # Fired by transcribe_audio after provider resolution, BEFORE any backend runs. Kwargs:
-    # file_path, provider, model, language, prompt, source. Return None or a dict mutating
-    # prompt/language/model (registration order, last-writer-wins; file_path is read-only).
+    # pre_transcription: after provider resolution, BEFORE any backend runs. Kwargs: file_path,
+    # provider, model, language, prompt, source. Return None or a dict mutating prompt/language/
+    # model (registration order, last-writer-wins; file_path is read-only).
     "pre_transcription",
     # Kanban task observers (hermes_cli.kanban_db), fired AFTER the DB commit so a slow plugin never
-    # holds the SQLite write lock. Return values ignored. Process matters: claimed fires in the
-    # DISPATCHER right before spawn; completed/blocked fire in the WORKER (or whichever process
-    # drove it). Kwargs: task_id, board, assignee, run_id, profile_name; completed adds summary,
-    # blocked adds reason.
+    # holds the SQLite write lock; returns ignored. claimed fires in the DISPATCHER right before
+    # spawn; completed/blocked fire in the WORKER (or whichever process drove it). Kwargs: task_id,
+    # board, assignee, run_id, profile_name; completed adds summary, blocked adds reason.
     "kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
-    # Kanban worker/mutation/tick observers; return values ignored; fire sites short-circuit on
-    # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus:
+    # Kanban worker/mutation/tick observers; returns ignored; fire sites short-circuit on
+    # has_hook(). Kwargs: task_id, profile_name, board, assignee, run_id plus, per hook:
     # worker_spawned (DISPATCHER, after PID persisted, inside the dispatch lock — stay fast):
     #   worker_pid, workspace_path (privacy: project layout/usernames).
-    "on_kanban_worker_spawned",
     # worker_exited (tick-derived on dead-PID reclaim): worker_pid, exit_kind ("clean_exit" |
     #   "rate_limited" | "nonzero_exit" | "signaled" | "unknown"), exit_code, outcome, retry_status.
-    "on_kanban_worker_exited",
     # worker_stale_claim (TTL-expired claim reclaimed; live-PID extensions do NOT fire):
     #   worker_pid, heartbeat_stale, retry_status.
-    "on_kanban_worker_stale_claim",
     # task_updated (committed task-row write outside claim/complete/block, in whichever process
     #   committed it): changed_fields — field NAMES only, never values.
-    "on_kanban_task_updated",
-    # dispatch_tick: once per dispatch_once, strictly AFTER the dispatch lock is released. Kwargs:
-    #   board, profile_name, dry_run, outcome ("ok"|"skipped_locked"|"idle"), result: DispatchResult
+    # dispatch_tick (once per dispatch_once, strictly AFTER the dispatch lock is released): board,
+    #   profile_name, dry_run, outcome ("ok"|"skipped_locked"|"idle"), result: DispatchResult
     #   (privacy: task ids, assignees, workspace paths).
-    "on_kanban_dispatch_tick",
-    # Gateway platform-boundary observer: normalized envelopes only, never raw SDK objects or
-    # adapter handles. Kwargs: platform, event_type, payload (event_type-local; see hooks.md).
-    # New event types land only together with real fire-sites.
+    "on_kanban_worker_spawned", "on_kanban_worker_exited", "on_kanban_worker_stale_claim",
+    "on_kanban_task_updated", "on_kanban_dispatch_tick",
+    # gateway_platform_event: normalized envelopes only, never raw SDK objects or adapter handles.
+    # Kwargs: platform, event_type, payload (event_type-local; see hooks.md). New event types land
+    # only together with real fire-sites.
     "gateway_platform_event",
-    # Fired BEFORE a recognized slash command's handler on CLI and gateway canonical dispatch.
-    # Return values IGNORED in v1. Deliberately NOT fired for the gateway's running-agent intercept
-    # path (/stop, /approve, busy_policy) — a slow/hostile plugin must not touch the operator's
-    # escape hatches. Kwargs: surface, command (canonical), alias_used, args_raw, session_key,
-    # platform.
+    # pre_command: BEFORE a recognized slash command's handler on CLI and gateway canonical dispatch;
+    # returns IGNORED in v1. Deliberately NOT fired for the gateway's running-agent intercept path
+    # (/stop, /approve, busy_policy) — a slow/hostile plugin must not touch the operator's escape
+    # hatches. Kwargs: surface, command (canonical), alias_used, args_raw, session_key, platform.
     "pre_command",
 }
 
@@ -305,9 +301,7 @@ class PluginContext:
         restore: Callable[[Any], bool],
     ) -> PluginRegistration:
         """Track one generation in a replaceable manager-local registration slot."""
-        lease = replacement_coordinator.acquire(
-            slot, current=current, previous=previous, restore=restore
-        )
+        lease = replacement_coordinator.acquire(slot, current=current, previous=previous, restore=restore)
         return self._track(kind, key, lease.dispose)
 
     def _track_mapping_entry(
@@ -320,11 +314,8 @@ class PluginContext:
             previous = mapping.get(key)
         mapping[key] = entry
         return self._track_replacement(
-            kind, key, slot=("manager_mapping", id(mapping), key),
-            current=entry, previous=previous,
-            restore=lambda replacement: self._manager._restore_mapping(
-                mapping, key, entry, replacement
-            ),
+            kind, key, slot=("manager_mapping", id(mapping), key), current=entry, previous=previous,
+            restore=lambda replacement: self._manager._restore_mapping(mapping, key, entry, replacement),
         )
 
     def _register_scoped_provider(
@@ -417,15 +408,26 @@ class PluginContext:
         """Register a human approval transport, inactive until ``security.approval.transport:
         <name>`` selects it. It receives a redacted ``ApprovalRequest`` and returns only a
         correlated decision; policy and persistence stay host-owned. ``present_fn`` may be async."""
-        self._manager.register_approval_transport(name, present_fn, plugin_id=self.plugin_id)
-        # Record ownership so unload/force-reload removes this transport. Duplicate names are
-        # rejected above (raise), so there is never a displaced previous entry to restore.
+        from hermes_cli.approval_transport import RegisteredApprovalTransport
+        transports = self._manager._approval_transports
         clean = str(name).strip().lower()
-        entry = self._manager._approval_transports.get(clean)
-        if entry is not None:
-            self._track_mapping_entry(
-                "approval_transport", clean, self._manager._approval_transports, entry, None
-            )
+        if clean == "builtin":
+            raise ValueError("approval transport name 'builtin' is reserved")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", clean):
+            raise ValueError("approval transport name must match [a-z0-9][a-z0-9_-]{0,63}")
+        if not callable(present_fn):
+            raise TypeError("approval transport present_fn must be callable")
+        if clean in transports:
+            owner = transports[clean].plugin_id
+            raise ValueError(f"approval transport {clean!r} is already registered by {owner!r}")
+        entry = RegisteredApprovalTransport(
+            name=clean, present=present_fn, plugin_id=self.plugin_id,
+            profile_home=str(get_hermes_home().resolve()),
+        )
+        logger.info("Plugin %s registered approval transport: %s", self.plugin_id, clean)
+        # Duplicate names are rejected above, so there is never a displaced previous entry to restore;
+        # tracking makes unload/force-reload remove this transport.
+        self._track_mapping_entry("approval_transport", clean, transports, entry, None)
 
     @_serialized_replacement
     def register_tool(
@@ -1179,22 +1181,25 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.scope_key = scope_key or hermes_home_key()
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
+        self._discovered: bool = False
+        self._cli_ref = None  # Set by CLI after plugin discovery
+        self._gateway_message_injector: tuple[object, Callable] | None = None
+        self._context_engine = None  # Set by a plugin via register_context_engine()
+        # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``).
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
-        self._context_engine = None  # Set by a plugin via register_context_engine()
-        self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
+        self._plugin_commands: Dict[str, dict] = {}  # slash commands
         self._system_prompt_sections: Dict[str, PluginSystemPromptSection] = {}
-        self._discovered: bool = False
-        self._cli_ref = None  # Set by CLI after plugin discovery
-        self._gateway_message_injector: tuple[object, Callable] | None = None
         self._plugin_skills: Dict[str, Dict[str, Any]] = {}  # qualified name -> metadata
         self._portable_mcp_servers: Dict[str, Dict[str, Any]] = {}
-        self._aux_tasks: Dict[str, Dict[str, Any]] = {}  # see register_auxiliary_task
+        self._aux_tasks: Dict[str, Dict[str, Any]] = {}
         self._approval_transports: Dict[str, Any] = {}
+        self._slack_action_handlers: List[tuple] = []  # (matcher, callback, plugin_name)
+        self._platform_handler_factories: Dict[str, List[tuple]] = {}  # lowercase platform -> list
         # Event bus: owner-tagged subscriptions (unload removes zombies); one daemon worker keeps
         # registration order while emitters never block.
         self._subscriptions: Dict[str, List[_EventSubscription]] = {}
@@ -1205,7 +1210,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._event_queue: queue.Queue[Any] = queue.Queue(maxsize=_EVENT_PENDING_CAP)
         self._event_worker: Optional[threading.Thread] = None
         self._emit_depth = threading.local()  # per-worker chain depth caps mutual emitters
-        self._slack_action_handlers: List[tuple] = []  # (matcher, callback, plugin_name)
         # In-flight / recently-timed-out hook callbacks keyed by (hook_name, id(cb)) so a stuck
         # policy hook cannot spawn a new abandoned thread on every fire.
         self._hook_running_callbacks: Dict[tuple, object] = {}
@@ -1226,8 +1230,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # and contributed tool names (so `hermes plugins list` still attributes them).
         self._predeclared_modules: Dict[str, types.ModuleType] = {}
         self._predeclared_tools: Dict[str, List[str]] = {}
-        # Native platform handler factories keyed by lowercase platform name.
-        self._platform_handler_factories: Dict[str, List[tuple]] = {}
 
     @property
     def has_gateway_message_injector(self) -> bool:
@@ -1382,27 +1384,6 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         if verdict.log:
             logger.log(*verdict.log)
         return False
-
-    def register_approval_transport(
-        self, name: str, present_fn: Callable, *, plugin_id: str,
-    ) -> None:
-        """Register one plugin-owned approval transport for this profile."""
-        from hermes_cli.approval_transport import RegisteredApprovalTransport
-        clean = str(name).strip().lower()
-        if clean == "builtin":
-            raise ValueError("approval transport name 'builtin' is reserved")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", clean):
-            raise ValueError("approval transport name must match [a-z0-9][a-z0-9_-]{0,63}")
-        if not callable(present_fn):
-            raise TypeError("approval transport present_fn must be callable")
-        if clean in self._approval_transports:
-            owner = self._approval_transports[clean].plugin_id
-            raise ValueError(f"approval transport {clean!r} is already registered by {owner!r}")
-        self._approval_transports[clean] = RegisteredApprovalTransport(
-            name=clean, present=present_fn, plugin_id=plugin_id,
-            profile_home=str(get_hermes_home().resolve()),
-        )
-        logger.info("Plugin %s registered approval transport: %s", plugin_id, clean)
 
     def get_approval_transport(self, name: str):
         """Return a transport only inside the profile that registered it."""
