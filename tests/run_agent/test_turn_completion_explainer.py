@@ -13,7 +13,7 @@ These tests exercise:
      retries and verifies the explanation reaches ``final_response``.
 
 All assertions work under the mocked OpenAI SDK used elsewhere in this
-suite (we patch ``run_agent.OpenAI`` and drive ``agent.client``), so they
+suite (we patch ``agent.process_bootstrap.OpenAI`` and drive ``agent.client``), so they
 pass identically in CI and locally.
 """
 
@@ -36,10 +36,10 @@ def _mock_response(content="Hello", finish_reason="stop", tool_calls=None):
 
 def _make_agent(max_iterations: int = 10, config: dict | None = None) -> AIAgent:
     with (
-        patch("run_agent.get_tool_definitions", return_value=[]),
-        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
         patch("hermes_cli.config.load_config", return_value=config or {}),
-        patch("run_agent.OpenAI"),
+        patch("agent.process_bootstrap.OpenAI"),
     ):
         agent = AIAgent(
             api_key="test-key-1234567890",

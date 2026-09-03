@@ -1001,16 +1001,15 @@ def _lazy_headers(module: str, name: str, pass_key: bool = False, pass_base: boo
 
 
 # Host → default_headers factory for explicit base_url client construction. Ordered: first
-# host match wins; no match falls back to the provider profile's declared headers. ``_ra()``
-# keeps the ``run_agent.*`` helpers patchable by tests.
+# host match wins; no match falls back to the provider profile's declared headers.
 _HOST_DEFAULT_HEADERS: List[tuple[str, Callable[[Any, str], Dict[str, str]]]] = [
     ("openrouter.ai", _lazy_headers("agent.auxiliary_client", "build_or_headers")),
     ("integrate.api.nvidia.com",
      _lazy_headers("agent.auxiliary_client", "build_nvidia_nim_headers", pass_base=True)),
-    ("api.routermint.com", lambda _k, _b: _ra()._routermint_headers()),
+    ("api.routermint.com", _lazy_headers("agent.client_lifecycle", "_routermint_headers")),
     ("githubcopilot.com", _lazy_headers("hermes_cli.models", "copilot_default_headers")),
     ("api.kimi.com", lambda _k, _b: {"User-Agent": "claude-code/0.1.0"}),
-    ("portal.qwen.ai", lambda _k, _b: _ra()._qwen_portal_headers()),
+    ("portal.qwen.ai", _lazy_headers("agent.client_lifecycle", "_qwen_portal_headers")),
     ("chatgpt.com", _lazy_headers("agent.codex_headers", "codex_cloudflare_headers", pass_key=True)),
     ("x.ai", _lazy_headers("tools.xai_http", "hermes_xai_default_headers")),
 ]
@@ -1086,7 +1085,8 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
         agent._tool_snapshot_generation = _snapshot_registry._generation
     except Exception:
         agent._tool_snapshot_generation = 0
-    agent.tools = _ra().get_tool_definitions(
+    import model_tools
+    agent.tools = model_tools.get_tool_definitions(
         enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
     )
@@ -1105,7 +1105,8 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
             print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
         if disabled_toolsets:
             print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
-        requirements = _ra().check_toolset_requirements()
+        import model_tools
+        requirements = model_tools.check_toolset_requirements()
         missing_reqs = [name for name, available in requirements.items() if not available]
         if missing_reqs:
             print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
@@ -1970,7 +1971,7 @@ def _inject_context_engine_tools(agent):
     # Context engine tool schemas (lcm_*), deduped against existing names (plugins may
     # register the same schemas; duplicates 400 provider-side) and gated on enabled_toolsets
     # so `platform_toolsets: telegram: []` can't leak them.
-    # Skip names that are already present — the _ra().get_tool_definitions() quiet_mode cache returned a
+    # Skip names that are already present — the model_tools.get_tool_definitions() quiet_mode cache returned a
     # shared list pre-#17335, so a stray mutation here would poison subsequent agent inits in the same
     # Gateway process and trip provider-side 'duplicate tool name' errors. Even with the cache fix, dedup is
     # the right defense against plugin paths that may register the same schemas via ctx.register_tool().

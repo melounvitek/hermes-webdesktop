@@ -1610,7 +1610,7 @@ class CLITuiMixin:
             event.app.invalidate()
         if pasted_text:
             # Sanitize surrogates (Word/Google Docs paste) before writing.
-            from run_agent import _sanitize_surrogates
+            from agent.message_sanitization import _sanitize_surrogates
             pasted_text = _sanitize_surrogates(pasted_text)
             line_count = pasted_text.count('\n')
             buf = event.current_buffer

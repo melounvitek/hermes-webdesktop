@@ -1594,8 +1594,8 @@ class TestCopilotACPStreamingDecision:
     must detect ACP runtimes and route to _interruptible_api_call instead.
     """
 
-    @patch("run_agent.get_tool_definitions", return_value=[])
-    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("model_tools.get_tool_definitions", return_value=[])
+    @patch("model_tools.check_toolset_requirements", return_value={})
     @patch("agent.copilot_acp_client.CopilotACPClient")
     def test_provider_name_triggers_non_streaming(
         self, mock_acp_cls, _mock_check, _mock_tools
@@ -1625,8 +1625,8 @@ class TestCopilotACPStreamingDecision:
             response = mock_non_stream({})
             mock_stream.assert_not_called()
 
-    @patch("run_agent.get_tool_definitions", return_value=[])
-    @patch("run_agent.check_toolset_requirements", return_value={})
+    @patch("model_tools.get_tool_definitions", return_value=[])
+    @patch("model_tools.check_toolset_requirements", return_value={})
     @patch("agent.copilot_acp_client.CopilotACPClient")
     def test_acp_base_url_triggers_non_streaming(
         self, mock_acp_cls, _mock_check, _mock_tools

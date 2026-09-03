@@ -3,7 +3,6 @@
 Each ``AIAgent`` (parent or subagent) holds its own :class:`IterationBudget`: the parent's
 cap is ``max_iterations`` (default 500), each subagent's ``delegation.max_iterations``
 (default 50), so total iterations across parent + subagents can exceed the parent's cap.
-``run_agent`` re-exports the class so ``from run_agent import IterationBudget`` keeps working.
 """
 
 from __future__ import annotations

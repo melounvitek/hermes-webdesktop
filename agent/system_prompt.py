@@ -24,6 +24,7 @@ from agent.prompt_builder import (
     SKILLS_GUIDANCE, STEER_CHANNEL_NOTE, TASK_COMPLETION_GUIDANCE, TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, drain_truncation_warnings,
 )
+from agent import prompt_builder as _pb
 from agent.runtime_cwd import resolve_context_cwd
 from hermes_constants import get_default_hermes_root, get_hermes_home
 from utils import is_truthy_value
@@ -34,13 +35,6 @@ _PLUGIN_SECTION_FRAME_RE = re.compile(
     re.MULTILINE,
 )
 _GATE_WORDS = {**dict.fromkeys(("true", "always", "yes", "on"), True), **dict.fromkeys(("false", "never", "no", "off"), False)}
-
-
-def _ra():
-    """Lazy ``run_agent`` handle: tests ``patch("run_agent.load_soul_md")`` etc.,
-    so the helpers must be resolved through that namespace on every call."""
-    import run_agent
-    return run_agent
 
 
 def _model_gate(setting: Any, model: Optional[str], default_models) -> bool:
@@ -301,18 +295,19 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
     return " ".join(g for g in tool_guidance if g) or None
 
 
-def _skills_prompt(agent: Any, _r: Any) -> str:
+def _skills_prompt(agent: Any) -> str:
     """Skills index (empty without skills tools).  Focus mode demotes non-coding
     categories to names-only — never hidden, every name stays visible."""
     if not any(name in agent.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage']):
         return ""
-    avail_toolsets = {_r.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names} - {None, ""}
+    import model_tools
+    avail_toolsets = {model_tools.get_toolset_for_tool(tool_name) for tool_name in agent.valid_tool_names} - {None, ""}
     try:
         from agent.coding_context import coding_compact_skill_categories
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
-    return _r.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
+    return _pb.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
                                          compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
 
 
@@ -489,12 +484,12 @@ def _memory_parts(agent: Any) -> List[str]:
     return parts
 
 
-def _identity_parts(agent: Any, _r: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool]:
+def _identity_parts(agent: Any, ctx_len: Optional[int]) -> Tuple[List[str], bool]:
     """SOUL.md (primary identity; cron keeps the persona while skipping cwd
     instructions, scoped to the agent's OWN home) or the default identity.
     Returns ``(parts, soul_loaded)``."""
     wants_soul = agent.load_soul_identity or not agent.skip_context_files
-    _soul_content = _r.load_soul_md(ctx_len, home_override=_agent_home(agent)) if wants_soul else None
+    _soul_content = _pb.load_soul_md(ctx_len, home_override=_agent_home(agent)) if wants_soul else None
     return ([_soul_content], True) if _soul_content else ([DEFAULT_AGENT_IDENTITY], False)
 
 
@@ -571,7 +566,7 @@ def _post_workspace_parts(agent: Any) -> List[str]:
     return parts
 
 
-def _context_files_part(agent: Any, _r: Any, ctx_len: Optional[int], soul_loaded: bool) -> List[str]:
+def _context_files_part(agent: Any, ctx_len: Optional[int], soul_loaded: bool) -> List[str]:
     """Project context files (AGENTS.md etc.) for the context tier. TERMINAL_CWD
     when set (gateway); None lets discovery fall back to the launch dir.  The
     install-tree fallback is only legitimate for cli/tui where the launch dir
@@ -580,7 +575,7 @@ def _context_files_part(agent: Any, _r: Any, ctx_len: Optional[int], soul_loaded
     if agent.skip_context_files:
         return []
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
-    return [_r.build_context_files_prompt(
+    return [_pb.build_context_files_prompt(
         cwd=None if launch_artifact else resolve_context_cwd(), skip_soul=soul_loaded, context_length=ctx_len,
         allow_install_tree_fallback=agent.platform in ("cli", "tui"), home_override=_agent_home(agent))]
 
@@ -596,7 +591,6 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     (snapshot, remaining session-stable guidance, caller ``system_message``,
     context files) and ``volatile`` (skills index, memory, user profile, external
     memory block, timestamp line).  Never re-rendered mid-session."""
-    _r = _ra()
     # Model context window scales the context-file caps; stable per conversation.
     _cc_len = getattr(getattr(agent, "context_compressor", None), "context_length", None)
     _ctx_len = _cc_len if isinstance(_cc_len, int) and _cc_len > 0 else None
@@ -614,7 +608,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     if "skill_view" in (agent.valid_tool_names or set()) and "- hermes-agent:" in skills_prompt:
         stable_parts[_help_guidance_slot] = HERMES_AGENT_HELP_GUIDANCE
     stable_parts.extend(_alibaba_identity_part(agent))
-    stable_parts.append(_r.build_environment_hints())
+    stable_parts.append(_pb.build_environment_hints())
     # Coding posture: operating brief stays in the stable prefix; the live
     # git/workspace snapshot sits behind its own cache boundary, and the blocks
     # below it must keep their historical post-snapshot position.

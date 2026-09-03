@@ -87,10 +87,6 @@ def _gateway_origin_json(agent: "AIAgent") -> Optional[str]:
         return None
 
 
-# Every F401-suppressed import below is a re-export reached via `patch("run_agent.<X>")`,
-# `from run_agent import X`, or `_ra().<X>` from the agent/ helpers — keep them resolving here.
-# `OpenAI` is a lazy proxy (SDK import costs ~240ms) that keeps `patch("run_agent.OpenAI")` working.
-from agent.process_bootstrap import OpenAI, _SafeWriter, _get_proxy_for_base_url, _get_proxy_from_env  # noqa: F401
 from agent.iteration_budget import IterationBudget
 from hermes_cli.env_loader import load_hermes_dotenv
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
@@ -103,14 +99,13 @@ if not _loaded_env_paths:
     logger.info("No .env file found. Using system environment variables.")
 
 
-from model_tools import get_tool_definitions, get_toolset_for_tool, handle_function_call, check_toolset_requirements  # noqa: F401
+from model_tools import get_toolset_for_tool
 from tools.terminal_tool_lifecycle import cleanup_vm, get_active_env
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
 from agent.memory_provider import is_trivial_prompt
-from agent.error_classifier import FailoverReason  # noqa: F401
-from agent.client_lifecycle import ClientLifecycleMixin, _qwen_portal_headers, _routermint_headers  # noqa: F401
+from agent.client_lifecycle import ClientLifecycleMixin
 from agent.stream_delivery import StreamDeliveryMixin
 from agent.status_output import StatusOutputMixin
 from agent.api_request_hooks import ApiRequestHooksMixin
@@ -119,28 +114,15 @@ from agent.interrupt_control import InterruptControlMixin
 from agent.turn_explainers import TurnExplainersMixin
 from agent.activity_tracking import ActivityTrackingMixin
 from agent.rate_limit_credits import RateLimitCreditsMixin
-from agent.session_persistence import (  # noqa: F401
-    SessionPersistenceMixin, _DB_PERSISTED_MARKER, _EPHEMERAL_SCAFFOLDING_FLAGS,
-    _is_ephemeral_scaffolding, _safe_session_filename_component,
-)
+from agent.session_persistence import SessionPersistenceMixin
 from agent.compression_facade import CompressionFacadeMixin
 from agent.turn_facade import TurnFacadeMixin
 from agent.vision_message_prep import VisionMessagePrepMixin
 from agent.reasoning_params import ReasoningParamsMixin
 from agent.lazy_forward import forward as _forward, forward_static as _forward_static
 from agent.session_activity import ActivityProvenance
-from agent.model_metadata import estimate_request_tokens_rough, is_local_endpoint  # noqa: F401
-from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor, user_originated_turn_view  # noqa: F401
-from agent.retry_utils import jittered_backoff  # noqa: F401
-from agent.prompt_builder import (  # noqa: F401
-    DEFAULT_AGENT_IDENTITY, build_skills_system_prompt, build_context_files_prompt,
-    build_environment_hints, load_soul_md,
-)
-from agent.message_sanitization import (  # noqa: F401
-    _SURROGATE_RE, _sanitize_surrogates, _sanitize_structure_surrogates, _sanitize_messages_surrogates,
-    _escape_invalid_chars_in_json_strings, _repair_tool_call_arguments, _strip_non_ascii,
-    _sanitize_messages_non_ascii, _sanitize_tools_non_ascii, _looks_like_image_content_rejection,
-    _strip_images_from_messages, _sanitize_structure_non_ascii,
+from agent.model_metadata import is_local_endpoint
+from agent.message_sanitization import (
     coalesce_tool_call_id as _sanitize_coalesce_tool_call_id,
     uniquify_tool_call_ids as _sanitize_uniquify_tool_call_ids,
 )
@@ -151,10 +133,6 @@ from agent.codex_responses_adapter import (
     _summarize_user_message_for_log,
 )
 from agent.tool_guardrails import ToolGuardrailDecision, append_toolguard_guidance, toolguard_synthetic_result
-from agent.tool_dispatch_helpers import (  # noqa: F401
-    _should_parallelize_tool_batch, _is_destructive_command, _extract_parallel_scope_path, _paths_overlap,
-    _append_subdir_hint_to_multimodal, _trajectory_normalize_msg,
-)
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens
 
 
@@ -493,8 +471,6 @@ class AIAgent(
         self._codex_reasoning_replay_enabled = False
         return {"messages": stripped_messages, "items": stripped_items}
 
-    # Backward-compat alias; the list lives in ``agent.stream_diag.STREAM_DIAG_HEADERS``.
-    from agent.stream_diag import STREAM_DIAG_HEADERS as _STREAM_DIAG_HEADERS  # noqa: E402
     _stream_diag_init = _forward_static("agent.stream_diag", "stream_diag_init")
     _stream_diag_capture_response = _forward("agent.stream_diag", "stream_diag_capture_response")
     _flatten_exception_chain = _forward_static("agent.stream_diag", "flatten_exception_chain")
@@ -955,7 +931,7 @@ class AIAgent(
             process_registry.kill_all(task_id=task_id)
 
         def release_computer_use() -> None:
-            from tools.computer_use.tool import release_computer_use_session
+            from tools.computer_use import release_computer_use_session
             release_computer_use_session(task_id)
 
         for step in (kill_processes, lambda: cleanup_vm(task_id), lambda: cleanup_browser(task_id), release_computer_use):

@@ -1,9 +1,9 @@
 """Process-level bootstrap helpers for ``run_agent``.
 
 Lazy OpenAI SDK import (``_OpenAIProxy`` keeps ``isinstance`` and
-``patch("run_agent.OpenAI")`` working), crash-resistant stdio (``_SafeWriter``),
-env-only HTTP proxy resolution, and Codex dual-stack (Happy Eyeballs)
-connection racing. ``run_agent`` re-exports every name.
+``patch("agent.process_bootstrap.OpenAI")`` working), crash-resistant stdio
+(``_SafeWriter``), env-only HTTP proxy resolution, and Codex dual-stack
+(Happy Eyeballs) connection racing.
 """
 
 from __future__ import annotations
@@ -451,7 +451,7 @@ def _install_safe_stdio() -> None:
             setattr(sys, stream_name, _SafeWriter(stream))
 
 
-# Drop-in for ``openai.OpenAI`` (also re-exported via ``run_agent``).
+# Drop-in for ``openai.OpenAI``.
 OpenAI = _OpenAIProxy()
 
 

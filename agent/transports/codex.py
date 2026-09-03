@@ -479,7 +479,7 @@ class ResponsesApiTransport(ProviderTransport):
         is_codex_backend: bool — chatgpt.com/backend-api/codex is_xai_responses: bool — xAI/Grok backend
         github_reasoning_extra: dict | None — Copilot reasoning params
         """
-        from run_agent import DEFAULT_AGENT_IDENTITY
+        from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
         instructions = params.get("instructions", "")
         payload_messages = messages

@@ -61,7 +61,7 @@ class CLIChatTurnMixin:
             if blocked is not None:
                 return blocked
             # Lone surrogates (rich-text clipboard paste) crash the OpenAI SDK's JSON serialization.
-            from run_agent import _sanitize_surrogates
+            from agent.message_sanitization import _sanitize_surrogates
             message = _sanitize_surrogates(message)
 
         self._chat_stage_user_message(agent, message)

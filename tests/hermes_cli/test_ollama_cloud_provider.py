@@ -250,7 +250,7 @@ class TestOllamaCloudAgentInit:
     def test_ollama_cloud_agent_uses_chat_completions(self, monkeypatch):
         """Ollama Cloud falls through to chat_completions — no special elif needed."""
         monkeypatch.setenv("OLLAMA_API_KEY", "test-key")
-        with patch("run_agent.OpenAI") as mock_openai:
+        with patch("agent.process_bootstrap.OpenAI") as mock_openai:
             mock_openai.return_value = MagicMock()
             from run_agent import AIAgent
             agent = AIAgent(

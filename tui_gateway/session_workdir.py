@@ -462,7 +462,7 @@ def _rewind_active_session_history(
 
 def _history_without_ephemeral_scaffolding(history: list[dict]) -> list[dict]:
     """Return the durable transcript shape without transient recovery rows."""
-    from run_agent import _is_ephemeral_scaffolding
+    from agent.session_persistence import _is_ephemeral_scaffolding
     return [message.copy() for message in history if not _is_ephemeral_scaffolding(message)]
 
 

@@ -1218,7 +1218,7 @@ def _select_cached_agent_history(
     retention.
     """
     if isinstance(live_history, list) and len(live_history) > len(persisted_history):
-        from run_agent import _is_ephemeral_scaffolding
+        from agent.session_persistence import _is_ephemeral_scaffolding
 
         has_unpersisted_row = any(
             isinstance(message, dict) and not message.get("_db_persisted")
@@ -2916,7 +2916,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         return text
 
     if evt_type == "async_delegation":
-        from tools.process_registry import format_process_notification
+        from tools.process_registry_notifications import format_process_notification
         return format_process_notification(evt)
 
     return None

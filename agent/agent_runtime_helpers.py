@@ -1278,7 +1278,8 @@ def dump_api_request_debug(
             dump_payload["error"] = _api_error_debug_info(error)
         # Sanitize the session ID (may come from an untrusted X-Hermes-Session-Id header) so a
         # "../"-shaped ID cannot write outside logs_dir.
-        safe_sid = _ra()._safe_session_filename_component(agent.session_id)
+        from agent.session_persistence import _safe_session_filename_component
+        safe_sid = _safe_session_filename_component(agent.session_id)
         dump_file = agent.logs_dir / f"request_dump_{safe_sid}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
         # Redact secrets first: this fires unconditionally on API errors and captures the full
         # request body, so context-embedded secrets would otherwise land in cleartext on disk.
@@ -1750,8 +1751,9 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
         client_kwargs, access_token=client_kwargs.get("api_key", ""),
         base_url=str(client_kwargs.get("base_url", "")),
     )
-    # Module-level `OpenAI` is resolved lazily via __getattr__; tests patch `run_agent.OpenAI`.
-    client = _ra().OpenAI(**client_kwargs)
+    # ``process_bootstrap.OpenAI`` is a lazy SDK proxy; resolved at call time so tests can patch it.
+    from agent import process_bootstrap
+    client = process_bootstrap.OpenAI(**client_kwargs)
     _ra().logger.info("OpenAI client created (%s, shared=%s) %s", reason, shared, agent._client_log_context())
     return client
 
@@ -2247,7 +2249,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             )
             if skip_tool_execution_middleware:
                 dispatch_kwargs["skip_tool_execution_middleware"] = True
-            return _ra().handle_function_call(function_name, next_args, effective_task_id, **dispatch_kwargs)
+            import model_tools
+            return model_tools.handle_function_call(function_name, next_args, effective_task_id, **dispatch_kwargs)
     if skip_tool_execution_middleware:
         return _execute(function_args)
     from hermes_cli.middleware import run_tool_execution_middleware

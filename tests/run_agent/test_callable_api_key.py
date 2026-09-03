@@ -51,7 +51,7 @@ class TestCreateOpenAIClientCallable:
             return MagicMock(api_key=kwargs.get("api_key"))
 
         # Patch the module-level OpenAI proxy used by ``_create_openai_client``.
-        monkeypatch.setattr("run_agent.OpenAI", fake_openai)
+        monkeypatch.setattr("agent.process_bootstrap.OpenAI", fake_openai)
 
         # Build a minimal stand-in for AIAgent so we can call the bound
         # method directly without paying the full __init__ cost.
