@@ -108,8 +108,9 @@ def _extract_health_report_from_result(result: Report) -> Report:
 
 def _open_mcp(binary: str) -> subprocess.Popen:
     """Spawn ``<binary> mcp``; pin UTF-8 — cua-driver emits emoji/arbitrary paths and Windows' cp1252 would raise."""
-    return subprocess.Popen([binary, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            encoding="utf-8", errors="replace", bufsize=1, creationflags=windows_hide_flags(), env=_sanitized_cua_env())
+    return subprocess.Popen([binary, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1, creationflags=windows_hide_flags(),
+                            env=_sanitized_cua_env())
 
 def _mcp_rpc(proc: subprocess.Popen, msg_id: int, method: str, params: Any = None) -> Report:
     """Write one JSON-RPC request and read one response line."""

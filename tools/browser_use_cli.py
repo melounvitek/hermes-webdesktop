@@ -275,8 +275,8 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
         logger.debug("Could not prepare %s: %s", bin_dir, e)
 
     try:
-        result = subprocess.run([uv_bin, "tool", "install", "browser-use"], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", env=env, timeout=timeout_s)
+        result = subprocess.run([uv_bin, "tool", "install", "browser-use"], capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", env=env, timeout=timeout_s, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return False, f"`uv tool install browser-use` timed out after {timeout_s}s"
     except Exception as e:

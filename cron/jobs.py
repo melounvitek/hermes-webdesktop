@@ -521,9 +521,13 @@ def _preserve_file_ownership(path: Path, before: Optional[os.stat_result]) -> No
     unprivileged gateway's store would flip jobs.json to root:root 0600 and lock the ticker out."""
     if before is None or os.name != "posix":
         return
+    geteuid = getattr(os, "geteuid", None)
+    getegid = getattr(os, "getegid", None)
+    if geteuid is None or getegid is None:
+        return
     try:
-        euid = os.geteuid()
-        if euid != 0 or (before.st_uid, before.st_gid) == (euid, os.getegid()):
+        euid = geteuid()
+        if euid != 0 or (before.st_uid, before.st_gid) == (euid, getegid()):
             return  # unprivileged writer, or already ours before the rewrite
         os.chown(path, before.st_uid, before.st_gid)
     except OSError as e:

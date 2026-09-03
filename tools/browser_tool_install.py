@@ -256,7 +256,8 @@ def _maybe_autoinstall_chromium() -> bool:
 
     _bt.logger.info("browser: Chromium missing — auto-installing the browser binary (one-time ~170MB; disable via security.allow_lazy_installs)")
     try:
-        proc = subprocess.run(install_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_bt._build_browser_env())
+        proc = subprocess.run(install_cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600,
+                              env=_bt._build_browser_env(), stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as e:
         _bt.logger.warning("browser: Chromium auto-install failed to start: %s", e)
         return False

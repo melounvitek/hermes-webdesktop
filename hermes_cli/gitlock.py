@@ -34,9 +34,10 @@ def _git_proc_running() -> bool:
     try:
         if os.name == "nt":
             proc = subprocess.run(["tasklist", "/FI", "IMAGENAME eq git.exe", "/FO", "CSV"],
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
             return "git.exe" in proc.stdout.lower()
-        proc = subprocess.run(["pgrep", "-x", "git"], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(["pgrep", "-x", "git"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=10)
         return proc.returncode == 0
     except Exception:
         logger.debug("git process probe failed; assuming no git running", exc_info=True)

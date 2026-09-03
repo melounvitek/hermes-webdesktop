@@ -114,9 +114,12 @@ def _run_quiet(argv: List[str], *, timeout: float, swallow: Any = (), **kw: Any)
     stdin-reading mode on unknown verbs; EOF makes them exit fast instead of blocking until the timeout), output
     captured unless the caller redirects it. Exceptions in ``swallow`` return None; others raise."""
     kw.setdefault("stdin", subprocess.DEVNULL)
+    kw.setdefault("encoding", "utf-8")
+    kw.setdefault("errors", "replace")
     "stdout" in kw or kw.setdefault("capture_output", True)
     try:
-        return subprocess.run(argv, text=True, timeout=timeout, **kw)
+        return subprocess.run(argv, text=True, timeout=timeout, stdin=kw.pop("stdin"), encoding=kw.pop("encoding"),
+                              errors=kw.pop("errors"), **kw)
     except swallow:
         return None
 

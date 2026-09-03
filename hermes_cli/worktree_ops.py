@@ -116,7 +116,8 @@ def _maintain_pack_health(repo_root: str) -> None:
         cmd = ["git", "repack", "-a", "-d", "--quiet"]
         if os.name == "posix":
             cmd = ["nice", "-n", "19", *cmd]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=1800, cwd=repo_root, check=False)
+        subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800,
+                       cwd=repo_root, check=False)
         # Repacking can strand now-duplicated admin files; prune on the same pass.
         _git(["worktree", "prune"], repo_root, timeout=60, check=False)
     except Exception as e:

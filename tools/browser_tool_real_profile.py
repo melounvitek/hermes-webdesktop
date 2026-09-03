@@ -41,7 +41,8 @@ def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> 
         return None
     try:
         return subprocess.run([*_bt._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
-                              capture_output=True, text=True, timeout=15, env=_bt._build_browser_env())
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                              env=_bt._build_browser_env(), stdin=subprocess.DEVNULL)
     except (subprocess.SubprocessError, OSError) as e:
         _bt.logger.debug("real-profile %s failed: %s", log_label, e)
         return None
@@ -163,8 +164,9 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     argv = [*_bt._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
             "--cdp", str(port), "open", "about:blank"]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True,
-                              timeout=_bt._get_open_command_timeout(first_open=True), env=_bt._build_browser_env())
+        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=_bt._get_open_command_timeout(first_open=True), env=_bt._build_browser_env(),
+                              stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, _RP + "the real-profile browser took too long to start. Retry, or turn the toggle off."
     except (subprocess.SubprocessError, OSError) as e:

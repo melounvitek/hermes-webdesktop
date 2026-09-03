@@ -433,8 +433,8 @@ class HonchoClientConfig:
         import subprocess
 
         try:
-            root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
-                                  encoding='utf-8', errors='replace', cwd=cwd, timeout=5, stdin=subprocess.DEVNULL)
+            root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, encoding='utf-8',
+                                  errors='replace', cwd=cwd, timeout=5, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired):
             return None
         return Path(root.stdout.strip()).name if root.returncode == 0 else None

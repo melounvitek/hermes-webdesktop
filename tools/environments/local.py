@@ -650,10 +650,9 @@ def _kill_process_group_posix(proc) -> None:
     except Exception:
         descendants = []
     try:
-        # windows-footgun: ok — POSIX only (see _IS_WINDOWS gate in caller)
-        os.killpg(pgid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)  # windows-footgun: ok — POSIX only (see _IS_WINDOWS gate in caller)
         if not _wait_for_group_exit(proc, pgid, 1.0):
-            os.killpg(pgid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok — POSIX only (see _IS_WINDOWS gate in caller)
             _wait_for_group_exit(proc, pgid, 2.0)
             with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 proc.wait(timeout=0.2)

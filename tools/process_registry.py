@@ -208,7 +208,8 @@ def _stop_systemd_unit(unit_name: str) -> bool:
     if binary is None:
         return False
     try:
-        result = subprocess.run([binary, "--user", "stop", unit_name], capture_output=True, timeout=15)
+        result = subprocess.run([binary, "--user", "stop", unit_name], capture_output=True, timeout=15,
+                                stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             stderr = (result.stderr or b"").decode(errors="replace").strip()
             if any(marker in stderr.lower() for marker in ("not loaded", "not found", "does not exist")):

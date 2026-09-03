@@ -522,7 +522,7 @@ class SimplexAdapter(BasePlatformAdapter):
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                     tmp_path = tmp.name
                 subprocess.run(["convert", file_path, "-resize", "128x128", "-quality", "70", tmp_path],
-                               check=True, capture_output=True, timeout=30)
+                               check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
                 with open(tmp_path, "rb") as f:
                     thumb_uri = _THUMB_URI_PREFIX + base64.b64encode(f.read()).decode()
                 os.remove(tmp_path)

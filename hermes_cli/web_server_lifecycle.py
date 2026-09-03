@@ -73,7 +73,8 @@ def _process_start_marker(pid: int) -> str:
         filetime = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
         return f"win:{filetime + 504911232000000000}"
 
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, check=False)
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", check=False)
     marker = result.stdout.strip()
     if result.returncode == 0 and marker:
         return f"ps:{marker}"
