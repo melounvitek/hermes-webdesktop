@@ -1,16 +1,13 @@
 """Secret-source registry + apply orchestrator.
 
-Owns everything that must be uniform across backends so no source can get it
-wrong: registration (name/scheme uniqueness, API-version gating), the
-wall-clock timeout around ``fetch()``, precedence (mapped beats bulk; within a
-shape ``secrets.sources`` order, else registration order; first claim wins),
-``override_existing`` semantics (may beat .env/shell, never another source,
-never a protected var), cross-source conflict warnings, and provenance.
-
-Startup entry point: :func:`apply_all` via
-``hermes_cli.env_loader._apply_external_secret_sources()``.  Plugins register
-through ``PluginContext.register_secret_source()`` → :func:`register_source`;
-bundled sources register lazily in :func:`_ensure_builtin_sources`.
+Owns everything that must be uniform across backends: registration
+(name/scheme uniqueness, API-version gating), the wall-clock timeout around
+``fetch()``, precedence (mapped beats bulk; within a shape ``secrets.sources``
+order, else registration order; first claim wins), ``override_existing``
+semantics (may beat .env/shell, never another source, never a protected var),
+cross-source conflict warnings, and provenance. Startup entry point:
+:func:`apply_all` via ``hermes_cli.env_loader``; plugins register through
+``PluginContext.register_secret_source()`` → :func:`register_source`.
 """
 
 from __future__ import annotations
@@ -36,8 +33,8 @@ from hermes_constants import hermes_home_key
 
 logger = logging.getLogger(__name__)
 
-# Ordered registry: name → source.  Dict insertion order doubles as the default
-# apply order.  Origin is recorded so consumers never infer ownership from names.
+# Ordered registry: name → source. Dict insertion order doubles as the default
+# apply order. Origin is recorded so consumers never infer ownership from names.
 _SOURCES: Dict[str, SecretSource] = {}
 _SOURCE_ORIGINS: Dict[str, str] = {}
 _SCOPED_SOURCES: Dict[str, Dict[str, SecretSource]] = {}
@@ -89,9 +86,22 @@ class ApplyReport:
         return bool(self.provenance)
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
+# --- Registration -----------------------------------------------------------
+
+
+def _validate_source(source: SecretSource) -> Optional[str]:
+    """Reason a source is unregistrable (already formatted for the log), or None."""
+    if not isinstance(source, SecretSource):
+        return f"Ignoring secret source {source!r}: does not inherit from SecretSource"
+    name = source.name or ""
+    if not name or not name.replace("_", "").isalnum() or name != name.lower():
+        return f"Ignoring secret source with invalid name {name!r}"
+    if source.api_version != SECRET_SOURCE_API_VERSION:
+        return (f"Ignoring secret source '{name}': built against secret-source API "
+                f"v{source.api_version}, this Hermes speaks v{SECRET_SOURCE_API_VERSION}")
+    if source.shape not in ("mapped", "bulk"):
+        return f"Ignoring secret source '{name}': shape must be 'mapped' or 'bulk', got {source.shape!r}"
+    return None
 
 
 def register_source(
@@ -101,54 +111,31 @@ def register_source(
     builtin: bool = False,
     scope: Optional[str] = None,
 ) -> bool:
-    """Register a secret source.  Returns True on success.
+    """Register a secret source. Returns True on success.
 
     Rejections are logged, never raised — a bad plugin must not take down
-    startup.  ``replace`` lets tests / user plugins override a same-named
+    startup. ``replace`` lets tests / user plugins override a same-named
     source (last-writer-wins); scheme collisions across *different* names are
     always rejected.
     """
-    if not isinstance(source, SecretSource):
-        logger.warning(
-            "Ignoring secret source %r: does not inherit from SecretSource",
-            source,
-        )
+    problem = _validate_source(source)
+    if problem:
+        logger.warning(problem)
         return False
-    name = source.name or ""
-    if not name or not name.replace("_", "").isalnum() or name != name.lower():
-        logger.warning("Ignoring secret source with invalid name %r", name)
-        return False
-    if source.api_version != SECRET_SOURCE_API_VERSION:
-        logger.warning(
-            "Ignoring secret source '%s': built against secret-source API v%s, "
-            "this Hermes speaks v%s",
-            name, source.api_version, SECRET_SOURCE_API_VERSION,
-        )
-        return False
-    if source.shape not in ("mapped", "bulk"):
-        logger.warning(
-            "Ignoring secret source '%s': shape must be 'mapped' or 'bulk', got %r",
-            name, source.shape,
-        )
-        return False
+    name = source.name
     with _REGISTRY_LOCK:
         effective = dict(_SOURCES)
         if scope is not None:
             effective.update(_SCOPED_SOURCES.get(scope, {}))
         if name in effective and not replace:
-            logger.warning(
-                "Secret source '%s' already registered; ignoring duplicate", name
-            )
+            logger.warning("Secret source '%s' already registered; ignoring duplicate", name)
             return False
         if source.scheme:
             for other_name, other in effective.items():
                 if other_name != name and other.scheme == source.scheme:
                     logger.warning(
-                        "Ignoring secret source '%s': scheme '%s://' is already "
-                        "owned by source '%s'",
-                        name,
-                        source.scheme,
-                        other_name,
+                        "Ignoring secret source '%s': scheme '%s://' is already owned by source '%s'",
+                        name, source.scheme, other_name,
                     )
                     return False
         target = _SOURCES if scope is None else _SCOPED_SOURCES.setdefault(scope, {})
@@ -171,9 +158,7 @@ def get_source(name: str, *, scope: Optional[str] = None) -> Optional[SecretSour
         return _merged(scope).get(name)
 
 
-def snapshot_registration(
-    name: str, *, scope: Optional[str] = None
-) -> Optional[SecretSource]:
+def snapshot_registration(name: str, *, scope: Optional[str] = None) -> Optional[SecretSource]:
     """Return the registration owned by exactly one registry layer."""
     _ensure_builtin_sources()
     with _REGISTRY_LOCK:
@@ -214,11 +199,7 @@ def list_plugin_sources() -> List[SecretSource]:
     plus every scoped registration (bundled sources register with scope=None)."""
     _ensure_builtin_sources()
     with _REGISTRY_LOCK:
-        merged: Dict[str, SecretSource] = {
-            name: source
-            for name, source in _SOURCES.items()
-            if _SOURCE_ORIGINS.get(name) == "plugin"
-        }
+        merged = {n: s for n, s in _SOURCES.items() if _SOURCE_ORIGINS.get(n) == "plugin"}
         merged.update(_SCOPED_SOURCES.get(hermes_home_key(), {}))
         return list(merged.values())
 
@@ -239,10 +220,7 @@ def _ensure_builtin_sources() -> None:
                 module = __import__(module_name, fromlist=[class_name])
                 register_source(getattr(module, class_name)(), builtin=True)
             except Exception:  # noqa: BLE001 — never block startup
-                logger.warning(
-                    "Failed to register bundled %s secret source", label,
-                    exc_info=True,
-                )
+                logger.warning("Failed to register bundled %s secret source", label, exc_info=True)
 
 
 def _reset_registry_for_tests() -> None:
@@ -254,9 +232,7 @@ def _reset_registry_for_tests() -> None:
         _BUILTINS_LOADED = False
 
 
-# ---------------------------------------------------------------------------
-# Orchestrated apply
-# ---------------------------------------------------------------------------
+# --- Orchestrated apply -----------------------------------------------------
 
 
 def _fetch_with_timeout(
@@ -266,7 +242,7 @@ def _fetch_with_timeout(
     """Run source.fetch() under a wall-clock budget; never raises.
 
     A daemon worker thread enforces the budget: a source that blows it is
-    reported as TIMEOUT and its eventual result discarded.  The thread may
+    reported as TIMEOUT and its eventual result discarded. The thread may
     linger until process exit — acceptable for a startup-only path, and far
     better than an unbounded hang on every ``hermes`` invocation.
     """
@@ -294,16 +270,13 @@ def _fetch_with_timeout(
                 ErrorKind.TIMEOUT,
             )
         except Exception as exc:  # noqa: BLE001 — contract violation, contain it
-            return FetchResult().fail(
-                f"fetch raised {type(exc).__name__}: {exc}", ErrorKind.INTERNAL
-            )
+            return FetchResult().fail(f"fetch raised {type(exc).__name__}: {exc}", ErrorKind.INTERNAL)
     finally:
         executor.shutdown(wait=False)
 
     if not isinstance(result, FetchResult):
         return FetchResult().fail(
-            f"fetch returned {type(result).__name__} instead of FetchResult",
-            ErrorKind.INTERNAL,
+            f"fetch returned {type(result).__name__} instead of FetchResult", ErrorKind.INTERNAL,
         )
     return result
 
@@ -313,9 +286,7 @@ def _section(secrets_cfg: dict, name: str) -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
-def _ordered_enabled_sources(
-    secrets_cfg: dict, *, scope: Optional[str] = None
-) -> List[SecretSource]:
+def _ordered_enabled_sources(secrets_cfg: dict, *, scope: Optional[str] = None) -> List[SecretSource]:
     """Which sources run, in which order: ``secrets.sources`` first, then the
     rest in registration order; enabled = the source's own ``is_enabled``.
     Mapped-vs-bulk precedence is applied on top by :func:`apply_all`."""
@@ -341,8 +312,7 @@ def _ordered_enabled_sources(
             if source.is_enabled(_section(secrets_cfg, name)):
                 enabled.append(source)
         except Exception:  # noqa: BLE001
-            logger.warning("Secret source '%s' is_enabled() raised; skipping",
-                           name, exc_info=True)
+            logger.warning("Secret source '%s' is_enabled() raised; skipping", name, exc_info=True)
     return enabled
 
 
@@ -372,9 +342,7 @@ def _profile_alias_target(var: str, profile: str) -> Optional[str]:
     if not var.endswith(suffix):
         return None
     alias = var[: -len(suffix)]
-    if not alias or not is_valid_env_name(alias):
-        return None
-    if not any(alias.endswith(s) for s in _ALIAS_SUFFIXES):
+    if not alias or not is_valid_env_name(alias) or not alias.endswith(_ALIAS_SUFFIXES):
         return None
     return alias
 
@@ -407,8 +375,7 @@ class _Applier:
             if (alias and alias not in supplied_directly and alias not in self.claimed
                     and self._try_apply(sr, source, override, alias, value)):
                 result.warnings.append(
-                    f"applied profile-scoped {var} as {alias} "
-                    f"(active profile {profile!r})"
+                    f"applied profile-scoped {var} as {alias} (active profile {profile!r})"
                 )
 
     def _try_apply(self, sr: SourceReport, source: SecretSource, override: bool,
@@ -460,7 +427,7 @@ def apply_all(secrets_cfg: dict, home_path: Path,
 
     Profile aliasing: under a named profile an applied ``FOO_<PROFILE>``
     (credential-shaped suffixes only) also hydrates canonical ``FOO`` so
-    adapters reading fixed env names see the profile's value.  The alias obeys
+    adapters reading fixed env names see the profile's value. The alias obeys
     the same guards and is disabled with ``secrets.profile_alias: false``.
     """
     env = environ if environ is not None else os.environ
@@ -481,7 +448,6 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     ordered = ([s for s in enabled if s.shape == "mapped"]
                + [s for s in enabled if s.shape == "bulk"])
 
-    # Fetch phase.
     fetches: List[tuple[SecretSource, dict, FetchResult]] = []
     protected: Dict[str, str] = {}  # var → source that protects it
     for source in ordered:
@@ -500,5 +466,4 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     applier = _Applier(env, report, protected, preserve)
     for source, cfg, result in fetches:
         applier.apply_source(source, cfg, result, profile, supplied_directly)
-
     return report
