@@ -41,16 +41,9 @@ def _handle_unreachable_endpoint(endpoint: str, message: str, select, cancelled,
         title = "  OpenViking server unhealthy" if is_local else "  OpenViking server unreachable"
         return _retry_or_cancel_manual_setup(select, title, message, cancelled)
     _say(message)
-    choice = select(
-        "  Local OpenViking server is down",
-        [
-            ("Start local OpenViking", "run openviking-server and retry"),
-            ("Retry URL", "enter the server URL again"),
-            _CANCEL_OPTION,
-        ],
-        default=0,
-        cancel_returns=cancelled,
-    )
+    choice = select("  Local OpenViking server is down",
+                    [("Start local OpenViking", "run openviking-server and retry"), ("Retry URL", "enter the server URL again"), _CANCEL_OPTION],
+                    default=0, cancel_returns=cancelled)
     if choice == 1:
         return False
     if choice != 0:
@@ -91,16 +84,9 @@ def _confirm_replace_existing_profile(path: Path, values: dict, select, cancelle
         existing_data = {}
     if existing_data == ov._ovcli_data_from_connection_values(values):
         return True
-    choice = select(
-        "  OpenViking profile already exists",
-        [
-            ("Choose another name", "leave the existing profile unchanged"),
-            ("Replace profile", "overwrite this saved OpenViking profile"),
-            _CANCEL_OPTION,
-        ],
-        default=0,
-        cancel_returns=cancelled,
-    )
+    choice = select("  OpenViking profile already exists",
+                    [("Choose another name", "leave the existing profile unchanged"), ("Replace profile", "overwrite this saved OpenViking profile"), _CANCEL_OPTION],
+                    default=0, cancel_returns=cancelled)
     return {1: True, 0: False}.get(choice, _SETUP_CANCELLED)
 
 
@@ -119,43 +105,21 @@ def _prompt_endpoint(prompt, select, cancelled) -> str | object:
         if reachable:
             _say("OpenViking server is reachable.")
             return endpoint
-        retry = _handle_unreachable_endpoint(
-            endpoint, message, select, cancelled,
-            allow_local_autostart=not (message or "").startswith(ov._OPENVIKING_RESPONDED_FAILURE_PREFIX),
-        )
+        retry = _handle_unreachable_endpoint(endpoint, message, select, cancelled,
+                                             allow_local_autostart=not (message or "").startswith(ov._OPENVIKING_RESPONDED_FAILURE_PREFIX))
         if retry is True:
             return endpoint
         if retry is _SETUP_CANCELLED:
             return _SETUP_CANCELLED
 
 
-_KEY_ROLES = {"user": "User API key", "root": "Root API key"}
-# When the entered key turns out to have the other role: (note, menu title, switch option).
+# When the entered key turns out to have the other role: (note, menu title, switch option, re-enter label).
 _REROUTE = {
     "root": ("That key is valid, but it is a user API key.", "  OpenViking key is a user key",
-             ("Use as User API key", "server derives account/user automatically")),
+             ("Use as User API key", "server derives account/user automatically"), "Root API key"),
     "user": ("That key is valid, but it has root access.", "  OpenViking user API key is root key",
-             ("Configure as Root API key", "provide account and user IDs")),
+             ("Configure as Root API key", "provide account and user IDs"), "User API key"),
 }
-_OTHER_ROLE = {"root": "user", "user": "root"}
-
-
-def _reroute_key_type(select, cancelled, current: str):
-    """Offer to use the key as the other role (prefill), re-enter, or cancel.
-    -> (api_key_type, prefill) or _SETUP_CANCELLED."""
-    note, title, switch_option = _REROUTE[current]
-    _say(note)
-    route_choice = select(
-        title,
-        [switch_option, (f"Re-enter {_KEY_ROLES[current]}", f"try another {current} key"), _CANCEL_OPTION],
-        default=0,
-        cancel_returns=cancelled,
-    )
-    if route_choice == 0:
-        return _OTHER_ROLE[current], True
-    if route_choice == 1:
-        return current, False
-    return _SETUP_CANCELLED
 
 
 class _Cancelled(Exception):
@@ -184,12 +148,16 @@ def _prompt_manual_connection_values(prompt, select, cancelled, *, service: bool
             raise _Cancelled
 
     def reroute(current: str) -> None:
+        """Key has the other role: offer to use it as such (prefilled), re-enter, or cancel."""
         nonlocal api_key_type, prefilled_api_key
-        routed = _reroute_key_type(select, cancelled, current)
-        if routed is _SETUP_CANCELLED:
+        note, title, switch_option, role_label = _REROUTE[current]
+        _say(note)
+        route_choice = select(title, [switch_option, (f"Re-enter {role_label}", f"try another {current} key"), _CANCEL_OPTION],
+                              default=0, cancel_returns=cancelled)
+        if route_choice not in (0, 1):
             raise _Cancelled
-        api_key_type, prefill = routed
-        prefilled_api_key = values["api_key"] if prefill else ""
+        api_key_type = ("user" if current == "root" else "root") if route_choice == 0 else current
+        prefilled_api_key = values["api_key"] if route_choice == 0 else ""
 
     try:
         while True:
@@ -262,18 +230,14 @@ def _prompt_manual_connection_values(prompt, select, cancelled, *, service: bool
         return _SETUP_CANCELLED
 
 
-def _set_openviking_provider(config: dict, provider_config: dict) -> None:
-    config["memory"]["provider"] = "openviking"
-    config["memory"]["openviking"] = provider_config
-
-
 def _link_ovcli_profile(*, config: dict, provider_config: dict, env_path: Path, ovcli_path: Path) -> None:
     ov = _ov()
     for key in ("endpoint", "api_key", "root_api_key", "account", "user", "agent", "api_key_type"):
         provider_config.pop(key, None)
     provider_config["use_ovcli_config"] = True
     ov._remember_ovcli_path(provider_config, ovcli_path)
-    _set_openviking_provider(config, provider_config)
+    config["memory"]["provider"] = "openviking"
+    config["memory"]["openviking"] = provider_config
     ov._write_env_vars(env_path, {}, remove_keys=ov._OPENVIKING_ENV_KEYS)
     for key in ov._OPENVIKING_ENV_KEYS:
         os.environ.pop(key, None)
@@ -286,7 +250,8 @@ def _save_hermes_only_config(*, config: dict, provider_config: dict, env_path: P
     # A newly selected connection must not inherit the previous YAML peer; a
     # non-empty peer, if supplied, is saved with the connection below.
     provider_config.pop("agent", None)
-    _set_openviking_provider(config, provider_config)
+    config["memory"]["provider"] = "openviking"
+    config["memory"]["openviking"] = provider_config
     # Publish the file writer's cleaned values to the current process as well.
     writes = {key: ov._env_line_safe(value) for key, value in ov._env_writes_from_connection_values(values).items()}
     ov._write_env_vars(env_path, writes, remove_keys=ov._OPENVIKING_ENV_KEYS)
@@ -297,12 +262,6 @@ def _save_hermes_only_config(*, config: dict, provider_config: dict, env_path: P
 
 def _profile_display_name(profile) -> str:
     return {"env": _ov()._OVCLI_CONFIG_ENV, "active": "ovcli.conf"}.get(profile.source, profile.name)
-
-
-def _profile_description(profile) -> str:
-    ov = _ov()
-    endpoint = ov._clean_config_value(profile.values.get("endpoint")) or ov._DEFAULT_ENDPOINT
-    return f"{endpoint} ({profile.path})"
 
 
 def _print_openviking_ready(message: str, path: Optional[Path] = None) -> None:
@@ -318,9 +277,8 @@ def _run_existing_profile_setup(*, profiles: list, select, cancelled, config: di
     while True:
         choice = select(
             "  OpenViking profile",
-            [(_profile_display_name(profile), _profile_description(profile)) for profile in profiles],
-            default=0,
-            cancel_returns=cancelled,
+            [(_profile_display_name(p), f"{ov._clean_config_value(p.values.get('endpoint')) or ov._DEFAULT_ENDPOINT} ({p.path})") for p in profiles],
+            default=0, cancel_returns=cancelled,
         )
         if choice == cancelled or choice < 0 or choice >= len(profiles):
             return _SETUP_CANCELLED
@@ -337,16 +295,9 @@ def _run_existing_profile_setup(*, profiles: list, select, cancelled, config: di
             _say(message)
             if attempt == 1:
                 break  # second failure returns to the profile picker
-            retry = select(
-                "  OpenViking profile validation failed",
-                [
-                    ("Choose another profile", "select a different OpenViking profile"),
-                    ("Retry validation", "try this profile again"),
-                    _CANCEL_OPTION,
-                ],
-                default=0,
-                cancel_returns=cancelled,
-            )
+            retry = select("  OpenViking profile validation failed",
+                           [("Choose another profile", "select a different OpenViking profile"), ("Retry validation", "try this profile again"), _CANCEL_OPTION],
+                           default=0, cancel_returns=cancelled)
             if retry == 0:
                 break
             if retry != 1:
@@ -370,15 +321,10 @@ def _mirror_manual_config_to_openviking_store(*, prompt, select, cancelled, valu
 
 
 def _run_create_profile_setup(*, prompt, select, cancelled, config: dict, provider_config: dict, env_path: Path) -> bool | object:
-    source_choice = select(
-        "  OpenViking connection",
-        [
-            ("OpenViking Service (VolcEngine Cloud)", "use the managed OpenViking endpoint"),
-            ("Custom", "use a local, VPS, or self-hosted OpenViking server"),
-        ],
-        default=0,
-        cancel_returns=cancelled,
-    )
+    source_choice = select("  OpenViking connection",
+                           [("OpenViking Service (VolcEngine Cloud)", "use the managed OpenViking endpoint"),
+                            ("Custom", "use a local, VPS, or self-hosted OpenViking server")],
+                           default=0, cancel_returns=cancelled)
     if source_choice == cancelled:
         return _SETUP_CANCELLED
 
@@ -388,15 +334,10 @@ def _run_create_profile_setup(*, prompt, select, cancelled, config: dict, provid
     if values is None:
         return False
 
-    save_choice = select(
-        "  Save OpenViking config",
-        [
-            ("Keep in Hermes only", "write values only to Hermes .env"),
-            ("Mirror to OpenViking store", "write ~/.openviking/ovcli.conf.<name> and link it"),
-        ],
-        default=1,
-        cancel_returns=cancelled,
-    )
+    save_choice = select("  Save OpenViking config",
+                         [("Keep in Hermes only", "write values only to Hermes .env"),
+                          ("Mirror to OpenViking store", "write ~/.openviking/ovcli.conf.<name> and link it")],
+                         default=1, cancel_returns=cancelled)
     if save_choice == cancelled:
         return _SETUP_CANCELLED
 
@@ -422,23 +363,17 @@ def run_setup(hermes_home: str, config: dict) -> None:
     if not isinstance(config.get("memory"), dict):
         config["memory"] = {}
     provider_config = config["memory"].get("openviking", {})
-    if not isinstance(provider_config, dict):
-        provider_config = {}
+    provider_config = provider_config if isinstance(provider_config, dict) else {}
     common = dict(select=_curses_select, cancelled=_CANCELLED, config=config, provider_config=provider_config, env_path=env_path)
 
     print("\n  OpenViking memory setup\n")
 
     profiles = _ov()._discover_ovcli_profiles()
     if profiles:
-        choice = _curses_select(
-            "  OpenViking config source",
-            [
-                ("Use existing OpenViking profile", "choose from detected ovcli.conf profiles"),
-                ("Create new OpenViking profile", "enter a new URL/API key"),
-            ],
-            default=0,
-            cancel_returns=_CANCELLED,
-        )
+        choice = _curses_select("  OpenViking config source",
+                                [("Use existing OpenViking profile", "choose from detected ovcli.conf profiles"),
+                                 ("Create new OpenViking profile", "enter a new URL/API key")],
+                                default=0, cancel_returns=_CANCELLED)
         if choice == _CANCELLED:
             _print_cancelled_setup()
             return
