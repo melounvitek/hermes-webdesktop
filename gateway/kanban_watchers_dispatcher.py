@@ -11,7 +11,7 @@ import contextlib
 import os
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 from gateway.kanban_watchers_common import _board_slugs, _positive_int_setting, logger
@@ -186,18 +186,12 @@ class _KanbanDispatcher:
         fingerprint = self.board_db_fingerprint(slug)
         if not self._quarantine_lifted(slug, fingerprint):
             return None
-        s = self.settings
+        kwargs = {k: v for k, v in asdict(self.settings).items() if k != "interval"}
         try:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
             conn = self.kb.connect(board=slug)
-            return self.kb.dispatch_once(
-                conn, board=slug, max_spawn=s.max_spawn, max_in_progress=s.max_in_progress,
-                failure_limit=s.failure_limit, stale_timeout_seconds=s.stale_timeout_seconds,
-                default_assignee=s.default_assignee,
-                max_in_progress_per_profile=s.max_in_progress_per_profile,
-                reconcile_orphans=s.reconcile_orphans,
-            )
+            return self.kb.dispatch_once(conn, board=slug, **kwargs)
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())

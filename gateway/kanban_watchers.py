@@ -144,31 +144,21 @@ class GatewayKanbanWatchersMixin:
         deduplicated, missing files are skipped (may be mentioned for
         reference only), and upload errors are logged, never raised.
         """
-        candidates: list[str] = []
-        seen: set[str] = set()
-
-        def _add(path: str) -> None:
-            if not path:
-                return
-            expanded = os.path.expanduser(path)
-            if expanded in seen or not os.path.isfile(expanded):
-                return
-            seen.add(expanded)
-            candidates.append(expanded)
-
+        raw_paths: list[str] = []
         if isinstance(event_payload, dict):
             raw = event_payload.get("artifacts")
             if isinstance(raw, (list, tuple)):
-                for item in raw:
-                    if isinstance(item, str):
-                        _add(item)
+                raw_paths += [item for item in raw if isinstance(item, str)]
             summary = event_payload.get("summary")
             if isinstance(summary, str) and summary:
-                for p in adapter.extract_local_files(summary)[0]:
-                    _add(p)
+                raw_paths += adapter.extract_local_files(summary)[0]
         if task is not None and getattr(task, "result", None):
-            for p in adapter.extract_local_files(str(task.result))[0]:
-                _add(p)
+            raw_paths += adapter.extract_local_files(str(task.result))[0]
+        candidates: list[str] = []
+        for path in raw_paths:
+            expanded = os.path.expanduser(path) if path else ""
+            if expanded and expanded not in candidates and os.path.isfile(expanded):
+                candidates.append(expanded)
         if not candidates:
             return
 
