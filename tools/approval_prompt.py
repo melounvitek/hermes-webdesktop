@@ -10,8 +10,7 @@ import logging
 import os
 import sys
 import threading
-import time
-from tools.approval_human_wait import human_wait_window
+from tools.approval_human_wait import activity_heartbeat, human_wait_window
 from tools.interrupt import is_interrupted
 
 logger = logging.getLogger("tools.approval")
@@ -43,10 +42,8 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
     # bounded by the approval deadline): record it as human-wait time so the
     # concurrent batch deadline excludes it.
     with human_wait_window():
-        return _prompt_dangerous_approval_inner(
-            command, description, timeout_seconds, allow_permanent,
-            approval_callback, allow_session=allow_session, smart_denied=smart_denied,
-        )
+        return _ask_human(command, description, timeout_seconds, allow_permanent,
+                          approval_callback, allow_session, smart_denied)
 
 
 _CLI_CHOICE_ALIASES = {
@@ -79,9 +76,8 @@ def _read_choice(prompt: str, timeout_seconds: int) -> str | None:
     return None if thread.is_alive() else result["choice"]
 
 
-def _prompt_dangerous_approval_inner(command: str, description: str, timeout_seconds: int,
-                                     allow_permanent: bool = True, approval_callback=None,
-                                     *, allow_session: bool = True, smart_denied: bool = False) -> str:
+def _ask_human(command: str, description: str, timeout_seconds: int, allow_permanent: bool,
+               approval_callback, allow_session: bool, smart_denied: bool) -> str:
     # Redact before any user-visible rendering; the original `command` still
     # executes after approval. Same redactor as memory/log sanitization so
     # tokens mask consistently across surfaces.
@@ -93,11 +89,10 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
 
     if approval_callback is not None:
         try:
-            callback_kwargs = {"allow_permanent": allow_permanent}
-            if not allow_session:
-                callback_kwargs["allow_session"] = False
-            if smart_denied:
-                callback_kwargs["smart_denied"] = True
+            # Non-default scopes only: legacy callbacks lack the newer keywords.
+            callback_kwargs = {"allow_permanent": allow_permanent,
+                               **({"allow_session": False} if not allow_session else {}),
+                               **({"smart_denied": True} if smart_denied else {})}
             return approval_callback(display_command, display_description, **callback_kwargs)
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
@@ -111,11 +106,9 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
     try:
         from prompt_toolkit.application.current import get_app_or_none
         if get_app_or_none() is not None:
-            logger.warning(
-                "Dangerous-command approval requested on a thread with no "
-                "approval callback while prompt_toolkit is active; denying "
-                "to avoid stdin deadlock. command=%r description=%r", command, description,
-            )
+            logger.warning("Dangerous-command approval requested on a thread with no "
+                           "approval callback while prompt_toolkit is active; denying "
+                           "to avoid stdin deadlock. command=%r description=%r", command, description)
             return "deny"
     except Exception:
         pass  # prompt_toolkit absent or detection failed: legacy input() path is safe
@@ -124,11 +117,8 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
     try:
         from agent.i18n import t
         # (prompt key, menu key) by menu shape: once/deny, full, or no [a]lways.
-        prompt_key, menu_key = (
-            ("approval.prompt_smart_deny", "approval.choose_smart_deny") if once_only
-            else ("approval.prompt_long", "approval.choose_long") if allow_permanent
-            else ("approval.prompt_short", "approval.choose_short")
-        )
+        shape = "smart_deny" if once_only else "long" if allow_permanent else "short"
+        prompt_key, menu_key = f"approval.prompt_{shape}", f"approval.choose_{shape}"
         print(f"\n  {t('approval.dangerous_header', description=display_description)}"
               f"\n      {display_command}\n\n{t(menu_key)}\n")
         sys.stdout.flush()
@@ -137,10 +127,9 @@ def _prompt_dangerous_approval_inner(command: str, description: str, timeout_sec
             print("\n" + t("approval.timeout"))
             return "timeout"  # distinct from deny: the user never answered
         if once_only:
-            decision = {
-                **dict.fromkeys(t("approval.smart_deny_once_inputs").split(","), "once"),
-                **dict.fromkeys(t("approval.smart_deny_deny_inputs").split(","), "deny"),
-            }.get(choice, "deny")
+            decision = {**dict.fromkeys(t("approval.smart_deny_once_inputs").split(","), "once"),
+                        **dict.fromkeys(t("approval.smart_deny_deny_inputs").split(","), "deny"),
+                        }.get(choice, "deny")
         else:
             decision = _CLI_CHOICE_ALIASES.get(choice, "deny")
             if decision == "always" and not allow_permanent:
@@ -217,21 +206,11 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
         request_id=request.request_id, request_digest=request.digest,
     )
     _a._fire_approval_hook("pre_approval_request", **hook_kwargs)
-    try:
-        from tools.environments.base import touch_activity_if_due
-    except Exception:  # pragma: no cover - minimal tool-only environments
-        touch_activity_if_due = None
-    now = time.monotonic()
-    activity_state = {"last_touch": now, "start": now}
-
-    def _poll() -> None:
-        if touch_activity_if_due is not None:
-            touch_activity_if_due(activity_state, "waiting for plugin approval transport")
-
     with human_wait_window(session_key):
         result = invoke_approval_transport(
             registered.present, request, timeout_seconds=timeout_seconds,
-            on_poll=_poll, is_interrupted=is_interrupted,
+            on_poll=activity_heartbeat("waiting for plugin approval transport"),
+            is_interrupted=is_interrupted,
         )
     hook_choice = result.choice if result.failure is None else f"transport_{result.failure}"
     _a._fire_approval_hook("post_approval_response", **hook_kwargs, choice=hook_choice)
@@ -291,10 +270,11 @@ def request_elicitation_consent(message: str, description: str, *,
             logger.warning("Elicitation requested in gateway session %s but no "
                            "notify_cb is registered — failing closed", session_key)
             return "decline"
-        approval_data = {"command": message, "description": description,
-                         "pattern_key": "mcp_elicitation", "pattern_keys": ["mcp_elicitation"]}
         try:
-            decision = _a._await_gateway_decision(session_key, notify_cb, approval_data, surface=surface)
+            decision = _a._await_gateway_decision(
+                session_key, notify_cb, {"command": message, "description": description,
+                                         "pattern_key": "mcp_elicitation",
+                                         "pattern_keys": ["mcp_elicitation"]}, surface=surface)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"
@@ -306,9 +286,8 @@ def request_elicitation_consent(message: str, description: str, *,
 
     # allow_permanent=False: elicitation is a per-call confirmation — no pattern to remember.
     try:
-        choice = _a.prompt_dangerous_approval(
-            message, description, timeout_seconds=timeout_seconds, allow_permanent=False,
-        )
+        choice = _a.prompt_dangerous_approval(message, description, timeout_seconds=timeout_seconds,
+                                              allow_permanent=False)
     except Exception as exc:
         logger.error("Elicitation CLI prompt failed: %s", exc, exc_info=True)
         return "decline"

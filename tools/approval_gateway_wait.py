@@ -16,6 +16,7 @@ import time
 import uuid
 
 from tools.interrupt import is_interrupted
+from tools.approval_human_wait import activity_heartbeat
 
 logger = logging.getLogger("tools.approval")
 
@@ -49,14 +50,8 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     dedicated interrupt-cause channel, not string matching."""
     from tools.approval import _get_approval_timeout, human_wait_window
 
-    timeout = _get_approval_timeout()
-    try:
-        from tools.environments.base import touch_activity_if_due
-    except Exception:  # pragma: no cover
-        touch_activity_if_due = None
-    now = time.monotonic()
-    deadline = now + max(timeout, 0)
-    activity_state = {"last_touch": now, "start": now}
+    deadline = time.monotonic() + max(_get_approval_timeout(), 0)
+    heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
             if is_interrupted():
@@ -67,8 +62,7 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
                 return "timeout"
             if event.wait(timeout=min(1.0, remaining)):
                 return "set"
-            if touch_activity_if_due is not None:
-                touch_activity_if_due(activity_state, "waiting for user approval")
+            heartbeat()
 
 
 def _finish(payload: dict, resolved: bool, choice: str | None, reason, **extra) -> dict:

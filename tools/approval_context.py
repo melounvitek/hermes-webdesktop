@@ -50,9 +50,7 @@ def reset_hermes_interactive_context(token: contextvars.Token) -> None:
 def _is_interactive_cli() -> bool:
     """True for an interactive CLI/ACP session (contextvar first, env fallback)."""
     ctx_val = _hermes_interactive_ctx.get()
-    if ctx_val is not None:
-        return is_truthy_value(ctx_val)
-    return env_var_enabled("HERMES_INTERACTIVE")
+    return is_truthy_value(ctx_val) if ctx_val is not None else env_var_enabled("HERMES_INTERACTIVE")
 
 
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
@@ -90,9 +88,8 @@ def reset_current_session_key(token: contextvars.Token[str]) -> None:
 _Tokens = tuple[contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]]
 
 
-def set_current_observability_context(
-    *, turn_id: str = "", tool_call_id: str = "", session_id: str = "",
-) -> _Tokens:
+def set_current_observability_context(*, turn_id: str = "", tool_call_id: str = "",
+                                      session_id: str = "") -> _Tokens:
     """Bind active tool correlation IDs to approval hooks."""
     return (_approval_turn_id.set(turn_id or ""), _approval_tool_call_id.set(tool_call_id or ""),
             _approval_session_id.set(session_id or ""))
@@ -108,8 +105,7 @@ def reset_current_observability_context(tokens: _Tokens) -> None:
 
 def get_current_session_key(default: str = "default") -> str:
     """Return the active session key: approval contextvar → session_context → os.environ."""
-    session_key = _approval_session_key.get()
-    if session_key:
+    if session_key := _approval_session_key.get():
         return session_key
     from gateway.session_context import get_session_env
     return get_session_env("HERMES_SESSION_KEY", default)
@@ -229,8 +225,7 @@ def _get_approval_mode() -> str:
     from tools import approval as _a
     try:
         from gateway.hosted_room_execution_policy import current_room_execution_policy
-        room_policy = current_room_execution_policy()
-        if room_policy is not None:
+        if (room_policy := current_room_execution_policy()) is not None:
             return room_policy.approval_mode
     except Exception:
         pass
@@ -253,13 +248,11 @@ def _get_approval_timeout() -> int:
         from agent.deadline import MAX_SAFE_TIMEOUT_S
         safe_cap = int(MAX_SAFE_TIMEOUT_S)
     except Exception:
-        # Fail CLOSED: the raw value would re-open the overflow this prevents.
-        safe_cap = 365 * 24 * 3600
+        safe_cap = 365 * 24 * 3600  # fail CLOSED: the raw value would re-open the overflow
     if raw > safe_cap:
         logger.warning("approvals.timeout=%s exceeds the platform-safe maximum; "
                        "clamping to %ss", raw, safe_cap)
-        return safe_cap
-    return raw
+    return min(raw, safe_cap)
 
 
 def _binary_approval_mode(key: str) -> str:
@@ -294,13 +287,11 @@ def _tirith_fail_open() -> bool:
     False means the operator opted into fail-closed: an un-importable scanner
     must not silently grant access."""
     try:
-        from hermes_cli.config import load_config_readonly as _load_cfg
-        _sec = (_load_cfg() or {}).get("security", {}) or {}
-        if _sec.get("tirith_enabled", True):
-            return bool(_sec.get("tirith_fail_open", True))
+        from hermes_cli.config import load_config_readonly
+        _sec = (load_config_readonly() or {}).get("security", {}) or {}
+        return bool(_sec.get("tirith_fail_open", True)) if _sec.get("tirith_enabled", True) else True
     except Exception:
-        pass
-    return True
+        return True
 
 
 def _get_approval_transport_config() -> tuple[str, str | None]:

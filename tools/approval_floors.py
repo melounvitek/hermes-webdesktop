@@ -7,6 +7,7 @@ allowlist runs after. Session state stays in ``tools.approval`` and is read
 through it at call time so tests that rebind it keep working.
 """
 
+import contextlib
 import fnmatch
 import logging
 import re
@@ -42,17 +43,12 @@ def _match_user_deny_rule(command: str) -> str | None:
 
 def _user_deny_block_result(pattern: str) -> dict:
     """Build the standard block result for an ``approvals.deny`` match."""
-    return {
-        "approved": False,
-        "user_deny": True,
-        "message": (
-            f"BLOCKED: this command matches the user-defined deny rule "
-            f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
-            "executed via the agent — not even with --yolo, /yolo, or "
-            "approvals.mode=off. Do NOT retry or rephrase this command; "
-            "the user has explicitly forbidden it."
-        ),
-    }
+    return {"approved": False, "user_deny": True, "message": (
+        f"BLOCKED: this command matches the user-defined deny rule "
+        f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
+        "executed via the agent — not even with --yolo, /yolo, or "
+        "approvals.mode=off. Do NOT retry or rephrase this command; "
+        "the user has explicitly forbidden it.")}
 
 
 def _save_blocked_payload(command: str) -> str | None:
@@ -70,11 +66,9 @@ def _save_blocked_payload(command: str) -> str | None:
         # Opportunistic cleanup: blocked payloads older than 7 days.
         cutoff = time.time() - 7 * 86400
         for old in script_dir.glob("blocked-*.sh"):
-            try:
+            with contextlib.suppress(OSError):
                 if old.stat().st_mtime < cutoff:
                     old.unlink()
-            except OSError:
-                pass
         path = script_dir / f"blocked-{int(time.time())}-{uuid.uuid4().hex[:8]}.sh"
         path.write_text(
             "#!/bin/bash\n"
@@ -130,16 +124,12 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
 
 def _sudo_stdin_block_result(description: str) -> dict:
     """Build the standard block result for sudo stdin guard."""
-    return {
-        "approved": False,
-        "message": (
-            f"BLOCKED: {description}. "
-            "Do not pipe passwords to 'sudo -S' — this is a brute-force "
-            "attack vector. Set SUDO_PASSWORD in your .env file if the "
-            "agent needs passwordless sudo, or run the sudo command "
-            "manually in your own terminal."
-        ),
-    }
+    return {"approved": False, "message": (
+        f"BLOCKED: {description}. "
+        "Do not pipe passwords to 'sudo -S' — this is a brute-force "
+        "attack vector. Set SUDO_PASSWORD in your .env file if the "
+        "agent needs passwordless sudo, or run the sudo command "
+        "manually in your own terminal.")}
 
 
 # Shell control characters that make a command compound when they appear OUTSIDE
@@ -209,10 +199,7 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
         patterns = tuple(_a._permanent_approved)
     for pattern in patterns:
         pattern = pattern.strip() if isinstance(pattern, str) else ""
-        if not pattern:
-            continue
-        if command == pattern:
-            return True
-        if any(ch in pattern for ch in "*?[") and fnmatch.fnmatchcase(command, pattern):
+        if pattern and (command == pattern or (any(ch in pattern for ch in "*?[")
+                                               and fnmatch.fnmatchcase(command, pattern))):
             return True
     return False

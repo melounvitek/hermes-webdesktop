@@ -82,6 +82,19 @@ def _resolve_key(session_key: str | None) -> str:
     return get_current_session_key()
 
 
+def activity_heartbeat(label: str):
+    """Callable that pings the agent's inactivity tracker (at most every ~10s)
+    while a human wait is parked, so the gateway watchdog does not kill the agent
+    while the user is still answering. No-op in minimal tool-only environments."""
+    try:
+        from tools.environments.base import touch_activity_if_due
+    except Exception:  # pragma: no cover - minimal tool-only environments
+        return lambda: None
+    now = time.monotonic()
+    state = {"last_touch": now, "start": now}
+    return lambda: touch_activity_if_due(state, label)
+
+
 @contextlib.contextmanager
 def human_wait_window(session_key: str | None = None):
     """Mark the enclosed block as time spent blocked on a human prompt. Wrap ONLY
