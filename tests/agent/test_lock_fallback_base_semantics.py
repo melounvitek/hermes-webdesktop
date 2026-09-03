@@ -208,3 +208,12 @@ def _duck(outer=None, inner=None, *, has_outer=True, has_inner=True):
 )
 def test_is_openai_client_closed_truth_table(client, expected):
     assert ClientLifecycleMixin._is_openai_client_closed(client) is expected
+
+
+def test_cached_agent_for_lockless_fallback_only_when_requested():
+    # Manual codex /compress historically read the cache lock-free when the lock was absent.
+    runner = _Runner()
+    runner._agent_cache = {"k": ("AGENT", "sig")}
+    runner._agent_cache_lock = None
+    assert GatewaySlashCommandsMixin._cached_agent_for(runner, "k") is None
+    assert GatewaySlashCommandsMixin._cached_agent_for(runner, "k", lockless_fallback=True) == "AGENT"

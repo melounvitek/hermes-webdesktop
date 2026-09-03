@@ -167,17 +167,21 @@ class GatewaySlashCommandsMixin(
     async_session_store: AsyncSessionStore
 
     # ------------------------------------------------------------------ shared helpers
-    def _cached_agent_for(self, session_key: str):
+    def _cached_agent_for(self, session_key: str, *, lockless_fallback: bool = False):
         """Peek the cached AIAgent for *session_key* without evicting it, or None. Entries are
-        ``(agent, signature, ...)`` tuples (bare agents from test doubles accepted). Every historical
-        caller read the cache ONLY under ``_agent_cache_lock``; fixtures that skip ``__init__`` (no lock
-        or no cache) get None rather than an unlocked read."""
+        ``(agent, signature, ...)`` tuples (bare agents from test doubles accepted). Historical callers
+        read the cache ONLY under ``_agent_cache_lock`` and got None when a fixture that skipped
+        ``__init__`` had no lock; the manual codex ``/compress`` path was the one exception that read
+        lock-free (``lockless_fallback=True``)."""
         cache = getattr(self, "_agent_cache", None)
         lock = getattr(self, "_agent_cache_lock", None)
-        if cache is None or lock is None:
+        if cache is None or (lock is None and not lockless_fallback):
             return None
         try:
-            with lock:
+            if lock:
+                with lock:
+                    entry = cache.get(session_key)
+            else:
                 entry = cache.get(session_key)
         except Exception:
             return None

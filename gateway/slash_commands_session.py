@@ -470,7 +470,7 @@ class GatewaySessionCommandsMixin:
         """
         from gateway.run import _AGENT_PENDING_SENTINEL
 
-        agent = self._cached_agent_for(session_key)
+        agent = self._cached_agent_for(session_key, lockless_fallback=True)
         if agent is None or agent is _AGENT_PENDING_SENTINEL or getattr(agent, "_codex_session", None) is None:
             return (
                 "🗜️ Nothing to compact: this session runs on the Codex app-server runtime, whose "
