@@ -127,16 +127,18 @@ def _describe_content(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return {"omitted": True, "type": "number"}
-    if isinstance(value, bytes):
-        return {"omitted": True, "type": "bytes", "length": len(value)}
-    if isinstance(value, str):
-        return {"omitted": True, "type": "text", "chars": len(value)}
-    if isinstance(value, dict):
-        return {"omitted": True, "type": "object", "keys": [str(k) for k in list(value.keys())[:20]]}
-    if isinstance(value, (list, tuple, set)):
-        return {"omitted": True, "type": "array", "items": len(value)}
-    return {"omitted": True, "type": type(value).__name__}
+        shape = {"type": "number"}
+    elif isinstance(value, bytes):
+        shape = {"type": "bytes", "length": len(value)}
+    elif isinstance(value, str):
+        shape = {"type": "text", "chars": len(value)}
+    elif isinstance(value, dict):
+        shape = {"type": "object", "keys": [str(k) for k in list(value.keys())[:20]]}
+    elif isinstance(value, (list, tuple, set)):
+        shape = {"type": "array", "items": len(value)}
+    else:
+        shape = {"type": type(value).__name__}
+    return {"omitted": True, **shape}
 
 
 def _capture_content(value: Any, *, parse_json_strings: bool = False) -> Any:
@@ -298,9 +300,8 @@ def _truncate_text(value: str, max_chars: int) -> Any:
     # Redact BEFORE truncating so a secret straddling the cut cannot leak.
     if _capture_mode() == "sanitized":
         value = _redact_secrets(value)
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
+    over = len(value) - max_chars
+    return value if over <= 0 else value[:max_chars] + f"... [truncated {over} chars]"
 
 
 def _maybe_parse_json_string(value: str) -> Any:
@@ -344,22 +345,17 @@ def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> 
     if lines:
         normalized["returned_lines"] = {"start": lines[0]["line"], "end": lines[-1]["line"], "count": len(lines)}
         head, tail = _READ_FILE_HEAD_LINES, _READ_FILE_TAIL_LINES
-        if len(lines) <= head + tail:
-            normalized["content_preview"] = {"lines": lines}
-        else:
-            normalized["content_preview"] = {
-                "head": lines[:head],
-                "tail": lines[-tail:],
-                "omitted_line_count": len(lines) - head - tail,
-            }
+        normalized["content_preview"] = {"lines": lines} if len(lines) <= head + tail else {
+            "head": lines[:head], "tail": lines[-tail:], "omitted_line_count": len(lines) - head - tail,
+        }
     elif value.get("content"):
         normalized["content_preview"] = {"text": value.get("content", "")}
 
     normalized.update({key: value[key] for key in _READ_FILE_META_KEYS if key in value})
 
-    base64_content = value.get("base64_content")
-    if isinstance(base64_content, str) and base64_content:
-        normalized["base64_content"] = {"omitted": True, "length": len(base64_content)}
+    b64 = value.get("base64_content")
+    if isinstance(b64, str) and b64:
+        normalized["base64_content"] = {"omitted": True, "length": len(b64)}
     return normalized
 
 
@@ -404,10 +400,8 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
 def _extract_last_user_message(messages: Any) -> Any:
     if not isinstance(messages, list):
         return None
-    for message in reversed(messages):
-        if isinstance(message, dict) and message.get("role") == "user":
-            return {"role": "user", "content": _capture_content(message.get("content"))}
-    return None
+    last = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None)
+    return None if last is None else {"role": "user", "content": _capture_content(last.get("content"))}
 
 
 def _coerce_request_messages(*, request_messages: Any = None, messages: Any = None,
@@ -415,9 +409,7 @@ def _coerce_request_messages(*, request_messages: Any = None, messages: Any = No
     for candidate in (request_messages, messages, conversation_history):
         if isinstance(candidate, list):
             return candidate
-    if user_message is None:
-        return []
-    return [{"role": "user", "content": user_message}]
+    return [] if user_message is None else [{"role": "user", "content": user_message}]
 
 
 def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
@@ -435,9 +427,7 @@ def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
         text = "\n\n".join(parts)
     else:
         return None
-    if not text:
-        return None
-    return {"role": "system", "content": _capture_content(text)}
+    return {"role": "system", "content": _capture_content(text)} if text else None
 
 
 def _messages_for_langfuse_input(*, request_messages: Any = None, messages: Any = None,
@@ -593,10 +583,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
 
     def open_root():
-        ctx = client.start_as_current_observation(
-            trace_context=trace_ctx, name="Hermes turn", as_type="chain",
-            input=trace_input, metadata=metadata, end_on_exit=False,
-        )
+        ctx = client.start_as_current_observation(trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+                                                  input=trace_input, metadata=metadata, end_on_exit=False)
         return ctx, ctx.__enter__()
 
     root_ctx = root_span = None
@@ -623,10 +611,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
                              input_value: Any, metadata: Optional[dict] = None,
                              model: Optional[str] = None, model_parameters: Optional[dict] = None) -> Any:
-    return state.root_span.start_observation(
-        name=name, as_type=as_type, input=input_value, metadata=metadata or {},
-        model=model, model_parameters=model_parameters,
-    )
+    return state.root_span.start_observation(name=name, as_type=as_type, input=input_value, metadata=metadata or {},
+                                             model=model, model_parameters=model_parameters)
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
@@ -645,14 +631,10 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
 
 
 def _end_children(state: TraceState, *, include_subagents: bool = False) -> None:
-    for observation in (*state.generations.values(), *state.tools.values()):
+    pending = [obs for queue in state.pending_tools_by_name.values() for obs in queue]
+    subagents = state.subagents.values() if include_subagents else ()
+    for observation in (*state.generations.values(), *state.tools.values(), *pending, *subagents):
         _end_observation(observation)
-    for queue in state.pending_tools_by_name.values():
-        for observation in queue:
-            _end_observation(observation)
-    if include_subagents:
-        for observation in state.subagents.values():
-            _end_observation(observation)
 
 
 def _exit_root_ctx(state: TraceState) -> None:
@@ -707,10 +689,10 @@ def _finalize_all_traces() -> None:
     for key, state in states:
         try:
             _end_children(state, include_subagents=True)
-            state.root_span.end()
-            _exit_root_ctx(state)
         except Exception as exc:  # pragma: no cover - fail-open
             _debug(f"atexit finalize failed for {key}: {exc}")
+        else:
+            _end_root(state, f"atexit finalize for {key}")
     if states:
         _flush(_get_langfuse())
 
@@ -744,11 +726,7 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
                     getattr(state.root_span, method)(output=final_output)
                 except Exception as exc:
                     _debug(f"{label} failed: {exc}")
-        try:
-            state.root_span.end()
-        except Exception as exc:
-            _debug(f"root end() failed: {exc}")
-        _exit_root_ctx(state)
+        _end_root(state, "root end()")
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
         # Last-chance end so an unexpected error still exports the root.
@@ -781,8 +759,7 @@ def _pop_generation(task_key: str, api_call_count: Any) -> tuple[Optional[TraceS
     """Detach the open generation for one API call. Returns (state, generation); either may be None."""
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
-        generation = state.generations.pop(_request_key(api_call_count), None) if state else None
-    return state, generation
+        return state, state.generations.pop(_request_key(api_call_count), None) if state else None
 
 
 def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:
@@ -991,12 +968,11 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
         if state is None:
             return
         observation = state.tools.pop(tool_call_id, None) if tool_call_id else None
-        if observation is None:
-            queue = state.pending_tools_by_name.get(tool_name)
-            if queue:
-                observation = queue.pop(0)
-                if not queue:
-                    state.pending_tools_by_name.pop(tool_name, None)
+        queue = state.pending_tools_by_name.get(tool_name) if observation is None else None
+        if queue:
+            observation = queue.pop(0)
+            if not queue:
+                state.pending_tools_by_name.pop(tool_name, None)
     if observation is None:
         return
 
@@ -1006,14 +982,12 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     if tool_call_id:
         with _STATE_LOCK:
             state = _TRACE_STATE.get(task_key)
-            if state is not None:
-                for tool_call in reversed(state.turn_tool_calls):
-                    if tool_call.get("id") == tool_call_id:
-                        tool_call["output"] = safe_result_value
-                        function_payload = tool_call.get("function")
-                        if isinstance(function_payload, dict):
-                            function_payload["output"] = safe_result_value
-                        break
+            calls = state.turn_tool_calls if state is not None else []
+            tool_call = next((tc for tc in reversed(calls) if tc.get("id") == tool_call_id), None)
+            if tool_call is not None:
+                tool_call["output"] = safe_result_value
+                if isinstance(tool_call.get("function"), dict):
+                    tool_call["function"]["output"] = safe_result_value
 
     _end_observation(
         observation, output=safe_result_value,
@@ -1137,14 +1111,13 @@ def on_subagent_stop(*, parent_turn_id: str = "", child_session_id: Any = None, 
 def register(ctx) -> None:
     # Both hook-name variants so the plugin works across Hermes versions:
     # *_api_request fire per API call (preferred); *_llm_call once per turn.
-    ctx.register_hook("pre_api_request", on_pre_llm_request)
-    ctx.register_hook("post_api_request", on_post_llm_call)
-    ctx.register_hook("api_request_error", on_api_request_error)
-    ctx.register_hook("pre_llm_call", on_pre_llm_call)
-    ctx.register_hook("post_llm_call", on_post_llm_call)
-    ctx.register_hook("pre_tool_call", on_pre_tool_call)
-    ctx.register_hook("post_tool_call", on_post_tool_call)
-    ctx.register_hook("on_session_finalize", on_session_finalize)
-    ctx.register_hook("on_session_end", on_session_finalize)
-    ctx.register_hook("subagent_start", on_subagent_start)
-    ctx.register_hook("subagent_stop", on_subagent_stop)
+    hooks = (
+        ("pre_api_request", on_pre_llm_request), ("post_api_request", on_post_llm_call),
+        ("api_request_error", on_api_request_error), ("pre_llm_call", on_pre_llm_call),
+        ("post_llm_call", on_post_llm_call), ("pre_tool_call", on_pre_tool_call),
+        ("post_tool_call", on_post_tool_call), ("on_session_finalize", on_session_finalize),
+        ("on_session_end", on_session_finalize), ("subagent_start", on_subagent_start),
+        ("subagent_stop", on_subagent_stop),
+    )
+    for name, fn in hooks:
+        ctx.register_hook(name, fn)

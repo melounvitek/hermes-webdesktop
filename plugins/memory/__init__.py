@@ -98,9 +98,7 @@ def _iter_entry_points():
         eps = importlib.metadata.entry_points()
         if hasattr(eps, "select"):
             return list(eps.select(group=ENTRY_POINTS_GROUP))
-        if isinstance(eps, dict):
-            return list(eps.get(ENTRY_POINTS_GROUP, []))
-        return [ep for ep in eps if ep.group == ENTRY_POINTS_GROUP]
+        return list(eps.get(ENTRY_POINTS_GROUP, [])) if isinstance(eps, dict) else [ep for ep in eps if ep.group == ENTRY_POINTS_GROUP]
     except Exception as exc:
         logger.debug("Memory provider entry-point scan failed: %s", exc)
         return []
@@ -174,11 +172,7 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
     return results
 
 
-def load_memory_provider(
-    name: str,
-    *,
-    register_skills: Optional[bool] = None,
-) -> Optional["MemoryProvider"]:
+def load_memory_provider(name: str, *, register_skills: Optional[bool] = None) -> Optional["MemoryProvider"]:
     """Load a MemoryProvider by name (bundled, user, project, then pip entry point);
     None if not found or failing to load. Skills register only for the configured
     active provider unless ``register_skills`` is explicit, so inspecting inactive
@@ -214,31 +208,25 @@ def _instantiate_subclass(namespace) -> Optional["MemoryProvider"]:
     return None
 
 
-def _load_provider_from_entry_point(
-    entry_point,
-    *,
-    register_skills: bool = True,
-) -> Optional["MemoryProvider"]:
-    """Import a provider entry point and extract the MemoryProvider instance."""
+def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True) -> Optional["MemoryProvider"]:
+    """Import a provider entry point and extract the MemoryProvider instance: an
+    instance, a subclass, a module with ``register(ctx)``, a factory / ``register``
+    callable, or a namespace holding a subclass — in that order."""
     from agent.memory_provider import MemoryProvider
 
     loaded = entry_point.load()
-
     if isinstance(loaded, MemoryProvider):
         return loaded
-
     if isinstance(loaded, type) and issubclass(loaded, MemoryProvider):
         try:
             return loaded()
         except Exception:
             pass
-
     if hasattr(loaded, "register"):
         collector = _ProviderCollector(entry_point.name, register_skills=register_skills)
         loaded.register(collector)
         if collector.provider:
             return collector.provider
-
     if callable(loaded):
         try:
             provider = loaded()
@@ -246,7 +234,6 @@ def _load_provider_from_entry_point(
                 return provider
         except TypeError:
             pass
-
         collector = _ProviderCollector(entry_point.name, register_skills=register_skills)
         loaded(collector)
         return collector.provider
@@ -257,11 +244,7 @@ def _load_provider_from_entry_point(
     return provider
 
 
-def _load_provider_from_dir(
-    provider_dir: Path,
-    *,
-    register_skills: bool = True,
-) -> Optional["MemoryProvider"]:
+def _load_provider_from_dir(provider_dir: Path, *, register_skills: bool = True) -> Optional["MemoryProvider"]:
     """Import a provider module; ``register(ctx)`` first, else a top-level subclass."""
     name = provider_dir.name
     mod = _loader.load_plugin_module(
@@ -368,9 +351,7 @@ def _get_active_memory_provider() -> Optional[str]:
         return None
 
 
-def _prune_inactive_memory_provider_skills(
-    active_provider: Optional[str] = None,
-) -> None:
+def _prune_inactive_memory_provider_skills(active_provider: Optional[str] = None) -> None:
     """Remove tracked skills that no longer belong to the active provider."""
     if active_provider is None:
         active_provider = _get_active_memory_provider()

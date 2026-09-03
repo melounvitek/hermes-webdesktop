@@ -85,15 +85,7 @@ def probe_existing_customization(api_url: str, bank_id: str, api_key: str | None
     return bool(data.get("bank") or data.get("mental_models") or data.get("directives"))
 
 
-def run_template_step(
-    *,
-    api_url: str,
-    bank_id: str,
-    api_key: str | None,
-    select,
-    cancelled,
-    log=print,
-) -> str | None:
+def run_template_step(*, api_url: str, bank_id: str, api_key: str | None, select, cancelled, log=print) -> str | None:
     """Wizard starter-template step. ``select(title, items, default, cancel_returns)``
     is the picker (injected: testable without curses). Returns the applied template
     id, or None if skipped/blank/failed. Never raises — a template is a nice-to-have."""
