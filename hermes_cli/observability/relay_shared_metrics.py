@@ -76,6 +76,10 @@ def _task_parent_handle(session: _MetricsSession, task_id: str) -> Any:
     return session.relay_session.handle
 
 
+def _elapsed_ms(started_ns: int) -> int:
+    return max(0, (monotonic_ns() - started_ns) // 1_000_000)
+
+
 def _scope_handle(session: _MetricsSession, task: _TaskRun | None) -> Any:
     return task.handle if task is not None else session.relay_session.handle
 
@@ -666,19 +670,17 @@ class _Runtime:
             return session, task
 
         turn_id = _text(event, "turn_id")
-        if not turn_id:
+        session = None
+        if turn_id:
+            with self._task_sessions_lock:
+                session = _sole(
+                    candidate
+                    for (owner_id, candidate_turn_id), candidate in self._turn_sessions.items()
+                    if candidate_turn_id == turn_id and self._sessions.get(owner_id) is candidate
+                )
+        if session is None:
             return None, None
-        with self._task_sessions_lock:
-            session = _sole(
-                candidate
-                for (owner_id, candidate_turn_id), candidate in self._turn_sessions.items()
-                if candidate_turn_id == turn_id and self._sessions.get(owner_id) is candidate
-            )
-        task = (
-            _sole(task for task in session.tasks.values() if turn_id in task.turn_ids)
-            if session is not None
-            else None
-        )
+        task = _sole(task for task in session.tasks.values() if turn_id in task.turn_ids)
         return (None, None) if task is None else (session, task)
 
     def _open_tool_call(self, task: _TaskRun, event: dict[str, Any]) -> _ToolCall:
@@ -692,10 +694,8 @@ class _Runtime:
         self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
     ) -> None:
         fields = contract.tool_terminal_fields(
-            event,
-            category=tool_call.category,
-            approval_outcome=tool_call.approval_outcome,
-            fallback_duration_ms=max(0, (monotonic_ns() - tool_call.started_ns) // 1_000_000),
+            event, category=tool_call.category, approval_outcome=tool_call.approval_outcome,
+            fallback_duration_ms=_elapsed_ms(tool_call.started_ns),
         )
         self._guarded(
             "Hermes shared-metrics tool call close failed",
@@ -737,10 +737,8 @@ class _Runtime:
         if not request_id:
             return None
         key = (_text(event, "task_id"), request_id)
-        if key in session.model_calls:
-            return key
-        if key[0]:
-            return None
+        if key in session.model_calls or key[0]:
+            return key if key in session.model_calls else None
         candidates = [candidate for candidate in session.model_calls if candidate[1] == request_id]
         return candidates[0] if len(candidates) == 1 else None
 
@@ -752,7 +750,7 @@ class _Runtime:
         self._end_pending_model_calls(session, {**event, "task_id": task_id})
         fields = contract.task_terminal_fields(
             {**task.start_fields, **event},
-            duration_ms=max(0, (monotonic_ns() - task.started_ns) // 1_000_000),
+            duration_ms=_elapsed_ms(task.started_ns),
             model_call_count=len(task.model_call_ids),
             tool_call_count=len(task.tool_call_ids) + task.unidentified_tool_calls,
             retry_count=task.retry_count,
