@@ -417,7 +417,6 @@ def estimate_request_context_tokens(api_payload: Any) -> int:
 
 def _is_openai_codex_backend(agent) -> bool:
     from agent.codex_responses_adapter import classify_responses_route
-
     return classify_responses_route(agent).is_codex_backend
 
 
@@ -446,8 +445,7 @@ def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
         return sort_value
     logger.warning(
         "Ignoring invalid OpenRouter provider.sort value %r (allowed: %s)",
-        raw_sort,
-        ", ".join(sorted(_OPENROUTER_PROVIDER_SORT_VALUES)),
+        raw_sort, ", ".join(sorted(_OPENROUTER_PROVIDER_SORT_VALUES)),
     )
     return None
 
@@ -476,7 +474,6 @@ def _prompt_cache_scope_for_agent(agent) -> "str | None":
     """
     try:
         from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
-
         return resolve_prompt_cache_scope_safe(agent)
     except Exception:
         logger.debug("prompt-cache scope resolution failed", exc_info=True)
@@ -494,24 +491,14 @@ def _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs: dict) -> dic
         return anthropic_kwargs
     try:
         from providers import get_provider_profile
-
         nous_profile = get_provider_profile("nous")
         if nous_profile is not None:
             anthropic_kwargs.setdefault("extra_body", {}).update(
-                nous_profile.build_extra_body(
-                    session_id=getattr(agent, "session_id", None)
-                )
+                nous_profile.build_extra_body(session_id=getattr(agent, "session_id", None))
             )
     except Exception as exc:  # noqa: BLE001 — never block a turn on tagging
         logger.debug("Nous Portal extra_body merge failed: %s", exc)
     return anthropic_kwargs
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
 
 
 def _estimate_chunk_bytes(chunk: Any) -> int:
@@ -549,15 +536,8 @@ def _estimate_chunk_bytes(chunk: Any) -> int:
 
 
 def _codex_wait_notice_recovery(
-    *,
-    stale_timeout: float,
-    ttfb_enabled: bool,
-    ttfb_timeout: float,
-    last_event_ts: Optional[float],
-    call_start: float,
-    idle_enabled: bool,
-    idle_timeout: float,
-    elapsed: float,
+    *, stale_timeout: float, ttfb_enabled: bool, ttfb_timeout: float, last_event_ts: Optional[float],
+    call_start: float, idle_enabled: bool, idle_timeout: float, elapsed: float,
 ) -> str:
     """Describe the earliest enabled Codex watchdog on the call timeline."""
     deadlines: list[float] = []
@@ -1234,7 +1214,7 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
         # Flat hard ceiling (#64507) for a request that emits SOME bytes then
         # wedges. Default sits ABOVE the max floor (1200s) — a backstop, never a
         # tighter limit. 0 disables.
-        hard_timeout = _env_float("HERMES_CODEX_HARD_TIMEOUT_SECONDS", 1500.0)
+        hard_timeout = env_float("HERMES_CODEX_HARD_TIMEOUT_SECONDS", 1500.0)
         if hard_timeout > 0:
             stale_timeout = min(stale_timeout, hard_timeout)
 
@@ -1247,14 +1227,14 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
     # No-byte TTFB cutoff. Default 120s: the SDK's own read timeout is 600s,
     # and a tight 12s killed subscription-backed requests mid-prefill.
     ttfb_enabled = codex
-    ttfb_timeout = _env_float("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", 120.0)
+    ttfb_timeout = env_float("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", 120.0)
     if ttfb_timeout <= 0:
         ttfb_enabled = False
     elif openai_codex_backend:
         # Large requests legitimately spend tens of seconds in admission /
         # prefill before the first SSE event: scale the cutoff up to the idle
         # default unless HERMES_CODEX_TTFB_STRICT keeps the smaller one.
-        disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
+        disable_above = env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
         strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {"1", "true", "yes", "on"}
         if not strict and disable_above > 0 and est_tokens >= disable_above and ttfb_timeout < idle_default:
             logger.info(
@@ -1264,7 +1244,7 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
                 ttfb_timeout, idle_default, f"{est_tokens:,}", disable_above,
             )
             ttfb_timeout = idle_default
-        ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
+        ttfb_cap = env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
         if ttfb_cap > 0 and ttfb_timeout > ttfb_cap:
             logger.info(
                 "Capping openai-codex no-byte TTFB timeout from %.0fs to %.0fs "
@@ -1273,7 +1253,7 @@ def _resolve_nonstream_watchdogs(agent, api_kwargs: dict) -> _NonStreamWatchdogs
             )
             ttfb_timeout = ttfb_cap
 
-    idle_timeout = _env_float("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", idle_default)
+    idle_timeout = env_float("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", idle_default)
     return _NonStreamWatchdogs(
         stale_timeout=stale_timeout, codex=codex, est_tokens=est_tokens,
         ttfb_enabled=ttfb_enabled, ttfb_timeout=ttfb_timeout,
@@ -1452,10 +1432,7 @@ class _NonStreamRequest:
             "Codex stream produced no SSE events for %.0fs after first byte "
             "(threshold %.0fs, model=%s, context=~%s tokens). Killing "
             "connection so the retry loop can reconnect.",
-            event_stale_elapsed,
-            wd.idle_timeout,
-            self._model(),
-            f"{wd.est_tokens:,}",
+            event_stale_elapsed, wd.idle_timeout, self._model(), f"{wd.est_tokens:,}",
         )
         agent._buffer_status(
             f"⚠️ Codex stream sent no events for {int(event_stale_elapsed)}s "
@@ -1463,9 +1440,7 @@ class _NonStreamRequest:
             f"Reconnecting."
         )
         self._abort_request("codex_stream_idle_kill")
-        agent._touch_activity(
-            f"codex stream killed after {int(event_stale_elapsed)}s with no SSE events"
-        )
+        agent._touch_activity(f"codex stream killed after {int(event_stale_elapsed)}s with no SSE events")
         self._await_worker_after_kill(
             f"Codex stream produced no SSE events for {int(event_stale_elapsed)}s "
             f"after first byte (threshold: {int(wd.idle_timeout)}s)"
@@ -1476,9 +1451,7 @@ class _NonStreamRequest:
         circuit breaker (#58962, see ``_stale_streak``)."""
         agent, wd = self.agent, self.wd
         silent_hint = _codex_silent_hang_hint(agent, self.api_kwargs)
-        _report_stale_nonstream_kill(
-            agent, self.api_kwargs, elapsed, wd.stale_timeout, hint=silent_hint
-        )
+        _report_stale_nonstream_kill(agent, self.api_kwargs, elapsed, wd.stale_timeout, hint=silent_hint)
         self._abort_request("stale_call_kill")
         _bump_stale_streak(agent)
         _touch_stale_kill_activity(agent, elapsed)
@@ -1491,22 +1464,15 @@ class _NonStreamRequest:
     def _interrupt(self, elapsed: float) -> None:
         agent = self.agent
         _record_interrupted_provider_wait(
-            agent,
-            elapsed,
-            response_started=(
-                self.wd.codex
-                and getattr(agent, "_codex_stream_last_event_ts", None) is not None
-            ),
+            agent, elapsed,
+            response_started=self.wd.codex and getattr(agent, "_codex_stream_last_event_ts", None) is not None,
         )
-        # Mark cancelled BEFORE force-closing so the worker treats the
-        # transport error as a cancel (#6600). Never close the shared client:
-        # releasing a TLS FD mid-SSL-BIO corrupted an unrelated SQLite DB
-        # (#67142). Then let the worker unwind Relay scopes before raising
-        # (#81521).
+        # Mark cancelled BEFORE force-closing so the worker treats the transport
+        # error as a cancel (#6600). Never close the shared client (releasing a
+        # TLS FD mid-SSL-BIO corrupted an unrelated SQLite DB, #67142). Then let
+        # the worker unwind Relay scopes before raising (#81521).
         self.cancelled = True
-        logger.debug(
-            "Force-closing httpx client due to interrupt (not a network error)."
-        )
+        logger.debug("Force-closing httpx client due to interrupt (not a network error).")
         self._abort_request("interrupt_abort")
         _join_worker_for_relay_teardown(self.thread, label="Non-streaming")
         raise InterruptedError("Agent interrupted during API call")
@@ -1535,11 +1501,7 @@ class _NonStreamRequest:
             if wd.ttfb_enabled and elapsed > wd.ttfb_timeout and last_event_ts is None:
                 self._ttfb_kill(elapsed)
                 break
-            if (
-                wd.idle_enabled
-                and last_event_ts is not None
-                and (time.time() - last_event_ts) > wd.idle_timeout
-            ):
+            if wd.idle_enabled and last_event_ts is not None and (time.time() - last_event_ts) > wd.idle_timeout:
                 self._idle_kill(time.time() - last_event_ts)
                 break
             if elapsed > wd.stale_timeout:
@@ -1601,11 +1563,7 @@ def _consume_ephemeral_reasoning_off(agent) -> bool:
 def _reasoning_config_for_wire(agent):
     """``agent.reasoning_config`` with the one-shot reasoning-off override applied."""
     if _consume_ephemeral_reasoning_off(agent):
-        return {
-            **(agent.reasoning_config or {}),
-            "enabled": False,
-            "effort": "none",
-        }
+        return {**(agent.reasoning_config or {}), "enabled": False, "effort": "none"}
     return agent.reasoning_config
 
 
@@ -1618,23 +1576,15 @@ def _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api):
     tools_for_api aliases agent.tools."""
     if transport is not None and hasattr(transport, "_last_wire_aliases"):
         transport._last_wire_aliases = {}
-    is_xai_chat = (
-        agent.provider in {"xai", "xai-oauth"}
-        or agent._base_url_hostname == "api.x.ai"
-    )
+    is_xai_chat = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
     if not (is_xai_chat and tools_for_api):
         return tools_for_api
     try:
         import copy as _copy_xai
-
-        from agent.transports.chat_completions import (
-            _rename_tool_search_bridge_for_xai,
-        )
+        from agent.transports.chat_completions import _rename_tool_search_bridge_for_xai
 
         has_bridge = any(
-            (t.get("function") or {}).get("name") == "tool_search"
-            for t in tools_for_api
-            if isinstance(t, dict)
+            (t.get("function") or {}).get("name") == "tool_search" for t in tools_for_api if isinstance(t, dict)
         )
         if has_bridge:
             tools_for_api = _copy_xai.deepcopy(tools_for_api)
@@ -1642,10 +1592,7 @@ def _alias_tool_search_bridge_for_xai(agent, transport, tools_for_api):
             if transport is not None:
                 transport._last_wire_aliases = alias_map
     except Exception as exc:
-        logger.warning(
-            "%s⚠️ Failed to alias tool_search bridge for xAI: %s",
-            getattr(agent, "log_prefix", ""), exc,
-        )
+        logger.warning("%s⚠️ Failed to alias tool_search bridge for xAI: %s", getattr(agent, "log_prefix", ""), exc)
     return tools_for_api
 
 
@@ -1702,10 +1649,7 @@ def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, re
     # Codex routes only) — None on every other route/model, leaving the
     # request unchanged from pre-feature behavior.
     context_management = native_compaction_context_management(
-        agent,
-        is_codex_backend=is_codex_backend,
-        is_xai_responses=is_xai_responses,
-        is_github_responses=is_github_responses,
+        agent, is_codex_backend=is_codex_backend, is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
     )
     # xAI's /responses endpoint 400s on ``pattern``/``format`` schema keywords
     # and on ``enum`` values containing ``/`` (HuggingFace IDs from MCP
@@ -1722,10 +1666,7 @@ def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, re
             tools_for_api, _ = strip_pattern_and_format(tools_for_api)
             tools_for_api, _ = strip_slash_enum(tools_for_api)
         except Exception as exc:
-            logger.warning(
-                "%s⚠️ Failed to sanitize tool schemas for xAI: %s",
-                getattr(agent, "log_prefix", ""), exc,
-            )
+            logger.warning("%s⚠️ Failed to sanitize tool schemas for xAI: %s", getattr(agent, "log_prefix", ""), exc)
     return agent._get_transport().build_kwargs(
         model=agent.model,
         messages=agent._prepare_messages_for_non_vision_model(api_messages),
@@ -1787,10 +1728,7 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
 
     _prefs = _provider_preferences_for_agent(agent)
     _ant_max = _anthropic_max_output_for_model(agent)
-    _qwen_meta = (
-        {"sessionId": agent.session_id or "hermes", "promptId": str(uuid.uuid4())}
-        if _is_qwen else None
-    )
+    _qwen_meta = {"sessionId": agent.session_id or "hermes", "promptId": str(uuid.uuid4())} if _is_qwen else None
     try:
         from providers import get_provider_profile
         _profile = get_provider_profile(agent.provider)
@@ -1801,24 +1739,14 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
     # Strip image parts for non-vision models on BOTH paths (registered
     # providers with profiles used to bypass it).
     _common = dict(
-        model=agent.model,
-        messages=agent._prepare_messages_for_non_vision_model(api_messages),
-        tools=tools_for_api,
-        base_url=agent.base_url,
-        timeout=agent._resolved_api_call_timeout(),
-        max_tokens=agent.max_tokens,
-        ephemeral_max_output_tokens=_ephemeral_out,
-        max_tokens_param_fn=agent._max_tokens_param,
-        reasoning_config=reasoning_config,
-        request_overrides=request_overrides,
-        session_id=getattr(agent, "session_id", None),
-        cache_scope_id=cache_scope_id,
-        ollama_num_ctx=agent._ollama_num_ctx,
-        provider_preferences=_prefs or None,
-        openrouter_min_coding_score=agent.openrouter_min_coding_score,
-        anthropic_max_output=_ant_max,
-        supports_reasoning=agent._supports_reasoning_extra_body(),
-        qwen_session_metadata=_qwen_meta,
+        model=agent.model, messages=agent._prepare_messages_for_non_vision_model(api_messages), tools=tools_for_api,
+        base_url=agent.base_url, timeout=agent._resolved_api_call_timeout(), max_tokens=agent.max_tokens,
+        ephemeral_max_output_tokens=_ephemeral_out, max_tokens_param_fn=agent._max_tokens_param,
+        reasoning_config=reasoning_config, request_overrides=request_overrides,
+        session_id=getattr(agent, "session_id", None), cache_scope_id=cache_scope_id,
+        ollama_num_ctx=agent._ollama_num_ctx, provider_preferences=_prefs or None,
+        openrouter_min_coding_score=agent.openrouter_min_coding_score, anthropic_max_output=_ant_max,
+        supports_reasoning=agent._supports_reasoning_extra_body(), qwen_session_metadata=_qwen_meta,
     )
     if _profile:
         # Profiles handle per-provider quirks via hooks fed the context above.
@@ -1833,10 +1761,7 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
         is_qwen_portal=_is_qwen,
         is_github_models=_is_gh,
         is_nvidia_nim=base_url_host_matches(_host, "integrate.api.nvidia.com"),
-        is_kimi=any(
-            base_url_host_matches(agent.base_url, h)
-            for h in ("api.kimi.com", "moonshot.ai", "moonshot.cn")
-        ),
+        is_kimi=any(base_url_host_matches(agent.base_url, h) for h in ("api.kimi.com", "moonshot.ai", "moonshot.cn")),
         is_tokenhub=base_url_host_matches(_host, "tokenhub.tencentmaas.com"),
         is_lmstudio=_is_lmstudio,
         is_custom_provider=agent.provider == "custom",
@@ -1868,9 +1793,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     # Rotation-stable logical cache scope shared by every OpenAI-wire branch
     # (memoized on the agent); anthropic/bedrock above don't use it.
     cache_scope_id = _prompt_cache_scope_for_agent(agent)
-    builder = (
-        _build_codex_kwargs if agent.api_mode == "codex_responses" else _build_chat_completions_kwargs
-    )
+    builder = _build_codex_kwargs if agent.api_mode == "codex_responses" else _build_chat_completions_kwargs
     return builder(agent, api_messages, tools_for_api, reasoning_config, request_overrides, cache_scope_id)
 
 
@@ -1897,12 +1820,7 @@ def _assistant_reasoning_text(agent, assistant_message) -> Optional[str]:
     # stream (structured deltas or <think> tag extraction); fire only for
     # non-streaming modes (gateway, batch, quiet). Anything not shown during
     # streaming is caught by the CLI post-response fallback.
-    if (
-        reasoning_text
-        and agent.reasoning_callback
-        and not agent.stream_delta_callback
-        and not agent._stream_callback
-    ):
+    if reasoning_text and agent.reasoning_callback and not agent.stream_delta_callback and not agent._stream_callback:
         try:
             agent.reasoning_callback(reasoning_text)
         except Exception:
@@ -1936,9 +1854,7 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
         else:
             _fn = getattr(tool_call, "function", None)
             call_id = agent._deterministic_call_id(
-                getattr(_fn, "name", "") if _fn else "",
-                getattr(_fn, "arguments", "{}") if _fn else "{}",
-                index,
+                getattr(_fn, "name", "") if _fn else "", getattr(_fn, "arguments", "{}") if _fn else "{}", index,
             )
     call_id = call_id.strip()
 
@@ -1946,29 +1862,20 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
     if not isinstance(response_item_id, str) or not response_item_id.strip():
         _, response_item_id = agent._split_responses_tool_id(raw_id)
     response_item_id = agent._derive_responses_function_call_id(
-        call_id,
-        response_item_id if isinstance(response_item_id, str) else None,
+        call_id, response_item_id if isinstance(response_item_id, str) else None,
     )
     # Arguments are deliberately NOT redacted: this dict is replayed to the
     # model every turn, so a ``***`` mask would break every credential-
     # dependent command (#43083) while protecting nothing (tool OUTPUT leaks).
     tc_dict = {
-        "id": call_id,
-        "call_id": call_id,
-        "response_item_id": response_item_id,
-        "type": tool_call.type,
-        "function": {
-            "name": tool_call.function.name,
-            "arguments": tool_call.function.arguments
-        },
+        "id": call_id, "call_id": call_id, "response_item_id": response_item_id, "type": tool_call.type,
+        "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments},
     }
     # Preserve extra_content (Gemini thought_signature) or Gemini 3 thinking
     # models 400 on the next request.
     extra = getattr(tool_call, "extra_content", None)
     if extra is not None:
-        if hasattr(extra, "model_dump"):
-            extra = _model_dump_safe(extra)
-        tc_dict["extra_content"] = extra
+        tc_dict["extra_content"] = _model_dump_safe(extra) if hasattr(extra, "model_dump") else extra
     return tc_dict
 
 
@@ -1984,10 +1891,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     assistant_tool_calls = getattr(assistant_message, "tool_calls", None)
     reasoning_text = _assistant_reasoning_text(agent, assistant_message)
     msg = stamp_message_timestamp({
-        "role": "assistant",
-        "content": _assistant_content_for_storage(agent, assistant_message),
-        "reasoning": reasoning_text,
-        "finish_reason": finish_reason,
+        "role": "assistant", "content": _assistant_content_for_storage(agent, assistant_message),
+        "reasoning": reasoning_text, "finish_reason": finish_reason,
     })
 
     raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
@@ -2029,21 +1934,13 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # (reconstruction reorders signed blocks -> HTTP 400); codex_* items are
     # the encrypted reasoning / exact message items Responses prefix caching
     # needs.
-    for attr in (
-        "anthropic_content_blocks",
-        "bedrock_content_blocks",
-        "codex_reasoning_items",
-        "codex_message_items",
-    ):
+    for attr in ("anthropic_content_blocks", "bedrock_content_blocks", "codex_reasoning_items", "codex_message_items"):
         value = getattr(assistant_message, attr, None)
         if value:
             msg[attr] = value
 
     if assistant_tool_calls:
-        msg["tool_calls"] = [
-            _assistant_tool_call_dict(agent, tool_call, index)
-            for index, tool_call in enumerate(assistant_tool_calls)
-        ]
+        msg["tool_calls"] = [_assistant_tool_call_dict(agent, tc, i) for i, tc in enumerate(assistant_tool_calls)]
     return msg
 
 
@@ -4114,6 +4011,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # Cross-turn stale-stream circuit breaker (see ``_stale_streak()``).
     _check_stale_giveup(agent)
     return _StreamingCall(agent, api_kwargs, on_first_delta).run()
+
 
 __all__ = [
     "interruptible_api_call",
