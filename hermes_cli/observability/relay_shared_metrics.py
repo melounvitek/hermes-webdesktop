@@ -203,10 +203,8 @@ class _Runtime:
                     if owner.closing:
                         return None
                     task = owner.tasks.get(task_id)
-                    if task is not None:
-                        if not self._event_matches_task_turn(task, event):
-                            return None
-                        self._remember_turn(owner, task, event)
+                    if task is not None and not self._admits(owner, task, event):
+                        return None
                     return task
 
             session = self.ensure_session(event)
@@ -233,16 +231,14 @@ class _Runtime:
                 ):
                     parent_handle = active_turn.handle
 
-                def push_task() -> Any:
-                    self.relay.get_scope_stack()
-                    return self.relay.scope.push(
-                        TASK_SCOPE, self.relay.ScopeType.Function,
-                        handle=parent_handle, input=start_fields, metadata=self._event_metadata(),
-                    )
-
+                handle = task_context.run(
+                    self._with_scope_stack, self.relay.scope.push,
+                    TASK_SCOPE, self.relay.ScopeType.Function,
+                    handle=parent_handle, input=start_fields, metadata=self._event_metadata(),
+                )
                 task = _TaskRun(
                     task_id=task_id,
-                    handle=task_context.run(push_task),
+                    handle=handle,
                     context=task_context,
                     started_ns=monotonic_ns(),
                     start_fields=start_fields,
@@ -257,11 +253,11 @@ class _Runtime:
     def _run_in_task(
         self, task: _TaskRun, callback: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
-        def invoke() -> Any:
-            self.relay.get_scope_stack()
-            return callback(*args, **kwargs)
+        return task.context.copy().run(self._with_scope_stack, callback, *args, **kwargs)
 
-        return task.context.copy().run(invoke)
+    def _with_scope_stack(self, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        self.relay.get_scope_stack()
+        return callback(*args, **kwargs)
 
     def start_model_call(self, event: dict[str, Any]) -> None:
         task_id = _text(event, "task_id")
@@ -281,13 +277,8 @@ class _Runtime:
         with session.lock:
             if session.closing:
                 return
-            if task is not None:
-                if (
-                    session.tasks.get(task.task_id) is not task
-                    or not self._event_matches_task_turn(task, event)
-                ):
-                    return
-                self._remember_turn(session, task, event)
+            if task is not None and not self._admits(session, task, event, current=True):
+                return
             existing = session.model_calls.get(model_call_key)
             if existing is not None:
                 existing.fields = fields
@@ -346,9 +337,8 @@ class _Runtime:
             return
         identity = self._tool_call_identity(event)
         with session.lock:
-            if session.closing or not self._event_matches_task_turn(task, event):
+            if not self._admits(session, task, event):
                 return
-            self._remember_turn(session, task, event)
             key = (task_id, *identity)
             if identity in task.completed_tool_call_ids or key in session.tool_calls:
                 return
@@ -385,9 +375,8 @@ class _Runtime:
         if session is None or task is None:
             return
         with session.lock:
-            if session.closing or not self._event_matches_task_turn(task, event):
+            if not self._admits(session, task, event):
                 return
-            self._remember_turn(session, task, event)
             tool_call = None
             if _text(event, "tool_call_id"):
                 observed_identity = self._tool_call_identity(event)
@@ -445,8 +434,9 @@ class _Runtime:
         if session_id and task_id:
             return
 
-        self.relay.get_scope_stack()
-        self.relay.scope.event(mark, data=fields, metadata=self._event_metadata())
+        self._with_scope_stack(
+            self.relay.scope.event, mark, data=fields, metadata=self._event_metadata()
+        )
 
     def finish_task(self, event: dict[str, Any]) -> None:
         """Close one task scope exactly once with bounded terminal fields."""
@@ -531,8 +521,8 @@ class _Runtime:
     def _join_send_thread(self, timeout: float = 2.0) -> None:
         """Give an in-flight send a brief, bounded chance to finish at exit.
 
-        Pending packages stay in SQLite and go out next run, so blocking shutdown on a
-        slow network is the wrong trade. The daemon thread dies with the process.
+        Pending packages stay in SQLite and go out next run, so blocking on a slow network
+        is the wrong trade; the daemon thread dies with the process.
         """
         with self._send_lock:
             thread = self._send_thread
@@ -663,6 +653,26 @@ class _Runtime:
         if turn_id in task.retired_turn_ids:
             return False
         return not task.turn_ids or turn_id in task.turn_ids
+
+    def _admits(
+        self,
+        session: _MetricsSession,
+        task: _TaskRun,
+        event: dict[str, Any],
+        *,
+        current: bool = False,
+    ) -> bool:
+        """Whether ``event`` may act on ``task`` (caller holds ``session.lock``).
+
+        Rejects closing sessions and stale turns; with ``current`` also requires ``task`` to
+        still be the session's live run for its ID. Admitted events have their turn remembered.
+        """
+        if session.closing or not self._event_matches_task_turn(task, event):
+            return False
+        if current and session.tasks.get(task.task_id) is not task:
+            return False
+        self._remember_turn(session, task, event)
+        return True
 
     def _approval_task(
         self, event: dict[str, Any]
@@ -803,18 +813,14 @@ class _Runtime:
 
     def _export(self) -> None:
         exported = self._safe(self.subscriber.store.create_and_export_package_if_due)
-        # Sending is opt-in and must never delay the caller: _export runs on finish_task,
-        # the user's interactive path. The sender swallows its own errors; the thread is
-        # about latency, not correctness.
+        # Sending must never delay the caller: _export runs on finish_task, the user's
+        # interactive path. The thread is about latency, not correctness.
         if exported is not None:
             self._safe(self._send_exported_packages)
 
     def _observe_send_consent(self, send_enabled: bool) -> None:
-        """Reconcile consent windows with the observed config state.
-
-        Failures must never break the export hook, but are logged at warning: silently
-        failing to close a consent window is a privacy-relevant event.
-        """
+        """Reconcile consent windows with observed config; failures never break the export
+        hook but log at warning (an unclosed consent window is privacy-relevant)."""
         self._guarded(
             "Unable to record a shared-metrics consent transition",
             _reconcile_store_consent, self.subscriber.store, send_enabled,
@@ -827,9 +833,8 @@ class _Runtime:
             logger.debug("Unable to read shared-metrics send policy", exc_info=True)
             return
 
-        # Observe the consent EDGE before deciding whether to send. The dominant case is
-        # the user turning sending off while no pass is running; recording revocation
-        # inside the send loop can never see that, so the window must close here.
+        # Observe the consent EDGE before deciding whether to send: the dominant revocation
+        # case is "sending turned off while no pass is running", invisible to the send loop.
         self._observe_send_consent(resolved.send)
         if not resolved.send:
             return
@@ -929,13 +934,10 @@ _consent_reconcile_done = False
 def _reconcile_send_consent_once() -> None:
     """Reconcile consent windows with config, once per process.
 
-    Runs BEFORE and INDEPENDENT of the collection gate: the only idle-path consent observer
-    must not sit behind ``handles_hook()``, or it becomes dead code the moment
-    ``enabled: false`` is set and a user with collection off never gets windows reconciled.
-
-    Skipped only when there is no store on disk AND consent is off: with no store there are
-    no packages for a window to protect, and creating ``~/.hermes/telemetry`` for every
-    fully-disabled user would be a behaviour change in the wrong direction.
+    Runs BEFORE and INDEPENDENT of the collection gate, so a user with ``enabled: false``
+    still gets send-consent windows reconciled. Skipped only when there is no store on disk
+    AND consent is off: nothing to protect, and creating ``~/.hermes/telemetry`` for every
+    fully-disabled user would be the wrong behaviour change.
     """
     global _consent_reconcile_done
     if _consent_reconcile_done:
