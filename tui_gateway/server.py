@@ -128,8 +128,7 @@ def _resolve_ws_orphan_reap_grace() -> float:
 _WS_ORPHAN_REAP_GRACE_S = _resolve_ws_orphan_reap_grace()
 # A detached RUNNING turn is interrupted only once its activity clock (API waits, stream tokens, tool
 # heartbeats) idled this long; 600s = the turn-liveness watchdog so "wedged" means the same. 0 disables.
-_WS_ORPHAN_ACTIVITY_STALE_S = _ws_orphan_setting(
-    "HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S", "ws_orphan_activity_stale_s", 600.0)
+_WS_ORPHAN_ACTIVITY_STALE_S = _ws_orphan_setting("HERMES_TUI_WS_ORPHAN_ACTIVITY_STALE_S", "ws_orphan_activity_stale_s", 600.0)
 _WS_ORPHAN_INTERRUPT_REAP_POLL_S = 1.0
 # Interrupt-then-reap poll budget: a turn that never settles (thread hung in a syscall) would
 # reschedule the 1s poll forever; after this many polls, log loudly and force-reap.
@@ -221,9 +220,7 @@ class _SlashWorker:
         self._seq = 0
         self.stderr_tail: list[str] = []
         self.stdout_queue: queue.Queue[dict | None] = queue.Queue()
-        argv = [sys.executable, "-m", "tui_gateway.slash_worker", "--session-key", session_key]
-        if model:
-            argv += ["--model", model]
+        argv = [sys.executable, "-m", "tui_gateway.slash_worker", "--session-key", session_key] + (["--model", model] if model else [])
         self._closed = False
         from hermes_cli._subprocess_compat import windows_hide_flags
         from tools.environments.local import build_subprocess_env
@@ -600,15 +597,14 @@ def _pending_clarify_request_payload(sid: str) -> dict | None:
     contract as `pending_approval`: the registry stays authoritative; `clarify.respond` resolves by request_id."""
     with _prompt_lock:
         for rid, (owner_sid, _ev) in _pending.items():
-            if owner_sid != sid:
-                continue
             event, prompt_payload = _pending_prompt_payloads.get(rid, ("", {}))
-            if event == "clarify.request":
-                snapshot = dict(prompt_payload)
-                # Batch clarify: replay the answers locked so far so a reconnecting client restores its ✓ state.
-                if (batch := _batch_clarify.get(rid)) is not None and batch["answers"]:
-                    snapshot["answers"] = dict(batch["answers"])
-                return snapshot
+            if owner_sid != sid or event != "clarify.request":
+                continue
+            snapshot = dict(prompt_payload)
+            # Batch clarify: replay the answers locked so far so a reconnecting client restores its ✓ state.
+            if (batch := _batch_clarify.get(rid)) is not None and batch["answers"]:
+                snapshot["answers"] = dict(batch["answers"])
+            return snapshot
     if (session := _sessions.get(sid)) is not None:
         with session.get("history_lock", threading.Lock()):
             pending = session.get("_compute_host_pending_clarify")
@@ -733,8 +729,7 @@ def dispatch(req: dict, transport: Optional[Transport] = None) -> dict | None:
         normalized = _normalize_request(req)
         if isinstance(normalized, dict):
             return normalized
-        _rid, method, _params = normalized
-        if method not in _LONG_HANDLERS:
+        if normalized[1] not in _LONG_HANDLERS:
             return handle_request(req)
         ctx = contextvars.copy_context()  # the pool worker must see the bound transport
 
@@ -938,11 +933,9 @@ def _finish_agent_build(sid: str, key: str, current: dict, *, notify_registered:
             unregister_gateway_notify(key)
     # Dedicated profile handle: hand it to the agent that will be torn down, else close it (build
     # failed, or `replaced`: this agent is discarded and _teardown_session never reaches it).
-    if session_db is not None:
-        built = None if replaced else current.get("agent")
-        if not _transfer_db_to_agent(built, session_db):
-            with contextlib.suppress(Exception):
-                session_db.close()
+    if session_db is not None and not _transfer_db_to_agent(None if replaced else current.get("agent"), session_db):
+        with contextlib.suppress(Exception):
+            session_db.close()
 
 
 def _start_agent_build(sid: str, session: dict) -> None:
@@ -1088,11 +1081,8 @@ def _load_cfg_raw() -> dict:
         with _cfg_lock:
             if _cfg_cache is not None and _cfg_mtime == mtime and _cfg_path == p:
                 return copy.deepcopy(_cfg_cache)
-        if p.exists():
-            from hermes_cli.config import read_user_config_raw
-            data = read_user_config_raw(p)
-        else:
-            data = {}
+        from hermes_cli.config import read_user_config_raw
+        data = read_user_config_raw(p) if p.exists() else {}
         with _cfg_lock:  # cache the RAW config: _save_cfg writes _cfg_cache back to disk
             _cfg_cache, _cfg_mtime, _cfg_path = copy.deepcopy(data), mtime, p
         return data
@@ -1201,8 +1191,7 @@ _EXPIRING_REQUESTS = frozenset({
 })
 
 
-def _block(
-    event: str, sid: str, payload: dict, timeout: float | None = 300, batch_qids: list[str] | None = None) -> str:
+def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, batch_qids: list[str] | None = None) -> str:
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
     with _prompt_lock:
@@ -1259,9 +1248,8 @@ def _clarify_block(sid: str, q, c, multi_select=False, questions=None) -> str:
     (``multi_select`` only when True — older renderers never see a new field); batch calls emit one
     clarify.request with only the wire fields (the tool-side entries carry result-assembly keys too)."""
     if questions:
-        wire = [
-            {"qid": e["qid"], "question": e["question"], "choices": e["choices"], "multi_select": bool(e["multi_select"])}
-            for e in questions]
+        wire = [{"qid": e["qid"], "question": e["question"], "choices": e["choices"], "multi_select": bool(e["multi_select"])}
+                for e in questions]
         return _block("clarify.request", sid, {"questions": wire}, timeout=_clarify_timeout_seconds(),
                       batch_qids=[e["qid"] for e in questions])
     payload = {"question": q, "choices": c, "multi_select": True} if multi_select else {"question": q, "choices": c}
@@ -1290,9 +1278,7 @@ def _tour_request(sid: str, payload: dict) -> str:
     an older app nobody calls ``tour.respond`` and each action would block the full deadline, stacking per
     turn. First action per session gets the short probe deadline; unanswered → bridge marked unavailable
     for that session; once answered, the full deadline. Verdict lives on the record, so a new session re-probes."""
-    session = _sessions.get(sid)
-    if session is None:  # detached caller: throwaway record, plain bridge, unprobed
-        session = {}
+    session = _sessions.get(sid) or {}  # detached caller: throwaway record, plain bridge, unprobed
     state = session.get("tour_bridge")
     if state == "unanswered":
         return _TOUR_BRIDGE_UNAVAILABLE
@@ -1376,10 +1362,8 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     with contextlib.suppress(Exception):
         from hermes_cli.models import detect_static_provider_for_model
         cfg = _load_cfg().get("model") or {}
-        current_provider = (
-            (str(cfg.get("provider") or "").strip().lower() if isinstance(cfg, dict) else "")
-            or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower()
-            or "auto")
+        current_provider = ((str(cfg.get("provider") or "").strip().lower() if isinstance(cfg, dict) else "")
+                            or os.environ.get("HERMES_INFERENCE_PROVIDER", "").strip().lower() or "auto")
         if detected := detect_static_provider_for_model(explicit_model, current_provider):
             provider, detected_model = detected
             return detected_model, provider
@@ -1472,11 +1456,8 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         overrides["provider_override"] = provider
     if isinstance(reasoning_config, dict):
         overrides["reasoning_config_override"] = reasoning_config
-    if service_tier.lower() == "normal":
-        # None = "inherit the profile" at _make_agent; "" = real override "no priority tier".
-        overrides["service_tier_override"] = ""
-    elif service_tier:
-        overrides["service_tier_override"] = service_tier
+    if service_tier:  # None = "inherit the profile" at _make_agent; "" = real override "no priority tier"
+        overrides["service_tier_override"] = "" if service_tier.lower() == "normal" else service_tier
     return overrides
 
 
@@ -1533,10 +1514,8 @@ def _persist_live_session_runtime(session: dict | None) -> None:
 
 def _live_session_agent_db(session: dict | None):
     """(agent, session_key, db) for a live record, or None when any of them is missing."""
-    if not session:
-        return None
-    agent = session.get("agent")
-    session_key = str(session.get("session_key") or "").strip()
+    agent = (session or {}).get("agent")
+    session_key = str((session or {}).get("session_key") or "").strip()
     if agent is None or not session_key:
         return None
     db = getattr(agent, "_session_db", None) or _get_db()
@@ -1608,11 +1587,9 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         db = getattr(agent, "_session_db", None) if agent is not None else None
         if db is None:
             _ensure_session_db_row(session)
-            with _session_db(session) as db:
-                if db is not None:
-                    db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
-        else:
-            db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
+        with (contextlib.nullcontext(db) if db is not None else _session_db(session)) as db:
+            if db is not None:
+                db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
     except Exception:
         logger.debug("failed to persist model switch marker", exc_info=True)
 
@@ -1667,11 +1644,9 @@ def _display_mouse_tracking(display: dict) -> str:
     if not isinstance(display, dict):
         return "all"
     raw = display.get("mouse_tracking") if "mouse_tracking" in display else display.get("tui_mouse", True)
-    if raw is False or raw == 0:
-        return "off"
     if isinstance(raw, str):
         return _MOUSE_TRACKING_ALIASES.get(raw.strip().lower(), "all")
-    return "all"
+    return "off" if raw is False or raw == 0 else "all"
 
 
 def _load_reasoning_config(model: str = "") -> dict | None:
@@ -1719,10 +1694,8 @@ def _load_tool_progress_mode() -> str:
     if env in _TOOL_PROGRESS_MODES:
         return env
     raw = _display_cfg().get("tool_progress", "all")
-    if raw is False:
-        return "off"
-    if raw is True:
-        return "all"
+    if isinstance(raw, bool):
+        return "all" if raw else "off"
     mode = str(raw or "all").strip().lower()
     return mode if mode in _TOOL_PROGRESS_MODES else "all"
 
@@ -1749,9 +1722,8 @@ def _resolve_explicit_toolsets(explicit: list[str], validate_toolset) -> list[st
             plugin_valid = [name for name in unresolved if validate_toolset(name)]
         except Exception:
             plugin_valid = []
-        if plugin_valid:
-            built_in.extend(plugin_valid)
-            unresolved = [name for name in unresolved if name not in plugin_valid]
+        built_in.extend(plugin_valid)
+        unresolved = [name for name in unresolved if name not in plugin_valid]
     if any(name in {"all", "*"} for name in built_in):
         if ignored := [name for name in explicit if name not in {"all", "*"}]:
             _tui_notice(
@@ -1889,10 +1861,9 @@ def _get_usage(agent) -> dict:
         _lhist = list(getattr(agent, "_api_latency_history", []) or [])
         _ohist = list(getattr(agent, "_api_output_history", []) or [])
         if _n := min(len(_lhist), len(_ohist)):
-            _lhist, _ohist = _lhist[-_n:], _ohist[-_n:]
-            _total_lat = sum(_lhist)
+            _total_lat = sum(_lhist[-_n:])
             _avg_lat = _total_lat / _n
-            _avg_vel = (sum(_ohist) / _total_lat) if _total_lat > 0 else None
+            _avg_vel = (sum(_ohist[-_n:]) / _total_lat) if _total_lat > 0 else None
             # Guard NaN/negative/absurd values from odd provider timings.
             if _avg_lat == _avg_lat and 0 < _avg_lat < 1e6:
                 usage["avg_latency_s"] = round(float(_avg_lat), 1)
@@ -1978,9 +1949,8 @@ def _project_info_for_cwd(cwd: str) -> dict | None:
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as conn:
             project = pdb.project_for_path(conn, cwd)
-        if project is None:
-            return None
-        return {"id": project.id, "slug": project.slug, "name": project.name, "primary_path": project.primary_path}
+        return None if project is None else {
+            "id": project.id, "slug": project.slug, "name": project.name, "primary_path": project.primary_path}
     except Exception:
         logger.debug("failed to resolve project for cwd", exc_info=True)
         return None
@@ -2040,8 +2010,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
     }
     with contextlib.suppress(Exception):
         from hermes_cli import __version__, __release_date__
-        info["version"] = __version__
-        info["release_date"] = __release_date__
+        info.update(version=__version__, release_date=__release_date__)
     live_agent = agent is not None and not sess.get("_compute_host_active")
     if live_agent:
         with contextlib.suppress(Exception):
@@ -2063,8 +2032,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
     with contextlib.suppress(Exception):
         from hermes_cli.banner import get_update_result
         from hermes_cli.config import recommended_update_command
-        info["update_behind"] = get_update_result(timeout=0.5)
-        info["update_command"] = recommended_update_command()
+        info.update(update_behind=get_update_result(timeout=0.5), update_command=recommended_update_command())
     if live_agent and (warn := _probe_credentials(agent)):
         info["credential_warning"] = warn
     return info
@@ -2145,10 +2113,8 @@ def _resolve_runtime_with_fallback(resolve_kwargs: dict | None = None) -> _Runti
         return _RuntimeFallbackResolution(resolve_runtime_provider(**(resolve_kwargs or {})), None, False)
     except AuthError as primary_exc:
         for entry in _load_fallback_model() or []:
-            if not isinstance(entry, dict):
-                continue
-            fb_provider = str(entry.get("provider") or "").strip()
-            fb_model = str(entry.get("model") or "").strip()
+            fb_provider = str(entry.get("provider") or "").strip() if isinstance(entry, dict) else ""
+            fb_model = str(entry.get("model") or "").strip() if isinstance(entry, dict) else ""
             if not fb_provider or not fb_model:
                 continue
             try:
@@ -2276,8 +2242,7 @@ def _make_agent(
 
 def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | None) -> None:
     """Adopt the stored row's cwd, or persist the fresh session's cwd (+ schedule git meta) when the row has none."""
-    owns_db = False
-    db = session_db
+    owns_db, db = False, session_db
     if db is None and not profile_home:
         db = _get_db()
     elif db is None:
@@ -2298,10 +2263,9 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
                 with _sessions_lock:
                     if sid in _sessions:
                         _sessions[sid]["cwd"] = row["cwd"]
-            else:
+            elif hasattr(db, "update_session_cwd"):
                 try:
-                    if hasattr(db, "update_session_cwd"):
-                        _persist_session_cwd_and_schedule_git_meta(_sessions[sid], _sessions[sid]["cwd"], db=db)
+                    _persist_session_cwd_and_schedule_git_meta(_sessions[sid], _sessions[sid]["cwd"], db=db)
                 except Exception:
                     logger.debug("failed to persist resumed session cwd", exc_info=True)
     finally:
@@ -2601,9 +2565,8 @@ def _find_live_session_by_key(session_key: str, profile_home=_ANY_PROFILE) -> tu
     # Timestamp-based stored ids can exist in several profiles' stores; a bare-id match would hand
     # profile B's resume profile A's runtime, so profile-aware callers match on (profile_home, key).
     for sid, session in list(_sessions.items()):
-        if session.get("_finalized"):
-            continue
-        if _session_lookup_key(session, fallback=sid) == session_key and _live_profile_matches(session, profile_home):
+        if (not session.get("_finalized") and _session_lookup_key(session, fallback=sid) == session_key
+                and _live_profile_matches(session, profile_home)):
             return sid, session
     return None
 
@@ -2635,10 +2598,7 @@ def _reconcile_display_with_live(db_display: list[dict], in_memory: list[dict]) 
     def _key(msg: dict) -> tuple:
         return (msg.get("role"), _coerce_message_text(msg.get("content")))
     anchor = _key(db_display[-1])
-    last_shared = -1
-    for idx, msg in enumerate(in_memory):
-        if isinstance(msg, dict) and _key(msg) == anchor:
-            last_shared = idx
+    last_shared = max((idx for idx, msg in enumerate(in_memory) if isinstance(msg, dict) and _key(msg) == anchor), default=-1)
     if last_shared == -1:
         return db_display  # DB tail not in memory (DB ahead, or diverged) — trust it over duplicating
     return list(db_display) + list(in_memory[last_shared + 1 :])
@@ -2693,9 +2653,9 @@ def _live_session_payload(
         "started_at": float(session.get("created_at") or time.time()),
         "status": _session_live_status(sid, session),
     }
-    approval = _pending_approval_request_payload(str(session.get("session_key") or ""))
-    clarify = _pending_clarify_request_payload(sid)
-    for key, value in (("inflight", inflight), ("queued", queued), ("pending_approval", approval), ("pending_clarify", clarify)):
+    for key, value in (("inflight", inflight), ("queued", queued),
+                       ("pending_approval", _pending_approval_request_payload(str(session.get("session_key") or ""))),
+                       ("pending_clarify", _pending_clarify_request_payload(sid))):
         if value:
             payload[key] = value
     return _attach_todo_state(payload, session)
@@ -2753,12 +2713,8 @@ def _pet_row_frame_counts(spritesheet) -> dict:
         out: dict[str, int] = {}
         for row_idx, name in enumerate(rows[:row_count]):
             top = row_idx * H
-            count = 0
-            for col in range(cols):
-                if render._frame_is_blank(image.crop((col * W, top, col * W + W, top + H))):
-                    break
-                count += 1
-            out[name] = count
+            blank = lambda col: render._frame_is_blank(image.crop((col * W, top, col * W + W, top + H)))
+            out[name] = next((col for col in range(cols) if blank(col)), cols)  # frames before the first blank cell
         return out
     except Exception:  # noqa: BLE001
         return {}
@@ -2959,12 +2915,9 @@ def _append_spawn_tree_index(session_dir, entry: dict) -> None:
 
 
 def _read_spawn_tree_index(session_dir) -> list[dict]:
-    index_path = session_dir / _SPAWN_TREE_INDEX
-    if not index_path.exists():
-        return []
     out: list[dict] = []
     try:
-        with index_path.open("r", encoding="utf-8") as f:
+        with (session_dir / _SPAWN_TREE_INDEX).open("r", encoding="utf-8") as f:
             for line in f:
                 if line := line.strip():
                     with contextlib.suppress(json.JSONDecodeError):
@@ -3146,10 +3099,8 @@ def _rank_slash_completions(items: list[dict], usage, origin_of, *, browsing: bo
     skills = [item for item in items if item.get("kind") == "skill"]
     if browsing:
         skills = [item for item in skills if origin_of(name_of(item)) != "bundled" or usage(name_of(item)) > 0]
-    if score_of is not None:
-        skills.sort(key=lambda item: (score_of(item), -usage(name_of(item)), name_of(item)))
-    else:
-        skills.sort(key=lambda item: (-usage(name_of(item)), name_of(item)))
+    skills.sort(key=lambda item: (
+        *(() if score_of is None else (score_of(item),)), -usage(name_of(item)), name_of(item)))
     return commands[:_SLASH_COMPLETION_LIMIT] + skills[:_SLASH_COMPLETION_LIMIT]
 
 
