@@ -4,6 +4,7 @@ Publishes the commit fence ``hard_interrupt()`` reads, runs the compressor on a 
 timeout, mirrors ``_DB_PERSISTED_MARKER`` stamps back onto the live lists and rebinds the session context.
 Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO unchanged.
 """
+
 import logging
 import copy
 import threading
@@ -26,11 +27,7 @@ def _timeout_fallback_prompt(agent, system_message: str) -> str:
     try:
         return agent._build_system_prompt(system_message)
     except Exception:
-        logger.debug(
-            "compress_context timeout fallback prompt rebuild "
-            "failed; using raw system_message",
-            exc_info=True,
-        )
+        logger.debug("compress_context timeout fallback prompt rebuild failed; using raw system_message", exc_info=True)
         return system_message or ""
 
 
@@ -68,10 +65,7 @@ def _report_compression_timeout(
     touch = getattr(agent, "_touch_activity", None)
     if callable(touch):
         try:
-            touch(
-                "context compression timed out",
-                provenance=ActivityProvenance.AGENT_COMPRESSION_TIMEOUT,
-            )
+            touch("context compression timed out", provenance=ActivityProvenance.AGENT_COMPRESSION_TIMEOUT)
         except Exception:
             logger.debug("compress_context timeout activity touch failed", exc_info=True)
     # Same timeout cooldown ladder as summary-LLM timeouts: avoid re-burning the
@@ -171,6 +165,7 @@ class CompressionFacadeMixin:
             resolve_context_compression_timeouts,
             run_compress_context_with_progress_timeout,
         )
+
         reset_context_compression_timeout_outcome(self)
         from agent.portal_tags import (
             get_affinity_scope,
@@ -181,6 +176,7 @@ class CompressionFacadeMixin:
             set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
+
         # Out-of-turn compaction (/compact, gateway /compress, partial head compression) runs outside
         # run_conversation's ambient scope; publish the root as a fallback so the summarizer's call carries
         # the conversation tag. No-op for in-turn callers. Same for the ROUTING scope when declared.
@@ -198,26 +194,24 @@ class CompressionFacadeMixin:
         # admission against begin_commit(). Publication is serialized so overlapping automatic/manual
         # entrypoints cannot replace the fence of the attempt currently committing.
         active_fence = commit_fence or CompressionCommitFence()
-        fence_registration_lock = vars(self).setdefault(
-            "_compression_commit_fence_lock", threading.RLock()
-        )
+        fence_registration_lock = vars(self).setdefault("_compression_commit_fence_lock", threading.RLock())
         with fence_registration_lock:
             missing_fence = object()
             previous_fence = vars(self).get("_active_compression_commit_fence", missing_fence)
             self._active_compression_commit_fence = active_fence
         try:
+
             def _run(fence=None, target_messages=None):
                 return compress_context(
                     self,
                     target_messages if target_messages is not None else messages,
                     system_message,
-                    approx_tokens=approx_tokens, task_id=task_id,
+                    approx_tokens=approx_tokens,
+                    task_id=task_id,
                     focus_topic=focus_topic,
                     force=force,
                     bypass_cooldown=bypass_cooldown,
-                    defer_context_engine_notification=(
-                        defer_context_engine_notification
-                    ),
+                    defer_context_engine_notification=(defer_context_engine_notification),
                     commit_fence=fence,
                 )
 
@@ -233,6 +227,7 @@ class CompressionFacadeMixin:
             if direct_path:
                 result = _run(active_fence)
             else:
+
                 def _snapshot_worker(fence=None):
                     # The pooled worker must NEVER share the caller's live transcript — a late
                     # engine after a host timeout could rewrite it. Deep-snapshot on the worker;
@@ -294,6 +289,7 @@ class CompressionFacadeMixin:
             # The worker thread rotated hermes_logging's thread-local session id; propagate to this thread.
             try:
                 from hermes_logging import set_session_context
+
                 set_session_context(self.session_id)
             except Exception:
                 pass
@@ -301,6 +297,7 @@ class CompressionFacadeMixin:
             # resolve HERMES_SESSION_ID to the child id (idempotent when no rotation happened).
             try:
                 from gateway.session_context import set_current_session_id
+
                 if self.session_id:
                     set_current_session_id(self.session_id)
             except Exception:
