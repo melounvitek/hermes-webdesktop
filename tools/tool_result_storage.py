@@ -1,15 +1,11 @@
 """Tool result persistence -- preserves large outputs instead of truncating.
 
-Three layers against context-window overflow: (1) per-tool output caps inside
-each tool; (2) ``maybe_persist_tool_result`` — output over the tool's threshold
-is persisted and replaced in-context by a preview + path. The canonical home is
-ALWAYS host-side ``$HERMES_HOME/cache/spillover/{tool_use_id}.txt`` (works for
-MCP-only/cron/gateway sessions that never ran a terminal); remote backends see
-the translated in-sandbox path (``cache/spillover`` is in the auto-mounted cache
-list), probed for readability, else a copy written into the sandbox temp dir.
-(3) ``enforce_turn_budget`` — spills the largest results of a turn until the
-aggregate fits.
-"""
+Layers against context overflow: (1) per-tool caps inside each tool; (2)
+``maybe_persist_tool_result`` — output over the tool's threshold is persisted and
+replaced by a preview + path. Canonical home is ALWAYS host-side
+``$HERMES_HOME/cache/spillover/{id}.txt`` (works for sessions that never ran a
+terminal); remote backends get the translated in-sandbox path (probed for
+readability) else a copy in the sandbox temp dir. (3) ``enforce_turn_budget``."""
 
 import hashlib
 import logging

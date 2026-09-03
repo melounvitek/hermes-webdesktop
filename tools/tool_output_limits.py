@@ -1,15 +1,8 @@
-"""Configurable tool-output truncation limits (``tool_output`` in config.yaml).
-
-Centralises the caps once hardcoded in ``terminal_tool`` (``max_bytes``) and
-``file_operations`` (``max_lines`` / ``max_line_length``). Defaults equal the
-old constants and the reader never raises, so behaviour is unchanged when the
-section is absent or malformed::
-
-    tool_output:
-      max_bytes: 100000        # terminal output cap (chars)
-      max_lines: 5000          # read_file pagination + truncation cap
-      max_line_length: 2000    # per-line cap before '... [truncated]'
-"""
+"""Configurable tool-output truncation limits (``tool_output`` in config.yaml):
+``max_bytes`` (terminal output cap), ``max_lines`` (read_file pagination cap),
+``max_line_length`` (per-line cap before '... [truncated]'). Defaults equal the
+constants once hardcoded in terminal_tool / file_operations and the reader never
+raises, so behaviour is unchanged when the section is absent or malformed."""
 
 from __future__ import annotations
 

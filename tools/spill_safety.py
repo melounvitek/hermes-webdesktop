@@ -1,17 +1,11 @@
-"""Symlink-safe creation helpers for spill/cache files.
-
-Spill files live in predictable directories under ``~/.hermes``; a plain
-``open(path, "w")`` there would follow a pre-planted symlink and let a local
-process redirect the write onto ``~/.bashrc``, ``authorized_keys``, etc. Every
-helper refuses symlinks by construction: new files use ``O_CREAT | O_EXCL``
-(fails on ANY existing path, including a dangling link); overwrites ``lstat`` +
-``unlink`` the existing path first (removes the link, never its target), then
-create exclusively, so the pair can't be raced. ``private=True`` (default)
-forces ``0o700`` dirs / ``0o600`` files for spills that may hold pre-redaction
-secrets; ``private=False`` keeps umask perms for cache dirs bind-mounted into
-remote backends (``credential_files._CACHE_DIRS``) where a non-root container
-UID must read them. Disk failures are the caller's concern: helpers raise ``OSError``.
-"""
+"""Symlink-safe creation helpers for spill/cache files under ``~/.hermes``, where a
+plain ``open(path, "w")`` would follow a pre-planted symlink onto ``~/.bashrc`` etc.
+New files use ``O_CREAT | O_EXCL`` (fails on ANY existing path, even a dangling
+link); overwrites ``lstat`` + ``unlink`` first (removes the link, never its target)
+then create exclusively, so the pair can't be raced. ``private=True`` (default) =
+``0o700`` dirs / ``0o600`` files for spills that may hold pre-redaction secrets;
+``private=False`` keeps umask perms for cache dirs bind-mounted into remote backends
+(``credential_files._CACHE_DIRS``). Disk failures raise ``OSError`` to the caller."""
 
 from __future__ import annotations
 

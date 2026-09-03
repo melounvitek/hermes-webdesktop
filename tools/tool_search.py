@@ -1,15 +1,11 @@
 """Progressive tool disclosure ("tool search"): MCP/plugin tools and a curated set
 of event-triggered core tools are replaced in the model-visible array by three
-bridge tools — tool_search / tool_describe / tool_call.
-
-Invariants: working-set core tools (``toolsets._HERMES_CORE_TOOLS``) and
-session-gated GUI toolsets never defer unless named in ``defer``; ANY deferrable
-tool activates the bridge (the listing scales with budget, not activation); the
-catalog is stateless — rebuilt from the live tool-defs on every assembly (a
-session-keyed catalog drifts from the registry and silently drops tools); bridge
-calls route through ``model_tools.handle_function_call`` so guardrails, hooks,
-approvals and truncation fire identically.
-"""
+bridge tools — tool_search / tool_describe / tool_call. Invariants: core tools
+(``toolsets._HERMES_CORE_TOOLS``) and session-gated GUI toolsets never defer unless
+named in ``defer``; ANY deferrable tool activates the bridge (the listing scales
+with budget, not activation); the catalog is stateless — rebuilt from the live
+tool-defs every assembly (a session-keyed one drifts and silently drops tools);
+bridge calls route through ``model_tools.handle_function_call`` (same guardrails)."""
 
 from __future__ import annotations
 
@@ -111,6 +107,7 @@ def _safe_float(value: Any, fallback: float) -> float:
 
 
 def _config_from_loader(loader_name: str) -> ToolSearchConfig:
+    """Tool-search config via ``hermes_cli.config.<loader_name>`` (defaults on any failure)."""
     try:
         import hermes_cli.config as _cfg_mod
         cfg = getattr(_cfg_mod, loader_name)() or {}
@@ -122,12 +119,11 @@ def _config_from_loader(loader_name: str) -> ToolSearchConfig:
 
 
 def load_config() -> ToolSearchConfig:
-    """Load tool-search config from the user config file."""
     return _config_from_loader("load_config")
 
 
 def load_config_readonly() -> ToolSearchConfig:
-    """Load tool-search config without copying the cached full config."""
+    """Same as ``load_config`` without copying the cached full config."""
     return _config_from_loader("load_config_readonly")
 
 
@@ -221,11 +217,9 @@ def should_activate(
     config: ToolSearchConfig,
     deferrable_tokens: int,
     context_length: Optional[int]) -> bool:
-    """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any
-    deferrable tool exists. ``"auto"`` is an alias of ``"on"`` reserved for a
-    future budget-gated mode — do not distinguish them without that design.
-    ``context_length`` stays in the signature for caller compatibility; the
-    threshold governs the listing budget, not activation."""
+    """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any deferrable
+    tool exists ("auto" is reserved for a future budget-gated mode — do not distinguish
+    them without that design). ``context_length`` is kept for caller compatibility."""
     return config.enabled != "off" and deferrable_tokens > 0
 
 
@@ -363,9 +357,8 @@ def assemble_tool_defs(
     *,
     context_length: Optional[int] = None,
     config: Optional[ToolSearchConfig] = None) -> AssemblyResult:
-    """Return the tool-defs list the model should actually see: passthrough
-    when inactive, otherwise deferrable tools replaced by the three bridge
-    tools. Idempotent — bridge tools already present are stripped first."""
+    """Tool-defs the model should see: passthrough when inactive, else deferrable tools
+    replaced by the three bridge tools. Idempotent — existing bridge tools are stripped first."""
     if config is None:
         config = load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
@@ -404,9 +397,8 @@ def is_bridge_tool(name: str) -> bool:
 
 
 def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
-    """One record for the response's shared ``tools`` map (held once per tool;
-    per-query groups carry names only). ``required`` lets the model attempt a
-    trivial call without a ``tool_describe`` round-trip."""
+    """One record for the shared ``tools`` map (per-query groups carry names only);
+    ``required`` lets the model attempt a trivial call without a ``tool_describe`` round-trip."""
     schema = entry.schema if isinstance(entry.schema, dict) else {}
     fn = schema.get("function")
     params = fn.get("parameters") if isinstance(fn, dict) else None
@@ -430,9 +422,8 @@ def _available_source_summary(catalog: List[CatalogEntry]) -> List[Dict[str, Any
 def _string_list_arg(
     args: Dict[str, Any], key: str, *, dedupe: bool, max_items: int, retry_hint: str,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
-    """Read a list-of-strings bridge argument -> ``(items, error_json)``. A bare
-    string (a common model slip) counts as a one-item list. Rejects non-list
-    input, an empty list (after stripping blanks), and more than ``max_items``."""
+    """Read a list-of-strings bridge argument -> ``(items, error_json)``. A bare string (a
+    common model slip) is a one-item list; rejects non-lists, all-blank lists, > ``max_items``."""
     raw = args.get(key)
     if isinstance(raw, str):
         raw = [raw]
@@ -552,10 +543,9 @@ def dispatch_tool_describe(args: Dict[str, Any],
 
 
 def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
-    """Deferrable tool names in the *pre-assembly* ``tool_defs`` of the session's
-    toolset scope — the universe ``tool_call`` may reach. Gates both bridge
-    dispatch and the executor unwrap so a restricted session cannot invoke an
-    out-of-scope tool via the bridge."""
+    """Deferrable names in the *pre-assembly* ``tool_defs`` of the session scope — the
+    universe ``tool_call`` may reach. Gates bridge dispatch AND the executor unwrap so a
+    restricted session cannot invoke an out-of-scope tool via the bridge."""
     defer_tools = load_config_readonly().effective_defer_tools
     return frozenset(
         name for name in _tool_def_names(tool_defs)
@@ -563,9 +553,8 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
 
 
 def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
-    """Parse a ``tool_call`` invocation into (underlying_name, args, error_msg);
-    ``(None, {}, msg)`` on parse error. Shared by dispatch, display, and the
-    trajectory recorder so all three agree on the underlying tool."""
+    """Parse a ``tool_call`` invocation -> (underlying_name, args, error_msg); ``(None, {}, msg)``
+    on error. Shared by dispatch, display and the trajectory recorder so all three agree."""
     name = str(args.get("name") or "").strip()
     if not name:
         return None, {}, "tool_call requires a 'name' argument"
