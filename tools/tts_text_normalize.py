@@ -81,10 +81,13 @@ def strip_markdown_for_tts(text: str) -> str:
 
 def _normalize_temperature_ranges(text: str) -> str:
     """``11-17°C`` -> ``11 to 17 degrees Celsius`` (en/em dash or hyphen; unicode minus normalized)."""
+    number = r"([-+\u2212]?\d+(?:\.\d+)?)"
     for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
         text = re.sub(
-            r"(?<!\w)([-+\u2212]?\d+(?:\.\d+)?)\s*[\u2013\u2014-]\s*([-+\u2212]?\d+(?:\.\d+)?)\s*°\s*" + unit + r"\b",
-            lambda m, w=word: f"{m.group(1).replace(chr(0x2212), '-')} to {m.group(2).replace(chr(0x2212), '-')} degrees {w}",
+            r"(?<!\w)" + number + r"\s*[\u2013\u2014-]\s*" + number + r"\s*°\s*" + unit + r"\b",
+            lambda m, w=word: (
+                f"{m.group(1).replace(chr(0x2212), '-')} to {m.group(2).replace(chr(0x2212), '-')} degrees {w}"
+            ),
             text,
             flags=re.IGNORECASE,
         )
@@ -105,7 +108,9 @@ def normalize_symbols_for_tts(text: str) -> str:
     # Temperatures with a number first, then bare units ("measured in degrees C"),
     # then any remaining degree symbol (angles, stray cases).
     for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
-        text = re.sub(r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°\s*" + unit + r"\b", r"\1 degrees " + word, text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°\s*" + unit + r"\b", r"\1 degrees " + word, text, flags=re.IGNORECASE,
+        )
     for unit, word in (("C", "Celsius"), ("F", "Fahrenheit")):
         text = re.sub(r"°\s*" + unit + r"\b", "degrees " + word, text, flags=re.IGNORECASE)
     text = re.sub(r"(?<!\w)([-+]?\d+(?:\.\d+)?)\s*°", r"\1 degrees", text)

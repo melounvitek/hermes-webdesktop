@@ -147,7 +147,9 @@ def command_failure_detail(exc: subprocess.CalledProcessError) -> str:
     return "; ".join(parts) or "no command output"
 
 
-def run_command_provider(command: str, timeout: float, env_passthrough: Optional[list] = None) -> subprocess.CompletedProcess:
+def run_command_provider(
+    command: str, timeout: float, env_passthrough: Optional[list] = None,
+) -> subprocess.CompletedProcess:
     """Run a command-provider shell command with process-tree idle cleanup.
 
     ``timeout`` is an IDLE timeout, reset whenever the command emits output — a
@@ -280,8 +282,10 @@ def _is_command_provider_config(config: Dict[str, Any]) -> bool:
     return isinstance(command, str) and bool(command.strip())
 
 
-def _resolve_command_config(provider: str, config: Dict[str, Any], reserved: FrozenSet[str]) -> Optional[Dict[str, Any]]:
-    """Provider config when *provider* is a user-declared command provider; None for *reserved* names, unknown or non-command."""
+def _resolve_command_config(
+    provider: str, config: Dict[str, Any], reserved: FrozenSet[str],
+) -> Optional[Dict[str, Any]]:
+    """Config of a user-declared command provider; None for *reserved* names, unknown or non-command."""
     if not provider:
         return None
     key = provider.lower().strip()
@@ -292,7 +296,7 @@ def _resolve_command_config(provider: str, config: Dict[str, Any], reserved: Fro
 
 
 def _command_timeout(config: Dict[str, Any], default: float) -> float:
-    """Timeout in seconds (``timeout`` > ``timeout_seconds``); invalid or non-positive values fall back to *default*."""
+    """Timeout in seconds (``timeout`` > ``timeout_seconds``); invalid or non-positive -> *default*."""
     raw = config.get("timeout", config.get("timeout_seconds", default))
     try:
         value = float(raw)
@@ -363,7 +367,9 @@ def _configured_command_tts_output_path(path: Path, config: Dict[str, Any]) -> P
     return path.with_suffix(f".{_get_command_tts_output_format(config)}")
 
 
-def _generate_command_tts(text: str, output_path: str, provider_name: str, config: Dict[str, Any], tts_config: Dict[str, Any]) -> str:
+def _generate_command_tts(
+    text: str, output_path: str, provider_name: str, config: Dict[str, Any], tts_config: Dict[str, Any],
+) -> str:
     """Generate speech by running a user-configured shell command; returns the audio path it wrote.
 
     Raises ``ValueError`` for invalid provider config and ``RuntimeError`` for

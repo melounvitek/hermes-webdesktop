@@ -64,7 +64,7 @@ _STT_M4A_ENCODE_ARGS = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a"
 
 
 def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None) -> None:
-    """Run the shared STT m4a encode, optionally with an ``-af`` filter. Raises on failure (callers own the semantics)."""
+    """Run the shared STT m4a encode, optionally with an ``-af`` filter. Raises on failure; callers own the semantics."""
     command = [ffmpeg, "-y", "-i", input_path]
     if audio_filter:
         command += ["-af", audio_filter]
@@ -236,7 +236,9 @@ def _probe_audio_duration(file_path: str) -> Optional[float]:
     ffprobe = _find_ffprobe_binary()
     if not ffprobe:
         return None
-    command = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+    command = [
+        ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path,
+    ]
     try:
         return float(_run_quiet(command, timeout=30).stdout.strip())
     except Exception:  # noqa: BLE001 - probe is best-effort

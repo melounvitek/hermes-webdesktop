@@ -1,10 +1,10 @@
 """Cloud STT providers.
 
-OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, the REST
-multipart backends (xAI, ElevenLabs), and OpenAI audio credential resolution
-(config > keyless local server > env > managed Nous gateway). Every name is
-re-imported by ``tools/transcription_tools.py`` (patch surface), which is
-imported lazily here so origin patches still intercept.
+OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, REST multipart
+backends (xAI, ElevenLabs), and OpenAI audio credential resolution (config > keyless
+local server > env > managed Nous gateway). Every name is re-imported by
+``tools/transcription_tools.py`` (patch surface), imported lazily here so origin
+patches still intercept.
 """
 
 from __future__ import annotations
@@ -35,11 +35,7 @@ def _has_xai_stt_credentials() -> bool:
 
 
 def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
-    """Run ``body(client)`` against a fresh OpenAI SDK client (30s timeout, no SDK retries).
-
-    Always closes the client; any exception maps to the shared envelope via
-    :func:`_openai_sdk_failure`.
-    """
+    """Run ``body(client)`` on a fresh OpenAI SDK client (30s timeout, no retries); always closed, errors -> envelope."""
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
@@ -64,8 +60,8 @@ def _cloud_failure(exc: BaseException, file_path: str, label: str, detail: Optio
 def _openai_sdk_failure(exc: BaseException, file_path: str, log_label: str) -> Dict[str, Any]:
     """Map an OpenAI-SDK-shaped exception to the shared error envelope.
 
-    Order matters: APIConnectionError is checked before APITimeoutError (its
-    subclass) so timeouts report as connection errors, as they always have.
+    APIConnectionError is checked before APITimeoutError (its subclass) so timeouts
+    report as connection errors, as they always have.
     """
     try:
         from openai import APIError, APIConnectionError, APITimeoutError
@@ -93,11 +89,7 @@ def _sdk_prompt_kwargs(language: Optional[str], prompt: Optional[str]) -> Dict[s
 def _transcribe_groq(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Transcribe using Groq Whisper API (free tier available).
-
-    Language: hook override > ``stt.groq.language`` > ``stt.language`` > env;
-    otherwise Groq auto-detects.
-    """
+    """Transcribe via the Groq Whisper API; language: hook > ``stt.groq.language`` > ``stt.language`` > env > auto."""
     from tools.transcription_tools import _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
     if not api_key:
@@ -131,9 +123,8 @@ def _transcribe_openai(
 ) -> Dict[str, Any]:
     """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
 
-    Shared backend for every OpenAI-compatible STT endpoint (DeepInfra etc.):
-    callers pass explicit ``api_key``/``base_url`` to skip the OpenAI-only auth
-    chain and a ``provider_label`` for the response's ``provider``.
+    Shared by every OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/
+    ``base_url`` skip the OpenAI-only auth chain; ``provider_label`` names the response's provider.
     """
     from tools.transcription_tools import _HAS_OPENAI, _resolve_openai_audio_client_config, _resolve_stt_language
     if api_key is None:
@@ -149,8 +140,7 @@ def _transcribe_openai(
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
 
-    # Auto-correct a Groq-only model on the native OpenAI path only —
-    # third-party endpoints may legitimately serve a whisper-large-v3 variant.
+    # Auto-correct a Groq-only model on the native OpenAI path only (third-party endpoints may serve it).
     if provider_label == "openai" and model_name in GROQ_MODELS:
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
@@ -167,14 +157,12 @@ def _transcribe_openai(
                 }
                 if language:
                     if model_name == "gpt-transcribe":
-                        # gpt-transcribe replaces ``language`` with a ``languages``
-                        # list and rejects requests sending the legacy field.
+                        # gpt-transcribe takes a ``languages`` list and rejects the legacy field.
                         create_kwargs["extra_body"] = {"languages": [language]}
                     else:
                         create_kwargs["language"] = language
                     logger.debug("Using language hint '%s' for OpenAI STT", language)
-                if prompt:
-                    # Only sent when set so the no-hook, no-config request stays byte-identical.
+                if prompt:  # only when set so the bare request stays byte-identical
                     create_kwargs["prompt"] = prompt
                 return client.audio.transcriptions.create(**create_kwargs)
 
@@ -185,8 +173,7 @@ def _transcribe_openai(
                 message = str(exc).lower()
                 if not any(k in message for k in ("unsupported", "corrupted", "invalid file")):
                     raise
-                # Newer models reject some containers whisper-1 accepted
-                # (notably Ogg/Opus voice notes): transcode to m4a, retry once.
+                # Newer models reject containers whisper-1 accepted (Ogg/Opus voice notes): transcode, retry once.
                 converted_path, transcode_error = _transcode_audio_for_stt(file_path, work_dir)
                 if transcode_error:
                     return _error_result(transcode_error)
@@ -255,11 +242,10 @@ def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, dat
 
 
 def _rest_transcript(response, label: str, extract_detail, extract_text):
-    """Turn a multipart STT response into ``(text, body, None)`` or ``(None, None, error_envelope)``.
+    """Multipart STT response -> ``(text, body, None)`` or ``(None, None, error_envelope)``.
 
-    Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via
-    *extract_detail*, else the first 300 body chars); empty text -> the
-    ``no_speech`` envelope so callers treat silence as non-fatal.
+    Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via *extract_detail*, else
+    the first 300 body chars); empty text -> the ``no_speech`` envelope (silence is non-fatal).
     """
     if response.status_code != 200:
         try:
@@ -299,9 +285,8 @@ def _transcribe_xai(
     if prompt:
         _log_prompt_unsupported("STT provider 'xai'")
 
-    # STT is API-billed: prefer the explicit XAI_API_KEY over the general xAI
-    # OAuth/Grok-subscription credential, which may be valid for Grok yet hit
-    # personal-team spending-limit errors on /v1/stt.
+    # STT is API-billed: prefer the explicit XAI_API_KEY over the xAI OAuth/Grok-subscription
+    # credential, which may be valid for Grok yet hit spending-limit errors on /v1/stt.
     direct_api_key = str(get_env_value("XAI_API_KEY") or "").strip()
     if direct_api_key:
         creds = {
@@ -319,8 +304,7 @@ def _transcribe_xai(
     xai_config = stt_config.get("xai") or {}
 
     def _resolve_base_url(resolved_creds: Dict[str, str]) -> str:
-        # OAuth bearers are pinned to the resolver-validated xAI origin;
-        # config/env base URL overrides only apply to API-key credentials.
+        # OAuth bearers are pinned to the resolver-validated origin; overrides apply to API keys only.
         if resolved_creds.get("provider") == "xai-oauth":
             url = resolved_creds.get("base_url")
         else:
@@ -454,12 +438,8 @@ def _transcribe_deepinfra(
 
 
 def _is_local_or_private_url(url: str) -> bool:
-    """True for loopback/RFC-1918/LAN-internal hosts.
-
-    Decides whether an empty ``stt.openai.api_key`` is acceptable: local
-    OpenAI-compatible STT servers ignore the auth header, so users shouldn't
-    need a sham ``api_key: not-needed``.
-    """
+    """True for loopback/RFC-1918/LAN-internal hosts, where an empty ``stt.openai.api_key`` is acceptable
+    (local OpenAI-compatible servers ignore the auth header — no sham ``api_key: not-needed`` needed)."""
     try:
         from urllib.parse import urlparse
         import ipaddress
@@ -476,11 +456,8 @@ def _is_local_or_private_url(url: str) -> bool:
 
 
 def _direct_openai_credentials(cfg_api_key: str, cfg_base_url: str) -> Optional[tuple[str, str]]:
-    """Direct-credential ladder: config key > keyless local base_url > env key; None if none apply.
-
-    A local OpenAI-compatible server needs no key — send a placeholder so the
-    SDK doesn't refuse to construct a client.
-    """
+    """Direct-credential ladder: config key > keyless local base_url (placeholder key so the SDK
+    constructs a client) > env key; None if none apply."""
     from tools.transcription_tools import resolve_openai_audio_api_key
     if cfg_api_key:
         return cfg_api_key, (cfg_base_url or OPENAI_BASE_URL)
@@ -493,16 +470,10 @@ def _direct_openai_credentials(cfg_api_key: str, cfg_base_url: str) -> Optional[
 
 
 def _resolve_openai_audio_client_config() -> tuple[str, str]:
-    """Return ``(api_key, base_url)`` for the OpenAI STT client.
-
-    Strict selection semantics on the stored ``stt`` provider string:
-    - ``"nous"`` → managed gateway ONLY; unentitled/unreachable is a
-      selection-naming error (a direct OPENAI_API_KEY must NOT override it).
-    - any other stored provider → direct credentials ONLY; missing credentials
-      is a selection-naming error — no silent managed fallback.
-    - never-configured stt section → legacy ladder: direct credentials, then
-      the managed gateway.
-    """
+    """``(api_key, base_url)`` for the OpenAI STT client, strict on the stored ``stt`` selection:
+    ``"nous"`` -> managed gateway ONLY (a direct OPENAI_API_KEY must NOT override it); any other
+    stored provider -> direct credentials ONLY (no silent managed fallback); never-configured ->
+    legacy ladder: direct credentials, then the managed gateway. Failures raise ValueError."""
     from tools.transcription_tools import (
         _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
         resolve_managed_tool_gateway,

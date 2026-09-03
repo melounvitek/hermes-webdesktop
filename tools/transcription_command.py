@@ -154,11 +154,10 @@ def _dispatch_to_plugin_provider(
 ) -> Optional[Dict[str, Any]]:
     """Route to a plugin-registered transcription provider; None when no plugin claims the name.
 
-    Invariants re-verified here (a caller refactor can't silently break them):
-    built-in names never reach the registry; a same-name ``stt.providers.<name>:
-    type: command`` wins over a plugin. A matched plugin with ``is_available() ==
-    False`` returns an error envelope — not None — because the user explicitly
-    opted in via ``stt.provider``. Provider exceptions become the error envelope.
+    Invariants re-verified here so a caller refactor can't break them: built-in names never
+    reach the registry; a same-name command provider wins over a plugin. A matched plugin with
+    ``is_available() == False`` returns an error envelope — not None — because the user
+    explicitly opted in via ``stt.provider``. Provider exceptions become the error envelope.
     """
     if not provider:
         return None
@@ -216,8 +215,7 @@ def _dispatch_to_plugin_provider(
     return result
 
 
-# Fields a pre_transcription hook may mutate. ``file_path`` is read-only —
-# attempts to change it are logged and dropped.
+# Fields a pre_transcription hook may mutate; ``file_path`` is read-only (logged and dropped).
 _PRE_TRANSCRIPTION_MUTABLE_FIELDS = ("prompt", "language", "model")
 
 # Whisper-family models only use the final ~224 tokens of the prompt; longer values
@@ -229,11 +227,8 @@ _WHISPER_PROMPT_CAPPED_PROVIDERS = frozenset({"local", "openai", "groq", "deepin
 
 
 def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Optional[str]:
-    """Truncate *prompt* to the whisper-family token cap, keeping the TAIL (fail-open).
-
-    Whisper conditions on the final context window, so the most recently
-    appended hints survive. Other providers own their own validation.
-    """
+    """Truncate *prompt* to the whisper-family token cap, keeping the TAIL (whisper conditions
+    on the final context window, so the newest hints survive). Other providers self-validate."""
     if not prompt or provider not in _WHISPER_PROMPT_CAPPED_PROVIDERS:
         return prompt
     max_chars = _WHISPER_PROMPT_TOKEN_CAP * _PROMPT_CHARS_PER_TOKEN
@@ -251,17 +246,12 @@ def _apply_pre_transcription_hook(
     *, file_path: str, provider: str, model: Optional[str], language: Optional[str],
     prompt: Optional[str], source: Optional[str],
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Fire the ``pre_transcription`` plugin hook and merge its results.
+    """Fire the ``pre_transcription`` plugin hook; returns ``(model, language_override, prompt)``.
 
-    Gated on ``has_hook`` so the no-hook path never builds hook kwargs, and
-    fail-open: any hook-plumbing error leaves the dispatch untouched. Results
-    arrive in registration order and are applied field-by-field, so the last
-    hook to write a field wins. Model values flow through the same per-backend
-    normalization a caller-supplied model would.
-
-    Returns ``(model, language_override, prompt)``; ``language_override`` is
-    None unless a hook explicitly set ``language``, so backends keep their own
-    config/env language resolution.
+    Gated on ``has_hook`` (the no-hook path never builds kwargs) and fail-open: any
+    plumbing error leaves the dispatch untouched. Results apply field-by-field in
+    registration order (last hook wins). ``language_override`` is None unless a hook
+    explicitly set ``language``, so backends keep their own config/env resolution.
     """
     try:
         from hermes_cli.plugins import has_hook, invoke_hook

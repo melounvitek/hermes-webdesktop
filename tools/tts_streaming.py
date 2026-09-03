@@ -21,8 +21,7 @@ from tools.tts_tool import _get_provider, _load_tts_config, get_env_value
 
 logger = logging.getLogger(__name__)
 
-# Per-sentence PCM byte cap, mirroring the 16 MiB bounded-body invariant of the
-# sync providers: a buggy or hostile endpoint must not feed unbounded audio.
+# Per-sentence PCM byte cap, mirroring the sync providers' 16 MiB bounded-body invariant.
 _STREAM_SENTENCE_BYTE_CAP = 16 * 1024 * 1024
 
 
@@ -147,9 +146,8 @@ def _try_instantiate(name: str, tts_config: Dict) -> Optional[StreamingTTSProvid
         return None
 
 
-# Fallback priority for ``tts.streaming.provider: auto`` — best chunked
-# latency/quality first. Deliberately hard-coded (a UX decision, not a config
-# knob); edge is absent because it has no chunked-PCM API.
+# Fallback priority for ``tts.streaming.provider: auto`` — best chunked latency/quality
+# first. Deliberately hard-coded (a UX decision); edge is absent (no chunked-PCM API).
 _PROVIDER_PRIORITY: List[str] = ["elevenlabs", "gemini", "openai", "xai"]
 
 
@@ -262,7 +260,9 @@ class GeminiStreamer(StreamingTTSProvider):
 
         import requests
 
-        from tools.tts_tool_providers import DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE
+        from tools.tts_tool_providers import (
+            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE,
+        )
 
         api_key = _gemini_key()
         model = str(self.section.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
@@ -280,7 +280,9 @@ class GeminiStreamer(StreamingTTSProvider):
         url = f"{base_url}/models/{model}:streamGenerateContent"
 
         def _sse_chunks() -> Iterator[bytes]:
-            with requests.post(url, params={"alt": "sse", "key": api_key}, json=payload, timeout=60, stream=True) as response:
+            with requests.post(
+                url, params={"alt": "sse", "key": api_key}, json=payload, timeout=60, stream=True,
+            ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines(decode_unicode=True):
                     if not line or not line.startswith("data: "):
