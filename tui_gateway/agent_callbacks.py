@@ -176,7 +176,6 @@ def _wire_callbacks(sid: str):
     from tools.terminal_tool import set_sudo_password_callback
     from tools.skills_tool import set_secret_capture_callback
     from tools.project_tools import set_project_workspace_callback
-
     set_sudo_password_callback(lambda: _block("sudo.request", sid, {}, timeout=120))
     set_project_workspace_callback(_apply_project_workspace)
 
@@ -188,7 +187,6 @@ def _wire_callbacks(sid: str):
         if not val:
             return {"success": True, "stored_as": env_var, "validated": False, "skipped": True, "message": "skipped"}
         from hermes_cli.config import save_env_value_secure
-
         return {**save_env_value_secure(env_var, val), "skipped": False, "message": "ok"}
 
     set_secret_capture_callback(secret_cb)
@@ -197,7 +195,6 @@ def _wire_callbacks(sid: str):
 def _available_personalities(cfg: dict | None = None) -> dict:
     """Built-ins + user overrides, via hermes_cli.personality (single owner)."""
     from hermes_cli.personality import available_personalities
-
     return available_personalities(_load_cfg() if cfg is None else cfg)
 
 
@@ -206,7 +203,6 @@ def _validate_personality(value: str, cfg: dict | None = None) -> tuple[str, str
     contract as hermes_cli.personality.resolve_personality, but goes through the
     module-level _available_personalities so tests keep a single patch point."""
     from hermes_cli.personality import normalize_personality_name, render_personality_prompt
-
     name = normalize_personality_name(value)
     if not name:
         return "", ""
@@ -220,7 +216,6 @@ def _validate_personality(value: str, cfg: dict | None = None) -> tuple[str, str
 def _prompt_text(value) -> str:
     """Normalize config prompt values from YAML for AIAgent (hermes_cli.personality owns this)."""
     from hermes_cli.personality import prompt_text
-
     return prompt_text(value)
 
 
@@ -284,7 +279,6 @@ def _load_fallback_model():
     """Configured fallback chain via the shared ``get_fallback_chain`` (parity with
     HermesCLI/gateway: ``fallback_providers`` first, legacy ``fallback_model`` merged after)."""
     from hermes_cli.fallback_config import get_fallback_chain
-
     return get_fallback_chain(_load_cfg())
 
 
@@ -302,7 +296,8 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         return getattr(agent, name, default)
 
     kwargs = {k: g(k) or None for k in (
-        "base_url", "api_key", "provider", "api_mode", "acp_command", "acp_args", "ephemeral_system_prompt")}
+        "base_url", "api_key", "provider", "api_mode", "acp_command", "acp_args",
+        "ephemeral_system_prompt")}
     kwargs.update({k: g(k) for k in (
         "providers_allowed", "providers_ignored", "providers_order", "provider_sort",
         "provider_data_collection", "openrouter_min_coding_score")})
@@ -329,15 +324,18 @@ def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
     return kwargs
 
 
+_PREVIEW_HISTORY_ROLES = ("user", "assistant", "tool", "system")
+
+
 def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_chars: int = 1200) -> list[dict]:
     """Distill recent parent history for the ephemeral preview-restart agent (else it
     guesses app/server/cwd/port from the bare URL). Keeps the last ``max_messages``
     (always back to the last user turn); tool results truncated to ``max_tool_chars``."""
     try:
         with session["history_lock"]:
-            history = list(session.get("history", []) or [])
+            history = list(session.get("history") or [])
     except Exception:
-        history = list(session.get("history", []) or [])
+        history = list(session.get("history") or [])
     if not history:
         return []
     start = max(0, len(history) - max_messages)
@@ -347,15 +345,12 @@ def _preview_restart_history(session: dict, max_messages: int = 24, max_tool_cha
             break
     trimmed: list[dict] = []
     for msg in history[start:]:
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") not in ("user", "assistant", "tool", "system"):
+        if not isinstance(msg, dict) or msg.get("role") not in _PREVIEW_HISTORY_ROLES:
             continue
         copy = {k: v for k, v in msg.items() if k != "reasoning"}
-        if msg.get("role") == "tool":
-            content = copy.get("content")
-            if isinstance(content, str) and len(content) > max_tool_chars:
-                copy["content"] = content[:max_tool_chars] + f"\n... (truncated, original {len(content)} chars)"
+        content = copy.get("content")
+        if msg.get("role") == "tool" and isinstance(content, str) and len(content) > max_tool_chars:
+            copy["content"] = content[:max_tool_chars] + f"\n... (truncated, original {len(content)} chars)"
         trimmed.append(copy)
     return trimmed
 

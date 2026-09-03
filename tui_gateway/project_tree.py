@@ -39,12 +39,10 @@ def stamp_profile(projects: list[dict], profile: str) -> None:
     """Stamp every session row with the request-scope profile (authoritative even
     for legacy rows whose ``profile_name`` is NULL) for cross-profile routing."""
     for project in projects:
-        for session in project.get("previewSessions") or []:
+        lanes = [g for repo in project.get("repos") or [] for g in repo.get("groups") or []]
+        lane_rows = [s for g in lanes for s in g.get("sessions") or []]
+        for session in (project.get("previewSessions") or []) + lane_rows:
             session["profile"] = profile
-        for repo in project.get("repos") or []:
-            for group in repo.get("groups") or []:
-                for session in group.get("sessions") or []:
-                    session["profile"] = profile
 
 
 def _branch_lane_id(repo_root: str, branch: str = "") -> str:
@@ -82,11 +80,11 @@ def _path_key(path: str) -> str:
 def _lane_key(path_or_lane: str) -> str:
     """Canonicalize only the path portion of a lane id; branch labels stay
     byte-preserved so equivalent Windows spellings don't fork lanes."""
-    for marker in ("::branch::", "::kanban"):
-        if marker in path_or_lane:
-            root, suffix = path_or_lane.split(marker, 1)
-            return f"{_path_key(root)}{marker}{suffix}"
-    return _path_key(path_or_lane)
+    marker = next((m for m in ("::branch::", "::kanban") if m in path_or_lane), None)
+    if marker is None:
+        return _path_key(path_or_lane)
+    root, suffix = path_or_lane.split(marker, 1)
+    return f"{_path_key(root)}{marker}{suffix}"
 
 
 def base_name(path: str) -> str:
@@ -248,16 +246,18 @@ def _disambiguate_labels(items: list[dict]) -> None:
         if len(pathed) < 2:
             continue
         parents = {id(g): _segments(g["path"])[:-1] for g in pathed}
-        max_depth = max(len(p) for p in parents.values())
-        for depth in range(1, max_depth + 1):
-            counts: dict[str, int] = {}
+        for depth in range(1, max(len(p) for p in parents.values()) + 1):
             for g in pathed:
                 prefix = "/".join(parents[id(g)][-depth:])
                 base = base_name(g["path"]) or g["path"]
                 g["label"] = f"{prefix}/{base}" if prefix else base
-                counts[g["label"]] = counts.get(g["label"], 0) + 1
-            if all(c == 1 for c in counts.values()):
+            if len({g["label"] for g in pathed}) == len(pathed):
                 break
+
+
+# Lane group wire fields <- placement keys (same order).
+_LANE_FIELDS = ("id", "label", "path", "isMain", "isKanban")
+_PLACEMENT_LANE_KEYS = ("lane_key", "lane_label", "lane_path", "is_main", "is_kanban")
 
 
 def _repo_node(root: str, label: str) -> dict:
@@ -273,11 +273,8 @@ def _build_repos(sessions: list[dict], resolve: Optional[Resolve], hydrate: bool
             continue
         lane_identity = _lane_key(placement["lane_key"])
         if lane_identity not in lanes:
-            group = {
-                "id": placement["lane_key"], "label": placement["lane_label"],
-                "path": placement["lane_path"], "isMain": placement["is_main"],
-                "isKanban": placement["is_kanban"], "sessions": [],
-            }
+            group = dict(zip(_LANE_FIELDS, (placement[k] for k in _PLACEMENT_LANE_KEYS)))
+            group["sessions"] = []
             lanes[lane_identity] = (group, placement)
         lanes[lane_identity][0]["sessions"].append(session)
 

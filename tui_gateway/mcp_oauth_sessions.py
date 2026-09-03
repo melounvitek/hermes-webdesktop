@@ -98,14 +98,42 @@ def _start_loopback_listener(flow) -> "http.server.HTTPServer":
     return httpd
 
 
+def _probe_with_rollback(
+    server_name: str, cfg: dict, hermes_home: str, flow, reconnect_live: bool) -> None:
+    """Run the OAuth probe; on ANY failure restore the prior token file + manager entry."""
+    from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server, _save_mcp_server
+    from tools.mcp_oauth import HermesTokenStorage
+    from tools.mcp_oauth_manager import get_manager
+    manager = get_manager()
+    storage = HermesTokenStorage(server_name)
+    backup = storage.snapshot()
+    previous_entry = None
+    try:
+        previous_entry = manager.remove(server_name, hermes_home=hermes_home)
+        timeout = max(float(cfg.get("connect_timeout", 0) or 0), 315)
+        tools = _probe_single_server(server_name, cfg, connect_timeout=timeout)
+        if not _oauth_tokens_present(server_name):
+            raise RuntimeError(
+                "The server responded, but no OAuth token was obtained — "
+                "this provider may require a manually-registered OAuth client.")
+        _save_mcp_server(server_name, cfg)
+        if flow is not None:
+            flow.tools = [{"name": t, "description": d} for t, d in tools]
+            flow.mark_approved()
+        if reconnect_live:
+            from tools.mcp_tool import reconnect_mcp_server
+            reconnect_mcp_server(server_name)
+    except Exception:
+        storage.restore(backup, only_if_absent=True)
+        manager.restore_entry(server_name, previous_entry, hermes_home=hermes_home)
+        raise
+
+
 def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reconnect_live: bool) -> None:
     """Drive the interactive MCP OAuth probe under the shared dashboard bridge (same
-    wrapping as ``web_server._run_dashboard_mcp_oauth``). On success the token file
-    exists and the server config is (re)saved; on failure the prior token/manager
-    state is restored."""
-    from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server, _save_mcp_server
+    HERMES_HOME + secret-scope + force_interactive_oauth + dashboard_oauth_flow wrapping
+    as ``web_server._run_dashboard_mcp_oauth``), keyed to our session record."""
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
     rec = _sessions.get(session_id)
     flow = rec["flow"] if rec else None
     try:
@@ -113,38 +141,11 @@ def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reco
             build_profile_secret_scope, reset_secret_scope, set_secret_scope)
         from tools.mcp_dashboard_oauth import dashboard_oauth_flow
         from tools.mcp_oauth import force_interactive_oauth
-        from tools.mcp_oauth_manager import get_manager
-
         home_token = set_hermes_home_override(hermes_home)
         secret_token = set_secret_scope(build_profile_secret_scope(Path(hermes_home)))
         try:
             with force_interactive_oauth(), dashboard_oauth_flow(flow):
-                from tools.mcp_oauth import HermesTokenStorage
-
-                manager = get_manager()
-                storage = HermesTokenStorage(server_name)
-                backup = storage.snapshot()
-                previous_entry = None
-                try:
-                    previous_entry = manager.remove(server_name, hermes_home=hermes_home)
-                    timeout = max(float(cfg.get("connect_timeout", 0) or 0), 315)
-                    tools = _probe_single_server(server_name, cfg, connect_timeout=timeout)
-                    if not _oauth_tokens_present(server_name):
-                        raise RuntimeError(
-                            "The server responded, but no OAuth token was obtained — "
-                            "this provider may require a manually-registered OAuth client.")
-                    _save_mcp_server(server_name, cfg)
-                    if flow is not None:
-                        flow.tools = [{"name": t, "description": d} for t, d in tools]
-                        flow.mark_approved()
-                    if reconnect_live:
-                        from tools.mcp_tool import reconnect_mcp_server
-
-                        reconnect_mcp_server(server_name)
-                except Exception:
-                    storage.restore(backup, only_if_absent=True)
-                    manager.restore_entry(server_name, previous_entry, hermes_home=hermes_home)
-                    raise
+                _probe_with_rollback(server_name, cfg, hermes_home, flow, reconnect_live)
         finally:
             reset_secret_scope(secret_token)
             reset_hermes_home_override(home_token)
@@ -152,7 +153,6 @@ def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reco
         msg = str(exc)
         with suppress(Exception):
             from tools.mcp_oauth import humanize_oauth_registration_error
-
             msg = humanize_oauth_registration_error(
                 server_name, exc, server_url=cfg.get("url") if isinstance(cfg, dict) else None
             ) or msg
@@ -178,7 +178,6 @@ def start_flow(
     backend; invalid values raise ``ValueError``) no gateway-side listener is bound and
     the client relays ``code``/``state`` via ``deliver_callback_flow``."""
     from tools.mcp_dashboard_oauth import DashboardOAuthFlow
-
     if client_redirect_uri is not None:
         client_redirect_uri = _validate_client_redirect_uri(client_redirect_uri)
 

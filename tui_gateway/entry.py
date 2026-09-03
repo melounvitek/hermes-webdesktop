@@ -45,7 +45,6 @@ def _install_sidecar_publisher() -> None:
     if not url:
         return
     from tui_gateway.event_publisher import WsPublisherTransport
-
     server._stdio_transport = TeeTransport(server._stdio_transport, WsPublisherTransport(url))
 
 
@@ -68,7 +67,6 @@ def _mcp_startup_call(name: str, *args, default=None, **kwargs):
     """Call ``hermes_cli.mcp_startup.<name>`` (lazy import); ``default`` on any failure."""
     try:
         from hermes_cli import mcp_startup
-
         return getattr(mcp_startup, name)(*args, **kwargs)
     except Exception:
         return default
@@ -118,7 +116,6 @@ def _log_signal(signum: int, frame) -> None:
     # messages reach state.db before the hard-exit timer fires.
     with suppress(Exception):
         from tui_gateway.server import _shutdown_sessions
-
         _shutdown_sessions()
 
     # Unwind the main thread so atexit + finalisers run inside the grace window;
@@ -176,7 +173,8 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
         fallback = timeout if timeout is not None else 0.75
-        thread.join(timeout=_mcp_startup_call("_resolve_discovery_timeout", timeout, default=fallback))
+        bound = _mcp_startup_call("_resolve_discovery_timeout", timeout, default=fallback)
+        thread.join(timeout=bound)
         return
     # Shared-owner path. Re-invoke the idempotent spawn first so a previous
     # zero-connected run gets its retry instead of latching the process MCP-less.
@@ -187,7 +185,6 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
         return
     try:
         from hermes_cli.mcp_startup import start_background_mcp_discovery
-
         start_background_mcp_discovery(logger=logger, thread_name="tui-mcp-discovery")
     except Exception:
         logger.debug("TUI MCP discovery retry-spawn failed", exc_info=True)
@@ -224,7 +221,6 @@ _recovery_times: list[float] = []
 def _has_configured_mcp_servers() -> bool:
     """Delegate to the shared native and portable MCP startup gate."""
     from hermes_cli.mcp_startup import _has_configured_mcp_servers as configured
-
     return configured()
 
 
@@ -245,7 +241,6 @@ def ensure_mcp_discovery_started() -> None:
     _mcp_discovery_enabled = True
     try:
         from hermes_cli.mcp_startup import start_background_mcp_discovery
-
         start_background_mcp_discovery(logger=logger, thread_name="tui-mcp-discovery")
     except Exception:
         logger.warning("Background MCP tool discovery failed to start", exc_info=True)

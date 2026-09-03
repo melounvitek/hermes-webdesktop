@@ -167,12 +167,9 @@ def _is_repo_junk(root: str) -> bool:
 
 
 def _is_session_cwd_junk(cwd: str) -> bool:
-    """A non-git cwd that stays in flat Recents rather than auto-grouping.
-
-    Unlike git roots, an explicitly selected DESCENDANT of HERMES_HOME may be an
-    intentional prose/data workspace (the pre-Projects desktop surfaced every
-    cwd), so only HERMES_HOME itself and ``_non_workspace_dirs`` are excluded.
-    """
+    """A non-git cwd that stays in flat Recents rather than auto-grouping. Unlike git
+    roots, a selected DESCENDANT of HERMES_HOME may be an intentional prose/data
+    workspace, so only HERMES_HOME itself and ``_non_workspace_dirs`` are excluded."""
     if not cwd:
         return True
     from hermes_constants import get_hermes_home
@@ -192,7 +189,8 @@ def _repo_discovery_policy(raw: dict | None = None) -> dict:
     def _get(short: str, long: str):
         return source.get(short, source.get(long, defaults[long]))
 
-    def _paths(values, long: str) -> list[str]:
+    def _paths(short: str, long: str) -> list[str]:
+        values = _get(short, long)
         if not isinstance(values, list):
             return list(defaults[long])
         return [v.strip() for v in values if isinstance(v, str) and v.strip()]
@@ -200,9 +198,8 @@ def _repo_discovery_policy(raw: dict | None = None) -> dict:
     enabled = _get("enabled", "repo_scan_enabled")
     return {
         "enabled": enabled if isinstance(enabled, bool) else defaults["repo_scan_enabled"],
-        "roots": _paths(_get("roots", "repo_scan_roots"), "repo_scan_roots"),
-        "exclude_paths": _paths(
-            _get("exclude_paths", "repo_scan_exclude_paths"), "repo_scan_exclude_paths"),
+        "roots": _paths("roots", "repo_scan_roots"),
+        "exclude_paths": _paths("exclude_paths", "repo_scan_exclude_paths"),
     }
 
 
@@ -245,9 +242,8 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
         return any(path == ex or path.startswith(ex.rstrip("/\\") + os.sep) for ex in excludes if ex)
     for root in roots:
         if not os.path.isdir(root):
-            # `os.walk` on a missing root yields nothing instead of raising; an
-            # unmounted volume would look like an empty scan and let the
-            # authoritative replace wipe every cached repo under it.
+            # `os.walk` on a missing root yields nothing instead of raising; an unmounted
+            # volume would look like an empty scan and let the replace wipe its cache.
             authoritative = False
             logger.debug("discover_repos scan root missing, skipping: %s", root)
             continue
@@ -255,23 +251,21 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
             for dirpath, dirnames, _filenames in os.walk(root):
                 if _is_excluded(dirpath):
                     dirnames[:] = []
-                    continue
-                # Check `.git` BEFORE pruning hidden dirs — `.git` is itself hidden.
-                if ".git" in dirnames:
+                elif ".git" in dirnames:  # check BEFORE pruning hidden dirs — `.git` is hidden
                     if dirpath not in seen:
                         seen.add(dirpath)
                         pairs.append((dirpath, os.path.basename(dirpath)))
                     dirnames[:] = []  # don't hunt nested repos inside a repo
                 else:
-                    dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("node_modules",)]
+                    dirnames[:] = [
+                        d for d in dirnames if not d.startswith(".") and d != "node_modules"]
                 if len(pairs) >= 500:
                     break
         except Exception:
             authoritative = False
             logger.debug("discover_repos scan failed for root %s", root, exc_info=True)
         if len(pairs) >= 500:
-            # Cap hit: the walk didn't cover the full roots, so this set is not
-            # the complete authoritative universe.
+            # Cap hit: the walk didn't cover the full roots -> not authoritative.
             authoritative = False
             break
     if pairs:
