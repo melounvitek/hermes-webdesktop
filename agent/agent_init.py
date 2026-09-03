@@ -260,30 +260,20 @@ def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> b
     # matching ANY catalog entry counts, else a provider whose `model` differs from the
     # session model drops its extra_body (e.g. OpenAI service_tier) → wrong billing tier.
     models = entry.get("models")
-    catalog: List[str] = []
-    if isinstance(models, dict):
-        catalog = [str(k).strip().lower() for k in models]
-    elif isinstance(models, (list, tuple)):
-        catalog = [str(m).strip().lower() for m in models]
+    catalog = [str(m).strip().lower() for m in models] if isinstance(models, (dict, list, tuple)) else []
     if catalog and agent_model_norm in catalog:
         return True
     provider_model = str(entry.get("model", "") or "").strip().lower()
-    if not provider_model and not catalog:
-        return True
-    return provider_model == agent_model_norm
+    return (not provider_model and not catalog) or provider_model == agent_model_norm
 
 
 def _custom_provider_extra_body_for_agent(
     *, provider: str, model: str, base_url: str, custom_providers: List[Dict[str, Any]]
 ) -> Optional[Dict[str, Any]]:
     provider_norm = (provider or "").strip().lower()
-    if provider_norm == "custom":
-        provider_key_filter = ""
-    elif provider_norm.startswith("custom:"):
-        provider_key_filter = provider_norm.split(":", 1)[1].strip()
-    else:
+    if provider_norm != "custom" and not provider_norm.startswith("custom:"):
         return None
-
+    provider_key_filter = provider_norm.partition(":")[2].strip()
     target_url = _normalized_custom_base_url(base_url)
     if not target_url:
         return None
