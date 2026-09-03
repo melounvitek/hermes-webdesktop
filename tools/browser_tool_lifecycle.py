@@ -1,9 +1,7 @@
-"""Browser session lifecycle: inactivity janitor, orphan reaper, per-session teardown, atexit emergency cleanup.
+"""Browser session lifecycle: inactivity janitor, orphan reaper, per-session teardown, atexit cleanup.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there. Origin
-symbols and module state are read/written through ``_bt`` (the origin module,
-the :data:`tools.browser_tool_origin.origin` proxy) so
-``patch("tools.browser_tool.X")`` is honoured and no import cycle exists.
+Split out of ``tools/browser_tool.py`` (every name re-imported there); origin symbols
+are read through the ``_bt`` proxy so ``patch("tools.browser_tool.X")`` is honoured.
 """
 
 import contextlib
@@ -53,6 +51,19 @@ def _session_has_expired(
     return (time.time() if now is None else now) >= expires_at
 
 
+def _best_effort(label: str, fn) -> None:
+    """Run ``fn()``; log (debug) and swallow any exception — teardown must never abort."""
+    try:
+        fn()
+    except Exception as e:
+        _bt.logger.debug("%s failed: %s", label, e)
+
+
+def _stop_all_lightpanda() -> None:
+    from tools.browser_lightpanda import stop_all_lightpanda
+    stop_all_lightpanda()
+
+
 def _emergency_cleanup_all_sessions():
     """atexit: close this process's sessions, then sweep orphans left by crashed
     hermes processes — every clean exit reaps accumulated orphans, not only
@@ -64,10 +75,7 @@ def _emergency_cleanup_all_sessions():
     # Own sessions first so their owner_pid files are gone before the reaper scans.
     # Real-profile Chrome is launched directly (not by agent-browser), so the
     # session cleanup never reaps it.
-    try:
-        _bt._terminate_real_profile_chrome()
-    except Exception as e:
-        _bt.logger.debug("Real-profile chrome cleanup on exit failed: %s", e)
+    _best_effort("Real-profile chrome cleanup on exit", _bt._terminate_real_profile_chrome)
     if _bt._active_sessions:
         _bt.logger.info("Emergency cleanup: closing %s active session(s)...", len(_bt._active_sessions))
         try:
@@ -81,21 +89,11 @@ def _emergency_cleanup_all_sessions():
                 _bt._session_owner_homes.clear()
                 _bt._cleanup_failures.clear()
                 _bt._recording_sessions.clear()
-
     # Lightpanda servers we spawned that fell out of ``_active_sessions``.
-    try:
-        from tools.browser_lightpanda import stop_all_lightpanda
-
-        stop_all_lightpanda()
-    except Exception as e:
-        _bt.logger.debug("Lightpanda cleanup on exit failed: %s", e)
-
-    # Safe even if we never used the browser — owner_pid liveness protects
-    # daemons owned by other live hermes processes.
-    try:
-        _bt._reap_orphaned_browser_sessions()
-    except Exception as e:
-        _bt.logger.debug("Orphan reap on exit failed: %s", e)
+    _best_effort("Lightpanda cleanup on exit", _stop_all_lightpanda)
+    # Safe even if we never used the browser — owner_pid liveness protects daemons
+    # owned by other live hermes processes.
+    _best_effort("Orphan reap on exit", _bt._reap_orphaned_browser_sessions)
 
 
 @contextlib.contextmanager
@@ -147,10 +145,8 @@ def _cleanup_inactive_browser_sessions():
     current_time = time.time()
 
     with _bt._cleanup_lock:
-        sessions_to_cleanup = [
-            task_id for task_id, last_time in list(_bt._session_last_activity.items())
-            if current_time - last_time > _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT
-        ]
+        sessions_to_cleanup = [task_id for task_id, last_time in list(_bt._session_last_activity.items())
+                               if current_time - last_time > _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT]
 
     for task_id in sessions_to_cleanup:
         elapsed = int(current_time - _bt._session_last_activity.get(task_id, current_time))
@@ -191,23 +187,22 @@ def _write_owner_pid(socket_dir: str, session_name: str) -> None:
 
 def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
                                     session_name: str) -> bool:
-    """Confirm a live PID is genuinely *this* session's agent-browser daemon.
+    """Confirm a live PID is genuinely *this* session's agent-browser daemon (fail-closed).
 
-    The ``.pid`` file lives in a world-writable temp dir and is written by the
-    daemon: a same-user actor can plant one pointing at a victim PID, or a recycled
-    PID can land on an unrelated process — and reaping is a *tree* kill. Two
-    checks must pass: (1) identity — ``agent-browser`` in name or cmdline;
-    (2) binding — the socket dir in the cmdline or ``AGENT_BROWSER_SOCKET_DIR`` in
-    its environ (the real spoof defense). Fail-closed on any ambiguity.
+    The ``.pid`` file sits in a world-writable temp dir: a planted or recycled PID
+    would turn the tree-kill into an arbitrary-process DoS. Both must pass:
+    (1) identity — ``agent-browser`` in name/cmdline; (2) binding — the socket dir in
+    the cmdline or ``AGENT_BROWSER_SOCKET_DIR`` in its environ (the real spoof defense).
     """
+    def refuse(reason: str, *args) -> bool:
+        _bt.logger.warning("Refusing to reap browser daemon PID %d (session %s): " + reason,
+                           daemon_pid, session_name, *args)
+        return False
+
     try:
         import psutil
     except ImportError:  # psutil is a hard dep; defensive only
-        _bt.logger.warning(
-            "Refusing to reap browser daemon PID %d (session %s): "
-            "psutil unavailable for identity verification",
-            daemon_pid, session_name)
-        return False
+        return refuse("psutil unavailable for identity verification")
 
     try:
         proc = psutil.Process(daemon_pid)
@@ -216,17 +211,10 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
     except psutil.NoSuchProcess:
         return False  # vanished between the liveness check and now
     except (psutil.AccessDenied, OSError) as exc:
-        _bt.logger.warning(
-            "Refusing to reap browser daemon PID %d (session %s): "
-            "could not read process identity (%s)",
-            daemon_pid, session_name, exc)
-        return False
+        return refuse("could not read process identity (%s)", exc)
 
     if "agent-browser" not in name and "agent-browser" not in cmdline:
-        _bt.logger.warning(
-            "Refusing to reap PID %d (session %s): not an agent-browser "
-            "process (name=%r)", daemon_pid, session_name, name)
-        return False
+        return refuse("not an agent-browser process (name=%r)", name)
 
     socket_dir_l = socket_dir.lower()
     socket_base_l = os.path.basename(socket_dir).lower()
@@ -237,24 +225,15 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
             bound = bool(env_dir) and os.path.normpath(env_dir) == os.path.normpath(socket_dir)
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             bound = False  # environ() can be denied even same-user; cmdline already failed — fail closed
-
     if not bound:
-        _bt.logger.warning(
-            "Refusing to reap agent-browser PID %d: not bound to session "
-            "socket dir %s (possible recycled PID or planted pid file)",
-            daemon_pid, socket_dir)
-        return False
-
+        return refuse("not bound to session socket dir %s (possible recycled PID or planted pid file)", socket_dir)
     return True
 
 
 def _socket_dir_idle_seconds(socket_dir: str) -> Optional[float]:
     """Seconds since anything in ``socket_dir`` was last written; None if unknown (fail safe).
-
-    Every command writes ``_stdout_<cmd>`` there, so the newest mtime is a
-    last-activity marker surviving hermes restarts. The dir's own mtime is not
-    enough — rewriting an existing file doesn't touch it — so entries are scanned.
-    """
+    Every command rewrites ``_stdout_<cmd>`` there — a restart-proof activity marker — and
+    rewriting doesn't touch the dir mtime, so entries are scanned too."""
     try:
         latest = os.path.getmtime(socket_dir)
     except OSError:
@@ -291,13 +270,16 @@ def _owner_pid_alive(socket_dir: str, session_name: str) -> Tuple[Optional[int],
     return owner_pid, _pid_exists(owner_pid)
 
 
-def _terminate_verified_daemon(daemon_pid: int) -> bool:
+def _terminate_verified_daemon(daemon_pid: int, session_name: str, log) -> bool:
     """Tree-kill ``daemon_pid`` if it has a start-time fingerprint (so a PID swapped
-    between check and kill is refused); False when no fingerprint. Raises on OS errors."""
+    between check and kill is refused); False (logged via ``log``) when no fingerprint.
+    Raises on OS errors."""
     from gateway.status import get_process_start_time
     from tools.process_registry import ProcessRegistry
     daemon_start = get_process_start_time(daemon_pid)
     if daemon_start is None:
+        log("Refusing to reap browser daemon PID %d (session %s): no start-time fingerprint available",
+            daemon_pid, session_name)
         return False
     ProcessRegistry._terminate_host_pid(daemon_pid, daemon_start)
     return True
@@ -306,13 +288,11 @@ def _terminate_verified_daemon(daemon_pid: int) -> bool:
 def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> bool:
     """Reap one ``agent-browser-<session>`` dir if orphaned; True when a daemon was killed.
 
-    Ownership priority: (1) a live ``owner_pid`` means another hermes process owns
-    it — leave it alone UNLESS it is untracked here and idle past
-    ``BROWSER_ORPHAN_GRACE_SECONDS`` (owner-alive alone made leaked daemons
-    immortal); (2) no owner_pid (legacy) falls back to this process's tracking.
-    A pidless dir is only stale after the grace period — deleting it immediately
-    races the creator's first stdout open. The daemon PID is identity-verified
-    before a tree-kill and refused without a start-time fingerprint.
+    A live ``owner_pid`` means another hermes process owns it — leave it UNLESS untracked
+    here and idle past ``BROWSER_ORPHAN_GRACE_SECONDS`` (owner-alive alone made leaked
+    daemons immortal); no owner_pid (legacy) falls back to this process's tracking. A
+    pidless dir is only stale after the grace period (deleting it immediately races the
+    creator's first stdout open). The PID is identity-verified before any tree-kill.
     """
     owner_pid, owner_alive = _bt._owner_pid_alive(socket_dir, session_name)
     if owner_alive is True:
@@ -349,10 +329,7 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
     # Tree-kill so Chromium children (renderer, GPU, ...) go too.
     reaped = False
     try:
-        if not _terminate_verified_daemon(daemon_pid):
-            _bt.logger.warning(
-                "Refusing to reap browser daemon PID %d (session %s): "
-                "no start-time fingerprint available", daemon_pid, session_name)
+        if not _terminate_verified_daemon(daemon_pid, session_name, _bt.logger.warning):
             return False
         _bt.logger.info("Reaped orphaned browser daemon PID %d (session %s)", daemon_pid, session_name)
         reaped = True
@@ -363,23 +340,17 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
 
 
 def _reap_orphaned_browser_sessions():
-    """Kill agent-browser daemons whose owning hermes process is gone.
-
-    An unclean exit (SIGKILL, crash, gateway restart) loses ``_active_sessions``
-    but node + Chromium keep running. Scans the tmp dir for ``agent-browser-*``
-    socket dirs and applies ``_reap_socket_dir``'s ownership rules. Safe from any
-    context — atexit, cleanup thread, or on demand.
-    """
+    """Kill agent-browser daemons whose owning hermes process is gone (an unclean exit loses
+    ``_active_sessions`` but node + Chromium keep running). Scans the tmp dir for
+    ``agent-browser-*`` socket dirs; safe from any context."""
     import glob
 
     # Lightpanda servers keep their own records (no socket dir); sweep them with the
     # same owner-liveness rule BEFORE the daemon scan, which may return early.
-    try:
+    def _reap_lp():
         from tools.browser_lightpanda import reap_orphaned_lightpanda
-
         reap_orphaned_lightpanda()
-    except Exception as e:
-        _bt.logger.debug("Lightpanda orphan reap failed: %s", e)
+    _best_effort("Lightpanda orphan reap", _reap_lp)
 
     tmpdir = _bt._socket_safe_tmpdir()
     socket_dirs = []
@@ -389,11 +360,7 @@ def _reap_orphaned_browser_sessions():
         return
 
     with _bt._cleanup_lock:
-        tracked_names = {
-            info.get("session_name")
-            for info in _bt._active_sessions.values()
-            if info.get("session_name")
-        }
+        tracked_names = {info.get("session_name") for info in _bt._active_sessions.values() if info.get("session_name")}
 
     reaped = 0
     for socket_dir in socket_dirs:
@@ -435,9 +402,8 @@ def _start_browser_cleanup_thread():
     with _bt._cleanup_lock:
         if _bt._cleanup_thread is None or not _bt._cleanup_thread.is_alive():
             _bt._cleanup_running = True
-            _bt._cleanup_thread = threading.Thread(
-                target=_bt._browser_cleanup_thread_worker, daemon=True, name="browser-cleanup"
-            )
+            _bt._cleanup_thread = threading.Thread(target=_bt._browser_cleanup_thread_worker, daemon=True,
+                                                   name="browser-cleanup")
             _bt._cleanup_thread.start()
             _bt.logger.info("Started inactivity cleanup thread (timeout: %ss)", _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT)
 
@@ -450,9 +416,8 @@ def _stop_browser_cleanup_thread():
 
 
 def _update_session_activity(task_id: str):
-    """Touch the activity timestamp; records the owning Hermes home on first sight so
-    the process-global janitor tears down under the owner's scope. Deliberately does
-    NOT reset ``_cleanup_failures`` — only a successful cleanup does."""
+    """Touch the activity timestamp and record the owning Hermes home on first sight (the
+    janitor tears down under the owner's scope). Does NOT reset ``_cleanup_failures``."""
     with _bt._cleanup_lock:
         _bt._session_last_activity[task_id] = time.time()
         _bt._session_owner_homes.setdefault(task_id, str(get_hermes_home()))
@@ -461,12 +426,10 @@ def _update_session_activity(task_id: str):
 def _kill_process_tree(proc: "subprocess.Popen") -> None:
     """Best-effort kill of *proc* and every descendant; never raises.
 
-    ``Popen.kill()`` only signals the direct child; npm/npx helpers and
-    agent-browser's detached daemon grandchild keep a capture pipe open so
-    ``communicate()`` never sees EOF (no non-blocking read on Windows), so the whole
-    tree must go. No grace period: the caller already burned its timeout.
-    Delegates to :func:`agent.deadline.kill_process_tree`, falling back to
-    :func:`_legacy_kill_process_tree` on any failure.
+    ``Popen.kill()`` only signals the direct child; npm/npx helpers and the detached
+    daemon grandchild keep a capture pipe open so ``communicate()`` never sees EOF, so
+    the whole tree must go (no grace: the caller already burned its timeout). Delegates
+    to :func:`agent.deadline.kill_process_tree`, falling back to the legacy kill.
     """
     try:
         from agent.deadline import kill_process_tree as _deadline_kill_tree
@@ -477,15 +440,12 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
 
 
 def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
-    """Local tree-kill — fallback when agent.deadline is unavailable."""
+    """Local tree-kill (SIGTERM then SIGKILL to the process group) — fallback when
+    agent.deadline is unavailable; tests pin this signal sequence."""
     if os.name == "nt":
         try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                check=False,
-                capture_output=True,
-                stdin=subprocess.DEVNULL,
-            )
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           check=False, capture_output=True, stdin=subprocess.DEVNULL)
         except Exception:
             pass
         return
@@ -502,8 +462,7 @@ def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, OSError):
         return
-    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    for sig in (signal.SIGTERM, sigkill):
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         try:
             killpg(pgid, sig)
         except (ProcessLookupError, PermissionError, OSError):
@@ -554,18 +513,12 @@ def _cleanup_old_recordings(max_age_hours=72):
 
 
 def _drop_last_active_binding(task_id: str) -> None:
-    """Drop stale last-active ownership after cleaning ``task_id``.
-
-    A bare task drops its binding; a sidecar drops it only if that sidecar was
-    still the recorded owner — a later click can't resurrect a cleaned sidecar on
-    about:blank while a primary-session binding is preserved.
-    """
-    if _bt._is_local_sidecar_key(task_id):
-        bare_task_id = _bt._bare_task_id_for_session_key(task_id)
-        if _bt._last_active_session_key.get(bare_task_id) == task_id:
-            _bt._last_active_session_key.pop(bare_task_id, None)
-    else:
-        _bt._last_active_session_key.pop(task_id, None)
+    """Drop stale last-active ownership after cleaning ``task_id``: a bare task always, a
+    sidecar only if it was still the recorded owner (a later click must not resurrect a
+    cleaned sidecar while a primary-session binding is preserved)."""
+    bare_task_id = _bt._bare_task_id_for_session_key(task_id)
+    if bare_task_id == task_id or _bt._last_active_session_key.get(bare_task_id) == task_id:
+        _bt._last_active_session_key.pop(bare_task_id, None)
 
 
 def cleanup_browser(task_id: Optional[str] = None) -> None:
@@ -575,34 +528,28 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
         task_id = "default"
 
     session_keys = [task_id]
-    if not _bt._is_local_sidecar_key(task_id):
-        sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
-        with _bt._cleanup_lock:
-            if sidecar_key in _bt._active_sessions:
-                session_keys.append(sidecar_key)
-
+    sidecar_key = f"{task_id}{_bt._LOCAL_SUFFIX}"
+    with _bt._cleanup_lock:
+        if not _bt._is_local_sidecar_key(task_id) and sidecar_key in _bt._active_sessions:
+            session_keys.append(sidecar_key)
     for session_key in session_keys:
         _bt._cleanup_single_browser_session(session_key)
     _bt._drop_last_active_binding(task_id)
 
 
 def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
-    """Tree-kill the daemon in ``<socket_dir>/<session>.pid`` if verifiably ours
-    (identity check + start-time fingerprint). True when a kill was issued. Never raises."""
+    """Tree-kill the daemon in ``<socket_dir>/<session>.pid`` if verifiably ours; True when
+    a kill was issued. Never raises."""
     pid_file = os.path.join(socket_dir, f"{session_name}.pid")
     if not os.path.isfile(pid_file):
         return False
     try:
         daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
         if not _bt._verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
-            _bt.logger.debug(
-                "Skipped daemon kill for %s: pid %s failed identity "
-                "verification", session_name, daemon_pid)
+            _bt.logger.debug("Skipped daemon kill for %s: pid %s failed identity verification", session_name, daemon_pid)
             return False
-        if not _terminate_verified_daemon(daemon_pid):
-            _bt.logger.debug(
-                "Skipped daemon kill for %s: no start-time "
-                "fingerprint for pid %s", session_name, daemon_pid)
+        if not _terminate_verified_daemon(daemon_pid, session_name, lambda *_a: _bt.logger.debug(
+                "Skipped daemon kill for %s: no start-time fingerprint for pid %s", session_name, daemon_pid)):
             return False
         _bt.logger.debug("Killed daemon pid %s for %s", daemon_pid, session_name)
         return True
@@ -612,11 +559,8 @@ def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
 
 
 def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> None:
-    """Untrack ``task_id``, close its cloud provider session, kill its daemon.
-
-    Unconditional tail of ``_cleanup_single_browser_session``; also the whole of the
-    janitor's force-reap path, which skips the polite ``close`` that kept failing.
-    """
+    """Untrack ``task_id``, close its cloud provider session, kill its daemon — the
+    unconditional tail of a teardown, and the whole of the janitor's force-reap path."""
     bb_session_id = session_info.get("bb_session_id", "unknown")
     _forget_session_tracking(task_id, session=True)
 
@@ -637,8 +581,7 @@ def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> No
 
 
 def _force_reap_browser_session(task_id: str) -> None:
-    """Janitor last resort after repeated failures: skip the failing ``close``
-    round-trips, go straight to ``_release_session_resources``."""
+    """Janitor last resort: skip the failing ``close`` round-trips, release resources directly."""
     _bt._stop_cdp_supervisor(task_id)
     with _bt._cleanup_lock:
         session_info = _bt._active_sessions.get(task_id)
@@ -651,25 +594,21 @@ def _force_reap_browser_session(task_id: str) -> None:
 
 def _cleanup_single_browser_session(task_id: str) -> None:
     """Reap a single browser session by its exact session key."""
-    # Stop the CDP supervisor FIRST so our WebSocket closes before the backend
-    # tears down the CDP endpoint.
-    _bt._stop_cdp_supervisor(task_id)
+    _bt._stop_cdp_supervisor(task_id)  # close our WebSocket BEFORE the backend tears down the endpoint
 
-    # Camofox: skip the full close when managed persistence is on — the profile
-    # (session cookies) must survive across tasks; the inactivity reaper still frees idle resources.
+    # Camofox: managed persistence keeps the profile (cookies) across tasks; skip the full
+    # close then — the inactivity reaper still frees idle resources.
     if _bt._is_camofox_mode():
-        try:
+        def _camofox_cleanup():
             from tools.browser_camofox import camofox_close, camofox_soft_cleanup
             if not camofox_soft_cleanup(task_id):
                 camofox_close(task_id)
-        except Exception as e:
-            _bt.logger.debug("Camofox cleanup for task %s: %s", task_id, e)
+        _best_effort(f"Camofox cleanup for task {task_id}", _camofox_cleanup)
 
     _bt.logger.debug("cleanup_browser called for task_id: %s", task_id)
     _bt.logger.debug("Active sessions: %s", list(_bt._active_sessions.keys()))
 
-    # Look up (under lock) but don't remove yet — _run_browser_command needs the
-    # entry to build the close command.
+    # Look up but don't remove yet — _run_browser_command needs the entry for ``close``.
     with _bt._cleanup_lock:
         session_info = _bt._active_sessions.get(task_id)
 
@@ -680,13 +619,11 @@ def _cleanup_single_browser_session(task_id: str) -> None:
     _bt.logger.debug("Found session for task %s: bb_session_id=%s", task_id, session_info.get("bb_session_id", "unknown"))
     _bt._maybe_stop_recording(task_id)  # saves the file before close
 
-    # Lightpanda sessions are processes Hermes spawned (no daemon to ``close``).
-    # An expired cloud CDP URL cannot accept a close, and feeding it through
-    # _get_session_info() would try to renew the session recursively mid-cleanup.
+    # Lightpanda sessions have no daemon to ``close``; an expired cloud CDP URL cannot
+    # accept one and would make _get_session_info() renew the session mid-cleanup.
     if (session_info.get("features") or {}).get("lightpanda"):
         try:
             from tools.browser_lightpanda import stop_lightpanda
-
             stop_lightpanda(session_info.get("session_name", ""))
         except Exception as e:
             _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
@@ -710,23 +647,21 @@ def cleanup_all_browsers() -> None:
     for task_id in task_ids:
         _bt.cleanup_browser(task_id)
 
-    # Tear down CDP supervisors for all tasks so background threads exit.
-    try:
+    try:  # tear down CDP supervisors so background threads exit
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
         SUPERVISOR_REGISTRY.stop_all()
     except Exception:
         pass
 
-    _bt._cached_agent_browser = None
-    _bt._agent_browser_resolved = False
     _bt._discover_homebrew_node_dirs.cache_clear()
-    # Flip the resolved flag BEFORE nulling the cache so a concurrent reader never
+    # Each resolved flag flips BEFORE its cache is nulled so a concurrent reader never
     # sees ``resolved=True`` with ``cache=None``.
-    _bt._command_timeout_resolved = False
-    _bt._cached_command_timeout = None
-    _bt._snapshot_threshold_resolved = False
-    _bt._cached_snapshot_threshold = None
-    _bt._cached_chromium_installed = None
-    _bt._chromium_autoinstall_attempted = False
-    _bt._cached_browser_engine = None
-    _bt._browser_engine_resolved = False
+    for flag, cache in (
+        ("_agent_browser_resolved", "_cached_agent_browser"),
+        ("_command_timeout_resolved", "_cached_command_timeout"),
+        ("_snapshot_threshold_resolved", "_cached_snapshot_threshold"),
+        ("_chromium_autoinstall_attempted", "_cached_chromium_installed"),
+        ("_browser_engine_resolved", "_cached_browser_engine"),
+    ):
+        setattr(_bt, flag, False)
+        setattr(_bt, cache, None)

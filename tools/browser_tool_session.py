@@ -1,11 +1,8 @@
 """agent-browser session management: daemon spawn, per-backend session creation
-(local/lightpanda/cdp/cloud), cached session lookup, command execution with timeout
-handling and output interpretation.
+(local/lightpanda/cdp/cloud), cached lookup, command execution + output interpretation.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there. Origin
-symbols and module state are read/written through ``_bt`` (the origin module,
-the :data:`tools.browser_tool_origin.origin` proxy) so
-``patch("tools.browser_tool.X")`` is honoured and no import cycle exists.
+Split out of ``tools/browser_tool.py`` (every name re-imported there); origin symbols
+are read through the ``_bt`` proxy so ``patch("tools.browser_tool.X")`` is honoured.
 """
 
 import json
@@ -19,16 +16,11 @@ from typing import Any, Dict, List, Optional
 
 from tools.browser_tool_origin import origin as _bt
 
-_CHROMIUM_MISSING_DOCKER_HINT = (
-    "Chromium browser is missing. You're running in Docker — pull "
-    "the latest image to get the bundled Chromium: "
-    "docker pull ghcr.io/nousresearch/hermes-agent:latest"
-)
-_CHROMIUM_MISSING_HINT = (
-    "Chromium browser is missing. Install it with: "
-    "npx agent-browser install --with-deps "
-    "(or: npx playwright install --with-deps chromium)"
-)
+_DOCKER_PULL = "docker pull ghcr.io/nousresearch/hermes-agent:latest"
+_CHROMIUM_INSTALL = "npx agent-browser install --with-deps (or: npx playwright install --with-deps chromium)"
+_CHROMIUM_MISSING_DOCKER_HINT = ("Chromium browser is missing. You're running in Docker — pull the latest image "
+                                 f"to get the bundled Chromium: {_DOCKER_PULL}")
+_CHROMIUM_MISSING_HINT = f"Chromium browser is missing. Install it with: {_CHROMIUM_INSTALL}"
 
 
 def _needs_chromium_sandbox_bypass() -> bool:
@@ -46,15 +38,9 @@ def _needs_chromium_sandbox_bypass() -> bool:
 
 def _apply_chromium_sandbox_args(browser_env: Dict[str, str]) -> None:
     """Add required Chromium sandbox flags without overriding user settings."""
-    if (
-        "AGENT_BROWSER_ARGS" not in browser_env
-        and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env
-        and _bt._needs_chromium_sandbox_bypass()
-    ):
-        _bt.logger.debug(
-            "browser: sandbox bypass needed (root/docker/AppArmor userns) — "
-            "injecting --no-sandbox"
-        )
+    if ("AGENT_BROWSER_ARGS" not in browser_env and "AGENT_BROWSER_CHROME_FLAGS" not in browser_env
+            and _bt._needs_chromium_sandbox_bypass()):
+        _bt.logger.debug("browser: sandbox bypass needed (root/docker/AppArmor userns) — injecting --no-sandbox")
         browser_env["AGENT_BROWSER_ARGS"] = "--no-sandbox,--disable-dev-shm-usage"
 
 
@@ -87,39 +73,27 @@ def _format_browser_timeout_error(
     if detail:
         parts.append(detail[:1500])
 
-    combined = f"{stderr}\n{stdout}".lower()
-    if "sandbox" in combined:
-        parts.append(
-            "Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
-            "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
-            "or run: npx agent-browser install --with-deps"
-        )
+    if "sandbox" in f"{stderr}\n{stdout}".lower():
+        parts.append("Chromium sandbox launch failed. Set AGENT_BROWSER_ARGS="
+                     "'--no-sandbox,--disable-dev-shm-usage' in your environment, "
+                     "or run: npx agent-browser install --with-deps")
     elif command == "open" and _bt._is_local_mode():
         if _bt._running_in_docker():
-            parts.append(
-                "The browser daemon may still be starting or Chromium may be "
-                "missing. Pull the latest image: "
-                "docker pull ghcr.io/nousresearch/hermes-agent:latest"
-            )
+            parts.append("The browser daemon may still be starting or Chromium may be "
+                         f"missing. Pull the latest image: {_DOCKER_PULL}")
         else:
-            parts.append(
-                "The browser daemon may still be starting, or Chromium may be "
-                "missing system libraries. Install/repair with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
-            )
+            parts.append("The browser daemon may still be starting, or Chromium may be "
+                         f"missing system libraries. Install/repair with: {_CHROMIUM_INSTALL}")
     return "\n".join(parts)
 
 
 def _agent_browser_argv(browser_cmd: str) -> list:
-    """Command prefix to invoke agent-browser (concrete binary or npx sentinel).
+    """Command prefix to invoke agent-browser (concrete binary, or the npx sentinel expanded).
 
-    Concrete paths stay a single argv item; only the npx sentinel expands. npx is
-    resolved through the same PATH cascade as ``_find_agent_browser`` (a bare
-    ``shutil.which("npx")`` would let a broken system npx shadow a healthy managed
-    one); if absent the bare name gives a readable ``FileNotFoundError: 'npx'``.
-    ``--ignore-scripts``: AGENT_BROWSER_NPX_SPEC is a floating range — a compromised
-    future patch must not run install-time scripts.
+    npx is resolved through the same PATH cascade as ``_find_agent_browser`` (a bare
+    ``which("npx")`` would let a broken system npx shadow a healthy managed one); if
+    absent the bare name gives a readable ``FileNotFoundError``. ``--ignore-scripts``:
+    the spec is a floating range — a compromised future patch must not run install scripts.
     """
     if _bt._is_npx_agent_browser_sentinel(browser_cmd):
         _npx_bin = _bt._resolve_npx_bin() or "npx"
@@ -128,12 +102,9 @@ def _agent_browser_argv(browser_cmd: str) -> list:
 
 
 def _prepare_session_socket_dir(session_name: str) -> str:
-    """Create the per-session socket dir and claim it with our PID.
-
-    Per-session dirs keep parallel workers from fighting over the default socket
-    path. The owner_pid file is written BEFORE first use: another hermes process's
-    orphan reaper rmtree's any ownerless agent-browser-* dir in the shared tmpdir.
-    """
+    """Create the per-session socket dir (parallel workers must not share one) and claim it
+    with our PID BEFORE first use — another hermes process's orphan reaper rmtree's any
+    ownerless agent-browser-* dir in the shared tmpdir."""
     socket_dir = os.path.join(_bt._socket_safe_tmpdir(), f"agent-browser-{session_name}")
     os.makedirs(socket_dir, mode=0o700, exist_ok=True)
     _bt._write_owner_pid(socket_dir, session_name)
@@ -141,10 +112,9 @@ def _prepare_session_socket_dir(session_name: str) -> str:
 
 
 def _agent_browser_command_env(socket_dir: str) -> Dict[str, str]:
-    """Credential-scrubbed env for one agent-browser command: discovery-time PATH
-    fallbacks, the session socket dir, and daemon-side idle self-termination
-    (``AGENT_BROWSER_IDLE_TIMEOUT_MS``, agent-browser 0.24+) mirroring the Python
-    janitor — unless the user set it explicitly."""
+    """Credential-scrubbed env for one command: PATH fallbacks, the session socket dir, and
+    daemon-side idle self-termination (agent-browser 0.24+) mirroring the Python janitor
+    unless the user set ``AGENT_BROWSER_IDLE_TIMEOUT_MS`` explicitly."""
     env = _bt._build_browser_env()
     env["PATH"] = _bt._merge_browser_path(env.get("PATH", ""))
     env["AGENT_BROWSER_SOCKET_DIR"] = socket_dir
@@ -154,53 +124,40 @@ def _agent_browser_command_env(socket_dir: str) -> Dict[str, str]:
 
 
 def _popen_agent_browser(argv: List[str], env: Dict[str, str], socket_dir: str, tag: str) -> "subprocess.Popen":
-    """Spawn agent-browser with stdout/stderr redirected to ``socket_dir/_stdout_<tag>``.
+    """Spawn agent-browser with stdout/stderr redirected to ``socket_dir/_std{out,err}_<tag>``.
 
-    Temp files instead of pipes: the CLI forks a daemon that inherits its fds, so
-    with pipes ``communicate()`` never sees EOF until the timeout. Windows:
-    CREATE_NO_WINDOW only (NOT CREATE_NEW_PROCESS_GROUP — on 3.11 it cancels
-    asyncio's running task and surfaces as KeyboardInterrupt), STARTF_USESTDHANDLES
-    so the child gets ONLY our three handles (leaked console handles make the Rust
-    daemon grandchild die silently), close_fds=True for the rest.
+    Temp files, not pipes: the CLI forks a daemon that inherits its fds, so pipes never
+    see EOF until the timeout. Windows: CREATE_NO_WINDOW only (CREATE_NEW_PROCESS_GROUP
+    cancels asyncio's running task on 3.11), STARTF_USESTDHANDLES + close_fds so the child
+    gets ONLY our three handles (leaked console handles kill the Rust daemon grandchild).
     """
-    stdout_path = os.path.join(socket_dir, f"_stdout_{tag}")
-    stderr_path = os.path.join(socket_dir, f"_stderr_{tag}")
-    stdout_fd = os.open(stdout_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fds = [os.open(os.path.join(socket_dir, f"_{slot}_{tag}"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+           for slot in ("stdout", "stderr")]
     try:
         _popen_extra: dict = {}
         if os.name == "nt":
-            _popen_extra["creationflags"] = _bt.windows_hide_flags()
-            _popen_extra["close_fds"] = True
             _si = subprocess.STARTUPINFO()
             _si.dwFlags |= subprocess.STARTF_USESTDHANDLES
-            _popen_extra["startupinfo"] = _si
-        return subprocess.Popen(
-            argv, stdout=stdout_fd, stderr=stderr_fd,
-            stdin=subprocess.DEVNULL, env=env, **_popen_extra,
-        )
+            _popen_extra = {"creationflags": _bt.windows_hide_flags(), "close_fds": True, "startupinfo": _si}
+        return subprocess.Popen(argv, stdout=fds[0], stderr=fds[1], stdin=subprocess.DEVNULL, env=env, **_popen_extra)
     finally:
-        os.close(stdout_fd)
-        os.close(stderr_fd)
+        for fd in fds:
+            os.close(fd)
 
 
 def _session_record(prefix: str, cdp_url: Optional[str], features: Dict[str, Any]) -> Dict[str, Any]:
     """Fresh session dict with a random ``<prefix>_<hex10>`` session name."""
-    return {
-        "session_name": f"{prefix}_{uuid.uuid4().hex[:10]}",
-        "bb_session_id": None,
-        "cdp_url": cdp_url,
-        "features": features,
-    }
+    return {"session_name": f"{prefix}_{uuid.uuid4().hex[:10]}", "bb_session_id": None,
+            "cdp_url": cdp_url, "features": features}
 
 
 def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict[str, str]:
     """Local Chromium session; consented real-profile CDP attach when allowed.
 
-    Real-profile fails closed on resolver/launch errors — a consented user must
-    never be silently downgraded to a throwaway. The hybrid private-URL sidecar
-    passes ``allow_real_profile=False``: handing the user's cookie jar to an
-    arbitrary internal host the model chose is a larger, unconsented exposure.
+    Real-profile fails closed on resolver/launch errors (a consented user must never be
+    silently downgraded to a throwaway). The hybrid private-URL sidecar passes
+    ``allow_real_profile=False``: the user's cookie jar must not reach an arbitrary
+    internal host the model chose.
     """
     if allow_real_profile:
         cdp_url, err = _bt._real_profile_cdp()
@@ -208,14 +165,11 @@ def _create_local_session(task_id: str, allow_real_profile: bool = True) -> Dict
             raise RuntimeError(err)
         if cdp_url:
             info = _session_record("rp", _bt._resolve_cdp_override(cdp_url), {"local": True, "real_profile": True})
-            _bt.logger.info(
-                "Created real-profile local session %s for task %s", info["session_name"], task_id
-            )
+            _bt.logger.info("Created real-profile local session %s for task %s", info["session_name"], task_id)
             return info
 
-    # Browser Use mode drives whatever CDP endpoint it is handed; with
-    # ``browser.engine: lightpanda`` that is a Hermes-spawned ``lightpanda serve``.
-    # The built-in tools never reach this branch (hidden in Browser Use mode).
+    # Browser Use mode + ``browser.engine: lightpanda`` drives a Hermes-spawned
+    # ``lightpanda serve`` (the built-in tools are hidden in that mode).
     if _bt._is_browser_use_cli_mode() and _bt._using_lightpanda_engine():
         return _bt._create_lightpanda_session(task_id)
 
@@ -228,17 +182,13 @@ def _create_lightpanda_session(task_id: str) -> Dict[str, Any]:
     """Spawn ``lightpanda serve`` for this session key (Browser Use mode)."""
     from tools.browser_lightpanda import launch_lightpanda
 
-    session_name = f"lp_{uuid.uuid4().hex[:10]}"
-    server, err = launch_lightpanda(session_name, block_private_networks=not _bt._is_local_backend())
+    info = _session_record("lp", None, {"local": True, "lightpanda": True})
+    server, err = launch_lightpanda(info["session_name"], block_private_networks=not _bt._is_local_backend())
     if err:
         raise RuntimeError(err)
-    _bt.logger.info("Created Lightpanda session %s (port %s) for task %s", session_name, server.port, task_id)
-    return {
-        "session_name": session_name,
-        "bb_session_id": None,
-        "cdp_url": server.cdp_url,
-        "features": {"local": True, "lightpanda": True},
-    }
+    info["cdp_url"] = server.cdp_url
+    _bt.logger.info("Created Lightpanda session %s (port %s) for task %s", info["session_name"], server.port, task_id)
+    return info
 
 
 def _local_backend_process_dead(session_info: Dict[str, Any]) -> bool:
@@ -260,11 +210,8 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
 
 
 def _create_cloud_session_or_fallback(task_id: str, provider) -> Dict[str, Any]:
-    """Cloud session; fall back to local Chromium (marked degraded) on failure.
-
-    Some providers (Browser-Use v3) return an HTTP CDP discovery URL instead of a
-    raw websocket endpoint, so ``cdp_url`` is resolved here.
-    """
+    """Cloud session; fall back to local Chromium (marked degraded) on failure. ``cdp_url``
+    is resolved here because some providers return an HTTP discovery URL, not a websocket."""
     try:
         session_info = provider.create_session(task_id)
         if not session_info or not isinstance(session_info, dict):
@@ -275,33 +222,22 @@ def _create_cloud_session_or_fallback(task_id: str, provider) -> Dict[str, Any]:
         return session_info
     except Exception as e:
         provider_name = type(provider).__name__
-        _bt.logger.warning(
-            "Cloud provider %s failed (%s); attempting fallback to local "
-            "Chromium for task %s",
-            provider_name, e, task_id,
-            exc_info=True,
-        )
+        _bt.logger.warning("Cloud provider %s failed (%s); attempting fallback to local Chromium for task %s",
+                           provider_name, e, task_id, exc_info=True)
         try:
             session_info = _bt._create_local_session(task_id)
         except Exception as local_error:
-            raise RuntimeError(
-                f"Cloud provider {provider_name} failed ({e}) and local "
-                f"fallback also failed ({local_error})"
-            ) from e
+            raise RuntimeError(f"Cloud provider {provider_name} failed ({e}) and local "
+                               f"fallback also failed ({local_error})") from e
         if isinstance(session_info, dict):  # mark degraded for observability
-            session_info = dict(session_info)
-            session_info["fallback_from_cloud"] = True
-            session_info["fallback_reason"] = str(e)
-            session_info["fallback_provider"] = provider_name
+            session_info = {**session_info, "fallback_from_cloud": True, "fallback_reason": str(e),
+                            "fallback_provider": provider_name}
         return session_info
 
 
 def _create_session_for_key(task_id: str, force_local: bool) -> Dict[str, Any]:
     """Fresh session for ``task_id`` (runs OUTSIDE the lock: cloud mode makes a network call).
-
-    Precedence: CDP override > hybrid local sidecar > cloud provider > local. The
-    hybrid sidecar NEVER gets the real profile (see ``_create_local_session``).
-    """
+    Precedence: CDP override > hybrid local sidecar (never real-profile) > cloud > local."""
     cdp_override = _bt._get_cdp_override()
     if cdp_override and not force_local:
         return _bt._create_cdp_session(task_id, cdp_override)
@@ -314,13 +250,9 @@ def _create_session_for_key(task_id: str, force_local: bool) -> Dict[str, Any]:
 
 
 def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
-    """Get or create session info for a session key (thread-safe).
-
-    A ``::local``-suffixed key (hybrid sidecar) forces local Chromium even with a
-    cloud provider configured. Also starts the inactivity thread and touches
-    activity tracking. Returns ``session_name`` (always) plus ``bb_session_id`` /
-    ``cdp_url`` for cloud sessions.
-    """
+    """Get or create session info for a session key (thread-safe); also starts the
+    inactivity thread and touches activity. A ``::local`` key forces local Chromium
+    even with a cloud provider configured."""
     if task_id is None:
         task_id = "default"
 
@@ -331,29 +263,22 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
         existing_session = _bt._active_sessions.get(task_id)
 
     def _replacement_after_teardown() -> Optional[Dict[str, Any]]:
-        # Teardown removes the activity entry; the replacement must be tracked by
-        # the reaper like an initial session. Another thread may already have
-        # recycled and re-created it — return that live one instead of a third.
+        # Teardown removes the activity entry; re-touch so the reaper tracks the
+        # replacement. Another thread may already have re-created it — reuse that.
         _bt._update_session_activity(task_id)
         with _bt._cleanup_lock:
             replacement = _bt._active_sessions.get(task_id)
-        if replacement is not None and replacement is not existing_session:
-            return replacement
-        return None
+        return replacement if replacement is not None and replacement is not existing_session else None
 
     if existing_session is not None:
-        # Suspect-session recycle: a previous command timeout marked this cached
-        # session via the SuspectableBackend adapter; the expensive recycle lives
-        # here at next use, not on the timeout path (mark must stay cheap).
+        # Suspect recycle: a command timeout marked this session; the expensive recycle
+        # lives here at next use, not on the timeout path (mark must stay cheap).
         if not _bt._browser_session_backend(task_id).ensure_healthy():
             replacement = _replacement_after_teardown()
             if replacement is not None:
                 return replacement
             existing_session = None
-        elif (
-            not _bt._session_has_expired(existing_session)
-            and not _bt._local_backend_process_dead(existing_session)
-        ):
+        elif not _bt._session_has_expired(existing_session) and not _bt._local_backend_process_dead(existing_session):
             return existing_session
         else:
             _bt.logger.info("Replacing expired or dead browser session for task %s", task_id)
@@ -366,29 +291,23 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     session_info = _bt._create_session_for_key(task_id, force_local)
 
     with _bt._cleanup_lock:
-        # Another thread may have created a session during the network call; use
-        # it to avoid leaking orphan cloud sessions.
-        if task_id in _bt._active_sessions:
+        if task_id in _bt._active_sessions:  # created concurrently during the network call — don't leak ours
             return _bt._active_sessions[task_id]
         session_info = dict(session_info)
         session_info.setdefault("session_key", task_id)
         session_info.setdefault("owner_task_id", _bt._bare_task_id_for_session_key(task_id))
         _bt._active_sessions[task_id] = session_info
-        # A brand-new session is healthy by definition — drop any stale suspect flag.
-        _bt._suspect_browser_sessions.pop(task_id, None)
+        _bt._suspect_browser_sessions.pop(task_id, None)  # brand-new session is healthy by definition
 
-    # Lazy-start the CDP supervisor (idempotent; swallows errors). Skip for local
-    # sidecars (no CDP URL) and Lightpanda sessions (Browser Use mode hides the
-    # browser_* tools that consume supervisor state; it would just idle a second CDP connection).
+    # Lazy-start the CDP supervisor (idempotent). Skip local sidecars (no CDP URL) and
+    # Lightpanda sessions (Browser Use mode hides the tools that consume supervisor state).
     if not force_local and not (session_info.get("features") or {}).get("lightpanda"):
         _bt._ensure_cdp_supervisor(task_id)
 
     return session_info
 
 
-def _discard_timed_out_browser_session(
-    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
-) -> None:
+def _discard_timed_out_browser_session(task_id: str, session_info: Dict[str, Any], task_socket_dir: str) -> None:
     """Drop a stuck client generation without losing cloud cleanup state."""
     with _bt._cleanup_lock:
         if _bt._active_sessions.get(task_id) is not session_info:
@@ -436,12 +355,9 @@ def _read_browser_daemon_pid(task_socket_dir: str, session_name: str) -> Optiona
 
 
 def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.0) -> bool:
-    """Cheap liveness probe: connect to the daemon's unix control socket.
-
-    A successful connect proves the accept loop is alive (the command wedged on the
-    page/CDP side). Windows uses named pipes — no probe possible, so report
-    unresponsive (tree-kill + respawn is the safe recovery).
-    """
+    """Cheap liveness probe: a connect to the daemon's unix control socket proves the accept
+    loop is alive (the command wedged page/CDP-side). Windows named pipes can't be probed →
+    report unresponsive (tree-kill + respawn is the safe recovery)."""
     if os.name == "nt":
         return False
     import socket as socket_mod
@@ -452,9 +368,7 @@ def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.
         entries = os.listdir(task_socket_dir)
     except OSError:
         return False
-    for entry in entries:
-        if not entry.endswith(".sock"):
-            continue
+    for entry in (e for e in entries if e.endswith(".sock")):
         try:
             with socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM) as s:
                 s.settimeout(probe_timeout_s)
@@ -465,20 +379,15 @@ def _browser_daemon_responsive(task_socket_dir: str, probe_timeout_s: float = 1.
     return False
 
 
-def _handle_browser_command_timeout(
-    task_id: str, session_info: Dict[str, Any], task_socket_dir: str
-) -> None:
-    """Recover session state after a browser command timeout.
+def _handle_browser_command_timeout(task_id: str, session_info: Dict[str, Any], task_socket_dir: str) -> None:
+    """Recover session state after a command timeout.
 
-    * Cloud / CDP: no local daemon to probe — replace the stuck client generation
-      now (fresh ``session_name``, same ``bb_session_id`` so cloud cleanup works).
-    * Local daemon alive (PID live, identity-verified, control socket accepts): only
-      the *command* wedged; mark suspect and let next use recycle via ``ensure_healthy``.
-    * Local daemon wedged/dead: it cannot service a clean close and its Chromium
-      children would leak — tree-kill and evict now.
-
-    Both local branches ``mark_suspect`` first (cheap, lock-free) so the
-    poisoned-cache invariant holds even if eviction races another thread's replacement.
+    Cloud/CDP: no daemon to probe — replace the stuck client generation now (same
+    ``bb_session_id`` so cloud cleanup works). Local daemon alive (PID live, verified,
+    socket accepts): only the command wedged — mark suspect, recycle at next use.
+    Local daemon wedged/dead: tree-kill and evict now (Chromium children would leak).
+    Both local branches ``mark_suspect`` first so the poisoned-cache invariant holds
+    even if eviction races another thread's replacement.
     """
     if session_info.get("bb_session_id") or session_info.get("cdp_url"):
         _bt._discard_timed_out_browser_session(task_id, session_info, task_socket_dir)
@@ -495,16 +404,12 @@ def _handle_browser_command_timeout(
         and _bt._browser_daemon_responsive(task_socket_dir)
     )
     if daemon_alive:
-        _bt.logger.warning(
-            "browser daemon for %s is alive after command timeout; session "
-            "marked suspect and will be recycled at next use", task_id,
-        )
+        _bt.logger.warning("browser daemon for %s is alive after command timeout; session "
+                           "marked suspect and will be recycled at next use", task_id)
         return
 
-    _bt.logger.warning(
-        "browser daemon for %s is wedged or dead after command timeout; "
-        "tree-killing and evicting the session", task_id,
-    )
+    _bt.logger.warning("browser daemon for %s is wedged or dead after command timeout; "
+                       "tree-killing and evicting the session", task_id)
     _bt._discard_timed_out_browser_session(task_id, session_info, task_socket_dir)
     # The poisoned entry is gone either way; the flag must not poison a session
     # created later under the same key.
@@ -512,42 +417,34 @@ def _handle_browser_command_timeout(
 
 
 def _interpret_browser_command_output(command: str, stdout: str, stderr: str, returncode: int) -> Dict[str, Any]:
-    """Turn a finished agent-browser process's output into a result dict.
-
-    Empty stdout with rc=0 is a broken state (stale daemon) and is reported as
-    failure rather than a silent success — except for ``_EMPTY_OK_COMMANDS``.
-    Non-JSON output is an error, except ``screenshot`` where the saved path is
-    recovered from the prose.
-    """
+    """Finished agent-browser process output → result dict. Empty stdout with rc=0 is a
+    broken state (stale daemon) reported as failure except for ``_EMPTY_OK_COMMANDS``;
+    non-JSON output is an error except ``screenshot``, whose path is recovered from prose."""
     if stderr and stderr.strip():
         level = logging.WARNING if returncode != 0 else logging.DEBUG
         _bt.logger.log(level, "browser '%s' stderr: %s", command, stderr.strip()[:500])
 
     stdout_text = stdout.strip()
-    if not stdout_text and returncode == 0 and command not in _bt._EMPTY_OK_COMMANDS:
-        _bt.logger.warning("browser '%s' returned empty output (rc=0)", command)
-        return {"success": False, "error": f"Browser command '{command}' returned no output"}
     if not stdout_text:
         if returncode != 0:
             error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
             _bt.logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
             return {"success": False, "error": error_msg}
+        if command not in _bt._EMPTY_OK_COMMANDS:
+            _bt.logger.warning("browser '%s' returned empty output (rc=0)", command)
+            return {"success": False, "error": f"Browser command '{command}' returned no output"}
         return {"success": True, "data": {}}
 
     try:
         parsed = json.loads(stdout_text)
     except json.JSONDecodeError:
         raw = stdout_text[:2000]
-        _bt.logger.warning("browser '%s' returned non-JSON output (rc=%s): %s",
-                       command, returncode, raw[:500])
+        _bt.logger.warning("browser '%s' returned non-JSON output (rc=%s): %s", command, returncode, raw[:500])
         if command == "screenshot":
-            stderr_text = (stderr or "").strip()
-            combined_text = "\n".join(part for part in [stdout_text, stderr_text] if part)
+            combined_text = "\n".join(part for part in [stdout_text, (stderr or "").strip()] if part)
             recovered_path = _bt._extract_screenshot_path_from_text(combined_text)
             if recovered_path and Path(recovered_path).exists():
-                _bt.logger.info(
-                    "browser 'screenshot' recovered file from non-JSON output: %s", recovered_path
-                )
+                _bt.logger.info("browser 'screenshot' recovered file from non-JSON output: %s", recovered_path)
                 return {"success": True, "data": {"path": recovered_path, "raw": raw}}
         return {"success": False, "error": f"Non-JSON output from agent-browser for '{command}': {raw}"}
 
@@ -555,16 +452,14 @@ def _interpret_browser_command_output(command: str, stdout: str, stderr: str, re
     if command == "snapshot" and parsed.get("success"):
         snap_data = parsed.get("data", {})
         if not snap_data.get("snapshot") and not snap_data.get("refs"):
-            _bt.logger.warning("snapshot returned empty content. "
-                           "Possible stale daemon or CDP connection issue. "
-                           "returncode=%s", returncode)
+            _bt.logger.warning("snapshot returned empty content. Possible stale daemon or CDP connection issue. "
+                               "returncode=%s", returncode)
     return parsed
 
 
 def _browser_command_preflight() -> Dict[str, Any]:
-    """Fail fast before spawning: missing CLI, Termux install gap, interrupt, or no
-    Chromium in local mode (else every call hangs for command_timeout). Returns an
-    error result, or ``{"browser_cmd": path}`` on success."""
+    """Fail fast before spawning (missing CLI, Termux gap, interrupt, no Chromium in local
+    mode — else every call hangs for command_timeout). Error result, or ``{"browser_cmd": path}``."""
     try:
         browser_cmd = _bt._find_agent_browser()
     except FileNotFoundError as e:
@@ -606,15 +501,11 @@ def _spawn_and_collect(
     # Lightpanda rejects Chromium-only launch flags: strip current and legacy vars;
     # Chrome commands and fallback use the shared Chromium policy.
     if engine == "lightpanda":
-        _stripped_args = browser_env.pop("AGENT_BROWSER_ARGS", None)
-        _stripped_flags = browser_env.pop("AGENT_BROWSER_CHROME_FLAGS", None)
-        if _stripped_args is not None or _stripped_flags is not None:
-            _bt.logger.debug(
-                "browser: stripped Chromium-only AGENT_BROWSER_ARGS/"
-                "AGENT_BROWSER_CHROME_FLAGS for Lightpanda command %s "
-                "(agent-browser rejects them with --engine lightpanda)",
-                command,
-            )
+        stripped = [browser_env.pop(k, None) for k in ("AGENT_BROWSER_ARGS", "AGENT_BROWSER_CHROME_FLAGS")]
+        if any(v is not None for v in stripped):
+            _bt.logger.debug("browser: stripped Chromium-only AGENT_BROWSER_ARGS/AGENT_BROWSER_CHROME_FLAGS "
+                             "for Lightpanda command %s (agent-browser rejects them with --engine lightpanda)",
+                             command)
     else:
         _bt._apply_chromium_sandbox_args(browser_env)
 
@@ -634,10 +525,7 @@ def _spawn_and_collect(
             _bt.logger.warning("browser '%s' stderr after timeout: %s", command, stderr.strip()[:500])
         _bt.logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                        command, timeout, task_id, task_socket_dir)
-        return {
-            "success": False,
-            "error": _bt._format_browser_timeout_error(command, timeout, stdout, stderr),
-        }
+        return {"success": False, "error": _bt._format_browser_timeout_error(command, timeout, stdout, stderr)}
     with open(stdout_path, "r", encoding="utf-8") as f:
         stdout = f.read()
     with open(stderr_path, "r", encoding="utf-8") as f:
@@ -654,11 +542,8 @@ def _run_browser_command(
     _engine_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one agent-browser CLI command against the task's session; returns its parsed JSON.
-
-    ``timeout=None`` reads ``browser.command_timeout`` (default 30s).
-    ``_engine_override`` forces an engine for this call only (the Lightpanda
-    fallback uses it to retry with Chrome without touching global state).
-    """
+    ``timeout=None`` reads ``browser.command_timeout``; ``_engine_override`` forces an engine
+    for this call only (Lightpanda fallback retries with Chrome without touching global state)."""
     if timeout is None:
         timeout = _bt._safe_command_timeout()
     args = args or []
@@ -679,18 +564,17 @@ def _run_browser_command(
 
     # Cloud/CDP: ``--cdp <ws_url>`` (NEVER with --session: agent-browser >=0.13
     # would create a local browser and silently ignore --cdp). Local: ``--session <name>``.
+    # Engine injection keys off the resolved session backend, not global provider
+    # state: hybrid routing can create a local sidecar while a cloud provider stays configured.
+    engine = _engine_override or _bt._get_browser_engine()
     if session_info.get("cdp_url"):
         backend_args = ["--cdp", session_info["cdp_url"]]
     else:
         backend_args = ["--session", session_info["session_name"]]
         if _bt._is_headed_mode():
             backend_args.append("--headed")
-
-    # Engine injection keys off the resolved session backend, not global provider
-    # state: hybrid routing can create a local sidecar while a cloud provider stays configured.
-    engine = _engine_override or _bt._get_browser_engine()
-    if engine != "auto" and not _bt._is_camofox_mode() and not session_info.get("cdp_url"):
-        backend_args += ["--engine", engine]
+        if engine != "auto" and not _bt._is_camofox_mode():
+            backend_args += ["--engine", engine]
 
     cmd_parts = _bt._agent_browser_argv(browser_cmd) + backend_args + ["--json", command] + args
 
@@ -704,12 +588,7 @@ def _run_browser_command(
     # empty, non-JSON, nonzero rc, parsed).
     fallback_reason = _bt._lightpanda_fallback_reason(engine, command, result)
     if fallback_reason:
-        _bt.logger.info(
-            "Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s",
-            command,
-            task_id,
-            fallback_reason,
-        )
+        _bt.logger.info("Lightpanda fallback: retrying '%s' with Chrome (task=%s): %s", command, task_id, fallback_reason)
         if command == "screenshot":  # separate Chrome session to the same URL
             fallback_result = _bt._chrome_fallback_screenshot(task_id, args or [], timeout)
         else:
