@@ -600,9 +600,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
     resp, payload = _capture_response(cap), _action_payload(res)
     if isinstance(resp, dict) and resp.get("_multimodal"):
         # Keep the evidence/verdict contract visible alongside the image — it governs whether input may repeat.
-        prefix = json.dumps(payload) + "\n\n"
-        resp["content"][0]["text"] = prefix + resp["content"][0]["text"]
-        resp["text_summary"] = prefix + resp["text_summary"]
+        resp["content"][0]["text"] = resp["text_summary"] = json.dumps(payload) + "\n\n" + resp["text_summary"]
         resp["action_result"] = payload
         return resp
     return json.dumps({**json.loads(resp), **payload})  # text capture: merge the action payload in
@@ -641,13 +639,12 @@ def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
 
 def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
     """FULL element tree (untruncated labels) in a cache file — the read_file/search_files escape hatch for capped text."""
-    def write(path) -> None:
-        payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
-                   "elements": [{"index": e.index, "role": e.role, "label": e.label,
-                                 "bounds": list(e.bounds), "app": e.app} for e in cap.elements]}
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache",
-                             f"elements_{uuid.uuid4().hex}.json", "elements_*.json", _MAX_SPILL_FILES, write)
+    payload = {"app": cap.app, "window_title": cap.window_title, "total_elements": len(cap.elements),
+               "elements": [{"index": e.index, "role": e.role, "label": e.label, "bounds": list(e.bounds), "app": e.app}
+                            for e in cap.elements]}
+    return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache", f"elements_{uuid.uuid4().hex}.json",
+                             "elements_*.json", _MAX_SPILL_FILES,
+                             lambda p: p.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"))
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
 
