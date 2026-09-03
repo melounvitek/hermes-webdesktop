@@ -955,7 +955,7 @@ class AIAgent(
             process_registry.kill_all(task_id=task_id)
 
         def release_computer_use() -> None:
-            from tools.computer_use import release_computer_use_session
+            from tools.computer_use.tool import release_computer_use_session
             release_computer_use_session(task_id)
 
         for step in (kill_processes, lambda: cleanup_vm(task_id), lambda: cleanup_browser(task_id), release_computer_use):

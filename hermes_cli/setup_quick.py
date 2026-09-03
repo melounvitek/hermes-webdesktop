@@ -203,7 +203,8 @@ def _set_bundled_skills_opt_out(opt_out: bool, log_label: str, on_success=None, 
     """Record the bundled-skills opt-out marker and sync (essential skills are always seeded);
     ``on_success(sync_result)`` / ``on_error(exc)`` report the outcome."""
     try:
-        from tools.skills_sync import set_bundled_skills_opt_out, sync_skills
+        from tools.skills_sync import sync_skills
+        from tools.skills_sync_bundled_ops import set_bundled_skills_opt_out
         set_bundled_skills_opt_out(opt_out)
         result = sync_skills(quiet=True)
         if on_success is not None:

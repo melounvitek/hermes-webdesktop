@@ -116,7 +116,7 @@ class TestBlankSlateFork:
         monkeypatch.setattr(s, "_blank_slate_walkthrough",
                             lambda cfg, home: walked.__setitem__("called", True))
         opted_out = {"value": None}
-        monkeypatch.setattr("tools.skills_sync.set_bundled_skills_opt_out",
+        monkeypatch.setattr("tools.skills_sync_bundled_ops.set_bundled_skills_opt_out",
                             lambda enabled: opted_out.__setitem__("value", enabled))
 
         cfg = {}

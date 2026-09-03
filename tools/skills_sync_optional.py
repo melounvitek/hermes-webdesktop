@@ -15,7 +15,7 @@ logger = logging.getLogger("tools.skills_sync")
 
 
 def _ss():
-    """Live ``tools.skills_sync`` module (imported lazily: it re-exports this module)."""
+    """Live ``tools.skills_sync`` module (imported lazily: it imports helpers from this module)."""
     from tools import skills_sync
     return skills_sync
 

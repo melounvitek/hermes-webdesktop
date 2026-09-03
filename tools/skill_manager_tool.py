@@ -27,15 +27,11 @@ from agent.skill_utils import (
     is_skill_description_truncated_for_prompt,
     parse_frontmatter as _parse_frontmatter,
     SKILL_PROMPT_DESC_LIMIT)
-from tools.skill_manager_guards import (  # noqa: F401 — re-exported for callers/tests
-    _BackgroundReviewReadMarks, _background_review_has_read, _background_review_preflight,
-    _background_review_read_before_write_guard, _background_review_read_paths,
-    _background_review_write_guard, _containing_skills_root, _curator_consolidation_delete_guard,
-    _is_path_redirect, _maybe_auto_propose_org_edit, _org_mirror_write_guard, _pinned_guard,
-    _reset_background_review_read_marks, _validate_delete_target, _is_background_review,
-    mark_background_review_skill_read, _refusal as _err)
-from tools.skill_manager_batch import (  # noqa: F401
-    _BATCH_MAX_OPS, _BATCH_OP_ACTIONS, _skill_manage_batch)
+from tools.skill_manager_guards import (
+    _background_review_preflight, _background_review_read_before_write_guard, _background_review_write_guard,
+    _containing_skills_root, _curator_consolidation_delete_guard, _maybe_auto_propose_org_edit,
+    _org_mirror_write_guard, _pinned_guard, _validate_delete_target, _is_background_review, _refusal as _err)
+from tools.skill_manager_batch import _skill_manage_batch
 from tools.skills_guard import scan_skill, should_allow_install, format_scan_report
 
 logger = logging.getLogger(__name__)

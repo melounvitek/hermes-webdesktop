@@ -19,8 +19,8 @@ from agent.redact import redact_sensitive_text
 from hermes_cli.goals import judge_goal
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get, load_config
-from tools.kanban_tools_schemas import (  # noqa: F401 - re-exported for callers/tests
-    _DESC_BOARD, _DESC_TASK_ID_DEFAULT, _board_schema_prop, KANBAN_ATTACH_SCHEMA,
+from tools.kanban_tools_schemas import (
+    KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
     KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,

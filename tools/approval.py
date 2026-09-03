@@ -237,7 +237,7 @@ def _release_permission_mode_dependents(session_key: str) -> None:
     sessions never load computer-use; releasing on BOTH edges makes enabling YOLO replace a
     standard backend and disabling it revoke a private unrestricted daemon immediately."""
     try:
-        from tools.computer_use import release_computer_use_session
+        from tools.computer_use.tool import release_computer_use_session
 
         release_computer_use_session(session_key)
     except Exception:

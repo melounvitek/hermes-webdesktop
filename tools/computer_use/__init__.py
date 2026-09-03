@@ -10,13 +10,3 @@ Modules: `tool.py` (handler, approval gate, response shaping), `backend.py` (abs
 `ComputerUseBackend` + result dataclasses), `cua_backend.py` (default MCP-over-stdio
 backend + `cua_backend_parse`/`_session`/`_daemon` siblings), `schema.py` (byte-frozen).
 """
-
-from __future__ import annotations
-
-from tools.computer_use.tool import (  # noqa: F401  (public re-exports)
-    handle_computer_use,
-    release_computer_use_session,
-    set_approval_callback,
-    check_computer_use_requirements,
-    get_computer_use_schema,
-)

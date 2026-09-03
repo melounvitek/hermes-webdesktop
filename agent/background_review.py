@@ -961,7 +961,7 @@ def _run_review_fork(
         ),
     )
     with suppress(Exception):
-        from tools.skill_manager_tool import _reset_background_review_read_marks
+        from tools.skill_manager_guards import _reset_background_review_read_marks
 
         _reset_background_review_read_marks()
     try:

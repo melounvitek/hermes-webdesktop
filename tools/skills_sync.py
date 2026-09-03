@@ -24,7 +24,9 @@ for _stream in (sys.stdout, sys.stderr):
             _stream.reconfigure(encoding="utf-8", errors="replace")
 from hermes_constants import get_bundled_skills_dir, get_hermes_home, get_optional_skills_dir
 from agent.skill_utils import ESSENTIAL_SKILLS, is_excluded_skill_path
-from tools.skill_usage import _read_skill_name, read_suppressed_names  # noqa: F401  (re-exported)
+from tools.skill_usage import _read_skill_name, read_suppressed_names
+from tools.skills_sync_bundled_ops import _is_tracked_user_modification
+from tools.skills_sync_optional import _backfill_optional_provenance, _read_hub_install_paths
 from utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
@@ -417,16 +419,6 @@ def _rmtree_writable(path: Path) -> None:
                 os.chmod(p, stat.S_IRWXU)
         func(fpath)
     shutil.rmtree(path, onerror=_on_error)
-
-
-# Re-exported so ``from tools.skills_sync import X`` / ``patch("tools.skills_sync.X")`` keep working.
-from tools.skills_sync_bundled_ops import (  # noqa: E402,F401
-    _is_tracked_user_modification, _read_for_diff, diff_bundled_skill, list_user_modified_bundled_skills,
-    remove_pristine_bundled_skills, reset_bundled_skill, set_bundled_skills_opt_out)
-from tools.skills_sync_optional import (  # noqa: E402,F401
-    _backfill_optional_provenance, _content_hash, _index_installed_skill_dirs_by_name, _move_to_restore_backup,
-    _optional_skill_index, _read_hub_install_paths, _safe_rel_install_path, _skill_file_list,
-    restore_official_optional_skill)
 
 
 if __name__ == "__main__":

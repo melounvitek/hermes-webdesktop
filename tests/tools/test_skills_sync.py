@@ -17,9 +17,9 @@ from tools.skills_sync import (
     _compute_relative_dest,
     _dir_hash,
     sync_skills,
-    reset_bundled_skill,
-    restore_official_optional_skill,
 )
+from tools.skills_sync_bundled_ops import reset_bundled_skill
+from tools.skills_sync_optional import restore_official_optional_skill
 
 
 class TestReadWriteManifest:
@@ -765,7 +765,7 @@ class TestOptOutToggleAndRemove:
         return bundled
 
     def test_marker_toggle(self, tmp_path):
-        from tools.skills_sync import set_bundled_skills_opt_out
+        from tools.skills_sync_bundled_ops import set_bundled_skills_opt_out
         home = tmp_path / "home"
         home.mkdir()
         marker = home / ".no-bundled-skills"
@@ -783,9 +783,8 @@ class TestOptOutToggleAndRemove:
             assert not marker.exists()
 
     def test_remove_keeps_user_modified(self, tmp_path):
-        from tools.skills_sync import (
-            sync_skills, remove_pristine_bundled_skills,
-        )
+        from tools.skills_sync import sync_skills
+        from tools.skills_sync_bundled_ops import remove_pristine_bundled_skills
         bundled = self._setup_bundled(tmp_path)
         skills_dir = tmp_path / "user_skills"
         manifest_file = skills_dir / ".bundled_manifest"

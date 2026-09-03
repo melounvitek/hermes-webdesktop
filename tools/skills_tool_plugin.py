@@ -104,7 +104,7 @@ def _serve_skill_file(
 
 def _mark_background_review_read(path: Path) -> None:
     try:
-        from tools.skill_manager_tool import mark_background_review_skill_read
+        from tools.skill_manager_guards import mark_background_review_skill_read
         mark_background_review_skill_read(path)
     except Exception:
         logger.debug("Could not record background-review skill read for %s", path, exc_info=True)
