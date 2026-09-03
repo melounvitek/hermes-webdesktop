@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import resource_limits
+from hermes_cli import dashboard_procs
+from hermes_cli import main_dashboard
 
 
 class _FakeResource:
@@ -270,7 +272,7 @@ def test_named_profile_reroute_defers_limit_to_final_process(monkeypatch, tmp_pa
         "get_active_profile_name",
         lambda: "worker",
     )
-    monkeypatch.setattr(cli_main, "_dashboard_listening", lambda *args: False)
+    monkeypatch.setattr(main_dashboard, "_dashboard_listening", lambda *args: False)
     monkeypatch.setattr(
         local_environment,
         "build_subprocess_env",
@@ -325,7 +327,7 @@ def test_dashboard_lifecycle_flags_skip_limit_adjustment(monkeypatch, lifecycle_
         "apply_nofile_soft_limit",
         lambda: calls.append("limit"),
     )
-    monkeypatch.setattr(cli_main, "_scan_dashboard_processes", lambda: [])
+    monkeypatch.setattr(dashboard_procs, "_scan_dashboard_processes", lambda: [])
     monkeypatch.setattr(cli_main, "_find_stale_dashboard_pids", lambda: [])
 
     args = SimpleNamespace(

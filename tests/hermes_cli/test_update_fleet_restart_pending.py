@@ -82,7 +82,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
         "_get_origin_url",
         lambda *a, **k: "https://github.com/NousResearch/hermes-agent.git",
     )
-    monkeypatch.setattr(hermes_main, "_is_fork", lambda *a, **k: False)
+    monkeypatch.setattr(update_cmd, "_is_fork", lambda *a, **k: False)
     monkeypatch.setattr(
         hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None
     )
@@ -99,8 +99,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     )
     monkeypatch.setattr(hermes_main, "_write_update_incomplete_marker", lambda: None)
     monkeypatch.setattr(hermes_main, "_clear_update_incomplete_marker", lambda: None)
-    monkeypatch.setattr(
-        hermes_main, "_finish_dashboard_update_cleanup", lambda *a, **k: None
+    monkeypatch.setattr(update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None
     )
     monkeypatch.setattr(
         update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None
