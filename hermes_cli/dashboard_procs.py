@@ -295,12 +295,10 @@ def _kill_pids_windows(pids: list[int], killed: list[int], failed: list[tuple[in
             if not pid_is_hermes(pid, expected_start_time=expected_start_time):
                 failed.append((pid, "not hermes-owned or process identity changed"))
                 continue
-            result = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="replace", timeout=10,
-                creationflags=windows_hide_flags(),
-            )
+            result = subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True,
+                                    encoding="utf-8", errors="replace", timeout=10,
+                                    creationflags=windows_hide_flags())
             if result.returncode == 0:
                 killed.append(pid)
             else:
@@ -365,8 +363,7 @@ def _kill_stale_dashboard_processes(
         # below drops PIDs it owns) and keep going.
         _dash_unit = getattr(_m(), "_DASHBOARD_SYSTEMD_UNIT", "hermes-dashboard.service")
         already_restarted_units = set(already_restarted_units or ()) | {
-            str(_dash_unit).removesuffix(".service")
-        }
+            str(_dash_unit).removesuffix(".service")}
 
     exclude = _exclude_pids_from_env()
     if restart_managed:

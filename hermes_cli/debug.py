@@ -168,9 +168,8 @@ def delete_paste(url: str) -> bool:
     if not paste_id:
         raise ValueError(f"Cannot delete: only paste.rs URLs are supported.  Got: {url}")
 
-    req = urllib.request.Request(
-        f"{_PASTE_RS_URL}{paste_id}", method="DELETE", headers={"User-Agent": _USER_AGENT},
-    )
+    req = urllib.request.Request(f"{_PASTE_RS_URL}{paste_id}", method="DELETE",
+                                 headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return 200 <= resp.status < 300
 
@@ -191,10 +190,8 @@ def _schedule_auto_delete(urls: list[str], delay_seconds: int = _AUTO_DELETE_SEC
 
 def _post_paste(service: str, endpoint: str, body: bytes, content_type: str) -> str:
     """POST *body* to a paste service and return the paste URL it echoes back."""
-    req = urllib.request.Request(
-        endpoint, data=body, method="POST",
-        headers={"Content-Type": content_type, "User-Agent": _USER_AGENT},
-    )
+    req = urllib.request.Request(endpoint, data=body, method="POST",
+                                 headers={"Content-Type": content_type, "User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
         url = resp.read().decode("utf-8").strip()
     if not url.startswith("http"):
@@ -488,12 +485,9 @@ def build_nous_bundle(bundle: dict[str, str], redact: bool = True) -> bytes:
     The JSON shape (``format``, ``redacted``, ``created``, ``files``) is what the
     discord-support viewer parses — keep it stable.
     """
-    envelope = {
-        "format": _NOUS_BUNDLE_FORMAT,
-        "redacted": bool(redact),
-        "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "files": bundle,
-    }
+    envelope = {"format": _NOUS_BUNDLE_FORMAT, "redacted": bool(redact),
+                "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "files": bundle}
     return gzip.compress(json.dumps(envelope).encode("utf-8"))
 
 
@@ -544,10 +538,8 @@ def build_debug_share(*, log_lines: int = 200, expiry: int = 7, redact: bool = T
 
     _schedule_auto_delete(list(urls.values()))
 
-    return DebugShareResult(
-        urls=urls, failures=failures, redacted=redact,
-        auto_delete_seconds=_AUTO_DELETE_SECONDS, report=report,
-    )
+    return DebugShareResult(urls=urls, failures=failures, redacted=redact,
+                            auto_delete_seconds=_AUTO_DELETE_SECONDS, report=report)
 
 
 def _confirm_upload(args) -> bool:

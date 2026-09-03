@@ -79,11 +79,9 @@ def resolve_copilot_token() -> tuple[str, str]:
     # one silently substituted from the gh credential store. Skipping the subprocess also
     # avoids a slow `gh auth token` call (up to 5s on Windows) on every cold start.
     if any_env_var_set:
-        logger.debug(
-            "Copilot env var(s) set but none held a supported token; "
-            "skipping `gh auth token` fallback to honor explicit env-var "
-            "intent (and avoid the subprocess cost on cold start, #60800)."
-        )
+        logger.debug("Copilot env var(s) set but none held a supported token; skipping `gh auth "
+                     "token` fallback to honor explicit env-var intent (and avoid the subprocess "
+                     "cost on cold start, #60800).")
         return "", ""
 
     token = _try_gh_cli_token()
@@ -99,9 +97,8 @@ def resolve_copilot_token() -> tuple[str, str]:
 def _gh_cli_candidates() -> list[str]:
     """Candidate ``gh`` binary paths, including common Homebrew installs."""
     candidates: list[str] = [c for c in (shutil.which("gh"),) if c]
-    for candidate in (
-        "/opt/homebrew/bin/gh", "/usr/local/bin/gh", str(Path.home() / ".local" / "bin" / "gh")
-    ):
+    for candidate in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh",
+                      str(Path.home() / ".local" / "bin" / "gh")):
         if (candidate not in candidates and os.path.isfile(candidate)
                 and os.access(candidate, os.X_OK)):
             candidates.append(candidate)
@@ -154,10 +151,9 @@ def _probe_gh_cli_token() -> Optional[str]:
         if hostname:
             cmd += ["--hostname", hostname]
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, encoding='utf-8', errors='replace',
-                timeout=5, env=clean_env, stdin=subprocess.DEVNULL, **_popen_kwargs,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                                    errors='replace', timeout=5, env=clean_env,
+                                    stdin=subprocess.DEVNULL, **_popen_kwargs)
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             logger.debug("gh CLI token lookup failed (%s): %s", gh_path, exc)
             continue
@@ -168,10 +164,8 @@ def _probe_gh_cli_token() -> Optional[str]:
 
 # ─── OAuth Device Code Flow ────────────────────────────────────────────────
 
-_DEVICE_CODE_TERMINAL_ERRORS = {
-    "expired_token": "  ✗ Device code expired. Please try again.",
-    "access_denied": "  ✗ Authorization was denied.",
-}
+_DEVICE_CODE_TERMINAL_ERRORS = {"expired_token": "  ✗ Device code expired. Please try again.",
+                                "access_denied": "  ✗ Authorization was denied."}
 
 
 def _post_form(url: str, fields: dict, timeout: float) -> dict:
@@ -197,9 +191,8 @@ def copilot_device_code_login(
     access_token_url = f"https://{domain}/login/oauth/access_token"
 
     try:
-        device_data = _post_form(
-            device_code_url, {"client_id": COPILOT_OAUTH_CLIENT_ID, "scope": "read:user"}, 15
-        )
+        device_data = _post_form(device_code_url,
+                                 {"client_id": COPILOT_OAUTH_CLIENT_ID, "scope": "read:user"}, 15)
     except Exception as exc:
         logger.error("Failed to initiate device authorization: %s", exc)
         print(f"  ✗ Failed to start device authorization: {exc}")
@@ -332,9 +325,8 @@ def _read_jwt_store(path: Path) -> Optional[dict]:
         return None
     try:
         if path.stat().st_size > _JWT_DISK_MAX_BYTES:
-            logger.debug(
-                "Persisted Copilot JWT store exceeds %d bytes; ignoring", _JWT_DISK_MAX_BYTES
-            )
+            logger.debug("Persisted Copilot JWT store exceeds %d bytes; ignoring",
+                         _JWT_DISK_MAX_BYTES)
             return None
         loaded = json.loads(path.read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else None
@@ -549,10 +541,8 @@ def _exchange_copilot_token_locked(
                 break
             if attempt < _EXCHANGE_MAX_ATTEMPTS:
                 sleep_s = _EXCHANGE_BACKOFF_BASE_SECONDS * attempt
-                logger.debug(
-                    "Copilot token exchange attempt %d/%d failed (%s); retrying in %.1fs",
-                    attempt, _EXCHANGE_MAX_ATTEMPTS, exc, sleep_s,
-                )
+                logger.debug("Copilot token exchange attempt %d/%d failed (%s); retrying in %.1fs",
+                             attempt, _EXCHANGE_MAX_ATTEMPTS, exc, sleep_s)
                 time.sleep(sleep_s)
     if data is None:
         ttl = (
@@ -624,13 +614,10 @@ def copilot_request_headers(
     *, is_agent_turn: bool = True, is_vision: bool = False,
 ) -> dict[str, str]:
     """Build the standard headers for Copilot API requests."""
-    headers: dict[str, str] = {
-        "Editor-Version": _EDITOR_VERSION,
-        "User-Agent": "HermesAgent/1.0",
-        "Copilot-Integration-Id": "vscode-chat",
-        "Openai-Intent": "conversation-edits",
-        "x-initiator": "agent" if is_agent_turn else "user",
-    }
+    headers: dict[str, str] = {"Editor-Version": _EDITOR_VERSION, "User-Agent": "HermesAgent/1.0",
+                               "Copilot-Integration-Id": "vscode-chat",
+                               "Openai-Intent": "conversation-edits",
+                               "x-initiator": "agent" if is_agent_turn else "user"}
     if is_vision:
         headers["Copilot-Vision-Request"] = "true"
 

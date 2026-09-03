@@ -93,10 +93,8 @@ def _register_self_hosted_client(
         except Exception:
             pass
         if exc.code == 401:
-            raise RuntimeError(
-                "Nous Portal rejected the access token (401). "
-                "Try `hermes auth add nous` to re-authenticate."
-            ) from exc
+            raise RuntimeError("Nous Portal rejected the access token (401). Try `hermes auth add "
+                               "nous` to re-authenticate.") from exc
         if exc.code == 403:
             raise RuntimeError(
                 detail or "Your account is not permitted to register a self-hosted dashboard."

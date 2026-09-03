@@ -254,10 +254,8 @@ def cron_list(show_all: bool = False):
 
         latest_execution = job.get("latest_execution")
         if latest_execution:
-            print(
-                f"    Execution: {latest_execution.get('status', '?')}  "
-                f"{latest_execution.get('id', '?')}"
-            )
+            print(f"    Execution: {latest_execution.get('status', '?')}  "
+                  f"{latest_execution.get('id', '?')}")
 
         delivery_err = job.get("last_delivery_error")
         if delivery_err:
@@ -267,17 +265,13 @@ def cron_list(show_all: bool = False):
         # (Slack/Matrix/Mattermost shape): accepted as delivered, but say so here.
         unverified = job.get("last_delivery_unverified")
         if unverified:
-            print(
-                f"    {color('⚠ Delivery UNVERIFIED:', Colors.YELLOW)} "
-                f"adapter acked {_unverified_targets(unverified)} without message_id/raw_response"
-            )
+            print(f"    {color('⚠ Delivery UNVERIFIED:', Colors.YELLOW)} adapter acked "
+                  f"{_unverified_targets(unverified)} without message_id/raw_response")
 
         fire_err = job.get("last_fire_error")
         if isinstance(fire_err, dict) and fire_err.get("detail"):
-            print(
-                f"    {color('⚠ Missed scheduled fire:', Colors.RED)} "
-                f"{fire_err.get('at', '?')}  {fire_err['detail']}"
-            )
+            print(f"    {color('⚠ Missed scheduled fire:', Colors.RED)} "
+                  f"{fire_err.get('at', '?')}  {fire_err['detail']}")
 
         print()
 
@@ -293,10 +287,8 @@ def cron_tick():
         # Not expected here (a one-shot CLI process has no boot fingerprint, so the yield
         # gate is inert) — report cleanly instead of a traceback if a future caller records one.
         print(color(f"✗ {exc}", Colors.YELLOW))
-        print(
-            "  A fresher gateway process owns the runtime lock and will fire "
-            "due jobs; this stale process yielded its tick."
-        )
+        print("  A fresher gateway process owns the runtime lock and will fire due jobs; this "
+              "stale process yielded its tick.")
         return 1
     except OSError as exc:
         # tick() propagates real lock-acquisition failures (EMFILE, EACCES on open, ...)
@@ -316,11 +308,9 @@ def cron_runs(job_id: Optional[str] = None, limit: int = 20):
         print("No cron execution attempts recorded.")
         return
     for record in records:
-        print(
-            f"{record.get('id', '?')}  {record.get('status', '?'):<9}  "
-            f"job={record.get('job_id', '?')}  source={record.get('source', '?')}  "
-            f"{record.get('claimed_at', '?')}"
-        )
+        print(f"{record.get('id', '?')}  {record.get('status', '?'):<9}  "
+              f"job={record.get('job_id', '?')}  source={record.get('source', '?')}  "
+              f"{record.get('claimed_at', '?')}")
         if record.get("error"):
             print(f"    {record['error']}")
 
@@ -379,18 +369,12 @@ def cron_incidents(args) -> int:
     return 0
 
 
-_PERMISSION_HINT = (
-    "  Hint: jobs.json may be owned by another user "
-    "(e.g. rewritten by a root `docker exec hermes "
-    "hermes cron ...`). Fix ownership to match the "
-    "gateway user, and prefer `docker exec -u <uid>:<gid>`."
-)
-_FD_EXHAUSTION_HINT = (
-    "  Hint: the ticker hit file-descriptor exhaustion "
-    "(EMFILE). The scheduler now retries with backoff and "
-    "attempts fd reclamation, but if the leak persists, "
-    "restart the gateway to recover scheduling."
-)
+_PERMISSION_HINT = ("  Hint: jobs.json may be owned by another user (e.g. rewritten by a root "
+                    "`docker exec hermes hermes cron ...`). Fix ownership to match the gateway "
+                    "user, and prefer `docker exec -u <uid>:<gid>`.")
+_FD_EXHAUSTION_HINT = ("  Hint: the ticker hit file-descriptor exhaustion (EMFILE). The scheduler "
+                       "now retries with backoff and attempts fd reclamation, but if the leak "
+                       "persists, restart the gateway to recover scheduling.")
 
 
 def _print_ticker_health(pids: list) -> None:
@@ -669,13 +653,11 @@ def cron_doctor() -> int:
     return 1
 
 
-_JOB_ARG_FIELDS = (
-    ("name", "name"), ("deliver", "deliver"), ("failure_deliver", "failure_deliver"),
-    ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"), ("model", "model"),
-    ("provider", "model_provider"), ("monitor_script", "monitor_script"),
-    ("monitor_url", "monitor_url"), ("continuity", "continuity"),
-    ("reasoning_effort", "reasoning_effort"),
-)
+_JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver", "failure_deliver"),
+                   ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"),
+                   ("model", "model"), ("provider", "model_provider"),
+                   ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
+                   ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"))
 
 
 def _job_api_kwargs(args) -> Dict[str, Any]:
@@ -753,11 +735,10 @@ def cron_edit(args):
             if skill not in final_skills:
                 final_skills.append(skill)
 
-    result = _cron_api(
-        action="update", job_id=args.job_id, schedule=getattr(args, "schedule", None),
-        prompt=getattr(args, "prompt", None), skills=final_skills,
-        no_agent=getattr(args, "no_agent", None), **_job_api_kwargs(args),
-    )
+    result = _cron_api(action="update", job_id=args.job_id,
+                       schedule=getattr(args, "schedule", None),
+                       prompt=getattr(args, "prompt", None), skills=final_skills,
+                       no_agent=getattr(args, "no_agent", None), **_job_api_kwargs(args))
     if not result.get("success"):
         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
         return 1
