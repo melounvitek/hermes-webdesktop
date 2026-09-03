@@ -10,6 +10,14 @@ from hermes_cli.config import load_config
 DEFAULT_PORTAL_URL = "https://portal.nousresearch.com"
 SUBSCRIPTION_URL = "https://portal.nousresearch.com/manage-subscription"
 DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-gateway"
+# Static `portal tools` catalog — the partners Tool Gateway routes to today: (key, label, partner).
+_CATALOG = [
+    ("web", "Web search & extract", "Firecrawl"),
+    ("image_gen", "Image generation", "FAL"),
+    ("tts", "Text-to-speech", "OpenAI TTS"),
+    ("browser", "Browser automation", "Browser Use"),
+    ("modal", "Cloud terminal", "Modal"),
+]
 
 
 def _feature_state(feat, *, via_nous: str) -> str:
@@ -29,12 +37,10 @@ def _cmd_status(args) -> int:
     from hermes_cli.nous_subscription import get_nous_subscription_features
 
     config = load_config() or {}
-
     try:
         auth = get_nous_auth_status_local() or {}  # refresh-free snapshot
     except Exception:
         auth = {}
-
     logged_in = bool(auth.get("logged_in"))
 
     print()
@@ -67,19 +73,12 @@ def _cmd_status(args) -> int:
     try:
         features = get_nous_subscription_features(config)
     except Exception:
-        features = None
-
-    if features is None:
         print("  (could not resolve subscription state)")
         return 0
-
-    rows = [(feat.label, _feature_state(feat, via_nous="via Nous Portal"))
-            for feat in features.items()]
-
+    rows = [(feat.label, _feature_state(feat, via_nous="via Nous Portal")) for feat in features.items()]
     width = max((len(r[0]) for r in rows), default=0)
     for label, state in rows:
         print(f"  {label:<{width}}   {state}")
-
     if not logged_in:
         print()
         print(color(f"  Docs: {DOCS_URL}", Colors.DIM))
@@ -88,17 +87,16 @@ def _cmd_status(args) -> int:
 
 def _cmd_open(args) -> int:
     """Open the Portal subscription page in the default browser."""
-    target = SUBSCRIPTION_URL
-    print(f"Opening {target}")
+    print(f"Opening {SUBSCRIPTION_URL}")
     try:
-        opened = webbrowser.open(target)
+        opened = webbrowser.open(SUBSCRIPTION_URL)
     except Exception:
         opened = False
-    if not opened:
-        print()
-        print("Could not launch a browser. Visit the URL above manually.")
-        return 1
-    return 0
+    if opened:
+        return 0
+    print()
+    print("Could not launch a browser. Visit the URL above manually.")
+    return 1
 
 
 def _cmd_tools(args) -> int:
@@ -112,15 +110,6 @@ def _cmd_tools(args) -> int:
         print("Could not resolve Tool Gateway state.", file=sys.stderr)
         return 1
 
-    # Static catalog — the partners Tool Gateway routes to today.
-    catalog = [
-        ("web",       "Web search & extract",  "Firecrawl"),
-        ("image_gen", "Image generation",      "FAL"),
-        ("tts",       "Text-to-speech",        "OpenAI TTS"),
-        ("browser",   "Browser automation",    "Browser Use"),
-        ("modal",     "Cloud terminal",        "Modal"),
-    ]
-
     print()
     print(color("  Tool Gateway catalog", Colors.MAGENTA))
     print(color("  ────────────────────", Colors.MAGENTA))
@@ -129,8 +118,8 @@ def _cmd_tools(args) -> int:
         print(color("  Not logged into Nous Portal — sign in with `hermes portal`.", Colors.YELLOW))
         print()
 
-    label_width = max(len(label) for _, label, _ in catalog)
-    for key, label, partner in catalog:
+    label_width = max(len(label) for _, label, _ in _CATALOG)
+    for key, label, partner in _CATALOG:
         feat = features.features.get(key)
         state = color("unknown", Colors.DIM) if feat is None else _feature_state(feat, via_nous="✓ via Nous Portal")
         print(f"  {label:<{label_width}}  partner: {partner:<14} {state}")
