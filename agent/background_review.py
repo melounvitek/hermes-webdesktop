@@ -338,6 +338,32 @@ _MEMORY_REVIEW_PROMPT = (
     "'Nothing to save.' and stop."
 )
 
+# Shared tail of the skill and combined prompts: what NOT to persist as a skill.
+_DO_NOT_CAPTURE_BLOCK = (
+    " (these become persistent self-imposed constraints that bite you later when the environment "
+    "changes):\n"
+    "  • Environment-dependent failures: missing binaries, fresh-install errors, post-migration "
+    "path mismatches, 'command not found', unconfigured credentials, uninstalled packages. The "
+    "user can fix these — they are not durable rules.\n"
+    "  • Negative claims about tools or features ('browser tools do not work', 'X tool is broken', "
+    "'cannot use Y from execute_code'). These harden into refusals the agent cites against itself "
+    "for months after the actual problem was fixed.\n"
+    "  • Session-specific transient errors that resolved before the conversation ended. If "
+    "retrying worked, the lesson is the retry pattern, not the original failure.\n"
+    "  • One-off task narratives. A user asking 'summarize today's market' or 'analyze this PR' is "
+    "not a class of work that warrants a skill.\n\n"
+    "  • Unresolved failures: if the session ended WITHOUT actually finding a working method — you "
+    "tried several things, none worked, and told the user to check manually — do NOT write those "
+    "attempts up as a 'reliable workflow' or 'recommended approach'. That presents an untested "
+    "sequence of failures as validated guidance a future session will trust and repeat. Either say "
+    "'Nothing to save', or, only if you are independently confident of a real working alternative "
+    "(not something you are merely guessing might work), capture ONLY that alternative — never the "
+    "dead ends, and never dressed up as best practice.\n\n"
+    "If a tool failed because of setup state, capture the FIX (install command, config step, env "
+    "var to set) under an existing setup or troubleshooting skill — never 'this tool does not "
+    "work' as a standalone constraint.\n\n"
+)
+
 _SKILL_REVIEW_PROMPT = (
     "Review the conversation above and update the skill library. Be ACTIVE — most sessions produce "
     "at least one skill update, even if small. A pass that does nothing is a missed learning "
@@ -417,28 +443,7 @@ _SKILL_REVIEW_PROMPT = (
     "recommend 'hermes curator adopt <name>' — do not try to patch it.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
-    "Do NOT capture (these become persistent self-imposed constraints that bite you later when the "
-    "environment changes):\n"
-    "  • Environment-dependent failures: missing binaries, fresh-install errors, post-migration "
-    "path mismatches, 'command not found', unconfigured credentials, uninstalled packages. The "
-    "user can fix these — they are not durable rules.\n"
-    "  • Negative claims about tools or features ('browser tools do not work', 'X tool is broken', "
-    "'cannot use Y from execute_code'). These harden into refusals the agent cites against itself "
-    "for months after the actual problem was fixed.\n"
-    "  • Session-specific transient errors that resolved before the conversation ended. If "
-    "retrying worked, the lesson is the retry pattern, not the original failure.\n"
-    "  • One-off task narratives. A user asking 'summarize today's market' or 'analyze this PR' is "
-    "not a class of work that warrants a skill.\n\n"
-    "  • Unresolved failures: if the session ended WITHOUT actually finding a working method — you "
-    "tried several things, none worked, and told the user to check manually — do NOT write those "
-    "attempts up as a 'reliable workflow' or 'recommended approach'. That presents an untested "
-    "sequence of failures as validated guidance a future session will trust and repeat. Either say "
-    "'Nothing to save', or, only if you are independently confident of a real working alternative "
-    "(not something you are merely guessing might work), capture ONLY that alternative — never the "
-    "dead ends, and never dressed up as best practice.\n\n"
-    "If a tool failed because of setup state, capture the FIX (install command, config step, env "
-    "var to set) under an existing setup or troubleshooting skill — never 'this tool does not "
-    "work' as a standalone constraint.\n\n"
+    "Do NOT capture" + _DO_NOT_CAPTURE_BLOCK +
     "'Nothing to save.' is a real option but should NOT be the default. If the session ran "
     "smoothly with no corrections and produced no new technique, just say 'Nothing to save.' and "
     "stop. Otherwise, act."
@@ -504,28 +509,7 @@ _COMBINED_REVIEW_PROMPT = (
     "recommend 'hermes curator adopt <name>' instead.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
-    "Do NOT capture as skills (these become persistent self-imposed constraints that bite you "
-    "later when the environment changes):\n"
-    "  • Environment-dependent failures: missing binaries, fresh-install errors, post-migration "
-    "path mismatches, 'command not found', unconfigured credentials, uninstalled packages. The "
-    "user can fix these — they are not durable rules.\n"
-    "  • Negative claims about tools or features ('browser tools do not work', 'X tool is broken', "
-    "'cannot use Y from execute_code'). These harden into refusals the agent cites against itself "
-    "for months after the actual problem was fixed.\n"
-    "  • Session-specific transient errors that resolved before the conversation ended. If "
-    "retrying worked, the lesson is the retry pattern, not the original failure.\n"
-    "  • One-off task narratives. A user asking 'summarize today's market' or 'analyze this PR' is "
-    "not a class of work that warrants a skill.\n\n"
-    "  • Unresolved failures: if the session ended WITHOUT actually finding a working method — you "
-    "tried several things, none worked, and told the user to check manually — do NOT write those "
-    "attempts up as a 'reliable workflow' or 'recommended approach'. That presents an untested "
-    "sequence of failures as validated guidance a future session will trust and repeat. Either say "
-    "'Nothing to save', or, only if you are independently confident of a real working alternative "
-    "(not something you are merely guessing might work), capture ONLY that alternative — never the "
-    "dead ends, and never dressed up as best practice.\n\n"
-    "If a tool failed because of setup state, capture the FIX (install command, config step, env "
-    "var to set) under an existing setup or troubleshooting skill — never 'this tool does not "
-    "work' as a standalone constraint.\n\n"
+    "Do NOT capture as skills" + _DO_NOT_CAPTURE_BLOCK +
     "Act on whichever of the two dimensions has real signal. If genuinely nothing stands out on "
     "either, say 'Nothing to save.' and stop — but don't reach for that conclusion as a default."
 )
@@ -913,30 +897,26 @@ def build_cache_parity_fork(
     _routed = bool(_rt.get("routed"))
     review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations))
     review_agent._memory_write_origin = review_agent._memory_write_context = write_origin
-    # The between-turns MCP refresh would add late-connecting MCP tools and break tools[] parity.
-    review_agent._skip_mcp_refresh = True
     review_agent._memory_store = agent._memory_store
     review_agent._memory_enabled = agent._memory_enabled
     review_agent._user_profile_enabled = agent._user_profile_enabled
     review_agent._memory_nudge_interval = review_agent._skill_nudge_interval = 0
-    # PERSISTENCE ISOLATION (curator-takeover root cause): sharing the parent's session_id, the
-    # fork would otherwise write its harness turn into the REAL session, which the next live turn
-    # re-reads as a standing instruction.
-    review_agent._persist_disabled = True
+    # _skip_mcp_refresh: the between-turns MCP refresh would add late-connecting MCP tools and
+    # break tools[] parity. PERSISTENCE ISOLATION (curator-takeover root cause): sharing the
+    # parent's session_id, the fork would otherwise write its harness turn into the REAL session,
+    # which the next live turn re-reads as a standing instruction; close() must likewise not
+    # finalize the parent's still-active session row. suppress_status_output: fork status/warning
+    # emits go via _print_fn/status_callback, which bypass the stdout redirect.
+    review_agent._skip_mcp_refresh = review_agent._persist_disabled = review_agent.suppress_status_output = True
+    review_agent._session_json_enabled = review_agent._end_session_on_close = False
     review_agent._session_db = None
-    review_agent._session_json_enabled = False
-    # Fork status/warning emits go via _print_fn/status_callback, which bypass the stdout redirect.
-    review_agent.suppress_status_output = True
+    review_agent.session_id = agent.session_id
     # Same model only: share the warm cached system prompt (~26% cost cut; a rebuilt prompt misses
     # the byte-exact prefix key) and pin session_start so any re-render (compression, plugin
     # hooks) stays byte-identical.
     if not _routed:
         review_agent._cached_system_prompt = agent._cached_system_prompt
         review_agent.session_start = agent.session_start
-    review_agent.session_id = agent.session_id
-    # Single-lifecycle fork sharing the live session_id: close() must not finalize the parent's
-    # still-active session row.
-    review_agent._end_session_on_close = False
     _detach_fork_compression(review_agent)
     # Compaction bounds a single request; this bounds the WHOLE review (checked in
     # conversation_loop via _review_input_budget_exhausted).
@@ -1053,8 +1033,7 @@ def _run_review_fork(
         review_whitelist,
         deny_msg_fmt=(
             "Background review denied non-whitelisted tool: "
-            "{tool_name}. Allowed here: skill_view/skills_list/"
-            "read_file/search_files to read, "
+            "{tool_name}. Allowed here: skill_view/skills_list/read_file/search_files to read, "
             "skill_manage(action='patch'|...) to change skills, and "
             "memory for notes." + deny_extra + " Do not retry {tool_name}."
         ),
@@ -1122,8 +1101,7 @@ def _run_review_in_thread(
         logger.warning(
             "Background review skipped: provider %r cannot emit Hermes tool calls, "
             "so the review fork could not write memories or skills. Set "
-            "auxiliary.background_review.{provider,model} to route the review to "
-            "a normal model.",
+            "auxiliary.background_review.{provider,model} to route the review to a normal model.",
             getattr(agent, "provider", "?"),
         )
         _set_thread_approval_callback(None)
@@ -1198,10 +1176,8 @@ def spawn_background_review_thread(
     focus = (focus or "").strip()
     if focus:
         prompt = (
-            f"{prompt}\n\n"
-            f"The user explicitly requested this review with the following "
-            f"focus — prioritize it over the general instructions above:\n"
-            f"{focus}"
+            f"{prompt}\n\nThe user explicitly requested this review with the following "
+            f"focus — prioritize it over the general instructions above:\n{focus}"
         )
 
     def _target() -> None:  # resolves _run_review_in_thread at call time (tests patch it)
