@@ -1,11 +1,9 @@
 """``hermes sessions`` command.
 
-``cmd_sessions`` routes ``args.sessions_action`` through ``_PRE_DB_HANDLERS``
-(repair / recover / import — must run without opening ``SessionDB()``, which is
-exactly what a malformed schema prevents) and ``_DB_HANDLERS`` (everything else,
-sharing one ``SessionDB`` that is always closed afterwards). ``get_hermes_home``
-is resolved through ``hermes_cli.main`` at call time so monkeypatches there keep
-working and imports stay one-way. Browse picker: :mod:`hermes_cli.sessions_cmd_browse`.
+``cmd_sessions`` routes ``args.sessions_action`` through ``_PRE_DB_HANDLERS`` (repair / recover /
+import — must run without opening ``SessionDB()``, which a malformed schema prevents) and
+``_DB_HANDLERS`` (everything else, sharing one ``SessionDB``). ``get_hermes_home`` is resolved through
+``hermes_cli.main`` at call time so monkeypatches keep working. Picker: :mod:`hermes_cli.sessions_cmd_browse`.
 """
 
 import json
@@ -34,12 +32,9 @@ def _size_mb(path) -> float:
 
 
 def _size_delta_label(saved_mb: float) -> str:
-    """Size delta label. A negative delta means the file GREW (concurrent writes
-    during a long optimize can outweigh what the rebuild freed); "reclaimed
-    -163.0 MB" reads as data loss, so say "grew by" instead."""
-    if saved_mb >= 0:
-        return f"reclaimed {saved_mb:.1f} MB"
-    return f"grew by {-saved_mb:.1f} MB"
+    """A negative delta means the file GREW (concurrent writes during a long optimize); "reclaimed
+    -163.0 MB" reads as data loss, so say "grew by"."""
+    return f"reclaimed {saved_mb:.1f} MB" if saved_mb >= 0 else f"grew by {-saved_mb:.1f} MB"
 
 
 def _confirm_prompt(prompt: str) -> bool:
@@ -86,9 +81,7 @@ def _write_output(output, text, summary) -> None:
     print(summary)
 
 
-# ---------------------------------------------------------------------------
-# Handlers that must run BEFORE SessionDB() is opened
-# ---------------------------------------------------------------------------
+# -- handlers that must run BEFORE SessionDB() is opened ----------------------
 
 def _cmd_repair(args):
     from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
@@ -122,8 +115,7 @@ def _cmd_repair(args):
     if report.get("backup_path"):
         print(f"  A backup is preserved at: {report['backup_path']}")
     print("  Keep state.db and the backup; do not delete them.")
-    # Without this pointer the user is at a dead end after a failed in-place
-    # repair. Lead with --inspect-only so they confirm readability before writing.
+    # Without this pointer the user is at a dead end; lead with --inspect-only before writing.
     print("")
     print("  Next step — offline recovery (never modifies the source):")
     source_hint = report.get("backup_path") or db_path
@@ -136,8 +128,7 @@ def _cmd_repair(args):
 
 
 def _cmd_recover(args):
-    """Offline recovery: never opens the supplied source directly (works on a
-    disposable copy) and never touches the active database."""
+    """Offline recovery: works on a disposable copy of the source; never touches the active database."""
     import sqlite3
 
     from hermes_cli.session_recovery import (
@@ -232,10 +223,8 @@ def _print_recovery_verdict(report, output, allow_partial) -> int:
             )
         else:
             print(f"✓ Partial recovery output verified at: {output}")
-        print(
-            f"  Recovered {int(counts.get('sessions') or 0):,} sessions and "
-            f"{int(counts.get('messages') or 0):,} messages."
-        )
+        sessions_n, messages_n = int(counts.get("sessions") or 0), int(counts.get("messages") or 0)
+        print(f"  Recovered {sessions_n:,} sessions and {messages_n:,} messages.")
         print("  The active session database was not changed.")
         print(
             "  This output is incomplete. Review every skipped range and orphan count in the "
@@ -249,15 +238,12 @@ def _print_recovery_verdict(report, output, allow_partial) -> int:
 
 def _cmd_import(args):
     from hermes_cli.foreign_sessions import run_sessions_import
-    # Explicit path but nothing imported (bad path, unknown source, no turns) →
-    # non-zero so scripts can detect it. Picker cancel (no path) → normal exit 0.
+    # Explicit path but nothing imported -> non-zero for scripts. Picker cancel (no path) -> exit 0.
     if run_sessions_import(args) is None and getattr(args, "path", None):
         return 1
 
 
-# ---------------------------------------------------------------------------
-# Handlers that receive an open SessionDB
-# ---------------------------------------------------------------------------
+# -- handlers that receive an open SessionDB ----------------------------------
 
 def _default_exclude(args):
     """Hide third-party tool sessions by default, but honour explicit --source."""
@@ -283,8 +269,7 @@ def _cmd_list(db, args):
         print("No sessions found.")
         return
 
-    # The Workspace column only appears once at least one session carries a
-    # workspace key (or when filtering), so all-unbound listings read as before.
+    # Workspace column only when some session carries a key (or when filtering): unbound listings read as before.
     has_ws = bool(_ws_filter) or any(_ws_key(s) for s in sessions)
     has_titles = any(s.get("title") for s in sessions)
 
@@ -339,8 +324,7 @@ def _cmd_export(db, args):
         return redact_session_data(data)
 
     def _collect_sessions():
-        """Resolve --session-id / filters / bare export into a list of
-        redacted session dicts, or None after printing an error."""
+        """--session-id / filters / bare export -> redacted session dicts, or None after printing an error."""
         if args.session_id:
             resolved = db.resolve_session_id(args.session_id)
             data = _redact(db.export_session(resolved)) if resolved else None
@@ -413,11 +397,10 @@ def _export_jsonl(args, collect):
 
 
 def _export_trace(db, args, filters):
-    """Claude Code JSONL trace export — local file or HF upload. Redaction is ON
-    by default (traces leave the machine with --upload); --no-redact opts out."""
+    """Claude Code JSONL trace export — local file or HF upload. Redaction is ON by default (traces
+    leave the machine with --upload); --no-redact opts out."""
     session_id = args.session_id
-    if not session_id and not filters:
-        # Match the shell's common intent: "the last thing I did".
+    if not session_id and not filters:  # "the last thing I did"
         rows = db.list_sessions_rich(limit=1, order_by_last_active=True)
         session_id = rows[0].get("id") if rows else None
         if not session_id:
@@ -501,7 +484,6 @@ def _export_markdown(db, args, filters, redact):
     if args.delete_after_verified and not args.session_id:
         print("--delete-after-verified is only supported with --session-id.")
         return
-
     lineage_is_logical = getattr(args, "lineage", "single") == "logical"
 
     if args.session_id:
@@ -584,8 +566,7 @@ def _cmd_delete(db, args):
     resolved_session_id = db.resolve_session_id(args.session_id)
     if not resolved_session_id:
         return _not_found(args.session_id)
-    # The user named this id directly so the delete is honored, but a pin is a
-    # "keep" flag and silently destroying it is surprising — say so.
+    # The delete is honored (explicit id), but a pin is a "keep" flag: say so instead of silently destroying it.
     _meta = db.get_session(resolved_session_id) or {}
     _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
     if not args.yes:
@@ -603,16 +584,14 @@ def _cmd_delete(db, args):
         return _not_found(args.session_id)
 
 
-#: Age floor for `prune --never-active`. Generous on purpose: the rows are harmless,
-#: and a young never-active row may simply be a chat nobody has replied to yet.
+#: Age floor for `prune --never-active`; generous: a young never-active row may be a chat nobody replied to yet.
 _NEVER_ACTIVE_DEFAULT_DAYS = 30.0
 
 
 def _prune_never_active_keyed(db, args):
-    """`prune --never-active`: drop keyed gateway rows opened and never used
-    (mostly escaped test fixtures). Separate from the shared prune/archive
-    selector, which is pinned to `ended_at IS NOT NULL`: never-closed rows sit
-    outside it by construction and cannot be expressed as one more filter."""
+    """`prune --never-active`: drop keyed gateway rows opened and never used (mostly escaped test
+    fixtures). Separate from the shared prune/archive selector, which is pinned to `ended_at IS NOT
+    NULL` — never-closed rows sit outside it by construction."""
     from hermes_cli.session_filters import format_epoch, parse_duration_seconds
     older_than = getattr(args, "older_than", None)
     if older_than is None:
@@ -659,9 +638,8 @@ def _prune_never_active_keyed(db, args):
 
 
 def _note_pinned_skipped(db, filters, action):
-    """Pinned sessions are excluded by default from bulk prune/archive (pin =
-    durable keep). `prune --include-pinned` opts in; archive has no such flag,
-    so archive always spares pinned rows. Tell the user how many were spared."""
+    """Tell the user how many pinned rows bulk prune/archive spared (pin = durable keep; only
+    `prune --include-pinned` opts in, archive always spares them)."""
     _base = {k: v for k, v in filters.items() if k != "include_pinned"}
     skipped = max(
         int(db.count_prune_matches(**_base, include_pinned=True))
@@ -689,10 +667,9 @@ def _cmd_prune_or_archive(db, args, action):
         return _prune_never_active_keyed(db, args)
 
     from hermes_cli.session_filters import build_prune_filters, describe_filters, format_epoch
-    # Bare `prune` (no time window, no filters) keeps the historical "older
-    # than 90 days" default. ANY filter — including --source — suppresses the
-    # implicit cutoff (`prune --source cron` matches ALL cron sessions); the
-    # preview + confirmation below is the safety net.
+    # Bare `prune` keeps the historical "older than 90 days" default. ANY filter — including --source —
+    # suppresses the implicit cutoff (`prune --source cron` matches ALL cron sessions); the preview +
+    # confirmation below is the safety net.
     if action == "prune" and not _any_filter_args(args, _TIME_FILTER_ARGS + _NON_TIME_FILTER_ARGS):
         args.older_than = "90"
 
@@ -709,8 +686,7 @@ def _cmd_prune_or_archive(db, args, action):
         )
         return
 
-    # Prune skips archived rows unless --include-archived; archive only targets
-    # not-yet-archived rows (idempotent).
+    # Prune skips archived rows unless --include-archived; archive only targets not-yet-archived rows.
     filters["archived"] = None if action == "prune" and getattr(args, "include_archived", False) else False
 
     filters["include_pinned"] = getattr(args, "include_pinned", False)
@@ -718,8 +694,8 @@ def _cmd_prune_or_archive(db, args, action):
         _note_pinned_skipped(db, filters, action)
 
     candidates = db.list_prune_candidates(**filters)
-    # Archive expands each row to its compression lineage (may include open
-    # continuations), so a direct-open count would misdescribe its effect.
+    # Archive expands each row to its compression lineage (may include open continuations), so a
+    # direct-open count would misdescribe its effect.
     skipped_open = db.count_open_prune_matches(**filters) if action == "prune" else 0
     if skipped_open:
         suffix = "" if skipped_open == 1 else "s"
@@ -734,8 +710,8 @@ def _cmd_prune_or_archive(db, args, action):
         print(f"No sessions match ({describe_filters(filters)}).")
         return
 
-    # Candidates are ordered oldest-activity-first; show the span so a long-lived
-    # but recently used conversation cannot look old merely by creation date.
+    # Candidates are oldest-activity-first; show the span so a long-lived but recently used
+    # conversation cannot look old merely by creation date.
     _span = (
         f"oldest activity {format_epoch(candidates[0].get('last_active'))}, "
         f"newest activity {format_epoch(candidates[-1].get('last_active'))}"
@@ -778,8 +754,7 @@ def _cmd_rename(db, args):
     if not resolved_session_id:
         return _not_found(args.session_id)
     title = " ".join(args.title)
-    # Empty titles render as "—" and newlines corrupt the `list` table; length
-    # is validated in set_session_title.
+    # Empty titles render as "—" and newlines corrupt the `list` table; length is validated in set_session_title.
     if not title.strip():
         print("Error: title cannot be empty or whitespace-only.")
         return 1
@@ -797,8 +772,7 @@ def _cmd_rename(db, args):
 
 
 def _cmd_pin(db, args, pinning):
-    """Durable "keep" flag (exempt from sessions.auto_archive, always listed);
-    every surface — GUI, TUI, CLI, scripts — reads/writes the same store."""
+    """Durable "keep" flag (exempt from sessions.auto_archive, always listed); every surface shares the store."""
     failures = 0
     for raw_id in args.session_ids:
         resolved = db.resolve_session_id(raw_id)
@@ -814,22 +788,12 @@ def _cmd_pin(db, args, pinning):
 
 
 def _cmd_pinned(db, args):
-    # limit=1 keeps the recency page minimal; include_pinned back-fills ALL
-    # pinned rows the page missed, so old pins can't fall off a paging window.
+    # limit=1 keeps the recency page minimal; include_pinned back-fills ALL pinned rows the page missed.
     rows = db.list_sessions_rich(limit=1, include_pinned=True, exclude_sources=_default_exclude(args))
     pinned_rows = [s for s in rows if s.get("pinned")]
     if getattr(args, "json", False):
-        payload = [
-            {
-                "id": s["id"],
-                "title": s.get("title"),
-                "source": s.get("source"),
-                "last_active": s.get("last_active"),
-                "message_count": s.get("message_count"),
-            }
-            for s in pinned_rows
-        ]
-        print(json.dumps(payload, indent=2))
+        keys = ("title", "source", "last_active", "message_count")
+        print(json.dumps([{"id": s["id"], **{k: s.get(k) for k in keys}} for s in pinned_rows], indent=2))
         return
     if not pinned_rows:
         print("No pinned sessions. Pin one with: hermes sessions pin <session_id>")
@@ -849,9 +813,8 @@ def _cmd_retitle_skills(db, args):
     apply_changes = bool(getattr(args, "apply", False))
 
     def _is_titlelike(candidate: str) -> bool:
-        """Reject non-titles: an auxiliary model occasionally answers the prompt
-        instead of titling it ('$ df -h /'). The live path takes what it gets,
-        but this is a REPAIR — never replace a serviceable title with that."""
+        """Reject non-titles: an auxiliary model occasionally answers the prompt instead of titling it
+        ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that."""
         return bool(candidate) and candidate[0].isalnum()
 
     candidates = db.list_skill_scaffolded_sessions(limit=limit)
@@ -879,8 +842,7 @@ def _cmd_retitle_skills(db, args):
             continue
         try:
             db.set_session_title(session_id, new_title)
-        except ValueError:
-            # Unique-title collision: dedupe like the live auto-titler (base #2, #3, ...).
+        except ValueError:  # unique-title collision: dedupe like the live auto-titler (base #2, #3, ...)
             deduped = db.get_next_title_in_lineage(new_title)
             try:
                 db.set_session_title(session_id, deduped)
@@ -905,16 +867,13 @@ def _cmd_browse(db, args):
         print("No sessions found.")
         return
 
-    # Keep the DB open: the picker uses it for status tags and 'd' delete.
-    try:
+    try:  # keep the DB open: the picker uses it for status tags and 'd' delete
         selected_id = _session_browse_picker(sessions, session_db=db)
     finally:
         db.close()
     if not selected_id:
         print("Cancelled.")
         return
-
-    # Launch hermes --resume <id> by replacing the current process
     print(f"Resuming session: {selected_id}")
     from hermes_cli.relaunch import relaunch
     relaunch(["--resume", selected_id])  # won't return after execvp
@@ -923,26 +882,20 @@ def _cmd_browse(db, args):
 # -- storage maintenance -----------------------------------------------------
 
 def _print_size_change(db, before_mb, prefix=""):
-    """Report before/after size, preferring SQLite's page accounting over stat():
-    in WAL mode a VACUUM's rewrite sits in the -wal file until a checkpoint,
-    which is refused while a live gateway holds a read-mark, so the main file
-    lags and stat() can even go negative. page_count * page_size is correct now."""
-    after_mb = _size_mb(db.db_path)
+    """Report before/after size, preferring SQLite's page accounting over stat(): in WAL mode a VACUUM's
+    rewrite sits in the -wal file until a checkpoint (refused while a live gateway holds a read-mark),
+    so the main file lags and stat() can even go negative."""
     logical_after = db.logical_size_bytes()
-    if logical_after is not None:
-        after_mb = logical_after / (1024 * 1024)
-    print(
-        f"{prefix}Database size: {before_mb:.1f} MB -> {after_mb:.1f} MB "
-        f"({_size_delta_label(before_mb - after_mb)})"
-    )
+    after_mb = logical_after / (1024 * 1024) if logical_after is not None else _size_mb(db.db_path)
+    delta = _size_delta_label(before_mb - after_mb)
+    print(f"{prefix}Database size: {before_mb:.1f} MB -> {after_mb:.1f} MB ({delta})")
 
 
 def _cmd_optimize(db, args):
     before_mb = _size_mb(db.db_path)
     print("Optimizing session store (FTS merge + VACUUM)…")
     try:
-        # vacuum() merges FTS5 segments then VACUUMs; returns indexes merged.
-        n = db.vacuum()
+        n = db.vacuum()  # merges FTS5 segments then VACUUMs; returns indexes merged
     except Exception as e:
         print(f"Error: optimization failed: {e}")
         return
@@ -951,10 +904,7 @@ def _cmd_optimize(db, args):
 
 
 def _cmd_clean_markers(db, args):
-    if args.dry_run:
-        print("Dry run — scanning for stale tool-call marker rows (#78148)…")
-    else:
-        print("Scanning for stale tool-call marker rows (#78148)…")
+    print(f"{'Dry run — scanning' if args.dry_run else 'Scanning'} for stale tool-call marker rows (#78148)…")
     report = db.purge_stale_tool_call_markers(dry_run=args.dry_run, backup=not args.no_backup)
     if report["rows_affected"] == 0:
         print("✓ No affected rows found — nothing to clean.")
@@ -975,8 +925,8 @@ def _cmd_optimize_storage(db, args):
     before_bytes = os.path.getsize(db_path) if db_path.exists() else 0
     before_mb = before_bytes / (1024 * 1024)
 
-    # Disk preflight: the new index is built before the old is torn down, and
-    # VACUUM needs a full second copy — require headroom ≈ current file size.
+    # Disk preflight: the new index is built before the old is torn down, and VACUUM needs a full
+    # second copy — require headroom ≈ current file size.
     do_vacuum = not getattr(args, "no_vacuum", False)
     try:
         free_bytes = shutil.disk_usage(db_path.parent).free
@@ -987,18 +937,15 @@ def _cmd_optimize_storage(db, args):
     print(f"  Current database size: {before_mb:.1f} MB")
     if free_bytes is not None:
         print(f"  Free disk: {free_bytes / (1024*1024):.0f} MB "
-              f"(need ~{need_bytes / (1024*1024):.0f} MB to complete"
-              f"{' incl. VACUUM' if do_vacuum else ''})")
+              f"(need ~{need_bytes / (1024*1024):.0f} MB to complete{' incl. VACUUM' if do_vacuum else ''})")
         if free_bytes < need_bytes:
             print()
-            print("⚠ Not enough free disk to complete safely. Free up "
-                  "space, or run with --no-vacuum (rebuilds the index "
-                  "but doesn't reclaim space until a later VACUUM).")
+            print("⚠ Not enough free disk to complete safely. Free up space, or run with --no-vacuum "
+                  "(rebuilds the index but doesn't reclaim space until a later VACUUM).")
             return
     if before_mb > 500:
-        print("  This may take a while on a large database. It runs in "
-              "the foreground with progress below; safe to Ctrl-C and "
-              "re-run (it resumes).")
+        print("  This may take a while on a large database. It runs in the foreground with progress below; "
+              "safe to Ctrl-C and re-run (it resumes).")
     if not getattr(args, "yes", False):
         try:
             resp = input("Proceed? [y/N] ").strip().lower()
@@ -1012,16 +959,12 @@ def _cmd_optimize_storage(db, args):
 
     def _progress(info):
         phase = info.get("phase")
-        pct = info.get("percent", 0)
         if phase == "backfill":
-            print(f"\r  Rebuilding index: {pct:3d}% "
-                  f"({info.get('indexed',0):,}/{info.get('total',0):,})",
-                  end="", flush=True)
+            print(f"\r  Rebuilding index: {info.get('percent', 0):3d}% "
+                  f"({info.get('indexed',0):,}/{info.get('total',0):,})", end="", flush=True)
         elif phase != _last["phase"]:
-            label = {"teardown": "Reclaiming old index",
-                     "vacuum": "Compacting database (VACUUM)",
-                     "done": "Done"}.get(phase, phase)
-            print(f"\n  {label}…", flush=True)
+            label = {"teardown": "Reclaiming old index", "vacuum": "Compacting database (VACUUM)", "done": "Done"}
+            print(f"\n  {label.get(phase, phase)}…", flush=True)
         _last["phase"] = phase
 
     print("Optimizing search-index storage…")
@@ -1046,8 +989,7 @@ def _cmd_repair_routing(db, args):
     for record in records:
         print(f"{record['orphan_id']}  ({record['source']}, {record['message_count']} messages)")
         if record["adoptable"]:
-            print(f"  → adopt into {record['session_key']} "
-                  f"(from {record['donor_id']}, "
+            print(f"  → adopt into {record['session_key']} (from {record['donor_id']}, "
                   f"evidence: {record['evidence']})")
         else:
             print(f"  ✗ not repairable — {record['reason']}")
@@ -1087,9 +1029,7 @@ def _cmd_stats(db, args):
         print(f"Database size: {_size_mb(db.db_path):.1f} MB")
 
 
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
+# -- dispatch -----------------------------------------------------------------
 
 _PRE_DB_HANDLERS = {"repair": _cmd_repair, "recover": _cmd_recover, "import": _cmd_import}
 
