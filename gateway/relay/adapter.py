@@ -22,11 +22,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter,
-    MessageEvent,
-    MessageType,
-    ProcessingOutcome,
-    SendResult,
+    BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult,
 )
 from gateway.relay.descriptor import CapabilityDescriptor
 from gateway.relay.media import RelayMediaClient
@@ -65,27 +61,20 @@ def _utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-_LEN_FNS: Dict[str, Callable[[str], int]] = {
-    "chars": len,
-    "utf16": _utf16_len,
-}
+_LEN_FNS: Dict[str, Callable[[str], int]] = {"chars": len, "utf16": _utf16_len}
 
 
 def _send_result(result: Dict[str, Any], **extra: Any) -> SendResult:
     """Project a connector ``outbound_result`` dict onto a SendResult."""
     return SendResult(
-        success=bool(result.get("success")),
-        message_id=result.get("message_id"),
-        error=result.get("error"),
-        **extra,
+        success=bool(result.get("success")), message_id=result.get("message_id"),
+        error=result.get("error"), **extra,
     )
 
 
 def _event_ids(event) -> Tuple[Optional[str], Optional[str]]:
     """(message_id, chat_id) of an inbound event; message_id lives on the event, falls back to source."""
-    message_id = getattr(event, "message_id", None) or getattr(
-        event.source, "message_id", None
-    )
+    message_id = getattr(event, "message_id", None) or getattr(event.source, "message_id", None)
     return message_id, getattr(event.source, "chat_id", None)
 
 
@@ -314,9 +303,7 @@ class RelayAdapter(BasePlatformAdapter):
             d.pop(next(iter(d)), None)
 
     @staticmethod
-    def _card_key(
-        reply_to: Optional[str], metadata: Optional[Dict[str, Any]]
-    ) -> str:
+    def _card_key(reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> str:
         """Per-turn task-card identity — same precedence as ``_draft_key``; one
         derivation for send AND stop so the stop always hits the stream the send opened."""
         md = metadata or {}
@@ -330,9 +317,7 @@ class RelayAdapter(BasePlatformAdapter):
         )
         return f"turn:{anchor}"
 
-    def _match_open_draft(
-        self, chat_id: str, metadata: Optional[Dict[str, Any]]
-    ) -> Optional[str]:
+    def _match_open_draft(self, chat_id: str, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         """Resolve which open stream (if any) a turn-final send belongs to. Exact key
         match first. Callers carrying a per-turn MESSAGE id never fall back — their
         identity is authoritative. Callers without one may absorb into the chat's
@@ -345,9 +330,7 @@ class RelayAdapter(BasePlatformAdapter):
         if md.get("message_id") or md.get("reply_to_message_id"):
             return None
         prefix = f"{chat_id}:"
-        candidates = [
-            k for k in self._open_draft_by_chat if k.startswith(prefix)
-        ]
+        candidates = [k for k in self._open_draft_by_chat if k.startswith(prefix)]
         if len(candidates) == 1:
             # Absorbing a send into a stream is a significant decision (the
             # prompt-ack-seals-own-stream bug); log it so the next mismatch is a grep.
@@ -373,11 +356,7 @@ class RelayAdapter(BasePlatformAdapter):
         return self._with_scope(chat_id, self._with_format_hints_for_chat(chat_id, metadata))
 
     async def send_draft(
-        self,
-        chat_id: str,
-        draft_id: int,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        self, chat_id: str, draft_id: int, content: str, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         if not self.supports_draft_streaming(chat_id=str(chat_id)):
             raise NotImplementedError("connector does not advertise the 'draft' relay op")
@@ -596,10 +575,7 @@ class RelayAdapter(BasePlatformAdapter):
         return SendResult(success=bool(result.get("success")))
 
     async def abandon_open_draft(
-        self,
-        chat_id: str,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        self, chat_id: str, content: str, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Seal an orphaned stream when its turn dies (/stop, /new, supersede), in
         place with ``content`` (the text already on screen) so the seal adds and
@@ -670,8 +646,7 @@ class RelayAdapter(BasePlatformAdapter):
             await asyncio.sleep(poll_interval_s)
         logger.warning("relay credential revoked (opt-out) — marking the relay adapter disabled")
         self._set_fatal_error(
-            "relay_disabled",
-            "Relay disabled (opted out — recreate the instance to re-enable)",
+            "relay_disabled", "Relay disabled (opted out — recreate the instance to re-enable)",
             retryable=False,
         )
         try:
@@ -879,8 +854,7 @@ class RelayAdapter(BasePlatformAdapter):
             if platform_value and platform_value != "relay":
                 self._platform_by_chat[chat] = str(platform_value)
             for attr, cache in (
-                ("user_id", self._dm_user_by_chat),
-                ("scope_id", self._scope_by_chat),
+                ("user_id", self._dm_user_by_chat), ("scope_id", self._scope_by_chat),
                 ("chat_type", self._chat_type_by_chat),
             ):
                 value = getattr(src, attr, None)
@@ -893,9 +867,7 @@ class RelayAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - scope tracking must never break inbound
             pass
 
-    def _with_scope(
-        self, chat_id: str, metadata: Optional[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    def _with_scope(self, chat_id: str, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Outbound metadata carrying the tenant discriminators (see _capture_scope).
         Both are attached when known and not already set; the connector tries scope_id
         first and only falls back to user_id on a route miss, so carrying both never
@@ -949,9 +921,7 @@ class RelayAdapter(BasePlatformAdapter):
                     return
             logger.info(
                 "relay passthrough_forward dropped (no handler): platform=%s method=%s path=%s",
-                platform,
-                getattr(forward, "method", "?"),
-                getattr(forward, "path", "?"),
+                platform, getattr(forward, "method", "?"), getattr(forward, "path", "?"),
             )
         except Exception:  # noqa: BLE001 - a bad forward must never break the reader
             logger.warning("relay passthrough_forward handling failed", exc_info=True)
@@ -1309,10 +1279,7 @@ class RelayAdapter(BasePlatformAdapter):
         return self.auto_thread_info_for_chat(chat_id)
 
     def _resolve_reply_to_for_send(
-        self,
-        chat_id: str,
-        reply_to: Optional[str],
-        metadata: Optional[Dict[str, Any]],
+        self, chat_id: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
     ) -> Optional[str]:
         """Suppress the synthetic-DM thread anchor for a Slack DM reply.
 
@@ -1406,16 +1373,11 @@ class RelayAdapter(BasePlatformAdapter):
             },
         )
         return SendResult(
-            success=bool(result.get("success")),
-            message_id=result.get("message_id") or message_id,
+            success=bool(result.get("success")), message_id=result.get("message_id") or message_id,
             error=result.get("error"),
         )
 
-    async def delete_message(
-        self,
-        chat_id: str,
-        message_id: str,
-    ) -> bool:
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
         """Delete a relayed message (the stream consumer's fresh-final cleanup). Gated
         on the descriptor advertising ``delete``: older connectors return False so
         cleanup degrades to leaving the preview in place."""
@@ -1459,11 +1421,7 @@ class RelayAdapter(BasePlatformAdapter):
         except Exception:  # noqa: BLE001 - typing is cosmetic, never breaks a turn
             logger.debug("relay send_typing failed for %s", chat_id, exc_info=True)
 
-    async def stop_typing(
-        self,
-        chat_id: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    async def stop_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Forward an explicit typing/status clear (empty ``content``) — Slack only:
         other relay senders have one-shot heartbeats, where an empty heartbeat would
         re-trigger typing at completion. A connector older than gateway-gateway #154
@@ -1493,11 +1451,7 @@ class RelayAdapter(BasePlatformAdapter):
         return await self._transport.get_chat_info(chat_id)
 
     async def send_follow_up(
-        self,
-        session_key: str,
-        kind: str,
-        content: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        self, session_key: str, kind: str, content: str, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send via a shared-identity capability bound to a session. The gateway never
         holds the credential: it names the session and the capability ``kind``; the
@@ -1791,11 +1745,7 @@ class RelayAdapter(BasePlatformAdapter):
         """Register + egress a prompt; unregisters and returns None when the lane is unavailable."""
         prompt_id = self._mint_prompt(kind, {**state, "chat_id": str(chat_id)})
         result = await self._send_prompt(
-            chat_id,
-            prompt_kind=prompt_kind,
-            text=text,
-            prompt_id=prompt_id,
-            options=options,
+            chat_id, prompt_kind=prompt_kind, text=text, prompt_id=prompt_id, options=options,
             metadata=metadata,
         )
         if result is None:
@@ -1830,13 +1780,8 @@ class RelayAdapter(BasePlatformAdapter):
         if smart_denied:
             text += "\n\n**Smart DENY:** owner override applies to this one operation only."
         result = await self._mint_and_send_prompt(
-            "exec_approval",
-            {"session_key": session_key},
-            chat_id,
-            prompt_kind="approval",
-            text=text,
-            options=options,
-            metadata=metadata,
+            "exec_approval", {"session_key": session_key}, chat_id, prompt_kind="approval",
+            text=text, options=options, metadata=metadata,
         )
         return result if result is not None else self._PROMPT_UNAVAILABLE
 
@@ -1857,13 +1802,9 @@ class RelayAdapter(BasePlatformAdapter):
             {"id": "cancel", "label": "Cancel", "style": "danger"},
         ]
         result = await self._mint_and_send_prompt(
-            "slash_confirm",
-            {"session_key": session_key, "confirm_id": confirm_id},
-            chat_id,
-            prompt_kind="approval",
-            text=f"**{title}**\n\n{message}" if title else message,
-            options=options,
-            metadata=metadata,
+            "slash_confirm", {"session_key": session_key, "confirm_id": confirm_id}, chat_id,
+            prompt_kind="approval", text=f"**{title}**\n\n{message}" if title else message,
+            options=options, metadata=metadata,
         )
         return result if result is not None else self._PROMPT_UNAVAILABLE
 
@@ -2005,9 +1946,7 @@ class RelayAdapter(BasePlatformAdapter):
             # Unmappable option: flip to text capture (never dead-end a clarify).
             mark_awaiting_text(clarify_id)
 
-    def _send_lifecycle_ack(
-        self, chat_id: str, text: str, metadata: Dict[str, Any]
-    ) -> None:
+    def _send_lifecycle_ack(self, chat_id: str, text: str, metadata: Dict[str, Any]) -> None:
         """Fire-and-forget a prompt-lifecycle ack from read-loop context.
         _consume_prompt_response executes ON the transport read loop; an ``await
         self.send(...)`` there is a SELF-DEADLOCK (send() blocks on an outbound_result

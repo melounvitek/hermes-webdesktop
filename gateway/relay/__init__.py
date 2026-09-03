@@ -428,9 +428,7 @@ def _resolve_relay_identity_token() -> str:
     if scope:
         form["scope"] = scope
     req = urllib.request.Request(
-        token_url,
-        data=urllib.parse.urlencode(form).encode("utf-8"),
-        method="POST",
+        token_url, data=urllib.parse.urlencode(form).encode("utf-8"), method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
@@ -498,22 +496,15 @@ def self_provision_relay() -> bool:
     for platform, bot_id in identities:
         try:
             result = _post_provision(
-                provision_url=_provision_url(dial_url),
-                access_token=access_token,
-                gateway_id=gateway_id,
-                platform=platform,
-                bot_id=bot_id,
-                gateway_endpoint=endpoint,
-                route_keys=route_keys,
-                instance_id=instance_id,
-                wake_url=wake_url,
+                provision_url=_provision_url(dial_url), access_token=access_token,
+                gateway_id=gateway_id, platform=platform, bot_id=bot_id, gateway_endpoint=endpoint,
+                route_keys=route_keys, instance_id=instance_id, wake_url=wake_url,
                 display_name=display_name,
             )
         except RuntimeError as exc:
             logger.warning(
                 "relay self-provision failed for platform=%s (%s); continuing with the rest",
-                platform,
-                exc,
+                platform, exc,
             )
             continue
         provisioned.append(platform)

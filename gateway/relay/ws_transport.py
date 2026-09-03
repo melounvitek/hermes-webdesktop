@@ -276,13 +276,9 @@ def _passthrough_from_wire(raw: Dict[str, Any]) -> PassthroughForward:
         if isinstance(pair, (list, tuple)) and len(pair) == 2
     ]
     return PassthroughForward(
-        platform=str(raw.get("platform", "")),
-        bot_id=str(raw.get("botId", "")),
-        method=str(raw.get("method", "")),
-        path=str(raw.get("path", "")),
-        headers=headers,
-        body=body,
-        profile=raw.get("profile"),
+        platform=str(raw.get("platform", "")), bot_id=str(raw.get("botId", "")),
+        method=str(raw.get("method", "")), path=str(raw.get("path", "")), headers=headers,
+        body=body, profile=raw.get("profile"),
     )
 
 
