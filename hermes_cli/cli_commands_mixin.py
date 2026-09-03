@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import importlib
 import io
 import json
 import os
@@ -62,7 +63,7 @@ def _dim(text: str) -> str:
 
 def _dim_line(text: str) -> str:
     """Two-space indented dim line (the standard slash-command hint shape)."""
-    return f"  {_dim(text)}"
+    return "  " + _dim(text)
 
 
 def _accent(text: str) -> str:
@@ -80,7 +81,6 @@ def _probe(module: str, name: str, default, *args):
     """``<module>.<name>(*args)`` or ``default`` when the import or the call fails (optional
     subsystems: browser backends, async delegations, wake word, ...)."""
     try:
-        import importlib
         return getattr(importlib.import_module(module), name)(*args)
     except Exception:
         return default
@@ -106,10 +106,7 @@ def _attempt(label: str, errors, fn, *args, **kwargs):
 
 def _say_block(*lines: str) -> None:
     """print() the lines framed by a blank line above and below (the /browser output style)."""
-    print()
-    for line in lines:
-        print(line)
-    print()
+    _pr("", *lines, "")
 
 
 def _command_arg(cmd: str, *, lower: bool = False) -> str:
@@ -151,16 +148,6 @@ def _ellipsize(text: str, limit: int) -> str:
 
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'s' if n != 1 else ''}"
-
-
-def _print_capped(lines_text: str, limit: int, tail: str, emit) -> None:
-    """Emit ``lines_text`` through ``emit``, capped at ``limit`` lines with ``tail`` after."""
-    lines = lines_text.splitlines()
-    if len(lines) > limit:
-        emit("\n".join(lines[:limit]))
-        print(f"\n  ... ({len(lines) - limit} more lines{tail})")
-    else:
-        emit(lines_text)
 
 
 # Small data tables.
@@ -742,7 +729,12 @@ class CLICommandsMixin:
     def _print_diff_body(self, diff: str, stat_hint: str, limit: int = 400) -> None:
         """Print a diff, capped at ``limit`` lines with a pointer to the --stat form."""
         print("")
-        _print_capped(diff, limit, f" — {stat_hint}", self._print_diff_text)
+        diff_lines = diff.splitlines()
+        if len(diff_lines) > limit:
+            self._print_diff_text("\n".join(diff_lines[:limit]))
+            print(f"\n  ... ({len(diff_lines) - limit} more lines — {stat_hint})")
+        else:
+            self._print_diff_text(diff)
 
     def _print_session_diff(self, cwd: str, stat_only: bool):
         """Print the cumulative checkpoint-baseline diff (/diff session)."""
@@ -1586,13 +1578,10 @@ class CLICommandsMixin:
             # prompt_toolkit owns stdin on this daemon thread — raw input() never renders and eats
             # keystrokes; prefer the thread-aware helper (None when prompting isn't safe).
             prompt_helper = getattr(self, "_prompt_text_input", None)
-            if callable(prompt_helper):
-                concept = (prompt_helper("(o_o) Describe your pet: ") or "").strip()
-            else:
-                try:
-                    concept = input("(o_o) Describe your pet: ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    return print()
+            try:
+                concept = ((prompt_helper or input)("(o_o) Describe your pet: ") or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                return print()
         if not concept:
             return print("(o_o) Usage: /hatch <description>  (e.g. /hatch a tiny cyber fox)")
         # A short, friendly display name from the first few words of the concept.
@@ -2626,11 +2615,9 @@ class CLICommandsMixin:
         self.agent = None  # Force agent re-init with new reasoning config
         saved = explicit_global and _save("agent.reasoning_effort", arg)
         if saved:
-            agent_cfg = CLI_CONFIG.get("agent")
-            if not isinstance(agent_cfg, dict):
-                agent_cfg = {}
-                CLI_CONFIG["agent"] = agent_cfg
-            agent_cfg["reasoning_effort"] = arg
+            if not isinstance(CLI_CONFIG.get("agent"), dict):
+                CLI_CONFIG["agent"] = {}
+            CLI_CONFIG["agent"]["reasoning_effort"] = arg
         _cp(_accent_line(f"✓ Reasoning effort set to '{arg}' {_scope_outcome(explicit_global, saved)}"))
 
     def _handle_busy_command(self, cmd: str):
