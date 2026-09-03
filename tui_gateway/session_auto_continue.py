@@ -12,13 +12,11 @@ from .method_ctx import bind_module
 # _run_prompt_submit's finally; only a process death leaves it behind, so a marker at session.resume
 # proves the turn never finished AND the client never saw a terminal frame. Fresh: re-submit
 # automatically (as the messaging gateway does). Stale: clear it and let the partial transcript speak.
-_AUTO_CONTINUE_ENABLED_DEFAULT = True
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
-_AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT = 2
 
 
 def _auto_continue_config() -> tuple[bool, float, int]:
-    """(enabled, freshness window in seconds, max attempts) from config.yaml."""
+    """(enabled, freshness window in seconds, max attempts) from ``desktop.auto_continue`` in config.yaml."""
     desktop = _load_cfg().get("desktop")
     cfg = desktop.get("auto_continue") if isinstance(desktop, dict) else None
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -27,9 +25,9 @@ def _auto_continue_config() -> tuple[bool, float, int]:
     except (TypeError, ValueError):
         minutes = float(_AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT)
     return (
-        is_truthy_value(cfg.get("enabled"), default=_AUTO_CONTINUE_ENABLED_DEFAULT),
+        is_truthy_value(cfg.get("enabled"), default=True),
         max(0.0, minutes) * 60.0,
-        _coerce_int_config_value(cfg.get("max_attempts"), _AUTO_CONTINUE_MAX_ATTEMPTS_DEFAULT, min_value=0),
+        _coerce_int_config_value(cfg.get("max_attempts"), 2, min_value=0),
     )
 
 
