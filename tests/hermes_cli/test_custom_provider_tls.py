@@ -1,9 +1,6 @@
 """Tests for per-provider TLS settings in custom_providers config."""
 
-from hermes_cli.config import (
-    apply_custom_provider_tls_to_client_kwargs,
-    get_custom_provider_tls_settings,
-)
+from hermes_cli.config_providers import apply_custom_provider_tls_to_client_kwargs, get_custom_provider_tls_settings
 
 
 def test_get_custom_provider_tls_settings_matches_base_url():

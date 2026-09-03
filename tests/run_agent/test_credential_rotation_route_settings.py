@@ -100,7 +100,7 @@ def test_credential_rotation_does_not_carry_global_headers_across_routes():
     with (
         patch("hermes_cli.config.load_config_readonly", return_value=config),
         patch(
-            "hermes_cli.config.get_compatible_custom_providers",
+            "hermes_cli.config_providers.get_compatible_custom_providers",
             return_value=config["custom_providers"],
         ),
     ):

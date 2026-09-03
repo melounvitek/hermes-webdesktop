@@ -38,7 +38,7 @@ def _heal_bare_custom_provider(provider, *, base_url, model):
         # Heal bare "custom" persisted by older builds / gateway turns: it's the resolved billing class, not
         # a routable identity. (Stricter than the TUI gateway's recovery, which keeps bare "custom" when a
         # base_url exists — the CLI's resolve path would hard-fail on it, #14676.)
-        from hermes_cli.runtime_provider import canonical_custom_identity
+        from hermes_cli.runtime_provider_custom import canonical_custom_identity
         return canonical_custom_identity(base_url=base_url or None, model=model or None) or None
     except Exception:
         return None

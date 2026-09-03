@@ -1479,7 +1479,7 @@ class SlackAdapter(BasePlatformAdapter):
         # Every COMMAND_REGISTRY command is a native slash via one regex matcher. Commands must
         # ALSO be declared in the app manifest (`hermes slack manifest`): Socket Mode won't
         # deliver undeclared commands at all.
-        from hermes_cli.commands import slack_native_slashes
+        from hermes_cli.commands_platforms import slack_native_slashes
         _slash_names = [name for name, _d, _h in slack_native_slashes()]
         if _slash_names:
             _slash_pattern = re.compile(
@@ -5257,7 +5257,7 @@ class SlackAdapter(BasePlatformAdapter):
         if slash_name not in {"hermes", ""}:
             return f"/{slash_name}" if not raw_text else f"/{slash_name} {raw_text}"
         legacy_text = raw_text.strip()
-        from hermes_cli.commands import slack_subcommand_map
+        from hermes_cli.commands_platforms import slack_subcommand_map
         subcommand_map = slack_subcommand_map()
         subcommand_map["compact"] = "/compress"
         first_word = legacy_text.split()[0] if legacy_text.split() else ""

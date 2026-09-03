@@ -5,12 +5,8 @@ from types import MappingProxyType
 
 import pytest
 
-from hermes_cli.plugins import (
-    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS,
-    PluginContext,
-    PluginManager,
-    PluginManifest,
-)
+from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+from hermes_cli.plugins_dispatch import MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS
 
 
 def _context(manager: PluginManager, name: str = "example-plugin") -> PluginContext:

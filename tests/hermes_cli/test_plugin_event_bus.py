@@ -21,12 +21,8 @@ import threading
 
 import pytest
 
-from hermes_cli.plugins import (
-    _EVENT_EMIT_DEPTH_CAP,
-    PluginContext,
-    PluginManager,
-    PluginManifest,
-)
+from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+from hermes_cli.plugins_dispatch import _EVENT_EMIT_DEPTH_CAP
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -411,7 +407,7 @@ def test_manifest_parse_reads_emits_listens(tmp_path):
         encoding="utf-8",
     )
 
-    from hermes_cli.plugins import parse_manifest_file
+    from hermes_cli.plugins_manifest import parse_manifest_file
 
     manifest = parse_manifest_file(manifest_file, plugin_dir, "user", "")
     assert manifest is not None
@@ -429,7 +425,7 @@ def test_manifest_parse_absent_emits_listens(tmp_path):
         yaml.safe_dump({"name": "bare"}), encoding="utf-8"
     )
 
-    from hermes_cli.plugins import parse_manifest_file
+    from hermes_cli.plugins_manifest import parse_manifest_file
 
     manifest = parse_manifest_file(manifest_file, plugin_dir, "user", "")
     assert manifest is not None

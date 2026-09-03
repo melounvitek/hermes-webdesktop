@@ -25,7 +25,8 @@ from gateway.restart import (
 )
 from gateway.session import SessionSource
 from gateway.session_state import SERVICE_TIER_UNSET as _SERVICE_TIER_UNSET
-from hermes_cli.config import cfg_get, resolve_ephemeral_system_prompt_from_config
+from hermes_cli.config import cfg_get
+from hermes_cli.personality import resolve_ephemeral_system_prompt
 from hermes_cli.fallback_config import get_fallback_chain
 from utils import is_truthy_value
 
@@ -93,7 +94,7 @@ class GatewayConfigLoadersMixin:
         prompt = os.getenv("HERMES_EPHEMERAL_SYSTEM_PROMPT", "")
         if prompt:
             return prompt
-        return resolve_ephemeral_system_prompt_from_config(_load_gateway_runtime_config())
+        return resolve_ephemeral_system_prompt(_load_gateway_runtime_config())
 
     def _channel_override(self, platform: Platform, chat_id: str, thread_id, parent_id):
         """``channel_overrides`` entry for this channel/thread, or None (also when no config is bound)."""

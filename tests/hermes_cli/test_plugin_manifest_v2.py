@@ -11,13 +11,8 @@ import logging
 import pytest
 import yaml
 
-from hermes_cli.plugins import (
-    PluginManager,
-    PluginManifest,
-    SUPPORTED_MANIFEST_VERSION,
-    resolve_plugin_load_order,
-    validate_config_schema,
-)
+from hermes_cli.plugins import PluginManager, PluginManifest, resolve_plugin_load_order
+from hermes_cli.plugins_manifest import SUPPORTED_MANIFEST_VERSION, validate_config_schema
 
 
 def _write_plugin(base, name, manifest_extra=None, register_body="pass"):

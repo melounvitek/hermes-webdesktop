@@ -501,7 +501,7 @@ async def test_context_command_keeps_configured_window_without_resident_agent():
     with patch("gateway.run._load_gateway_config", return_value=config), patch(
         "gateway.run._resolve_runtime_agent_kwargs", return_value=runtime
     ), patch(
-        "hermes_cli.config.get_compatible_custom_providers",
+        "hermes_cli.config_providers.get_compatible_custom_providers",
         return_value=config["custom_providers"],
     ), patch(
         "agent.model_metadata.get_model_context_length",

@@ -1520,7 +1520,7 @@ class GatewayInboundMixin:
                 if _msg_raw_ctx is not None:
                     _msg_config_ctx = int(_msg_raw_ctx)
             try:
-                from hermes_cli.config import get_compatible_custom_providers
+                from hermes_cli.config_providers import get_compatible_custom_providers
 
                 _msg_custom_providers = get_compatible_custom_providers(_msg_cfg)
             except Exception:
@@ -1550,7 +1550,7 @@ class GatewayInboundMixin:
                 _msg_config_ctx = None
         if _msg_custom_providers and _msg_base_url:
             with suppress(Exception):
-                from hermes_cli.config import get_custom_provider_context_length
+                from hermes_cli.config_providers import get_custom_provider_context_length
 
                 _msg_config_ctx = get_custom_provider_context_length(
                     model=_msg_model, base_url=_msg_base_url, custom_providers=_msg_custom_providers,

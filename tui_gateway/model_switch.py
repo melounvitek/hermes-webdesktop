@@ -212,7 +212,8 @@ def _apply_model_switch(
     # (e.g. "ollama-launch") and validate against saved model lists.
     user_provs = custom_provs = cfg = None
     with contextlib.suppress(Exception):
-        from hermes_cli.config import get_compatible_custom_providers, load_config
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import get_compatible_custom_providers
         cfg = load_config()
         user_provs = cfg.get("providers")
         custom_provs = get_compatible_custom_providers(cfg)

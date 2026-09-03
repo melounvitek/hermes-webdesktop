@@ -30,7 +30,8 @@ _OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "q
 def _get_custom_provider_entries() -> list[dict]:
     """Return configured provider entries with legacy and canonical pool IDs."""
     try:
-        from hermes_cli.config import get_compatible_custom_providers, load_config
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import get_compatible_custom_providers
         config = load_config()
     except Exception:
         return []

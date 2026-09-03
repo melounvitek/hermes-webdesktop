@@ -138,10 +138,8 @@ def _restore_plugin_prompt_sections(prompt: str) -> tuple:
     """Recover frozen section bytes from the persisted full prompt.  Only the
     exact canonical container emitted by core is accepted — user/project text
     may resemble a frame."""
-    from hermes_cli.plugins import (
-        MAX_SYSTEM_PROMPT_SECTION_CHARS, PLUGIN_SECTIONS_END, PLUGIN_SECTIONS_START,
-        RenderedPluginSystemPromptSection, format_system_prompt_sections,
-    )
+    from hermes_cli.plugins import MAX_SYSTEM_PROMPT_SECTION_CHARS, RenderedPluginSystemPromptSection
+    from hermes_cli.plugins_dispatch import PLUGIN_SECTIONS_END, PLUGIN_SECTIONS_START, format_system_prompt_sections
     start = prompt.rfind(PLUGIN_SECTIONS_START)
     end = prompt.find(PLUGIN_SECTIONS_END, start + len(PLUGIN_SECTIONS_START)) if start >= 0 else -1
     if end < 0:
@@ -167,7 +165,7 @@ def restore_plugin_prompt_sections(agent: Any, prompt: str) -> None:
 
 
 def _plugin_section_blocks(sections: tuple, position: str) -> List[str]:
-    from hermes_cli.plugins import format_system_prompt_sections
+    from hermes_cli.plugins_dispatch import format_system_prompt_sections
     block = format_system_prompt_sections([s for s in sections if s.position == position])
     return [block] if block else []
 

@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from agent.process_bootstrap import build_keepalive_http_client
+from hermes_cli import config_providers
 
 _CA_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "HTTPS_PROXY")
 
@@ -43,7 +44,7 @@ def test_resolve_aux_verify_ssl_verify_false(clean_tls_env, monkeypatch):
     from agent import auxiliary_client
 
     monkeypatch.setattr(
-        cfg,
+        config_providers,
         "get_custom_provider_tls_settings",
         lambda *a, **k: {"ssl_verify": False},
     )

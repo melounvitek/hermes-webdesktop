@@ -52,20 +52,6 @@ def _load_bw():
     return _bw
 
 
-def __getattr__(name: str):
-    """PEP 562 lazy ``bw`` attribute (tests monkeypatch ``secrets_cli.bw``); an eager binding
-    would re-import ``cryptography`` at import time.
-
-    Existing callers (and upstream tests) monkeypatch attributes on ``hermes_cli.secrets_cli.bw`` directly.
-    Resolving that attribute at module-import time would re-import ``cryptography`` eagerly — the very
-    self-lock we are preventing (#86781). Defer the backend import until the first actual attribute access,
-    so ``import hermes_cli.secrets_cli`` stays crypto-free while ``secrets_cli.bw.find_bws`` still resolves.
-    """
-    if name == "bw":
-        return _load_bw()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 # ── Argparse wiring — called from hermes_cli.main ──
 
 

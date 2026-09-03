@@ -169,7 +169,7 @@ def _model_picker_context(agent):
     provider, base_url, model = (getattr(agent, k, "") if agent else "" for k in ("provider", "base_url", "model"))
     if str(provider or "").strip().lower() == "custom":
         try:
-            from hermes_cli.runtime_provider import canonical_custom_identity
+            from hermes_cli.runtime_provider_custom import canonical_custom_identity
             provider = canonical_custom_identity(
                 base_url=base_url or None, config_provider=ctx.current_provider, model=model or None) or provider
         except Exception:

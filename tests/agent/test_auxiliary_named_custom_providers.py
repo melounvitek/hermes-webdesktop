@@ -264,7 +264,7 @@ class TestProvidersDictApiModeAnthropicMessages:
                 },
             },
         })
-        from hermes_cli.runtime_provider import _get_named_custom_provider
+        from hermes_cli.runtime_provider_custom import _get_named_custom_provider
         entry = _get_named_custom_provider("myrelay")
         assert entry is not None
         assert entry.get("api_mode") == "anthropic_messages"

@@ -197,7 +197,7 @@ def test_provider_flag_logs_when_custom_default_model_cannot_resolve(monkeypatch
         raise RuntimeError("catalog unavailable")
 
     monkeypatch.setattr(
-        "hermes_cli.runtime_provider._get_named_custom_provider",
+        "hermes_cli.runtime_provider_custom._get_named_custom_provider",
         _boom,
     )
 

@@ -886,10 +886,10 @@ def _apply_openai_header_policy(agent, client_kwargs: Dict[str, Any]) -> None:
     # model.default_headers override provider/SDK defaults (WAFs rejecting SDK headers).
     agent._apply_user_default_headers()
     try:
-        from hermes_cli.config import (
-            apply_custom_provider_extra_headers_to_client_kwargs,
-            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers,
-            load_config,
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import (
+            apply_custom_provider_extra_headers_to_client_kwargs, apply_custom_provider_tls_to_client_kwargs,
+            get_compatible_custom_providers
         )
         _cp_entries = get_compatible_custom_providers(load_config())
         _cp_base_url = str(client_kwargs.get("base_url") or agent.base_url or "")
@@ -1519,7 +1519,7 @@ def _custom_provider_configured_base_url(
     _user_providers = _agent_cfg.get("providers")
     _disabled_ids: set[str] = set()
     if isinstance(_user_providers, dict):
-        from hermes_cli.config import is_provider_enabled
+        from hermes_cli.config_providers import is_provider_enabled
         for _key, _entry in _user_providers.items():
             if not isinstance(_entry, dict):
                 continue
@@ -1696,7 +1696,7 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
 
     # Resolve custom_providers before route-scoping: a named provider may keep its URL here.
     try:
-        from hermes_cli.config import get_compatible_custom_providers
+        from hermes_cli.config_providers import get_compatible_custom_providers
         _custom_providers = get_compatible_custom_providers(_agent_cfg)
     except Exception:
         _custom_providers = _agent_cfg.get("custom_providers")
@@ -1716,7 +1716,7 @@ def _resolve_context_length(agent, _agent_cfg, base_url):
 
     if _config_context_length is None and _custom_providers:
         with suppress(Exception):
-            from hermes_cli.config import get_custom_provider_context_length
+            from hermes_cli.config_providers import get_custom_provider_context_length
             _cp_ctx_resolved = get_custom_provider_context_length(
                 model=agent.model, base_url=agent.base_url, custom_providers=_custom_providers
             )

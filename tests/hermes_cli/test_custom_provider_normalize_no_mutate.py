@@ -8,10 +8,8 @@ caller's entry, corrupting the shared cache for every subsequent reader.
 
 import copy
 
-from hermes_cli.config import (
-    _normalize_custom_provider_entry,
-    get_compatible_custom_providers,
-    providers_dict_to_custom_providers,
+from hermes_cli.config_providers import (
+    _normalize_custom_provider_entry, get_compatible_custom_providers, providers_dict_to_custom_providers
 )
 
 

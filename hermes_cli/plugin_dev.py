@@ -223,7 +223,7 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
     """Manifest v2 checks: versions, deps, pip declarations, config schema."""
     import importlib.metadata
     import re as _re
-    from hermes_cli.plugins import SUPPORTED_MANIFEST_VERSION
+    from hermes_cli.plugins_manifest import SUPPORTED_MANIFEST_VERSION
     mv = getattr(manifest, "manifest_version", 1)
     if mv > SUPPORTED_MANIFEST_VERSION:
         report.warning(
@@ -272,7 +272,7 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
 
     schema = getattr(manifest, "config_schema", {}) or {}
     if schema:
-        from hermes_cli.plugins import _CONFIG_SCHEMA_TYPES
+        from hermes_cli.plugins_manifest import _CONFIG_SCHEMA_TYPES
         for skey, spec in schema.items():
             stype = spec.get("type") if isinstance(spec, dict) else None
             if stype is not None and str(stype).lower() not in _CONFIG_SCHEMA_TYPES:

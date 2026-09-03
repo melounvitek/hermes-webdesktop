@@ -171,13 +171,13 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
         from hermes_cli.auth import PROVIDER_REGISTRY, resolve_provider as resolve_auth
         known = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto", "moa"}
     with warn_on_error(""):
-        from hermes_cli.config import get_compatible_custom_providers
+        from hermes_cli.config_providers import get_compatible_custom_providers
         from hermes_cli.providers import custom_provider_aliases as aliases, normalize_provider as normalize, resolve_provider_full as resolve_full
         with warn_on_error(""):
             custom_providers = get_compatible_custom_providers(cfg)
     user_providers = cfg.get("providers")
     if isinstance(user_providers, dict):
-        from hermes_cli.config import is_provider_enabled
+        from hermes_cli.config_providers import is_provider_enabled
         known.update(str(name).strip().lower() for name, prov_cfg in user_providers.items()
                      if str(name).strip() and is_provider_enabled(prov_cfg))
     for entry in custom_providers if aliases is not None else ():

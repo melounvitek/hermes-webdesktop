@@ -1,5 +1,5 @@
 """prompt_toolkit completer + inline auto-suggest for slash commands. Kept out of
-:mod:`hermes_cli.commands` (which re-exports both classes) so the registry module stays
+:mod:`hermes_cli.commands` so the registry module stays
 prompt_toolkit-free for the gateway."""
 
 from __future__ import annotations

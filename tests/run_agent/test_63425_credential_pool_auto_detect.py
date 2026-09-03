@@ -44,7 +44,7 @@ class TestCredentialPoolPreservedOnAutoDetect:
              patch('hermes_cli.model_normalize.normalize_model_for_provider', return_value='test-model'), \
              patch('agent.credential_pool.load_pool', return_value=MagicMock()), \
              patch('hermes_cli.config.load_config', return_value={}), \
-             patch('hermes_cli.config.get_compatible_custom_providers', return_value=[]), \
+             patch('hermes_cli.config_providers.get_compatible_custom_providers', return_value=[]), \
              patch('agent.iteration_budget.IterationBudget'), \
              patch('hermes_cli.config.cfg_get', return_value=None):
 

@@ -9,6 +9,7 @@ end-to-end persist/resume round-trip.
 """
 
 import hermes_cli.runtime_provider as rp
+from hermes_cli import runtime_provider_custom
 
 
 def test_matches_legacy_custom_providers_list(monkeypatch):
@@ -22,7 +23,7 @@ def test_matches_legacy_custom_providers_list(monkeypatch):
         },
     )
     assert (
-        rp.find_custom_provider_identity("https://api.mimo.example/v1")
+        runtime_provider_custom.find_custom_provider_identity("https://api.mimo.example/v1")
         == "custom:mimo-v2.5-pro"
     )
 
@@ -34,7 +35,7 @@ def test_matches_providers_dict_by_key(monkeypatch):
         lambda: {"providers": {"local": {"api": "http://127.0.0.1:8000/v1"}}},
     )
     assert (
-        rp.find_custom_provider_identity("http://127.0.0.1:8000/v1")
+        runtime_provider_custom.find_custom_provider_identity("http://127.0.0.1:8000/v1")
         == "custom:local"
     )
 
@@ -53,10 +54,10 @@ def test_matches_providers_dict_by_stable_key_not_display_name(monkeypatch):
         "load_config",
         lambda: config,
     )
-    slug = rp.find_custom_provider_identity("http://127.0.0.1:8000/v1")
+    slug = runtime_provider_custom.find_custom_provider_identity("http://127.0.0.1:8000/v1")
     assert slug == "custom:local-127.0.0.1:8000"
 
-    entry = rp._get_named_custom_provider(slug)
+    entry = runtime_provider_custom._get_named_custom_provider(slug)
     assert entry is not None
     assert entry["name"] == "Local Ollama"
 
@@ -72,7 +73,7 @@ def test_match_ignores_trailing_slash_and_case(monkeypatch):
         },
     )
     assert (
-        rp.find_custom_provider_identity("http://localhost:8000/v1")
+        runtime_provider_custom.find_custom_provider_identity("http://localhost:8000/v1")
         == "custom:local"
     )
 
@@ -87,15 +88,15 @@ def test_no_match_returns_none(monkeypatch):
             ]
         },
     )
-    assert rp.find_custom_provider_identity("https://api.mimo.example/v1") is None
+    assert runtime_provider_custom.find_custom_provider_identity("https://api.mimo.example/v1") is None
 
 
 def test_empty_base_url_returns_none(monkeypatch):
     monkeypatch.setattr(
         rp, "load_config", lambda: {"custom_providers": [{"name": "x"}]}
     )
-    assert rp.find_custom_provider_identity("") is None
-    assert rp.find_custom_provider_identity(None) is None
+    assert runtime_provider_custom.find_custom_provider_identity("") is None
+    assert runtime_provider_custom.find_custom_provider_identity(None) is None
 
 
 def test_identity_resolves_back_through_named_lookup(monkeypatch):
@@ -112,10 +113,10 @@ def test_identity_resolves_back_through_named_lookup(monkeypatch):
     }
     monkeypatch.setattr(rp, "load_config", lambda: config)
 
-    slug = rp.find_custom_provider_identity("https://api.mimo.example/v1")
+    slug = runtime_provider_custom.find_custom_provider_identity("https://api.mimo.example/v1")
     assert slug == "custom:mimo-v2.5-pro"
 
-    entry = rp._get_named_custom_provider(slug)
+    entry = runtime_provider_custom._get_named_custom_provider(slug)
     assert entry is not None
     assert entry["base_url"] == "https://api.mimo.example/v1"
     assert entry["api_key"] == "sk-entry"

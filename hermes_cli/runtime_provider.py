@@ -12,22 +12,19 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
+from hermes_cli import config_providers
 
 logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
-from agent.credential_pool import (  # custom_provider_pool_key_candidates is read via origin by runtime_provider_custom
-    CredentialPool, PooledCredential, credential_pool_matches_provider, custom_provider_pool_key_candidates,  # noqa: F401
-    load_pool,
-)
+from agent.credential_pool import CredentialPool, PooledCredential, credential_pool_matches_provider, load_pool
 from agent.secret_scope import get_secret as _get_secret
-from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
-    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AuthError, DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL,
-    PROVIDER_REGISTRY, _agent_key_is_usable, _nous_inference_env_override, format_auth_error, resolve_provider,
-    resolve_nous_runtime_credentials, resolve_codex_runtime_credentials, resolve_xai_oauth_runtime_credentials,
-    resolve_qwen_runtime_credentials, resolve_api_key_provider_credentials,
-    resolve_external_process_provider_credentials,  # noqa: F401
-    has_usable_secret, is_actual_local_base_url, normalize_actual_base_url,
+from hermes_cli.auth import (
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AuthError, DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL,
+    DEFAULT_XAI_OAUTH_BASE_URL, PROVIDER_REGISTRY, _agent_key_is_usable, _nous_inference_env_override,
+    format_auth_error, resolve_provider, resolve_nous_runtime_credentials, resolve_codex_runtime_credentials,
+    resolve_xai_oauth_runtime_credentials, resolve_qwen_runtime_credentials, resolve_api_key_provider_credentials,
+    has_usable_secret, is_actual_local_base_url, normalize_actual_base_url
 )
 from hermes_cli import config as _config_mod
 from hermes_cli import models as _models  # attribute access keeps ``hermes_cli.models.<name>`` patches effective
@@ -44,11 +41,11 @@ def load_config():
 
 
 def get_compatible_custom_providers(config=None):
-    return _config_mod.get_compatible_custom_providers(config)
+    return config_providers.get_compatible_custom_providers(config)
 
 
 def normalize_extra_headers(value):
-    return _config_mod.normalize_extra_headers(value)
+    return config_providers.normalize_extra_headers(value)
 
 
 def _getenv(name: str, default: str = "") -> str:
@@ -135,7 +132,7 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
     """Validate an api_mode from config (None if invalid). Legacy/alias spellings (``openai``,
     ``anthropic``, ``responses``, …) are canonicalized first so old configs keep their transport
     instead of silently falling through to hostname-based detection."""
-    normalized = _config_mod._canonical_api_mode(raw).lower() if isinstance(raw, str) else ""
+    normalized = config_providers._canonical_api_mode(raw).lower() if isinstance(raw, str) else ""
     return normalized if normalized in _VALID_API_MODES else None
 
 
@@ -402,13 +399,7 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
 
 # ── extracted collaborators (re-exported; see module docstring) ────────────────────────────
 
-from hermes_cli.runtime_provider_custom import (  # noqa: E402,F401
-    _apply_custom_provider_extras, _custom_provider_request_overrides, _filter_capabilities, _find_custom_identity,
-    _get_named_custom_provider, _lift_common_custom_fields, _lift_extra_headers, _lift_max_output_tokens,
-    _lift_model_capabilities, _normalize_base_url_for_match, _normalize_custom_provider_name, _resolve_named_custom_runtime,
-    _try_resolve_from_custom_pool, canonical_custom_identity, find_custom_provider_identity,
-    find_custom_provider_identity_by_model, has_named_custom_provider, is_routable_provider,
-)
+from hermes_cli.runtime_provider_custom import _resolve_named_custom_runtime  # noqa: E402
 from hermes_cli.runtime_provider_backends import (  # noqa: E402,F401
     _is_external_process_provider, _resolve_azure_foundry_runtime, _resolve_bedrock_runtime,
     _resolve_external_process_runtime, _resolve_openrouter_runtime,
@@ -733,7 +724,7 @@ def _raise_if_provider_disabled(requested_provider: str) -> None:
     full_cfg = _config_mod.load_config()
     provs_cfg = full_cfg.get("providers") if isinstance(full_cfg, dict) else None
     block = provs_cfg.get(requested_provider) if isinstance(provs_cfg, dict) else None
-    if isinstance(block, dict) and not _config_mod.is_provider_enabled(block):
+    if isinstance(block, dict) and not config_providers.is_provider_enabled(block):
         raise ValueError(f"provider {requested_provider!r} is disabled in config "
                          f"(providers.{requested_provider}.enabled: false)")
 

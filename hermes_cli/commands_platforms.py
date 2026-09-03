@@ -148,9 +148,7 @@ def _prioritize_telegram_menu_candidates(
     """Order ``(final_name, description, source, raw_name)`` candidates; the default priority
     applies to core only, "replace" mode ignores it. ``raw_name`` is the pre-clamp name so a
     configured long command stays addressable."""
-    # Lazy origin import: tests patch ``hermes_cli.commands._telegram_command_menu_config``.
-    from hermes_cli.commands import _telegram_command_menu_config as menu_config
-    menu_cfg = menu_config()
+    menu_cfg = _telegram_command_menu_config()
     configured_rank = _sanitized_rank(menu_cfg["priority"])
     default_rank = _sanitized_rank(_TELEGRAM_MENU_PRIORITY)
     tiers = _TELEGRAM_PRIORITY_TIERS[menu_cfg["priority_mode"]]
@@ -272,9 +270,7 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     telegram-disabled skills excluded). Tiers keep relative order unless named in
     ``platforms.telegram.extra.command_menu.priority`` — applied *before* the cap, so a
     prioritized dynamic command can displace an unprioritized core command."""
-    # Lazy origin import: tests patch ``hermes_cli.commands.telegram_bot_commands``.
-    from hermes_cli.commands import telegram_bot_commands as bot_commands
-    core_commands = list(bot_commands(include_plugins=False))
+    core_commands = list(telegram_bot_commands(include_plugins=False))
     entries, hidden_count = _collect_gateway_skill_entries(
         platform="telegram", max_slots=None, reserved_names={n for n, _ in core_commands},
         desc_limit=40, sanitize_name=_sanitize_telegram_name)

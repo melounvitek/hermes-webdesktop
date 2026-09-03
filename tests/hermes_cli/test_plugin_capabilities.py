@@ -83,7 +83,7 @@ class TestDeclarationParsing:
 
     def test_manifest_field_lands_on_parsed_manifest(self, tmp_path):
         """PluginManifest picks up ``capabilities:`` from plugin.yaml."""
-        from hermes_cli.plugins import parse_manifest_file
+        from hermes_cli.plugins_manifest import parse_manifest_file
 
         plugin_dir = tmp_path / "capplug"
         plugin_dir.mkdir()
@@ -99,7 +99,7 @@ class TestDeclarationParsing:
         assert manifest.capabilities == ["tools.override"]
 
     def test_manifest_without_capabilities_field(self, tmp_path):
-        from hermes_cli.plugins import parse_manifest_file
+        from hermes_cli.plugins_manifest import parse_manifest_file
 
         plugin_dir = tmp_path / "plainplug"
         plugin_dir.mkdir()

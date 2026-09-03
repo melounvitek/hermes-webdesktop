@@ -52,12 +52,12 @@ def test_sibling_delegates_are_late_bound_too():
 
     marker = [{"name": "marker", "base_url": "http://m/v1"}]
     with patch(
-        "hermes_cli.config.get_compatible_custom_providers", return_value=marker
+        "hermes_cli.config_providers.get_compatible_custom_providers", return_value=marker
     ):
         assert rp.get_compatible_custom_providers({}) is marker
     assert rp.get_compatible_custom_providers({}) is not marker
 
     hdrs = {"X-Marker": "1"}
-    with patch("hermes_cli.config.normalize_extra_headers", return_value=hdrs):
+    with patch("hermes_cli.config_providers.normalize_extra_headers", return_value=hdrs):
         assert rp.normalize_extra_headers(None) is hdrs
     assert rp.normalize_extra_headers(None) is not hdrs

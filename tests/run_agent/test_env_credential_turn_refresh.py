@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from run_agent import AIAgent
+from hermes_cli import runtime_provider_custom
 
 DEFAULT_BASE = "https://api.openai.com/v1"
 LOCAL_BASE = "http://127.0.0.1:39080"
@@ -237,7 +238,7 @@ def named_custom_provider(monkeypatch):
     import hermes_cli.runtime_provider as rp
 
     monkeypatch.setattr(
-        rp,
+        runtime_provider_custom,
         "_get_named_custom_provider",
         lambda requested: block if requested == "longcat" else None,
     )

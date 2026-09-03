@@ -1,5 +1,5 @@
 """``hermes kanban …`` — dispatch (``kanban_command``), task-verb handlers, ``run_slash`` for ``/kanban``.
-DB work lives in ``kanban_db``; siblings: ``kanban_parser`` (argparse, re-exported ``build_parser``),
+DB work lives in ``kanban_db``; siblings: ``kanban_parser`` (argparse ``build_parser``),
 ``kanban_output`` (text/--json), ``kanban_boards`` (``boards …``), ``kanban_ops`` (dispatch/daemon/
 tail/watch/gc/repair).
 """
@@ -31,7 +31,7 @@ from hermes_cli.kanban_boards import _dispatch_boards
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
-from hermes_cli.kanban_parser import build_parser  # noqa: F401  (re-exported: hermes_cli.main, run_slash)
+from hermes_cli.kanban_parser import build_parser
 
 
 # --- Flag parsing helpers ---

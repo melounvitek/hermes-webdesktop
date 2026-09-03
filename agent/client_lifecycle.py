@@ -578,7 +578,7 @@ class ClientLifecycleMixin:
         elif self.provider == "custom":
             # Named custom provider: identity in config, credential in key_env; no key_env → nothing to watch.
             try:
-                from hermes_cli.runtime_provider import _get_named_custom_provider
+                from hermes_cli.runtime_provider_custom import _get_named_custom_provider
             except ImportError:
                 return None
             custom_provider = _get_named_custom_provider(getattr(self, "requested_provider", "") or "")
@@ -791,7 +791,7 @@ class ClientLifecycleMixin:
         # Per-provider extra_headers last so they survive swaps/rebuilds. SECURITY: may carry credentials; never log.
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
-                from hermes_cli.config import apply_custom_provider_extra_headers_to_client_kwargs
+                from hermes_cli.config_providers import apply_custom_provider_extra_headers_to_client_kwargs
                 apply_custom_provider_extra_headers_to_client_kwargs(self._client_kwargs, base_url)
             except Exception:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
@@ -836,8 +836,9 @@ class ClientLifecycleMixin:
         self._client_kwargs.pop("ssl_verify", None)
         self._client_kwargs.pop("ssl_ca_cert", None)
         try:
-            from hermes_cli.config import (
-                apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers, load_config_readonly,
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.config_providers import (
+                apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers
             )
             apply_custom_provider_tls_to_client_kwargs(
                 self._client_kwargs, str(self.base_url or ""), get_compatible_custom_providers(load_config_readonly()),

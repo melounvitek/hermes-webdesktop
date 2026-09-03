@@ -52,7 +52,7 @@ def _resolve_requests_verify(base_url: str = "") -> bool | str:
     spurious CERTIFICATE_VERIFY_FAILED while the httpx chat path succeeds) -> CA env vars -> certifi."""
     if base_url:
         try:
-            from hermes_cli.config import get_custom_provider_tls_settings
+            from hermes_cli.config_providers import get_custom_provider_tls_settings
             tls = get_custom_provider_tls_settings(base_url)
             if tls.get("ssl_verify") is False:
                 return False
@@ -1739,7 +1739,8 @@ def _resolve_moa_context_length(model: str, custom_providers: list | None) -> Op
     """Step 0a: MoA virtual provider — ``model`` is a preset name, so every probe would miss. Resolve
     the aggregator's real provider+model (references are advisory). None on any failure."""
     try:
-        from hermes_cli.config import get_compatible_custom_providers, load_config
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import get_compatible_custom_providers
         from hermes_cli.moa_config import resolve_moa_preset
         from hermes_cli.runtime_provider import resolve_runtime_provider
         config = load_config()
@@ -1776,7 +1777,7 @@ def _config_override_context_length(model: str, base_url: str, provider: str, cu
     # set. See #15779.
     if custom_providers and base_url and model:
         with contextlib.suppress(Exception):  # fall through to probing
-            from hermes_cli.config import get_custom_provider_context_length
+            from hermes_cli.config_providers import get_custom_provider_context_length
             cp_ctx = get_custom_provider_context_length(model=model, base_url=base_url, custom_providers=custom_providers)
             if cp_ctx:
                 return cp_ctx
