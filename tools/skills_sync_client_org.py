@@ -39,14 +39,14 @@ def org_head_ref(org_id: str) -> str:
 def resolve_org_identity() -> Dict[str, Any]:
     """``resolve_identity()`` + ``org_id``/``org_role``; SyncInertError without an ``org_role`` claim
     (personal org / old issuer): org sync unavailable, NOT an error."""
-    from tools.skills_sync_client import SyncInertError, resolve_identity
-    identity = resolve_identity()
+    ssc = _ssc()
+    identity = ssc.resolve_identity()
     claims = identity.get("claims") or {}
     org_id, org_role = claims.get("org_id"), claims.get("org_role")
     if not org_id:
-        raise SyncInertError("no organisation associated with this account")
+        raise ssc.SyncInertError("no organisation associated with this account")
     if not isinstance(org_role, str) or not org_role:
-        raise SyncInertError("this account isn't a member of a shared organisation")
+        raise ssc.SyncInertError("this account isn't a member of a shared organisation")
     identity.update(org_id=str(org_id), org_role=org_role)
     return identity
 
@@ -57,8 +57,7 @@ def _org_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient]
     ssc = _ssc()
     identity = identity or resolve_org_identity()
     if client is None:
-        base_url = ssc.resolve_sync_base_url()
-        if not base_url:
+        if not (base_url := ssc.resolve_sync_base_url()):
             raise ssc.SyncInertError("no sync base URL configured")
         client = SyncClient(base_url, identity["api_key"])
     caps, max_bytes = checked_capabilities(client)
@@ -73,8 +72,9 @@ def _read_org_head(client: SyncClient, org_id: str) -> Optional[str]:
 
 
 # Local mirror sidecars
-def _mirror_root(org_id: str) -> Path:
-    return _ssc()._org_dir() / org_id
+def _mirror_root(org_id: Optional[str]) -> Path:
+    """``<_org_dir>/<org_id>``; the org-level ``_org/`` root itself when *org_id* is None."""
+    return _ssc()._org_dir() / org_id if org_id else _ssc()._org_dir()
 
 
 def _write_sidecar(what: str, path_fn: Callable[[], Path], text: str) -> None:
@@ -105,7 +105,7 @@ def _skill_dir_fingerprint(path: Path) -> str:
 def _sidecar_path(org_id: Optional[str], const: str) -> Path:
     """``<mirror>/<agent.skill_utils.<const>>`` (org-level when org_id is None)."""
     import agent.skill_utils as sku
-    return (_mirror_root(org_id) if org_id else _ssc()._org_dir()) / getattr(sku, const)
+    return _mirror_root(org_id) / getattr(sku, const)
 
 
 def _read_org_baseline(org_id: str) -> Dict[str, Any]:
@@ -146,11 +146,9 @@ def _clear_active_org_marker() -> None:
 def org_skill_is_locally_modified(skill_rel_path: str, org_id: str) -> bool:
     """Local copy differs from upstream's fingerprint. No baseline (pre-existing mirror) => unmodified."""
     dest = _mirror_root(org_id) / PurePosixPath(skill_rel_path)
-    if not dest.is_dir():
-        return False
     entry = _read_org_baseline(org_id).get(skill_rel_path) or {}
     recorded = entry.get("fingerprint") if isinstance(entry, dict) else entry
-    return bool(recorded) and _skill_dir_fingerprint(dest) != recorded
+    return dest.is_dir() and bool(recorded) and _skill_dir_fingerprint(dest) != recorded
 
 
 def _active_org_id() -> Optional[str]:

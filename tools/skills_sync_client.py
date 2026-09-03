@@ -124,8 +124,7 @@ def _skills_dir() -> Path:
     return get_hermes_home() / "skills"
 
 
-def _org_dir() -> Path:
-    """Local mirror root for org skills (read-only by convention)."""
+def _org_dir() -> Path:  # local mirror root for org skills (read-only by convention)
     return _skills_dir() / ORG_DIR_NAME
 
 
@@ -300,8 +299,7 @@ def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_
     skill_tree_map: Dict[str, str] = {}
     root: Dict[str, Any] = {}
     for name in sorted(set(skill_names)):
-        rel = _skill_rel_path(name)
-        skill_dir = _find_skill_dir(name)
+        rel, skill_dir = _skill_rel_path(name), _find_skill_dir(name)
         if rel is None or skill_dir is None:
             continue
         try:
@@ -324,9 +322,8 @@ def _personal_client(identity: Optional[Dict[str, Any]], client: Optional[SyncCl
                      ) -> Tuple[Dict[str, Any], Optional[SyncClient]]:
     """Identity + client for a personal sync op; ``client`` is None when no base URL is configured."""
     identity = identity if identity is not None else resolve_identity()
-    if client is None:
-        base = resolve_sync_base_url()
-        client = SyncClient(base, identity["api_key"]) if base else None
+    if client is None and (base := resolve_sync_base_url()):
+        client = SyncClient(base, identity["api_key"])
     return identity, client
 
 
