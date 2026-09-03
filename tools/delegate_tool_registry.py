@@ -36,7 +36,6 @@ _RECENT_SUBAGENTS_CAP = 200
 
 _recent_subagents: Dict[str, Dict[str, Any]] = {}
 
-
 def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """Resolve a process task_id to its originating delegation, if any.
 
@@ -54,7 +53,6 @@ def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]
         return None
     return {"subagent_id": task_id, "goal": record.get("goal"), "delegation_id": record.get("delegation_id")}
 
-
 def set_spawn_paused(paused: bool) -> bool:
     """Globally block/unblock new delegate_task spawns.
 
@@ -66,11 +64,9 @@ def set_spawn_paused(paused: bool) -> bool:
         _spawn_paused = bool(paused)
         return _spawn_paused
 
-
 def is_spawn_paused() -> bool:
     with _spawn_pause_lock:
         return _spawn_paused
-
 
 def _register_subagent(record: Dict[str, Any]) -> None:
     sid = record.get("subagent_id")
@@ -79,7 +75,6 @@ def _register_subagent(record: Dict[str, Any]) -> None:
     record.setdefault("accepting_steer", True)
     with _active_subagents_lock:
         _active_subagents[sid] = record
-
 
 def _retain_recent_subagent(record: Dict[str, Any]) -> None:
     """Keep a bounded attribution stub after a child finishes (lock held)."""
@@ -94,14 +89,12 @@ def _retain_recent_subagent(record: Dict[str, Any]) -> None:
     while len(_recent_subagents) > _RECENT_SUBAGENTS_CAP:
         _recent_subagents.pop(next(iter(_recent_subagents)), None)
 
-
 def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
         if record is not None and (agent is None or record.get("agent") is agent):
             _active_subagents.pop(subagent_id, None)
             _retain_recent_subagent(record)
-
 
 def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
     """Atomically close steer acceptance and drain its final durable artifact.
@@ -126,7 +119,6 @@ def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
             return None
         return pending if isinstance(pending, str) and pending.strip() else None
 
-
 def interrupt_subagent(subagent_id: str) -> bool:
     """Request that a single running subagent stop at its next iteration boundary.
 
@@ -149,7 +141,6 @@ def interrupt_subagent(subagent_id: str) -> bool:
         logger.debug("interrupt_subagent(%s) failed: %s", subagent_id, exc)
         return False
     return True
-
 
 def steer_subagent(
     subagent_id: str,
@@ -193,7 +184,6 @@ def steer_subagent(
             logger.debug("steer_subagent(%s) failed: %s", subagent_id, exc)
             return False
 
-
 def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[Any, Any]:
     """Capture exact request transport + live session generation, if any.
 
@@ -209,10 +199,8 @@ def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[A
     except Exception:
         return None, None
 
-
 # Registry record fields never exposed to the TUI/RPC snapshot.
 _PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport", "owner_session_record", "accepting_steer"})
-
 
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
@@ -222,7 +210,6 @@ def list_active_subagents() -> List[Dict[str, Any]]:
     """
     with _active_subagents_lock:
         return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
-
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:
     """True when *child_agent* sits below *parent_agent* in the spawn tree.
@@ -244,11 +231,9 @@ def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) ->
         cur = ancestor
     return False
 
-
 # Model-facing control actions accepted by delegate_task(action=...).
 # "spawn" (or omitted) keeps the historical spawn semantics.
 _CONTROL_ACTIONS = frozenset({"list", "steer", "stop"})
-
 
 def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> str:
     """Resolve a session id to the tip of its compression lineage.
@@ -268,7 +253,6 @@ def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> st
         return str(resolved) if resolved else sid
     except Exception:
         return sid
-
 
 def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     """True when *parent_agent*'s conversation owns this live-child record.
@@ -300,7 +284,6 @@ def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
         parent_sid,
         _resolve_session_lineage(parent_sid, parent_agent),
     }
-
 
 def _handle_control_action(action: str, subagent_id: Optional[str], message: Optional[str], parent_agent: Any) -> str:
     """Synchronous control plane for delegate_task: list/steer/stop.
@@ -369,7 +352,6 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
     if ok:
         return json.dumps({"action": action, "subagent_id": sid, "status": status, "note": note}, ensure_ascii=False)
     return tool_error(failure.format(sid=sid))
-
 
 # action -> (success status, success note, failure error template)
 _CONTROL_OUTCOMES = {

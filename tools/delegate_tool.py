@@ -30,87 +30,38 @@ logger = logging.getLogger(__name__)
 # moved name is re-imported so ``tools.delegate_tool.<name>`` keeps resolving for
 # callers and patching tests. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
-    _WorktreeReporter,
-    _append_missed_steer,
-    _append_sibling_write_reminder,
-    _attach_child,
-    _await_child,
-    _build_result_entry,
-    _cleanup_child_run,
-    _dump_subagent_timeout_diagnostic,
-    _emit_child_complete,
-    _fabricated_entry,
-    _lease_child_credential,
-    _make_text_relay,
-    _merge_late_steer,
-    _register_child,
-    _seed_child_workspace,
-    _start_heartbeat,
+    _WorktreeReporter, _append_missed_steer, _append_sibling_write_reminder, _attach_child,
+    _await_child, _build_result_entry, _cleanup_child_run, _dump_subagent_timeout_diagnostic,
+    _emit_child_complete, _fabricated_entry, _lease_child_credential, _make_text_relay,
+    _merge_late_steer, _register_child, _seed_child_workspace, _start_heartbeat,
     _validate_child_output_schema,
 )
 from tools.delegate_tool_config import (  # noqa: F401
-    _DEFAULT_MAX_CONCURRENT_CHILDREN,
-    _get_child_timeout,
-    _get_inherit_mcp_toolsets,
-    _get_max_async_children,
-    _get_max_concurrent_children,
-    _get_max_spawn_depth,
-    _get_orchestrator_enabled,
-    _get_subagent_approval_callback,
-    _get_worktree_isolation,
-    _inherit_parent_base_url,
-    _inherit_parent_capabilities,
-    _load_config,
-    _merge_request_overrides,
-    _resolve_child_credential_pool,
-    _require_pinned_command,
-    _resolve_delegation_credentials,
-    _subagent_auto_approve,
-    _subagent_auto_deny,
+    _DEFAULT_MAX_CONCURRENT_CHILDREN, _get_child_timeout, _get_inherit_mcp_toolsets,
+    _get_max_async_children, _get_max_concurrent_children, _get_max_spawn_depth,
+    _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
+    _inherit_parent_base_url, _inherit_parent_capabilities, _load_config, _merge_request_overrides,
+    _resolve_child_credential_pool, _require_pinned_command, _resolve_delegation_credentials,
+    _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import (  # noqa: F401
-    _dispatch_background,
-    _run_children_parallel,
+    _dispatch_background, _run_children_parallel,
 )
 from tools.delegate_tool_progress import (  # noqa: F401
-    DelegateEvent,
-    SUBAGENT_FAILURE_STATUSES,
-    _batch_prefix,
-    _build_child_progress_callback,
-    _build_child_system_prompt,
-    _clean_error_text,
-    _emit_parent_console,
-    _resolve_workspace_hint,
-    _safe_progress,
-    format_batch_tag,
-    format_subagent_failure_line,
+    DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
+    _build_child_system_prompt, _clean_error_text, _emit_parent_console, _resolve_workspace_hint,
+    _safe_progress, format_batch_tag, format_subagent_failure_line,
 )
 from tools.delegate_tool_registry import (  # noqa: F401
-    _CONTROL_ACTIONS,
-    _active_subagents,
-    _active_subagents_lock,
-    _capture_gateway_steer_authority,
-    _close_subagent_steering,
-    _handle_control_action,
-    _is_descendant_of,
-    _owns_subagent_record,
-    _register_subagent,
-    _unregister_subagent,
-    get_subagent_attribution,
-    interrupt_subagent,
-    is_spawn_paused,
-    list_active_subagents,
-    set_spawn_paused,
-    steer_subagent,
+    _CONTROL_ACTIONS, _active_subagents, _active_subagents_lock, _capture_gateway_steer_authority,
+    _close_subagent_steering, _handle_control_action, _is_descendant_of, _owns_subagent_record,
+    _register_subagent, _unregister_subagent, get_subagent_attribution, interrupt_subagent,
+    is_spawn_paused, list_active_subagents, set_spawn_paused, steer_subagent,
 )
 from tools.delegate_tool_results import (  # noqa: F401
-    _apply_summary_budget,
-    _build_child_preserving_parent_tools,
-    _finalize_child_results,
-    _run_child_lifecycle,
-    _summarize_tool_arguments,
+    _apply_summary_budget, _build_child_preserving_parent_tools, _finalize_child_results,
+    _run_child_lifecycle, _summarize_tool_arguments,
 )
-
 
 # Tools that children must never have access to
 DELEGATE_BLOCKED_TOOLS = frozenset(
@@ -123,7 +74,6 @@ DELEGATE_BLOCKED_TOOLS = frozenset(
     ]
 )
 
-
 # Nested delegation is granted by depth/role in _build_child_agent, never by the
 # model naming toolsets (there is no model-facing toolsets argument).
 def _normalize_role(r: Optional[str]) -> str:
@@ -135,7 +85,6 @@ def _normalize_role(r: Optional[str]) -> str:
         return r_norm
     logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
     return "leaf"
-
 
 def _is_mcp_toolset_name(name: str) -> bool:
     """Return True for canonical MCP toolsets and their registered aliases."""
@@ -150,7 +99,6 @@ def _is_mcp_toolset_name(name: str) -> bool:
     except Exception:
         target = None
     return bool(target and str(target).startswith("mcp-"))
-
 
 def _expand_parent_toolsets(parent_toolsets: set) -> set:
     """Add every toolset whose tools are a subset of the parent's tools.
@@ -176,7 +124,6 @@ def _expand_parent_toolsets(parent_toolsets: set) -> set:
             expanded.add(ts_name)
     return expanded
 
-
 def _preserve_parent_mcp_toolsets(child_toolsets: List[str], parent_toolsets: set[str]) -> List[str]:
     """Append any parent MCP toolsets that are missing from a narrowed child."""
     preserved = list(child_toolsets)
@@ -184,7 +131,6 @@ def _preserve_parent_mcp_toolsets(child_toolsets: List[str], parent_toolsets: se
         if _is_mcp_toolset_name(toolset_name) and toolset_name not in preserved:
             preserved.append(toolset_name)
     return preserved
-
 
 DEFAULT_MAX_ITERATIONS = 250
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
@@ -197,11 +143,9 @@ _HEARTBEAT_STALE_CYCLES_IDLE = 15  # 450s idle between turns → stale
 _HEARTBEAT_STALE_CYCLES_IN_TOOL = 40  # 1200s stuck on same tool → stale
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
-
 def check_delegate_requirements() -> bool:
     """Delegation has no external requirements -- always available."""
     return True
-
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets whose tools are ALL blocked (derived from DELEGATE_BLOCKED_TOOLS
@@ -216,7 +160,6 @@ def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     blocked_toolset_names.add("kanban")
     return [t for t in toolsets if t not in blocked_toolset_names]
 
-
 def _blocked_toolsets_for_role(role: str) -> List[str]:
     """One-tool deny toolsets for the role; passed as ``disabled_toolsets`` so
     blocked names inside mixed bundles are subtracted AFTER composite expansion."""
@@ -229,7 +172,6 @@ def _blocked_toolsets_for_role(role: str) -> List[str]:
         if defn.get("tools")
         and set(defn.get("tools", ())).issubset(blocked_names)
     )
-
 
 def _resolve_child_toolsets(
     parent_agent, toolsets: Optional[List[str]], effective_role: str
@@ -285,7 +227,6 @@ def _resolve_child_toolsets(
     )
     return child_toolsets, child_disabled_toolsets
 
-
 # OpenRouter routing filters: inherited from the parent, but reset to these
 # defaults under a pinned provider — parent filters (e.g. only=["Anthropic"])
 # would silently force the child back onto the parent's provider.
@@ -299,7 +240,6 @@ _ROUTING_FILTER_DEFAULTS = (
     ("provider_data_collection", ""),
 )
 _NOUS_PROVIDERS = frozenset({"nous", "nous-portal", "nousresearch"})
-
 
 def _resolve_child_runtime(
     parent_agent,
@@ -405,7 +345,6 @@ def _resolve_child_runtime(
         kwargs["max_tokens"] = child_max_tokens
     return kwargs
 
-
 def _open_child_session_db(parent_agent) -> Any:
     """DEDICATED SessionDB handle for the child, or None.
 
@@ -425,7 +364,6 @@ def _open_child_session_db(parent_agent) -> Any:
     except Exception:
         logger.debug("subagent: failed to open dedicated SessionDB; child persistence disabled", exc_info=True)
         return None
-
 
 def _construct_child_agent(
     rt: Dict[str, Any],
@@ -492,7 +430,6 @@ def _construct_child_agent(
                     pass
             raise
 
-
 def _announce_child_spawn(child, parent_agent, child_progress_cb, *, goal, subagent_id, parent_subagent_id, role) -> None:
     """spawn_requested event (now — the child may queue for seconds when the
     pool is saturated) plus the subagent_start lifecycle hook."""
@@ -511,7 +448,6 @@ def _announce_child_spawn(child, parent_agent, child_progress_cb, *, goal, subag
         )
     except Exception:
         logger.debug("subagent_start hook invocation failed", exc_info=True)
-
 
 def _build_child_agent(
     task_index: int,
@@ -642,7 +578,6 @@ def _build_child_agent(
     )
     return child
 
-
 def _run_single_child(
     task_index: int,
     goal: str,
@@ -755,7 +690,6 @@ def _run_single_child(
             close_deferred=_child_close_deferred,
         )
 
-
 def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
     if not isinstance(tasks, str):
         return None, None
@@ -773,7 +707,6 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
         return None, (f"tasks must be a JSON array of task objects; parsed " f"{type(parsed).__name__} instead.")
     return parsed, None
 
-
 # Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels,
 # or unexpanded template markers. The marker regex is deliberately NARROW —
 # only snake_case / space-separated placeholder identifiers (`<feature_name>`,
@@ -787,7 +720,6 @@ _TEMPLATE_MARKER_RE = re.compile(
     r"|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
 )
 _MIN_BATCH_GOAL_LEN = 10
-
 
 def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
     """Validate a tasks=[...] batch beyond per-task goal presence; actionable
@@ -848,7 +780,6 @@ class _Batch:
     origin_owner_session_record: Any
     overall_start: float
 
-
 def _normalize_task_list(
     goal, context, tasks, output_schema, top_role: str, max_children: int
 ) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
@@ -898,7 +829,6 @@ def _normalize_task_list(
             return None, batch_error
     return task_list, None
 
-
 def _coerce_task_schemas(
     task_list: List[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
 ) -> tuple[List[Optional[Dict[str, Any]]], Optional[str]]:
@@ -918,7 +848,6 @@ def _coerce_task_schemas(
         task_schemas.append(coerced_schema)
     return task_schemas, None
 
-
 def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) -> None:
     """Announce the batch tag once so interleaved ``[tag n/N]`` lines are attributable."""
     if n_tasks <= 1 or not live_deleg_id:
@@ -932,7 +861,6 @@ def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) ->
         except Exception:
             pass
     _emit_parent_console(parent_agent, _hdr)
-
 
 def _capture_origin() -> tuple[str, str, Any, Any]:
     """``(wake_sid, ui_session_id, owner_transport, owner_session_record)`` of the
@@ -949,7 +877,6 @@ def _capture_origin() -> tuple[str, str, Any, Any]:
         _origin_ui_session_id = ""
     transport, record = _capture_gateway_steer_authority(_origin_ui_session_id)
     return _origin_wake_sid, _origin_ui_session_id, transport, record
-
 
 def _build_children(
     task_list: List[Dict[str, Any]],
@@ -1018,7 +945,6 @@ def _build_children(
         children.append((i, t, child))
     return children, None
 
-
 def _finalize_live_transcripts(results: list, live_writers: list, live_paths: list) -> None:
     """Close out live transcripts (files are retained as the full-fidelity
     record; retention pruning happens on future dispatches)."""
@@ -1032,7 +958,6 @@ def _finalize_live_transcripts(results: list, live_writers: list, live_paths: li
                 logger.debug("Live transcript finalize failed", exc_info=True)
             if _idx < len(live_paths):
                 entry["live_transcript"] = live_paths[_idx]
-
 
 def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True) -> dict:
     """Run all built children, join, finalize (hooks + cost rollup), return the combined dict.
@@ -1080,7 +1005,6 @@ def _execute_and_aggregate(batch: _Batch, *, honor_parent_interrupt: bool = True
     if batch.live_paths:
         combined["live_transcripts"] = list(batch.live_paths)
     return combined
-
 
 def delegate_task(
     goal: Optional[str] = None,
@@ -1212,7 +1136,6 @@ def delegate_task(
 
 # ── OpenAI function-calling schema ──────────────────────────────────────────
 
-
 def _build_top_level_description() -> str:
     """delegate_task description: ONLY guidance stated nowhere else in the schema
     (limits live in the 'tasks' parameter description, rebuilt per get_definitions())."""
@@ -1268,7 +1191,6 @@ def _build_top_level_description() -> str:
         "delegation.provider / delegation.model in config.yaml."
     )
 
-
 def _build_tasks_param_description() -> str:
     """Compose the 'tasks' parameter description with current concurrency limit."""
     try:
@@ -1282,7 +1204,6 @@ def _build_tasks_param_description() -> str:
         "is a one-entry array. Required when spawning."
     )
 
-
 def _build_dynamic_schema_overrides() -> dict:
     """Per-call schema overrides (ToolEntry.dynamic_schema_overrides): every
     get_definitions() pass rewrites the descriptions to the user's actual limits."""
@@ -1292,7 +1213,6 @@ def _build_dynamic_schema_overrides() -> dict:
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
 
     return {"description": _build_top_level_description(), "parameters": overrides_params}
-
 
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
@@ -1395,7 +1315,6 @@ DELEGATE_TASK_SCHEMA = {
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-
 def _model_background_value(args: dict, parent_agent=None) -> bool:
     """Background flag for the MODEL-facing dispatch path (registry fallback).
 
@@ -1408,9 +1327,7 @@ def _model_background_value(args: dict, parent_agent=None) -> bool:
     """
     return not getattr(parent_agent, "_delegate_depth", 0) > 0
 
-
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}
-
 
 def _strip_model_hidden_task_fields(tasks: Any) -> Any:
     if not isinstance(tasks, list):

@@ -23,14 +23,12 @@ from tools.delegate_tool_progress import (
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
 
-
 def _future_entry(future: Any, idx: int, child: Any) -> Dict[str, Any]:
     """The finished Future's entry, or a fabricated error entry if it raised."""
     try:
         return future.result()
     except Exception as exc:
         return _fabricated_entry(idx, "error", str(exc), child)
-
 
 def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tasks, remaining) -> None:
     """Print one completion line for a finished child and refresh the spinner text."""
@@ -53,7 +51,6 @@ def _report_child_done(parent_agent, spinner_ref, entry, tag, task_labels, n_tas
             )
         except Exception as e:
             logger.debug("Spinner update_text failed: %s", e)
-
 
 def _run_children_parallel(
     children: List[tuple],
@@ -136,7 +133,6 @@ def _run_children_parallel(
     # Sort by task_index so results match input order
     results.sort(key=lambda r: r["task_index"])
 
-
 _SYNC_FALLBACK_NOTES = {
     "no_async": (
         "background=true is not available in this session — it cannot "
@@ -154,14 +150,12 @@ _SYNC_FALLBACK_NOTES = {
     ),
 }
 
-
 def _run_sync_with_note(execute_and_aggregate: Any, reason: str) -> str:
     """Inline fallback: run the batch now and explain why it was not detached."""
     result = execute_and_aggregate()
     if isinstance(result, dict):
         result["note"] = _SYNC_FALLBACK_NOTES[reason]
     return json.dumps(result, ensure_ascii=False)
-
 
 def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
     """Wake target for a detached batch, or None to force synchronous execution.
@@ -191,7 +185,6 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
         )
         return origin_wake_sid
     return None
-
 
 def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> tuple[str, str]:
     """``(session_key, origin_ui_session_id)`` the async registry routes completions by.
@@ -223,7 +216,6 @@ def _resolve_async_session_key(parent_agent: Any, origin_ui_session_id: str) -> 
         session_key = agent_session_id
     return session_key, origin_ui_session_id
 
-
 def _batch_progress_token(child_agents: List[Any]) -> tuple:
     """Progress token for the async registry's stale monitor: every child's
     (api_call_count, current_tool, last_activity_ts). last_activity_ts ticks on
@@ -242,7 +234,6 @@ def _batch_progress_token(child_agents: List[Any]) -> tuple:
         except Exception:
             parts.append(None)
     return tuple(parts), in_tool
-
 
 def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any], live_paths: List[str]) -> dict:
     """Model-facing handle for an accepted background batch."""
@@ -285,7 +276,6 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
             "a child work while it runs."
         )
     return payload
-
 
 def _dispatch_background(
     *,

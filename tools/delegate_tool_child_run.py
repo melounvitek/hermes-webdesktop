@@ -27,11 +27,9 @@ from tools.delegate_tool_results import (
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
 
-
 def _num(value: Any, default: int = 0) -> int:
     """int() for counters that may be mocks/None on test doubles."""
     return int(value) if isinstance(value, (int, float)) else default
-
 
 def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: float = 0) -> Dict[str, Any]:
     """Result entry for a child that raised, never finished, or was abandoned."""
@@ -45,13 +43,11 @@ def _fabricated_entry(idx: int, status: str, error: str, child: Any, duration: f
         "_child_role": getattr(child, "_delegate_role", None),
     }
 
-
 def _append_missed_steer(entry: Dict[str, Any], late_steer: Optional[str]) -> None:
     """Record steer text that won the race with the child's failure/timeout."""
     if late_steer:
         entry["missed_steer"] = late_steer
         entry["error"] += (" [steer did not land before the subagent stopped: " f"{late_steer}]")
-
 
 def _close_child(child: Any, log_message: str) -> None:
     """Best-effort ``child.close()`` (tool sandboxes, browser daemons, httpx clients)."""
@@ -61,7 +57,6 @@ def _close_child(child: Any, log_message: str) -> None:
             close()
     except Exception:
         logger.debug(log_message, exc_info=True)
-
 
 def _attach_child(parent_agent: Any, child: Any) -> None:
     """Register the child for parent interrupt propagation."""
@@ -73,7 +68,6 @@ def _attach_child(parent_agent: Any, child: Any) -> None:
             parent_agent._active_children.append(child)
     else:
         parent_agent._active_children.append(child)
-
 
 def _detach_child(parent_agent: Any, child: Any) -> None:
     """Remove the child from parent interrupt propagation (no-op if absent)."""
@@ -89,7 +83,6 @@ def _detach_child(parent_agent: Any, child: Any) -> None:
     except (ValueError, UnboundLocalError) as e:
         logger.debug("Could not remove child from active_children: %s", e)
 
-
 def _signal_child_stop(child: Any, *reason: str) -> None:
     """Cooperative interrupt so the child's worker thread can exit cleanly."""
     try:
@@ -97,7 +90,6 @@ def _signal_child_stop(child: Any, *reason: str) -> None:
             child._interrupt_requested = True
     except Exception:
         pass
-
 
 def _format_thread_stack(frame: Any, indent: str) -> List[str]:
     import traceback as _traceback
@@ -108,13 +100,11 @@ def _format_thread_stack(frame: Any, indent: str) -> List[str]:
         for sub in frame_line.rstrip().split("\n")
     ]
 
-
 _DIAG_CHILD_ATTRS = (
     "model", "provider", "api_mode", "base_url", "max_iterations",
     "quiet_mode", "skip_memory", "skip_context_files", "platform",
     "_delegate_role", "_delegate_depth",
 )
-
 
 def _diag_sizes(child: Any) -> List[str]:
     lines: List[str] = ["## Prompt / schema sizes"]
@@ -132,7 +122,6 @@ def _diag_sizes(child: Any) -> List[str]:
     except Exception as exc:
         lines.append(f"  tool_schema: <error: {exc}>")
     return lines
-
 
 def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     """Worker stack plus all other live threads (bounded to 40): the worker is
@@ -173,7 +162,6 @@ def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     except Exception as exc:
         lines.append(f"  <all-thread dump failed: {exc}>")
     return lines
-
 
 def _dump_subagent_timeout_diagnostic(
     *,
@@ -252,7 +240,6 @@ def _dump_subagent_timeout_diagnostic(
         logger.warning("Subagent timeout diagnostic dump failed: %s", exc)
         return None
 
-
 def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
     """Build the parent-activity heartbeat thread for one child (not started).
 
@@ -318,7 +305,6 @@ def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
                 pass
 
     return _heartbeat_stop, threading.Thread(target=_heartbeat_loop, daemon=True)
-
 
 def _register_child(
     child: Any,
@@ -415,7 +401,6 @@ class _ChildWorkspace:
     wall_start: float
     parent_reads_snapshot: list
 
-
 def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_id: Optional[str]):
     """Opt-in worktree isolation: own git worktree off the parent's HEAD (the
     child's terminal starts there). Git-only, local-backend-only; failures
@@ -443,7 +428,6 @@ def _create_isolated_worktree(parent_agent: Any, parent_task_id: Any, subagent_i
     except Exception as e:
         logger.debug("worktree isolation setup failed: %s", e)
         return None
-
 
 def _seed_child_workspace(
     child: Any,
@@ -497,7 +481,6 @@ class _ChildFailure:
     entry: Dict[str, Any]
     close_deferred: bool
 
-
 def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     """Hand ``child.close()`` to a Future done-callback and drain its transports.
 
@@ -533,7 +516,6 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     _resweep_timer.daemon = True
     _resweep_timer.start()
 
-
 def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     """Lease a credential from the child's pool (if any) and bind it; ``(pool, lease_id)``."""
     child_pool = getattr(child, "_credential_pool", None)
@@ -549,7 +531,6 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
             logger.debug("Failed to bind child to leased credential: %s", exc)
     return child_pool, leased_cred_id
 
-
 def _make_text_relay(child_progress_cb: Any):
     """Stream callback forwarding the child's reply text up the progress relay so
     gateway watch windows mirror it live (subagent.text → message.delta). Inert
@@ -560,7 +541,6 @@ def _make_text_relay(child_progress_cb: Any):
             _safe_progress(child_progress_cb, "subagent.text", preview=delta)
 
     return _relay_child_text
-
 
 def _await_child(
     child: Any,
@@ -622,7 +602,6 @@ def _await_child(
         # Shut down without waiting — a child stuck on blocking I/O would hang wait=True forever.
         executor.shutdown(wait=False)
 
-
 def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child: Any) -> None:
     """Linearization boundary for registry steering: from here the child cannot
     consume another steer. Closing under the registry lock either rejects a
@@ -632,7 +611,6 @@ def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child:
     if late:
         existing = result.get("pending_steer")
         result["pending_steer"] = f"{existing}\n{late}" if isinstance(existing, str) and existing else late
-
 
 def _handle_child_wait_failure(
     exc: BaseException,
@@ -753,7 +731,6 @@ class _SchemaOutcome:
     errors: List[str]
     retries: int
 
-
 def _validate_child_output_schema(
     child: Any, result: Dict[str, Any], task_index: int, child_task_id: str, relay_child_text: Any
 ) -> _SchemaOutcome:
@@ -797,7 +774,6 @@ def _validate_child_output_schema(
         _schema_valid, _schema_errors = validate_output(_retry_text, _output_schema)
     return _SchemaOutcome(_output_schema, _schema_valid, _schema_errors, 1)
 
-
 def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
     """Tool trace from the child's conversation messages, pairing parallel
     tool calls with their results by tool_call_id."""
@@ -833,7 +809,6 @@ def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
             elif tool_trace:
                 tool_trace[-1].update(result_meta)  # no tool_call_id: pair with the latest call
     return tool_trace
-
 
 def _build_result_entry(
     child: Any,
@@ -936,7 +911,6 @@ def _build_result_entry(
         entry["summary"] = f"{summary}\n\n{_miss_note}" if summary else _miss_note
     return entry
 
-
 def _append_sibling_write_reminder(entry: Dict[str, Any], ws: _ChildWorkspace) -> None:
     """Warn the parent when this child wrote files the parent had already read.
 
@@ -963,7 +937,6 @@ def _append_sibling_write_reminder(entry: Dict[str, Any], ws: _ChildWorkspace) -
             entry["stale_paths"] = mod_paths
     except Exception:
         logger.debug("file_state sibling-write check failed", exc_info=True)
-
 
 def _emit_child_complete(
     child: Any,
@@ -1013,7 +986,6 @@ def _emit_child_complete(
         except (TypeError, ValueError):
             pass
     _safe_progress(child_progress_cb, "subagent.complete", **complete_kwargs)
-
 
 def _cleanup_child_run(
     child: Any,

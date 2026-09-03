@@ -30,7 +30,6 @@ _LEGACY_MAX_ASYNC_WARNED = False
 # opts back in.
 DEFAULT_CHILD_TIMEOUT: Optional[float] = None
 
-
 def _cfg() -> dict:
     """The ``delegation`` section, read through the origin so tests can patch it."""
     from tools.delegate_tool import _load_config
@@ -54,19 +53,16 @@ def _subagent_auto_deny(command: str, description: str, **kwargs) -> str:
     )
     return "deny"
 
-
 def _subagent_auto_approve(command: str, description: str, **kwargs) -> str:
     """Auto-approve (opt-in YOLO via delegation.subagent_auto_approve): returns 'once'."""
     logger.warning("Subagent auto-approved dangerous command: %s (%s)", command, description)
     return "once"
-
 
 def _get_subagent_approval_callback():
     """Callback for subagent worker threads per delegation.subagent_auto_approve (default False)."""
     if is_truthy_value(_cfg().get("subagent_auto_approve", False)):
         return _subagent_auto_approve
     return _subagent_auto_deny
-
 
 def _knob(key: str, env_var: str, parse, default, warn_invalid):
     """delegation.<key> > <env_var> > default. A config value that fails ``parse``
@@ -86,7 +82,6 @@ def _knob(key: str, env_var: str, parse, default, warn_invalid):
         except (TypeError, ValueError):
             pass
     return default
-
 
 def _get_max_concurrent_children() -> int:
     """delegation.max_concurrent_children > DELEGATION_MAX_CONCURRENT_CHILDREN env > 10.
@@ -112,7 +107,6 @@ def _get_max_concurrent_children() -> int:
             )
     return result
 
-
 def _get_worktree_isolation() -> bool:
     """delegation.worktree_isolation (bool, default False).
 
@@ -121,7 +115,6 @@ def _get_worktree_isolation() -> bool:
     local-backend-only; otherwise silently ignored (shared workspace as before).
     """
     return bool(_cfg().get("worktree_isolation", False))
-
 
 def _get_max_async_children() -> int:
     """Concurrency cap for background delegations == delegation.max_concurrent_children.
@@ -142,12 +135,10 @@ def _get_max_async_children() -> int:
         )
     return _get_max_concurrent_children()
 
-
 def _parse_timeout(raw: Any) -> Optional[float]:
     """Seconds → None (<= 0 disables) or max(30, value). Raises on non-numeric."""
     parsed = float(raw)
     return None if parsed <= 0 else max(30.0, parsed)
-
 
 def _get_child_timeout() -> Optional[float]:
     """Hard wall-clock cap for one child, or None (default: no timeout).
@@ -163,7 +154,6 @@ def _get_child_timeout() -> Optional[float]:
             "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)", val,
         ),
     )
-
 
 def _get_max_spawn_depth() -> int:
     """delegation.max_spawn_depth floored at 1 (no ceiling).
@@ -184,7 +174,6 @@ def _get_max_spawn_depth() -> int:
         logger.warning("delegation.max_spawn_depth=%d below floor %d; using %d", ival, _MIN_SPAWN_DEPTH, floored)
     return floored
 
-
 def _get_orchestrator_enabled() -> bool:
     """delegation.orchestrator_enabled kill switch (default True): False forces every child to leaf."""
     val = _cfg().get("orchestrator_enabled", True)
@@ -195,15 +184,12 @@ def _get_orchestrator_enabled() -> bool:
         return val.strip().lower() in {"true", "1", "yes", "on"}
     return True
 
-
 def _get_inherit_mcp_toolsets() -> bool:
     """Whether narrowed child toolsets should keep the parent's MCP toolsets."""
     return is_truthy_value(_cfg().get("inherit_mcp_toolsets"), default=True)
 
-
 def _normalized_runtime_url(value: Any) -> str:
     return str(value or "").strip().rstrip("/")
-
 
 def _inherit_parent_capabilities(parent_agent, override_provider, override_base_url) -> Optional[dict]:
     """Parent's endpoint-trust capability map for a child, or None.
@@ -218,7 +204,6 @@ def _inherit_parent_capabilities(parent_agent, override_provider, override_base_
     if not isinstance(parent_caps, dict):
         return None
     return {key: value for key, value in parent_caps.items() if isinstance(key, str) and isinstance(value, bool)}
-
 
 def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> Optional[str]:
     """Base URL the parent is actually calling (live client), not a stale attribute.
@@ -240,14 +225,12 @@ def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> 
             return url
     return fallback_base_url or None
 
-
 def _loaded_pool(key: Any):
     """``load_pool(key)`` when it holds credentials, else None."""
     from agent.credential_pool import load_pool
 
     pool = load_pool(key)
     return pool if pool is not None and pool.has_credentials() else None
-
 
 def _resolve_child_credential_pool(
     effective_provider: Optional[str],
@@ -301,7 +284,6 @@ def _resolve_child_credential_pool(
         logger.debug("Could not load credential pool for child provider '%s': %s", effective_provider, exc)
     return None
 
-
 def _merge_request_overrides(runtime_overrides, explicit_overrides):
     """Merge explicit ``delegation.request_overrides`` OVER runtime-derived ones.
 
@@ -329,13 +311,11 @@ def _merge_request_overrides(runtime_overrides, explicit_overrides):
         merged["extra_body"] = explicit_extra
     return merged or None
 
-
 # Native-SDK providers speak their own wire protocol and can't be reached via
 # chat_completions against a base_url: always take the runtime-provider path
 # (a configured base_url still flows through it, e.g. a Bedrock region).
 _NATIVE_SDK_PROVIDERS = frozenset({"bedrock", "vertex", "google", "google-genai"})
 _EXPLICIT_API_MODES = frozenset({"chat_completions", "codex_responses", "anthropic_messages"})
-
 
 def _require_pinned_command(command: Optional[str], message: str) -> None:
     """A pinned ACP transport command must exist on PATH — refuse loudly rather
@@ -346,7 +326,6 @@ def _require_pinned_command(command: Optional[str], message: str) -> None:
 
     if not _shutil.which(command):
         raise ValueError(message)
-
 
 def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
     """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
@@ -402,7 +381,6 @@ def _direct_endpoint_credentials(cfg_values: dict, explicit_request_overrides) -
         "max_output_tokens": max_output_tokens,
     }
 
-
 def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) -> dict:
     """``delegation.provider`` branch: full bundle via the runtime provider system."""
     configured_model, configured_provider = cfg_values["model"], cfg_values["provider"]
@@ -446,7 +424,6 @@ def _runtime_provider_credentials(cfg_values: dict, explicit_request_overrides) 
         "args": list(runtime.get("args") or []),
     }
 
-
 def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     """Resolve the child credential bundle from the ``delegation`` config section.
 
@@ -483,7 +460,6 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             "max_output_tokens": None,
         }
     return _runtime_provider_credentials(values, explicit_request_overrides)
-
 
 def _load_config() -> dict:
     """Return the ``delegation`` config section (read-only — do NOT mutate).

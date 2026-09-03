@@ -20,7 +20,6 @@ logger = logging.getLogger("tools.delegate_tool")
 # the parent-facing failure summary so every surface agrees.
 SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "error", "timeout"})
 
-
 def _safe_progress(cb: Any, event_type: Any, *args: Any, **kwargs: Any) -> None:
     """Invoke a child progress callback; relay failures never reach the run."""
     if not cb:
@@ -29,7 +28,6 @@ def _safe_progress(cb: Any, event_type: Any, *args: Any, **kwargs: Any) -> None:
         cb(event_type, *args, **kwargs)
     except Exception as e:
         logger.debug("Progress callback %s failed: %s", event_type, e)
-
 
 def _clean_error_text(error: Any, max_chars: int = 200) -> str:
     """Reduce an error payload (traceback / JSON wall) to one clean line: the
@@ -40,7 +38,6 @@ def _clean_error_text(error: Any, max_chars: int = 200) -> str:
         return ""
     line = lines[-1] if lines[0].startswith("Traceback") else lines[0]
     return line[: max_chars - 3] + "..." if len(line) > max_chars else line
-
 
 def format_subagent_failure_line(
     goal: Optional[str],
@@ -83,7 +80,6 @@ class DelegateEvent(str, enum.Enum):
     TASK_TOOL_STARTED = "delegate.tool_started"
     TASK_TOOL_COMPLETED = "delegate.tool_completed"
 
-
 # Legacy child-agent event strings → DelegateEvent.
 _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
     "_thinking": DelegateEvent.TASK_THINKING,
@@ -107,7 +103,6 @@ _EVENT_HANDLERS: Dict[Any, Optional[str]] = {
     DelegateEvent.TASK_TOOL_COMPLETED: None,
 }
 
-
 def _normalize_event(event_type: Any) -> Any:
     """Lifecycle string / DelegateEvent / legacy string / ``delegate.*`` string
     → dispatch key; None for unknown events."""
@@ -120,7 +115,6 @@ def _normalize_event(event_type: Any) -> Any:
         return DelegateEvent(event_type)
     except (ValueError, TypeError):
         return None
-
 
 def _build_child_system_prompt(
     goal: str,
@@ -213,7 +207,6 @@ def _build_child_system_prompt(
         )
     return "\n".join(parts)
 
-
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     """Best-effort local workspace hint for child prompts: only a concrete
     absolute directory is ever injected (never a fake container path)."""
@@ -236,10 +229,8 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
             return text
     return None
 
-
 _BATCH_ORDINALS: Dict[str, int] = {}
 _BATCH_ORDINALS_LOCK = threading.Lock()
-
 
 def format_batch_tag(delegation_id: Optional[str]) -> str:
     """Short human tag for a delegation batch: ``deleg_6a664903`` → ``set 1``
@@ -257,7 +248,6 @@ def format_batch_tag(delegation_id: Optional[str]) -> str:
         n = _BATCH_ORDINALS.setdefault(delegation_id, len(_BATCH_ORDINALS) + 1)
     return f"set {n}"
 
-
 def _batch_prefix(delegation_id: Optional[str], task_index: int, task_count: int) -> str:
     """``[set 2 · 3/9] `` for batch children, ``[set 2] `` for a lone child,
     ``[3/9] `` / ``""`` when the batch id is unknown."""
@@ -266,7 +256,6 @@ def _batch_prefix(delegation_id: Optional[str], task_index: int, task_count: int
         inner = f"{tag} · {task_index + 1}/{task_count}" if tag else f"{task_index + 1}/{task_count}"
         return f"[{inner}] "
     return f"[{tag}] " if tag else ""
-
 
 def _emit_parent_console(parent_agent, line: str) -> None:
     """Emit a progress line through ``parent_agent._safe_print`` when available
@@ -281,7 +270,6 @@ def _emit_parent_console(parent_agent, line: str) -> None:
             pass
     print(line)
 
-
 def _print_completion_line(parent_agent: Any, spinner_ref: Any, line: str) -> None:
     """Above-spinner line when a spinner exists (console fallback if it raises), else console."""
     if spinner_ref:
@@ -291,7 +279,6 @@ def _print_completion_line(parent_agent: Any, spinner_ref: Any, line: str) -> No
         except Exception:
             pass
     _emit_parent_console(parent_agent, f"  {line}")
-
 
 def _short(text: str, n: int) -> str:
     return (text[:n] + "...") if len(text) > n else text
@@ -435,7 +422,6 @@ class _ChildProgressRelay:
         method = _EVENT_HANDLERS.get(key, "_on_tool_started")
         if method is not None:
             getattr(self, method)(tool_name, preview, args, kwargs)
-
 
 def _build_child_progress_callback(
     task_index: int,

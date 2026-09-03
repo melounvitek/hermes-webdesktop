@@ -14,7 +14,6 @@ from urllib.parse import urlsplit, urlunsplit
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
 
-
 def _extract_output_tail(
     result: Dict[str, Any],
     *,
@@ -69,7 +68,6 @@ def _extract_output_tail(
     tail.reverse()  # restore chronological order for display
     return tail
 
-
 def _stringify_tool_content(content: Any) -> str:
     """Return a stable text representation for tool-result content.
 
@@ -92,7 +90,6 @@ def _stringify_tool_content(content: Any) -> str:
         return json.dumps(content, ensure_ascii=False, default=str)
     return str(content)
 
-
 _TOOL_INPUT_TARGET_KEYS = frozenset({
     "cwd",
     "destination_path",
@@ -111,7 +108,6 @@ _TOOL_INPUT_TARGET_KEYS = frozenset({
 })
 
 _TOOL_INPUT_URL_KEYS = frozenset({"endpoint", "url", "urls"})
-
 
 def _sanitize_tool_target(key: str, value: Any) -> Any:
     """Keep bounded side-effect targets while dropping URL secrets."""
@@ -140,10 +136,8 @@ def _sanitize_tool_target(key: str, value: Any) -> Any:
             return None
     return bounded
 
-
 def _empty_input_summary() -> Dict[str, Any]:
     return {"argument_keys": [], "targets": {}}
-
 
 def _sanitize_targets(mapping: Dict[str, Any]) -> Dict[str, Any]:
     """Keep only known side-effect target keys, each sanitized (URL secrets dropped)."""
@@ -155,7 +149,6 @@ def _sanitize_targets(mapping: Dict[str, Any]) -> Dict[str, Any]:
             if cleaned is not None:
                 targets[key] = cleaned
     return targets
-
 
 def _summarize_tool_arguments(arguments: Any) -> Dict[str, Any]:
     """Summarize argument names and side-effect targets without raw payloads."""
@@ -170,7 +163,6 @@ def _summarize_tool_arguments(arguments: Any) -> Dict[str, Any]:
     keys = sorted(str(key)[:128] for key in parsed)[:64]
     return {"argument_keys": keys, "targets": _sanitize_targets(parsed)}
 
-
 def _sanitize_tool_input_summary(summary: Any) -> Dict[str, Any]:
     """Re-sanitize a stored input summary before handing it to lifecycle hooks."""
     if not isinstance(summary, dict):
@@ -180,7 +172,6 @@ def _sanitize_tool_input_summary(summary: Any) -> Dict[str, Any]:
     targets = summary.get("targets")
     safe_targets = _sanitize_targets(targets) if isinstance(targets, dict) else {}
     return {"argument_keys": safe_keys, "targets": safe_targets}
-
 
 def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
     """Build a detached, metadata-only tool history for lifecycle hooks."""
@@ -210,7 +201,6 @@ def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
             "status": status,
         })
     return history
-
 
 def _looks_like_error_output(content: Any) -> bool:
     """Conservative stderr/error detector for tool-result previews.
@@ -242,7 +232,6 @@ def _looks_like_error_output(content: Any) -> bool:
     first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
     return first.startswith(("error:", "failed:", "traceback ", "exception:"))
 
-
 # Hard per-summary character ceiling layered on top of the dynamic
 # headroom budget (see _apply_summary_budget). Belt-and-suspenders for
 # models that ignore the "be concise" instruction. 0 disables the ceiling.
@@ -257,7 +246,6 @@ _SUMMARY_HEADROOM_FRACTION = 0.5
 # Floor so a single summary always gets a usable slice even when the parent is
 # already nearly full — below this we'd be truncating to noise.
 _MIN_SUMMARY_CHARS = 2000
-
 
 def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
     """Write a subagent's full summary to the delegation cache and return path.
@@ -287,7 +275,6 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
     except Exception as exc:
         logger.debug("Failed to spill subagent summary to file: %s", exc)
         return None
-
 
 def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[str, Optional[str]]:
     """Return (model_text, spill_path) for one over-budget summary.
@@ -341,7 +328,6 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
     model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n".join(footer_lines)
     return model_text, spill_path
 
-
 def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]:
     """Per-summary char budget from the parent's *remaining* context headroom
     (context length minus prompt tokens minus the compressor's output reserve),
@@ -373,7 +359,6 @@ def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]
     except Exception:
         logger.debug("Summary budget computation failed", exc_info=True)
         return None
-
 
 def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
     """Trim subagent summaries in-place so a batch can't overflow the parent's
@@ -422,13 +407,11 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
             spill_path or "none",
         )
 
-
 _PARENT_FINALIZATION_LOCK_GUARD = threading.Lock()
 
 _PARENT_FINALIZATION_FALLBACK_LOCK = threading.RLock()
 
 _CHILD_CONSTRUCTION_LOCK = threading.RLock()
-
 
 def _build_child_preserving_parent_tools(**kwargs):
     """Build a child without leaking its resolved toolset into the parent."""
@@ -443,7 +426,6 @@ def _build_child_preserving_parent_tools(**kwargs):
             model_tools._last_resolved_tool_names = parent_tool_names
     child._delegate_saved_tool_names = parent_tool_names
     return child
-
 
 def _parent_finalization_lock(parent_agent) -> threading.RLock:
     """Return the per-parent lock that serializes lifecycle side effects."""
@@ -462,7 +444,6 @@ def _parent_finalization_lock(parent_agent) -> threading.RLock:
                 return _PARENT_FINALIZATION_FALLBACK_LOCK
     return lock
 
-
 def _notify_memory_manager(results, task_list, child_by_index, parent_agent) -> None:
     memory = getattr(parent_agent, "_memory_manager", None) if parent_agent else None
     if not memory:
@@ -478,7 +459,6 @@ def _notify_memory_manager(results, task_list, child_by_index, parent_agent) -> 
             )
         except Exception:
             pass
-
 
 def _fire_subagent_stop_hooks(results, child_by_index, parent_agent) -> float:
     """Pop the model-hidden ``_child_role`` / ``_child_cost_usd`` fields from every
@@ -516,7 +496,6 @@ def _fire_subagent_stop_hooks(results, child_by_index, parent_agent) -> float:
             logger.debug("subagent_stop hook invocation failed", exc_info=True)
     return children_cost_total
 
-
 def _rollup_children_cost(parent_agent, children_cost_total: float) -> None:
     """Fold the children's spend into the parent's session cost (source/status
     only set when the parent had none of its own)."""
@@ -532,7 +511,6 @@ def _rollup_children_cost(parent_agent, children_cost_total: float) -> None:
     except Exception:
         logger.debug("Subagent cost rollup failed", exc_info=True)
 
-
 def _finalize_child_results(
     results: List[Dict[str, Any]],
     task_list: List[Dict[str, Any]],
@@ -545,7 +523,6 @@ def _finalize_child_results(
         child_by_index = {index: child for index, _task, child in children}
         _notify_memory_manager(results, task_list, child_by_index, parent_agent)
         _rollup_children_cost(parent_agent, _fire_subagent_stop_hooks(results, child_by_index, parent_agent))
-
 
 def _run_child_lifecycle(task_index: int, goal: str, child=None, parent_agent=None) -> Dict[str, Any]:
     """Run one child and apply the same host lifecycle used by delegate_task."""
