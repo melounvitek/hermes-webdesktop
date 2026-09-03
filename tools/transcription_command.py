@@ -54,7 +54,8 @@ _get_command_stt_output_format = partial(_command_output_format, formats=COMMAND
 
 def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
     """Transcript: non-empty output file > non-empty stdout (curl one-liners) > RuntimeError. JSON is returned raw."""
-    content = output_path.read_bytes().decode("utf-8", errors="replace").strip() if output_path.exists() else ""
+    content = (output_path.read_bytes().decode("utf-8", errors="replace").strip()
+               if output_path.exists() else "")
     if content or (stdout or "").strip():
         return content or stdout.strip()
     raise RuntimeError(f"Command STT provider wrote no output file at {output_path} and produced no stdout")
@@ -64,19 +65,16 @@ def _transcribe_command_stt(
     file_path: str, provider_name: str, config: Dict[str, Any], stt_config: Dict[str, Any],
     model_override: Optional[str] = None, language_override: Optional[str] = None,
     prompt: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
-
-    Placeholders (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``,
-    ``{output_path}`` (transcript file), ``{output_dir}``, ``{format}`` txt/json/srt/vtt,
-    ``{language}`` (default ``en``), ``{model}`` (empty when unset).
-    """
+    """Transcribe via a user-declared ``stt.providers.<name>: type: command``. Placeholders
+    (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``, ``{output_path}`` (transcript
+    file), ``{output_dir}``, ``{format}`` txt/json/srt/vtt, ``{language}`` (default ``en``),
+    ``{model}`` (empty when unset)."""
     from tools.transcription_tools import _resolve_stt_language
     if prompt:
         _log_prompt_unsupported(f"Command STT provider '{provider_name}'")
 
     def fail(error: str) -> Dict[str, Any]:
         return _error_result(error, provider=provider_name)
-
     command_template = str(config.get("command") or "").strip()
     if not command_template:
         return fail(f"stt.providers.{provider_name}.command is not configured")
@@ -128,12 +126,10 @@ def _dispatch_to_plugin_provider(
     model: Optional[str] = None, language: Optional[str] = None, prompt: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Route to a plugin-registered transcription provider; None when no plugin claims the name.
-
-    Invariants re-verified here so a caller refactor can't break them: built-in names never
-    reach the registry; a same-name command provider wins over a plugin. A matched plugin with
+    Invariants re-verified here so a caller refactor can't break them: built-in names never reach
+    the registry; a same-name command provider wins over a plugin. A matched plugin with
     ``is_available() == False`` returns an error envelope — not None — because the user
-    explicitly opted in via ``stt.provider``. Provider exceptions become the error envelope.
-    """
+    explicitly opted in via ``stt.provider``. Provider exceptions become the error envelope."""
     key = (provider or "").lower().strip()
     if not key or key in _NON_COMMAND_STT_NAMES:
         return None
@@ -212,12 +208,10 @@ def _apply_pre_transcription_hook(
     prompt: Optional[str], source: Optional[str],
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Fire the ``pre_transcription`` plugin hook; returns ``(model, language_override, prompt)``.
-
-    Gated on ``has_hook`` (the no-hook path never builds kwargs) and fail-open: any
-    plumbing error leaves the dispatch untouched. Results apply field-by-field in
-    registration order (last hook wins). ``language_override`` is None unless a hook
-    explicitly set ``language``, so backends keep their own config/env resolution.
-    """
+    Gated on ``has_hook`` (the no-hook path never builds kwargs) and fail-open: any plumbing error
+    leaves the dispatch untouched. Results apply field-by-field in registration order (last hook
+    wins). ``language_override`` is None unless a hook explicitly set ``language``, so backends keep
+    their own config/env resolution."""
     try:
         from hermes_cli.plugins import has_hook, invoke_hook
         if not has_hook("pre_transcription"):

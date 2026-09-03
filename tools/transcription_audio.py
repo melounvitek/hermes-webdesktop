@@ -58,15 +58,14 @@ _STT_M4A_ENCODE_ARGS = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a"
 def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None) -> None:
     """Run the shared STT m4a encode, optionally with an ``-af`` filter. Raises on failure; callers own the semantics."""
     filter_args = ["-af", audio_filter] if audio_filter else []
-    _run_quiet([ffmpeg, "-y", "-i", input_path, *filter_args, *_STT_M4A_ENCODE_ARGS, output_path], timeout=120)
+    _run_quiet([ffmpeg, "-y", "-i", input_path, *filter_args, *_STT_M4A_ENCODE_ARGS, output_path],
+               timeout=120)
 
 
 def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[str], Optional[str]]:
     """Transcode to a compact 16 kHz mono AAC/m4a for STT upload; ``(converted_path, None)`` or ``(None, error)``.
-
-    Newer OpenAI models reject containers ``whisper-1`` accepted (notably Ogg/Opus
-    voice notes) and gateway downloads may carry a misleading extension.
-    """
+    Newer OpenAI models reject containers ``whisper-1`` accepted (notably Ogg/Opus voice notes) and
+    gateway downloads may carry a misleading extension."""
     from tools.transcription_tools import _find_ffmpeg_binary, _run_ffmpeg_stt_encode
     ffmpeg = _find_ffmpeg_binary()
     if not ffmpeg:
@@ -207,18 +206,17 @@ _CLOUD_TRIM_MIN_INPUT_SECONDS = 12.0
 
 
 def _probe_audio_duration(file_path: str) -> Optional[float]:
-    """Return the audio duration in seconds via ffprobe, or None.
-
-    Canonical sync probe; ``gateway/run.py._probe_audio_duration`` and the
-    Telegram adapter carry local variants — keep the command shape in sync.
-    """
+    """Return the audio duration in seconds via ffprobe, or None. Canonical sync probe;
+    ``gateway/run.py._probe_audio_duration`` and the Telegram adapter carry local variants — keep
+    the command shape in sync."""
     from tools.transcription_tools import _find_ffprobe_binary
     ffprobe = _find_ffprobe_binary()
     if not ffprobe:
         return None
     try:
-        return float(_run_quiet([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of",
-                                 "default=noprint_wrappers=1:nokey=1", file_path], timeout=30).stdout.strip())
+        probe = _run_quiet([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of",
+                            "default=noprint_wrappers=1:nokey=1", file_path], timeout=30)
+        return float(probe.stdout.strip())
     except Exception:  # noqa: BLE001 - probe is best-effort
         return None
 
@@ -235,9 +233,7 @@ def _cloud_trim_settings(stt_config: Dict[str, Any]) -> tuple[bool, int, int]:
 
 def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> Optional[str]:
     """Return a silence-trimmed copy of *file_path* for cloud upload, or None (= upload the original).
-
-    On success the caller owns deleting the returned file's parent directory.
-    """
+    On success the caller owns deleting the returned file's parent directory."""
     from tools.transcription_tools import _find_ffmpeg_binary, _probe_audio_duration, _run_ffmpeg_stt_encode
     enabled, threshold_db, keep_ms = _cloud_trim_settings(stt_config)
     if not enabled:
@@ -277,8 +273,8 @@ def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> O
             logger.debug("Cloud STT silence trim discarded for %s: saves <%.0f%% (%.1fs -> %.1fs)",
                          name, _CLOUD_TRIM_MIN_SAVING * 100, original_duration, trimmed_duration)
             return None
-        logger.info("Trimmed silence from %s before cloud STT upload (%.1fs -> %.1fs, -%d%%)",
-                    name, original_duration, trimmed_duration, round((1 - trimmed_duration / original_duration) * 100))
+        logger.info("Trimmed silence from %s before cloud STT upload (%.1fs -> %.1fs, -%d%%)", name,
+                    original_duration, trimmed_duration, round((1 - trimmed_duration / original_duration) * 100))
         keep_result = True
         return trimmed_path
     except Exception as exc:  # noqa: BLE001 - trim is best-effort

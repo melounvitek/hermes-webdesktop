@@ -96,7 +96,7 @@ class SentenceChunker:
 
 
 class StreamingTTSProvider(ABC):
-    """Yields raw int16, little-endian, mono PCM chunks at ``sample_rate`` (built-in streamers: 24 kHz)."""
+    """Yields raw int16, little-endian, mono PCM chunks at ``sample_rate`` (built-ins: 24 kHz)."""
 
     sample_rate: int = 24000
     channels: int = 1
@@ -153,7 +153,8 @@ def resolve_streaming_provider(
     providers just to get streaming."""
     pinned = str((tts_config.get("streaming") or {}).get("provider") or "").lower().strip()
     if pinned == "auto":
-        return next((inst for name in _PROVIDER_PRIORITY if (inst := _try_instantiate(name, tts_config))), None)
+        return next((inst for name in _PROVIDER_PRIORITY
+                     if (inst := _try_instantiate(name, tts_config))), None)
     return _try_instantiate(pinned or (preferred or _get_provider(tts_config)).lower().strip(), tts_config)
 
 
@@ -274,7 +275,8 @@ class GeminiStreamer(StreamingTTSProvider):
 class XAIStreamer(StreamingTTSProvider):
     """xAI WebSocket TTS (``wss://api.x.ai/v1/tts``) → binary PCM frames (24 kHz mono int16).
     Credentials route through ``resolve_xai_http_credentials`` (OAuth or XAI_API_KEY), same as the
-    sync path. ``_collect_async`` bridges the async WS loop to the sync iterator contract (test seam)."""
+    sync path. ``_collect_async`` bridges the async WS loop to the sync iterator contract (test
+    seam)."""
 
     @staticmethod
     def available() -> bool:

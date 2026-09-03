@@ -121,13 +121,10 @@ def _get_idle_unload_seconds(local_cfg: Dict[str, Any]) -> int:
 
 
 def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto"):
-    """Load faster-whisper with graceful CUDA → CPU fallback.
-
-    ``device="auto"`` picks CUDA whenever the ctranslate2 wheel ships CUDA libs, even
-    on hosts without the NVIDIA runtime (WSL2, headless servers). Try the requested
-    config first; on a CUDA library load failure fall back to CPU + int8. Pass
-    ``stt.local.device`` / ``compute_type`` to pin.
-    """
+    """Load faster-whisper with graceful CUDA → CPU fallback. ``device="auto"`` picks CUDA
+    whenever the ctranslate2 wheel ships CUDA libs, even on hosts without the NVIDIA runtime (WSL2,
+    headless servers): try the requested config first; on a CUDA library load failure fall back to
+    CPU + int8. Pass ``stt.local.device`` / ``compute_type`` to pin."""
     force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
         # Importing ctranslate2 can itself abort on Apple Silicon/Rosetta when
@@ -194,11 +191,9 @@ def _confidence_thresholds(local_cfg: Dict[str, Any]) -> tuple[float, float]:
 
 
 def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_threshold: float) -> bool:
-    """True when a segment is very likely a silence hallucination.
-
-    Conservative AND gate (openai-whisper's own heuristic): non-speech AND low decode
-    confidence, so quiet-but-real speech survives. Unknown segment shapes are never dropped.
-    """
+    """True when a segment is very likely a silence hallucination. Conservative AND gate
+    (openai-whisper's own heuristic): non-speech AND low decode confidence, so quiet-but-real speech
+    survives. Unknown segment shapes are never dropped."""
     try:
         return (float(segment.no_speech_prob) > no_speech_threshold
                 and float(segment.avg_logprob) < logprob_threshold)
@@ -227,7 +222,6 @@ def _transcribe_local_command(
     from tools.transcription_tools import _prepare_local_audio, _resolve_stt_language
     if prompt:
         _log_prompt_unsupported("STT provider 'local_command'")
-
     command_template = _get_local_command_template()
     if not command_template:
         return _error_result(f"{LOCAL_STT_COMMAND_ENV} not configured and no local whisper binary was found")

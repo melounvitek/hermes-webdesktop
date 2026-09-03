@@ -111,7 +111,8 @@ def terminate_command_process_tree(proc: subprocess.Popen) -> None:
     except ImportError:
         psutil = None
     # Without psutil only the shell itself is signalled (children may survive).
-    signal = (lambda m: getattr(proc, m)()) if psutil is None else (lambda m: _signal_process_tree(psutil, proc, m))
+    signal = ((lambda m: getattr(proc, m)()) if psutil is None
+              else (lambda m: _signal_process_tree(psutil, proc, m)))
     signal("terminate")
     try:
         proc.wait(timeout=2)
@@ -122,7 +123,7 @@ def terminate_command_process_tree(proc: subprocess.Popen) -> None:
 def command_env_passthrough(config: Dict[str, Any]) -> list:
     """``env_passthrough`` allowlist: parent env vars copied back into the secret-scrubbed child env."""
     raw = config.get("env_passthrough")
-    return [str(item).strip() for item in raw if str(item).strip()] if isinstance(raw, (list, tuple)) else []
+    return [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, (list, tuple)) else []
 
 
 def command_failure_detail(exc: subprocess.CalledProcessError) -> str:
@@ -211,7 +212,6 @@ def run_command_provider(
 
 
 # ---- Generic ``<section>.providers.<name>`` config layer (TTS and STT share it) ----
-
 def _get_provider_section(config: Dict[str, Any], name: str) -> Dict[str, Any]:
     """Return ``config[name]`` if it's a dict, else an empty dict."""
     section = config.get(name) if isinstance(config, dict) else None
@@ -219,8 +219,8 @@ def _get_provider_section(config: Dict[str, Any], name: str) -> Dict[str, Any]:
 
 
 def _named_provider_config(config: Dict[str, Any], name: str, builtins: FrozenSet[str]) -> Dict[str, Any]:
-    """``<section>.providers.<name>`` (canonical), else ``<section>.<name>`` for non-built-in names only —
-    refused for built-ins so a user's ``openai:`` block still means the OpenAI provider, not a command."""
+    """``<section>.providers.<name>`` (canonical), else ``<section>.<name>`` for non-built-in names
+    only — refused for built-ins so a user's ``openai:`` block still means OpenAI, not a command."""
     section = _get_provider_section(config, "providers").get(name)
     if isinstance(section, dict):
         return section
@@ -310,7 +310,7 @@ def _generate_command_tts(
     text: str, output_path: str, provider_name: str, config: Dict[str, Any], tts_config: Dict[str, Any],
 ) -> str:
     """Generate speech by running a user-configured shell command; returns the audio path it wrote.
-    Raises ``ValueError`` for invalid provider config, ``RuntimeError`` for timeouts / non-zero exits / empty output."""
+    Raises ``ValueError`` for bad provider config, ``RuntimeError`` for timeouts / bad exits / no output."""
     command_template = str(config.get("command") or "").strip()
     if not command_template:
         raise ValueError(f"tts.providers.{provider_name}.command is not configured")
@@ -324,8 +324,9 @@ def _generate_command_tts(
         text_path.write_text(text, encoding="utf-8")
         placeholders = {
             "input_path": str(text_path), "text_path": str(text_path), "output_path": str(output),
-            "format": _get_command_tts_output_format(config, str(output)), "voice": str(config.get("voice", "")),
-            "model": str(config.get("model", "")), "speed": str(config.get("speed", tts_config.get("speed", ""))),
+            "format": _get_command_tts_output_format(config, str(output)),
+            "voice": str(config.get("voice", "")), "model": str(config.get("model", "")),
+            "speed": str(config.get("speed", tts_config.get("speed", ""))),
         }
         command = render_command_template(command_template, placeholders)
         try:

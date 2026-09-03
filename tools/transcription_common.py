@@ -61,10 +61,8 @@ def _ok_result(transcript: str, provider: str) -> Dict[str, Any]:
 
 def _lazy_ensure_quietly(dep: str) -> None:
     """Best-effort ``tools.lazy_deps.ensure(dep, prompt=False)``; failures are swallowed.
-
-    prompt=False: a bare input() deadlocks under the interactive CLI where
-    prompt_toolkit owns stdin; installs are gated by ``security.allow_lazy_installs``.
-    """
+    prompt=False: a bare input() deadlocks under the interactive CLI where prompt_toolkit owns
+    stdin; installs are gated by ``security.allow_lazy_installs``."""
     try:
         from tools.lazy_deps import ensure
         ensure(dep, prompt=False)

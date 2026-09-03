@@ -38,10 +38,8 @@ def _has_xai_stt_credentials() -> bool:
 
 def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
     """Run ``body(client)`` on a fresh OpenAI SDK client (30s timeout, no retries); always closed.
-
-    Errors map to the shared envelope. APIConnectionError is checked before APITimeoutError
-    (its subclass) so timeouts report as connection errors, as they always have.
-    """
+    Errors map to the shared envelope. APIConnectionError is checked before APITimeoutError (its
+    subclass) so timeouts report as connection errors, as they always have."""
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
@@ -96,13 +94,13 @@ def _transcribe_groq(
 
     def _run(client):
         with open(file_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=audio_file, model=model_name, response_format="text", **_sdk_prompt_kwargs(language, prompt))
+            transcription = client.audio.transcriptions.create(file=audio_file, model=model_name,
+                                                               response_format="text",
+                                                               **_sdk_prompt_kwargs(language, prompt))
         transcript_text = str(transcription).strip()
         logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
                      Path(file_path).name, model_name, language or "auto", len(transcript_text))
         return _ok_result(transcript_text, "groq")
-
     return _with_openai_client(api_key, GROQ_BASE_URL, file_path, "Groq", _run)
 
 
@@ -110,11 +108,9 @@ def _transcribe_openai(
     file_path: str, model_name: str, *, api_key: Optional[str] = None,
     base_url: Optional[str] = None, provider_label: str = "openai", language: Optional[str] = None,
     prompt: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
-
-    Shared by every OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/
-    ``base_url`` skip the OpenAI-only auth chain; ``provider_label`` names the response's provider.
-    """
+    """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape, shared by every
+    OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/``base_url`` skip the
+    OpenAI-only auth chain; ``provider_label`` names the response's provider."""
     from tools.transcription_tools import _HAS_OPENAI, _resolve_openai_audio_client_config, _resolve_stt_language
     if api_key is None:
         try:
@@ -149,7 +145,6 @@ def _transcribe_openai(
                 create_kwargs["prompt"] = prompt
             with open(path, "rb") as audio_file:
                 return client.audio.transcriptions.create(file=audio_file, **create_kwargs)
-
         with tempfile.TemporaryDirectory(prefix="hermes-stt-") as work_dir:
             try:
                 transcription = _create_transcription(file_path)
@@ -167,7 +162,6 @@ def _transcribe_openai(
         logger.info("Transcribed %s via %s (%s, %d chars)",
                     Path(file_path).name, provider_label, model_name, len(transcript_text))
         return _ok_result(transcript_text, provider_label)
-
     return _with_openai_client(api_key, base_url, file_path, provider_label, _run)
 
 
@@ -197,7 +191,6 @@ def _transcribe_mistral(
 
 
 # ---- REST multipart backends (xAI, ElevenLabs) ----------------------------
-
 def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, data: Dict[str, str]):
     import requests
     with open(file_path, "rb") as audio_file:
@@ -208,12 +201,10 @@ def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, dat
 def _rest_provider(
     file_path: str, provider: str, label: str, post: Callable[[], Any], extract_detail,
     extract_text, log: Callable[[str, Dict[str, Any]], None]) -> Dict[str, Any]:
-    """Shared multipart REST flow: ``post()`` -> ``log(text, body)`` -> ok envelope.
-
-    Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via *extract_detail*, else
-    the first 300 body chars); empty text -> the ``no_speech`` envelope (silence is non-fatal);
-    exceptions -> ``_cloud_failure``.
-    """
+    """Shared multipart REST flow: ``post()`` -> ``log(text, body)`` -> ok envelope. Non-200 ->
+    ``"<label> API error (HTTP n): detail"`` (JSON detail via *extract_detail*, else the first 300
+    body chars); empty text -> the ``no_speech`` envelope (silence is non-fatal); exceptions ->
+    ``_cloud_failure``."""
     try:
         response = post()
         if response.status_code != 200:
@@ -355,7 +346,6 @@ def _transcribe_deepinfra(
 
 
 # ---- OpenAI audio credential resolution -----------------------------------
-
 def _is_local_or_private_url(url: str) -> bool:
     """True for loopback/RFC-1918/LAN-internal hosts, where an empty ``stt.openai.api_key`` is acceptable
     (local OpenAI-compatible servers ignore the auth header — no sham ``api_key: not-needed`` needed)."""
@@ -404,15 +394,16 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
     if selected == NOUS_MANAGED_PROVIDER:
         managed = _managed()
         if managed is None:
-            raise ValueError(selection_error(
-                "stt", NOUS_MANAGED_PROVIDER, "the Nous Tool Gateway is not available (not entitled or unreachable)"))
+            raise ValueError(selection_error("stt", NOUS_MANAGED_PROVIDER,
+                                             "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         return managed
     direct = _direct_openai_credentials(openai_cfg.get("api_key", ""), openai_cfg.get("base_url", ""))
     if direct is not None:
         return direct
     if selected is not None:
         raise ValueError(selection_error(
-            "stt", selected, "neither stt.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"))
+            "stt", selected,
+            "neither stt.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"))
     managed = _managed()
     if managed is None:
         message = "Neither stt.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"

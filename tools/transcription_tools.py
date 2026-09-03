@@ -104,7 +104,6 @@ _IDLE_UNLOAD_CHECK_INTERVAL = 30  # seconds between idle checks
 
 
 # ---- Config helpers -----------------------------------------------------
-
 def _load_stt_config() -> dict:
     """Load the ``stt`` section from user config, falling back to defaults."""
     try:
@@ -122,11 +121,9 @@ def is_stt_enabled(stt_config: Optional[dict] = None) -> bool:
 def _resolve_stt_language(
     provider_key: str, stt_config: Optional[Dict[str, Any]] = None, *, extra_keys: tuple = ()
 ) -> Optional[str]:
-    """Language hint for an STT provider, first non-empty wins (never "").
-
-    ``stt.<provider>.language`` (plus *extra_keys* aliases, e.g. ``language_code``) >
-    ``stt.language`` > ``HERMES_LOCAL_STT_LANGUAGE`` env > None (provider auto-detects).
-    """
+    """Language hint for an STT provider, first non-empty wins (never ""): ``stt.<provider>.language``
+    (plus *extra_keys* aliases, e.g. ``language_code``) > ``stt.language`` > ``HERMES_LOCAL_STT_LANGUAGE``
+    env > None (provider auto-detects)."""
     if stt_config is None:
         stt_config = _load_stt_config()
     provider_cfg = _get_stt_section(stt_config, provider_key)
@@ -156,7 +153,6 @@ def _is_local_stt_provider(provider: str, stt_config: Dict[str, Any]) -> bool:
 
 
 # ---- Provider resolution ------------------------------------------------
-
 def _has_key(env_var: str, provider: str, *, needs_openai: bool = False, needs_mistral: bool = False):
     """Availability probe factory: optional SDK flag AND a resolvable API key."""
     def probe() -> bool:
@@ -293,7 +289,6 @@ def _get_provider(stt_config: dict) -> str:
 
 
 # ---- Provider: local (faster-whisper) -----------------------------------
-
 def _unload_local_model() -> None:
     """Release the cached local whisper model. Thread-safe via the model lock."""
     global _local_model, _local_model_name
@@ -305,13 +300,10 @@ def _unload_local_model() -> None:
 
 
 def _start_idle_unload_watcher(timeout_seconds: int) -> None:
-    """Ensure the single idle-unload watcher thread is running.
-
-    The loop re-reads ``stt.local.unload_after_idle_seconds`` every cycle so config edits
-    apply within one interval; ``timeout_seconds`` seeds the first cycle so a just-written
-    config is honored even if a concurrent read races. The thread exits after unloading,
-    when the timeout becomes 0, or when the model is already gone.
-    """
+    """Ensure the single idle-unload watcher thread is running. The loop re-reads
+    ``stt.local.unload_after_idle_seconds`` every cycle so config edits apply within one interval;
+    ``timeout_seconds`` seeds the first cycle so a just-written config is honored even if a
+    concurrent read races. Exits after unloading, when the timeout becomes 0, or when the model is gone."""
     global _idle_unload_thread
     with _idle_unload_mgmt_lock:
         if _idle_unload_thread is not None and _idle_unload_thread.is_alive():
@@ -328,7 +320,6 @@ def _start_idle_unload_watcher(timeout_seconds: int) -> None:
                 if time.monotonic() - _last_transcription_time >= timeout:
                     _unload_local_model()
                     break
-
         _idle_unload_stop.clear()
         _idle_unload_thread = threading.Thread(target=_watch, name="hermes-stt-idle-unload", daemon=True)
         _idle_unload_thread.start()
@@ -341,10 +332,8 @@ def _touch_transcription_time() -> None:
 
 
 def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
-    """Cached faster-whisper model, (re)loaded under a double-checked lock when needed.
-
-    The returned strong reference stays valid even if the idle watcher nulls the global mid-transcription.
-    """
+    """Cached faster-whisper model, (re)loaded under a double-checked lock when needed. The returned
+    strong reference stays valid even if the idle watcher nulls the global mid-transcription."""
     global _local_model, _local_model_name
     model = _local_model
     if model is None or _local_model_name != model_name:
@@ -385,7 +374,8 @@ def _transcribe_local(
             return _error_result("Local whisper model failed to load")
         # pre_transcription hook overrides win over config-resolved values.
         transcribe_kwargs = build_local_transcribe_kwargs(stt_config)
-        transcribe_kwargs.update({k: v for k, v in (("language", language), ("initial_prompt", prompt)) if v})
+        transcribe_kwargs.update({k: v for k, v in (("language", language), ("initial_prompt", prompt))
+                                  if v})
         try:
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
         except Exception as exc:
@@ -411,7 +401,6 @@ def _transcribe_local(
 
 
 # ---- Public API ---------------------------------------------------------
-
 def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
     """Refuse to ship a credential store (auth.json, .env, OAuth tokens) to an STT provider.
     Mirrors the image-gen / video-gen read guards."""
@@ -422,11 +411,9 @@ def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
 
 def _transcribe_prepared_audio(
     file_path: str, model: Optional[str] = None, source: Optional[str] = None) -> Dict[str, Any]:
-    """Transcribe a validated audio file with the configured STT provider.
-
-    ``model`` overrides the config default; ``source`` is a caller-surface label
-    (``"gateway"``, ``"voice_mode"``) forwarded to the ``pre_transcription`` hook only.
-    """
+    """Transcribe a validated audio file with the configured STT provider. ``model`` overrides the
+    config default; ``source`` is a caller-surface label (``"gateway"``, ``"voice_mode"``) forwarded
+    to the ``pre_transcription`` hook only."""
     # Validate before provider resolution so invalid files can't trigger provider setup
     # or lazy installation; the remote-upload size cap applies to non-local only.
     error = _read_block_error(file_path) or _validate_audio_file(file_path, enforce_size_limit=False)
@@ -536,11 +523,8 @@ def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, A
 
 def transcribe_audio(
     file_path: str, model: Optional[str] = None, source: Optional[str] = None) -> Dict[str, Any]:
-    """Validate, preprocess supported inputs, and dispatch transcription.
-
-    ``source`` is a caller-surface label (``"gateway"``, ``"voice_mode"``) forwarded to
-    the ``pre_transcription`` hook for observability only.
-    """
+    """Validate, preprocess supported inputs, and dispatch transcription. ``source`` is a caller-surface
+    label (``"gateway"``, ``"voice_mode"``) forwarded to the ``pre_transcription`` hook only."""
     # Secret-store refusal runs before ANY validation so the error names the real reason.
     blocked = _read_block_error(file_path)
     if blocked:
@@ -563,11 +547,8 @@ def transcribe_audio(
 
 
 def transcribe_audio_local_fallback(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
-    """Try an already-installed local STT backend without changing config.
-
-    Passive inbound-media recovery after the configured provider failed: never
-    lazy-installs or falls through to a cloud provider.
-    """
+    """Try an already-installed local STT backend without changing config: passive inbound-media
+    recovery after the configured provider failed — never lazy-installs or falls through to cloud."""
     error = _validate_audio_file(file_path)
     if error:
         return error
