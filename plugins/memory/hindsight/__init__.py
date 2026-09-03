@@ -1130,13 +1130,11 @@ class HindsightMemoryProvider(MemoryProvider):
         document_id, update_mode = self._resolve_retain_target(self._document_id)
         # Append-capable APIs get only the delta since the last retain; legacy /
         # overwrite APIs need the whole session because each retain replaces the document.
-        if update_mode == "append":
-            turns_to_retain = self._session_turns[self._last_retained_turn_count:]
-            if not turns_to_retain:
-                logger.debug("sync_turn: skipped append retain; no new turns since last retain")
-                return
-        else:
-            turns_to_retain = list(self._session_turns)
+        start = self._last_retained_turn_count if update_mode == "append" else 0
+        turns_to_retain = self._session_turns[start:]
+        if not turns_to_retain:
+            logger.debug("sync_turn: skipped append retain; no new turns since last retain")
+            return
         logger.debug("sync_turn: retaining %d/%d turns, payload %d chars",
                      len(turns_to_retain), len(self._session_turns), sum(len(t) for t in turns_to_retain))
 

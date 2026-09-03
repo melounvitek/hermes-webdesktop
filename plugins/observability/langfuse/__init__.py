@@ -187,67 +187,68 @@ def _get_langfuse() -> Optional[Langfuse]:
         # Re-check: a racing thread may have finished init while we waited.
         if _LANGFUSE_CLIENT is not None:
             return None if _LANGFUSE_CLIENT is _INIT_FAILED else _LANGFUSE_CLIENT
+        client = _build_client()
+        _LANGFUSE_CLIENT = _INIT_FAILED if client is None else client
+        if client is not None:
+            # atexit is LIFO: registering AFTER the SDK's constructor means our
+            # finalizer runs first, so root spans ended there still get flushed
+            # by the SDK (short-lived processes: kanban workers, chat -q, cron).
+            atexit.register(_finalize_all_traces)
+        return client
 
-        if Langfuse is None:
-            logger.warning(
-                "Langfuse plugin is enabled but the langfuse SDK is unavailable; "
-                "tracing is disabled. Run `hermes tools` and configure Langfuse "
-                "Observability to reinstall it."
-            )
-            _LANGFUSE_CLIENT = _INIT_FAILED
-            return None
 
-        public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
-        secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
-        if not (public_key and secret_key):
-            _LANGFUSE_CLIENT = _INIT_FAILED
-            return None
+def _build_client() -> Optional[Langfuse]:
+    """Construct the SDK client from env, or None (with one warning) when it can't be."""
+    if Langfuse is None:
+        logger.warning(
+            "Langfuse plugin is enabled but the langfuse SDK is unavailable; "
+            "tracing is disabled. Run `hermes tools` and configure Langfuse "
+            "Observability to reinstall it."
+        )
+        return None
 
-        # The SDK does not validate keys at construction; placeholder keys
-        # would fail silently at flush time (#23823). Warn once here instead.
-        placeholder_issues = list(filter(None, (
-            _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
-            _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key),
-        )))
-        if placeholder_issues:
-            logger.warning(
-                "Langfuse plugin: credentials look like placeholders, traces will "
-                "NOT be emitted (%s). Set real Langfuse keys (pk-lf-... / sk-lf-...) "
-                "or unset HERMES_LANGFUSE_PUBLIC_KEY / HERMES_LANGFUSE_SECRET_KEY to "
-                "silence this warning.",
-                "; ".join(placeholder_issues),
-            )
-            _LANGFUSE_CLIENT = _INIT_FAILED
-            return None
+    public_key = _env("HERMES_LANGFUSE_PUBLIC_KEY") or _env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _env("HERMES_LANGFUSE_SECRET_KEY") or _env("LANGFUSE_SECRET_KEY")
+    if not (public_key and secret_key):
+        return None
 
-        kwargs: Dict[str, Any] = {
-            "public_key": public_key,
-            "secret_key": secret_key,
-            "base_url": _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
-        }
-        for key, name in (("environment", "ENV"), ("release", "RELEASE")):
-            value = _env(f"HERMES_LANGFUSE_{name}") or _env(f"LANGFUSE_{name}")
-            if value:
-                kwargs[key] = value
-        sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
-        if sample_rate:
-            try:
-                kwargs["sample_rate"] = float(sample_rate)
-            except ValueError:
-                logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
+    # The SDK does not validate keys at construction; placeholder keys
+    # would fail silently at flush time (#23823). Warn once here instead.
+    placeholder_issues = list(filter(None, (
+        _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
+        _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key),
+    )))
+    if placeholder_issues:
+        logger.warning(
+            "Langfuse plugin: credentials look like placeholders, traces will "
+            "NOT be emitted (%s). Set real Langfuse keys (pk-lf-... / sk-lf-...) "
+            "or unset HERMES_LANGFUSE_PUBLIC_KEY / HERMES_LANGFUSE_SECRET_KEY to "
+            "silence this warning.",
+            "; ".join(placeholder_issues),
+        )
+        return None
 
+    kwargs: Dict[str, Any] = {
+        "public_key": public_key,
+        "secret_key": secret_key,
+        "base_url": _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
+    }
+    for key, name in (("environment", "ENV"), ("release", "RELEASE")):
+        value = _env(f"HERMES_LANGFUSE_{name}") or _env(f"LANGFUSE_{name}")
+        if value:
+            kwargs[key] = value
+    sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
+    if sample_rate:
         try:
-            _LANGFUSE_CLIENT = Langfuse(**kwargs)
-        except Exception as exc:  # pragma: no cover - fail-open
-            logger.warning("Could not initialize Langfuse client: %s", exc)
-            _LANGFUSE_CLIENT = _INIT_FAILED
-            return None
+            kwargs["sample_rate"] = float(sample_rate)
+        except ValueError:
+            logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
 
-        # atexit is LIFO: registering AFTER the SDK's constructor means our
-        # finalizer runs first, so root spans ended there still get flushed
-        # by the SDK (short-lived processes: kanban workers, chat -q, cron).
-        atexit.register(_finalize_all_traces)
-        return _LANGFUSE_CLIENT
+    try:
+        return Langfuse(**kwargs)
+    except Exception as exc:  # pragma: no cover - fail-open
+        logger.warning("Could not initialize Langfuse client: %s", exc)
+        return None
 
 
 def _scope_prefix(task_id: str, session_id: str) -> str:
@@ -502,12 +503,10 @@ def _serialize_assistant_message(message: Any) -> dict[str, Any]:
 def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
                               base_url: str) -> tuple[dict[str, int], dict[str, float]]:
     """Translate canonical Hermes usage into Langfuse usage and cost maps."""
-    usage_details: Dict[str, int] = {}
-    for key, attr, _ in _USAGE_FIELDS:
-        tokens = getattr(canonical, attr)
-        if tokens or key in ("input", "output"):
-            usage_details[key] = tokens
-
+    usage_details: Dict[str, int] = {
+        key: tokens for key, attr, _ in _USAGE_FIELDS
+        if (tokens := getattr(canonical, attr)) or key in ("input", "output")
+    }
     cost_details: Dict[str, float] = {}
     try:
         from agent.usage_pricing import estimate_usage_cost, resolve_billing_route
@@ -540,12 +539,11 @@ def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
         from agent.usage_pricing import get_pricing_entry
 
         entry = get_pricing_entry(model, provider=provider, base_url=base_url)
-        if entry:
-            for key, attr, rate_attr in _USAGE_FIELDS:
-                rate = getattr(entry, rate_attr, None) if rate_attr else None
-                tokens = getattr(canonical, attr)
-                if rate is not None and tokens:
-                    cost_details[key] = float(Decimal(tokens) * rate / Decimal("1000000"))
+        for key, attr, rate_attr in _USAGE_FIELDS if entry else ():
+            rate = getattr(entry, rate_attr, None) if rate_attr else None
+            tokens = getattr(canonical, attr)
+            if rate is not None and tokens:
+                cost_details[key] = float(Decimal(tokens) * rate / Decimal("1000000"))
     except Exception:  # pragma: no cover - canonical total remains usable
         pass
 
