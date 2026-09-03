@@ -686,7 +686,6 @@ def build_session_key(
     chat_type_slot = source.chat_type
     if thread_id and not source.thread_id:
         chat_type_slot = "thread"
-    participant_id = _canonical_participant(source)
     if is_dm:
         # No chat_id: fall back to the sender id before the bare per-platform sink, or every
         # chat_id-less DM shares one agent.
@@ -695,6 +694,8 @@ def build_session_key(
         # Threads are shared by default; per-user isolation only via thread_sessions_per_user or
         # outside a thread.
         isolate_user = group_sessions_per_user and not (thread_id and not thread_sessions_per_user)
+    # Duck-typed sources may lack user_id_alt: read the participant only when it matters.
+    participant_id = _canonical_participant(source) if (isolate_user or not is_dm) else None
 
     parts = [_session_key_namespace(profile), source.platform.value, chat_type_slot]
     if source.platform == Platform.SLACK and source.scope_id:
