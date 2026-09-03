@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from gateway import hosted_rooms
-from gateway.hosted_rooms_common import DbPath, compact_json
+from gateway.hosted_rooms_common import DbPath, compact_json, fenced_update
 
 
 MAX_ACTIVE_POLICY_EVENTS = 64
@@ -292,11 +292,10 @@ class HostedRoomPolicyCheckpoint:
                 _require_room(conn, room_id)
                 for event in rows:
                     self._apply_event(conn, event)
-                updated = conn.execute(
-                    "UPDATE hosted_room_policy_cursors SET through_seq=?, updated_at=? WHERE room_id=?",
-                    (next_cursor, float(rows[-1].get("created_at") or 0), room_id))
-                if updated.rowcount != 1:
-                    raise RuntimeError("room policy cursor disappeared during replay")
+                fenced_update(
+                    conn, "UPDATE hosted_room_policy_cursors SET through_seq=?, updated_at=? WHERE room_id=?",
+                    (next_cursor, float(rows[-1].get("created_at") or 0), room_id),
+                    RuntimeError("room policy cursor disappeared during replay"))
             cursor = next_cursor
         return cursor
 

@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from gateway.hosted_rooms_common import (
-    DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite, table_columns,
-    table_exists, transaction, utf8_len)
+    DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, fenced_update as _fenced_update,
+    identifier, open_sqlite, table_columns, table_exists, transaction, utf8_len)
 
 PROTOCOL_VERSION = 2
 MAX_ROOM_ID_CHARS = 128
@@ -62,7 +62,6 @@ _OPTIONAL_ACTOR_FIELDS = (
 _ACTOR_FIELDS = frozenset({"kind", "id", *(field for field, _ in _OPTIONAL_ACTOR_FIELDS)})
 
 # --- schema -----------------------------------------------------------------
-
 _REMOTE_RUN_IDENTITY_COLUMNS = (
     "room_id", "home_install_id", "authority_gateway_id", "authority_epoch", "member_id", "target_install_id",
     "target_profile", "task_id", "execution_generation")
@@ -156,7 +155,6 @@ _REQUIRED_COLUMNS = tuple(
 _REMOTE_RUN_SCHEMA_COLUMNS = _REQUIRED_COLUMNS[4][1]
 
 # --- SQL fragments (statement text must stay byte-stable after whitespace normalisation) ---
-
 _EVENT_COLUMNS = ("room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at")
 _SELECT_EVENT = f"SELECT {_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=? AND event_id=?"
 _INSERT_EVENT = (f"INSERT INTO hosted_room_events ({_EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
@@ -206,7 +204,6 @@ class AuthoritySupersededError(AuthorityConflictError):
 
 
 # --- validation ---------------------------------------------------------------
-
 _canonical_json = partial(canonical_json, error=HostedRoomError, ensure_ascii=False)
 _validate_identifier = partial(identifier, error=HostedRoomError)
 _room_id = partial(_validate_identifier, label="room_id", max_chars=MAX_ROOM_ID_CHARS)
@@ -462,12 +459,6 @@ def _require_authority(room: sqlite3.Row, gateway_id: str, epoch: int, message: 
         raise AuthorityConflictError(message)
 
 
-def _fenced_update(conn: sqlite3.Connection, sql: str, params: tuple, error: Exception) -> None:
-    """Run a compare-and-swap UPDATE; anything but exactly one row means the fence was lost."""
-    if conn.execute(sql, params).rowcount != 1:
-        raise error
-
-
 def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> sqlite3.Row:
     """Re-read a row this transaction just wrote; a miss is an invariant violation."""
     row = conn.execute(sql, params).fetchone()
@@ -540,7 +531,6 @@ def _prepare_event(
 
 
 # --- retention -------------------------------------------------------------------
-
 # Deleted in this order when a disbanded room's payload is purged.
 _DEPENDENT_TABLES = (
     "hosted_room_policy_transcript_state", "hosted_room_policy_transcript", "hosted_room_policy_publications",

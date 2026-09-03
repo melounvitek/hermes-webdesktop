@@ -19,7 +19,8 @@ from functools import partial
 from typing import Any, Callable, Literal, get_args
 
 from gateway.hosted_rooms_common import (
-    DbPath, bounded_int, canonical_json, compact_json, connect, identifier, table_columns, text, transaction)
+    DbPath, bounded_int, canonical_json, compact_json, connect, fenced_update, identifier, table_columns, text,
+    transaction)
 
 Clock = Callable[[], float]
 TaskStatus = Literal["queued", "running", "settled", "failed", "cancelled", "indeterminate", "deferred", "stopping"]
@@ -473,8 +474,7 @@ def _transition(
             _require_active_lease(conn, lease, now=now)
         if guard is not None:
             guard(row)
-        if conn.execute(sql, params).rowcount != 1:
-            raise StaleTaskError(stale)
+        fenced_update(conn, sql, params, StaleTaskError(stale))
         return _task_from_row(_load_task(conn, identity))
 
 
@@ -539,16 +539,15 @@ def acquire_lease(
             return _lease_from_row({**dict(row), "expires_at": renewed_expiry})
         if same_authority and live:
             raise LeaseHeldError("room driver lease is held by another generation")
-        updated = conn.execute("""UPDATE hosted_room_driver_leases
+        fenced_update(conn, """UPDATE hosted_room_driver_leases
                SET gateway_id=?, authority_epoch=?, process_generation=?, lease_generation=lease_generation + 1,
                    expires_at=?, acquired_at=?, updated_at=?, released_at=NULL
                WHERE room_id=? AND lease_generation=? AND (
                    gateway_id != ? OR authority_epoch != ? OR released_at IS NOT NULL OR expires_at <= ?)""",
             (
                 gateway_id, authority_epoch, process_generation, expires_at, now, now, room_id,
-                int(row["lease_generation"]), gateway_id, authority_epoch, now))
-        if updated.rowcount != 1:
-            raise LeaseHeldError("room driver lease changed during acquisition")
+                int(row["lease_generation"]), gateway_id, authority_epoch, now),
+            LeaseHeldError("room driver lease changed during acquisition"))
         return _lease_from_row(conn.execute(_SELECT_LEASE, (room_id,)).fetchone(), reclaimed=True)
 
 
@@ -558,12 +557,11 @@ def renew_lease(db_path: DbPath, lease: DriverLease, *, ttl_seconds: Any, clock:
     with _transaction(db_path) as conn:
         current = _require_active_lease(conn, lease, now=now)
         expires_at = max(float(current["expires_at"]), requested_expiry)
-        updated = conn.execute("""UPDATE hosted_room_driver_leases SET expires_at=?, updated_at=?
+        fenced_update(conn, """UPDATE hosted_room_driver_leases SET expires_at=?, updated_at=?
                WHERE room_id=? AND gateway_id=? AND process_generation=?
                  AND lease_generation=? AND released_at IS NULL AND expires_at > ?""",
-            (expires_at, now, lease.room_id, *_run_fence(lease), now))
-        if updated.rowcount != 1:
-            raise StaleLeaseError("driver lease changed during renewal")
+            (expires_at, now, lease.room_id, *_run_fence(lease), now),
+            StaleLeaseError("driver lease changed during renewal"))
         return dataclasses.replace(lease, expires_at=expires_at, reclaimed=False)
 
 
@@ -640,15 +638,13 @@ def start_task(
         if next_queued is None or next_queued["task_id"] != identity.task_id:
             raise InvalidTaskTransitionError("task is not next in the hosted room event order")
         execution_generation = int(row["execution_generation"]) + 1
-        updated = conn.execute("""UPDATE hosted_room_driver_tasks
+        fenced_update(conn, """UPDATE hosted_room_driver_tasks
                SET status='running', execution_generation=?, run_gateway_id=?, run_process_generation=?,
                    run_lease_generation=?, started_at=?, updated_at=?
                WHERE room_id=? AND task_id=? AND status='queued' AND cancel_generation=?""",
             (
                 execution_generation, *_run_fence(lease), now, now, identity.room_id, identity.task_id,
-                expected_cancel_generation))
-        if updated.rowcount != 1:
-            raise StaleTaskError("task changed during start")
+                expected_cancel_generation), StaleTaskError("task changed during start"))
         return TaskAttempt(
             identity=identity, lease=lease, execution_generation=execution_generation,
             cancel_generation=expected_cancel_generation)

@@ -139,6 +139,12 @@ def connect(
     return conn
 
 
+def fenced_update(conn: sqlite3.Connection, sql: str, params: tuple, error: Exception) -> None:
+    """Run a compare-and-swap UPDATE; anything but exactly one row means the fence was lost."""
+    if conn.execute(sql, params).rowcount != 1:
+        raise error
+
+
 def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
     return row is not None
