@@ -1,18 +1,12 @@
 """Shared engine for the /review command — every surface calls this.
 
-/review spawns an independent, full-privilege background subagent (the same
-async rail as ``delegate_task(background=true)``) to thoroughly review whatever
-the recent conversation presented (PR, diff, code, docs). Its result re-enters
-the spawning session as a normal async-delegation completion.
-
-Model routing: ``auxiliary.review`` (provider/model/base_url/api_key/api_mode)
-when configured, else the parent agent's credentials (main-model-first). It is
-passed as ``credentials_cfg`` to ``delegate_task`` so native-SDK providers,
-api_mode detection and credential pools behave identically to
-``delegation.provider`` pins.
-
-Surfaces (CLI/gateway ``/review``, TUI/Desktop) are thin adapters: snapshot the
-conversation, call :func:`start_review`, print the dispatch note.
+/review spawns an independent, full-privilege background subagent (the same async rail as
+``delegate_task(background=true)``) to review whatever the recent conversation presented;
+its result re-enters the spawning session as a normal async-delegation completion.
+Model routing: ``auxiliary.review`` when configured, else the parent agent's credentials,
+passed as ``credentials_cfg`` to ``delegate_task`` so native-SDK providers, api_mode
+detection and credential pools behave identically to ``delegation.provider`` pins.
+Surfaces (CLI/gateway ``/review``, TUI/Desktop) snapshot, call :func:`start_review`, print the note.
 """
 
 from __future__ import annotations
@@ -27,9 +21,22 @@ logger = logging.getLogger(__name__)
 # How many recent chat messages (user + assistant turns) the reviewer gets.
 DEFAULT_CONTEXT_MESSAGES = 10
 
-# Per-message excerpt cap: generous (a PR summary/diff excerpt is exactly what
-# the reviewer needs) but bounded against a pathological turn.
+# Per-message excerpt cap: generous (a PR summary/diff excerpt is exactly what the
+# reviewer needs) but bounded against a pathological turn.
 _MESSAGE_CHAR_CAP = 12_000
+
+_REVIEW_GOAL = (
+    "Act as an independent senior reviewer. Thoroughly review the work "
+    "presented in the conversation excerpt provided in your context: "
+    "investigate any code, pull request, branch, commit, documentation, "
+    "design, or other artifact it references (open the PR, read the "
+    "diff, run the code or tests where feasible) rather than judging "
+    "from the excerpt alone. Produce a full, structured review: what "
+    "the work does, whether it is correct and complete, concrete "
+    "defects or risks found (with file/line references where possible), "
+    "what was verified vs. only read, and a clear final verdict with "
+    "recommended next steps."
+)
 
 
 def _message_text(message: Dict[str, Any]) -> str:
@@ -54,8 +61,7 @@ def snapshot_recent_messages(
 ) -> List[Dict[str, str]]:
     """Last ``limit`` user/assistant messages as {role, text} dicts, oldest first.
 
-    System messages, tool results and empty-text messages (pure tool-call
-    assistant stubs) are excluded.
+    System messages, tool results and empty-text messages (pure tool-call stubs) are excluded.
     """
     out: List[Dict[str, str]] = []
     for message in reversed(list(messages or [])):
@@ -82,10 +88,9 @@ def collect_parent_loaded_skills(
     """Names of skills the parent agent was operating under.
 
     Launch-preloaded skills come from the stable marker in the parent's
-    ``ephemeral_system_prompt`` (``build_preloaded_skills_prompt``); mid-session
-    loads from ``skill_view`` tool calls in the history. Preloaded first, then
-    history loads, deduped, capped at ``limit`` (a reviewer told to load 30
-    skills would burn its budget before working).
+    ``ephemeral_system_prompt``; mid-session loads from ``skill_view`` tool calls in the
+    history. Preloaded first, then history loads, deduped, capped at ``limit`` (a reviewer
+    told to load 30 skills would burn its budget before working).
     """
     names: List[str] = []
     prompt = str(getattr(parent_agent, "ephemeral_system_prompt", "") or "")
@@ -101,8 +106,8 @@ def collect_parent_loaded_skills(
                 args = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 continue
-            # Only whole-skill loads seed the reviewer; a reference-file read
-            # is a detail of the parent's task covered by loading the SKILL.md.
+            # Only whole-skill loads seed the reviewer; a reference-file read is a detail
+            # of the parent's task covered by loading the SKILL.md.
             if isinstance(args, dict) and not args.get("file_path"):
                 candidates.append(str(args.get("name") or ""))
     for name in candidates:
@@ -118,19 +123,6 @@ def build_review_task(
     loaded_skills: Optional[List[str]] = None,
 ) -> tuple:
     """Compose the reviewer subagent's (goal, context) pair."""
-    goal = (
-        "Act as an independent senior reviewer. Thoroughly review the work "
-        "presented in the conversation excerpt provided in your context: "
-        "investigate any code, pull request, branch, commit, documentation, "
-        "design, or other artifact it references (open the PR, read the "
-        "diff, run the code or tests where feasible) rather than judging "
-        "from the excerpt alone. Produce a full, structured review: what "
-        "the work does, whether it is correct and complete, concrete "
-        "defects or risks found (with file/line references where possible), "
-        "what was verified vs. only read, and a clear final verdict with "
-        "recommended next steps."
-    )
-
     lines = [
         "You were spawned by the /review command. The following is an "
         "excerpt of the most recent conversation between the user and "
@@ -161,14 +153,14 @@ def build_review_task(
         "the primary agent and its user. Be direct and specific; do not "
         "soften findings.",
     ]
-    return goal, "\n".join(lines)
+    return _REVIEW_GOAL, "\n".join(lines)
 
 
 def _load_review_credentials_cfg() -> Optional[Dict[str, Any]]:
     """Read ``auxiliary.review`` into a delegation-credentials-shaped dict.
 
-    None when nothing is configured (provider=auto/empty and no model/base_url):
-    the reviewer then inherits the parent agent's credentials.
+    None when nothing is configured (provider=auto/empty and no model/base_url): the
+    reviewer then inherits the parent agent's credentials.
     """
     try:
         from hermes_cli.config import load_config_readonly
@@ -194,10 +186,10 @@ def start_review(
 ) -> Dict[str, Any]:
     """Dispatch the reviewer subagent in the background.
 
-    Returns the parsed ``delegate_task`` dispatch dict (``status: "dispatched"``
-    with a ``delegation_id``, or the synchronous result dict on channels that
-    cannot route async completions). Raises ValueError when there is nothing
-    to review or the dispatch is rejected/errored.
+    Returns the parsed ``delegate_task`` dispatch dict (``status: "dispatched"`` with a
+    ``delegation_id``, or the synchronous result dict on channels that cannot route async
+    completions). Raises ValueError when there is nothing to review or the dispatch is
+    rejected/errored.
     """
     if parent_agent is None:
         raise ValueError("No active agent — send a message first.")
@@ -222,7 +214,7 @@ def start_review(
     try:
         result = json.loads(raw)
     except Exception:
-        raise ValueError(f"Review dispatch failed: {raw!r}")
+        result = None
     if isinstance(result, dict) and result.get("error"):
         raise ValueError(str(result["error"]))
     if not isinstance(result, dict):

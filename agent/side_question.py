@@ -1,18 +1,11 @@
-"""Context-aware side questions (``/btw``).
+"""Context-aware side questions (``/btw``): answer a question ABOUT the conversation without
+touching it (no synthetic turns, no role-alternation risk, no prompt-cache invalidation).
 
-Answers a quick question ABOUT the current conversation without touching it (no
-synthetic turns, no role-alternation risk, no prompt-cache invalidation). Two
-paths, picked automatically:
-
-* **Cache-parity fork (preferred).** With a live parent ``AIAgent``, a detached
-  fork from :func:`agent.background_review.build_cache_parity_fork` replays the
-  parent's snapshot verbatim against the warm prefix cache. Tool calls are denied
-  at dispatch, persistence is detached, usage goes to the parent.
-* **One-shot digest (fallback).** With no live parent (e.g. the gateway evicted
-  the cached agent), a rendered transcript goes through :func:`agent.oneshot.run_oneshot`.
-
-``auxiliary.side_question.provider`` / ``.model`` route the fork to another model
-and replay a compact digest (cold cache on a different model).
+Preferred path: a detached cache-parity fork of the live parent ``AIAgent`` replays its
+snapshot verbatim against the warm prefix cache (tools denied at dispatch, persistence
+detached, usage attributed to the parent). Fallback (no live parent, e.g. gateway evicted
+the agent): a rendered transcript through :func:`agent.oneshot.run_oneshot`.
+``auxiliary.side_question.provider``/``.model`` route the fork elsewhere with a compact digest.
 """
 
 import logging
@@ -65,10 +58,8 @@ _ROLE_LABELS = {"user": "USER", "assistant": "ASSISTANT", "tool": "TOOL RESULT"}
 def trim_snapshot_for_fork(history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Drop trailing messages until the snapshot ends with a completed assistant text.
 
-    A mid-turn snapshot can end on unresolved ``tool_calls``, a tool result, or
-    the in-flight user message; appending the side question after any of those
-    breaks role alternation on strict providers. Trimming only the TAIL keeps
-    the warm prefix-cache property.
+    A mid-turn tail (unresolved ``tool_calls``, tool result, in-flight user message) breaks
+    role alternation on strict providers; trimming only the TAIL keeps the warm prefix cache.
     """
     msgs = list(history or [])
     while msgs:
@@ -83,12 +74,8 @@ def render_history_for_side_question(
     history: Optional[List[Dict[str, Any]]],
     char_budget: int = _TRANSCRIPT_CHAR_BUDGET,
 ) -> str:
-    """Render a snapshot as a plain-text transcript (fallback path only).
-
-    Newest-biased fit to ``char_budget``. Tool calls are summarized by name, tool
-    results included truncated (so "what did that output" stays answerable), the
-    system prompt skipped.
-    """
+    """Plain-text transcript for the fallback path: newest-biased fit to ``char_budget``,
+    tool calls summarized by name, tool results truncated, system prompt skipped."""
     lines: List[str] = []
     for msg in history or []:
         if not isinstance(msg, dict):
@@ -134,9 +121,8 @@ def _side_question_task_config() -> Dict[str, Any]:
 def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Dict[str, Any]]]) -> str:
     """Answer via a cache-parity fork of ``parent_agent`` on the calling thread.
 
-    The thread-scoped tool whitelist is emptied so any tool call is denied at
-    dispatch: ``tools[]`` stays byte-identical for cache parity, but the side
-    question can never mutate anything.
+    An empty thread-scoped tool whitelist denies every tool call at dispatch: ``tools[]``
+    stays byte-identical for cache parity, but the side question can never mutate anything.
     """
     from agent.background_review import (
         _digest_history,
@@ -208,9 +194,8 @@ def answer_side_question(
     temperature: Optional[float] = 0.3,
     timeout: float = 180.0,
 ) -> str:
-    """Answer ``question`` against a snapshot of ``history``: cache-parity fork when
-    ``parent_agent`` is live, else (or on empty answer / failure) the one-shot digest.
-    Raises on failure — callers surface the error on their own UI."""
+    """Fork when ``parent_agent`` is live, else (or on empty answer / failure) the one-shot
+    digest. Raises on failure — callers surface the error on their own UI."""
     question = (question or "").strip()
     if not question:
         raise ValueError("answer_side_question requires a non-empty question")

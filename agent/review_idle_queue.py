@@ -1,30 +1,20 @@
 """Idle deferral for background reviews on the managed local runtime.
 
-When the review runtime IS the managed llama-server, the post-turn review fork
-monopolizes the GPU the user's next prompt needs, for minutes — and the next
-live turn cancels it, so an active session pays the decode cost AND loses the
-learning. This module keeps the decision to learn where it was (turn end, nudge
-intervals, full model, full transcript) and moves only the execution moment:
-reviews bound for the managed local endpoint are queued and dispatched when the
-machine is quiet. Everything else runs immediately.
+When the review runtime IS the managed llama-server, the post-turn review fork monopolizes
+the GPU the user's next prompt needs, and the next live turn cancels it — an active
+session pays the decode cost AND loses the learning. Only the execution moment moves:
+reviews bound for the managed local endpoint are queued and dispatched when the machine
+is quiet; everything else runs immediately. Policy ``auxiliary.background_review.defer``:
+``auto`` (default) defers exactly when the review runtime targets the managed local
+server; ``never`` is the old behavior. Explicit /refine (focus set) never defers.
 
-Policy (auxiliary.background_review.defer): ``auto`` (default) defers exactly
-when the resolved review runtime targets the managed local server; ``never`` is
-the old behavior. Explicit /refine (focus set) never defers.
-
-Queue semantics:
-- One slot per session, newest snapshot wins (a review replays the whole
-  conversation, so coalescing is deduplication, not loss).
-- Preempted (cancelled-by-live-turn) reviews are requeued by the spawn wrapper
-  observing the run token's cancel flag.
-- Aged-out events (defer_max_age_s, default 30 min) dispatch regardless of
-  idleness — deferral may delay learning, never lose it.
-- In-memory, best-effort: dropped on process exit, like the immediate fork.
-
-Idle truth comes from the supervisor's /slots (machine-level, sees every client
-incl. other profiles) and must hold for a settle window so a review is not
-launched between two quick prompts. In-process turn liveness is tracked via
-note_turn_started/note_turn_finished from run_conversation.
+Queue semantics: one slot per session, newest snapshot wins (a review replays the whole
+conversation, so coalescing is deduplication, not loss); preempted reviews are requeued by
+the spawn wrapper observing the run token's cancel flag; aged-out events (defer_max_age_s,
+default 30 min) dispatch regardless of idleness — deferral may delay learning, never lose
+it; in-memory best-effort, dropped on process exit like the immediate fork. Idle truth
+comes from the supervisor's /slots (machine-level, sees every client incl. other profiles)
+and must hold for a settle window so a review is not launched between two quick prompts.
 """
 
 from __future__ import annotations
@@ -38,10 +28,10 @@ from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Sustained-quiet window before dispatch: long enough that two back-to-back
-# prompts do not look idle, short enough that a coffee break runs the queue.
+# Sustained-quiet window before dispatch: two back-to-back prompts must not look idle,
+# a coffee break must run the queue.
 _IDLE_SETTLE_S = 15.0
-# Poll cadence while the queue is non-empty. The thread parks when empty.
+# Poll cadence while the queue is non-empty; the thread parks when empty.
 _POLL_INTERVAL_S = 5.0
 # Age at which a queued review dispatches regardless of idleness.
 _MAX_AGE_DEFAULT_S = 30.0 * 60.0
@@ -66,11 +56,11 @@ def review_targets_managed_local(agent: Any,
                                  task_cfg: Optional[Dict[str, Any]]) -> bool:
     """Would this review fork decode on the llama-server WE manage?
 
-    Resolves the review runtime as the fork will and exact-matches its netloc
-    against the supervisor state file (cannot false-positive on external local
-    servers). Any failure reads False: immediate spawn is the safe default.
-    The netloc probe (one TTL-cached state-file read) runs FIRST so cloud-only
-    installs return False without resolving the runtime on the turn's tail.
+    Resolves the review runtime as the fork will and exact-matches its netloc against
+    the supervisor state file (cannot false-positive on external local servers). Any
+    failure reads False: immediate spawn is the safe default. The netloc probe (one
+    TTL-cached state-file read) runs FIRST so cloud-only installs return False without
+    resolving the runtime on the turn's tail.
     """
     try:
         from agent.auxiliary_client import (
@@ -91,11 +81,11 @@ def review_targets_managed_local(agent: Any,
 class _PendingReview:
     __slots__ = ("agent", "kwargs", "enqueued_at", "session_key")
 
-    def __init__(self, agent: Any, session_key: str, kwargs: Dict[str, Any]):
+    def __init__(self, agent: Any, session_key: str, kwargs: Dict[str, Any], enqueued_at: float):
         self.agent = agent
         self.session_key = session_key
         self.kwargs = kwargs
-        self.enqueued_at = time.monotonic()
+        self.enqueued_at = enqueued_at
 
 
 class ReviewIdleQueue:
@@ -130,16 +120,15 @@ class ReviewIdleQueue:
 
     def enqueue(self, agent: Any, session_key: str,
                 kwargs: Dict[str, Any]) -> None:
-        """Add (or replace — newest snapshot wins) a session's pending review."""
+        """Add (or replace — newest snapshot wins) a session's pending review.
+
+        Keeps the ORIGINAL enqueue time on coalesce so a busy session cannot push its
+        review's age-out forever.
+        """
         with self._lock:
             existing = self._pending.get(session_key)
-            item = _PendingReview(agent, session_key, kwargs)
-            # Stamp through the queue's clock (test seam); keep the ORIGINAL
-            # enqueue time on coalesce so a busy session cannot push its
-            # review's age-out forever.
-            item.enqueued_at = (existing.enqueued_at if existing is not None
-                                else self._now())
-            self._pending[session_key] = item
+            enqueued_at = existing.enqueued_at if existing is not None else self._now()
+            self._pending[session_key] = _PendingReview(agent, session_key, kwargs, enqueued_at)
         self._ensure_thread()
         self._wake.set()
         logger.info("Background review deferred (session=%s, queued=%d)",
@@ -166,15 +155,13 @@ class ReviewIdleQueue:
             return self._now() - self._quiet_since
 
     def _pop_dispatchable(self) -> Optional[_PendingReview]:
-        """Oldest aged-out item, else any item once quiet+idle hold."""
+        """Oldest aged-out item, else the oldest item once quiet+idle hold."""
         with self._lock:
             if not self._pending:
                 return None
-            items = sorted(self._pending.values(),
-                           key=lambda p: p.enqueued_at)
-            aged = [p for p in items
-                    if self._now() - p.enqueued_at
-                    >= defer_max_age_s(p.kwargs.get("task_cfg"))]
+            now = self._now()
+            aged = [p for p in sorted(self._pending.values(), key=lambda p: p.enqueued_at)
+                    if now - p.enqueued_at >= defer_max_age_s(p.kwargs.get("task_cfg"))]
             candidate = aged[0] if aged else None
         if candidate is None:
             if self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle():
@@ -219,9 +206,8 @@ class ReviewIdleQueue:
 
     @staticmethod
     def _still_enabled(item: _PendingReview) -> bool:
-        """Re-check the enabled gate at DISPATCH time: minutes may pass in the
-        queue, and disabling reviews meanwhile must not be resurrected. Fail-open
-        like the gate itself."""
+        """Re-check the enabled gate at DISPATCH time (minutes may pass in the queue;
+        disabling reviews meanwhile must not be resurrected). Fail-open like the gate."""
         try:
             from agent.background_review import load_background_review_settings
 
@@ -231,9 +217,8 @@ class ReviewIdleQueue:
 
 
 def _managed_server_idle() -> bool:
-    """Machine-level idle: no processing slot on any loaded model of the
-    managed router. Unreachable/no state file reads idle (nothing to
-    contend with). One /models + one /slots call per loaded model."""
+    """Machine-level idle: no processing slot on any loaded model of the managed router.
+    Unreachable/no state file reads idle (nothing to contend with)."""
     try:
         from hermes_cli.local_runtime.supervisor import state_path
         from urllib.parse import quote
