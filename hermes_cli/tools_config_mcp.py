@@ -5,25 +5,18 @@ from __future__ import annotations
 from typing import List, Set
 
 from hermes_cli.cli_output import (
-    print_error as _print_error,
-    print_info as _print_info,
-    print_success as _print_success,
-    print_warning as _print_warning,
-)
+    print_error as _print_error, print_info as _print_info, print_success as _print_success,
+    print_warning as _print_warning)
 from hermes_cli.colors import Colors, color
 from hermes_cli.toolset_scope import (
-    _TOOLSET_PLATFORM_RESTRICTIONS,
-    toolset_allowed_for_platform as _toolset_allowed_for_platform,
-)
+    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform)
 
 
 def _mcp_match_filter():
     """Runtime name-filter matcher (exact names or fnmatch globs), with a literal fallback.
-
-    Must use the SAME semantics as tools/mcp_tool.py registration — a literal ``in`` check renders
-    glob excludes (e.g. ``*team_member*`` from catalog default_excluded manifests) as if nothing
-    were excluded.
-    """
+    Must use the SAME semantics as tools/mcp_tool.py registration — a literal ``in`` check renders glob
+    excludes (e.g. ``*team_member*`` from catalog default_excluded manifests) as if nothing were
+    excluded."""
     try:
         from tools.mcp_tool import matches_name_filter
         return matches_name_filter
@@ -68,8 +61,7 @@ def _apply_mcp_checklist(server_name: str, tools_cfg: dict, tool_names: List[str
                 f"tool(s) still match glob exclude pattern(s) "
                 f"{glob_entries} and stay excluded — edit "
                 f"mcp_servers.{server_name}.tools.exclude in config.yaml "
-                "to enable them."
-            )
+                "to enable them.")
         if new_exclude:
             tools_cfg["exclude"] = new_exclude
         else:
@@ -83,9 +75,8 @@ def _apply_mcp_checklist(server_name: str, tools_cfg: dict, tool_names: List[str
 def _configure_mcp_tools_interactive(config: dict):
     """Probe each MCP server for its tools, show a per-server curses checklist, and write the result
     back as ``tools.exclude`` / ``tools.include`` entries in config.yaml."""
-    from hermes_cli.tools_config import save_config
-
     from hermes_cli.curses_ui import curses_checklist
+    from hermes_cli.tools_config import save_config
 
     mcp_servers = config.get("mcp_servers") or {}
     if not mcp_servers:
@@ -135,7 +126,6 @@ def _configure_mcp_tools_interactive(config: dict):
         for tool_name, description in tools:
             desc_short = description[:70] + "..." if len(description) > 70 else description
             labels.append(f"{tool_name}  ({desc_short})" if desc_short else tool_name)
-
         match = _mcp_match_filter()
         tool_names = [t[0] for t in tools]
         include_set = {str(p) for p in include_list} if include_list else None
@@ -276,18 +266,16 @@ def tools_disable_enable_command(args):
 
     valid_toolsets = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS} | _get_plugin_toolset_keys()
     unknown_toolsets = [t for t in toolset_targets if t not in valid_toolsets]
-    if unknown_toolsets:
-        for name in unknown_toolsets:
-            _print_error(f"Unknown toolset '{name}'")
-        toolset_targets = [t for t in toolset_targets if t in valid_toolsets]
+    for name in unknown_toolsets:
+        _print_error(f"Unknown toolset '{name}'")
+    toolset_targets = [t for t in toolset_targets if t in valid_toolsets]
 
     # Reject platform-scoped toolsets on platforms that don't allow them.
     restricted_targets = [t for t in toolset_targets if not _toolset_allowed_for_platform(t, platform)]
-    if restricted_targets:
-        for name in restricted_targets:
-            allowed = sorted(_TOOLSET_PLATFORM_RESTRICTIONS.get(name) or set())
-            _print_error(f"Toolset '{name}' is not available on platform '{platform}' (only: {', '.join(allowed)})")
-        toolset_targets = [t for t in toolset_targets if t not in restricted_targets]
+    for name in restricted_targets:
+        allowed = sorted(_TOOLSET_PLATFORM_RESTRICTIONS.get(name) or set())
+        _print_error(f"Toolset '{name}' is not available on platform '{platform}' (only: {', '.join(allowed)})")
+    toolset_targets = [t for t in toolset_targets if t not in restricted_targets]
 
     if toolset_targets:
         _apply_toolset_change(config, platform, toolset_targets, action)
@@ -302,10 +290,8 @@ def tools_disable_enable_command(args):
 
     successful = [
         t for t in targets
-        if t not in unknown_toolsets
-        and t not in restricted_targets
-        and (":" not in t or t.split(":")[0] not in failed_servers)
-    ]
+        if t not in unknown_toolsets and t not in restricted_targets
+        and (":" not in t or t.split(":")[0] not in failed_servers)]
     if successful:
         verb = "Disabled" if action == "disable" else "Enabled"
         _print_success(f"{verb}: {', '.join(successful)}")
