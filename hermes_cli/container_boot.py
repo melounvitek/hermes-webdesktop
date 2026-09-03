@@ -179,26 +179,22 @@ def _read_container_argv() -> tuple[str, ...]:
     ``s6-svscan`` and the real command lives on another PID, so after the PID 1 fast path we
     scan ``/proc/*/cmdline`` for a process whose argv contains ``main-wrapper.sh``.
     """
-    try:
-        argv = _cmdline_argv(Path("/proc/1/cmdline"))
+    def _cmdlines():
+        yield Path("/proc/1/cmdline")
+        try:
+            for entry in Path("/proc").iterdir():
+                if entry.name.isdigit():
+                    yield entry / "cmdline"
+        except OSError:
+            return
+
+    for cmdline in _cmdlines():
+        try:
+            argv = _cmdline_argv(cmdline)
+        except OSError:
+            continue
         if any("main-wrapper.sh" in part for part in argv):
             return argv
-    except OSError:
-        pass
-
-    try:
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                argv = _cmdline_argv(entry / "cmdline")
-            except OSError:
-                continue
-            if any("main-wrapper.sh" in part for part in argv):
-                return argv
-    except OSError:
-        pass
-
     return ()
 
 

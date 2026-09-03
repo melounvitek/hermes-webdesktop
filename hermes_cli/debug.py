@@ -1,5 +1,6 @@
 """``hermes debug`` debug tools for Hermes Agent."""
 
+import contextlib
 import datetime
 import gzip
 import io
@@ -11,6 +12,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from hermes_constants import get_hermes_home
@@ -396,19 +398,9 @@ def _capture_default_log_snapshots(
 def _capture_dump() -> str:
     """Run ``hermes dump`` and return its stdout as a string."""
     from hermes_cli.dump import run_dump
-
-    class _FakeArgs:
-        show_keys = False
-
-    old_stdout = sys.stdout
-    sys.stdout = capture = io.StringIO()
-    try:
-        run_dump(_FakeArgs())
-    except SystemExit:
-        pass
-    finally:
-        sys.stdout = old_stdout
-
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture), contextlib.suppress(SystemExit):
+        run_dump(SimpleNamespace(show_keys=False))
     return capture.getvalue()
 
 
@@ -448,9 +440,8 @@ def collect_debug_report(
 
     buf.write("\n")
     for name in _REPORT_LOGS:
-        buf.write(f"\n--- {name}.log (last {_tail_budget(name, log_lines)} lines) ---\n")
-        buf.write(log_snapshots[name].tail_text)
-        buf.write("\n")
+        buf.write(f"\n--- {name}.log (last {_tail_budget(name, log_lines)} lines) ---\n"
+                  f"{log_snapshots[name].tail_text}\n")
 
     return buf.getvalue()
 
