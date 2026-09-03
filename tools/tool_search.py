@@ -172,13 +172,12 @@ def _deferrable_in(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
     """Token cost via the chars/4 rule (order-of-magnitude precision suffices)."""
-    total_chars = 0
-    for td in tool_defs:
+    def _chars(td: Dict[str, Any]) -> int:
         try:
-            total_chars += len(json.dumps(td, ensure_ascii=False, separators=(",", ":")))
+            return len(json.dumps(td, ensure_ascii=False, separators=(",", ":")))
         except (TypeError, ValueError):
-            total_chars += len(str(td))
-    return int(math.ceil(total_chars / CHARS_PER_TOKEN))
+            return len(str(td))
+    return int(math.ceil(sum(map(_chars, tool_defs)) / CHARS_PER_TOKEN))
 
 
 def should_activate(config: ToolSearchConfig, deferrable_tokens: int,
@@ -366,8 +365,7 @@ def _string_list_arg(args: Dict[str, Any], key: str, *, dedupe: bool, max_items:
     """Read a list-of-strings bridge argument -> ``(items, error_json)``. A bare string (a
     common model slip) is a one-item list; rejects non-lists, all-blank lists, > ``max_items``."""
     raw = args.get(key)
-    if isinstance(raw, str):
-        raw = [raw]
+    raw = [raw] if isinstance(raw, str) else raw
     if not isinstance(raw, list):
         return None, tool_error(f"{key} is required and must be an array of strings")
     out: List[str] = []

@@ -22,8 +22,8 @@ def tip_tool(text: str, selector: str, title: str = "", side: str = "") -> str:
                           "what's on screen and prefer a target reporting stable: true.")
     if side and side not in SIDES:
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
-    payload = {"selector": selector, "text": text}
-    payload.update({k: v for k, v in (("title", title), ("side", side)) if v})
+    payload = {"selector": selector, "text": text,
+               **{k: v for k, v in (("title", title), ("side", side)) if v}}
     try:
         ok = desktop_ui.emit("tip.show", payload)
     except Exception as exc:

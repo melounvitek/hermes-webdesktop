@@ -44,10 +44,9 @@ def _stem(token: str) -> str:
     """Stem one token, memoized across stateless catalog rebuilds. Snowball stemmers carry
     mutable parsing state and bridge dispatch runs on parallel tool-call threads, so the
     stemmer is one-per-thread, created lazily."""
-    st = getattr(_thread_local, "stemmer", None)
-    if st is None:
-        st = _thread_local.stemmer = snowballstemmer.stemmer("english")
-    return st.stemWord(token)
+    if getattr(_thread_local, "stemmer", None) is None:
+        _thread_local.stemmer = snowballstemmer.stemmer("english")
+    return _thread_local.stemmer.stemWord(token)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -122,22 +121,18 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str], doc_lengths: Lis
                 b: float = 0.75) -> float:
     """Standard BM25 for one query against one document (inlined; the catalog is bounded —
     typically < 500 tools — so a dependency is not worth it)."""
-    if not doc_tokens:
-        return 0.0
     score = 0.0
     dl = len(doc_tokens)
     doc_tf = Counter(doc_tokens)
     for q in query_tokens:
-        df = doc_freq.get(q, 0)
-        tf = doc_tf.get(q, 0)
-        if df == 0 or tf == 0:
-            continue
-        idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
-        score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
+        df, tf = doc_freq.get(q, 0), doc_tf.get(q, 0)
+        if df and tf:
+            idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
+            score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
     return score
 
 
-_CorpusStats = Tuple[List[int], float, Dict[str, int], int]
+_CorpusStats = Tuple[List[int], float, Dict[str, int], int]  # doc_lengths, avg_dl, df, n_docs
 
 
 def _corpus_stats(catalog: List[CatalogEntry]) -> _CorpusStats:
@@ -157,8 +152,7 @@ def search_catalog(catalog: List[CatalogEntry], query: str, limit: int = 5, *,
     query_tokens = _tokenize(query) if catalog and limit > 0 else []
     if not query_tokens:
         return []
-    if corpus_stats is None:
-        corpus_stats = _corpus_stats(catalog)
+    corpus_stats = corpus_stats or _corpus_stats(catalog)
     scored: List[Tuple[float, CatalogEntry]] = []
     exact_name = query.strip().lower()
     for entry in catalog:
@@ -182,13 +176,11 @@ def _short_desc(description: str, max_chars: int = 60) -> str:
     search stay linear-time on hostile input."""
     text = " ".join((description or "").split())
     m = _SENTENCE_END_RE.search(text)
-    if m:
-        text = text[:m.end()]
+    text = text[:m.end()] if m else text
     if len(text) <= max_chars:
         return text
     clipped = text[:max_chars]
-    if " " in clipped:
-        clipped = clipped.rsplit(" ", 1)[0]
+    clipped = clipped.rsplit(" ", 1)[0] if " " in clipped else clipped
     return clipped.rstrip(",;: ") + "…"
 
 

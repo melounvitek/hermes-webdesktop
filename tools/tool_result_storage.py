@@ -105,12 +105,11 @@ def _sandbox_visible_spillover_path(host_path: str, env) -> str | None:
     except Exception as exc:
         logger.debug("Spillover path translation failed: %s", exc)
         return None
-    sync_manager = getattr(env, "_sync_manager", None)
-    if sync_manager is not None:
-        try:
+    try:
+        if (sync_manager := getattr(env, "_sync_manager", None)) is not None:
             sync_manager.sync(force=True)
-        except Exception as exc:
-            logger.debug("Spillover sync failed: %s", exc)
+    except Exception as exc:
+        logger.debug("Spillover sync failed: %s", exc)
     try:
         if env.execute(f"test -r {shlex.quote(visible)}", timeout=15).get("returncode", 1) == 0:
             return visible

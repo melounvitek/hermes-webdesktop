@@ -23,10 +23,9 @@ def _schema_for_local_validation(node: Any) -> Any:
     if not isinstance(node, dict):
         return node
     # Literal keywords hold instance data, not schemas: copy byte-for-byte.
-    normalized = {
-        key: (copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS
-              else _schema_for_local_validation(value))
-        for key, value in node.items() if key != "nullable"}
+    normalized = {key: (copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS
+                        else _schema_for_local_validation(value))
+                  for key, value in node.items() if key != "nullable"}
     if node.get("nullable") is not True:
         return normalized
     schema_type = normalized.get("type")
@@ -49,10 +48,9 @@ def _schema_has_external_ref(node: Any) -> bool:
     if not isinstance(node, dict):
         return False
     ref = node.get("$ref")
-    if isinstance(ref, str) and not ref.startswith("#"):
-        return True
-    return any(_schema_has_external_ref(value) for key, value in node.items()
-               if key not in _SCHEMA_LITERAL_KEYS)
+    return (isinstance(ref, str) and not ref.startswith("#")) or any(
+        _schema_has_external_ref(value) for key, value in node.items()
+        if key not in _SCHEMA_LITERAL_KEYS)
 
 
 def _validation_path(error: Any) -> str:

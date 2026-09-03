@@ -24,8 +24,7 @@ def _coerce_int(value: Any, default: int, minimum: int) -> int:
 
 
 def _coerce_positive_int(value: Any, default: int) -> int:
-    """Return ``value`` as a positive int, or ``default`` on any issue."""
-    return _coerce_int(value, default, 1)
+    return _coerce_int(value, default, 1)  # positive int, or ``default`` on any issue
 
 
 def get_tool_output_limits() -> Dict[str, int]:

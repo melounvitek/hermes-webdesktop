@@ -123,8 +123,7 @@ def resolve_provider_secret(env_var: str, provider_id: str, config_value: str = 
             return ""
     except Exception:  # pragma: no cover — secret_scope is in-repo
         pass
-    key = (str(env_getter(env_var) or "").strip() if env_getter is not None
-           else _dotenv_value(env_var))
+    key = str(env_getter(env_var) or "").strip() if env_getter else _dotenv_value(env_var)
     if key or not provider_id:
         return key
     try:
@@ -195,9 +194,9 @@ def read_selection(section: str) -> str | None:
     if is_truthy_value(raw.get("use_gateway")):
         return NOUS_MANAGED_PROVIDER
     for key in _SELECTION_NAME_KEYS.get(section, _DEFAULT_NAME_KEYS):
-        value = raw.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip().lower()
+        text = str(raw.get(key)).strip().lower() if raw.get(key) is not None else ""
+        if text:
+            return text
     # use_gateway: false with no name key is not a usable selection shape;
     # per-capability web keys still count as configured via selection_exists().
     return None
