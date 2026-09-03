@@ -91,21 +91,16 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     buf = ""
     for ch in name:
         if ch in "-_." or (ch.isupper() and buf and not buf[-1].isupper()):
-            if buf:
-                parts.append(buf)
+            parts += [buf] if buf else []
             buf = ch if ch not in "-_." else ""
         else:
             buf += ch
-    if buf:
-        parts.append(buf)
-    if any(p.lower().startswith(ql) for p in parts):
+    if any(p.lower().startswith(ql) for p in parts + ([buf] if buf else [])):
         return (2, len(name))
     if ql in nl:
         return (3, len(name))
     it = iter(nl)
-    if all(any(c == q for c in it) for q in ql):
-        return (4, len(name))
-    return None
+    return (4, len(name)) if all(any(c == q for c in it) for q in ql) else None
 
 
 def _abs_completion_prefix_exists(path_part: str) -> bool:

@@ -185,14 +185,11 @@ def _format_live_status_output(sid: str, session: dict, arg: str) -> str:
     return str(response.get("result", {}).get("output") or "")
 
 
-def _format_live_compress_output(sid: str, session: dict, arg: str) -> str:
-    return _mirror_slash_side_effects(sid, session, f"/compress {arg}".strip())
-
-
 # name → (reply when there is no session, formatter(sid, session, arg) or a fixed reply).
 # A None no-session reply means the formatter handles a missing session itself.
 _LIVE_SLASH_OUTPUT = {
-    "compress": ("no active session for /compress", _format_live_compress_output),
+    "compress": ("no active session for /compress",
+                 lambda sid, session, arg: _mirror_slash_side_effects(sid, session, f"/compress {arg}".strip())),
     "usage": (_NO_AGENT_USAGE, _format_live_usage_output),
     "review": (None, _format_live_review_output),
     "history": ("No conversation history yet.", _format_live_history_output),
@@ -272,63 +269,54 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
     return "\n".join(filter(None, [fb["headline"], fb["token_line"], fb.get("note")]))
 
 
-def _mirror_model(sid, session, agent, arg) -> str:
-    return _apply_model_switch(sid, session, arg).get("warning", "") if arg and agent else ""
-
-
-def _mirror_approvals(sid, session, agent, arg) -> str:
+def _mirror_approvals(sid, session, agent, arg) -> None:
     if arg:  # the worker already persisted approvals.mode; the bare read-only form needs no repaint
         broadcast_session_info()
-    return ""
 
 
-def _mirror_personality(sid, session, agent, arg) -> str:
+def _mirror_personality(sid, session, agent, arg) -> None:
     if arg and agent:
         pname, new_prompt = _validate_personality(arg, _load_cfg())
         from hermes_cli.personality import persist_personality  # single owner: no surface drift
         persist_personality(pname)
         _apply_personality_to_session(sid, session, new_prompt, pname)
-    return ""
 
 
-def _mirror_prompt(sid, session, agent, arg) -> str:
+def _mirror_prompt(sid, session, agent, arg) -> None:
     if agent:
         cfg = _load_cfg()
         agent.ephemeral_system_prompt = _prompt_text((cfg.get("agent") or {}).get("system_prompt", "")) or None
         agent._cached_system_prompt = None
-    return ""
-
-
-def _mirror_compress(sid, session, agent, arg) -> str:
-    return _compress_live_with_feedback(sid, session, agent, arg, snapshot_kwargs=False) if agent else ""
 
 
 _FAST_TIERS = {"fast": "priority", "on": "priority", "normal": None, "off": None, "auto": "auto", "cold": "cold"}
 
 
-def _mirror_fast(sid, session, agent, arg) -> str:
+def _mirror_fast(sid, session, agent, arg) -> None:
     if agent:
         if arg.lower() in _FAST_TIERS:
             agent.service_tier = _FAST_TIERS[arg.lower()]
         _emit("session.info", sid, _session_info(agent, session))
-    return ""
 
 
-def _mirror_reload_mcp(sid, session, agent, arg) -> str:
+def _mirror_reload_mcp(sid, session, agent, arg) -> None:
     if agent and hasattr(agent, "reload_mcp_tools"):
         agent.reload_mcp_tools()
-    return ""
 
 
-def _mirror_stop(sid, session, agent, arg) -> str:
+def _mirror_stop(sid, session, agent, arg) -> None:
     from tools.process_registry import process_registry
     process_registry.kill_all()
-    return ""
 
 
+# name → mirror(sid, session, agent, arg); a falsy return means "no warning".
 _SLASH_MIRRORS = {
-    "model": _mirror_model, "approvals": _mirror_approvals, "personality": _mirror_personality,
-    "prompt": _mirror_prompt, "compress": _mirror_compress, "fast": _mirror_fast,
+    "model": lambda sid, session, agent, arg: (
+        _apply_model_switch(sid, session, arg).get("warning", "") if arg and agent else ""),
+    "approvals": _mirror_approvals, "personality": _mirror_personality, "prompt": _mirror_prompt,
+    "compress": lambda sid, session, agent, arg: (
+        _compress_live_with_feedback(sid, session, agent, arg, snapshot_kwargs=False) if agent else ""),
+    "fast": _mirror_fast,
     "reload-mcp": _mirror_reload_mcp, "stop": _mirror_stop}
 
 
@@ -374,7 +362,7 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     if mirror is None:
         return ""
     try:
-        return mirror(sid, session, agent, arg)
+        return mirror(sid, session, agent, arg) or ""
     except Exception as e:
         if name == "compress" and agent:
             from agent.conversation_compression import finalize_context_engine_compression_notification

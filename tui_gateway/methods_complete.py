@@ -161,7 +161,6 @@ def _dir_listing_items(root: str, word: str, path_part: str, prefix_tag: str, is
     items: list[dict] = []
     if not os.path.isdir(search_dir):
         return items
-    want_dir = prefix_tag == "folder"
     match_lower = match.lower()
     for entry in sorted(os.listdir(search_dir)):
         if match and not entry.lower().startswith(match_lower):
@@ -170,7 +169,7 @@ def _dir_listing_items(root: str, word: str, path_part: str, prefix_tag: str, is
             continue
         full = os.path.join(search_dir, entry)
         is_dir = os.path.isdir(full)
-        if prefix_tag and want_dir != is_dir:  # explicit `@folder:`/`@file:` skip the opposite kind
+        if prefix_tag and (prefix_tag == "folder") != is_dir:  # explicit `@folder:`/`@file:` skip the other kind
             continue
         rel = os.path.relpath(full, root).replace(os.sep, "/")
         suffix = "/" if is_dir else ""
