@@ -112,8 +112,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
     data_url = f"data:image/png;base64,{_screenshot_b64}"
     vision_model = _bt._get_vision_model()
-    _bt.logger.debug("browser_vision: analysing screenshot (%d bytes)",
-                 len(_screenshot_bytes))
+    _bt.logger.debug("browser_vision: analysing screenshot (%d bytes)", len(_screenshot_bytes))
 
     vision_timeout = 120.0
     vision_temperature = 0.1
@@ -146,9 +145,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     try:
         response = _bt.call_llm(**call_kwargs)
     except Exception as _api_err:
-        from tools.vision_tools import (
-            _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES,
-        )
+        from tools.vision_tools import _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES
         if not (_is_image_size_error(_api_err) and len(data_url) > _RESIZE_TARGET_BYTES):
             raise
         _bt.logger.info(
