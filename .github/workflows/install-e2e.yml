@@ -97,9 +97,10 @@ jobs:
       - id: pick
         env:
           # Dispatch inputs never touch shell syntax directly: TAG_COUNT
-          # arrives via the environment, is validated decimal-only (bash
-          # arithmetic reads a leading zero as octal), and is capped below
-          # the 256-job matrix limit (15 tags = 270 windows entries).
+          # arrives via the environment and is validated decimal-only (bash
+          # arithmetic reads a leading zero as octal). GitHub's 256-job cap
+          # applies to each per-OS matrix separately; at 10 tags the largest
+          # is windows at 180 (first over the cap at 15 tags = 270).
           TAG_COUNT: ${{ inputs.tag-count || 2 }}
         run: |
           set -euo pipefail

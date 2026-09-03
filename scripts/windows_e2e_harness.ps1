@@ -32,7 +32,7 @@ Write-Host "parameter surface: OK"
 
 # 3. Dispatch bodies reference the right arms (AST-level: the switch on
 # InstallMethod contains the three arms; the switch on Route contains all
-# six, with desktop-installer@latest throwing).
+# six, with desktop-installer@latest re-running the GUI installer).
 $text = Get-Content -LiteralPath $driver -Raw
 foreach ($needle in @(
     'function Invoke-PhaseInstall',
@@ -40,7 +40,7 @@ foreach ($needle in @(
     'Invoke-RefInstaller $state.old "old" -IncludeDesktop',
     'Invoke-HermesDesktopAppUpdate $state.current',
     'Invoke-HermesUpdate',
-    "update method 'desktop-installer@latest' is not implemented yet"
+    'Invoke-PhaseInstallGui -Mode "update"'
 )) {
     if ($text.IndexOf($needle) -lt 0) { Write-Host "dispatch missing: $needle"; exit 1 }
 }
