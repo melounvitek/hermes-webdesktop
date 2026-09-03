@@ -70,9 +70,8 @@ class RateLimitCreditsMixin:
             logger.info(
                 "credits ▸ [FIXTURE] remaining=%d (%s) · paid=%s · denom=%s · used=%s "
                 "(real headers bypassed — `echo clear` / unset HERMES_DEV_CREDITS_FIXTURE to restore)",
-                fixture.remaining_micros, fixture.remaining_usd or "?", fixture.paid_access,
-                fixture.denominator_kind, _pct(fixture.used_fraction),
-            )
+                fixture.remaining_micros, fixture.remaining_usd or "?", fixture.paid_access, fixture.denominator_kind,
+                _pct(fixture.used_fraction))
             self._emit_credits_notices()
             return
         headers = _response_headers(http_response)
@@ -88,10 +87,8 @@ class RateLimitCreditsMixin:
             return
         if state is None:
             if dev:
-                logger.info(
-                    "credits ▸ response had no valid x-nous-credits-* headers "
-                    "(miss — producer off / non-Nous path / >TTL stale)"
-                )
+                logger.info("credits ▸ response had no valid x-nous-credits-* headers "
+                            "(miss — producer off / non-Nous path / >TTL stale)")
             return
 
         self._adopt_credits_state(state)
@@ -99,14 +96,11 @@ class RateLimitCreditsMixin:
             # HERMES_DEV_CREDITS streams each capture to agent.log (`hermes logs -f`, grep 'credits ▸').
             spent = self.get_credits_spent_micros()
             logger.info(
-                "credits ▸ remaining=%d (%s) · paid=%s · denom=%s · used=%s "
-                "· Δspent=%s · age=%s%s",
-                state.remaining_micros, state.remaining_usd or "?", state.paid_access,
-                state.denominator_kind, _pct(state.used_fraction),
-                ("%.1f¢" % (spent / 10000)) if spent is not None else "n/a",
+                "credits ▸ remaining=%d (%s) · paid=%s · denom=%s · used=%s · Δspent=%s · age=%s%s",
+                state.remaining_micros, state.remaining_usd or "?", state.paid_access, state.denominator_kind,
+                _pct(state.used_fraction), ("%.1f¢" % (spent / 10000)) if spent is not None else "n/a",
                 ("%.0fs" % state.age_seconds) if state.age_seconds != float("inf") else "n/a",
-                (" · disabled=%s" % state.disabled_reason) if state.disabled_reason else "",
-            )
+                (" · disabled=%s" % state.disabled_reason) if state.disabled_reason else "")
         self._emit_credits_notices()
 
     def _adopt_credits_state(self, state) -> None:
@@ -133,10 +127,7 @@ class RateLimitCreditsMixin:
             if latch is None:
                 latch = self._credits_latch = new_credits_latch()
             # Free-model gate: a depleted account can still inference on a free model. Local data only.
-            model_is_free = is_free_tier_model(
-                getattr(self, "model", "") or "",
-                getattr(self, "base_url", "") or "",
-            )
+            model_is_free = is_free_tier_model(getattr(self, "model", "") or "", getattr(self, "base_url", "") or "")
             to_show, to_clear = evaluate_credits_notices(state, latch, model_is_free=model_is_free)
             for key in to_clear:
                 self._emit_notice_clear(key)

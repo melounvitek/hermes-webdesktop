@@ -123,15 +123,10 @@ class ReasoningParamsMixin:
             return None
         effort = str(cfg.get("effort", "medium")).strip().lower()
 
-        if effort == "xhigh" and "xhigh" not in supported and "high" in supported:
-            effort = "high"
-        elif effort not in supported:
-            if effort == "minimal" and "low" in supported:
-                effort = "low"
-            elif "medium" in supported:
-                effort = "medium"
-            else:
-                effort = supported[0]
+        if effort not in supported:
+            # Nearest-neighbour fallbacks: xhigh→high, minimal→low, else medium, else the first published level.
+            nearest = {"xhigh": "high", "minimal": "low"}.get(effort)
+            effort = nearest if nearest in supported else "medium" if "medium" in supported else supported[0]
         return {"effort": effort}
 
     _build_assistant_message = _forward("agent.chat_completion_helpers", "build_assistant_message")
@@ -147,12 +142,8 @@ class ReasoningParamsMixin:
         cached = getattr(self, "_thinking_pad_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
-        result = (
-            self._needs_deepseek_tool_reasoning()
-            or self._needs_kimi_tool_reasoning()
-            or self._needs_mimo_tool_reasoning()
-            or self._reasoning_echo_opt_in()
-        )
+        result = (self._needs_deepseek_tool_reasoning() or self._needs_kimi_tool_reasoning()
+                  or self._needs_mimo_tool_reasoning() or self._reasoning_echo_opt_in())
         self._thinking_pad_cache = (key, result)
         return result
 
@@ -204,13 +195,9 @@ class ReasoningParamsMixin:
         if not isinstance(tool_calls, list):
             return api_msg
         from agent.transports.chat_completions import _model_consumes_thought_signature
-        strip = {"call_id", "response_item_id"}
-        if not _model_consumes_thought_signature(model):
-            strip.add("extra_content")
-        api_msg["tool_calls"] = [
-            {k: v for k, v in tc.items() if k not in strip} if isinstance(tc, dict) else tc
-            for tc in tool_calls
-        ]
+        strip = {"call_id", "response_item_id"} | (set() if _model_consumes_thought_signature(model) else {"extra_content"})
+        api_msg["tool_calls"] = [{k: v for k, v in tc.items() if k not in strip} if isinstance(tc, dict) else tc
+                                 for tc in tool_calls]
         return api_msg
 
     _sanitize_tool_call_arguments = _forward_static("agent.agent_runtime_helpers", "sanitize_tool_call_arguments")

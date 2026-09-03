@@ -66,8 +66,7 @@ def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
-def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float = 120.0,
-                     jitter_ratio: float = 0.5) -> float:
+def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float = 120.0, jitter_ratio: float = 0.5) -> float:
     """min(base * 2^(attempt-1), max_delay) + uniform jitter in
     [0, jitter_ratio * delay]. ``attempt`` is 1-based."""
     global _jitter_counter
@@ -102,12 +101,7 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
 
 
 def adaptive_rate_limit_backoff(
-    attempt: int,
-    *,
-    base_url: str | None,
-    model: str | None,
-    error: Any,
-    default_wait: float,
+    attempt: int, *, base_url: str | None, model: str | None, error: Any, default_wait: float,
     short_attempts: int = _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS,
 ) -> tuple[float, str | None]:
     """Provider-aware rate-limit backoff → ``(wait_seconds, reason_label)``.

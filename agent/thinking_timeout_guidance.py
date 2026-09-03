@@ -35,9 +35,7 @@ def is_thinking_timeout(classified: object, model: str, error_msg: str) -> bool:
     return any(p in error_msg_lower for p in _THINKING_TIMEOUT_SUBSTRINGS)
 
 
-def build_thinking_timeout_guidance(
-    provider: str, model: str, model_label: Optional[str] = None,
-) -> str:
+def build_thinking_timeout_guidance(provider: str, model: str, model_label: Optional[str] = None) -> str:
     """User-facing guidance appended to the final response. ``model`` is used verbatim in
     the config snippet so it is copy-pasteable; ``model_label`` is the optional prose name."""
     label = model_label or model

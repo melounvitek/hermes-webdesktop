@@ -41,20 +41,13 @@ def _message_text(message: Dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = [
-            str(part.get("text") or "") if part.get("type") == "text"
-            else f"[{part.get('type', 'attachment')}]"
-            for part in content
-            if isinstance(part, dict)
-        ]
+        parts = [str(part.get("text") or "") if part.get("type") == "text" else f"[{part.get('type', 'attachment')}]"
+                 for part in content if isinstance(part, dict)]
         return "\n".join(p for p in parts if p)
     return ""
 
 
-def snapshot_recent_messages(
-    messages: List[Dict[str, Any]],
-    limit: int = DEFAULT_CONTEXT_MESSAGES,
-) -> List[Dict[str, str]]:
+def snapshot_recent_messages(messages: List[Dict[str, Any]], limit: int = DEFAULT_CONTEXT_MESSAGES) -> List[Dict[str, str]]:
     """Last ``limit`` user/assistant messages as {role, text} dicts, oldest first.
 
     System messages, tool results and empty-text messages (pure tool-call stubs) are excluded.
@@ -76,11 +69,7 @@ def snapshot_recent_messages(
     return out
 
 
-def collect_parent_loaded_skills(
-    parent_agent,
-    messages: List[Dict[str, Any]],
-    limit: int = 8,
-) -> List[str]:
+def collect_parent_loaded_skills(parent_agent, messages: List[Dict[str, Any]], limit: int = 8) -> List[str]:
     """Names of skills the parent agent was operating under.
 
     Launch-preloaded skills come from the stable marker in the parent's
@@ -113,11 +102,7 @@ def collect_parent_loaded_skills(
     return names[:limit]
 
 
-def build_review_task(
-    snapshot: List[Dict[str, str]],
-    user_prompt: str = "",
-    loaded_skills: Optional[List[str]] = None,
-) -> tuple:
+def build_review_task(snapshot: List[Dict[str, str]], user_prompt: str = "", loaded_skills: Optional[List[str]] = None) -> tuple:
     """Compose the reviewer subagent's (goal, context) pair."""
     lines = [
         "You were spawned by the /review command. The following is an excerpt of the most recent conversation "
@@ -174,11 +159,7 @@ def _load_review_credentials_cfg() -> Optional[Dict[str, Any]]:
     return cfg
 
 
-def start_review(
-    parent_agent,
-    messages: List[Dict[str, Any]],
-    user_prompt: str = "",
-) -> Dict[str, Any]:
+def start_review(parent_agent, messages: List[Dict[str, Any]], user_prompt: str = "") -> Dict[str, Any]:
     """Dispatch the reviewer subagent in the background.
 
     Returns the parsed ``delegate_task`` dispatch dict (``status: "dispatched"`` with a
@@ -199,13 +180,7 @@ def start_review(
 
     from tools.delegate_tool import delegate_task
 
-    raw = delegate_task(
-        goal=goal,
-        context=context,
-        background=True,
-        parent_agent=parent_agent,
-        credentials_cfg=credentials_cfg,
-    )
+    raw = delegate_task(goal=goal, context=context, background=True, parent_agent=parent_agent, credentials_cfg=credentials_cfg)
     try:
         result = json.loads(raw)
     except Exception:

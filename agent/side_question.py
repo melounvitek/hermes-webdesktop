@@ -86,12 +86,10 @@ def render_history_for_side_question(
             break
         kept.append(line)
         used += cost
-    kept.reverse()
-
     if not kept:
         return "(no prior conversation)"
     prefix = "[...older conversation omitted...]\n" if len(kept) < len(lines) else ""
-    return prefix + "\n".join(kept)
+    return prefix + "\n".join(reversed(kept))
 
 
 def _side_question_task_config() -> Dict[str, Any]:
@@ -118,10 +116,8 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     )
     from hermes_cli.plugins import clear_thread_tool_whitelist, set_thread_tool_whitelist
 
-    fork, _rt, routed = build_cache_parity_fork(
-        parent_agent, _side_question_task_config(),
-        max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question",
-    )
+    fork, _rt, routed = build_cache_parity_fork(parent_agent, _side_question_task_config(),
+                                                max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question")
     try:
         set_thread_tool_whitelist(
             set(),
@@ -189,7 +185,5 @@ def answer_side_question(
         except Exception:
             logger.warning("/btw cache-parity fork failed; falling back to one-shot", exc_info=True)
 
-    return _answer_via_oneshot(
-        question, history,
-        main_runtime=main_runtime, max_tokens=max_tokens, temperature=temperature, timeout=timeout,
-    )
+    return _answer_via_oneshot(question, history, main_runtime=main_runtime, max_tokens=max_tokens,
+                               temperature=temperature, timeout=timeout)

@@ -86,9 +86,7 @@ def kimi_supported_efforts(model: Optional[str]) -> tuple[str, ...]:
 
 
 def clamp_effort(
-    effort: Optional[str],
-    supported: Optional[Sequence[str]],
-    overrides: Optional[dict[str, str]] = None,
+    effort: Optional[str], supported: Optional[Sequence[str]], overrides: Optional[dict[str, str]] = None,
 ) -> Optional[str]:
     """Clamp a requested reasoning effort onto a wire's supported levels.
 

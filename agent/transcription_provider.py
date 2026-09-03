@@ -25,12 +25,7 @@ class TranscriptionProvider(CatalogProviderBase):
 
     @abc.abstractmethod
     def transcribe(
-        self,
-        file_path: str,
-        *,
-        model: Optional[str] = None,
-        language: Optional[str] = None,
-        **extra: Any,
+        self, file_path: str, *, model: Optional[str] = None, language: Optional[str] = None, **extra: Any,
     ) -> Dict[str, Any]:
         """Transcribe ``file_path`` (existence + size already validated) into the module envelope.
 

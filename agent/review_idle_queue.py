@@ -220,11 +220,9 @@ def _managed_server_idle() -> bool:
 
         loaded = [m["id"] for m in _get("/models").get("data", [])
                   if (m.get("status") or {}).get("value") in ("loaded", "ready")]
-        for mid in loaded:
-            if any(s.get("is_processing") for s in _get(f"/slots?model={quote(mid)}")
-                   if isinstance(s, dict)):
-                return False
-        return True
+        return not any(
+            s.get("is_processing") for mid in loaded for s in _get(f"/slots?model={quote(mid)}") if isinstance(s, dict)
+        )
     except Exception:  # noqa: BLE001
         return True
 

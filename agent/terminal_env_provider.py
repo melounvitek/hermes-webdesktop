@@ -82,9 +82,7 @@ class TerminalEnvironmentProvider(ProviderBase):
     def probe(self) -> Tuple[str, str]:
         """Dashboard picker health probe ``(status, detail)`` with status in
         ``ready`` / ``needs_setup`` / ``unavailable``. Must never raise; stay fast (<~2s)."""
-        if self.is_available():
-            return ("ready", "")
-        return ("needs_setup", f"{self.display_name} is not configured.")
+        return ("ready", "") if self.is_available() else ("needs_setup", f"{self.display_name} is not configured.")
 
     def setup_instructions(self) -> List[str]:
         """Lines printed by ``hermes setup`` after this backend is selected. The wizard
@@ -107,14 +105,8 @@ class TerminalEnvironmentProvider(ProviderBase):
 
     @abc.abstractmethod
     def create_environment(
-        self,
-        *,
-        cwd: str,
-        timeout: int,
-        task_id: str = "default",
-        image: Optional[str] = None,
-        container_config: Optional[Dict[str, Any]] = None,
-        **kwargs: Any,
+        self, *, cwd: str, timeout: int, task_id: str = "default", image: Optional[str] = None,
+        container_config: Optional[Dict[str, Any]] = None, **kwargs: Any,
     ):
         """Create and return an execution environment (``BaseEnvironment`` duck type).
 

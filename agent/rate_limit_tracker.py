@@ -86,10 +86,7 @@ def has_rate_limit_headers(lowered: Mapping[str, str]) -> bool:
     return any(k.startswith("x-ratelimit-") for k in lowered)
 
 
-def parse_rate_limit_headers(
-    headers: Mapping[str, str],
-    provider: str = "",
-) -> Optional[RateLimitState]:
+def parse_rate_limit_headers(headers: Mapping[str, str], provider: str = "") -> Optional[RateLimitState]:
     """Parse x-ratelimit-* headers into a RateLimitState (None if none present)."""
     lowered = lower_headers(headers)
     if not has_rate_limit_headers(lowered):
@@ -159,12 +156,8 @@ def format_rate_limit_display(state: RateLimitState) -> str:
     freshness = "just now" if age < 5 else f"{int(age)}s ago" if age < 60 else f"{_fmt_seconds(age)} ago"
 
     provider_label = state.provider.title() if state.provider else "Provider"
-    labeled = [
-        ("Requests/min", state.requests_min),
-        ("Requests/hr", state.requests_hour),
-        ("Tokens/min", state.tokens_min),
-        ("Tokens/hr", state.tokens_hour),
-    ]
+    labeled = [("Requests/min", state.requests_min), ("Requests/hr", state.requests_hour),
+               ("Tokens/min", state.tokens_min), ("Tokens/hr", state.tokens_hour)]
     lines = [f"{provider_label} Rate Limits (captured {freshness}):", ""]
     lines += [_bucket_line(label, bucket) for label, bucket in labeled[:2]]
     lines += [""] + [_bucket_line(label, bucket) for label, bucket in labeled[2:]]

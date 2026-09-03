@@ -14,12 +14,7 @@ _CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"
 _INSECURE_STRINGS = {"false", "0", "no", "off"}
 
 
-def resolve_httpx_verify(
-    *,
-    ca_bundle: Optional[str] = None,
-    ssl_verify: Any = None,
-    base_url: str = "",
-) -> bool | ssl.SSLContext:
+def resolve_httpx_verify(*, ca_bundle: Optional[str] = None, ssl_verify: Any = None, base_url: str = "") -> bool | ssl.SSLContext:
     """Resolve httpx ``verify``: ``ssl_verify: false`` > explicit ``ca_bundle`` >
     CA-bundle env vars > ``True`` (certifi default). ``base_url`` only feeds the warning."""
     if ssl_verify is False or (isinstance(ssl_verify, str) and ssl_verify.strip().lower() in _INSECURE_STRINGS):
@@ -38,8 +33,5 @@ def resolve_httpx_verify(
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):
             return ssl.create_default_context(cafile=ca_path)
-        logger.warning(
-            "CA bundle path does not exist: %s — falling back to default certificates",
-            effective_ca,
-        )
+        logger.warning("CA bundle path does not exist: %s — falling back to default certificates", effective_ca)
     return True
