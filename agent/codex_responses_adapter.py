@@ -208,13 +208,11 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
     """Flatten message content to plain text: text parts joined with ``sep`` (``" "`` for
     logs; ``"\\n"`` for memory providers feeding regexes), images → ``[N image(s)]``
     marker, ``""`` for None/empty, ``str(content)`` for other scalars."""
-    if content is None:
-        return ""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         try:
-            return str(content)
+            return _str_or_empty(content)
         except Exception:
             return ""
     parts = list(_iter_content_parts(content))
@@ -375,9 +373,7 @@ def _replay_reasoning_items(
         if not (isinstance(ri, dict) and ri.get("encrypted_content")):
             continue
         item_id = ri.get("id")
-        if item_id and item_id in seen_item_ids:
-            continue
-        if ri.get("type") == "compaction" and not native_compaction_eligible:
+        if (item_id and item_id in seen_item_ids) or (ri.get("type") == "compaction" and not native_compaction_eligible):
             continue
         item_issuer = ri.get("_issuer_kind")
         if current_issuer_kind is not None and item_issuer is not None and item_issuer != current_issuer_kind:
@@ -399,13 +395,11 @@ def _replay_message_items(msg: Dict[str, Any], *, is_github_responses: bool) -> 
     """Replay exact assistant message items (id/phase) for prefix-cache hits."""
     replayed: List[Dict[str, Any]] = []
     for raw_item in _as_list(msg.get("codex_message_items")):
-        is_assistant_message = (
-            isinstance(raw_item, dict) and raw_item.get("type") == "message"
-            and raw_item.get("role") == "assistant" and isinstance(raw_item.get("content"), list)
-        )
+        if not (isinstance(raw_item, dict) and raw_item.get("type") == "message" and raw_item.get("role") == "assistant"):
+            continue
         content = [
             {"type": "output_text", "text": _str_or_empty(part.get("text", ""))}
-            for part in (raw_item["content"] if is_assistant_message else [])
+            for part in _as_list(raw_item.get("content"))
             if isinstance(part, dict) and str(part.get("type") or "").strip() in _OUTPUT_TEXT_TYPES
         ]
         if content:
@@ -484,7 +478,6 @@ def _chat_messages_to_responses_input(
     def emit(new_items: List[Dict[str, Any]], msg: Dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
-
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -498,11 +491,11 @@ def _chat_messages_to_responses_input(
             continue
         content = msg.get("content", "")
         content_parts = _chat_content_to_responses_parts(content, role=role)  # [] unless a list
-        if isinstance(content, list):
-            text_type = _text_type_for(role)
-            content_text = "".join(p["text"] for p in content_parts if p["type"] == text_type)
-        else:
-            content_text = _str_or_empty(content)
+        text_type = _text_type_for(role)
+        content_text = (
+            "".join(p["text"] for p in content_parts if p["type"] == text_type)
+            if isinstance(content, list) else _str_or_empty(content)
+        )
         if role == "user":
             emit([{"role": role, "content": content_parts or content_text}], msg)
             continue
@@ -549,7 +542,6 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
     def _host_is(domain: str) -> bool:
         return hostname == domain or hostname.endswith("." + domain)
-
     return ResponsesRouteFlags(
         is_codex_backend=provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
         is_xai_responses=provider in {"xai", "xai-oauth"} or hostname == "api.x.ai",
@@ -582,8 +574,6 @@ def estimate_native_responses_preflight_tokens(
         )
     except Exception:
         logger.debug("native Responses preflight conversion failed; falling back to generic estimate", exc_info=True)
-        return None
-    if not isinstance(items, list):
         return None
     from agent.model_metadata import estimate_request_tokens_rough
     return estimate_request_tokens_rough(items, system_prompt=system_prompt or "", tools=tools)
@@ -675,7 +665,13 @@ def _preflight_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Di
     return _assistant_message_item(item, normalized_content, is_github_responses=ctx.is_github_responses)
 
 
-def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _PreflightCtx) -> Dict[str, Any]:
+def _preflight_role_message(item: Dict[str, Any], idx: int, ctx: _PreflightCtx) -> Dict[str, Any]:
+    """Untyped ``user``/``assistant`` role message — the only legal shape besides typed items."""
+    role = item.get("role")
+    if role not in {"user", "assistant"}:
+        raise ValueError(
+            f"Codex Responses input[{idx}] has unsupported item shape (type={item.get('type')!r}, role={role!r})."
+        )
     content = item.get("content", "")
     if not isinstance(content, list):
         return {"role": role, "content": ctx.sanitize_text(_str_or_empty(content))}
@@ -704,11 +700,8 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _Pre
 
 
 _PREFLIGHT_ITEM_HANDLERS: Dict[str, Callable[..., Optional[Dict[str, Any]]]] = {
-    "function_call": _preflight_function_call,
-    "function_call_output": _preflight_function_call_output,
-    "reasoning": _preflight_encrypted,
-    "compaction": _preflight_encrypted,
-    "message": _preflight_message,
+    "function_call": _preflight_function_call, "function_call_output": _preflight_function_call_output,
+    "reasoning": _preflight_encrypted, "compaction": _preflight_encrypted, "message": _preflight_message,
 }
 
 
@@ -717,28 +710,15 @@ def _preflight_codex_input_items(
 ) -> List[Dict[str, Any]]:
     if not isinstance(raw_items, list):
         raise ValueError("Codex Responses input must be a list of input items.")
-    ctx = _PreflightCtx(
-        sanitize_text=_neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text),
-        sanitize_harmony_tokens=sanitize_harmony_tokens,
-        is_github_responses=is_github_responses,
-        seen_ids=set(),
-    )
+    sanitize_text = _neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text)
+    ctx = _PreflightCtx(sanitize_text, sanitize_harmony_tokens, is_github_responses, set())
     normalized: List[Dict[str, Any]] = []
     for idx, item in enumerate(raw_items):
         if not isinstance(item, dict):
             raise ValueError(f"Codex Responses input[{idx}] must be an object.")
         item_type = item.get("type")
         handler = _PREFLIGHT_ITEM_HANDLERS.get(item_type) if isinstance(item_type, str) else None
-        if handler is not None:
-            normalized_item = handler(item, idx, ctx)
-        else:
-            # Untyped role messages (user/assistant) are the only other legal shape.
-            role = item.get("role")
-            if role not in {"user", "assistant"}:
-                raise ValueError(
-                    f"Codex Responses input[{idx}] has unsupported item shape (type={item_type!r}, role={role!r})."
-                )
-            normalized_item = _preflight_role_message(item, idx, role, ctx)
+        normalized_item = (handler or _preflight_role_message)(item, idx, ctx)
         if normalized_item is not None:
             normalized.append(normalized_item)
     return normalized
@@ -752,8 +732,7 @@ def _preflight_tool(tool: Any, idx: int) -> Dict[str, Any]:
         return dict(tool)
     if tool_type != "function":
         raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
-    name = tool.get("name")
-    parameters = tool.get("parameters")
+    name, parameters = tool.get("name"), tool.get("parameters")
     if not _nonblank(name):
         raise ValueError(f"Codex Responses tools[{idx}] is missing a valid name.")
     if not isinstance(parameters, dict):
@@ -813,16 +792,10 @@ def _preflight_codex_api_kwargs(
     instructions = _str_or_empty(api_kwargs.get("instructions")).strip() or DEFAULT_AGENT_IDENTITY
     if sanitize_harmony_tokens:
         instructions = _neutralize_harmony_tokens(instructions)
-    normalized: Dict[str, Any] = {
-        "model": model.strip(),
-        "instructions": instructions,
-        "input": _preflight_codex_input_items(
-            api_kwargs.get("input"),
-            is_github_responses=is_github_responses,
-            sanitize_harmony_tokens=sanitize_harmony_tokens,
-        ),
-        "store": False,
-    }
+    input_items = _preflight_codex_input_items(
+        api_kwargs.get("input"), is_github_responses=is_github_responses, sanitize_harmony_tokens=sanitize_harmony_tokens,
+    )
+    normalized: Dict[str, Any] = {"model": model.strip(), "instructions": instructions, "input": input_items, "store": False}
     tools = api_kwargs.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
@@ -900,7 +873,6 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
     def field(name: str) -> str:
         value = _field(error_obj, name)
         return str(value).strip() if isinstance(value, str) or value else ""
-
     code_str, message_str = field("code"), field("message")
     if code_str and message_str:
         return f"{code_str}: {message_str}"
@@ -986,22 +958,20 @@ class _OutputScan:
                 reasoning_text = _extract_responses_reasoning_text(item)
                 if reasoning_text:
                     self.reasoning_parts.append(reasoning_text)
-                self._capture(_capture_reasoning_item(item, issuer_kind))
+                raw_item = _capture_reasoning_item(item, issuer_kind)
+                if raw_item is not None:
+                    self.reasoning_items_raw.append(raw_item)
             elif item_type == "compaction":
                 # Compaction checkpoints ride the codex_reasoning_items sidecar (persistence,
                 # replay, cross-issuer guard and kill switch for free).
                 raw_item = _stamped_encrypted_item(item, "compaction", issuer_kind)
-                if self._capture(raw_item):
+                if raw_item is not None:
+                    self.reasoning_items_raw.append(raw_item)
                     logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
                 self.tool_calls.append(_response_tool_call(item, item_type, len(self.tool_calls)))
-
-    def _capture(self, raw_item: Optional[Dict[str, Any]]) -> bool:
-        if raw_item is not None:
-            self.reasoning_items_raw.append(raw_item)
-        return raw_item is not None
 
     def _message(self, item: Any, item_status: Optional[str]) -> None:
         normalized_phase = _lower_or_none(getattr(item, "phase", None))
@@ -1084,13 +1054,10 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
                 reasoning_prefix = joined_reasoning[:marker].strip()
                 reasoning_parts = [reasoning_prefix] if reasoning_prefix else []
     assistant_message = SimpleNamespace(
-        content=final_text,
-        tool_calls=tool_calls,
+        content=final_text, tool_calls=tool_calls,
         reasoning="\n\n".join(reasoning_parts).strip() if reasoning_parts else None,
-        reasoning_content=None,
-        reasoning_details=None,
-        codex_reasoning_items=scan.reasoning_items_raw or None,
-        codex_message_items=scan.message_items_raw or None,
+        reasoning_content=None, reasoning_details=None,
+        codex_reasoning_items=scan.reasoning_items_raw or None, codex_message_items=scan.message_items_raw or None,
     )
     if tool_calls:
         finish_reason = "tool_calls"
