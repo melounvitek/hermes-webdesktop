@@ -1363,8 +1363,7 @@ class GatewayAdapterLifecycleMixin:
             return
         pending = self._profile_failed_platforms
         if not isinstance(pending, dict):
-            pending = {}
-            self._profile_failed_platforms = pending
+            pending = self._profile_failed_platforms = {}
         profile_pending = pending.setdefault(profile_name, {})
         if platform in profile_pending:
             return
@@ -1431,10 +1430,11 @@ class GatewayAdapterLifecycleMixin:
 
         async def _handler(event):
             self._stamp_event_profile(event, profile_name)
-            if profile_home is not None:
-                async with _async_profile_runtime_scope(profile_home):
-                    return await self._handle_message(event)
-            return await self._handle_message(event)
+            async with (
+                _async_profile_runtime_scope(profile_home) if profile_home is not None
+                else contextlib.nullcontext()
+            ):
+                return await self._handle_message(event)
 
         return _handler
 
@@ -1511,10 +1511,11 @@ class GatewayAdapterLifecycleMixin:
         async def _handler(event, source):
             if getattr(source, "profile", None) is None:
                 source.profile = profile_name
-            if profile_home is not None:
-                with _profile_runtime_scope(profile_home):
-                    return await self._handle_gateway_platform_event(event, source)
-            return await self._handle_gateway_platform_event(event, source)
+            with (
+                _profile_runtime_scope(profile_home) if profile_home is not None
+                else contextlib.nullcontext()
+            ):
+                return await self._handle_gateway_platform_event(event, source)
 
         return _handler
 
