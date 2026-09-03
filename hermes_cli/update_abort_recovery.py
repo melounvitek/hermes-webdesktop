@@ -59,7 +59,6 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
         return []
     try:
         from hermes_cli.process_identity import ledger_entries
-
         live: dict[int, float | None] = {
             entry["pid"]: _numeric(entry.get("create_time"))
             for entry in ledger_entries()
@@ -123,7 +122,6 @@ def _recover_gateway_restart_after_abort(
     Only profiles classified as supervisor-owned by the pre-update inventory are handed off.
     """
     from hermes_cli.update_cmd import _gateway_recovery_partition
-
     candidates, skipped = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
     profiles = sorted(candidates)
     recover_serve = _serve_unit_recovery_available()

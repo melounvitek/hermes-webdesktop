@@ -67,7 +67,6 @@ def _critical_module_import_failures(
     from hermes_constants import FIRST_PARTY_MODULE_ROOTS
 
     import secrets
-
     marker = f"__HERMES_IMPORT_HEALTH_{secrets.token_hex(16)}__"
     probe = (
         "import importlib, json, sys\n"
@@ -103,8 +102,7 @@ def _critical_module_import_failures(
                 interpreter = str(venv_python)
         result = subprocess.run(
             [interpreter, "-c", probe], cwd=str(root), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=120,
-        )
+            encoding="utf-8", errors="replace", timeout=120)
     except subprocess.TimeoutExpired:
         return _probe_failure("TimeoutExpired", "timed out before reporting import health")
     except (OSError, subprocess.SubprocessError):
@@ -197,7 +195,6 @@ def _capture_active_lazy_features() -> list[str]:
     """Snapshot active lazy backends before a managed runtime is replaced."""
     try:
         from tools import lazy_deps
-
         return lazy_deps.active_features()
     except Exception as exc:
         logger.debug("Could not snapshot active lazy features: %s", exc)
@@ -208,7 +205,6 @@ def _capture_active_tool_dependencies() -> list[str]:
     """Snapshot Python dependencies installed explicitly through ``hermes tools``."""
     try:
         from hermes_cli import tools_config
-
         return tools_config.active_restorable_python_tool_dependencies()
     except Exception as exc:
         logger.debug("Could not snapshot active Hermes Tools dependencies: %s", exc)
@@ -376,7 +372,6 @@ def _refresh_active_memory_provider_dependencies() -> None:
     """
     try:
         from hermes_cli.config import load_config
-
         cfg = load_config()
     except Exception as exc:
         logger.debug("Memory provider refresh skipped (config load failed): %s", exc)
@@ -423,7 +418,6 @@ def _install_psutil_android_compat(
     import tempfile
     import urllib.request
     from hermes_cli.psutil_android import PSUTIL_URL, prepare_patched_psutil_sdist
-
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         archive = tmp_path / "psutil.tar.gz"
@@ -439,7 +433,6 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
     PATH uv; else wheel-only ``pip install uv`` so the Rust crate is never source-built."""
     from hermes_cli.update_cmd import _m
     from hermes_cli.managed_uv import resolve_uv
-
     existing = resolve_uv()
     if existing:
         return existing
@@ -596,7 +589,6 @@ def _update_node_dependencies() -> list[str]:
         # Only a Windows npm reachable from WSL: flag loudly — skipping silently leaves
         # deps stale, running it would corrupt the tree.
         from hermes_constants import is_wsl
-
         path_npm = shutil.which("npm")
         if is_wsl() and path_npm and _m()._is_windows_npm_path(path_npm):
             print("→ Updating Node.js dependencies...")
@@ -609,7 +601,6 @@ def _update_node_dependencies() -> list[str]:
         return []
 
     from hermes_constants import get_default_hermes_root
-
     # node_modules is shared by every profile on this checkout: one per-checkout cache.
     shared_hermes_root = get_default_hermes_root()
 
@@ -644,7 +635,6 @@ def _update_node_dependencies() -> list[str]:
         "--include-workspace-root"]
 
     from hermes_constants import with_hermes_node_path
-
     nixos_env = with_hermes_node_path(_m()._nixos_build_env())
 
     # capture_output=False is deliberate: postinstall scripts print download progress and
@@ -694,8 +684,7 @@ def _venv_core_imports_healthy() -> tuple[bool, str]:
     try:
         result = subprocess.run(
             [str(venv_python), "-c", check], capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=60, cwd=_m().PROJECT_ROOT,
-        )
+            errors="replace", timeout=60, cwd=_m().PROJECT_ROOT)
     except Exception as exc:
         logger.debug("venv health probe failed to run: %s", exc)
         return True, ""
@@ -730,7 +719,6 @@ def _dependency_sync_would_rewrite(dist_name: str) -> bool | None:
     from hermes_cli.update_cmd import _m
     try:
         from importlib import metadata as _ilmd
-
         installed = _ilmd.version(dist_name)
     except Exception:
         return True  # not installed → the sync will definitely install it
@@ -740,7 +728,6 @@ def _dependency_sync_would_rewrite(dist_name: str) -> bool | None:
         from packaging.requirements import Requirement
         from packaging.utils import canonicalize_name
         from packaging.version import Version
-
         pyproject = _m().PROJECT_ROOT / "pyproject.toml"
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
         project = data.get("project") or {}
@@ -864,7 +851,6 @@ def _rebuild_desktop_after_update(
     # rebuild window), then surface the tail. Put Hermes-managed Node on PATH: the desktop
     # updater chain loses shell PATH customizations, so a bare-PATH child hits `node: not found`.
     from hermes_constants import with_hermes_node_path
-
     build_env = with_hermes_node_path()
     build_result = _m()._run_logged_subprocess(
         desktop_build_cmd, cwd=_m().PROJECT_ROOT, env=build_env)
@@ -877,7 +863,6 @@ def _rebuild_desktop_after_update(
         if tail:
             print(tail)
         from hermes_constants import display_hermes_home as _dhh
-
         print(f"  Full build log: {_dhh()}/logs/update.log")
         return False
     print("  ✓ Desktop app up to date")
@@ -1008,7 +993,6 @@ def _sync_python_dependencies_after_pull(
     else:
         print("→ Updating Python dependencies...")
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
-
     # `uv self update` if we already have a managed uv.
     update_managed_uv()
 
@@ -1023,7 +1007,6 @@ def _sync_python_dependencies_after_pull(
     if uv_bin:
         # managed_python_env() isolation so a third-party UV_PYTHON_INSTALL_DIR can't hijack uv.
         from hermes_cli.managed_uv import managed_python_env
-
         install_prefix, lazy_env = [uv_bin, "pip"], managed_python_env()
         lazy_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
         termux_note = "  → Termux detected: using uv + curated termux-all optional profile..."

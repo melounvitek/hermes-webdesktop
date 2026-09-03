@@ -105,7 +105,6 @@ def remove_path_from_shell_configs():
             new_content = _strip_hermes_path_lines(content)
             if new_content != content:
                 from utils import atomic_write_text
-
                 # This is the user's own shell rc, not a Hermes-owned file, and nothing here backs
                 # it up. A bare write_text() truncates it before the new content lands, so a crash
                 # or SIGINT mid-write leaves an empty/truncated ~/.zshrc -- and the enclosing
@@ -387,7 +386,6 @@ def remove_windows_bin_launchers(*, windows: bool | None = None) -> list[Path]:
         # startup heal stage into this dir.
         from hermes_cli._install_repair import _WINDOWS_BIN_LAUNCHERS
         from hermes_constants import get_default_hermes_root
-
         bin_dir = get_default_hermes_root() / "bin"
     except Exception as e:
         log_warn(f"Could not locate the managed binary dir: {e}")
@@ -449,8 +447,7 @@ def _uninstall_profile(profile) -> None:
         try:
             subprocess.run(
                 hermes_invocation + ["gateway", subcmd], capture_output=True, text=True,
-                encoding='utf-8', errors='replace', timeout=60, check=False,
-            )
+                encoding='utf-8', errors='replace', timeout=60, check=False)
         except subprocess.TimeoutExpired:
             log_warn(f"  Gateway {subcmd} timed out for '{name}'")
         except Exception as e:
@@ -628,8 +625,7 @@ def run_uninstall(args):
 
     _perform_uninstall(
         project_root=project_root, hermes_home=hermes_home, full_uninstall=full_uninstall,
-        remove_profiles=remove_profiles, named_profiles=named_profiles,
-    )
+        remove_profiles=remove_profiles, named_profiles=named_profiles)
 
 
 def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_uninstall: bool) -> None:
@@ -788,15 +784,13 @@ def _perform_uninstall(
 
 _REINSTALL_HINT = {
     True: "  iex (irm https://hermes-agent.nousresearch.com/install.ps1)",
-    False: "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
-}
+    False: "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"}
 # windows -> [(line, color or None)]
 _RELOAD_HINT = {
     True: [("Open a new terminal (PowerShell / Windows Terminal) to pick up", Colors.YELLOW),
            ("the updated User PATH and environment variables.", Colors.YELLOW)],
     False: [("Reload your shell to complete the process:", Colors.YELLOW),
-            ("  source ~/.bashrc  # or ~/.zshrc", None)],
-}
+            ("  source ~/.bashrc  # or ~/.zshrc", None)]}
 
 
 class _UninstallArgs:
@@ -817,12 +811,10 @@ def main(argv=None) -> int:
     from the venv.
     """
     import argparse
-
     parser = argparse.ArgumentParser(prog="python -m hermes_cli.uninstall")
     parser.add_argument(
         "--mode", choices=["gui", "lite", "full"], required=True,
-        help="gui = Chat GUI only; lite = GUI + agent, keep data; full = everything",
-    )
+        help="gui = Chat GUI only; lite = GUI + agent, keep data; full = everything")
     args = _UninstallArgs(mode=parser.parse_args(argv).mode)
     (run_gui_uninstall if args.gui else run_uninstall)(args)
     return 0

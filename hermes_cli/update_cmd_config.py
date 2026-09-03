@@ -24,7 +24,6 @@ def _reload_config_modules() -> None:
     cleanup sees symbols the update added instead of dying with ImportError.
     """
     import importlib
-
     importlib.invalidate_caches()
     for mod_name in (
         "hermes_cli.config_defaults",
@@ -45,7 +44,6 @@ def _run_config_check_fresh() -> tuple:
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import check_config_version
-
     return check_config_version()
 
 
@@ -54,7 +52,6 @@ def _run_migrate_config_fresh(*, interactive: bool = False, quiet: bool = False)
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import migrate_config
-
     return migrate_config(interactive=interactive, quiet=quiet)
 
 
@@ -75,7 +72,6 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
         from hermes_constants import (
             get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override)
         from hermes_cli.profiles import _get_profiles_root, _PROFILE_ID_RE
-
         active_home = get_process_hermes_home()
         root = _get_profiles_root()
         if not root.is_dir():
@@ -113,7 +109,6 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # restore from the pre-update snapshot if jobs went missing.
     try:
         from hermes_cli.backup import restore_cron_jobs_if_emptied
-
         cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
         if cron_restore:
             print()
@@ -129,7 +124,6 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # moa:; restore only those protected keys from the same pre-update snapshot.
     try:
         from hermes_cli.backup import restore_config_model_settings_if_rewritten
-
         cfg_restore = restore_config_model_settings_if_rewritten(pre_update_snapshot_id)
         if cfg_restore:
             print()
@@ -144,7 +138,6 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # Same cron-jobs safety net per sibling profile against ITS OWN pre-update snapshot.
     with _best_effort('Sibling cron auto-restore check failed: %s'):
         from hermes_cli.backup import restore_cron_jobs_all_profiles
-
         for _restored in restore_cron_jobs_all_profiles(
             _LAST_SIBLING_SNAPSHOTS):
             print()
@@ -157,7 +150,6 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
     # Same config model-settings safety net for sibling profiles.
     with _best_effort('Sibling config auto-restore check failed: %s'):
         from hermes_cli.backup import restore_config_model_settings_all_profiles
-
         for _cfg_restored in restore_config_model_settings_all_profiles(
             _LAST_SIBLING_SNAPSHOTS):
             print()

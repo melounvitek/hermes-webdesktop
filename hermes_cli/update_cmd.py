@@ -120,14 +120,12 @@ logger = logging.getLogger(__name__)
 def _m():
     """Lazy ``hermes_cli.main`` handle: keeps main-side test patches effective, import one-way."""
     from hermes_cli import main
-
     return main
 
 
 def _updates_config() -> dict:
     """The ``updates:`` config section (``{}`` when absent/malformed); may raise on config errors."""
     from hermes_cli.config import load_config
-
     section = (load_config() or {}).get("updates", {})
     return section if isinstance(section, dict) else {}
 
@@ -147,15 +145,13 @@ def _no_prompt_git_kwargs() -> dict:
 _UPDATE_CRITICAL_FILES = (
     "hermes_cli/main.py", "hermes_cli/config.py", "hermes_cli/__init__.py",
     "hermes_cli/web_server.py", "cli.py", "run_agent.py", "model_tools.py", "toolsets.py",
-    "hermes_constants.py",
-)
+    "hermes_constants.py")
 
 
 def _record_update_step(step: str, ok: bool, detail: str = "") -> None:
     """Best-effort ``update_receipt.record_step``; the receipt must never break an update."""
     with suppress(Exception):
         from hermes_cli.update_receipt import record_step
-
         record_step(step, ok, detail)
 
 
@@ -165,8 +161,7 @@ def _git_run(git_cmd, args, cwd=None, *, check=False, network=False):
     return subprocess.run(
         git_cmd + args, cwd=_m().PROJECT_ROOT if cwd is None else cwd, capture_output=True,
         text=True, encoding="utf-8", errors="replace", check=check,
-        **(_no_prompt_git_kwargs() if network else {}),
-    )
+        **(_no_prompt_git_kwargs() if network else {}))
 
 
 def _capture_head_sha(git_cmd, cwd) -> str | None:
@@ -183,7 +178,6 @@ def _validate_python_files_syntax(
     """Compile *relpaths* under *root* without writing bytecode into the tree."""
     import py_compile
     import tempfile
-
     root = Path(root)
     with tempfile.TemporaryDirectory(prefix="hermes-syntax-check-") as tmpdir:
         for relpath in relpaths:
@@ -216,7 +210,6 @@ def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0)
     import json as _json
     import uuid as _uuid
     from hermes_constants import get_hermes_home  # noqa: F811  (deliberate: constants variant)
-
     home = get_hermes_home()
     prompt_path = home / ".update_prompt.json"
     response_path = home / ".update_response"
@@ -393,20 +386,17 @@ def _format_concurrent_instances_message(
         "",
         "  Close Hermes Desktop, exit any open `hermes` REPLs, and",
         "  stop the gateway (`hermes gateway stop`) before retrying.",
-        "",
-    ]
+        ""]
     if matches:
         pid_args = " ".join(f"/PID {pid}" for pid, _ in matches)
         lines += [
             "  If you've already closed everything and these PIDs are",
             "  stale, terminate them directly, then retry the update:",
             f"      taskkill {pid_args} /F",
-            "",
-        ]
+            ""]
     lines += [
         "  Override with `hermes update --force` if you've already",
-        "  confirmed those processes will not write to the venv.",
-    ]
+        "  confirmed those processes will not write to the venv."]
     return "\n".join(lines)
 
 
@@ -429,7 +419,6 @@ def _classify_concurrent_instance(pid: int) -> str:
         return "unknown"
 
     from hermes_cli._scan_venv_blockers import _is_pausable_gateway  # noqa: PLC0415
-
     return "gateway" if _is_pausable_gateway(" ".join(cmdline_list or [])) else "non-gateway"
 
 
@@ -459,8 +448,7 @@ def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     ``CompletedProcess`` so the caller can surface the output on failure."""
     result = subprocess.run(
         cmd, cwd=cwd, env=env, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace",
-    )
+        text=True, encoding="utf-8", errors="replace")
     _log_only_write(result.stdout or "")
     return result
 
@@ -491,7 +479,6 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
 
     # Interrupted fetches leave .git/*.lock behind ("File exists" forever); self-heal first.
     from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
-
     cleared = clear_stale_git_locks(_m().PROJECT_ROOT)
     for lock_path in cleared:
         print(f"  (removed stale git lock: {lock_path})")
@@ -540,7 +527,6 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             print("✓ Already up to date.")
             return
         from hermes_cli.banner import _github_compare_behind
-
         # counted == 0 means local-ahead, not behind; None means the API could not count.
         _print_update_check_result(_github_compare_behind(head_sha, target_sha), compare_branch)
         return
@@ -560,7 +546,6 @@ def _print_update_check_result(behind: int | None, compare_branch: str) -> None:
     else:
         print(f"⚕ Update available (behind {compare_branch}).")
     from hermes_cli.config import recommended_update_command
-
     print(f"  Run '{recommended_update_command()}' to install.")
 
 
@@ -580,7 +565,6 @@ def _repair_current_checkout(
     # "No new commits" != safe interpreter: uv can keep the same CPython patch while
     # python-build-standalone refreshes the embedded SQLite; keep the boundary hook here too.
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
-
     runtime_repairs = []
     update_managed_uv(repair_observer=runtime_repairs.append)
     ensure_uv(repair_observer=runtime_repairs.append)
@@ -604,7 +588,6 @@ def _repair_current_checkout(
         _m()._abort_dependency_sync_if_self_locked(_windows_gateway_resume)
         _write_update_incomplete_marker()
         from hermes_cli.managed_uv import ensure_uv
-
         repair_uv = ensure_uv()
         # Venv gone entirely (repair interrupted after the old one was moved aside): recreate.
         venv_python_missing = not (
@@ -615,7 +598,6 @@ def _repair_current_checkout(
         if repair_uv:
             # Isolated from third-party UV env vars, like the other dependency syncs.
             from hermes_cli.managed_uv import managed_python_env
-
             repair_prefix, repair_env = [repair_uv, "pip"], managed_python_env()
             repair_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
         else:
@@ -698,7 +680,6 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
         has_common_ancestor = merge_base_result.returncode == 0 and merge_base_result.stdout.strip()
         if not has_common_ancestor and pre_pull_sha:
             from datetime import datetime as _dt, timezone
-
             # SHA suffix so two updates in the same second get distinct refs.
             rescue_ref = (
                 f"refs/hermes-update-backups/orphan-{branch}-"
@@ -936,7 +917,6 @@ def _prepare_checkout_for_update(
         _git_run(git_cmd, ["rev-parse", "--is-shallow-repository"]).stdout.strip() == "true")
     if commit_count > 0 and apply_is_shallow:
         from hermes_cli.banner import _github_compare_behind
-
         head_sha = _git_run(git_cmd, ["rev-parse", "HEAD"]).stdout.strip()
         target_sha = _git_run(git_cmd, ["rev-parse", f"origin/{branch}"]).stdout.strip()
         counted = _github_compare_behind(head_sha, target_sha)
@@ -961,8 +941,7 @@ def _prepare_checkout_for_update(
     return _CheckoutPlan(
         auto_stash_ref=auto_stash_ref, commit_count=commit_count, in_place_update=in_place_update,
         parked_branch_switched=parked_branch_switched, prompt_for_restore=prompt_for_restore,
-        switch_block_reason=switch_block_reason, upstream_checked=upstream_checked,
-    )
+        switch_block_reason=switch_block_reason, upstream_checked=upstream_checked)
 
 
 @dataclass
@@ -1012,8 +991,7 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
         active_lazy_features=active_lazy_features,
         active_tool_dependencies=active_tool_dependencies, pre_update_version=pre_update_version,
         gw_input_fn=gw_input_fn, assume_yes=assume_yes, keep_stash=keep_stash,
-        switch_branch=switch_branch, discard_local_changes=discard_local_changes,
-    )
+        switch_branch=switch_branch, discard_local_changes=discard_local_changes)
 
 
 def _begin_update_receipt_and_plan(args):
@@ -1023,7 +1001,6 @@ def _begin_update_receipt_and_plan(args):
     # Structured receipt: record what this run discovers/does/skips so silent failures are diagnosable.
     with _best_effort('Update receipt unavailable: %s'):
         from hermes_cli.update_receipt import begin_update_receipt
-
         begin_update_receipt()
 
     # Plan phase: snapshot runtimes/supervisors/version (read-only; probe failure records
@@ -1148,8 +1125,7 @@ def _handle_update_called_process_error(
         if _called_process_error_is_python_dep_install(e):
             print(
                 "  The git update already finished. Re-downloading the source "
-                "ZIP cannot fix a dependency install error and would overwrite "
-                "local files.")
+                "ZIP cannot fix a dependency install error and would overwrite local files.")
             if _m()._is_windows():
                 print("  Retry through the venv interpreter:")
                 print(
@@ -1157,7 +1133,6 @@ def _handle_update_called_process_error(
                     '"from hermes_cli.main import main; main()" update --yes')
         with suppress(Exception):
             from hermes_cli.update_receipt import finalize_update_receipt
-
             finalize_update_receipt("failed")
         sys.exit(1)
 
@@ -1217,7 +1192,6 @@ def _finish_already_up_to_date(
             _write_gateway_update_exit_code(False)
         with _best_effort('Update receipt finalize (current checkout) failed: %s'):
             from hermes_cli.update_receipt import finalize_update_receipt
-
             finalize_update_receipt("partial")
         sys.exit(1)
 
@@ -1246,7 +1220,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
     _windows_gateway_resume = _m()._pause_windows_gateways_for_update()
     if _windows_gateway_resume:
         import atexit as _atexit
-
         _atexit.register(_m()._resume_windows_gateways_after_update, _windows_gateway_resume)
 
     # Any venv python still running (typically the Desktop `hermes serve` backend) keeps .pyd
@@ -1282,7 +1255,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Self-heal abandoned .git/*.lock files (crashed fetch) or the fetch fails "File exists".
         from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
-
         cleared = clear_stale_git_locks(_m().PROJECT_ROOT)
         if cleared:
             print("  (removed stale git lock(s): %s)" % ", ".join(cleared))
@@ -1317,8 +1289,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 had_desktop_app_before_update=had_desktop_app_before_update,
                 active_lazy_features=active_lazy_features,
                 active_tool_dependencies=active_tool_dependencies,
-                _windows_gateway_resume=_windows_gateway_resume,
-            )
+                _windows_gateway_resume=_windows_gateway_resume)
             return
 
         if commit_count > 0:
@@ -1356,8 +1327,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _sync_python_dependencies_after_pull(
             git_cmd, branch, pre_pull_sha, active_lazy_features=active_lazy_features,
             active_tool_dependencies=active_tool_dependencies,
-            _windows_gateway_resume=_windows_gateway_resume,
-        )
+            _windows_gateway_resume=_windows_gateway_resume)
 
         node_failures = _update_node_dependencies()
         _m()._build_web_ui(_m().PROJECT_ROOT / "web")
@@ -1386,8 +1356,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _verify_fleet_after_update(
             _restart, _pre_update_plan=_pre_update_plan,
             _windows_gateway_resume=_windows_gateway_resume, node_failures=node_failures,
-            update_complete=update_complete,
-        )
+            update_complete=update_complete)
 
     except _shim_quarantine_error_type() as e:
         # Strict quarantine refused BEFORE any installer ran — defer via marker, exit 2, no ZIP.
