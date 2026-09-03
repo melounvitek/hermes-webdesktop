@@ -60,7 +60,7 @@ from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_state import (
     PluginState, _locked_plugin_state, _nested_plugin_mapping, _nested_plugin_value,
-    _plugin_relative_segments,
+    _plugin_relative_segments, _plugin_settings_entry,
 )
 
 
@@ -228,10 +228,8 @@ class PluginContext:
         legacy ``config`` subtree for migration compatibility)."""
         segments = self._segments(key)
         from hermes_cli.config import load_config_readonly
-        entry = _nested_plugin_value(
-            load_config_readonly() or {}, ("plugins", "entries", self.plugin_id), None
-        )
-        if not isinstance(entry, Mapping):
+        entry = _plugin_settings_entry(load_config_readonly() or {}, self.plugin_id)
+        if entry is None:
             return default
         missing = object()
         value = _nested_plugin_value(entry.get("settings"), segments, missing)
@@ -487,10 +485,9 @@ class PluginContext:
         timeout: float = 30,
     ) -> Dict[str, Any]:
         """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
-        (same trust gates, breaker, reconnect — never a parallel connection). Default-off per-server
-        grant: servers not in ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError``.
-        ``timeout`` clamps to 1–600s. Returns ``{"ok": True, "result"}`` / ``{"ok": False, "error"}``;
-        results over ~64KB are truncated with a marker."""
+        (same trust gates, breaker, reconnect — never a parallel connection). Servers not in
+        ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError`` (default-deny). ``timeout``
+        clamps to 1–600s; results over ~64KB are truncated with a marker."""
         if server not in self._mcp_allowlist(self.plugin_id):
             raise PermissionError(
                 f"Plugin {self.manifest.name!r} is not allowed to call MCP "
@@ -545,8 +542,7 @@ class PluginContext:
             cfg = load_config() or {}
         except Exception:
             return []
-        allowlist = ((cfg.get("plugins") or {}).get("entries") or {}).get(plugin_id) or {}
-        allowlist = allowlist.get("mcp_allowlist")
+        allowlist = (_plugin_settings_entry(cfg, plugin_id) or {}).get("mcp_allowlist")
         return [str(item) for item in allowlist] if isinstance(allowlist, list) else []
 
     def _tool_override_allowed(self, tool_name: str) -> bool:
@@ -608,8 +604,8 @@ class PluginContext:
             cfg = load_config_readonly() or {}
         except Exception:
             return False
-        return _nested_plugin_value(
-            cfg, ("plugins", "entries", self.plugin_id, "allow_gateway_injection"), False
+        return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get(
+            "allow_gateway_injection"
         ) is True
 
     @_serialized_replacement
@@ -632,10 +628,9 @@ class PluginContext:
         self, name: str, handler: Callable, description: str = "", args_hint: str = "",
         argument_mode: str | None = None,
     ) -> Optional[PluginRegistration]:
-        """Register an in-session slash command (``/name``) for CLI and gateway sessions. Handler:
-        ``fn(raw_args: str) -> str | None`` (sync or async). ``args_hint`` (e.g. ``"<file>"``) lets
-        adapters like Discord surface an argument field; without it the command registers parameterless
-        there but still accepts trailing text as free-form chat."""
+        """Register an in-session slash command (``/name``); handler ``fn(raw_args: str) -> str | None``
+        (sync or async). ``args_hint`` (e.g. ``"<file>"``) lets adapters like Discord surface an argument
+        field; without it the command registers parameterless there but still accepts trailing text."""
         clean = name.lower().strip().lstrip("/").replace(" ", "-")
         if not clean:
             logger.warning(
@@ -775,10 +770,9 @@ class PluginContext:
     ) -> Optional[PluginRegistration]:
         """Register a gateway platform adapter (``adapter_factory(PlatformConfig) -> BasePlatformAdapter``).
         ``check_fn`` is a PASSIVE "deps importable?" probe that must never install (status displays call
-        it freely); pass an ACTIVE installer as ``ensure_deps_fn`` (the gateway calls it from
-        ``create_adapter()`` when ``check_fn`` is False). Extra kwargs (``setup_fn``, ``emoji``,
-        ``allowed_users_env``, ``platform_hint``, ``ensure_deps_fn``) forward to ``PlatformEntry``;
-        unknown keys raise TypeError."""
+        it freely); an ACTIVE installer goes in ``ensure_deps_fn`` (called from ``create_adapter()`` when
+        ``check_fn`` is False). Extra kwargs (``setup_fn``, ``emoji``, ``allowed_users_env``,
+        ``platform_hint``, ``ensure_deps_fn``) forward to ``PlatformEntry``; unknown keys raise TypeError."""
         from gateway.platform_registry import platform_registry, PlatformEntry
         entry_kwargs.setdefault("plugin_name", self.manifest.name)
         entry = PlatformEntry(
@@ -822,13 +816,13 @@ class PluginContext:
         return handle
 
     def register_platform_handler(self, platform: str, factory: Callable) -> None:
-        """Register a native-client handler factory for a gateway platform, invoked at ``connect()`` as
-        ``factory(native, adapter)`` before/as the core handlers register (``adapter`` read-only).
-        ``native``: telegram PTB ``Application``, discord ``commands.Bot``, slack ``AsyncApp``, matrix
-        client, teams ``App``, dingtalk ``DingTalkStreamClient``, line aiohttp ``web.Application``,
-        others ``None``. Keep SDK imports inside the factory; exceptions are logged and the platform
-        still connects. Always scope handlers hooked into first-match dispatch tables so core flows
-        keep working. Raises ``ValueError`` for a non-callable factory or empty platform."""
+        """Register ``factory(native, adapter)``, invoked at ``connect()`` before/as the core handlers
+        register (``adapter`` read-only). ``native``: telegram PTB ``Application``, discord
+        ``commands.Bot``, slack ``AsyncApp``, matrix client, teams ``App``, dingtalk
+        ``DingTalkStreamClient``, line aiohttp ``web.Application``, others ``None``. Keep SDK imports
+        inside the factory; exceptions are logged and the platform still connects. Scope handlers in
+        first-match dispatch tables so core flows keep working. Raises ``ValueError`` when not callable
+        or platform is empty."""
         if not callable(factory):
             raise self._refuse("a platform handler factory with a non-callable factory")
         key = (platform or "").strip().lower()
@@ -843,10 +837,9 @@ class PluginContext:
         )
 
     def register_telegram_handler(self, factory: Callable) -> None:
-        """Alias of ``register_platform_handler("telegram", factory)``: ``factory(application,
-        adapter)`` runs before the core handlers. PTB dispatches only the FIRST matching handler per
-        group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
-        ``pattern=`` or you swallow the core button flows. Raises ``ValueError`` if not callable."""
+        """``register_platform_handler("telegram", factory)``. PTB dispatches only the FIRST matching
+        handler per group and core registers a catch-all ``CallbackQueryHandler`` — always scope with
+        ``pattern=`` or you swallow the core button flows."""
         self.register_platform_handler("telegram", factory)
 
     @_serialized_replacement
@@ -855,10 +848,9 @@ class PluginContext:
         defaults: Optional[Dict[str, Any]] = None,
     ) -> PluginRegistration:
         """Register an auxiliary LLM task with its own ``auxiliary.<key>`` config block (picker entry,
-        ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``key`` is snake_case
-        and must not shadow a built-in task; ``defaults`` may override
-        provider/model/base_url/api_key/timeout/extra_body (unknown keys preserved verbatim). Raises
-        ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
+        ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``defaults`` may
+        override provider/model/base_url/api_key/timeout/extra_body (unknown keys kept verbatim).
+        Raises ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
         if not key or not isinstance(key, str):
             raise ValueError(
                 f"Plugin '{self.manifest.name}' tried to register auxiliary task with invalid key {key!r}"
@@ -1927,10 +1919,9 @@ def get_plugin_error_classification(
     num_messages: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """Consult ``transform_api_error_classification`` hooks BEFORE the built-in classifier.
-    Run-all-then-pick-first: every callback runs isolated, the first valid result in registration
-    order wins, losing valid results warn (conflicts visible, not shadowed). Returns a sanitized dict
-    (``reason`` -> ``FailoverReason``, hint flags -> bool, ``message`` capped at 500) or ``None``.
-    Privacy: ``error_message``/``error_body`` may be unredacted."""
+    Run-all-then-pick-first: the first valid result in registration order wins, losing valid results
+    warn (conflicts visible, not shadowed). Returns a sanitized dict (``reason`` -> ``FailoverReason``,
+    hint flags -> bool, ``message`` capped at 500) or ``None``. Privacy: inputs may be unredacted."""
     from agent.error_classifier import FailoverReason
     hook_results = invoke_hook(
         "transform_api_error_classification", provider=provider, model=model,
@@ -1939,38 +1930,33 @@ def get_plugin_error_classification(
         error=error, approx_tokens=approx_tokens, context_length=context_length,
         num_messages=num_messages,
     )
-    winner: Optional[Dict[str, Any]] = None
-    skipped_valid = 0
-    for result in hook_results:
-        if not isinstance(result, dict):
-            continue
-        reason = result.get("reason")
+
+    def _reason(result: Any) -> Any:
+        reason = result.get("reason") if isinstance(result, dict) else None
         if isinstance(reason, str):
-            try:
-                reason = FailoverReason(reason.strip().lower())
-            except ValueError:
-                continue
-        if not isinstance(reason, FailoverReason):
-            continue
-        if winner is not None:
-            skipped_valid += 1
-            continue
-        out: Dict[str, Any] = {"reason": reason}
-        for key in ("retryable", "should_compress", "should_rotate_credential", "should_fallback"):
-            if key in result:
-                out[key] = bool(result[key])
-        message = result.get("message")
-        if isinstance(message, str) and message.strip():
-            out["message"] = message.strip()[:500]
-        error_context = result.get("error_context")
-        if isinstance(error_context, dict):
-            out["error_context"] = error_context
-        winner = out
-    if winner is not None and skipped_valid:
+            with suppress(ValueError):
+                return FailoverReason(reason.strip().lower())
+            return None
+        return reason if isinstance(reason, FailoverReason) else None
+
+    valid = [(result, reason) for result in hook_results if (reason := _reason(result)) is not None]
+    if not valid:
+        return None
+    result, reason = valid[0]
+    winner: Dict[str, Any] = {"reason": reason}
+    for key in ("retryable", "should_compress", "should_rotate_credential", "should_fallback"):
+        if key in result:
+            winner[key] = bool(result[key])
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        winner["message"] = message.strip()[:500]
+    if isinstance(result.get("error_context"), dict):
+        winner["error_context"] = result["error_context"]
+    if len(valid) > 1:
         logger.warning(
             "transform_api_error_classification: skipped %d valid "
             "classification(s) after the first result in registration order "
-            "won (run-all-then-pick-first)", skipped_valid,
+            "won (run-all-then-pick-first)", len(valid) - 1,
         )
     return winner
 

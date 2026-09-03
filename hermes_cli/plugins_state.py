@@ -57,6 +57,12 @@ def _nested_plugin_mapping(segments: tuple[str, ...], value: Any) -> dict[str, A
     return nested
 
 
+def _plugin_settings_entry(config: object, plugin_id: str) -> Mapping[str, Any] | None:
+    """``plugins.entries.<plugin_id>`` as a mapping, else ``None``."""
+    entry = _nested_plugin_value(config, ("plugins", "entries", plugin_id), None)
+    return entry if isinstance(entry, Mapping) else None
+
+
 def _plugin_data_namespace(plugin_id: str, skill_namespace: str) -> str:
     """Return one Windows-safe directory component for plugin-owned data."""
     candidate = skill_namespace or plugin_id

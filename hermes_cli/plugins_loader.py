@@ -25,6 +25,7 @@ from hermes_constants import get_hermes_home, reset_hermes_home_override, set_he
 from registration_lifecycle import replacement_coordinator
 from hermes_cli.plugins_discovery import ENTRY_POINTS_GROUP, _select_entry_point_group
 from hermes_cli.plugins_manifest import PluginManifest, manifest_key, validate_config_schema
+from hermes_cli.plugins_state import _plugin_settings_entry
 
 if TYPE_CHECKING:  # pragma: no cover
     from hermes_cli.plugins import LoadedPlugin
@@ -164,9 +165,7 @@ class PluginLoaderMixin:
                 )
                 return
             register_tools(PluginContext(manifest, self))
-            registered = [t for t in self._plugin_tool_names if t not in before]
-            loaded.tools_registered = registered
-            self._predeclared_tools[lookup_key] = registered
+            registered = _credit()
             logger.debug(
                 "Deferred platform '%s': pre-registered %d client tool(s) %s", lookup_key,
                 len(registered), registered,
@@ -226,12 +225,10 @@ class PluginLoaderMixin:
         settings: Mapping[str, Any] = {}
         try:
             from hermes_cli.config import load_config
-            entries = ((load_config() or {}).get("plugins") or {}).get("entries") or {}
-            entry = entries.get(plugin_id) if isinstance(entries, Mapping) else None
-            raw = entry.get("settings") if isinstance(entry, Mapping) else None
+            entry = _plugin_settings_entry(load_config() or {}, plugin_id) or {}
+            raw = entry.get("settings")
             if not isinstance(raw, Mapping):
-                # Migration fallback mirroring ctx.get_config.
-                raw = entry.get("config") if isinstance(entry, Mapping) else None
+                raw = entry.get("config")  # migration fallback mirroring ctx.get_config
             settings = raw if isinstance(raw, Mapping) else {}
         except Exception:
             settings = {}
