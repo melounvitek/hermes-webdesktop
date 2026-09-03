@@ -26,19 +26,20 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.krea.ai"
 
-# ``path`` is Krea's URL segment. ``upscale`` (the Enhance pass) is opt-in for
-# every tier: default-on enhance passes degraded output quality, and Large is
-# 2K native anyway.
+# ``path`` is Krea's URL segment. ``upscale`` (Enhance pass) is opt-in for every tier:
+# default-on enhance degraded output quality, and Large is 2K native anyway.
 _MODELS: Dict[str, Dict[str, Any]] = {
     "krea-2-medium": {
         "display": "Krea 2 Medium", "speed": "~15-25s",
         "strengths": "Illustration, anime, painting, expressive styles. Faster + cheaper.",
-        "price": "$0.030 (text) / $0.035 (style refs) / $0.040 (moodboards)", "path": "medium", "upscale": False,
+        "price": "$0.030 (text) / $0.035 (style refs) / $0.040 (moodboards)",
+        "path": "medium", "upscale": False,
     },
     "krea-2-large": {
         "display": "Krea 2 Large", "speed": "~25-60s",
         "strengths": "Photorealism, raw textured looks (motion blur, grain), expressive styles.",
-        "price": "$0.060 (text) / $0.065 (style refs) / $0.070 (moodboards)", "path": "large", "upscale": False,
+        "price": "$0.060 (text) / $0.065 (style refs) / $0.070 (moodboards)",
+        "path": "large", "upscale": False,
     },
     "krea-2-medium-turbo": {
         "display": "Krea 2 Medium Turbo", "speed": "~8-15s",
@@ -51,22 +52,18 @@ DEFAULT_MODEL = "krea-2-medium"
 
 # Hermes' 3 abstract ratios → Krea's enum (1:1, 4:3, 3:2, 16:9, 2.35:1, 4:5, 2:3, 9:16).
 _ASPECT_MAP = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
-# Only resolution Krea currently supports.
-DEFAULT_RESOLUTION = "1K"
-# image_style_references entries are objects ({"url", "strength"}); a URL
-# without explicit strength gets Krea's recommended start (range -2..2).
+DEFAULT_RESOLUTION = "1K"  # only resolution Krea currently supports
+# Style refs are objects ({"url", "strength"}); bare URLs get Krea's recommended start (range -2..2).
 _DEFAULT_STYLE_REFERENCE_STRENGTH = 0.6
 _MAX_STYLE_REFERENCES = 10
 _VALID_CREATIVITY = {"raw", "low", "medium", "high"}
 
-# Polling: Krea recommends 2-5s; start at 2s, back off to 5s (Large can take
-# ~1min). Ceiling matches Krea's hosted-tool timeout of 3 min.
+# Polling: Krea recommends 2-5s; 2s backing off to 5s (Large ~1min); ceiling = Krea's 3 min tool timeout.
 _POLL_INITIAL_INTERVAL = 2.0
 _POLL_MAX_INTERVAL = 5.0
 _POLL_BACKOFF = 1.3
 _POLL_TIMEOUT_SECONDS = 180.0
-# Statuses worth retrying while polling; everything else (401/402/403/404,
-# other 4xx) is permanent — surface it instead of burning the 180s deadline.
+# Retryable poll statuses; other 4xx are permanent — surface them instead of burning the deadline.
 _RETRYABLE_POLL_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
@@ -105,13 +102,9 @@ def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]
 
 
 def _resolve_managed_krea_gateway():
-    """Managed Krea gateway config when the user is on the managed path, else ``None``.
-
-    Strict selection: managed when the stored ``image_gen`` selection is ``nous``
-    (or legacy ``use_gateway: true``), or on a never-configured install with no
-    direct ``KREA_API_KEY``. An explicit vendor selection pins the direct path.
-    Never raises — plugin discovery and availability scans must stay robust.
-    """
+    """Managed gateway config on the managed path, else ``None``. Managed when the stored
+    ``image_gen`` selection is ``nous`` (or legacy ``use_gateway: true``), or never-configured with
+    no ``KREA_API_KEY``; an explicit vendor selection pins direct. Never raises (discovery scans)."""
     try:
         from tools.managed_tool_gateway import resolve_managed_tool_gateway
         from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection
@@ -156,9 +149,7 @@ def _headers(auth_token: str, *, managed: bool, json_body: bool) -> Dict[str, st
     if json_body:
         headers["Content-Type"] = "application/json"
     if managed:
-        # The gateway derives the per-generation billing idempotency boundary
-        # from this header; a fresh key per submit keeps each generation a
-        # distinct billable execution.
+        # Gateway billing idempotency boundary: a fresh key per submit = one billable execution.
         headers["x-idempotency-key"] = str(uuid.uuid4())
     return headers
 
@@ -168,15 +159,18 @@ def _submit_error_message(resp: Any, exc: Exception) -> str:
     try:
         body = resp.json() if resp is not None else {}
         error = body.get("error")
-        message = error.get("message") if isinstance(error, dict) else body.get("message") or body.get("detail")
+        if isinstance(error, dict):
+            message = error.get("message")
+        else:
+            message = body.get("message") or body.get("detail")
         return message or fallback
     except Exception:  # noqa: BLE001
         return fallback
 
 
 def _is_terminal(job: Any) -> bool:
-    """``completed_at`` is a backstop terminal marker even when ``status`` is an
-    unfamiliar enum (Krea adds pending states — backlogged/scheduled/sampling — over time)."""
+    """``completed_at`` is a backstop terminal marker for unfamiliar ``status`` enums (Krea adds
+    pending states — backlogged/scheduled/sampling — over time)."""
     return isinstance(job, dict) and (job.get("status") in _TERMINAL_STATES or bool(job.get("completed_at")))
 
 
@@ -184,14 +178,11 @@ def _poll_krea_job(
     base_url: str, auth_token: str, job_id: str, *, timeout_seconds: float = _POLL_TIMEOUT_SECONDS,
     on_error: Optional[Any] = None,
 ) -> Any:
-    """Poll ``/jobs/{job_id}`` until terminal.
+    """Poll ``/jobs/{job_id}`` until terminal; returns the job dict or ``None`` when it gave up.
 
-    Returns the terminal job dict, or ``None`` when the poll gave up. With
-    ``on_error(kind, detail)`` supplied (the main generation path), a fatal
-    poll failure returns whatever that callback returns instead of ``None``;
-    without it (the best-effort Enhance pass) failures only log.
-    ``kind`` ∈ ``http`` (detail = status) / ``timeout`` / ``invalid_json`` /
-    ``deadline`` (detail = last status seen).
+    With ``on_error(kind, detail)`` (main path) a fatal poll failure returns that callback's
+    result; without it (best-effort Enhance) failures only log. ``kind`` ∈ ``http`` (detail =
+    status) / ``timeout`` / ``invalid_json`` / ``deadline`` (detail = last status seen).
     """
     job_url = f"{base_url}/jobs/{job_id}"
     headers = _headers(auth_token, managed=False, json_body=False)
@@ -268,14 +259,9 @@ def _extract_result_url(job: Optional[Dict[str, Any]]) -> Optional[str]:
 def _enhance_image(
     base_url: str, auth_token: str, image_url: str, prompt: str, *, managed: bool
 ) -> Optional[str]:
-    """Run Krea Enhance on ``image_url``; return the enhanced URL or None.
-
-    Best-effort: any submit/poll/result failure logs and returns ``None`` so the
-    caller falls back to the original image — an upscale failure must never
-    destroy an already-successful generation.
-    """
-    # The original prompt guides detail; default ai_strength (0.4) adds detail
-    # without redrawing the composition.
+    """Krea Enhance on ``image_url`` → enhanced URL, or ``None`` on any failure (best-effort: an
+    upscale failure must never destroy an already-successful generation)."""
+    # The prompt guides detail; default ai_strength (0.4) adds detail without redrawing.
     payload = {"image_url": image_url, "image_scaling_factor": _ENHANCE_SCALE_FACTOR, "prompt": prompt}
     try:
         resp = requests.post(
@@ -299,9 +285,8 @@ def _enhance_image(
 def _collect_style_refs(
     image_url: Optional[str], reference_image_urls: Optional[List[str]], legacy_refs: Any
 ) -> List[Any]:
-    """Style-transfer references: unified ``image_url`` + ``reference_image_urls``
-    first, then the legacy ``image_style_references`` kwarg (URL strings or Krea
-    ref objects, passed through). Strings deduped in order; capped at 10."""
+    """``image_url`` + ``reference_image_urls`` first, then legacy ``image_style_references``
+    (URL strings or Krea ref objects, passed through); strings deduped in order; capped at 10."""
     refs: List[Any] = collect_source_images(image_url, reference_image_urls)
     for ref in legacy_refs if isinstance(legacy_refs, list) else []:
         if isinstance(ref, str):
@@ -332,8 +317,7 @@ def _build_payload(
     if isinstance(styles, list) and styles:
         payload["styles"] = styles
     if style_refs:
-        # Krea requires objects ({"url", "strength"}) — a bare string yields a
-        # 422 "Expected object, received string". Object refs pass through.
+        # Krea requires objects — a bare string yields 422 "Expected object, received string".
         payload["image_style_references"] = [
             {"url": ref, "strength": _DEFAULT_STYLE_REFERENCE_STRENGTH} if isinstance(ref, str) else ref
             for ref in style_refs
@@ -356,8 +340,7 @@ def _submit_job(
         if failure.kind == "http":
             status, err_msg = failure.status, failure.message
             logger.error("Krea submit failed (%d): %s", status, err_msg)
-            # Managed 4xx: the model may not be enabled/priced on the Nous
-            # Portal, or the gateway's shared key hit its concurrency cap (429).
+            # Managed 4xx: model not enabled/priced on the Portal, or shared-key concurrency cap (429).
             if managed and 400 <= status < 500:
                 hint = (
                     "Krea's shared-key concurrency cap was hit — retry shortly." if status == 429 else
@@ -419,13 +402,13 @@ class KreaImageGenProvider(StaticImageGenProvider):
         key="KREA_API_KEY", prompt="Krea API key", url="https://www.krea.ai/settings/api-tokens")
 
     def is_available(self) -> bool:
-        # Direct key OR the managed Nous gateway, so portal users without a
-        # Krea key can still reach Krea 2.
+        # Direct key OR managed Nous gateway (portal users without a Krea key).
         return bool(get_secret("KREA_API_KEY")) or _managed_krea_gateway_ready()
 
     def capabilities(self) -> Dict[str, Any]:
         return {
-            "modalities": ["text", "image"], "max_reference_images": _MAX_STYLE_REFERENCES, "supports_upscale": True,
+            "modalities": ["text", "image"], "max_reference_images": _MAX_STYLE_REFERENCES,
+            "supports_upscale": True,
         }
 
     def generate(
@@ -436,13 +419,14 @@ class KreaImageGenProvider(StaticImageGenProvider):
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
-        style_refs = _collect_style_refs(image_url, reference_image_urls, kwargs.get("image_style_references"))
+        style_refs = _collect_style_refs(
+            image_url, reference_image_urls, kwargs.get("image_style_references"),
+        )
         if not prompt:
             return prompt_required_error("krea", aspect)
 
-        # Managed Nous gateway (Nous Subscription) owns the shared Krea credential
-        # and meters per generation, so the caller token is the Nous access
-        # token; otherwise the direct Krea API with a BYO ``KREA_API_KEY``.
+        # Managed gateway owns the shared Krea credential and meters per generation (token =
+        # Nous access token); otherwise direct Krea with a BYO ``KREA_API_KEY``.
         managed = _resolve_managed_krea_gateway()
         if managed is not None:
             base_url = managed.gateway_origin.rstrip("/")
@@ -464,8 +448,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
         fail = error_factory("krea", aspect, model=model_id, prompt=prompt)
         payload = _build_payload(prompt, krea_ar, creativity, style_refs, kwargs)
 
-        # LoRAs and moodboards are rejected by the managed gateway, so fail fast
-        # with guidance instead of a raw 400.
+        # LoRAs/moodboards are rejected by the managed gateway: fail fast with guidance, not a raw 400.
         if managed is not None:
             for what, arg in _MANAGED_UNSUPPORTED:
                 if arg in payload:
@@ -480,8 +463,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
         if err is not None:
             return err
 
-        # 2. Poll. Polling is bound to the same principal at the gateway, so the
-        # managed path polls the gateway's ``/jobs/{id}`` with the Nous token.
+        # 2. Poll — same principal as submit, so the managed path polls the gateway with the Nous token.
         poll_errors: List[Dict[str, Any]] = []
 
         def poll_error(kind: str, detail: Any) -> Dict[str, Any]:
