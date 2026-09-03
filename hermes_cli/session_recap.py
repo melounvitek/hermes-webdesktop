@@ -27,17 +27,14 @@ def _coerce_text(value: Any) -> str:
         return ""
     if isinstance(value, str):
         return value
-    if isinstance(value, list):
-        parts: List[str] = []
-        for block in value:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, Mapping):
-                text = block.get("text")
-                if isinstance(text, str) and text:
-                    parts.append(text)
-        return "\n".join(parts)
-    return str(value)
+    if not isinstance(value, list):
+        return str(value)
+    parts: List[str] = []
+    for block in value:
+        text = block if isinstance(block, str) else block.get("text") if isinstance(block, Mapping) else None
+        if isinstance(text, str) and (text or isinstance(block, str)):
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def _tool_call_name_and_args(tool_call: Any) -> Tuple[str, Mapping[str, Any]]:
