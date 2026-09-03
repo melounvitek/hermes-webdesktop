@@ -993,7 +993,6 @@ class CLIStatusBarMixin:
             if count:
                 add(name, style(count) if callable(style) else style, f"{glyph} {count}")
 
-        percent = snapshot["context_percent"]
         if _ok("model"):
             if styled:
                 segs.append([(_SB, " ⚕ "), (_STRONG, model_short)])
@@ -1004,6 +1003,7 @@ class CLIStatusBarMixin:
             # Narrow bars put duration ahead of the goal segment; the other tiers reverse it.
             add("duration", _DIM, duration_label)
         else:
+            percent = snapshot["context_percent"]
             percent_label = f"{percent}%" if percent is not None else "--"
             if wide and _ok("context_detail"):
                 if snapshot["context_length"]:
