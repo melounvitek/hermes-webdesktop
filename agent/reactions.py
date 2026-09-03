@@ -39,6 +39,4 @@ _VIBE_RE = re.compile(
 
 def detect_reaction(text: str | None) -> str | None:
     """Return the reaction kind for *text* (currently :data:`VIBE`), or ``None``."""
-    if not text:
-        return None
-    return VIBE if _VIBE_RE.search(text) else None
+    return VIBE if text and _VIBE_RE.search(text) else None

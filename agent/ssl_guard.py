@@ -58,8 +58,7 @@ def verify_ca_bundle() -> None:
         logger.debug("SSL CA bundle guard skipped via HERMES_SKIP_SSL_GUARD")
         return
     for env_var in _CA_BUNDLE_ENV_VARS:
-        value = os.getenv(env_var)
-        if value:
+        if value := os.getenv(env_var):
             _validate_bundle_path(env_var, value)
     try:
         import certifi

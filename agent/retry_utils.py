@@ -38,12 +38,11 @@ def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
         if not callable(getter):
             return None
         try:
-            value = getter("Retry-After")
-            if value is None:
-                value = getter("retry-after")
+            raw = getter("Retry-After")
+            if raw is None:
+                raw = getter("retry-after")
         except Exception:
             return None
-        raw = value
     if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -77,10 +76,7 @@ def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float 
         tick = _jitter_counter
 
     exponent = max(0, attempt - 1)
-    if exponent >= 63 or base_delay <= 0:
-        delay = max_delay
-    else:
-        delay = min(base_delay * (2 ** exponent), max_delay)
+    delay = max_delay if (exponent >= 63 or base_delay <= 0) else min(base_delay * (2 ** exponent), max_delay)
 
     # Seed from time + counter so coarse clocks still decorrelate.
     seed = (time.time_ns() ^ (tick * 0x9E3779B9)) & 0xFFFFFFFF

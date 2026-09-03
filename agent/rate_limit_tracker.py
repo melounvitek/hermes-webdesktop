@@ -189,16 +189,14 @@ def format_rate_limit_compact(state: RateLimitState) -> str:
     if not state.has_data:
         return "No rate limit data."
 
-    rm, rh, tm, th = state.requests_min, state.requests_hour, state.tokens_min, state.tokens_hour
-
-    parts = []
-    if rm.limit > 0:
-        parts.append(f"RPM: {rm.remaining}/{rm.limit}")
-    if rh.limit > 0:
-        parts.append(f"RPH: {_fmt_count(rh.remaining)}/{_fmt_count(rh.limit)} (resets {_fmt_seconds(rh.remaining_seconds_now)})")
-    if tm.limit > 0:
-        parts.append(f"TPM: {_fmt_count(tm.remaining)}/{_fmt_count(tm.limit)}")
-    if th.limit > 0:
-        parts.append(f"TPH: {_fmt_count(th.remaining)}/{_fmt_count(th.limit)} (resets {_fmt_seconds(th.remaining_seconds_now)})")
-
-    return " | ".join(parts)
+    # (tag, bucket, count formatter, show reset) — RPM stays raw digits, hourly windows show the reset.
+    windows = (
+        ("RPM", state.requests_min, str, False),
+        ("RPH", state.requests_hour, _fmt_count, True),
+        ("TPM", state.tokens_min, _fmt_count, False),
+        ("TPH", state.tokens_hour, _fmt_count, True),
+    )
+    return " | ".join(
+        f"{tag}: {fmt(b.remaining)}/{fmt(b.limit)}" + (f" (resets {_fmt_seconds(b.remaining_seconds_now)})" if reset else "")
+        for tag, b, fmt, reset in windows if b.limit > 0
+    )

@@ -44,16 +44,14 @@ def defer_mode(task_cfg: Optional[Dict[str, Any]]) -> str:
 
 
 def defer_max_age_s(task_cfg: Optional[Dict[str, Any]]) -> float:
-    raw = (task_cfg or {}).get("defer_max_age_s", _MAX_AGE_DEFAULT_S)
     try:
-        value = float(raw)
+        value = float((task_cfg or {}).get("defer_max_age_s", _MAX_AGE_DEFAULT_S))
     except (TypeError, ValueError):
         return _MAX_AGE_DEFAULT_S
     return value if value > 0 else _MAX_AGE_DEFAULT_S
 
 
-def review_targets_managed_local(agent: Any,
-                                 task_cfg: Optional[Dict[str, Any]]) -> bool:
+def review_targets_managed_local(agent: Any, task_cfg: Optional[Dict[str, Any]]) -> bool:
     """Would this review fork decode on the llama-server WE manage?
 
     Resolves the review runtime as the fork will and exact-matches its netloc against
@@ -63,10 +61,7 @@ def review_targets_managed_local(agent: Any,
     resolving the runtime on the turn's tail.
     """
     try:
-        from agent.auxiliary_client import (
-            _is_managed_local_endpoint,
-            _managed_local_netloc,
-        )
+        from agent.auxiliary_client import _is_managed_local_endpoint, _managed_local_netloc
 
         if not _managed_local_netloc():
             return False
@@ -118,8 +113,7 @@ class ReviewIdleQueue:
 
     # ── queue ────────────────────────────────────────────────────
 
-    def enqueue(self, agent: Any, session_key: str,
-                kwargs: Dict[str, Any]) -> None:
+    def enqueue(self, agent: Any, session_key: str, kwargs: Dict[str, Any]) -> None:
         """Add (or replace — newest snapshot wins) a session's pending review.
 
         Keeps the ORIGINAL enqueue time on coalesce so a busy session cannot push its
@@ -131,8 +125,7 @@ class ReviewIdleQueue:
             self._pending[session_key] = _PendingReview(agent, session_key, kwargs, enqueued_at)
         self._ensure_thread()
         self._wake.set()
-        logger.info("Background review deferred (session=%s, queued=%d)",
-                    session_key[-12:], len(self._pending))
+        logger.info("Background review deferred (session=%s, queued=%d)", session_key[-12:], len(self._pending))
 
     def pending_count(self) -> int:
         with self._lock:
@@ -143,8 +136,7 @@ class ReviewIdleQueue:
     def _ensure_thread(self) -> None:
         with self._lock:
             if self._thread is None or not self._thread.is_alive():
-                self._thread = threading.Thread(
-                    target=self._run, daemon=True, name="bg-review-idle-queue")
+                self._thread = threading.Thread(target=self._run, daemon=True, name="bg-review-idle-queue")
                 self._thread.start()
 
     def _quiet_for(self) -> float:
@@ -160,17 +152,16 @@ class ReviewIdleQueue:
             if not self._pending:
                 return None
             now = self._now()
-            aged = [p for p in sorted(self._pending.values(), key=lambda p: p.enqueued_at)
+            aged = [p for p in self._pending.values()
                     if now - p.enqueued_at >= defer_max_age_s(p.kwargs.get("task_cfg"))]
-            candidate = aged[0] if aged else None
+            candidate = min(aged, key=lambda p: p.enqueued_at) if aged else None
         if candidate is None:
             if self._quiet_for() < _IDLE_SETTLE_S or not self._server_idle():
                 return None
             with self._lock:
                 if not self._pending:
                     return None
-                candidate = min(self._pending.values(),
-                                key=lambda p: p.enqueued_at)
+                candidate = min(self._pending.values(), key=lambda p: p.enqueued_at)
         with self._lock:
             return self._pending.pop(candidate.session_key, None)
 
@@ -187,20 +178,15 @@ class ReviewIdleQueue:
                 if item is not None:
                     if not self._still_enabled(item):
                         logger.info(
-                            "Deferred background review dropped: reviews "
-                            "were disabled while it was queued (session=%s)",
+                            "Deferred background review dropped: reviews were disabled while it was queued (session=%s)",
                             item.session_key[-12:])
                         continue
                     logger.info(
-                        "Dispatching deferred background review "
-                        "(session=%s, waited=%.0fs, queued=%d)",
-                        item.session_key[-12:],
-                        self._now() - item.enqueued_at,
-                        self.pending_count())
+                        "Dispatching deferred background review (session=%s, waited=%.0fs, queued=%d)",
+                        item.session_key[-12:], self._now() - item.enqueued_at, self.pending_count())
                     item.agent._spawn_background_review_now(**item.kwargs)
             except Exception:  # noqa: BLE001 — dispatcher must survive anything
-                logger.warning("Deferred review dispatch failed",
-                               exc_info=True)
+                logger.warning("Deferred review dispatch failed", exc_info=True)
             if item is None:
                 time.sleep(_POLL_INTERVAL_S)
 

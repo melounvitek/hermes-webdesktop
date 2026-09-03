@@ -27,9 +27,8 @@ _BUILTIN_NAMES = frozenset({
 
 def _warn_builtin_collision(key: str) -> None:
     logger.warning(
-        "Transcription provider '%s' shadows a built-in name; registration "
-        "ignored. Built-in STT providers (%s) always win — pick a different "
-        "name.",
+        "Transcription provider '%s' shadows a built-in name; registration ignored. "
+        "Built-in STT providers (%s) always win — pick a different name.",
         key, ", ".join(sorted(_BUILTIN_NAMES)),
     )
 

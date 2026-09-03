@@ -122,11 +122,10 @@ class ReasoningParamsMixin:
         if not supported:
             return None
 
-        effort = "medium"
-        if self.reasoning_config and isinstance(self.reasoning_config, dict):
-            if self.reasoning_config.get("enabled") is False:
-                return None
-            effort = str(self.reasoning_config.get("effort", "medium")).strip().lower()
+        cfg = self.reasoning_config if isinstance(self.reasoning_config, dict) else {}
+        if cfg.get("enabled") is False:
+            return None
+        effort = str(cfg.get("effort", "medium")).strip().lower()
 
         if effort == "xhigh" and "xhigh" not in supported and "high" in supported:
             effort = "high"

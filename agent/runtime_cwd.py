@@ -58,6 +58,14 @@ def scope_terminal_cwd() -> str:
     return terminal_env("TERMINAL_CWD", "")
 
 
+def _existing_dir(raw: str, label: str) -> Path | None:
+    p = Path(raw).expanduser()
+    if p.is_dir():
+        return p
+    logger.warning("%s does not exist: %s", label, raw)
+    return None
+
+
 def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
     """Session override, then TERMINAL_CWD; each validated as a real directory.
 
@@ -67,19 +75,11 @@ def _resolve_configured_cwd(*, override_is_final: bool) -> Path | None:
     override = _SESSION_CWD.get()
     override = "" if override is _UNSET else str(override).strip()
     if override:
-        p = Path(override).expanduser()
-        if p.is_dir():
+        p = _existing_dir(override, "configured working directory")
+        if p is not None or override_is_final:
             return p
-        logger.warning("configured working directory does not exist: %s", override)
-        if override_is_final:
-            return None
     raw = scope_terminal_cwd().strip()
-    if raw:
-        p = Path(raw).expanduser()
-        if p.is_dir():
-            return p
-        logger.warning("TERMINAL_CWD does not exist: %s", raw)
-    return None
+    return _existing_dir(raw, "TERMINAL_CWD") if raw else None
 
 
 def resolve_agent_cwd() -> Path:

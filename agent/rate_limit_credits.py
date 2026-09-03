@@ -123,10 +123,8 @@ class RateLimitCreditsMixin:
         """
         if getattr(self, "notice_callback", None) is None and getattr(self, "notice_clear_callback", None) is None:
             return
-        if not self._credits_notices_enabled():
-            return
         state = getattr(self, "_credits_state", None)
-        if state is None:
+        if not self._credits_notices_enabled() or state is None:
             return
         try:
             from agent.credits_tracker import evaluate_credits_notices, is_free_tier_model, new_credits_latch
@@ -153,13 +151,12 @@ class RateLimitCreditsMixin:
             return cached
         enabled = True
         try:
-            from hermes_cli.config import load_config as _load_config
-            _cfg = _load_config() or {}
-            _display = _cfg.get("display") if isinstance(_cfg, dict) else None
-            if isinstance(_display, dict) and "credits_notices" in _display:
-                enabled = bool(_display.get("credits_notices"))
+            from hermes_cli.config import load_config
+            display = (load_config() or {}).get("display")
+            if isinstance(display, dict) and "credits_notices" in display:
+                enabled = bool(display["credits_notices"])
         except Exception:
-            enabled = True
+            pass
         self._credits_notices_enabled_cache = enabled
         return enabled
 

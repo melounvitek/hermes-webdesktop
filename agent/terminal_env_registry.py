@@ -30,10 +30,7 @@ BUILTIN_BACKEND_NAMES = frozenset({
 
 
 def _reject_builtin_collision(name: str) -> None:
-    raise ValueError(
-        f"Terminal backend name '{name}' is reserved for the built-in "
-        f"{name} backend and cannot be registered by a plugin"
-    )
+    raise ValueError(f"Terminal backend name '{name}' is reserved for the built-in {name} backend and cannot be registered by a plugin")
 
 
 _registry: ProviderRegistry[TerminalEnvironmentProvider] = ProviderRegistry(
@@ -64,10 +61,7 @@ def provider_flag(name: str, attr: str, default=False):
     try:
         return getattr(provider, attr, default)
     except Exception:
-        logger.debug(
-            "Terminal environment provider '%s' attribute '%s' raised",
-            name, attr, exc_info=True,
-        )
+        logger.debug("Terminal environment provider '%s' attribute '%s' raised", name, attr, exc_info=True)
         return default
 
 
@@ -84,8 +78,5 @@ def plugin_strip_env_keys() -> frozenset:
         try:
             keys.update(provider.strip_env_keys)
         except Exception:
-            logger.debug(
-                "Terminal environment provider strip_env_keys raised",
-                exc_info=True,
-            )
+            logger.debug("Terminal environment provider strip_env_keys raised", exc_info=True)
     return frozenset(keys)

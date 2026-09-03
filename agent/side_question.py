@@ -113,8 +113,8 @@ def _side_question_task_config() -> Dict[str, Any]:
         cfg = load_config_readonly()
     except Exception:
         return {}
-    aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
-    task = aux.get(SIDE_QUESTION_TASK, {})
+    aux = cfg.get("auxiliary")
+    task = aux.get(SIDE_QUESTION_TASK) if isinstance(aux, dict) else None
     return task if isinstance(task, dict) else {}
 
 
