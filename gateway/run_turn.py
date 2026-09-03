@@ -2311,8 +2311,7 @@ class GatewayTurnMixin:
             # Route each media file by type so a TTS clip arrives as a voice bubble and a clip as a
             # video rather than a generic document. Mirrors the streaming + kanban paths.
             from gateway.platforms.base import should_send_media_as_audio as _should_send_media_as_audio
-            _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-            _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
+            from gateway.run_notifications import _IMAGE_EXTS, _VIDEO_EXTS
             for media_path, _is_voice in (media_files or []):
                 _ext = os.path.splitext(media_path)[1].lower()
                 with suppress(Exception):
