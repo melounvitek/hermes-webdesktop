@@ -1,7 +1,6 @@
 """Subagent result post-processing: summary budget/spill, tool-trace summaries, lifecycle hooks and cost rollup.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.delegate_tool")
-
 
 def _extract_output_tail(
     result: Dict[str, Any],
@@ -70,7 +68,6 @@ def _extract_output_tail(
     tail.reverse()  # restore chronological order for display
     return tail
 
-
 def _stringify_tool_content(content: Any) -> str:
     """Return a stable text representation for tool-result content.
 
@@ -83,21 +80,15 @@ def _stringify_tool_content(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-                else:
-                    parts.append(json.dumps(item, ensure_ascii=False, default=str))
-            else:
-                parts.append(str(item))
-        return "\n".join(parts)
+        return "\n".join(
+            item["text"] if isinstance(item, dict) and isinstance(item.get("text"), str)
+            else json.dumps(item, ensure_ascii=False, default=str) if isinstance(item, dict)
+            else str(item)
+            for item in content
+        )
     if isinstance(content, dict):
         return json.dumps(content, ensure_ascii=False, default=str)
     return str(content)
-
 
 _TOOL_INPUT_TARGET_KEYS = frozenset({
     "cwd",
@@ -118,14 +109,10 @@ _TOOL_INPUT_TARGET_KEYS = frozenset({
 
 _TOOL_INPUT_URL_KEYS = frozenset({"endpoint", "url", "urls"})
 
-
 def _sanitize_tool_target(key: str, value: Any) -> Any:
     """Keep bounded side-effect targets while dropping URL secrets."""
     if isinstance(value, list):
-        cleaned = [
-            item for item in (_sanitize_tool_target(key, item) for item in value[:16])
-            if item is not None
-        ]
+        cleaned = [item for item in (_sanitize_tool_target(key, item) for item in value[:16]) if item is not None]
         return cleaned or None
     if not isinstance(value, str) or not value:
         return None
@@ -149,10 +136,8 @@ def _sanitize_tool_target(key: str, value: Any) -> Any:
             return None
     return bounded
 
-
 def _empty_input_summary() -> Dict[str, Any]:
     return {"argument_keys": [], "targets": {}}
-
 
 def _sanitize_targets(mapping: Dict[str, Any]) -> Dict[str, Any]:
     """Keep only known side-effect target keys, each sanitized (URL secrets dropped)."""
@@ -164,7 +149,6 @@ def _sanitize_targets(mapping: Dict[str, Any]) -> Dict[str, Any]:
             if cleaned is not None:
                 targets[key] = cleaned
     return targets
-
 
 def _summarize_tool_arguments(arguments: Any) -> Dict[str, Any]:
     """Summarize argument names and side-effect targets without raw payloads."""
@@ -179,7 +163,6 @@ def _summarize_tool_arguments(arguments: Any) -> Dict[str, Any]:
     keys = sorted(str(key)[:128] for key in parsed)[:64]
     return {"argument_keys": keys, "targets": _sanitize_targets(parsed)}
 
-
 def _sanitize_tool_input_summary(summary: Any) -> Dict[str, Any]:
     """Re-sanitize a stored input summary before handing it to lifecycle hooks."""
     if not isinstance(summary, dict):
@@ -189,7 +172,6 @@ def _sanitize_tool_input_summary(summary: Any) -> Dict[str, Any]:
     targets = summary.get("targets")
     safe_targets = _sanitize_targets(targets) if isinstance(targets, dict) else {}
     return {"argument_keys": safe_keys, "targets": safe_targets}
-
 
 def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
     """Build a detached, metadata-only tool history for lifecycle hooks."""
@@ -220,7 +202,6 @@ def _subagent_stop_tool_call_history(tool_trace: Any) -> List[Dict[str, Any]]:
         })
     return history
 
-
 def _looks_like_error_output(content: Any) -> bool:
     """Conservative stderr/error detector for tool-result previews.
 
@@ -249,13 +230,7 @@ def _looks_like_error_output(content: Any) -> bool:
             pass
 
     first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
-    return (
-        first.startswith("error:")
-        or first.startswith("failed:")
-        or first.startswith("traceback ")
-        or first.startswith("exception:")
-    )
-
+    return first.startswith(("error:", "failed:", "traceback ", "exception:"))
 
 # Hard per-summary character ceiling layered on top of the dynamic
 # headroom budget (see _apply_summary_budget). Belt-and-suspenders for
@@ -271,7 +246,6 @@ _SUMMARY_HEADROOM_FRACTION = 0.5
 # Floor so a single summary always gets a usable slice even when the parent is
 # already nearly full — below this we'd be truncating to noise.
 _MIN_SUMMARY_CHARS = 2000
-
 
 def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
     """Write a subagent's full summary to the delegation cache and return path.
@@ -302,10 +276,7 @@ def _spill_summary_to_file(task_index: int, summary: str) -> Optional[str]:
         logger.debug("Failed to spill subagent summary to file: %s", exc)
         return None
 
-
-def _trim_summary_with_footer(
-    summary: str, cap: int, task_index: int
-) -> tuple[str, Optional[str]]:
+def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[str, Optional[str]]:
     """Return (model_text, spill_path) for one over-budget summary.
 
     Mirrors web_extract's ``_truncate_with_footer``: keep a head+tail window
@@ -357,21 +328,13 @@ def _trim_summary_with_footer(
     model_text = head + "\n\n[... middle omitted — see footer ...]\n\n" + tail + "\n".join(footer_lines)
     return model_text, spill_path
 
-
 def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]:
-    """Per-summary character budget sized against the parent's *remaining*
-    context headroom, split across the batch.
-
-    The overflow this guards against is N summaries entering the parent
-    context at once (batch fan-out), not any single summary being large.  We
-    take a fraction of the headroom the parent has left (resolved context
-    length minus what's already in its prompt) and divide it across the batch,
-    converting tokens→chars at the standard ~4 chars/token estimate.
-
-    Returns the per-summary char budget, or None when the parent's context
-    state is unknown (no compressor / no token count) — in which case the
-    caller falls back to the static char ceiling only.
-    """
+    """Per-summary char budget from the parent's *remaining* context headroom
+    (context length minus prompt tokens minus the compressor's output reserve),
+    a fraction of it split across the batch at ~4 chars/token. Guards against N
+    summaries landing at once, not one large summary. None when the parent's
+    context state is unknown (no compressor / token count) — caller then uses
+    the static ceiling only."""
     try:
         compressor = getattr(parent_agent, "context_compressor", None)
         context_length = getattr(compressor, "context_length", None)
@@ -397,25 +360,18 @@ def _parent_summary_char_budget(parent_agent, n_summaries: int) -> Optional[int]
         logger.debug("Summary budget computation failed", exc_info=True)
         return None
 
-
 def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
-    """Trim subagent summaries in-place so the batch can't overflow the
-    parent's context window, spilling full text to disk so nothing is lost.
+    """Trim subagent summaries in-place so a batch can't overflow the parent's
+    context window; full text is spilled to disk so nothing is lost.
 
-    The effective per-summary cap is the MIN of:
-      - the dynamic headroom budget (remaining parent context ÷ batch size), and
-      - the static ``delegation.max_summary_chars`` ceiling (0 = disabled).
-
-    When a summary exceeds the cap, its full text is written to a file and the
-    in-context summary becomes a head slice plus a pointer to that file. This
-    addresses issue/PR #9126: batch fan-out returned N full summaries verbatim,
-    blowing the parent context and (on rate-limited providers) triggering a
-    compression/429 death spiral.
+    Per-summary cap = MIN(dynamic headroom budget: remaining parent context ÷
+    batch size, static ``delegation.max_summary_chars`` ceiling; 0 = disabled).
+    Over-cap summaries become a head+tail slice plus a pointer to the spill file.
+    Without this, fan-out returned N full summaries verbatim, blowing the parent
+    context and (on rate-limited providers) triggering a compression/429 death spiral.
     """
     from tools.delegate_tool import _load_config
-    summaries = [
-        r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]
-    ]
+    summaries = [r for r in results if isinstance(r, dict) and isinstance(r.get("summary"), str) and r["summary"]]
     if not summaries:
         return
 
@@ -438,9 +394,7 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
         if len(summary) <= cap:
             continue
         original_len = len(summary)
-        model_text, spill_path = _trim_summary_with_footer(
-            summary, cap, entry.get("task_index", -1)
-        )
+        model_text, spill_path = _trim_summary_with_footer(summary, cap, entry.get("task_index", -1))
         entry["summary"] = model_text
         entry["summary_truncated"] = True
         if spill_path:
@@ -453,13 +407,11 @@ def _apply_summary_budget(results: List[Dict[str, Any]], parent_agent) -> None:
             spill_path or "none",
         )
 
-
 _PARENT_FINALIZATION_LOCK_GUARD = threading.Lock()
 
 _PARENT_FINALIZATION_FALLBACK_LOCK = threading.RLock()
 
 _CHILD_CONSTRUCTION_LOCK = threading.RLock()
-
 
 def _build_child_preserving_parent_tools(**kwargs):
     """Build a child without leaking its resolved toolset into the parent."""
@@ -474,7 +426,6 @@ def _build_child_preserving_parent_tools(**kwargs):
             model_tools._last_resolved_tool_names = parent_tool_names
     child._delegate_saved_tool_names = parent_tool_names
     return child
-
 
 def _parent_finalization_lock(parent_agent) -> threading.RLock:
     """Return the per-parent lock that serializes lifecycle side effects."""
@@ -493,6 +444,72 @@ def _parent_finalization_lock(parent_agent) -> threading.RLock:
                 return _PARENT_FINALIZATION_FALLBACK_LOCK
     return lock
 
+def _notify_memory_manager(results, task_list, child_by_index, parent_agent) -> None:
+    memory = getattr(parent_agent, "_memory_manager", None) if parent_agent else None
+    if not memory:
+        return
+    for entry in results:
+        try:
+            task_index = entry.get("task_index", -1)
+            in_range = isinstance(task_index, int) and 0 <= task_index < len(task_list)
+            memory.on_delegation(
+                task=task_list[task_index]["goal"] if in_range else "",
+                result=entry.get("summary", "") or "",
+                child_session_id=getattr(child_by_index.get(task_index), "session_id", ""),
+            )
+        except Exception:
+            pass
+
+def _fire_subagent_stop_hooks(results, child_by_index, parent_agent) -> float:
+    """Pop the model-hidden ``_child_role`` / ``_child_cost_usd`` fields from every
+    entry, fire ``subagent_stop`` per child, and return the summed child cost."""
+    try:
+        from hermes_cli.plugins import invoke_hook as invoke_hook
+    except Exception:
+        invoke_hook = None
+
+    children_cost_total = 0.0
+    for entry in results:
+        child_role = entry.pop("_child_role", None)
+        child_cost = entry.pop("_child_cost_usd", 0.0)
+        try:
+            if child_cost:
+                children_cost_total += float(child_cost)
+        except (TypeError, ValueError):
+            pass
+        if invoke_hook is None:
+            continue
+        try:
+            child = child_by_index.get(entry.get("task_index", -1))
+            invoke_hook(
+                "subagent_stop",
+                parent_session_id=getattr(parent_agent, "session_id", None),
+                parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
+                child_session_id=getattr(child, "session_id", None),
+                child_role=child_role,
+                child_summary=entry.get("summary"),
+                child_status=entry.get("status"),
+                tool_call_history=_subagent_stop_tool_call_history(entry.get("tool_trace")),
+                duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
+            )
+        except Exception:
+            logger.debug("subagent_stop hook invocation failed", exc_info=True)
+    return children_cost_total
+
+def _rollup_children_cost(parent_agent, children_cost_total: float) -> None:
+    """Fold the children's spend into the parent's session cost (source/status
+    only set when the parent had none of its own)."""
+    if children_cost_total <= 0.0:
+        return
+    try:
+        current = float(getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0)
+        parent_agent.session_estimated_cost_usd = current + children_cost_total
+        if getattr(parent_agent, "session_cost_source", "none") in {None, "", "none"}:
+            parent_agent.session_cost_source = "subagent"
+        if getattr(parent_agent, "session_cost_status", "unknown") in {None, "", "unknown"}:
+            parent_agent.session_cost_status = "estimated"
+    except Exception:
+        logger.debug("Subagent cost rollup failed", exc_info=True)
 
 def _finalize_child_results(
     results: List[Dict[str, Any]],
@@ -504,90 +521,10 @@ def _finalize_child_results(
     with _parent_finalization_lock(parent_agent):
         _apply_summary_budget(results, parent_agent)
         child_by_index = {index: child for index, _task, child in children}
+        _notify_memory_manager(results, task_list, child_by_index, parent_agent)
+        _rollup_children_cost(parent_agent, _fire_subagent_stop_hooks(results, child_by_index, parent_agent))
 
-        if parent_agent and getattr(parent_agent, "_memory_manager", None):
-            for entry in results:
-                try:
-                    task_index = entry.get("task_index", -1)
-                    task_goal = (
-                        task_list[task_index]["goal"]
-                        if isinstance(task_index, int)
-                        and 0 <= task_index < len(task_list)
-                        else ""
-                    )
-                    child = child_by_index.get(task_index)
-                    parent_agent._memory_manager.on_delegation(
-                        task=task_goal,
-                        result=entry.get("summary", "") or "",
-                        child_session_id=getattr(child, "session_id", ""),
-                    )
-                except Exception:
-                    pass
-
-        parent_session_id = getattr(parent_agent, "session_id", None)
-        try:
-            from hermes_cli.plugins import invoke_hook as invoke_hook
-        except Exception:
-            invoke_hook = None
-
-        children_cost_total = 0.0
-        for entry in results:
-            child_role = entry.pop("_child_role", None)
-            child_cost = entry.pop("_child_cost_usd", 0.0)
-            try:
-                if child_cost:
-                    children_cost_total += float(child_cost)
-            except (TypeError, ValueError):
-                pass
-            if invoke_hook is None:
-                continue
-            try:
-                child_index = entry.get("task_index", -1)
-                child = child_by_index.get(child_index)
-                invoke_hook(
-                    "subagent_stop",
-                    parent_session_id=parent_session_id,
-                    parent_turn_id=getattr(parent_agent, "_current_turn_id", "") or "",
-                    child_session_id=getattr(child, "session_id", None),
-                    child_role=child_role,
-                    child_summary=entry.get("summary"),
-                    child_status=entry.get("status"),
-                    tool_call_history=_subagent_stop_tool_call_history(
-                        entry.get("tool_trace")
-                    ),
-                    duration_ms=int((entry.get("duration_seconds") or 0) * 1000),
-                )
-            except Exception:
-                logger.debug("subagent_stop hook invocation failed", exc_info=True)
-
-        if children_cost_total > 0.0:
-            try:
-                current = float(
-                    getattr(parent_agent, "session_estimated_cost_usd", 0.0) or 0.0
-                )
-                parent_agent.session_estimated_cost_usd = current + children_cost_total
-                if getattr(parent_agent, "session_cost_source", "none") in {
-                    None,
-                    "",
-                    "none",
-                }:
-                    parent_agent.session_cost_source = "subagent"
-                if getattr(parent_agent, "session_cost_status", "unknown") in {
-                    None,
-                    "",
-                    "unknown",
-                }:
-                    parent_agent.session_cost_status = "estimated"
-            except Exception:
-                logger.debug("Subagent cost rollup failed", exc_info=True)
-
-
-def _run_child_lifecycle(
-    task_index: int,
-    goal: str,
-    child=None,
-    parent_agent=None,
-) -> Dict[str, Any]:
+def _run_child_lifecycle(task_index: int, goal: str, child=None, parent_agent=None) -> Dict[str, Any]:
     """Run one child and apply the same host lifecycle used by delegate_task."""
     from tools.delegate_tool import _run_single_child
     result = _run_single_child(task_index, goal, child, parent_agent)

@@ -1,7 +1,6 @@
 """Live-subagent registry + model-facing control plane (list/steer/stop) for delegate_task.
 
-Split out of ``tools/delegate_tool.py``; every moved name is re-imported there, so
-``tools.delegate_tool.<name>`` keeps resolving (and monkeypatching) as before.
+Split out of ``tools/delegate_tool.py``, which re-imports every name (patch targets stay valid).
 """
 
 from __future__ import annotations
@@ -37,7 +36,6 @@ _RECENT_SUBAGENTS_CAP = 200
 
 _recent_subagents: Dict[str, Dict[str, Any]] = {}
 
-
 def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """Resolve a process task_id to its originating delegation, if any.
 
@@ -50,22 +48,10 @@ def get_subagent_attribution(task_id: Optional[str]) -> Optional[Dict[str, Any]]
     if not task_id or not isinstance(task_id, str):
         return None
     with _active_subagents_lock:
-        record = _active_subagents.get(task_id)
-        if record is not None:
-            return {
-                "subagent_id": task_id,
-                "goal": record.get("goal"),
-                "delegation_id": record.get("delegation_id"),
-            }
-        retained = _recent_subagents.get(task_id)
-        if retained is not None:
-            return {
-                "subagent_id": task_id,
-                "goal": retained.get("goal"),
-                "delegation_id": retained.get("delegation_id"),
-            }
-    return None
-
+        record = _active_subagents.get(task_id) or _recent_subagents.get(task_id)
+    if record is None:
+        return None
+    return {"subagent_id": task_id, "goal": record.get("goal"), "delegation_id": record.get("delegation_id")}
 
 def set_spawn_paused(paused: bool) -> bool:
     """Globally block/unblock new delegate_task spawns.
@@ -78,11 +64,9 @@ def set_spawn_paused(paused: bool) -> bool:
         _spawn_paused = bool(paused)
         return _spawn_paused
 
-
 def is_spawn_paused() -> bool:
     with _spawn_pause_lock:
         return _spawn_paused
-
 
 def _register_subagent(record: Dict[str, Any]) -> None:
     sid = record.get("subagent_id")
@@ -91,7 +75,6 @@ def _register_subagent(record: Dict[str, Any]) -> None:
     record.setdefault("accepting_steer", True)
     with _active_subagents_lock:
         _active_subagents[sid] = record
-
 
 def _retain_recent_subagent(record: Dict[str, Any]) -> None:
     """Keep a bounded attribution stub after a child finishes (lock held)."""
@@ -106,14 +89,12 @@ def _retain_recent_subagent(record: Dict[str, Any]) -> None:
     while len(_recent_subagents) > _RECENT_SUBAGENTS_CAP:
         _recent_subagents.pop(next(iter(_recent_subagents)), None)
 
-
 def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
     with _active_subagents_lock:
         record = _active_subagents.get(subagent_id)
         if record is not None and (agent is None or record.get("agent") is agent):
             _active_subagents.pop(subagent_id, None)
             _retain_recent_subagent(record)
-
 
 def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
     """Atomically close steer acceptance and drain its final durable artifact.
@@ -138,7 +119,6 @@ def _close_subagent_steering(subagent_id: str, agent: Any) -> Optional[str]:
             return None
         return pending if isinstance(pending, str) and pending.strip() else None
 
-
 def interrupt_subagent(subagent_id: str) -> bool:
     """Request that a single running subagent stop at its next iteration boundary.
 
@@ -162,7 +142,6 @@ def interrupt_subagent(subagent_id: str) -> bool:
         return False
     return True
 
-
 def steer_subagent(
     subagent_id: str,
     text: str,
@@ -171,20 +150,16 @@ def steer_subagent(
     owner_transport: Any = None,
     owner_session_record: Any = None,
 ) -> bool:
-    """Queue steering text into a single running subagent without stopping it.
+    """Queue steering text into a running subagent without stopping it.
 
-    The redirection-side mirror of interrupt_subagent(): resolves the live
-    child in the registry and calls AIAgent.steer(), which appends the text
-    to the child's last tool result at its next iteration boundary — the
-    current tool call is never cut. Returns True if a matching subagent
-    QUEUED the text while the child was still accepting work; False for an
-    unknown/closed id, an ownership mismatch, a record with no live agent, or
-    empty text. ``owner_session_id=None`` deliberately preserves the internal
-    in-process helper contract; gateway callers must pass exact authority.
-
-    Acceptance and completion are linearized by the registry lock. If
-    acceptance wins but no delivery boundary remains, ``_run_single_child``
-    drains the exact text into the completion entry as ``missed_steer``.
+    Mirror of interrupt_subagent(): calls AIAgent.steer(), which appends the
+    text to the child's last tool result at its next iteration boundary — the
+    current tool call is never cut. True iff the text was QUEUED while the child
+    still accepted work; False for unknown/closed id, ownership mismatch, no
+    live agent, or empty text. ``owner_session_id=None`` keeps the in-process
+    helper contract; gateway callers must pass exact authority. Acceptance and
+    completion are linearized by the registry lock: if acceptance wins but no
+    delivery boundary remains, the text lands in the entry as ``missed_steer``.
     """
     if not text or not text.strip():
         return False
@@ -209,10 +184,7 @@ def steer_subagent(
             logger.debug("steer_subagent(%s) failed: %s", subagent_id, exc)
             return False
 
-
-def _capture_gateway_steer_authority(
-    owner_session_id: Optional[str],
-) -> tuple[Any, Any]:
+def _capture_gateway_steer_authority(owner_session_id: Optional[str]) -> tuple[Any, Any]:
     """Capture exact request transport + live session generation, if any.
 
     This is intentionally an in-process bridge, not a serializable capability.
@@ -227,6 +199,8 @@ def _capture_gateway_steer_authority(
     except Exception:
         return None, None
 
+# Registry record fields never exposed to the TUI/RPC snapshot.
+_PRIVATE_RECORD_KEYS = frozenset({"agent", "owner_session_id", "owner_transport", "owner_session_record", "accepting_steer"})
 
 def list_active_subagents() -> List[Dict[str, Any]]:
     """Snapshot of the currently running subagent tree.
@@ -235,22 +209,7 @@ def list_active_subagents() -> List[Dict[str, Any]]:
     tool_count, status}.  Safe to call from any thread — returns a copy.
     """
     with _active_subagents_lock:
-        return [
-            {
-                k: v
-                for k, v in r.items()
-                if k
-                not in {
-                    "agent",
-                    "owner_session_id",
-                    "owner_transport",
-                    "owner_session_record",
-                    "accepting_steer",
-                }
-            }
-            for r in _active_subagents.values()
-        ]
-
+        return [{k: v for k, v in r.items() if k not in _PRIVATE_RECORD_KEYS} for r in _active_subagents.values()]
 
 def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) -> bool:
     """True when *child_agent* sits below *parent_agent* in the spawn tree.
@@ -272,11 +231,9 @@ def _is_descendant_of(child_agent: Any, parent_agent: Any, max_hops: int = 8) ->
         cur = ancestor
     return False
 
-
 # Model-facing control actions accepted by delegate_task(action=...).
 # "spawn" (or omitted) keeps the historical spawn semantics.
 _CONTROL_ACTIONS = frozenset({"list", "steer", "stop"})
-
 
 def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> str:
     """Resolve a session id to the tip of its compression lineage.
@@ -297,28 +254,19 @@ def _resolve_session_lineage(session_id: Optional[str], parent_agent: Any) -> st
     except Exception:
         return sid
 
-
 def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
     """True when *parent_agent*'s conversation owns this live-child record.
 
-    Two-tier check:
-
-    1. Object identity — the ``_delegate_parent_ref`` weakref chain stamped
-       at build time reaches *parent_agent*. Fast path for the common case
-       where the parent AIAgent object survives the whole run.
-    2. Durable conversation lineage — the child was registered with the
-       owning conversation's durable session id
-       (``owner_agent_session_id``); match it against the calling parent's
-       ``session_id``, resolving compression-rotation lineage on both sides.
-
-    Tier 2 exists because the identity chain is BRITTLE across parent-agent
-    rebuilds: the CLI sets ``self.agent = None`` mid-session (route-signature
-    change, credential refresh, /model, MoA one-shots) and constructs a NEW
-    AIAgent for the next turn while the child keeps running with a weakref to
-    the old object. The delivery path always survived this (it routes by
-    durable session id); the control path must use the same durable spine or
-    running children go invisible/unsteerable (observed live: deleg_88454b70
-    / sa-0-dc0100f4, 2026-08-17).
+    Tier 1: object identity — the ``_delegate_parent_ref`` weakref chain reaches
+    *parent_agent* (fast path while the parent AIAgent survives the run).
+    Tier 2: durable lineage — the record's ``owner_agent_session_id`` matches the
+    caller's ``session_id``, resolving compression-rotation lineage on both
+    sides. Tier 2 exists because the identity chain is BRITTLE across parent
+    rebuilds: the CLI sets ``self.agent = None`` mid-session (route change,
+    credential refresh, /model, MoA one-shots) and builds a NEW AIAgent while
+    the child keeps a weakref to the old one. Delivery always routed by durable
+    session id; control must use the same spine or running children go
+    invisible/unsteerable.
     """
     agent = record.get("agent")
     if _is_descendant_of(agent, parent_agent):
@@ -337,13 +285,7 @@ def _owns_subagent_record(record: Dict[str, Any], parent_agent: Any) -> bool:
         _resolve_session_lineage(parent_sid, parent_agent),
     }
 
-
-def _handle_control_action(
-    action: str,
-    subagent_id: Optional[str],
-    message: Optional[str],
-    parent_agent: Any,
-) -> str:
+def _handle_control_action(action: str, subagent_id: Optional[str], message: Optional[str], parent_agent: Any) -> str:
     """Synchronous control plane for delegate_task: list/steer/stop.
 
     Runs in-turn (never backgrounded) and only over subagents descended from
@@ -375,11 +317,7 @@ def _handle_control_action(
                     "live_transcript": getattr(agent, "_live_transcript_path", None),
                 }
             )
-        payload: Dict[str, Any] = {
-            "action": "list",
-            "count": len(entries),
-            "subagents": entries,
-        }
+        payload: Dict[str, Any] = {"action": "list", "count": len(entries), "subagents": entries}
         if not entries:
             payload["note"] = (
                 "No live subagents right now. Children that already finished "
@@ -404,54 +342,37 @@ def _handle_control_action(
             "completion message). Use action='list' to see live children."
         )
 
-    if action == "stop":
-        if interrupt_subagent(sid):
-            return json.dumps(
-                {
-                    "action": "stop",
-                    "subagent_id": sid,
-                    "status": "interrupt_requested",
-                    "note": (
-                        "The subagent stops at its next iteration boundary "
-                        "(in-flight tool calls are asked to cancel). Its "
-                        "partial result still re-enters the conversation as a "
-                        "completion message — do not wait or poll."
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        return tool_error(
-            f"Could not interrupt '{sid}' — it likely finished in the last "
-            "moment. Its result arrives as a normal completion message."
-        )
+    if action == "steer" and not (message or "").strip():
+        return tool_error("action='steer' requires a non-empty 'message' describing the " "course correction.")
+    outcome = _CONTROL_OUTCOMES.get(action)
+    if outcome is None:
+        return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+    status, note, failure = outcome
+    ok = interrupt_subagent(sid) if action == "stop" else steer_subagent(sid, message.strip())
+    if ok:
+        return json.dumps({"action": action, "subagent_id": sid, "status": status, "note": note}, ensure_ascii=False)
+    return tool_error(failure.format(sid=sid))
 
-    if action == "steer":
-        text = (message or "").strip()
-        if not text:
-            return tool_error(
-                "action='steer' requires a non-empty 'message' describing the "
-                "course correction."
-            )
-        if steer_subagent(sid, text):
-            return json.dumps(
-                {
-                    "action": "steer",
-                    "subagent_id": sid,
-                    "status": "queued",
-                    "note": (
-                        "Steering text queued. The subagent sees it appended "
-                        "to its next tool result — the current tool call is "
-                        "never cut. If the child finishes before a delivery "
-                        "boundary remains, the text is reported back as "
-                        "missed_steer in its completion entry."
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        return tool_error(
-            f"Subagent '{sid}' is no longer accepting steering (finishing or "
-            "already finished). Its result arrives as a normal completion "
-            "message; re-delegate a follow-up task if more work is needed."
-        )
-
-    return tool_error(f"Unknown action '{action}'. Use spawn, list, steer, or stop.")
+# action -> (success status, success note, failure error template)
+_CONTROL_OUTCOMES = {
+    "stop": (
+        "interrupt_requested",
+        "The subagent stops at its next iteration boundary "
+        "(in-flight tool calls are asked to cancel). Its "
+        "partial result still re-enters the conversation as a "
+        "completion message — do not wait or poll.",
+        "Could not interrupt '{sid}' — it likely finished in the last "
+        "moment. Its result arrives as a normal completion message.",
+    ),
+    "steer": (
+        "queued",
+        "Steering text queued. The subagent sees it appended "
+        "to its next tool result — the current tool call is "
+        "never cut. If the child finishes before a delivery "
+        "boundary remains, the text is reported back as "
+        "missed_steer in its completion entry.",
+        "Subagent '{sid}' is no longer accepting steering (finishing or "
+        "already finished). Its result arrives as a normal completion "
+        "message; re-delegate a follow-up task if more work is needed.",
+    ),
+}
