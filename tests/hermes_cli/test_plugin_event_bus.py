@@ -236,9 +236,9 @@ def test_emit_returns_before_blocking_subscriber_finishes():
 
 
 def test_pending_budget_drops_new_event_without_blocking(monkeypatch, caplog):
-    from hermes_cli import plugins as plugins_mod
+    from hermes_cli import plugins_dispatch
 
-    monkeypatch.setattr(plugins_mod, "_EVENT_PENDING_CAP", 1)
+    monkeypatch.setattr(plugins_dispatch, "_EVENT_PENDING_CAP", 1)
     manager = _fresh_manager()
     ctx_a = _make_ctx(manager, "plugin_a", key="a")
     ctx_b = _make_ctx(manager, "plugin_b", key="b")
@@ -394,7 +394,7 @@ def test_manifest_emits_listens_present():
 
 
 def test_manifest_parse_reads_emits_listens(tmp_path):
-    """_parse_manifest picks up optional emits/listens from plugin.yaml."""
+    """parse_manifest_file picks up optional emits/listens from plugin.yaml."""
     import yaml
 
     plugin_dir = tmp_path / "myplug"
@@ -411,8 +411,9 @@ def test_manifest_parse_reads_emits_listens(tmp_path):
         encoding="utf-8",
     )
 
-    manager = _fresh_manager()
-    manifest = manager._parse_manifest(manifest_file, plugin_dir, "user", "")
+    from hermes_cli.plugins import parse_manifest_file
+
+    manifest = parse_manifest_file(manifest_file, plugin_dir, "user", "")
     assert manifest is not None
     assert manifest.emits == ["ping"]
     assert manifest.listens == ["other:evt"]
@@ -428,8 +429,9 @@ def test_manifest_parse_absent_emits_listens(tmp_path):
         yaml.safe_dump({"name": "bare"}), encoding="utf-8"
     )
 
-    manager = _fresh_manager()
-    manifest = manager._parse_manifest(manifest_file, plugin_dir, "user", "")
+    from hermes_cli.plugins import parse_manifest_file
+
+    manifest = parse_manifest_file(manifest_file, plugin_dir, "user", "")
     assert manifest is not None
     assert manifest.emits == []
     assert manifest.listens == []
