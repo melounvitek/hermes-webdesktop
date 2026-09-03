@@ -28,9 +28,7 @@ def parse_duration_seconds(value: str) -> Optional[float]:
     if re.fullmatch(r"\d+(?:\.\d+)?", s):
         return float(s) * 86400
     m = _DURATION_RE.match(s)
-    if not m:
-        return None
-    return float(m.group(1)) * _UNIT_SECONDS[m.group(2)[0]]
+    return None if not m else float(m.group(1)) * _UNIT_SECONDS[m.group(2)[0]]
 
 
 def parse_point_in_time(value: str, flag: str) -> float:
@@ -51,16 +49,48 @@ def parse_point_in_time(value: str, flag: str) -> float:
             f"'30m', '2d', '1w', a bare number of days, or an ISO timestamp "
             f"like '2026-07-05' or '2026-07-05 14:30'."
         ) from None
-    if dt.tzinfo is None:
-        return dt.timestamp()
-    return dt.astimezone(timezone.utc).timestamp()
+    return dt.timestamp() if dt.tzinfo is None else dt.astimezone(timezone.utc).timestamp()
 
 
 def format_epoch(ts: Optional[float]) -> str:
     """Render an epoch timestamp as a short local-time string."""
-    if ts is None:
-        return "-"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    return "-" if ts is None else datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+# (filter key, argparse attr, CLI flag, description template) for the four epoch bounds.
+_TIME_BOUNDS = (
+    ("last_active_before", "older_than", "--older-than", "last active before {v}"),
+    ("last_active_after", "newer_than", "--newer-than", "last active after {v}"),
+    ("started_before", "before", "--before", "started before {v}"),
+    ("started_after", "after", "--after", "started after {v}"),
+)
+# (lower key, upper key, window label, lower flag, upper flag); checked in this order.
+_WINDOWS = (
+    ("started_after", "started_before", "start-time", "--after", "--before"),
+    ("last_active_after", "last_active_before", "activity", "--newer-than", "--older-than"),
+)
+# (filter key, argparse attr, description template) for pass-through filters, in describe order.
+# Numeric (min_/max_) filters are described when not None, text filters only when truthy.
+_ARG_FILTERS = (
+    ("source", "source", "source '{v}'"),
+    ("title_like", "title", "title contains '{v}'"),
+    ("end_reason", "end_reason", "end reason '{v}'"),
+    ("cwd_prefix", "cwd", "cwd under '{v}'"),
+    ("min_messages", "min_messages", ">= {v} messages"),
+    ("max_messages", "max_messages", "<= {v} messages"),
+    ("model_like", "model", "model contains '{v}'"),
+    ("provider", "provider", "provider '{v}'"),
+    ("user_id", "user", "user '{v}'"),
+    ("chat_id", "chat_id", "chat '{v}'"),
+    ("chat_type", "chat_type", "chat type '{v}'"),
+    ("branch_like", "branch", "git branch contains '{v}'"),
+    ("min_tokens", "min_tokens", ">= {v} tokens"),
+    ("max_tokens", "max_tokens", "<= {v} tokens"),
+    ("min_cost", "min_cost", ">= ${v}"),
+    ("max_cost", "max_cost", "<= ${v}"),
+    ("min_tool_calls", "min_tool_calls", ">= {v} tool calls"),
+    ("max_tool_calls", "max_tool_calls", "<= {v} tool calls"),
+)
 
 
 def build_prune_filters(args: Any) -> Dict[str, Any]:
@@ -70,7 +100,7 @@ def build_prune_filters(args: Any) -> Dict[str, Any]:
     to ``started_at`` for empty sessions); ``--before`` / ``--after`` bound session start time.
     """
     bounds: Dict[str, Optional[float]] = {}
-    for key, attr, flag in _TIME_BOUNDS:
+    for key, attr, flag, _ in _TIME_BOUNDS:
         raw = getattr(args, attr, None)
         bounds[key] = None if raw is None else parse_point_in_time(raw, flag)
 
@@ -85,69 +115,19 @@ def build_prune_filters(args: Any) -> Dict[str, Any]:
     # older_than_days=None: the epoch bounds are the whole story; otherwise prune_sessions' default
     # 90-day cutoff would silently cap an --after/--newer-than-only window.
     filters: Dict[str, Any] = {"older_than_days": None, **bounds}
-    for key, attr in _ARG_FILTERS:
+    for key, attr, _ in _ARG_FILTERS:
         filters[key] = getattr(args, attr, None)
     return filters
-
-
-# (filter key, argparse attr, CLI flag) for the four epoch bounds.
-_TIME_BOUNDS = (
-    ("last_active_before", "older_than", "--older-than"),
-    ("last_active_after", "newer_than", "--newer-than"),
-    ("started_before", "before", "--before"),
-    ("started_after", "after", "--after"),
-)
-# (lower key, upper key, window label, lower flag, upper flag); checked in this order.
-_WINDOWS = (
-    ("started_after", "started_before", "start-time", "--after", "--before"),
-    ("last_active_after", "last_active_before", "activity", "--newer-than", "--older-than"),
-)
-# (filter key, argparse attr) for pass-through filters; also the describe order after the bounds.
-_ARG_FILTERS = (
-    ("source", "source"), ("title_like", "title"), ("end_reason", "end_reason"), ("cwd_prefix", "cwd"),
-    ("min_messages", "min_messages"), ("max_messages", "max_messages"), ("model_like", "model"),
-    ("provider", "provider"), ("user_id", "user"), ("chat_id", "chat_id"), ("chat_type", "chat_type"),
-    ("branch_like", "branch"), ("min_tokens", "min_tokens"), ("max_tokens", "max_tokens"),
-    ("min_cost", "min_cost"), ("max_cost", "max_cost"), ("min_tool_calls", "min_tool_calls"),
-    ("max_tool_calls", "max_tool_calls"),
-)
-
-# filter key -> description template. ``{e}`` renders an epoch (shown when not None); ``{v}`` on a
-# numeric filter is shown when not None, on a text filter only when truthy.
-_DESCRIBE = {
-    "last_active_before": "last active before {e}",
-    "last_active_after": "last active after {e}",
-    "started_before": "started before {e}",
-    "started_after": "started after {e}",
-    "source": "source '{v}'",
-    "title_like": "title contains '{v}'",
-    "end_reason": "end reason '{v}'",
-    "cwd_prefix": "cwd under '{v}'",
-    "min_messages": ">= {v} messages",
-    "max_messages": "<= {v} messages",
-    "model_like": "model contains '{v}'",
-    "provider": "provider '{v}'",
-    "user_id": "user '{v}'",
-    "chat_id": "chat '{v}'",
-    "chat_type": "chat type '{v}'",
-    "branch_like": "git branch contains '{v}'",
-    "min_tokens": ">= {v} tokens",
-    "max_tokens": "<= {v} tokens",
-    "min_cost": ">= ${v}",
-    "max_cost": "<= ${v}",
-    "min_tool_calls": ">= {v} tool calls",
-    "max_tool_calls": "<= {v} tool calls",
-}
 
 
 def describe_filters(filters: Dict[str, Any]) -> str:
     """Human-readable summary of active filters for confirmation prompts."""
     parts = []
-    for key, template in _DESCRIBE.items():
+    for key, _, _, template in _TIME_BOUNDS:
+        if (value := filters.get(key)) is not None:
+            parts.append(template.format(v=format_epoch(value)))
+    for key, _, template in _ARG_FILTERS:
         value = filters.get(key)
-        is_epoch = "{e}" in template
-        numeric = is_epoch or key.startswith(("min_", "max_"))
-        if (value is not None) if numeric else bool(value):
-            shown = format_epoch(value) if is_epoch else value
-            parts.append(template.replace("{e}", "{v}").format(v=shown))
+        if (value is not None) if key.startswith(("min_", "max_")) else bool(value):
+            parts.append(template.format(v=value))
     return ", ".join(parts) if parts else "no filters (all ended sessions)"
