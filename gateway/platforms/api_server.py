@@ -367,9 +367,7 @@ def _project_client_message(message: Dict[str, Any]) -> Dict[str, Any]:
         _COMPACTION_INTERNAL_FIELDS, project_compaction_message_for_display)
     projected = project_compaction_message_for_display(message)
     if projected is None:
-        projected = message.copy()
-        for internal_key in _COMPACTION_INTERNAL_FIELDS:
-            projected.pop(internal_key, None)
+        projected = {k: v for k, v in message.items() if k not in _COMPACTION_INTERNAL_FIELDS}
         projected["content"] = ""
         projected["display_kind"] = "hidden"
     return projected
@@ -1601,8 +1599,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.warning(
                 "X-Hermes-Session-Key rejected: no API key configured. "
                 "Set API_SERVER_KEY to enable long-term memory scoping.")
-            return None, _error_response("X-Hermes-Session-Key requires API key authentication. "
-                    "Configure API_SERVER_KEY to enable this feature.", 403)
+            return None, _error_response(
+                "X-Hermes-Session-Key requires API key authentication. "
+                "Configure API_SERVER_KEY to enable this feature.", 403)
         # Control characters could enable header injection on the echo path.
         if re.search(r'[\r\n\x00]', raw):
             return None, _invalid_request("Invalid session key")
@@ -2658,9 +2657,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "actual_cost_usd", "api_call_count", "parent_session_id", "last_active", "preview",
             "_lineage_root_id", "pinned", "archived", "hidden")
         payload = {key: session.get(key) for key in safe_keys if key in session}
-        for flag in ("pinned", "archived", "hidden"):  # SQLite stores 0/1
-            if flag in payload:
-                payload[flag] = bool(payload[flag])
+        # SQLite stores the flags as 0/1.
+        payload.update(
+            {f: bool(payload[f]) for f in ("pinned", "archived", "hidden") if f in payload})
         # Full system prompts / model_config never cross the client API; only their presence.
         payload["has_system_prompt"] = bool(session.get("system_prompt"))
         payload["has_model_config"] = bool(session.get("model_config"))
@@ -2882,8 +2881,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return err
         db = await self._ensure_session_db_async()
         resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
-        raw_limit = request.query.get("limit")
-        raw_offset = request.query.get("offset", "0")
+        raw_limit, raw_offset = request.query.get("limit"), request.query.get("offset", "0")
         order = request.query.get("order")
         if order not in (None, "oldest", "latest"):
             return _error_response("order must be one of: oldest, latest", 400, code="invalid_pagination")
@@ -3008,6 +3006,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "user_message": user_message, "runtime_request": runtime_request,
             "lock_active": lock_active, "run_kwargs": run_kwargs}, None
 
+    @staticmethod
+    def _session_headers(session_id: str, gateway_session_key: Optional[str]) -> Dict[str, str]:
+        """``X-Hermes-Session-Id`` (+ ``X-Hermes-Session-Key`` when declared) response headers."""
+        headers = {"X-Hermes-Session-Id": session_id}
+        if gateway_session_key:
+            headers["X-Hermes-Session-Key"] = gateway_session_key
+        return headers
+
     def _effective_turn_runtime(self, runtime_request: Dict[str, Any], result: Any, usage: Any) -> Dict[str, Any]:
         """Sanitized runtime metadata for a finished session-chat turn."""
         runtime = self._result_runtime(result, usage)
@@ -3040,11 +3046,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_id = ctx["session_id"]
         history = await self._conversation_history_for_session(session_id)
         result, usage = await self._run_agent(conversation_history=history, **ctx["run_kwargs"])
-        effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
-        final_response = _resolve_media_to_data_urls(result.get("final_response", "") if isinstance(result, dict) else "")
-        headers = {"X-Hermes-Session-Id": effective_session_id or session_id}
-        if gateway_session_key:
-            headers["X-Hermes-Session-Key"] = gateway_session_key
+        is_dict = isinstance(result, dict)
+        effective_session_id = result.get("session_id") if is_dict else session_id
+        final_response = _resolve_media_to_data_urls(
+            result.get("final_response", "") if is_dict else "")
+        headers = self._session_headers(effective_session_id or session_id, gateway_session_key)
         return web.json_response(
             {"object": "hermes.session.chat.completion",
              "session_id": effective_session_id or session_id,
@@ -3058,10 +3064,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         ctx, err = await self._prepare_session_chat(request)
         if err is not None:
             return err
-        gateway_session_key = ctx["gateway_session_key"]
-        session_id = ctx["session_id"]
-        user_message = ctx["user_message"]
-        runtime_request = ctx["runtime_request"]
+        gateway_session_key, session_id = ctx["gateway_session_key"], ctx["session_id"]
+        user_message, runtime_request = ctx["user_message"], ctx["runtime_request"]
         runtime_meta = self._sanitize_runtime_metadata(
             requested_runtime=runtime_request.get("requested"),
             route_source=runtime_request.get("route_source") or "global",
@@ -3069,8 +3073,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
         events = _SessionEventQueue(session_id, run_id)
-        queue = events.queue
-        _event_payload = events.payload
+        queue, _event_payload = events.queue, events.payload
         # Claim ownership inside the request's profile scope before any run-keyed state
         # exists, so /v1/runs/{id}* control is confined to the starting profile.
         self._run_owners[run_id] = self._run_idempotency_scope(request)
@@ -3139,10 +3142,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         task = asyncio.create_task(_run_and_signal())
         self._track_background_task(task)
         headers = {
-            "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no", "X-Hermes-Session-Id": session_id}
-        if gateway_session_key:
-            headers["X-Hermes-Session-Key"] = gateway_session_key
+            "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+            **self._session_headers(session_id, gateway_session_key)}
         response = web.StreamResponse(status=200, headers=headers)
         await response.prepare(request)
         try:
