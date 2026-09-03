@@ -1,8 +1,6 @@
-"""Atomic multi-op batch path for ``skill_manage`` (extracted from skill_manager_tool).
-
-``skill_manage``/``_find_skill``/``_skill_gate_bypass`` are reached lazily
-through ``tools.skill_manager_tool`` so the origin module owns all state.
-"""
+"""Atomic multi-op batch path for ``skill_manage``. Origin state
+(``skill_manage``/``_find_skill``/``_skill_gate_bypass``) is reached lazily
+through ``tools.skill_manager_tool`` so that module owns it."""
 
 import json
 import logging
@@ -17,11 +15,6 @@ _BATCH_OP_ACTIONS = {"create", "patch", "write_file", "remove_file"}
 _BATCH_MAX_OPS = 20
 
 
-def _norm_target(op) -> str:
-    fp = (op.get("file_path") or "").strip()
-    return posixpath.normpath(fp.lstrip("/")) if fp else "SKILL.md"
-
-
 def _validate_batch_ops(operations, default_name, tool_error):
     """Shape checks with no side effects. Returns (names, None) or (None, error_json)."""
     from tools.skill_manager_guards import _background_review_preflight
@@ -33,9 +26,8 @@ def _validate_batch_ops(operations, default_name, tool_error):
         act = op["action"]
         if act not in _BATCH_OP_ACTIONS:
             return None, tool_error(
-                f"operations[{i}]: unknown action '{act}'. "
-                f"Batchable: {', '.join(sorted(_BATCH_OP_ACTIONS))}; "
-                "delete must be sole.",
+                f"operations[{i}]: unknown action '{act}'. Batchable: "
+                f"{', '.join(sorted(_BATCH_OP_ACTIONS))}; delete must be sole.",
                 success=False)
         nm = op.get("name") or default_name
         if not nm:
@@ -49,43 +41,29 @@ def _validate_batch_ops(operations, default_name, tool_error):
         if preflight is not None:
             return None, json.dumps(preflight, ensure_ascii=False)
 
-    # Intra-batch clobber guard: sequential last-wins would SILENTLY discard an
-    # earlier op's work. A DESTRUCTIVE op (create/write_file/remove_file/full
-    # SKILL.md rewrite) on a file an earlier op touched is rejected; additive
-    # patches are always legal, so patch chains and write-then-patch stay
-    # allowed. Paths are normalized so spelling variants can't slip past.
+    # Clobber guard: a DESTRUCTIVE op (create/write_file/remove_file/full rewrite) on
+    # a file an earlier op touched would SILENTLY discard its work — reject it.
+    # Additive patches are always legal. Paths are normalized against spelling variants.
     touched_files = set()
     for i, op in enumerate(operations):
         act = op["action"]
         nm = names[i]
         # create and full-rewrite patch (content) always hit SKILL.md.
         full_rewrite = act == "patch" and bool(op.get("content"))
-        target = "SKILL.md" if (act == "create" or full_rewrite) else _norm_target(op)
+        fp = (op.get("file_path") or "").strip()
+        target = ("SKILL.md" if (act == "create" or full_rewrite or not fp)
+                  else posixpath.normpath(fp.lstrip("/")))
         key = (nm, target)
         destructive = act in ("create", "write_file", "remove_file") or full_rewrite
         if destructive and key in touched_files:
             return None, tool_error(
-                f"operations[{i}]: {act} on '{target}' of skill '{nm}' — an "
-                "earlier op in this batch already touched that file, and this "
-                "op would silently discard its work. One destructive op "
-                "(write_file/remove_file/full rewrite) per file per batch; "
-                "put it first, or fold the change in. Patch chains are fine.",
+                f"operations[{i}]: {act} on '{target}' of skill '{nm}' — an earlier op in this "
+                f"batch already touched that file, and this op would silently discard its work. "
+                f"One destructive op (write_file/remove_file/full rewrite) per file per batch; put "
+                f"it first, or fold the change in. Patch chains are fine.",
                 success=False)
         touched_files.add(key)
     return names, None
-
-
-def _stage_batch_if_gated(operations, names):
-    """Approval gate for the WHOLE batch as one pending write."""
-    from tools.skill_manager_tool import _run_write_gate
-
-    def _staging(wa):
-        acts = ", ".join(op["action"] for op in operations)
-        skills = ", ".join(sorted(set(names)))
-        gist = f"batch({len(operations)} ops: {acts}) on {skills}"
-        return {"action": "batch", "operations": operations}, gist
-
-    return _run_write_gate(_staging)
 
 
 def _snapshot_skills(names, snap_root, find_skill):
@@ -108,18 +86,15 @@ def _snapshot_skills(names, snap_root, find_skill):
 def _restore_snapshot(pre_dir, snap, post_dir) -> None:
     if snap is not None:
         if post_dir is not None and post_dir.is_dir():
-            # Never destroy the only other copy before the restore lands: move
-            # the broken state aside and delete it only after the snapshot is
-            # back, so a failed copytree (disk full, locked file) can't turn
-            # into total skill loss.
+            # Move the broken state aside and delete it only after the snapshot is
+            # back, so a failed copytree (disk full, locked file) can't mean total loss.
             aside = post_dir.with_name(post_dir.name + ".rollback-broken")
             shutil.rmtree(aside, ignore_errors=True)
             post_dir.rename(aside)
             try:
                 shutil.copytree(snap, pre_dir)
             except Exception:
-                # Restore failed: put the broken (half-applied) state back
-                # rather than leaving nothing.
+                # Restore failed: put the half-applied state back rather than nothing.
                 shutil.rmtree(pre_dir, ignore_errors=True)
                 aside.rename(pre_dir)
                 raise
@@ -147,15 +122,11 @@ def _rollback(snapshots, find_skill):
 
 def _skill_manage_batch(operations, default_name: str = None, task_id: str = None,
                         session_id: str = None) -> str:
-    """Apply a sequence of operations atomically (memory-tool pattern).
-
-    Every touched skill is snapshotted before any op runs; any failure rolls ALL
-    touched skills back (skills the batch created are removed). ``delete`` is
+    """Apply operations atomically: every touched skill is snapshotted first and any
+    failure rolls ALL of them back (batch-created skills are removed). ``delete`` is
     only legal as the SOLE op (its recoverable-archive path doesn't compose with
-    rollback) and is routed to the single-op handler, preserving
-    absorbed_into/archive semantics. ``default_name`` is the legacy top-level
-    ``name`` fallback (staged replay).
-    """
+    rollback) and routes to the single-op handler. ``default_name`` is the legacy
+    top-level ``name`` fallback (staged replay)."""
     from tools import skill_manager_tool as _smt
     from tools.registry import tool_error
 
@@ -182,7 +153,13 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         return err
 
     if not _smt._skill_gate_bypass.get():
-        staged = _stage_batch_if_gated(operations, names)
+        # Approval gate for the WHOLE batch as one pending write.
+        def _staging(wa):
+            acts = ", ".join(op["action"] for op in operations)
+            gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
+            return {"action": "batch", "operations": operations}, gist
+
+        staged = _smt._run_write_gate(_staging)
         if staged is not None:
             return staged
 
@@ -192,8 +169,7 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
         shutil.rmtree(snap_root, ignore_errors=True)
         return tool_error(snap_err, success=False)
 
-    # Execute through the single-op path with the gate bypassed (the batch
-    # already cleared/staged it); ledger + telemetry fire per-op.
+    # Single-op path with the gate bypassed (the batch already cleared/staged it).
     results = []
     rollback_failed = False
     token = _smt._skill_gate_bypass.set(True)
