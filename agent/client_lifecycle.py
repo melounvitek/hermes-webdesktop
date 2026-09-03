@@ -27,13 +27,11 @@ _NO_SOCKETS_SUFFIX = " — no sockets found; in-flight request may keep running 
 def _routermint_headers() -> dict:
     """User-Agent RouterMint needs to avoid Cloudflare 1010 blocks."""
     from hermes_cli import __version__ as _HERMES_VERSION
-
     return {"User-Agent": f"HermesAgent/{_HERMES_VERSION}"}
 
 
 def _qwen_portal_headers() -> dict:
     import platform as _plat
-
     _ua = f"QwenCode/{_QWEN_CODE_VERSION} ({_plat.system().lower()}; {_plat.machine()})"
     return {
         "User-Agent": _ua,
@@ -97,7 +95,6 @@ class ClientLifecycleMixin:
         """``is_closed`` is a bool property on httpx.Client but a method on openai.OpenAI; a bare getattr
         returned the always-truthy bound method and recreated the client on every call."""
         from unittest.mock import Mock
-
         if isinstance(client, Mock):
             return False
         is_closed = getattr(client, "is_closed", None)
@@ -109,7 +106,6 @@ class ClientLifecycleMixin:
     def _build_keepalive_http_client(base_url: str = "", *, verify: Any = True) -> Any:
         """Build the shared OpenAI httpx client used by main and aux paths."""
         from agent.process_bootstrap import build_keepalive_http_client
-
         return build_keepalive_http_client(base_url, verify=verify)
 
     _create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
@@ -214,7 +210,6 @@ class ClientLifecycleMixin:
                 # generic rebuild paths (rotation, timeout, dead-connection cleanup) must preserve that.
                 if (getattr(self, "provider", "") or "").strip().lower() == "moa":
                     from agent.moa_loop import build_moa_facade
-
                     new_client = build_moa_facade(self, self.model)
                 else:
                     new_client = self._create_openai_client(self._client_kwargs, reason=reason, shared=True)
@@ -245,7 +240,6 @@ class ClientLifecycleMixin:
                 )
                 raise RuntimeError("Failed to recreate closed OpenAI client") from exc
             self.client = new_client
-
         logger.warning(
             "Detected closed shared OpenAI client; recreated before use (%s) %s",
             reason, self._client_log_context(),
@@ -360,7 +354,6 @@ class ClientLifecycleMixin:
 
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
-
         primary_client = self._ensure_primary_openai_client(reason=reason)
         if self.provider == "moa" or isinstance(primary_client, Mock):
             return primary_client
@@ -374,7 +367,6 @@ class ClientLifecycleMixin:
             and self._api_kwargs_have_image_parts(api_kwargs or {})
         ):
             from hermes_cli.copilot_auth import copilot_request_headers
-
             request_kwargs["default_headers"] = copilot_request_headers(is_agent_turn=True, is_vision=True)
         cached, stale = self._checkout_request_slot(_OPENAI_SLOT, request_kwargs)
         if cached is not None:
@@ -425,10 +417,8 @@ class ClientLifecycleMixin:
     def _build_anthropic_client_for_key(self, key: tuple) -> Any:
         if key[0] == "bedrock":
             from agent.anthropic_adapter import build_anthropic_bedrock_client
-
             return build_anthropic_bedrock_client(key[1])
         from agent.anthropic_adapter import build_anthropic_client
-
         return build_anthropic_client(key[1], key[2], timeout=key[3], drop_context_1m_beta=key[4])
 
     def _create_request_anthropic_client(self, *, reason: str) -> Any:
@@ -514,7 +504,6 @@ class ClientLifecycleMixin:
         except Exception as exc:
             logger.debug("%s singleton read failed: %s", self.provider, exc)
             return False
-
         singleton_key = str(singleton_now.get("api_key") or "").strip()
         old_key = str(self.api_key or "").strip()
         if singleton_key and old_key and singleton_key != old_key:
@@ -525,13 +514,11 @@ class ClientLifecycleMixin:
                 self.provider,
             )
             return False
-
         try:
             creds = resolve(force_refresh=force)
         except Exception as exc:
             logger.debug("%s credential refresh failed: %s", self.provider, exc)
             return False
-
         api_key, base_url = creds.get("api_key"), creds.get("base_url")
         if not _valid_credential_pair(api_key, base_url):
             return False
@@ -550,14 +537,12 @@ class ClientLifecycleMixin:
             return False
         try:
             from hermes_cli.auth import resolve_nous_runtime_credentials
-
             creds = resolve_nous_runtime_credentials(
                 timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15), force_refresh=force,
             )
         except Exception as exc:
             logger.debug("Nous credential refresh failed: %s", exc)
             return False
-
         api_key, base_url = creds.get("api_key"), creds.get("base_url")
         if not _valid_credential_pair(api_key, base_url):
             return False
@@ -583,7 +568,6 @@ class ClientLifecycleMixin:
             from hermes_cli.auth import PROVIDER_REGISTRY
         except ImportError:
             return None
-
         pconfig = PROVIDER_REGISTRY.get(self.provider)
         if (
             pconfig
@@ -604,7 +588,6 @@ class ClientLifecycleMixin:
             base_url = env_url or default_base
             if self.provider in ("kimi-coding", "zai"):
                 from hermes_cli import auth as _auth
-
                 resolver = _auth._resolve_kimi_base_url if self.provider == "kimi-coding" else _auth._resolve_zai_base_url
                 base_url = resolver(api_key, pconfig.inference_base_url, env_url).rstrip("/")
         elif self.provider == "custom":
@@ -665,35 +648,28 @@ class ClientLifecycleMixin:
         if not self._should_adopt_env_credentials(api_key, base_url, default_base):
             self._env_creds_seen = (base_url, api_key)
             return False
-
         from hermes_cli.route_identity import normalize_route_base_url
-
         route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(base_url)
         prior_api_key, prior_base_url = self.api_key, self.base_url
         prior_client_kwargs = dict(self._client_kwargs)
-
         self.api_key = api_key
         self.base_url = base_url
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
         # A base-url change moves the route: recompute TLS material and default headers.
         self._reapply_route_client_config(route_changed=route_changed)
-
         if not self._replace_primary_openai_client(reason="env_credential_refresh"):
             # Leave the baseline un-advanced (retry next turn); roll the agent back to match the live client.
             self.api_key, self.base_url = prior_api_key, prior_base_url
             self._client_kwargs.clear()
             self._client_kwargs.update(prior_client_kwargs)
             return False
-
         # Rebind the pool entry id to the adopted key, or the next 429 quarantines the wrong credential.
         try:
             from agent.agent_runtime_helpers import sync_credential_pool_entry_id
-
             sync_credential_pool_entry_id(self)
         except Exception:
             logger.debug("sync_credential_pool_entry_id after env refresh failed", exc_info=True)
-
         self._env_creds_seen = (base_url, api_key)
         logger.info("Applied updated .env credentials for %s: endpoint %s", self.provider, self.base_url)
         return True
@@ -705,7 +681,6 @@ class ClientLifecycleMixin:
             return False
         try:
             from agent.vertex_adapter import get_vertex_config
-
             token, base_url = get_vertex_config()
         except Exception as exc:
             logger.debug("Vertex credential refresh failed: %s", exc)
@@ -737,7 +712,6 @@ class ClientLifecycleMixin:
             return False
         try:
             from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token, evict_cached_exchanged_token
-
             new_token, token_source = resolve_copilot_token()
         except Exception as exc:
             logger.debug("Copilot credential refresh failed: %s", exc)
@@ -769,7 +743,6 @@ class ClientLifecycleMixin:
             return False
         try:
             from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token, evict_cached_exchanged_token
-
             raw_token, token_source = resolve_copilot_token()
             if not isinstance(raw_token, str) or not raw_token.strip():
                 return False
@@ -807,7 +780,6 @@ class ClientLifecycleMixin:
             return False
         try:
             from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
-
             new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
@@ -848,7 +820,6 @@ class ClientLifecycleMixin:
             profile_headers = None
             try:
                 from providers import get_provider_profile
-
                 profile = get_provider_profile(self.provider)
                 if profile and profile.default_headers:
                     profile_headers = dict(profile.default_headers)
@@ -858,18 +829,15 @@ class ClientLifecycleMixin:
                 self._client_kwargs["default_headers"] = profile_headers
             else:
                 self._client_kwargs.pop("default_headers", None)
-
         # User-configured overrides win over URL/profile defaults for the same route; a credential swap
         # to another endpoint must not inherit them.
         if apply_user_headers:
             self._apply_user_default_headers()
-
         # Per-provider extra_headers applied last so they survive credential swaps and rebuilds.
         # SECURITY: values may carry credentials — never log them.
         if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
             try:
                 from hermes_cli.config import apply_custom_provider_extra_headers_to_client_kwargs
-
                 apply_custom_provider_extra_headers_to_client_kwargs(self._client_kwargs, base_url)
             except Exception:
                 logger.debug("custom-provider extra_headers skipped", exc_info=True)
@@ -881,7 +849,6 @@ class ClientLifecycleMixin:
         if self.api_mode in ("anthropic_messages", "bedrock_converse"):
             return
         from agent.auxiliary_client import _apply_user_default_headers as _merge_user_headers
-
         merged = _merge_user_headers(self._client_kwargs.get("default_headers"))
         if merged:
             self._client_kwargs["default_headers"] = merged
@@ -891,13 +858,10 @@ class ClientLifecycleMixin:
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
         self._credential_pool_entry_id = getattr(entry, "id", None)
         from hermes_cli.route_identity import normalize_route_base_url
-
         route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(runtime_base)
         stripped_base = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
-
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
-
             try:
                 self._anthropic_client.close()
             except Exception:
@@ -912,7 +876,6 @@ class ClientLifecycleMixin:
             self.api_key = runtime_key
             self.base_url = stripped_base
             return
-
         self.api_key = runtime_key
         self.base_url = stripped_base
         self._client_kwargs["api_key"] = self.api_key
@@ -934,7 +897,6 @@ class ClientLifecycleMixin:
                 get_compatible_custom_providers,
                 load_config_readonly,
             )
-
             apply_custom_provider_tls_to_client_kwargs(
                 self._client_kwargs,
                 str(self.base_url or ""),
