@@ -26,48 +26,33 @@ from hermes_cli.dashboard_auth.cookies import (
 from hermes_cli.dashboard_auth.prefix import prefix_from_request
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
 from hermes_cli.dashboard_auth.request_utils import (
-    access_token_max_age as _expires_in_seconds,
-    client_ip as _client_ip,
-    extract_bearer as _extract_bearer,
-    is_safe_next_path,
-    scan_session_providers,
+    access_token_max_age as _expires_in_seconds, client_ip as _client_ip,
+    extract_bearer as _extract_bearer, is_safe_next_path, scan_session_providers,
     unreachable_response)
 
 _log = logging.getLogger(__name__)
 
-# Prefix-matched (``path == p or path.startswith(p)``) bypass list: auth
-# bootstrap routes and static asset mounts. ``/assets/`` with the trailing
-# slash matches ``/assets/foo.css`` but not ``/assetsleak``.
+# Prefix-matched bypass list: auth bootstrap routes and static asset mounts. ``/assets/`` with
+# the trailing slash matches ``/assets/foo.css`` but not ``/assetsleak``.
 _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
-    "/auth/login",
-    "/auth/callback",
-    "/auth/native/authorize",
-    "/auth/native/token",
-    "/auth/native/refresh",
-    "/auth/password-login",
-    "/auth/logout",
-    "/login",
-    "/api/auth/providers",
-    "/api/mcp/oauth/callback/",
-    "/assets/",
-    "/favicon.ico",
-    "/ds-assets/",
-    "/fonts/",
-    "/fonts-terminal/")
+    "/auth/login", "/auth/callback", "/auth/native/authorize", "/auth/native/token",
+    "/auth/native/refresh", "/auth/password-login", "/auth/logout", "/login",
+    "/api/auth/providers", "/api/mcp/oauth/callback/",
+    "/assets/", "/favicon.ico", "/ds-assets/", "/fonts/", "/fonts-terminal/")
 
 
 def _path_is_public(path: str) -> bool:
-    """True if ``path`` bypasses the gate: :data:`PUBLIC_API_PATHS` (shared with the
-    legacy middleware) matched exactly so ``/api/status`` never exposes
-    ``/api/status/extension``; :data:`_GATE_PUBLIC_PREFIXES` prefix-matched."""
+    """:data:`PUBLIC_API_PATHS` (shared with the legacy middleware) matched exactly so
+    ``/api/status`` never exposes ``/api/status/extension``; :data:`_GATE_PUBLIC_PREFIXES`
+    prefix-matched."""
     return path in PUBLIC_API_PATHS or any(
         path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES)
 
 
 def _safe_next_target(request: Request) -> str:
-    """URL-encoded ``next`` value for the login redirect, or ``""``. Only same-origin
-    paths outside the auth flow and ``/api`` are kept (query preserved); dropped
-    deep links fall back to the SPA's ``sessionStorage["hermes.lastLocation"]``."""
+    """URL-encoded ``next`` value for the login redirect, or ``""``. Only same-origin paths outside
+    the auth flow and ``/api`` are kept (query preserved); dropped deep links fall back to the
+    SPA's ``sessionStorage["hermes.lastLocation"]``."""
     path = request.url.path
     if not path or not is_safe_next_path(path):
         return ""
@@ -76,32 +61,27 @@ def _safe_next_target(request: Request) -> str:
 
 
 def _unauth_response(request: Request, *, reason: str) -> Response:
-    """API routes -> 401 JSON with ``login_url``; HTML routes -> 302 -> /login.
-    fetch() follows a 302 opaquely into the cross-origin OAuth dance, so API routes
-    never get redirects; the SPA's 401 handler navigates to ``login_url`` on
-    ``unauthenticated`` / ``session_expired``. Both carry ``next=`` and the prefix."""
+    """API routes -> 401 JSON with ``login_url``; HTML routes -> 302 -> /login. fetch() follows a
+    302 opaquely into the cross-origin OAuth dance, so API routes never get redirects; the SPA's
+    401 handler navigates to ``login_url`` on ``unauthenticated`` / ``session_expired``."""
     next_param = _safe_next_target(request)
     prefix = prefix_from_request(request)
     login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
     if request.url.path.startswith("/api/"):
-        error_code = (
-            "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated")
+        expired = reason == "invalid_or_expired_session"
         return JSONResponse(
-            {"error": error_code, "detail": "Unauthorized", "reason": reason,
-             "login_url": login_url},
-            status_code=401)
+            {"error": "session_expired" if expired else "unauthenticated", "detail": "Unauthorized",
+             "reason": reason, "login_url": login_url}, status_code=401)
     return RedirectResponse(url=login_url, status_code=302)
 
 
 def _auto_sso_response(request: Request) -> Response | None:
     """302 straight to ``/auth/login`` on an unauthenticated HTML load, or ``None``.
 
-    Only for a document load (not ``/api/*``) when exactly one interactive
-    provider is registered and it is OAuth-style (a password provider must render
-    the form), and the one-shot loop-guard cookie is absent — a present marker
-    means the portal had no session last time: clear it and fall back to ``/login``
-    rather than ping-pong. Convenience, not a security check: ``/auth/login`` runs
-    the unchanged PKCE flow.
+    Only for a document load (not ``/api/*``) when exactly one interactive OAuth-style provider is
+    registered (a password provider must render the form) and the one-shot loop-guard cookie is
+    absent — a present marker means the portal had no session last time: clear it and fall back
+    to ``/login`` rather than ping-pong. Convenience, not a security check.
     """
     if request.url.path.startswith("/api/"):
         return None
@@ -127,19 +107,42 @@ def _auto_sso_response(request: Request) -> Response | None:
 
 def _verify_access_token(
     request: Request, *, access_token: str, provider_hint: str | None = None, audit: bool = True):
-    """Run ``verify_session`` across the provider stack; Session or ``None``.
-    ``audit=False`` is the native-app bearer path (no cookie, no server-side refresh
-    — the desktop rotates via ``/auth/native/refresh``); 503-on-outage semantics
-    come from :func:`scan_session_providers`."""
+    """Run ``verify_session`` across the provider stack; Session or ``None``. ``audit=False`` is
+    the native-app bearer path (no cookie, no server-side refresh — the desktop rotates via
+    ``/auth/native/refresh``); 503-on-outage semantics come from :func:`scan_session_providers`."""
     def _audit_unreachable(provider):
         if audit:
-            audit_log(
-                AuditEvent.SESSION_VERIFY_FAILURE, provider=provider.name,
-                reason="provider_unreachable", ip=_client_ip(request))
+            audit_log(AuditEvent.SESSION_VERIFY_FAILURE, provider=provider.name,
+                      reason="provider_unreachable", ip=_client_ip(request))
 
     return scan_session_providers(
         provider_hint, lambda p: p.verify_session(access_token=access_token),
         phase="verify" if audit else "bearer verify", log=_log, on_unreachable=_audit_unreachable)
+
+
+async def _serve_refreshed(request: Request, call_next, new_session, provider: str) -> Response:
+    """Serve the request under a just-rotated session and write the rotated cookies back. Writing
+    the ROTATED RT is mandatory: Portal runs reuse detection, so replaying the stale RT would
+    revoke the session."""
+    request.state.session = new_session
+    response = await call_next(request)
+    set_session_cookies(
+        response, access_token=new_session.access_token, refresh_token=new_session.refresh_token,
+        access_token_expires_in=_expires_in_seconds(new_session), use_https=detect_https(request),
+        prefix=prefix_from_request(request), provider=provider)
+    audit_log(AuditEvent.REFRESH_SUCCESS, provider=provider, user_id=new_session.user_id,
+              ip=_client_ip(request))
+    return response
+
+
+def _session_expired_response(request: Request) -> Response:
+    """Refresh failed (or no RT): structured 401/redirect and clear the dead cookies under the
+    active prefix so the deletion Path matches the set Path."""
+    audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises",
+              ip=_client_ip(request))
+    response = _unauth_response(request, reason="invalid_or_expired_session")
+    clear_session_cookies(response, prefix=prefix_from_request(request))
+    return response
 
 
 async def gated_auth_middleware(
@@ -147,17 +150,14 @@ async def gated_auth_middleware(
     """Engaged only when ``app.state.auth_required is True``."""
     if not getattr(request.app.state, "auth_required", False):
         return await call_next(request)
-    # Already authenticated by the token-auth seam (service caller on a
-    # registered token route): not a cookie session, must not bounce to /login.
-    if getattr(request.state, "token_authenticated", False):
+    # Already authenticated by the token-auth seam (service caller on a registered token
+    # route): not a cookie session, must not bounce to /login.
+    if getattr(request.state, "token_authenticated", False) or _path_is_public(request.url.path):
         return await call_next(request)
-    if _path_is_public(request.url.path):
-        return await call_next(request)
-
-    # RFC 8252 native-app bearer path: the same provider-minted access token
-    # the cookie flow stores, verified with the same provider stack, no cookie
-    # read or set. A presented-but-invalid bearer gets the structured 401 so
-    # the desktop refreshes/re-logs instead of following a cookie redirect.
+    # RFC 8252 native-app bearer path: the same provider-minted access token the cookie flow
+    # stores, verified with the same provider stack, no cookie read or set. A presented-but-
+    # invalid bearer gets the structured 401 so the desktop refreshes/re-logs instead of
+    # following a cookie redirect.
     bearer = _extract_bearer(request)
     if bearer:
         try:
@@ -175,49 +175,25 @@ async def gated_auth_middleware(
         # No session at all: try the silent portal bounce before /login.
         auto = _auto_sso_response(request)
         return auto if auto is not None else _unauth_response(request, reason="no_cookie")
-
-    # An absent AT with a present RT is the COMMON expiry case (the AT cookie's
-    # Max-Age tracks the token TTL, so the browser evicts it first) — skip
-    # straight to refresh rather than bouncing to /login.
+    # An absent AT with a present RT is the COMMON expiry case (the AT cookie's Max-Age tracks
+    # the token TTL, so the browser evicts it first) — skip straight to refresh.
     session = None
     if at:
         try:
             session = _verify_access_token(request, access_token=at, provider_hint=provider_hint)
         except ProviderError as e:
             return unreachable_response(str(e))
-
     if session is None:
-        # Rotate via the refresh token before forcing re-login. On success the
-        # rotated cookies are re-set and the request served transparently.
+        # Rotate via the refresh token before forcing re-login; on success the request is
+        # served transparently with the rotated cookies re-set.
         try:
             refreshed = _attempt_refresh(request, refresh_token=_rt, provider_hint=provider_hint)
         except ProviderError as e:
             # Uncertain (provider unreachable), not rejected: keep the cookies.
             return unreachable_response(str(e))
-        if refreshed is not None:
-            new_session, refreshing_provider = refreshed
-            request.state.session = new_session
-            response = await call_next(request)
-            # Writing the ROTATED RT back is mandatory: Portal runs reuse
-            # detection, so replaying the stale RT would revoke the session.
-            set_session_cookies(
-                response, access_token=new_session.access_token,
-                refresh_token=new_session.refresh_token,
-                access_token_expires_in=_expires_in_seconds(new_session),
-                use_https=detect_https(request), prefix=prefix_from_request(request),
-                provider=refreshing_provider)
-            audit_log(
-                AuditEvent.REFRESH_SUCCESS, provider=refreshing_provider,
-                user_id=new_session.user_id, ip=_client_ip(request))
-            return response
-
-        audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises",
-                  ip=_client_ip(request))
-        response = _unauth_response(request, reason="invalid_or_expired_session")
-        # Refresh failed (or no RT): clear the dead cookies under the active
-        # prefix so the deletion Path matches the set Path.
-        clear_session_cookies(response, prefix=prefix_from_request(request))
-        return response
+        if refreshed is None:
+            return _session_expired_response(request)
+        return await _serve_refreshed(request, call_next, *refreshed)
 
     request.state.session = session
     response = await call_next(request)
@@ -229,10 +205,10 @@ async def gated_auth_middleware(
 
 
 def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | None = None):
-    """Rotate an expired session via the refresh token; ``(Session, provider_name)``
-    or ``None``. ``RefreshExpiredError`` rejects that candidate only (Basic raises it
-    for foreign opaque tokens too); if none succeeds and any raised ``ProviderError``
-    it is re-raised so the caller returns 503 without clearing cookies."""
+    """Rotate an expired session via the refresh token; ``(Session, provider_name)`` or ``None``.
+    ``RefreshExpiredError`` rejects that candidate only (Basic raises it for foreign opaque tokens
+    too); if none succeeds and any raised ``ProviderError`` it is re-raised so the caller returns
+    503 without clearing cookies."""
     if not refresh_token:
         return None
 

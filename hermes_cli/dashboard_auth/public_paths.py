@@ -1,13 +1,9 @@
-"""Shared allowlist of ``/api/*`` paths that bypass dashboard auth.
-
-Imported by BOTH gates — ``web_server.auth_middleware`` (loopback /
-``--insecure``, ephemeral ``_SESSION_TOKEN``) and
-``dashboard_auth.middleware.gated_auth_middleware`` (OAuth cookie) — so the
-lists cannot drift again (a drift once 401'd ``/api/status`` under the OAuth
-gate and broke the portal's cookie-less liveness probe). Keep minimal: every
-entry must be safe for external uptime probes, the pre-login SPA, and anyone
-who ``curl``s the hostname; otherwise gate it and bootstrap after login.
-"""
+"""Shared allowlist of ``/api/*`` paths that bypass dashboard auth. Imported by BOTH gates —
+``web_server.auth_middleware`` (loopback / ``--insecure``) and
+``dashboard_auth.middleware.gated_auth_middleware`` (OAuth cookie) — so the lists cannot drift
+again (a drift once 401'd ``/api/status`` and broke the portal's cookie-less liveness probe).
+Keep minimal: every entry must be safe for external uptime probes, the pre-login SPA, and anyone
+who ``curl``s the hostname; otherwise gate it and bootstrap after login."""
 from __future__ import annotations
 
 PUBLIC_API_PATHS: frozenset[str] = frozenset({
@@ -28,5 +24,4 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # Chronos managed-cron fire webhook (NAS -> agent). NOT cookie-gated: it
     # carries its own short-lived NAS-minted JWT (purpose=cron_fire), which the
     # handler verifies — the JWT, not this allowlist, is the security boundary.
-    "/api/cron/fire",
-})
+    "/api/cron/fire"})

@@ -59,14 +59,15 @@ def _prefix(request: Request) -> str:
     return _prefix_mod.prefix_from_request(request)
 
 
-def _redirect_uri(request: Request) -> str:
-    """Absolute ``/auth/callback`` URL handed to the IDP.
+def _audit(request: Request, event: AuditEvent, **fields) -> None:
+    audit_log(event, **fields, ip=_client_ip(request))
 
-    An operator-declared public URL is the complete authority (``X-Forwarded-Prefix``
-    ignored so a baked-in prefix is not doubled); otherwise ``url_for`` (honours
-    ``X-Forwarded-Host/Proto`` under uvicorn ``proxy_headers``) with the prefix
-    prepended, which Starlette does not do.
-    """
+
+def _redirect_uri(request: Request) -> str:
+    """Absolute ``/auth/callback`` URL handed to the IDP. An operator-declared public URL is the
+    complete authority (``X-Forwarded-Prefix`` ignored so a baked-in prefix is not doubled);
+    otherwise ``url_for`` (honours ``X-Forwarded-Host/Proto`` under uvicorn ``proxy_headers``)
+    with the prefix prepended, which Starlette does not do."""
     public_url = _prefix_mod.resolve_public_url()
     if public_url:
         return f"{public_url}/auth/callback"
@@ -79,8 +80,8 @@ def _redirect_uri(request: Request) -> str:
 
 
 def _provider_pkce_segments(cookie_payload: dict[str, str]) -> dict[str, str]:
-    """Parse a provider's flat ``state=…;verifier=…`` PKCE string into a dict — the
-    ONE place the flat form is parsed; :func:`set_pkce_cookie` encodes the dict."""
+    """Parse a provider's flat ``state=…;verifier=…`` PKCE string into a dict — the ONE place
+    the flat form is parsed; :func:`set_pkce_cookie` encodes the dict."""
     flat = cookie_payload.get("hermes_session_pkce", "")
     return dict(seg.split("=", 1) for seg in flat.split(";") if "=" in seg)
 
@@ -88,10 +89,8 @@ def _provider_pkce_segments(cookie_payload: dict[str, str]) -> dict[str, str]:
 def _validate_post_login_target(raw: str) -> str:
     """``raw`` (URL-decoded) if it is a safe same-origin path, else ``""``. Re-validated
     at every hop because a ``next=`` value can re-enter via a crafted URL."""
-    if not raw:
-        return ""
-    decoded = unquote(raw)
-    return decoded if is_safe_next_path(decoded) else ""
+    decoded = unquote(raw) if raw else ""
+    return decoded if decoded and is_safe_next_path(decoded) else ""
 
 
 def _set_pkce(resp, request: Request, payload: dict[str, str]) -> None:
@@ -115,39 +114,46 @@ def _bearer_payload(session: Session) -> dict[str, Any]:
 
 def _finish_native_login(
     request: Request, *, broker_state: str, session: Session, provider: str) -> str:
-    """Shared tail of ``/auth/callback`` and ``/auth/password-login``: mint the
-    one-time loopback code and return the desktop's ``redirect_uri?code=…&state=…``.
+    """Mint the one-time loopback code and return the desktop's ``redirect_uri?code=…&state=…``.
     No session cookies on the native path — the desktop redeems at ``/auth/native/token``."""
-    ip = _client_ip(request)
     try:
         pending = native_flow.get_pending(broker_state)
         gw_code = native_flow.complete_pending(broker_state, session=session)
     except native_flow.NativeFlowError:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=provider, reason="pending_not_found",
-                  ip=ip)
+        _audit(request, AuditEvent.NATIVE_TOKEN_FAILURE, provider=provider,
+               reason="pending_not_found")
         raise _http(400, _NATIVE_EXPIRED_DETAIL)
     sep = "&" if "?" in pending.redirect_uri else "?"
     query = urlencode({'code': gw_code, 'state': pending.client_state})
-    loopback = f"{pending.redirect_uri}{sep}{query}"
-    audit_log(AuditEvent.NATIVE_CODE_ISSUED, provider=provider, user_id=session.user_id, ip=ip)
-    return loopback
+    _audit(request, AuditEvent.NATIVE_CODE_ISSUED, provider=provider, user_id=session.user_id)
+    return f"{pending.redirect_uri}{sep}{query}"
 
 
 def _login_failure(request: Request, provider: str, reason: str, **extra) -> None:
-    audit_log(AuditEvent.LOGIN_FAILURE, provider=provider, reason=reason, **extra,
-              ip=_client_ip(request))
+    _audit(request, AuditEvent.LOGIN_FAILURE, provider=provider, reason=reason, **extra)
 
 
 def _login_success(request: Request, session: Session, provider: str) -> None:
-    audit_log(
-        AuditEvent.LOGIN_SUCCESS, provider=provider, user_id=session.user_id,
-        email=session.email, org_id=session.org_id, ip=_client_ip(request))
+    _audit(request, AuditEvent.LOGIN_SUCCESS, provider=provider, user_id=session.user_id,
+           email=session.email, org_id=session.org_id)
+
+
+def _complete_login(request: Request, provider: str, session: Session, *, broker_state: str,
+                    next_raw: str) -> tuple:
+    """Shared tail of the callback + password routes after credentials verified: audit success,
+    then either the native loopback redirect (no cookies) or the landing path. Returns
+    ``(target_url, native)``."""
+    _login_success(request, session, provider)
+    if broker_state:
+        return _finish_native_login(
+            request, broker_state=broker_state, session=session, provider=provider), True
+    return _validate_post_login_target(next_raw) or "/", False
 
 
 def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkce: dict[str, str]):
-    """Run ``start_login`` and 302 to the IDP with the PKCE cookie set. That cookie
-    is the only server-controlled channel surviving the round trip (IDPs echo back
-    only code+state), so it carries the provider name plus ``extra_pkce``."""
+    """Run ``start_login`` and 302 to the IDP with the PKCE cookie set. That cookie is the only
+    server-controlled channel surviving the round trip (IDPs echo back only code+state), so it
+    carries the provider name plus ``extra_pkce``."""
     try:
         ls = p.start_login(redirect_uri=_redirect_uri(request))
     except ProviderError as e:
@@ -163,7 +169,6 @@ def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkc
 
 
 # --- Public: login page + provider list ------------------------------------
-
 
 @router.get("/login", name="login_page")
 async def login_page(request: Request) -> HTMLResponse:
@@ -186,7 +191,6 @@ async def api_auth_providers() -> Any:
 
 # --- Public: OAuth round trip ----------------------------------------------
 
-
 @router.get("/auth/login", name="auth_login")
 async def auth_login(request: Request, provider: str, next: str = ""):
     p = get_provider(provider)
@@ -202,17 +206,16 @@ async def auth_login(request: Request, provider: str, next: str = ""):
         return RedirectResponse(url=login_url, status_code=302)
     resp = _start_upstream_login(
         request, p, audit_failure=True, extra_pkce={"next": safe_next} if safe_next else {})
-    audit_log(AuditEvent.LOGIN_START, provider=provider, ip=_client_ip(request))
+    _audit(request, AuditEvent.LOGIN_START, provider=provider)
     return resp
 
 
 # --- Public: RFC 8252 native-app authorization (system browser + loopback + PKCE)
 
-
 def _validate_loopback_redirect_uri(raw: str) -> str:
-    """Accept only ``http://127.0.0.1[:port]/…`` / ``http://[::1][:port]/…``. Security
-    boundary: the route is public, so a non-loopback host would make the callback
-    an open redirect leaking a live code. ``localhost`` is rejected (RFC 8252 §8.3)."""
+    """Accept only ``http://127.0.0.1[:port]/…`` / ``http://[::1][:port]/…``. Security boundary:
+    the route is public, so a non-loopback host would make the callback an open redirect leaking
+    a live code. ``localhost`` is rejected (RFC 8252 §8.3)."""
     if not raw:
         raise _http(400, "redirect_uri required")
     parsed = urlparse(raw)
@@ -224,75 +227,65 @@ def _validate_loopback_redirect_uri(raw: str) -> str:
 
 
 def _select_native_provider(provider: str):
-    """Resolve the provider for a native authorize request. An empty ``provider``
-    auto-selects the single brokerable (non-password) session provider — so an
-    OIDC+basic deployment does not fail with "Unknown provider"; with none, a lone
-    password provider is still returned so the caller emits a 400 rather than 404."""
+    """Resolve the provider for a native authorize request. An empty ``provider`` auto-selects
+    the single brokerable (non-password) session provider — so an OIDC+basic deployment does not
+    fail with "Unknown provider"; with none, a lone password provider is still returned so the
+    caller emits a 400 rather than 404."""
     if provider:
         return get_provider(provider)
     sess_providers = list_session_providers()
     native_eligible = [pp for pp in sess_providers if not getattr(pp, "supports_password", False)]
-    if len(native_eligible) == 1:
-        return native_eligible[0]
-    if not native_eligible and len(sess_providers) == 1:
-        return sess_providers[0]
-    return None
+    candidates = native_eligible or sess_providers
+    return candidates[0] if len(candidates) == 1 else None
 
 
 @router.get("/auth/native/authorize", name="auth_native_authorize")
 async def auth_native_authorize(
     request: Request, provider: str = "", code_challenge: str = "",
     code_challenge_method: str = "", redirect_uri: str = "", state: str = ""):
-    """Begin an RFC 8252 native-app login: stash a pending broker authorization keyed
-    by an opaque ``broker_state`` riding in the gateway's own PKCE cookie (the
-    desktop's challenge/state never touch it), then run the normal upstream round
-    trip. Password providers go to the ``/login`` form instead."""
+    """Begin an RFC 8252 native-app login: stash a pending broker authorization keyed by an
+    opaque ``broker_state`` riding in the gateway's own PKCE cookie (the desktop's
+    challenge/state never touch it), then run the normal upstream round trip. Password providers
+    go to the ``/login`` form instead."""
     if code_challenge_method.upper() != "S256":
         raise _http(400, "code_challenge_method must be S256")
     if not code_challenge:
         raise _http(400, "code_challenge required")
     _validate_loopback_redirect_uri(redirect_uri)
-
     p = _select_native_provider(provider)
     if p is None:
         raise _http(404, f"Unknown provider: {provider!r}")
     if not getattr(p, "supports_session", True):
         raise _http(400, f"Provider does not support native login: {p.name!r}")
-
     try:
         broker_state = native_flow.register_pending(
             code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=state,
             client_ip=_client_ip(request))
     except native_flow.NativeFlowError as e:
         raise _http(503, str(e))
-
     if getattr(p, "supports_password", False):
-        audit_log(AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name, ip=_client_ip(request))
+        _audit(request, AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name)
         resp = RedirectResponse(url=f"{_prefix(request)}/login", status_code=302)
         _set_pkce(resp, request, {"provider": p.name, "broker": broker_state})
         return resp
-
     resp = _start_upstream_login(
         request, p, audit_failure=False, extra_pkce={"broker": broker_state})
-    audit_log(AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name, ip=_client_ip(request))
+    _audit(request, AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name)
     return resp
 
 
 @router.get("/auth/callback", name="auth_callback")
 async def auth_callback(
-    request: Request, code: str = "", state: str = "", error: str = "", error_description: str = "",
-):
+    request: Request, code: str = "", state: str = "", error: str = "",
+    error_description: str = ""):
     pkce_raw = read_pkce_cookie(request)
     if not pkce_raw:
-        audit_log(AuditEvent.LOGIN_FAILURE, reason="missing_pkce_cookie", ip=_client_ip(request))
+        _audit(request, AuditEvent.LOGIN_FAILURE, reason="missing_pkce_cookie")
         raise _http(400, "Missing PKCE state cookie")
-
     # ``next`` and ``broker`` come from the server-set cookie ONLY: the IDP
     # echoes back just code+state, so any such query param is attacker controlled.
     parts = parse_pkce_payload(pkce_raw)
     provider_name = parts.get("provider", "")
-    broker_state = parts.get("broker", "")
-
     p = get_provider(provider_name)
     if p is None:
         raise _http(400, f"Unknown provider in cookie: {provider_name!r}")
@@ -302,7 +295,6 @@ async def auth_callback(
     if not state or state != parts.get("state", ""):
         _login_failure(request, provider_name, "state_mismatch")
         raise _http(400, "OAuth state mismatch (CSRF check failed)")
-
     try:
         session = p.complete_login(
             code=code, state=state, code_verifier=parts.get("verifier", ""),
@@ -313,32 +305,23 @@ async def auth_callback(
     except ProviderError as e:
         _login_failure(request, provider_name, "provider_unreachable")
         raise _http(503, f"Provider unreachable: {e}")
-
-    _login_success(request, session, provider_name)
-
-    https = detect_https(request)
-    prefix = _prefix(request)
-    if broker_state:
-        loopback = _finish_native_login(
-            request, broker_state=broker_state, session=session, provider=provider_name)
-        resp = RedirectResponse(url=loopback, status_code=302)
-    else:
-        landing = _validate_post_login_target(parts.get("next", "")) or "/"
-        resp = RedirectResponse(url=landing, status_code=302)
+    target, native = _complete_login(
+        request, provider_name, session, broker_state=parts.get("broker", ""),
+        next_raw=parts.get("next", ""))
+    resp = RedirectResponse(url=target, status_code=302)
+    if not native:
         _set_session(resp, request, session)
-    clear_pkce_cookie(resp, use_https=https, prefix=prefix)
-    # Clear the one-shot auto-SSO loop-guard so it never suppresses a future
-    # silent attempt after logout.
+    prefix = _prefix(request)
+    clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
+    # Clear the one-shot auto-SSO loop-guard so it never suppresses a future silent attempt.
     clear_sso_attempt_cookie(resp, prefix=prefix)
     return resp
 
 
 # --- Public: password (non-redirect) login ---------------------------------
-#
-# Brute-force throttle: a process-local sliding window per client IP. Best
-# effort defence-in-depth on top of the provider's constant-time verify (resets
-# on restart; behind a proxy the IP is the proxy's unless X-Forwarded-For).
-
+# Brute-force throttle: a process-local sliding window per client IP. Best-effort
+# defence-in-depth on top of the provider's constant-time verify (resets on restart; behind a
+# proxy the IP is the proxy's unless X-Forwarded-For).
 _PW_RATE_MAX_ATTEMPTS = 10
 _PW_RATE_WINDOW_SEC = 60.0
 _pw_attempts: Dict[str, Deque[float]] = defaultdict(deque)
@@ -346,8 +329,8 @@ _pw_attempts_lock = threading.Lock()
 
 
 def _password_rate_limited(ip: str) -> bool:
-    """True if ``ip`` exceeded the budget; records the attempt when allowed. An empty
-    IP shares one bucket — fail-safe toward throttling."""
+    """True if ``ip`` exceeded the budget; records the attempt when allowed. An empty IP shares
+    one bucket — fail-safe toward throttling."""
     now = time.monotonic()
     cutoff = now - _PW_RATE_WINDOW_SEC
     with _pw_attempts_lock:
@@ -377,35 +360,30 @@ class _PasswordLoginBody(BaseModel):
 async def auth_password_login(request: Request, body: _PasswordLoginBody):
     """Authenticate a username/password against a password provider.
 
-    Returns ``{"ok": true, "next": <path>}`` (the form POSTs via fetch, which
-    follows a 302 opaquely) and sets the session cookies; with a native ``broker``
-    handle in the PKCE cookie, ``next`` is the desktop's loopback redirect and NO
-    cookies are set. Failures are deliberately generic (no username/provider
-    oracle): unknown/non-password provider 404, bad credentials 401, store
-    unreachable 503, rate limited 429.
+    Returns ``{"ok": true, "next": <path>}`` (the form POSTs via fetch, which follows a 302
+    opaquely) and sets the session cookies; with a native ``broker`` handle in the PKCE cookie,
+    ``next`` is the desktop's loopback redirect and NO cookies are set. Failures are deliberately
+    generic (no username/provider oracle): unknown/non-password provider 404, bad credentials
+    401, store unreachable 503, rate limited 429.
     """
-    ip = _client_ip(request)
-    if _password_rate_limited(ip):
+    if _password_rate_limited(_client_ip(request)):
         _login_failure(request, body.provider, "rate_limited")
         raise _http(429, "Too many login attempts. Try again shortly.")
-
     p = get_provider(body.provider)
     if p is None or not getattr(p, "supports_password", False):
         _login_failure(request, body.provider, "unknown_password_provider")
         raise _http(404, "Unknown provider")
-
-    # The native broker handle also records WHICH provider the flow was started
-    # for. Enforce equality BEFORE verifying credentials so a flow started for
-    # provider A cannot be completed with provider B's credentials.
+    # The native broker handle also records WHICH provider the flow was started for. Enforce
+    # equality BEFORE verifying credentials so a flow started for provider A cannot be completed
+    # with provider B's credentials.
     pkce_raw = read_pkce_cookie(request)
     pkce_parts = parse_pkce_payload(pkce_raw) if pkce_raw else {}
     broker_state = pkce_parts.get("broker", "")
     if broker_state and pkce_parts.get("provider", "") != body.provider:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=body.provider,
-                  reason="provider_mismatch", ip=ip)
+        _audit(request, AuditEvent.NATIVE_TOKEN_FAILURE, provider=body.provider,
+               reason="provider_mismatch")
         raise _http(400, "This native sign-in was started for a different provider; "
                          "use that provider's form or restart sign-in.")
-
     try:
         session = p.complete_password_login(username=body.username, password=body.password)
     except InvalidCredentialsError:
@@ -417,36 +395,28 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     except ProviderError as e:
         _login_failure(request, body.provider, "provider_unreachable")
         raise _http(503, f"Provider unreachable: {e}")
-
-    _login_success(request, session, body.provider)
-
-    if broker_state:
-        loopback = _finish_native_login(
-            request, broker_state=broker_state, session=session, provider=body.provider)
-        resp = JSONResponse({"ok": True, "next": loopback})
+    target, native = _complete_login(
+        request, body.provider, session, broker_state=broker_state, next_raw=body.next)
+    resp = JSONResponse({"ok": True, "next": target})
+    if native:
         clear_pkce_cookie(resp, use_https=detect_https(request), prefix=_prefix(request))
-        return resp
-
-    resp = JSONResponse({"ok": True, "next": _validate_post_login_target(body.next) or "/"})
-    _set_session(resp, request, session)
+    else:
+        _set_session(resp, request, session)
     return resp
 
 
 @router.post("/auth/logout", name="auth_logout")
 async def auth_logout(request: Request):
     _at, rt = read_session_cookies(request)
-    if rt:
-        # Best-effort revoke on every provider; failures logged, never raised.
-        for provider in list_providers():
-            try:
-                provider.revoke_session(refresh_token=rt)
-            except Exception as e:  # noqa: BLE001 — best-effort
-                _log.warning("dashboard-auth: revoke on %r failed: %s", provider.name, e)
-
+    # Best-effort revoke on every provider; failures logged, never raised.
+    for provider in list_providers() if rt else ():
+        try:
+            provider.revoke_session(refresh_token=rt)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            _log.warning("dashboard-auth: revoke on %r failed: %s", provider.name, e)
     sess = getattr(request.state, "session", None)
-    audit_log(
-        AuditEvent.LOGOUT, provider=(sess.provider if sess else "unknown"),
-        user_id=(sess.user_id if sess else ""), ip=_client_ip(request))
+    _audit(request, AuditEvent.LOGOUT, provider=(sess.provider if sess else "unknown"),
+           user_id=(sess.user_id if sess else ""))
     prefix = _prefix(request)
     resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
     clear_session_cookies(resp, prefix=prefix)
@@ -455,7 +425,6 @@ async def auth_logout(request: Request):
 
 
 # --- Auth-required: identity probe + WS ticket for the SPA -----------------
-
 
 def _require_session(request: Request):
     sess = getattr(request.state, "session", None)
@@ -479,15 +448,12 @@ async def api_auth_ws_ticket(request: Request):
     ``Authorization`` on the upgrade); one ticket per WS."""
     sess = _require_session(request)
     from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_ticket
-
     ticket = mint_ticket(user_id=sess.user_id, provider=sess.provider)
-    audit_log(AuditEvent.WS_TICKET_MINTED, provider=sess.provider, user_id=sess.user_id,
-              ip=_client_ip(request))
+    _audit(request, AuditEvent.WS_TICKET_MINTED, provider=sess.provider, user_id=sess.user_id)
     return {"ticket": ticket, "ttl_seconds": TTL_SECONDS}
 
 
 # --- Public: RFC 8252 native-app token exchange + refresh ------------------
-
 
 class _NativeTokenBody(BaseModel):
     code: str
@@ -496,18 +462,16 @@ class _NativeTokenBody(BaseModel):
 
 @router.post("/auth/native/token", name="auth_native_token")
 async def auth_native_token(request: Request, body: _NativeTokenBody):
-    """Exchange a loopback gateway code + PKCE verifier for bearer tokens. The code
-    is consumed on every path (no verifier oracle, no replay); any failure is a
-    generic 400. Tokens go in the JSON body; no cookie is set."""
+    """Exchange a loopback gateway code + PKCE verifier for bearer tokens. The code is consumed
+    on every path (no verifier oracle, no replay); any failure is a generic 400. Tokens go in
+    the JSON body; no cookie is set."""
     try:
         session = native_flow.redeem_code(code=body.code, code_verifier=body.code_verifier)
     except native_flow.CodeInvalid:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, reason="invalid_code_or_pkce",
-                  ip=_client_ip(request))
+        _audit(request, AuditEvent.NATIVE_TOKEN_FAILURE, reason="invalid_code_or_pkce")
         raise _http(400, "Invalid or expired authorization code.")
-    audit_log(
-        AuditEvent.NATIVE_TOKEN_SUCCESS, provider=session.provider, user_id=session.user_id,
-        ip=_client_ip(request))
+    _audit(request, AuditEvent.NATIVE_TOKEN_SUCCESS, provider=session.provider,
+           user_id=session.user_id)
     return _bearer_payload(session)
 
 
@@ -518,9 +482,9 @@ class _NativeRefreshBody(BaseModel):
 
 @router.post("/auth/native/refresh", name="auth_native_refresh")
 async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
-    """Rotate a desktop-held refresh token (mirrors the gate's ``_attempt_refresh``):
-    every provider rejecting the RT -> 401 ``session_expired`` (desktop re-logs);
-    none rotated and one unreachable -> 503."""
+    """Rotate a desktop-held refresh token (mirrors the gate's ``_attempt_refresh``): every
+    provider rejecting the RT -> 401 ``session_expired`` (desktop re-logs); none rotated and one
+    unreachable -> 503."""
     if not body.refresh_token:
         raise _http(400, "refresh_token required")
     try:
@@ -530,13 +494,10 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
     except ProviderError as e:
         raise _http(503, f"Auth provider {str(e)!r} unreachable")
     if session is not None:
-        audit_log(
-            AuditEvent.REFRESH_SUCCESS, provider=session.provider, user_id=session.user_id,
-            ip=_client_ip(request))
+        _audit(request, AuditEvent.REFRESH_SUCCESS, provider=session.provider,
+               user_id=session.user_id)
         return _bearer_payload(session)
-    audit_log(AuditEvent.REFRESH_FAILURE, reason="all_providers_rejected_rt",
-              ip=_client_ip(request))
+    _audit(request, AuditEvent.REFRESH_FAILURE, reason="all_providers_rejected_rt")
     return JSONResponse(
         {"error": "session_expired",
-         "detail": "Refresh token expired or invalid; start a new sign-in."},
-        status_code=401)
+         "detail": "Refresh token expired or invalid; start a new sign-in."}, status_code=401)

@@ -1,24 +1,16 @@
 """Cookie helpers for dashboard auth.
 
-All HttpOnly, ``SameSite=Lax`` unless noted, Path = proxy prefix or /:
-  - hermes_session_at        access token; Max-Age = token TTL (~15 min)
-  - hermes_session_rt        rotating refresh token; written only when the provider
-                             returned one, always cleared on logout/expiry
-  - hermes_session_provider  non-secret routing hint so an RT is not handed to the
-                             wrong provider when several auth plugins are enabled
-  - hermes_session_pkce      PKCE state + CSRF nonce + provider hint, 10 min.
-                             ``SameSite=None; Secure`` over HTTPS: it is set on the
-                             /auth/login 302 and must survive the cross-site redirect
-                             chain (Chromium drops Lax cookies set on such a 302,
-                             crbug 40508226); plain HTTP falls back to Lax.
-  - hermes_sso_attempt       one-shot auto-SSO loop-guard marker (60 s)
-
-``Secure`` only when ``request.url.scheme`` is https (honours ``X-Forwarded-Proto``
-only from uvicorn's ``forwarded_allow_ips``). Cookie-prefix hardening per
-draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with
-Path=/; ``__Secure-`` behind a proxy prefix (``__Host-`` forbids Path != /). Setters
-and readers BOTH resolve the name via :func:`_resolved_name` — a mismatch silently
-breaks sessions.
+All HttpOnly, ``SameSite=Lax`` unless noted, Path = proxy prefix or /: ``hermes_session_at``
+(access token; Max-Age = token TTL), ``hermes_session_rt`` (rotating refresh token; written only
+when the provider returned one, always cleared on logout/expiry), ``hermes_session_provider``
+(non-secret routing hint so an RT is not handed to the wrong provider), ``hermes_session_pkce``
+(PKCE state + CSRF nonce + provider hint, 10 min; ``SameSite=None; Secure`` over HTTPS because it
+is set on the /auth/login 302 and must survive the cross-site redirect chain — Chromium drops Lax
+cookies set on such a 302, crbug 40508226), ``hermes_sso_attempt`` (auto-SSO loop guard, 60 s).
+``Secure`` only when ``request.url.scheme`` is https. Cookie-prefix hardening per
+draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with Path=/;
+``__Secure-`` behind a proxy prefix (``__Host-`` forbids Path != /). Setters and readers BOTH
+resolve the name via :func:`_resolved_name` — a mismatch silently breaks sessions.
 """
 from __future__ import annotations
 
@@ -41,16 +33,14 @@ SSO_ATTEMPT_COOKIE = "hermes_sso_attempt"
 # Name variants a reader may have to try; most strict first.
 _NAME_VARIANTS = ("__Host-", "__Secure-", "")
 
-# RT cookie lifetime is a generous browser-side upper bound; the provider's own
-# RT TTL is the real authority (an expired RT -> RefreshExpiredError -> re-login).
+# RT cookie lifetime is a generous browser-side upper bound; the provider's own RT TTL is the
+# real authority (an expired RT -> RefreshExpiredError -> re-login).
 _RT_MAX_AGE = 30 * 24 * 60 * 60
 _PKCE_MAX_AGE = 10 * 60
-# Long enough for one portal round trip / back-button; short enough that a
-# user returning later gets a fresh silent attempt rather than a stuck /login.
+# Long enough for one portal round trip / back-button; short enough that a user returning later
+# gets a fresh silent attempt rather than a stuck /login.
 _SSO_ATTEMPT_MAX_AGE = 60
-
-# Cheap pre-filter: legacy wire forms always contain ``%`` or ``;``, which are
-# outside the base64url alphabet, so they never reach the base64 decoder.
+# Cheap pre-filter: legacy wire forms always contain ``%`` or ``;`` (outside base64url).
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 
 
@@ -62,8 +52,7 @@ def _resolved_name(bare: str, *, use_https: bool, prefix: str) -> str:
 
 
 def _cookie_path(prefix: str) -> str:
-    """``Path=/hermes`` under a proxy prefix (so the cookie does not leak to
-    sibling apps), else ``/``."""
+    """``Path=/hermes`` under a proxy prefix (no leak to sibling apps), else ``/``."""
     return prefix if prefix else "/"
 
 
@@ -101,13 +90,9 @@ def set_session_provider_cookie(
 def set_session_cookies(
     response: Response, *, access_token: str, refresh_token: str, access_token_expires_in: int,
     use_https: bool, prefix: str = "", provider: str = "") -> None:
-    """Set the session cookies.
-
-    ``access_token_expires_in`` is seconds (the provider's reported TTL). An
-    empty ``refresh_token`` means "don't persist the RT cookie" — a literal
-    empty cookie would be dead state at best, attack surface at worst.
-    ``prefix`` is the normalised X-Forwarded-Prefix or ``""``.
-    """
+    """``access_token_expires_in`` is seconds (the provider's reported TTL). An empty
+    ``refresh_token`` means "don't persist the RT cookie" — a literal empty cookie would be dead
+    state at best, attack surface at worst."""
     _set(response, SESSION_AT_COOKIE, access_token, max_age=access_token_expires_in,
          use_https=use_https, prefix=prefix)
     if refresh_token:
@@ -119,14 +104,10 @@ def set_session_cookies(
 def _clear_cookie_variants(
     response: Response, bare_name: str, *, prefix: str,
     https_samesite: Literal["lax", "strict", "none"], bare_attrs: dict) -> None:
-    """Emit Max-Age=0 deletions for every plausible name variant of a cookie.
-
-    We don't know which variant the setter used (it depends on the setting
-    request's shape). Prefixed names are rejected by the browser unless they
-    carry ``Secure`` (``__Host-`` additionally needs ``Path=/``), so those
-    deletions always carry them; the bare deletion mirrors the setter's shape
-    (``bare_attrs``), which works on both HTTP and HTTPS origins.
-    """
+    """Emit Max-Age=0 deletions for every plausible name variant (the setting request's shape is
+    unknown). Prefixed names are rejected by the browser unless they carry ``Secure`` (``__Host-``
+    additionally ``Path=/``), so those deletions always do; the bare deletion mirrors the setter's
+    shape (``bare_attrs``), which works on both HTTP and HTTPS origins."""
     for variant, path in (("__Host-", "/"), ("__Secure-", _cookie_path(prefix))):
         response.set_cookie(
             f"{variant}{bare_name}", "", max_age=0, path=path, httponly=True,
@@ -143,41 +124,32 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
 
 
 def encode_pkce_payload(parts: dict[str, str]) -> str:
-    """Serialise PKCE segments to the wire value ``base64url(JSON)``, no padding.
-
-    The urlsafe alphabet is a strict subset of RFC 6265 cookie-octets, so
-    http.cookies never quotes it (strict proxies such as Go net/http reject the
-    quoted form) and no value can collide with a delimiter. Padding ``=`` would
-    trigger quoting; the parser restores it.
-    """
+    """Wire value ``base64url(JSON)``, no padding. The urlsafe alphabet is a strict subset of RFC
+    6265 cookie-octets, so http.cookies never quotes it (strict proxies such as Go net/http reject
+    the quoted form) and no value can collide with a delimiter; padding ``=`` would trigger
+    quoting, the parser restores it."""
     raw = json.dumps(parts, separators=(",", ":"), sort_keys=True)
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 def set_pkce_cookie(
     response: Response, *, payload: dict[str, str], use_https: bool, prefix: str = "") -> None:
-    """Set the PKCE cookie (``payload`` is the segment dict; see module docstring
-    for the SameSite=None rationale)."""
+    """``payload`` is the segment dict; see module docstring for the SameSite=None rationale."""
     _set(response, PKCE_COOKIE, encode_pkce_payload(payload), max_age=_PKCE_MAX_AGE,
          use_https=use_https, prefix=prefix, attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
 
 
 def clear_pkce_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:
-    """Delete every PKCE cookie variant; the bare deletion mirrors the setter's
-    shape for the active origin, the prefixed ones carry ``Secure; SameSite=None``."""
+    """Delete every PKCE cookie variant (prefixed ones carry ``Secure; SameSite=None``)."""
     _clear_cookie_variants(
         response, PKCE_COOKIE, prefix=prefix, https_samesite="none",
         bare_attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
 
 
 def _read_with_fallback(request: Request, bare_name: str) -> Optional[str]:
-    """Read a cookie trying every prefix variant (the reading request may not
-    have the same shape as the one that set it)."""
-    for variant in _NAME_VARIANTS:
-        value = request.cookies.get(f"{variant}{bare_name}")
-        if value is not None:
-            return value
-    return None
+    """Try every prefix variant (the reading request may not match the setting request's shape)."""
+    return next((v for v in (request.cookies.get(f"{p}{bare_name}") for p in _NAME_VARIANTS)
+                 if v is not None), None)
 
 
 def read_session_cookies(request: Request) -> Tuple[Optional[str], Optional[str]]:
@@ -197,18 +169,12 @@ def read_pkce_cookie(request: Request) -> Optional[str]:
 
 
 def parse_pkce_payload(raw: str) -> dict[str, str]:
-    """Decode a PKCE cookie value into its segment dict (inverse of
-    :func:`encode_pkce_payload`). EVERY reader must go through this — reading the
-    raw wire value parses zero segments and silently disables the check it feeds
-    (provider dispatch, CSRF state, broker binding).
-
-    Compatibility ladder for cookies minted by an older server mid-upgrade:
-      1. base64url(JSON) — current.
-      2. Flat form with raw ``;`` delimiters — split WITHOUT unquoting (the ``next``
-         segment carries its own URL-encoding; a ``%3B`` inside it is not a delimiter).
-      3. URL-encoded flat form — unquote once, split.
-    A NEW cookie hitting an OLD server fails the state check; the user retries.
-    """
+    """Inverse of :func:`encode_pkce_payload`. EVERY reader must go through this — reading the raw
+    wire value parses zero segments and silently disables the check it feeds (provider dispatch,
+    CSRF state, broker binding). Compatibility ladder for cookies minted by an older server
+    mid-upgrade: 1. base64url(JSON); 2. flat form with raw ``;`` delimiters, split WITHOUT
+    unquoting (the ``next`` segment carries its own URL-encoding); 3. URL-encoded flat form,
+    unquote once then split. A NEW cookie hitting an OLD server fails the state check."""
     if _B64URL_RE.match(raw):
         try:
             padded = raw + "=" * (-len(raw) % 4)
@@ -233,14 +199,12 @@ def read_sso_attempt_cookie(request: Request) -> Optional[str]:
 
 
 def clear_sso_attempt_cookie(response: Response, *, prefix: str = "") -> None:
-    """Delete the auto-SSO marker (every variant) so it never suppresses a
-    later silent attempt."""
+    """Delete the auto-SSO marker (every variant) so it never suppresses a later silent attempt."""
     _clear_cookie_variants(
         response, SSO_ATTEMPT_COOKIE, prefix=prefix, https_samesite="lax",
         bare_attrs=_common_attrs(use_https=False, prefix=prefix))
 
 
 def detect_https(request: Request) -> bool:
-    """``Secure`` flag decision: ``request.url.scheme == "https"`` (honours
-    ``X-Forwarded-Proto`` under uvicorn ``proxy_headers=True``)."""
+    """``Secure`` flag decision (honours ``X-Forwarded-Proto`` under uvicorn ``proxy_headers``)."""
     return request.url.scheme == "https"
