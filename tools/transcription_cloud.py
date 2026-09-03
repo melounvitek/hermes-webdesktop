@@ -1,11 +1,10 @@
 """Cloud STT providers.
 
-OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, the REST
-multipart backends (xAI, ElevenLabs), and OpenAI audio credential resolution
-(config > keyless local server > env > managed Nous gateway).
-
-Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
-surface) and is imported lazily here so origin patches still intercept.
+OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, REST multipart
+backends (xAI, ElevenLabs), and OpenAI audio credential resolution (config > keyless
+local server > env > managed Nous gateway). Every name is re-imported by
+``tools/transcription_tools.py`` (patch surface), imported lazily here so origin
+patches still intercept.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import logging
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urljoin
 
 from utils import is_truthy_value
@@ -35,25 +34,17 @@ def _has_xai_stt_credentials() -> bool:
     return bool(resolve_xai_http_credentials().get("api_key"))
 
 
-def _close_client(client: Any) -> None:
-    close = getattr(client, "close", None)
-    if callable(close):
-        close()
-
-
 def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
-    """Run ``body(client)`` against a fresh OpenAI SDK client (30s timeout, no SDK retries).
-
-    Always closes the client; any exception maps to the shared envelope via
-    :func:`_openai_sdk_failure`.
-    """
+    """Run ``body(client)`` on a fresh OpenAI SDK client (30s timeout, no retries); always closed, errors -> envelope."""
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
             return body(client)
         finally:
-            _close_client(client)
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
     except Exception as e:
         return _openai_sdk_failure(e, file_path, log_label)
 
@@ -69,8 +60,8 @@ def _cloud_failure(exc: BaseException, file_path: str, label: str, detail: Optio
 def _openai_sdk_failure(exc: BaseException, file_path: str, log_label: str) -> Dict[str, Any]:
     """Map an OpenAI-SDK-shaped exception to the shared error envelope.
 
-    Order matters: APIConnectionError is checked before APITimeoutError (its
-    subclass) so timeouts report as connection errors, as they always have.
+    APIConnectionError is checked before APITimeoutError (its subclass) so timeouts
+    report as connection errors, as they always have.
     """
     try:
         from openai import APIError, APIConnectionError, APITimeoutError
@@ -78,33 +69,31 @@ def _openai_sdk_failure(exc: BaseException, file_path: str, log_label: str) -> D
         APIError = APIConnectionError = APITimeoutError = ()
     if isinstance(exc, PermissionError):
         return _error_result(f"Permission denied: {file_path}")
-    if isinstance(exc, APIConnectionError):
-        return _error_result(f"Connection error: {exc}")
-    if isinstance(exc, APITimeoutError):
-        return _error_result(f"Request timeout: {exc}")
-    if isinstance(exc, APIError):
-        return _error_result(f"API error: {exc}")
+    for cls, label in ((APIConnectionError, "Connection error"), (APITimeoutError, "Request timeout"), (APIError, "API error")):
+        if isinstance(exc, cls):
+            return _error_result(f"{label}: {exc}")
     logger.error("%s transcription failed: %s", log_label, exc, exc_info=True)
     return _error_result(f"Transcription failed: {exc}")
 
 
-def _transcribe_groq(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Transcribe using Groq Whisper API (free tier available).
+def _sdk_prompt_kwargs(language: Optional[str], prompt: Optional[str]) -> Dict[str, Any]:
+    """``language``/``prompt`` create-kwargs, each only when set so the bare request stays byte-identical."""
+    kwargs: Dict[str, Any] = {}
+    if language:
+        kwargs["language"] = language
+    if prompt:
+        kwargs["prompt"] = prompt
+    return kwargs
 
-    Language: hook override > ``stt.groq.language`` > ``stt.language`` > env;
-    otherwise Groq auto-detects.
-    """
+
+def _transcribe_groq(
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
+) -> Dict[str, Any]:
+    """Transcribe via the Groq Whisper API; language: hook > ``stt.groq.language`` > ``stt.language`` > env > auto."""
     from tools.transcription_tools import _HAS_OPENAI, _resolve_provider_key, _resolve_stt_language
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
     if not api_key:
         return _error_result("GROQ_API_KEY not set")
-
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
 
@@ -116,45 +105,26 @@ def _transcribe_groq(
     language = language or _resolve_stt_language("groq")
 
     def _run(client):
-        create_kwargs = {
-            "model": model_name,
-            "response_format": "text",
-        }
-        if language:
-            create_kwargs["language"] = language
-        if prompt:
-            # Only sent when set so the no-hook, no-config request stays byte-identical.
-            create_kwargs["prompt"] = prompt
+        create_kwargs = {"model": model_name, "response_format": "text", **_sdk_prompt_kwargs(language, prompt)}
         with open(file_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=audio_file,
-                **create_kwargs,
-            )
-
+            transcription = client.audio.transcriptions.create(file=audio_file, **create_kwargs)
         transcript_text = str(transcription).strip()
         logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
                      Path(file_path).name, model_name, language or "auto", len(transcript_text))
-
         return _ok_result(transcript_text, "groq")
 
     return _with_openai_client(api_key, GROQ_BASE_URL, file_path, "Groq", _run)
 
 
 def _transcribe_openai(
-    file_path: str,
-    model_name: str,
-    *,
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-    provider_label: str = "openai",
-    language: Optional[str] = None,
+    file_path: str, model_name: str, *, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, provider_label: str = "openai", language: Optional[str] = None,
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
 
-    Shared backend for every OpenAI-compatible STT endpoint (DeepInfra etc.):
-    callers pass explicit ``api_key``/``base_url`` to skip the OpenAI-only auth
-    chain and a ``provider_label`` for the response's ``provider``.
+    Shared by every OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/
+    ``base_url`` skip the OpenAI-only auth chain; ``provider_label`` names the response's provider.
     """
     from tools.transcription_tools import _HAS_OPENAI, _resolve_openai_audio_client_config, _resolve_stt_language
     if api_key is None:
@@ -170,8 +140,7 @@ def _transcribe_openai(
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
 
-    # Auto-correct a Groq-only model on the native OpenAI path only —
-    # third-party endpoints may legitimately serve a whisper-large-v3 variant.
+    # Auto-correct a Groq-only model on the native OpenAI path only (third-party endpoints may serve it).
     if provider_label == "openai" and model_name in GROQ_MODELS:
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
@@ -188,14 +157,12 @@ def _transcribe_openai(
                 }
                 if language:
                     if model_name == "gpt-transcribe":
-                        # gpt-transcribe replaces ``language`` with a ``languages``
-                        # list and rejects requests sending the legacy field.
+                        # gpt-transcribe takes a ``languages`` list and rejects the legacy field.
                         create_kwargs["extra_body"] = {"languages": [language]}
                     else:
                         create_kwargs["language"] = language
                     logger.debug("Using language hint '%s' for OpenAI STT", language)
-                if prompt:
-                    # Only sent when set so the no-hook, no-config request stays byte-identical.
+                if prompt:  # only when set so the bare request stays byte-identical
                     create_kwargs["prompt"] = prompt
                 return client.audio.transcriptions.create(**create_kwargs)
 
@@ -206,8 +173,7 @@ def _transcribe_openai(
                 message = str(exc).lower()
                 if not any(k in message for k in ("unsupported", "corrupted", "invalid file")):
                     raise
-                # Newer models reject some containers whisper-1 accepted
-                # (notably Ogg/Opus voice notes): transcode to m4a, retry once.
+                # Newer models reject containers whisper-1 accepted (Ogg/Opus voice notes): transcode, retry once.
                 converted_path, transcode_error = _transcode_audio_for_stt(file_path, work_dir)
                 if transcode_error:
                     return _error_result(transcode_error)
@@ -222,18 +188,13 @@ def _transcribe_openai(
             "Transcribed %s via %s (%s, %d chars)",
             Path(file_path).name, provider_label, model_name, len(transcript_text),
         )
-
         return _ok_result(transcript_text, provider_label)
 
     return _with_openai_client(api_key, base_url, file_path, provider_label, _run)
 
 
 def _transcribe_mistral(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe with the ``mistralai`` SDK (``/v1/audio/transcriptions``); requires ``MISTRAL_API_KEY``."""
     from tools.transcription_tools import _resolve_provider_key, _resolve_stt_language
@@ -247,17 +208,13 @@ def _transcribe_mistral(
 
         with Mistral(api_key=api_key) as client:
             with open(file_path, "rb") as audio_file:
+                # Language: hook override > stt.mistral.language > stt.language > env > auto.
+                language = language or _resolve_stt_language("mistral")
                 complete_kwargs: Dict[str, Any] = {
                     "model": model_name,
                     "file": {"content": audio_file, "file_name": Path(file_path).name},
+                    **_sdk_prompt_kwargs(language, prompt),
                 }
-                # Language: hook override > stt.mistral.language > stt.language > env > auto.
-                language = language or _resolve_stt_language("mistral")
-                if language:
-                    complete_kwargs["language"] = language
-                if prompt:
-                    # Only sent when set so the no-hook, no-config request stays byte-identical.
-                    complete_kwargs["prompt"] = prompt
                 result = client.audio.transcriptions.complete(**complete_kwargs)
 
             transcript_text = _extract_transcript_text(result)
@@ -271,6 +228,9 @@ def _transcribe_mistral(
         return _cloud_failure(e, file_path, "Mistral transcription", type(e).__name__)
 
 
+# ---- REST multipart backends (xAI, ElevenLabs) ----------------------------
+
+
 def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, data: Dict[str, str]):
     import requests
 
@@ -281,22 +241,17 @@ def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, dat
         )
 
 
-def _http_error_detail(response, extract) -> str:
-    """``extract(json_body)`` -> detail string, falling back to the first 300 chars of the body."""
-    try:
-        return extract(response.json()) or response.text[:300]
-    except Exception:
-        return response.text[:300]
-
-
 def _rest_transcript(response, label: str, extract_detail, extract_text):
-    """Turn a multipart STT response into ``(text, body, None)`` or ``(None, None, error_envelope)``.
+    """Multipart STT response -> ``(text, body, None)`` or ``(None, None, error_envelope)``.
 
-    Non-200 -> ``"<label> API error (HTTP n): detail"``; empty text -> the
-    ``no_speech`` envelope so callers treat silence as non-fatal.
+    Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via *extract_detail*, else
+    the first 300 body chars); empty text -> the ``no_speech`` envelope (silence is non-fatal).
     """
     if response.status_code != 200:
-        detail = _http_error_detail(response, extract_detail)
+        try:
+            detail = extract_detail(response.json()) or response.text[:300]
+        except Exception:
+            detail = response.text[:300]
         return None, None, _error_result(f"{label} API error (HTTP {response.status_code}): {detail}")
     body = response.json()
     text = extract_text(body)
@@ -305,19 +260,23 @@ def _rest_transcript(response, label: str, extract_detail, extract_text):
     return text, body, None
 
 
-def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
-    error_value = err_body.get("detail") or err_body.get("error")
-    if isinstance(error_value, dict):
-        return str(error_value.get("message") or error_value)
-    return str(error_value) if error_value else ""
+def _rest_provider(
+    file_path: str, provider: str, label: str, post: Callable[[], Any], extract_detail,
+    extract_text, log: Callable[[str, Dict[str, Any]], None],
+) -> Dict[str, Any]:
+    """Shared REST flow: ``post()`` -> envelope/transcript -> ``log(text, body)`` -> ok; exceptions -> ``_cloud_failure``."""
+    try:
+        transcript_text, body, error = _rest_transcript(post(), label, extract_detail, extract_text)
+        if error:
+            return error
+        log(transcript_text, body)
+        return _ok_result(transcript_text, provider)
+    except Exception as e:
+        return _cloud_failure(e, file_path, f"{label} transcription")
 
 
 def _transcribe_xai(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe via xAI ``POST /v1/stt`` (multipart). Supports ITN, diarization, word timestamps."""
     from tools.transcription_tools import _load_stt_config, _resolve_stt_language, get_env_value
@@ -326,9 +285,8 @@ def _transcribe_xai(
     if prompt:
         _log_prompt_unsupported("STT provider 'xai'")
 
-    # STT is API-billed: prefer the explicit XAI_API_KEY over the general xAI
-    # OAuth/Grok-subscription credential, which may be valid for Grok yet hit
-    # personal-team spending-limit errors on /v1/stt.
+    # STT is API-billed: prefer the explicit XAI_API_KEY over the xAI OAuth/Grok-subscription
+    # credential, which may be valid for Grok yet hit spending-limit errors on /v1/stt.
     direct_api_key = str(get_env_value("XAI_API_KEY") or "").strip()
     if direct_api_key:
         creds = {
@@ -346,8 +304,7 @@ def _transcribe_xai(
     xai_config = stt_config.get("xai") or {}
 
     def _resolve_base_url(resolved_creds: Dict[str, str]) -> str:
-        # OAuth bearers are pinned to the resolver-validated xAI origin;
-        # config/env base URL overrides only apply to API-key credentials.
+        # OAuth bearers are pinned to the resolver-validated origin; overrides apply to API keys only.
         if resolved_creds.get("provider") == "xai-oauth":
             url = resolved_creds.get("base_url")
         else:
@@ -357,7 +314,7 @@ def _transcribe_xai(
     # Language: hook override > stt.xai.language > stt.language > env.
     language = language or _resolve_stt_language("xai", stt_config) or ""
 
-    try:
+    def _post() -> Any:
         from tools.xai_http import hermes_xai_user_agent
 
         data: Dict[str, str] = {}
@@ -375,7 +332,6 @@ def _transcribe_xai(
             )
 
         response = _post_transcription(api_key, _resolve_base_url(creds))
-
         if response.status_code in {401, 403} and creds.get("provider") == "xai-oauth":
             logger.info("xAI STT got HTTP %d; refreshing OAuth credentials and retrying once", response.status_code)
             try:
@@ -387,30 +343,29 @@ def _transcribe_xai(
                 logger.warning(
                     "xAI STT OAuth refresh-and-retry after HTTP %d failed: %s", response.status_code, retry_exc,
                 )
+        return response
 
-        transcript_text, result, error = _rest_transcript(
-            response, "xAI STT",
-            lambda body: body.get("error", {}).get("message", ""),
-            lambda body: body.get("text", "").strip(),
-        )
-        if error:
-            return error
+    def _log(transcript_text: str, result: Dict[str, Any]) -> None:
         logger.info(
             "Transcribed %s via xAI Grok STT (lang=%s, %.1fs audio, %d chars)",
             Path(file_path).name, result.get("language", language), result.get("duration", 0), len(transcript_text),
         )
-        return _ok_result(transcript_text, "xai")
 
-    except Exception as e:
-        return _cloud_failure(e, file_path, "xAI STT transcription")
+    return _rest_provider(
+        file_path, "xai", "xAI STT", _post, lambda body: body.get("error", {}).get("message", ""),
+        lambda body: body.get("text", "").strip(), _log,
+    )
+
+
+def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
+    error_value = err_body.get("detail") or err_body.get("error")
+    if isinstance(error_value, dict):
+        return str(error_value.get("message") or error_value)
+    return str(error_value) if error_value else ""
 
 
 def _transcribe_elevenlabs(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Transcribe using ElevenLabs Scribe STT API."""
     from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _resolve_stt_language, get_env_value
@@ -428,7 +383,8 @@ def _transcribe_elevenlabs(
     ).strip().rstrip("/")
     # Language: hook override > stt.elevenlabs.language(_code) > stt.language.
     language_code = language or _resolve_stt_language("elevenlabs", stt_config, extra_keys=("language_code",)) or ""
-    try:
+
+    def _post() -> Any:
         data: Dict[str, str] = {
             "model_id": model_name,
             "tag_audio_events": str(is_truthy_value(elevenlabs_config.get("tag_audio_events", False))).lower(),
@@ -436,33 +392,23 @@ def _transcribe_elevenlabs(
         }
         if language_code:
             data["language_code"] = language_code
+        return _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
 
-        response = _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
-
-        transcript_text, _body, error = _rest_transcript(
-            response, "ElevenLabs STT", _elevenlabs_error_detail, _extract_transcript_text,
-        )
-        if error:
-            return error
+    def _log(transcript_text: str, _body: Dict[str, Any]) -> None:
         logger.info(
             "Transcribed %s via ElevenLabs Scribe (%s, %d chars)",
             Path(file_path).name, model_name, len(transcript_text),
         )
-        return _ok_result(transcript_text, "elevenlabs")
 
-    except Exception as e:
-        return _cloud_failure(e, file_path, "ElevenLabs STT transcription")
+    return _rest_provider(
+        file_path, "elevenlabs", "ElevenLabs STT", _post, _elevenlabs_error_detail, _extract_transcript_text, _log,
+    )
 
 
 def _transcribe_deepinfra(
-    file_path: str,
-    model_name: str,
-    *,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
+    file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Resolve DeepInfra credentials/model (via the shared ``hermes_cli.models``
-    helpers), then delegate to :func:`_transcribe_openai`."""
+    """Resolve DeepInfra credentials/model (shared ``hermes_cli.models`` helpers), then delegate to :func:`_transcribe_openai`."""
     from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _transcribe_openai
     api_key = _resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
     if not api_key:
@@ -488,13 +434,12 @@ def _transcribe_deepinfra(
     )
 
 
-def _is_local_or_private_url(url: str) -> bool:
-    """True for loopback/RFC-1918/LAN-internal hosts.
+# ---- OpenAI audio credential resolution -----------------------------------
 
-    Decides whether an empty ``stt.openai.api_key`` is acceptable: local
-    OpenAI-compatible STT servers ignore the auth header, so users shouldn't
-    need a sham ``api_key: not-needed``.
-    """
+
+def _is_local_or_private_url(url: str) -> bool:
+    """True for loopback/RFC-1918/LAN-internal hosts, where an empty ``stt.openai.api_key`` is acceptable
+    (local OpenAI-compatible servers ignore the auth header — no sham ``api_key: not-needed`` needed)."""
     try:
         from urllib.parse import urlparse
         import ipaddress
@@ -511,11 +456,8 @@ def _is_local_or_private_url(url: str) -> bool:
 
 
 def _direct_openai_credentials(cfg_api_key: str, cfg_base_url: str) -> Optional[tuple[str, str]]:
-    """Direct-credential ladder: config key > keyless local base_url > env key; None if none apply.
-
-    A local OpenAI-compatible server needs no key — send a placeholder so the
-    SDK doesn't refuse to construct a client.
-    """
+    """Direct-credential ladder: config key > keyless local base_url (placeholder key so the SDK
+    constructs a client) > env key; None if none apply."""
     from tools.transcription_tools import resolve_openai_audio_api_key
     if cfg_api_key:
         return cfg_api_key, (cfg_base_url or OPENAI_BASE_URL)
@@ -528,16 +470,10 @@ def _direct_openai_credentials(cfg_api_key: str, cfg_base_url: str) -> Optional[
 
 
 def _resolve_openai_audio_client_config() -> tuple[str, str]:
-    """Return ``(api_key, base_url)`` for the OpenAI STT client.
-
-    Strict selection semantics on the stored ``stt`` provider string:
-    - ``"nous"`` → managed gateway ONLY; unentitled/unreachable is a
-      selection-naming error (a direct OPENAI_API_KEY must NOT override it).
-    - any other stored provider → direct credentials ONLY; missing credentials
-      is a selection-naming error — no silent managed fallback.
-    - never-configured stt section → legacy ladder: direct credentials, then
-      the managed gateway.
-    """
+    """``(api_key, base_url)`` for the OpenAI STT client, strict on the stored ``stt`` selection:
+    ``"nous"`` -> managed gateway ONLY (a direct OPENAI_API_KEY must NOT override it); any other
+    stored provider -> direct credentials ONLY (no silent managed fallback); never-configured ->
+    legacy ladder: direct credentials, then the managed gateway. Failures raise ValueError."""
     from tools.transcription_tools import (
         _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
         resolve_managed_tool_gateway,

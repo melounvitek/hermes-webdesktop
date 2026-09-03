@@ -2,10 +2,9 @@
 
 Binary discovery, the shared ffmpeg m4a encode (transcode + silence trim),
 source/format validation, WeChat .silk decoding, CAF conversion and the
-best-effort cloud pre-upload silence trim.
-
-Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
-surface) and is imported lazily here so origin patches still intercept.
+best-effort cloud pre-upload silence trim. Every name is re-imported by
+``tools/transcription_tools.py`` (patch surface), which is imported lazily here
+so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -61,17 +60,11 @@ def _run_quiet(command: list, *, timeout: float, env: Optional[dict] = None) -> 
 
 # Shared encode profile for every STT-bound m4a (transcode and silence-trim):
 # 16 kHz mono 32 kbps AAC, faststart. One owner so codec/bitrate never drift.
-_STT_M4A_ENCODE_ARGS = (
-    "-vn", "-ac", "1", "-ar", "16000",
-    "-c:a", "aac", "-b:a", "32k", "-movflags", "+faststart",
-)
+_STT_M4A_ENCODE_ARGS = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k", "-movflags", "+faststart")
 
 
 def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None) -> None:
-    """Run the shared STT m4a encode, optionally with an ``-af`` filter.
-
-    Raises on failure — callers own the error semantics (transcode reports, trim swallows).
-    """
+    """Run the shared STT m4a encode, optionally with an ``-af`` filter. Raises on failure; callers own the semantics."""
     command = [ffmpeg, "-y", "-i", input_path]
     if audio_filter:
         command += ["-af", audio_filter]
@@ -80,11 +73,10 @@ def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, au
 
 
 def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[str], Optional[str]]:
-    """Transcode to a compact 16 kHz mono AAC/m4a for STT upload.
+    """Transcode to a compact 16 kHz mono AAC/m4a for STT upload; ``(converted_path, None)`` or ``(None, error)``.
 
     Newer OpenAI models reject containers ``whisper-1`` accepted (notably Ogg/Opus
     voice notes) and gateway downloads may carry a misleading extension.
-    Returns ``(converted_path, None)`` or ``(None, error)``.
     """
     from tools.transcription_tools import _find_ffmpeg_binary, _run_ffmpeg_stt_encode
     ffmpeg = _find_ffmpeg_binary()
@@ -110,16 +102,13 @@ def _validate_audio_file_size(audio_path: Path, *, enforce_size_limit: bool = Tr
     except OSError as e:
         return _error_result(f"Failed to access file: {e}")
     if enforce_size_limit and file_size > MAX_FILE_SIZE:
-        return _error_result(
-            f"File too large: {file_size / (1024*1024):.1f}MB (max {MAX_FILE_SIZE / (1024*1024):.0f}MB)"
-        )
+        return _error_result(f"File too large: {file_size / (1024*1024):.1f}MB (max {MAX_FILE_SIZE / (1024*1024):.0f}MB)")
     return None
 
 
 def _validate_audio_source_file(file_path: str, *, enforce_size_limit: bool = True) -> Optional[Dict[str, Any]]:
     """Validate source path safety (and optionally size) before any decoder runs."""
     audio_path = Path(file_path)
-
     if os.path.islink(audio_path):
         return _error_result(f"Path is a symbolic link: {file_path}")
     if not audio_path.exists():
@@ -137,9 +126,7 @@ def _validate_audio_file(file_path: str, *, enforce_size_limit: bool = True) -> 
 
     suffix = Path(file_path).suffix
     if suffix.lower() not in SUPPORTED_FORMATS:
-        return _error_result(
-            f"Unsupported format: {suffix}. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}"
-        )
+        return _error_result(f"Unsupported format: {suffix}. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}")
     return None
 
 
@@ -150,8 +137,7 @@ def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Opt
     if audio_path.suffix.lower() != ".silk":
         return file_path, None, None
     if not _HAS_PILK:
-        # pilk is a tiny silk-v3 codec binding — lazy-install on first .silk
-        # voice note instead of bloating the base install.
+        # pilk is a tiny silk-v3 codec binding — lazy-installed on first .silk voice note.
         _lazy_ensure_quietly("stt.silk")
         if not _safe_find_spec("pilk"):
             return None, None, _error_result(
@@ -221,23 +207,22 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
 
 # ---- Cloud pre-upload silence trim --------------------------------------
 #
-# Local faster-whisper gets Silero VAD; cloud providers get the raw file, so
-# every second of silence is paid for twice (upload + per-minute billing) and
-# cloud Whisper hallucinates on it. Before uploading to a built-in cloud
-# provider we collapse long pauses with ffmpeg's silenceremove, keeping
-# ``stt.cloud_trim_keep_ms`` of each pause so word boundaries survive.
-# Purely best-effort — ANY of these uploads the original untouched:
-# ``stt.cloud_trim_silence: false``, ffmpeg/ffprobe missing, trim failure or
-# timeout, a ~empty result (the provider, not a dB heuristic, decides "no
-# speech"), or <10% saving. Command-type and plugin providers are NOT trimmed:
-# they may wrap local CLIs that want the original bytes.
+# Local faster-whisper gets Silero VAD; cloud providers get the raw file, so silence
+# is paid for twice (upload + per-minute billing) and cloud Whisper hallucinates on
+# it. Before uploading to a built-in cloud provider we collapse long pauses with
+# ffmpeg's silenceremove, keeping ``stt.cloud_trim_keep_ms`` of each pause so word
+# boundaries survive. Purely best-effort — ANY of these uploads the original:
+# ``stt.cloud_trim_silence: false``, ffmpeg/ffprobe missing, trim failure/timeout, a
+# ~empty result (the provider, not a dB heuristic, decides "no speech"), or <10%
+# saving. Command-type and plugin providers are NOT trimmed: they may wrap local
+# CLIs that want the original bytes.
 
 _CLOUD_TRIM_THRESHOLD_DB_DEFAULT = -40  # audio below this level counts as silence
 _CLOUD_TRIM_KEEP_MS_DEFAULT = 300  # how much of each pause survives the trim
 _CLOUD_TRIM_MIN_SAVING = 0.10  # use the trimmed file only when >=10% shorter
 _CLOUD_TRIM_MIN_RESULT_SECONDS = 0.3  # all-silence guard floor: never upload ~empty audio
-# Below this the trim can't pay for itself (several providers bill a 10s
-# minimum per request) and the encode would sit on the synchronous voice-note path.
+# Below this the trim can't pay for itself (several providers bill a 10s minimum)
+# and the encode would sit on the synchronous voice-note path.
 _CLOUD_TRIM_MIN_INPUT_SECONDS = 12.0
 
 
@@ -252,10 +237,7 @@ def _probe_audio_duration(file_path: str) -> Optional[float]:
     if not ffprobe:
         return None
     command = [
-        ffprobe, "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        file_path,
+        ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path,
     ]
     try:
         return float(_run_quiet(command, timeout=30).stdout.strip())
@@ -274,11 +256,9 @@ def _cloud_trim_settings(stt_config: Dict[str, Any]) -> tuple[bool, int, int]:
 
 
 def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> Optional[str]:
-    """Return a silence-trimmed copy of *file_path* for cloud upload, or None.
+    """Return a silence-trimmed copy of *file_path* for cloud upload, or None (= upload the original).
 
-    ``None`` always means "upload the original" (disabled, tools missing, clip
-    too short, trim failed, mostly silence, or not enough saving). On success
-    the caller owns deleting the returned file's parent directory.
+    On success the caller owns deleting the returned file's parent directory.
     """
     from tools.transcription_tools import _find_ffmpeg_binary, _probe_audio_duration, _run_ffmpeg_stt_encode
     enabled, threshold_db, keep_ms = _cloud_trim_settings(stt_config)
@@ -301,8 +281,7 @@ def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> O
         return None
 
     keep_seconds = keep_ms / 1000.0
-    # start_periods=1 strips leading silence; stop_periods=-1 collapses every
-    # interior/trailing silence, keeping ``keep_seconds`` of each pause.
+    # start_periods=1 strips leading silence; stop_periods=-1 collapses every interior/trailing silence.
     filter_expr = (
         f"silenceremove="
         f"start_periods=1:start_threshold={threshold_db}dB:start_silence={keep_seconds}:"
@@ -310,8 +289,7 @@ def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> O
     )
     work_dir = tempfile.mkdtemp(prefix="hermes-stt-trim-")
     trimmed_path = os.path.join(work_dir, f"{Path(file_path).stem or 'audio'}-trimmed.m4a")
-    # Scale the all-silence guard with keep_ms: an output consisting solely
-    # of kept pause must never be uploaded as "speech".
+    # Scale the all-silence guard with keep_ms: output that is solely kept pause must never upload as "speech".
     min_result_seconds = max(_CLOUD_TRIM_MIN_RESULT_SECONDS, 2 * keep_seconds)
     keep_result = False
     try:
