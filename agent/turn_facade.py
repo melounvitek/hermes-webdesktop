@@ -7,6 +7,7 @@ MRO unchanged.
 """
 import logging
 import uuid
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 from agent.lazy_forward import forward as _forward
@@ -130,12 +131,11 @@ class TurnFacadeMixin:
                     if lease is not None:
                         lease.stop_refresher()
             terminal = result if isinstance(result, dict) else {}
-            if terminal.get("interrupted") is True:
-                relay_outcome = "cancelled"
-            elif terminal.get("failed") is True:
-                relay_outcome = "failed"
-            else:
-                relay_outcome = "success"
+            relay_outcome = (
+                "cancelled" if terminal.get("interrupted") is True
+                else "failed" if terminal.get("failed") is True
+                else "success"
+            )
             relay_runtime.SESSION_COORDINATOR.finish_logical_calls(relay_turn, outcome=relay_outcome)
             if task_started:
                 task_finished = True
@@ -173,10 +173,8 @@ class TurnFacadeMixin:
                         lease.release()
                     # Always clear mid-turn labels when the turn exits — including interrupted early
                     # returns that skip finalize_turn. Keep ts.
-                    try:
+                    with suppress(Exception):
                         self._reset_activity_labels_after_turn()
-                    except Exception:
-                        pass
                     if getattr(self, "_relay_pending_turn_id", None) == relay_turn_id:
                         self._relay_pending_turn_id = None
                     if acct_token is not None:
@@ -187,10 +185,8 @@ class TurnFacadeMixin:
                         reset_affinity_scope(affinity_token)
                     # Balance note_turn_started on every exit so the idle queue's live-turn count
                     # cannot leak.
-                    try:
+                    with suppress(Exception):
                         _review_queue.note_turn_finished()
-                    except Exception:
-                        pass
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """Final response string of one turn; ``stream_callback`` receives each text delta."""

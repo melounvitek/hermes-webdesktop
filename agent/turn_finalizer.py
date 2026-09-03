@@ -239,19 +239,17 @@ def _micro_compact_after_turn(agent, messages, final_response, logger) -> None:
     rolling summary before persist, amortizing compression across turns."""
     try:
         _compressor = getattr(agent, "context_compressor", None)
-        # Strict `is True` + isinstance gates: plugin context engines and MagicMock
-        # compressors pass duck checks and would wipe the transcript.
+        # Strict `is True` + callable gates: plugin context engines and MagicMock
+        # compressors pass duck checks and would wipe the transcript. Never run while
+        # compression.checkpoint_required is armed (no checkpoint hook here), nor for
+        # persistence-isolated agents (background review fork): that burns an aux-LLM
+        # call on a throwaway transcript and could compact the CANONICAL session rows.
         if (
             _compressor
             and getattr(_compressor, '_micro_compact_enabled', False) is True
             and callable(getattr(_compressor, '_micro_compact', None))
             and final_response
-            # No checkpoint hook, so never run while compression.checkpoint_required
-            # is armed.
             and getattr(agent, "compression_checkpoint_required", False) is not True
-            # Persistence-isolated agents (background review fork) must not
-            # micro-compact: it burns an aux-LLM call on a throwaway transcript and
-            # could archive_and_compact the CANONICAL session rows.
             and not getattr(agent, "_persist_disabled", False)
         ):
             _before = len(messages)
@@ -264,9 +262,8 @@ def _micro_compact_after_turn(agent, messages, final_response, logger) -> None:
                 agent._db_flush_scan_prefix = None
             if isinstance(_compacted, list) and _compacted:
                 messages[:] = _compacted
-            _after = len(messages)
-            if _before != _after:
-                logger.info("Micro-compaction: %d -> %d messages", _before, _after)
+            if _before != len(messages):
+                logger.info("Micro-compaction: %d -> %d messages", _before, len(messages))
     except Exception as _mc_err:
         logger.info("Micro-compaction failed: %s", _mc_err)
 
@@ -311,9 +308,8 @@ def _log_turn_exit(agent, messages, final_response, api_call_count, _turn_exit_r
 
 
 def _append_file_mutation_footer(agent, final_response, logger):
-    """If ``write_file`` / ``patch`` calls failed and were never superseded by a
-    successful write to the same path, append an advisory so over-claiming is
-    surfaced."""
+    """Append the verifier advisory when ``write_file`` / ``patch`` calls failed and were
+    never superseded by a successful write to the same path (surfaces over-claiming)."""
     try:
         _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
         if _failed and agent._file_mutation_verifier_enabled():
@@ -333,7 +329,7 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
         if not agent._turn_completion_explainer_enabled():
             return final_response
         _stripped = (final_response or "").strip()
-        _is_empty_terminal = _stripped == "" or _stripped == "(empty)"
+        _is_empty_terminal = _stripped in ("", "(empty)")
         # A short fragment not from a text_response exit and lacking sentence-ending
         # punctuation is treated as a truncated partial (#34452).
         _is_partial_fragment = (
@@ -343,11 +339,7 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
             and len(_stripped) <= 24
             and _stripped[-1:] not in _SENTENCE_END
         )
-        if (
-            _is_empty_terminal
-            or _is_partial_fragment
-            or str(_turn_exit_reason) == "partial_stream_recovery"
-        ):
+        if _is_empty_terminal or _is_partial_fragment or str(_turn_exit_reason) == "partial_stream_recovery":
             _explanation = agent._format_turn_completion_explanation(
                 _turn_exit_reason, getattr(agent, "_last_persistence_error_cause", None)
             )
