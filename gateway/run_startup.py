@@ -1316,20 +1316,18 @@ class GatewayStartupMixin:
         self._schedule_resume_pending_sessions()
         await self._finish_startup_restore()
 
-        # Surface state.db init failures to the user's messaging platforms
-        # so they know persistence is broken before losing data (#88235).
+        # Surface state.db init failures to the user's messaging platforms so they know persistence
+        # is broken before losing data.
         await self._send_session_db_warning_notifications()
 
-        # Drain any recovered process watchers (from crash recovery checkpoint)
+        # Drain recovered process watchers (crash-recovery checkpoint). Detach the batch atomically:
+        # reassigning a fresh list takes ownership of exactly the watchers present now, so one
+        # appended concurrently during the yield below isn't dropped by a clear() on the shared
+        # list. Yield every 100 to avoid O(n^2) loop blocking when recovering thousands.
         try:
             from tools.process_registry import process_registry
-            # Detach the current batch atomically: reassigning to a fresh list takes ownership of
-            # exactly the watchers present now, so any watcher appended concurrently during the
-            # yield below isn't silently dropped by a clear() on the shared list.
             watchers = process_registry.pending_watchers
             process_registry.pending_watchers = []
-            # Process in batches of 100 with event-loop yield points to avoid
-            # O(n^2) event-loop blocking when recovering thousands of watchers.
             for i, watcher in enumerate(watchers):
                 self._spawn_supervised(
                     lambda w=watcher: self._run_process_watcher(w),
@@ -1341,38 +1339,20 @@ class GatewayStartupMixin:
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
-    # Long-lived supervised watchers spawned at the end of start(), in order. (method, name)
-    # - session_expiry_watcher: finalize expired sessions.
-    # - model_catalog_refresh_watcher: keep /model picker remote catalogs warm on disk so a
-    #   delisted/new model reaches the picker within one TTL (model_catalog.ttl_minutes).
-    # - session_stall_watcher: pending inbound + stale agent activity → warn user to /new
-    #   (does not kill the turn; agent.session_stall_timeout).
-    # - kanban_notifier_watcher: deliver events for subscriptions owned by the profiles whose
-    #   adapters this gateway hosts, even when another gateway owns the dispatcher.
-    # - kanban_dispatcher_watcher: spawn workers for ready tasks; gated by
-    #   kanban.dispatch_in_gateway (default True), no-op when false.
+    # Long-lived supervised watchers spawned at the end of start(), in order; the supervised name is
+    # the method name without its leading underscore. Each watcher's docstring explains its job
+    # (session expiry, /model catalog TTL refresh, stall warnings, kanban notifier/dispatcher,
+    # CLI handoff, async-delegation completions, /loop wakeups).
     _PRE_RECONNECT_WATCHERS = (
-        ("_session_expiry_watcher", "session_expiry_watcher"),
-        ("_model_catalog_refresh_watcher", "model_catalog_refresh_watcher"),
-        ("_session_stall_watcher", "session_stall_watcher"),
-        ("_kanban_notifier_watcher", "kanban_notifier_watcher"),
-        ("_kanban_dispatcher_watcher", "kanban_dispatcher_watcher"),
+        "_session_expiry_watcher", "_model_catalog_refresh_watcher", "_session_stall_watcher",
+        "_kanban_notifier_watcher", "_kanban_dispatcher_watcher",
     )
-    # - handoff_watcher: re-bind CLI sessions marked handoff_state='pending' to the destination
-    #   platform's home channel and forge a synthetic user turn.
-    # - async_delegation_watcher: inject delegate_task(background=true) completions into their
-    #   originating session as a new turn (covers the idle, no-turn case).
-    # - loop_wakeup_watcher: inject due /loop wakeup prompts into idle originating chats.
-    _POST_RECONNECT_WATCHERS = (
-        ("_handoff_watcher", "handoff_watcher"),
-        ("_async_delegation_watcher", "async_delegation_watcher"),
-        ("_loop_wakeup_watcher", "loop_wakeup_watcher"),
-    )
+    _POST_RECONNECT_WATCHERS = ("_handoff_watcher", "_async_delegation_watcher", "_loop_wakeup_watcher")
 
     def _start_spawn_background_watchers(self) -> None:
         """Spawn the long-lived supervised background watchers."""
-        for method, name in self._PRE_RECONNECT_WATCHERS:
-            self._spawn_supervised(getattr(self, method), name)
+        for method in self._PRE_RECONNECT_WATCHERS:
+            self._spawn_supervised(getattr(self, method), method[1:])
 
         if self._failed_platforms:
             logger.info(
@@ -1386,8 +1366,8 @@ class GatewayStartupMixin:
         # backoff respawns so a superseded handle never looks like a dead watcher.
         self._spawn_reconnect_watcher()
 
-        for method, name in self._POST_RECONNECT_WATCHERS:
-            self._spawn_supervised(getattr(self, method), name)
+        for method in self._POST_RECONNECT_WATCHERS:
+            self._spawn_supervised(getattr(self, method), method[1:])
 
         # Scale-to-zero idle watcher ONLY when opted in (HERMES_SCALE_TO_ZERO stamp), messaging is
         # relay-only/absent, and a wakeUrl is registered. When armed it drives the relay dormant on
