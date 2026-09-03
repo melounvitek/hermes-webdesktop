@@ -34,9 +34,7 @@ _SKILL_MULTI_HYPHEN = re.compile(r"-{2,}")
 # ``_scaffold_header``).
 _SKILL_INVOCATION_PREFIX = "[IMPORTANT: The user has invoked the "
 _SINGLE_SKILL_MARKER = "The full skill content is loaded below.]"
-_SINGLE_SKILL_INSTRUCTION = (
-    "The user has provided the following instruction alongside the skill invocation: "
-)
+_SINGLE_SKILL_INSTRUCTION = "The user has provided the following instruction alongside the skill invocation: "
 _RUNTIME_NOTE = "\n\n[Runtime note:"
 _BUNDLE_MARKER = " skill bundle,"
 _BUNDLE_USER_INSTRUCTION = "\nUser instruction: "
@@ -77,12 +75,9 @@ def append_user_instruction(parts: list, instruction: str) -> str:
 
 
 def extract_user_instruction_from_skill_message(content: Any) -> Optional[str]:
-    """Recover the user's instruction from a slash-skill-expanded turn.
-
-    Returns the string unchanged when it is NOT scaffolding, the extracted
-    instruction when the scaffolding carried one, or ``None`` for a bare
-    ``/skill`` invocation (nothing worth storing in memory).
-    """
+    """Recover the user's instruction from a slash-skill-expanded turn: the
+    string unchanged when it is NOT scaffolding, the extracted instruction when
+    the scaffolding carried one, or ``None`` for a bare ``/skill`` invocation."""
     if not isinstance(content, str):
         return None
     if not content.startswith(_SKILL_INVOCATION_PREFIX):
@@ -104,12 +99,10 @@ def describe_skill_invocation(content: Any, separator: str = " — ") -> Optiona
     """
     if not isinstance(content, str) or not content.startswith(_SKILL_INVOCATION_PREFIX):
         return None
-
     match = _SKILL_NAME_RE.match(content)
     name = (match.group(1) if match else "").strip()
     # Bundle headers already carry their typed "/a /b" keys; a single skill is a bare name.
     label = name if name.startswith("/") else f"/{name}"
-
     instruction = extract_user_instruction_from_skill_message(content)
     if instruction and instruction is not content:
         # An excerpt (head + tail joined by SKILL_EXCERPT_JOINT) can put the
@@ -117,7 +110,6 @@ def describe_skill_invocation(content: Any, separator: str = " — ") -> Optiona
         instruction = " ".join(instruction.split(SKILL_EXCERPT_JOINT)[0].split())
         if instruction:
             return f"{label}{separator}{instruction}" if name else instruction
-
     return label if name else None
 
 
@@ -184,15 +176,6 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     return loaded_skill, skill_dir, skill_name
 
 
-def _bump_use(skill_name: str, task_id: str | None) -> None:
-    """Track active usage for Curator lifecycle management; never fatal."""
-    try:
-        from tools.skill_usage import bump_use
-        bump_use(skill_name, task_id=task_id)
-    except Exception:
-        pass
-
-
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
     """Append a ``[Skill config: ...]`` block with resolved ``metadata.hermes.config``
     values so the agent needn't read config.yaml. Any failure leaves the message without it."""
@@ -212,12 +195,15 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
         pass
 
 
+_SETUP_SKIPPED_NOTE = (
+    "Required environment setup was skipped. Continue loading the skill "
+    "and explain any reduced functionality if it matters."
+)
+
+
 def _setup_note(loaded_skill: dict[str, Any]) -> Optional[str]:
     if loaded_skill.get("setup_skipped"):
-        return (
-            "Required environment setup was skipped. Continue loading the skill "
-            "and explain any reduced functionality if it matters."
-        )
+        return _SETUP_SKIPPED_NOTE
     return loaded_skill.get("gateway_setup_hint") or (
         loaded_skill.get("setup_note") if loaded_skill.get("setup_needed") else None
     ) or None
@@ -254,14 +240,9 @@ def _build_skill_message(
 
     # Preprocess first so downstream blocks see the expanded content.
     content = preprocess_skill_content(
-        str(loaded_skill.get("content") or ""),
-        skill_dir,
-        session_id,
-        skills_cfg=_load_skills_config(),
+        str(loaded_skill.get("content") or ""), skill_dir, session_id, skills_cfg=_load_skills_config(),
     )
-
     parts = [activation_note, "", content.strip()]
-
     # Absolute skill dir lets the agent run bundled scripts without a skill_view() round-trip.
     if skill_dir:
         parts += [
@@ -273,11 +254,9 @@ def _build_skill_message(
         ]
 
     _inject_skill_config(loaded_skill, parts)
-
     setup_note = _setup_note(loaded_skill)
     if setup_note:
         parts += ["", f"[Skill setup note: {setup_note}]"]
-
     supporting = _supporting_files(loaded_skill, skill_dir)
     if supporting and skill_dir:
         try:
@@ -291,17 +270,14 @@ def _build_skill_message(
             f'file_path="<path>"), or run scripts directly by absolute path '
             f"(e.g. `node {skill_dir}/scripts/foo.js`)."
         )
-
     stable_prefix = None
     if user_instruction:
         parts.append("")
         # Everything before the volatile instruction is a stable scaffold; the
         # registered boundary lets the cache planner break there (see append_user_instruction).
         stable_prefix = append_user_instruction(parts, user_instruction)
-
     if runtime_note:
         parts += ["", f"[Runtime note: {runtime_note}]"]
-
     message = "\n".join(parts)
     if stable_prefix is not None and message.startswith(stable_prefix) and len(message) > len(stable_prefix):
         register_stable_prefix(stable_prefix)
@@ -309,26 +285,22 @@ def _build_skill_message(
 
 
 def _render_skill_block(
-    loaded: tuple[dict[str, Any], Path | None, str],
-    activation_note: str,
-    task_id: str | None,
-    **message_kwargs: str,
+    loaded: tuple[dict[str, Any], Path | None, str], activation_note: str, task_id: str | None, **message_kwargs: str,
 ) -> str:
-    """Bump usage and build the message block for one loaded skill."""
+    """Bump Curator usage tracking (never fatal) and build the message block for one loaded skill."""
     loaded_skill, skill_dir, skill_name = loaded
-    _bump_use(skill_name, task_id)
+    try:
+        from tools.skill_usage import bump_use
+        bump_use(skill_name, task_id=task_id)
+    except Exception:
+        pass
     return _build_skill_message(loaded_skill, skill_dir, activation_note, session_id=task_id, **message_kwargs)
 
 
 def _scaffold_header(
-    subject: str,
-    loaded_names: list[str],
-    *,
-    lead_lines: list[str] | None = None,
-    missing: list[str] | None = None,
-    disabled: list[str] | None = None,
-    extra_instruction: str = "",
-    user_instruction: str = "",
+    subject: str, loaded_names: list[str], *, lead_lines: list[str] | None = None,
+    missing: list[str] | None = None, disabled: list[str] | None = None,
+    extra_instruction: str = "", user_instruction: str = "",
 ) -> str:
     """Header for multi-skill messages (bundles and stacked invocations).
     ``subject`` must end in " skill bundle" so the bundle-format extractor applies."""
@@ -343,13 +315,11 @@ def _scaffold_header(
     if missing:
         lines.append(f"Skills missing (skipped): {', '.join(missing)}")
     if disabled:
-        lines.append(
-            f"Skills disabled for this platform (skipped): {', '.join(disabled)}"
-        )
+        lines.append(f"Skills disabled for this platform (skipped): {', '.join(disabled)}")
     if extra_instruction:
-        lines.extend(["", f"Bundle instruction: {extra_instruction}"])
+        lines += ["", f"Bundle instruction: {extra_instruction}"]
     if user_instruction:
-        lines.extend(["", f"User instruction: {user_instruction}"])
+        lines += ["", f"User instruction: {user_instruction}"]
     return "\n".join(lines)
 
 
@@ -381,10 +351,8 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: Dic
     # auto-registration; the skill stays loadable via /skill <name>.
     if resolve_command(cmd_name) is not None:
         logger.warning(
-            "Skill %r generates slash command '/%s' which "
-            "collides with a core Hermes command; skipping "
-            "auto-registration. Use '/skill %s' instead.",
-            name, cmd_name, name,
+            "Skill %r generates slash command '/%s' which collides with a core Hermes command; "
+            "skipping auto-registration. Use '/skill %s' instead.", name, cmd_name, name,
         )
         return
     # Dedup on the slug too: "git_helper" and "git-helper" normalize the same.
@@ -392,8 +360,7 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: Dic
     cmd_key = f"/{cmd_name}"
     if cmd_key in commands:
         logger.warning(
-            "Skill %r maps to slash command %s already claimed "
-            "by %r; keeping the first and skipping this one.",
+            "Skill %r maps to slash command %s already claimed by %r; keeping the first and skipping this one.",
             name, cmd_key, commands[cmd_key]["name"],
         )
         return
@@ -419,10 +386,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     try:
         from tools.skills_tool import _skills_dir, _get_disabled_skill_names
         from agent.skill_utils import (
-            get_external_skills_dirs,
-            get_project_skills_dirs,
-            iter_project_skill_files,
-            iter_skill_index_files,
+            get_external_skills_dirs, get_project_skills_dirs, iter_project_skill_files, iter_skill_index_files,
         )
         from hermes_cli.commands import resolve_command
         disabled = _get_disabled_skill_names()
@@ -518,10 +482,7 @@ def resolve_slash_key(command: str, table: Dict[str, Any]) -> Optional[str]:
 
 
 def build_skill_invocation_message(
-    cmd_key: str,
-    user_instruction: str = "",
-    task_id: str | None = None,
-    runtime_note: str = "",
+    cmd_key: str, user_instruction: str = "", task_id: str | None = None, runtime_note: str = "",
 ) -> Optional[str]:
     """Build the user message for a skill slash command, or None if not found."""
     skill_info = get_skill_commands().get(cmd_key)
@@ -566,15 +527,10 @@ def split_stacked_skill_commands(rest: str) -> tuple[list[str], str]:
 
 
 def build_stacked_skill_invocation_message(
-    cmd_keys: list[str],
-    user_instruction: str = "",
-    task_id: str | None = None,
+    cmd_keys: list[str], user_instruction: str = "", task_id: str | None = None,
 ) -> Optional[tuple[str, list[str], list[str]]]:
-    """Build the user message for a stacked multi-skill slash invocation.
-
-    Returns ``(message, loaded_skill_names, missing_skill_names)`` or ``None``
-    when no skill could be loaded at all.
-    """
+    """Build the user message for a stacked multi-skill slash invocation:
+    ``(message, loaded_skill_names, missing_skill_names)``, or ``None`` when no skill loaded."""
     commands = get_skill_commands()
     loaded_names, missing, _disabled, skill_blocks = _load_skill_blocks(
         [k for k in cmd_keys if k],
@@ -600,14 +556,8 @@ def _disabled_skill_names(platform: str | None = None) -> set:
 
 
 def _load_skill_blocks(
-    identifiers: list[str],
-    load,
-    activation_note,
-    task_id: str | None,
-    *,
-    missing_label=lambda ident: ident,
-    disabled_names: set | None = None,
-    disabled_as_missing: bool = False,
+    identifiers: list[str], load, activation_note, task_id: str | None, *,
+    missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Load each distinct identifier via *load* and render its block.
 
@@ -641,10 +591,7 @@ def _load_skill_blocks(
     return loaded_names, missing, disabled, blocks
 
 
-def build_preloaded_skills_prompt(
-    skill_identifiers: list[str],
-    task_id: str | None = None,
-) -> tuple[str, list[str], list[str]]:
+def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | None = None) -> tuple[str, list[str], list[str]]:
     """Load skills for session-wide CLI/TUI preloading.
 
     Returns (prompt_text, loaded_skill_names, missing_identifiers). Disabled
