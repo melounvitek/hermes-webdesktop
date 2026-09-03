@@ -227,13 +227,11 @@ class PluginContext:
         """Read plugin-relative ``plugins.entries.<plugin_id>.settings.<key>`` (falls back to the
         legacy ``config`` subtree for migration compatibility)."""
         segments = self._segments(key)
-        from hermes_cli.config import load_config_readonly
         entry = _plugin_settings_entry(load_config_readonly() or {}, self.plugin_id)
         if entry is None:
             return default
-        missing = object()
-        value = _nested_plugin_value(entry.get("settings"), segments, missing)
-        if value is not missing:
+        value = _nested_plugin_value(entry.get("settings"), segments, _UNSET)
+        if value is not _UNSET:
             return value
         return _nested_plugin_value(entry.get("config"), segments, default)
 
@@ -275,10 +273,8 @@ class PluginContext:
         """Warn-and-ignore gate shared by every registrar that requires a base class."""
         if isinstance(obj, base_class):
             return False
-        logger.warning(
-            "Plugin '%s' tried to register %s %s that does not inherit from %s. Ignoring.",
-            self.manifest.name, article, label, base_class.__name__,
-        )
+        logger.warning("Plugin '%s' tried to register %s %s that does not inherit from %s. Ignoring.",
+                       self.manifest.name, article, label, base_class.__name__)
         return True
 
     def _refuse(self, what: str) -> ValueError:
@@ -290,9 +286,7 @@ class PluginContext:
     ) -> PluginRegistration:
         """Record host-owned cleanup for a successful registration (see
         :meth:`PluginManager._track_registration` for ``persistent``)."""
-        return self._manager._track_registration(
-            self.manifest, kind, key, release, persistent=persistent
-        )
+        return self._manager._track_registration(self.manifest, kind, key, release, persistent=persistent)
 
     def _track_replacement(
         self, kind: str, key: str, *, slot: tuple, current: Any, previous: Any,
@@ -316,6 +310,16 @@ class PluginContext:
             restore=lambda replacement: self._manager._restore_mapping(mapping, key, entry, replacement),
         )
 
+    def _register_entry(
+        self, kind: str, key: str, mapping: Dict[str, Any], entry: Any, log_fmt: str, *log_args: Any,
+        previous: Any = _UNSET,
+    ) -> PluginRegistration:
+        """Shared tail of the manager-mapping registrars: store + lease the entry, then log
+        ``log_fmt % (plugin name, *log_args)`` at debug."""
+        handle = self._track_mapping_entry(kind, key, mapping, entry, previous)
+        logger.debug(log_fmt, self.manifest.name, *log_args)
+        return handle
+
     def _register_scoped_provider(
         self, provider: Any, *, kind: str, base_class: type, registry: Any, label: str,
         article: str = "a", normalize: Optional[Callable[[str], str]] = lambda n: n.strip(),
@@ -330,17 +334,16 @@ class PluginContext:
         registry_name = provider.name if normalize is None else normalize(provider.name)
         scope = self._manager.scope_key
         previous = registry.snapshot_registration(registry_name, scope=scope)
-        register_fn = register or registry.register_provider
         try:
-            accepted = register_fn(provider, scope=scope)
+            accepted = (register or registry.register_provider)(provider, scope=scope)
         except ValueError as exc:
             if reject_message is None:
                 raise
             logger.warning(reject_message, self.manifest.name, exc)
             return None
-        if register is not None and not accepted:
-            return None
-        if registry.snapshot_registration(registry_name, scope=scope) is not provider:
+        if (register is not None and not accepted) or registry.snapshot_registration(
+            registry_name, scope=scope
+        ) is not provider:
             return None
         handle = self._manager._track_scoped_registration(
             self.manifest, kind, registry_name, registry, provider, previous
@@ -392,12 +395,7 @@ class PluginContext:
         loop = asyncio.get_running_loop()
         task_name = name or f"plugin:{self.plugin_id}:task"
         task = loop.create_task(coro, name=task_name)
-
-        def _cancel_task() -> None:
-            if not task.done():
-                task.cancel()
-
-        handle = self._track("background_task", task_name, _cancel_task)
+        handle = self._track("background_task", task_name, lambda: task.done() or task.cancel())
         task.add_done_callback(lambda _t: handle.dispose())
         logger.debug("Plugin %s spawned supervised task: %s", self.manifest.name, task_name)
         return task
@@ -439,19 +437,16 @@ class PluginContext:
         any enabled plugin could silently replace a privileged built-in like ``write_file``."""
         if override and not self._tool_override_allowed(name):
             raise PluginToolOverrideError(
-                f"Plugin {self.manifest.name!r} cannot override built-in tool " f"{name!r}. Set "
+                f"Plugin {self.manifest.name!r} cannot override built-in tool {name!r}. Set "
                 f"plugins.entries.{self.plugin_id}.allow_tool_override: true "
                 f"in config.yaml to allow this plugin to replace built-in tools."
             )
-
         from tools.registry import registry
         scope = self._manager.scope_key
         previous = registry.snapshot_registration(name, scope=scope)
         if previous is None and not override and registry.get_entry(name, scope=scope) is not None:
-            logger.warning(
-                "Plugin %s tried to shadow global tool %s without override=True",
-                self.manifest.name, name,
-            )
+            logger.warning("Plugin %s tried to shadow global tool %s without override=True",
+                           self.manifest.name, name)
             return None
         registry.register(
             name=name, toolset=toolset, schema=schema, handler=handler, check_fn=check_fn,
@@ -466,10 +461,8 @@ class PluginContext:
                 self.manifest, "tool", name, registry, registered, previous,
                 finalize=lambda: self._manager._remove_tool_name_if_unowned(name),
             )
-        logger.debug(
-            "Plugin %s registered tool: %s%s",
-            self.manifest.name, name, " (override)" if override else "",
-        )
+        logger.debug("Plugin %s registered tool: %s%s", self.manifest.name, name,
+                     " (override)" if override else "")
         return handle
 
     def has_capability(self, capability: str) -> bool:
@@ -502,10 +495,8 @@ class PluginContext:
         timeout = max(1.0, min(timeout, 600.0))
         from tools.mcp_tool import _make_tool_handler
         raw = _make_tool_handler(server, tool, timeout)(dict(arguments or {}))
-        logger.debug(
-            "Plugin %s called MCP %s/%s (timeout=%ss, %d chars returned)",
-            self.manifest.name, server, tool, timeout, len(raw or ""),
-        )
+        logger.debug("Plugin %s called MCP %s/%s (timeout=%ss, %d chars returned)",
+                     self.manifest.name, server, tool, timeout, len(raw or ""))
         return self._mcp_envelope(raw)
 
     _MCP_RESULT_CHAR_CAP = 65536
@@ -530,9 +521,7 @@ class PluginContext:
                 envelope["structuredContent"] = parsed["structuredContent"]
         else:
             envelope = {"ok": True, "result": parsed if parsed is not None else raw}
-        if truncated:
-            envelope["truncated"] = True
-        return envelope
+        return {**envelope, "truncated": True} if truncated else envelope
 
     @staticmethod
     def _mcp_allowlist(plugin_id: str) -> List[str]:
@@ -578,11 +567,9 @@ class PluginContext:
             logger.warning("inject_message: gateway mode requires an existing session_key")
             return False
         if not self._gateway_injection_allowed():
-            logger.warning(
-                "inject_message: gateway injection denied for plugin %s; set "
-                "plugins.entries.%s.allow_gateway_injection: true to allow it", self.plugin_id,
-                self.plugin_id,
-            )
+            logger.warning("inject_message: gateway injection denied for plugin %s; set "
+                           "plugins.entries.%s.allow_gateway_injection: true to allow it",
+                           self.plugin_id, self.plugin_id)
             return False
         if not self._manager.has_gateway_message_injector:
             logger.warning("inject_message: no live gateway is available")
@@ -592,10 +579,8 @@ class PluginContext:
                 session_key=session_key, content=msg, plugin_id=self.plugin_id,
             ))
         except Exception:
-            logger.warning(
-                "inject_message: gateway scheduling failed for plugin %s", self.plugin_id,
-                exc_info=True,
-            )
+            logger.warning("inject_message: gateway scheduling failed for plugin %s", self.plugin_id,
+                           exc_info=True)
             return False
 
     def _gateway_injection_allowed(self) -> bool:
@@ -604,9 +589,7 @@ class PluginContext:
             cfg = load_config_readonly() or {}
         except Exception:
             return False
-        return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get(
-            "allow_gateway_injection"
-        ) is True
+        return (_plugin_settings_entry(cfg, self.plugin_id) or {}).get("allow_gateway_injection") is True
 
     @_serialized_replacement
     def register_cli_command(
@@ -619,9 +602,8 @@ class PluginContext:
             "name": name, "help": help, "description": description, "setup_fn": setup_fn,
             "handler_fn": handler_fn, "plugin": self.manifest.name, "plugin_key": self.plugin_id,
         }
-        handle = self._track_mapping_entry("cli_command", name, self._manager._cli_commands, entry)
-        logger.debug("Plugin %s registered CLI command: %s", self.manifest.name, name)
-        return handle
+        return self._register_entry("cli_command", name, self._manager._cli_commands, entry,
+                                    "Plugin %s registered CLI command: %s", name)
 
     @_serialized_replacement
     def register_command(
@@ -633,30 +615,23 @@ class PluginContext:
         field; without it the command registers parameterless there but still accepts trailing text."""
         clean = name.lower().strip().lstrip("/").replace(" ", "-")
         if not clean:
-            logger.warning(
-                "Plugin '%s' tried to register a command with an empty name.", self.manifest.name,
-            )
+            logger.warning("Plugin '%s' tried to register a command with an empty name.", self.manifest.name)
             return
         with suppress(Exception):  # reject if it conflicts with a built-in command
             from hermes_cli.commands import resolve_command
             if resolve_command(clean) is not None:
-                logger.warning(
-                    "Plugin '%s' tried to register command '/%s' which conflicts "
-                    "with a built-in command. Skipping.", self.manifest.name, clean,
-                )
+                logger.warning("Plugin '%s' tried to register command '/%s' which conflicts "
+                               "with a built-in command. Skipping.", self.manifest.name, clean)
                 return
         hint = (args_hint or "").strip()
-        mode = argument_mode if argument_mode in {"options", "text", "mixed"} else (
-            "text" if hint else None
-        )
         entry = {
             "handler": handler, "description": description or "Plugin command",
             "plugin": self.manifest.name, "plugin_key": self.plugin_id, "args_hint": hint,
-            "argument_mode": mode,
+            "argument_mode": argument_mode if argument_mode in {"options", "text", "mixed"}
+            else ("text" if hint else None),
         }
-        handle = self._track_mapping_entry("command", clean, self._manager._plugin_commands, entry)
-        logger.debug("Plugin %s registered command: /%s", self.manifest.name, clean)
-        return handle
+        return self._register_entry("command", clean, self._manager._plugin_commands, entry,
+                                    "Plugin %s registered command: /%s", clean)
 
     def dispatch_tool(self, tool_name: str, args: dict, **kwargs) -> str:
         """Dispatch a tool call through the registry with the parent agent (when available)
@@ -674,24 +649,19 @@ class PluginContext:
         """Register the (single) ``agent.context_engine.ContextEngine`` replacing the built-in
         ContextCompressor; a second registration is rejected with a warning."""
         if self._manager._context_engine is not None:
-            logger.warning(
-                "Plugin '%s' tried to register a context engine, but one is "
-                "already registered. Only one context engine plugin is allowed.",
-                self.manifest.name,
-            )
+            logger.warning("Plugin '%s' tried to register a context engine, but one is "
+                           "already registered. Only one context engine plugin is allowed.",
+                           self.manifest.name)
             return
         from agent.context_engine import ContextEngine
         if self._wrong_type(engine, ContextEngine, "context engine"):
             return
-        previous = self._manager._context_engine
+        previous = self._manager._context_engine  # always None here; kept for the restore contract
         self._manager._context_engine = engine
         handle = self._track_replacement(
-            "context_engine", engine.name,
-            slot=("manager_value", id(self._manager), "_context_engine"),
+            "context_engine", engine.name, slot=("manager_value", id(self._manager), "_context_engine"),
             current=engine, previous=previous,
-            restore=lambda replacement: self._manager._restore_value(
-                "_context_engine", engine, replacement
-            ),
+            restore=lambda replacement: self._manager._restore_value("_context_engine", engine, replacement),
         )
         logger.info("Plugin '%s' registered context engine: %s", self.manifest.name, engine.name)
         return handle
@@ -708,13 +678,9 @@ class PluginContext:
         try:
             _register(provider)
         except ValueError as exc:
-            logger.warning(
-                "Plugin '%s' context reference registration failed: %s", self.manifest.name, exc,
-            )
+            logger.warning("Plugin '%s' context reference registration failed: %s", self.manifest.name, exc)
             return
-        logger.info(
-            "Plugin '%s' registered context reference: @%s:", self.manifest.name, provider.prefix,
-        )
+        logger.info("Plugin '%s' registered context reference: @%s:", self.manifest.name, provider.prefix)
 
     def register_memory_provider(self, provider) -> None:
         """Record a memory provider (inert). Activation is owned by ``plugins/memory`` via
@@ -724,10 +690,8 @@ class PluginContext:
         if self._wrong_type(provider, MemoryProvider, "memory provider"):
             return
         self._memory_provider = provider
-        logger.debug(
-            "Plugin '%s' registered memory provider: %s",
-            self.manifest.name, getattr(provider, "name", "?"),
-        )
+        logger.debug("Plugin '%s' registered memory provider: %s", self.manifest.name,
+                     getattr(provider, "name", "?"))
 
     @_serialized_replacement
     def register_dashboard_auth_provider(self, provider) -> Optional[PluginRegistration]:
@@ -735,9 +699,7 @@ class PluginContext:
         auth gate (non-loopback bind without ``--insecure``). Wrong type / duplicate name warn and
         are ignored, never raised."""
         from hermes_cli.dashboard_auth import DashboardAuthProvider
-        from hermes_cli.dashboard_auth.registry import (
-            register_global_provider, unregister_global_provider,
-        )
+        from hermes_cli.dashboard_auth.registry import register_global_provider, unregister_global_provider
         if self._wrong_type(provider, DashboardAuthProvider, "dashboard-auth provider"):
             return
         registry_name = provider.name
@@ -747,19 +709,13 @@ class PluginContext:
         try:
             register_global_provider(provider)
         except (TypeError, ValueError) as e:
-            logger.warning(
-                "Plugin '%s' failed to register dashboard-auth provider %r: %s",
-                self.manifest.name, getattr(provider, "name", "?"), e,
-            )
+            logger.warning("Plugin '%s' failed to register dashboard-auth provider %r: %s",
+                           self.manifest.name, getattr(provider, "name", "?"), e)
             return
-        handle = self._track(
-            "dashboard_auth_provider", registry_name,
-            lambda: unregister_global_provider(registry_name, provider), persistent=True,
-        )
-        logger.info(
-            "Plugin '%s' registered dashboard-auth provider: %s (%s)",
-            self.manifest.name, registry_name, provider.display_name,
-        )
+        handle = self._track("dashboard_auth_provider", registry_name,
+                             lambda: unregister_global_provider(registry_name, provider), persistent=True)
+        logger.info("Plugin '%s' registered dashboard-auth provider: %s (%s)", self.manifest.name,
+                    registry_name, provider.display_name)
         return handle
 
     @_serialized_replacement
@@ -808,10 +764,8 @@ class PluginContext:
         entry = (action_id, callback, self.manifest.name)
         handlers = self._manager._slack_action_handlers
         handlers.append(entry)
-        handle = self._track(
-            "slack_action_handler", repr(action_id),
-            lambda: self._manager._remove_identity(handlers, entry),
-        )
+        handle = self._track("slack_action_handler", repr(action_id),
+                             lambda: self._manager._remove_identity(handlers, entry))
         logger.debug("Plugin %s registered Slack action handler: %s", self.manifest.name, action_id)
         return handle
 
@@ -828,13 +782,9 @@ class PluginContext:
         key = (platform or "").strip().lower()
         if not key:
             raise self._refuse("a platform handler factory with an empty platform name")
-        self._manager._platform_handler_factories.setdefault(key, []).append(
-            (factory, self.manifest.name)
-        )
-        logger.debug(
-            "Plugin %s registered %s handler factory: %s", self.manifest.name, key,
-            getattr(factory, "__name__", repr(factory)),
-        )
+        self._manager._platform_handler_factories.setdefault(key, []).append((factory, self.manifest.name))
+        logger.debug("Plugin %s registered %s handler factory: %s", self.manifest.name, key,
+                     getattr(factory, "__name__", repr(factory)))
 
     def register_telegram_handler(self, factory: Callable) -> None:
         """``register_platform_handler("telegram", factory)``. PTB dispatches only the FIRST matching
@@ -851,46 +801,32 @@ class PluginContext:
         ``AUXILIARY_<KEY>_*`` env bridge, defaults merged into loaded configs). ``defaults`` may
         override provider/model/base_url/api_key/timeout/extra_body (unknown keys kept verbatim).
         Raises ``ValueError`` for an empty/invalid key, a built-in key, or another plugin's key."""
+        me = self.manifest.name
         if not key or not isinstance(key, str):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' tried to register auxiliary task with invalid key {key!r}"
-            )
+            raise ValueError(f"Plugin '{me}' tried to register auxiliary task with invalid key {key!r}")
         if not all(c.isalnum() or c == "_" for c in key):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' auxiliary task key {key!r} "
-                f"must contain only alphanumeric characters and underscores"
-            )
+            raise ValueError(f"Plugin '{me}' auxiliary task key {key!r} "
+                             f"must contain only alphanumeric characters and underscores")
         from hermes_cli.main import _AUX_TASKS as _BUILTIN_AUX_TASKS
         if key in {k for k, _name, _desc in _BUILTIN_AUX_TASKS}:
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' cannot register auxiliary task "
-                f"{key!r} — that key is reserved for a built-in task. "
-                f"Pick a plugin-namespaced key (e.g. '{self.manifest.name}_{key}')."
-            )
+            raise ValueError(f"Plugin '{me}' cannot register auxiliary task {key!r} — that key is reserved "
+                             f"for a built-in task. Pick a plugin-namespaced key (e.g. '{me}_{key}').")
         # Owner is the canonical id ``ctx.llm`` is bound to, so agent/plugin_llm.py can match it.
         owner_id = self.plugin_id
         existing = self._manager._aux_tasks.get(key)
         if existing is not None and existing.get("plugin") != owner_id:
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' cannot register auxiliary task "
-                f"{key!r} — already registered by plugin " f"'{existing.get('plugin')}'"
-            )
+            raise ValueError(f"Plugin '{me}' cannot register auxiliary task {key!r} — already registered "
+                             f"by plugin '{existing.get('plugin')}'")
         # Plugin owns the schema; routing fields are guaranteed present so consumers don't crash.
-        merged_defaults: Dict[str, Any] = {
-            "provider": "auto", "model": "", "base_url": "", "api_key": "",
-            "timeout": 60, "extra_body": {}, **(defaults or {}),
-        }
         entry = {
             "key": key, "display_name": display_name, "description": description,
-            "defaults": merged_defaults, "plugin": owner_id, "plugin_key": owner_id,
+            "defaults": {"provider": "auto", "model": "", "base_url": "", "api_key": "", "timeout": 60,
+                         "extra_body": {}, **(defaults or {})},
+            "plugin": owner_id, "plugin_key": owner_id,
         }
-        handle = self._track_mapping_entry(
-            "auxiliary_task", key, self._manager._aux_tasks, entry, existing
-        )
-        logger.debug(
-            "Plugin %s registered auxiliary task: %s (%s)", self.manifest.name, key, display_name,
-        )
-        return handle
+        return self._register_entry("auxiliary_task", key, self._manager._aux_tasks, entry,
+                                    "Plugin %s registered auxiliary task: %s (%s)", key, display_name,
+                                    previous=existing)
 
     def register_redaction_patterns(self, patterns) -> int:
         """Additively register secret-token regexes with :mod:`agent.redact`; returns the count accepted.
@@ -901,9 +837,7 @@ class PluginContext:
         try:
             count = _register(patterns, source=f"plugin:{self.manifest.name}")
         except Exception as exc:
-            logger.warning(
-                "Plugin '%s' redaction pattern registration failed: %s", self.manifest.name, exc,
-            )
+            logger.warning("Plugin '%s' redaction pattern registration failed: %s", self.manifest.name, exc)
             return 0
         logger.debug("Plugin %s registered %d redaction pattern(s)", self.manifest.name, count)
         return count
@@ -925,14 +859,10 @@ class PluginContext:
     ) -> PluginRegistration:
         """Append ``callback`` under ``key`` (warning on unknown ``key``) and lease its removal."""
         if key not in valid:
-            logger.warning(
-                "Plugin '%s' registered unknown %s '%s' (valid: %s)",
-                self.manifest.name, kind, key, ", ".join(sorted(valid)),
-            )
+            logger.warning("Plugin '%s' registered unknown %s '%s' (valid: %s)", self.manifest.name, kind,
+                           key, ", ".join(sorted(valid)))
         mapping.setdefault(key, []).append(callback)
-        handle = self._track(
-            kind, key, lambda: self._manager._remove_callback(mapping, key, callback),
-        )
+        handle = self._track(kind, key, lambda: self._manager._remove_callback(mapping, key, callback))
         logger.debug("Plugin %s registered %s: %s", self.manifest.name, kind, key)
         return handle
 
@@ -943,39 +873,25 @@ class PluginContext:
         """Register bounded context frozen into each new session prompt. Callables receive a
         read-only session-info mapping; the rendered prompt is persisted by core verbatim."""
         if not is_valid_system_prompt_section_id(id):
-            raise ValueError(
-                "system prompt section id must be 1-128 lowercase characters "
-                "using letters, numbers, '.', '_', or '-'"
-            )
+            raise ValueError("system prompt section id must be 1-128 lowercase characters "
+                             "using letters, numbers, '.', '_', or '-'")
         if not isinstance(content, str) and not callable(content):
             raise TypeError("system prompt section content must be a string or callable")
         if position not in SYSTEM_PROMPT_SECTION_POSITIONS:
-            raise ValueError(
-                "system prompt section position must be one of: "
-                + ", ".join(sorted(SYSTEM_PROMPT_SECTION_POSITIONS))
-            )
-        if (
-            isinstance(max_chars, bool) or not isinstance(max_chars, int)
-            or not 0 < max_chars <= MAX_SYSTEM_PROMPT_SECTION_CHARS
-        ):
-            raise ValueError(
-                "system prompt section max_chars must be between 1 and "
-                f"{MAX_SYSTEM_PROMPT_SECTION_CHARS}"
-            )
+            raise ValueError("system prompt section position must be one of: "
+                             + ", ".join(sorted(SYSTEM_PROMPT_SECTION_POSITIONS)))
+        if (isinstance(max_chars, bool) or not isinstance(max_chars, int)
+                or not 0 < max_chars <= MAX_SYSTEM_PROMPT_SECTION_CHARS):
+            raise ValueError(f"system prompt section max_chars must be between 1 and {MAX_SYSTEM_PROMPT_SECTION_CHARS}")
         existing = self._manager._system_prompt_sections.get(id)
         if existing is not None:
-            raise ValueError(
-                f"system prompt section {id!r} is already registered by "
-                f"plugin {existing.plugin!r}"
-            )
+            raise ValueError(f"system prompt section {id!r} is already registered by plugin {existing.plugin!r}")
         section = PluginSystemPromptSection(
             id=id, content=content, position=position, max_chars=max_chars, plugin=self.plugin_id,
         )
-        handle = self._track_mapping_entry(
-            "system_prompt_section", id, self._manager._system_prompt_sections, section, existing
-        )
-        logger.debug("Plugin %s registered system prompt section: %s", self.manifest.name, id)
-        return handle
+        return self._register_entry("system_prompt_section", id, self._manager._system_prompt_sections,
+                                    section, "Plugin %s registered system prompt section: %s", id,
+                                    previous=existing)
 
     def emit(self, event: str, payload: Optional[dict] = None) -> int:
         """Publish bare *event* as ``<plugin_key>:<event>`` (namespace FORCED to this plugin); return
@@ -987,17 +903,13 @@ class PluginContext:
             logger.warning("Plugin '%s' tried to emit an invalid event name %r", plugin_key, event)
             raise ValueError(f"Plugin '{plugin_key}' emit() requires a non-empty event name")
         if ":" in event:
-            logger.warning(
-                "Plugin '%s' tried to emit namespaced/reserved event '%s' — "
-                "a plugin may only emit bare event names under its own '%s:' "
-                "namespace (the '%s:' prefix is reserved for core, and foreign "
-                "namespaces are forbidden)", plugin_key, event, plugin_key, HERMES_EVENT_NAMESPACE,
-            )
-            raise ValueError(
-                f"Plugin '{plugin_key}' may not emit '{event}': emit only the "
-                f"bare event name; the namespace is forced to '{plugin_key}:' "
-                f"and the '{HERMES_EVENT_NAMESPACE}:' prefix is reserved for core"
-            )
+            logger.warning("Plugin '%s' tried to emit namespaced/reserved event '%s' — a plugin may only emit "
+                           "bare event names under its own '%s:' namespace (the '%s:' prefix is reserved "
+                           "for core, and foreign namespaces are forbidden)",
+                           plugin_key, event, plugin_key, HERMES_EVENT_NAMESPACE)
+            raise ValueError(f"Plugin '{plugin_key}' may not emit '{event}': emit only the bare event name; "
+                             f"the namespace is forced to '{plugin_key}:' and the '{HERMES_EVENT_NAMESPACE}:' "
+                             f"prefix is reserved for core")
         if payload is not None and not isinstance(payload, dict):
             raise TypeError(f"Plugin '{plugin_key}' emit() payload must be a dict or None")
         return self._manager._dispatch_event(f"{plugin_key}:{event}", payload or {})
@@ -1006,9 +918,7 @@ class PluginContext:
         """Subscribe to a fully-qualified ``<plugin_key>:<event>`` name (unrestricted — only
         emitting is namespace-gated). Owner-tagged so unload removes zombie callbacks."""
         if not event or not isinstance(event, str):
-            raise ValueError(
-                f"Plugin '{self.manifest.name}' subscribe() requires a " f"non-empty event name"
-            )
+            raise ValueError(f"Plugin '{self.manifest.name}' subscribe() requires a non-empty event name")
         self._manager._subscribe_event(self.plugin_id, event, callback)
         logger.debug("Plugin %s subscribed to event: %s", self.manifest.name, event)
 
@@ -1022,11 +932,8 @@ class PluginContext:
         ``ValueError`` (``':'``/invalid chars) or ``FileNotFoundError``."""
         from agent.skill_utils import _NAMESPACE_RE
         if ":" in name:
-            raise ValueError(
-                f"Skill name '{name}' must not contain ':' "
-                f"(the namespace is derived from the plugin name "
-                f"'{self.manifest.name}' automatically)."
-            )
+            raise ValueError(f"Skill name '{name}' must not contain ':' (the namespace is derived from the "
+                             f"plugin name '{self.manifest.name}' automatically).")
         if not name or not _NAMESPACE_RE.match(name):
             raise ValueError(f"Invalid skill name '{name}'. Must match [a-zA-Z0-9_-]+.")
         if not path.exists():
@@ -1039,9 +946,8 @@ class PluginContext:
             "path": path, "plugin": namespace, "plugin_key": self.plugin_id, "bare_name": name,
             "description": description, "frontmatter": dict(frontmatter or {}),
         }
-        handle = self._track_mapping_entry("skill", qualified, self._manager._plugin_skills, entry)
-        logger.debug("Plugin %s registered skill: %s", self.manifest.name, qualified)
-        return handle
+        return self._register_entry("skill", qualified, self._manager._plugin_skills, entry,
+                                    "Plugin %s registered skill: %s", qualified)
 
 
 # -- scoped provider registrars ------------------------------------------------------------------
@@ -1111,8 +1017,7 @@ def _make_scoped_provider_registrar(method_name, kind, registry_mod, base_ref, l
         registry = importlib.import_module(registry_mod)
         return self._register_scoped_provider(
             provider, kind=kind, base_class=getattr(importlib.import_module(base_mod), base_attr),
-            registry=registry, label=label, article=options.get("article", "a"),
-            normalize=normalize_fn,
+            registry=registry, label=label, article=options.get("article", "a"), normalize=normalize_fn,
             register=getattr(registry, register_name) if register_name else None,
             reject_message=options.get("reject_message"),
         )
@@ -1121,9 +1026,7 @@ def _make_scoped_provider_registrar(method_name, kind, registry_mod, base_ref, l
         return register(self, source)
 
     method = register_source if options.get("param") == "source" else register
-    method.__name__ = method_name
-    method.__qualname__ = f"PluginContext.{method_name}"
-    method.__doc__ = doc
+    method.__name__, method.__qualname__, method.__doc__ = method_name, f"PluginContext.{method_name}", doc
     return _serialized_replacement(method)
 
 
@@ -1135,31 +1038,24 @@ del _row
 def _resolve_hook_callback_timeout() -> float:
     """Effective hook-callback timeout from ``plugins.hook_callback_timeout`` (default 30s; ``<= 0``
     disables the threaded path; clamped to ``_MAX_HOOK_CALLBACK_TIMEOUT_SECS``)."""
-    timeout = _HOOK_CALLBACK_TIMEOUT_SECS
+    default = _HOOK_CALLBACK_TIMEOUT_SECS
     try:
         from hermes_cli.config import load_config_readonly
         plugins_cfg = (load_config_readonly() or {}).get("plugins")
-        if isinstance(plugins_cfg, dict) and plugins_cfg.get("hook_callback_timeout") is not None:
-            timeout = float(plugins_cfg["hook_callback_timeout"])
+        if not isinstance(plugins_cfg, dict) or plugins_cfg.get("hook_callback_timeout") is None:
+            return default
+        timeout = float(plugins_cfg["hook_callback_timeout"])
     except (TypeError, ValueError):
-        logger.warning(
-            "plugins.hook_callback_timeout is not a number; using default %gs",
-            _HOOK_CALLBACK_TIMEOUT_SECS,
-        )
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        logger.warning("plugins.hook_callback_timeout is not a number; using default %gs", default)
+        return default
     except Exception:
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        return default
     if timeout < 0:
-        logger.warning(
-            "plugins.hook_callback_timeout=%g is negative; using default %gs", timeout,
-            _HOOK_CALLBACK_TIMEOUT_SECS,
-        )
-        return _HOOK_CALLBACK_TIMEOUT_SECS
+        logger.warning("plugins.hook_callback_timeout=%g is negative; using default %gs", timeout, default)
+        return default
     if timeout > _MAX_HOOK_CALLBACK_TIMEOUT_SECS:
-        logger.warning(
-            "plugins.hook_callback_timeout=%g exceeds max %gs; clamping", timeout,
-            _MAX_HOOK_CALLBACK_TIMEOUT_SECS,
-        )
+        logger.warning("plugins.hook_callback_timeout=%g exceeds max %gs; clamping", timeout,
+                       _MAX_HOOK_CALLBACK_TIMEOUT_SECS)
         return _MAX_HOOK_CALLBACK_TIMEOUT_SECS
     return timeout
 
@@ -1177,23 +1073,26 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._cli_ref = None  # Set by CLI after plugin discovery
         self._gateway_message_injector: tuple[object, Callable] | None = None
         self._context_engine = None  # Set by a plugin via register_context_engine()
-        # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``).
+        # Manager-local registries keyed by name (see the matching ``PluginContext.register_*``):
+        # plugins, hooks, middleware, CLI + slash commands, prompt sections, skills (qualified name ->
+        # metadata), portable MCP servers, auxiliary tasks, approval transports, Slack action handlers
+        # (matcher, callback, plugin_name), platform handler factories (lowercase platform -> list).
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._middleware: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
         self._plugin_platform_names: Set[str] = set()
         self._cli_commands: Dict[str, dict] = {}
-        self._plugin_commands: Dict[str, dict] = {}  # slash commands
+        self._plugin_commands: Dict[str, dict] = {}
         self._system_prompt_sections: Dict[str, PluginSystemPromptSection] = {}
-        self._plugin_skills: Dict[str, Dict[str, Any]] = {}  # qualified name -> metadata
+        self._plugin_skills: Dict[str, Dict[str, Any]] = {}
         self._portable_mcp_servers: Dict[str, Dict[str, Any]] = {}
         self._aux_tasks: Dict[str, Dict[str, Any]] = {}
         self._approval_transports: Dict[str, Any] = {}
-        self._slack_action_handlers: List[tuple] = []  # (matcher, callback, plugin_name)
-        self._platform_handler_factories: Dict[str, List[tuple]] = {}  # lowercase platform -> list
+        self._slack_action_handlers: List[tuple] = []
+        self._platform_handler_factories: Dict[str, List[tuple]] = {}
         # Event bus: owner-tagged subscriptions (unload removes zombies); one daemon worker keeps
-        # registration order while emitters never block.
+        # registration order while emitters never block; per-worker chain depth caps mutual emitters.
         self._subscriptions: Dict[str, List[_EventSubscription]] = {}
         self._event_lock = threading.RLock()
         self._event_idle = threading.Condition(self._event_lock)
@@ -1201,21 +1100,20 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self._event_pending_by_generation: Dict[int, int] = {0: 0}
         self._event_queue: queue.Queue[Any] = queue.Queue(maxsize=_EVENT_PENDING_CAP)
         self._event_worker: Optional[threading.Thread] = None
-        self._emit_depth = threading.local()  # per-worker chain depth caps mutual emitters
+        self._emit_depth = threading.local()
         # In-flight / recently-timed-out hook callbacks keyed by (hook_name, id(cb)) so a stuck
         # policy hook cannot spawn a new abandoned thread on every fire.
         self._hook_running_callbacks: Dict[tuple, object] = {}
         self._hook_timeout_suppressed_until: Dict[tuple, float] = {}
         self._hook_timeout_lock = threading.Lock()
         self._hook_timeout_suppression_seconds = _HOOK_TIMEOUT_SUPPRESSION_SECONDS
-        # Ledger per plugin (ownership) plus global order (reverse teardown across plugins).
-        # Process-global registries are shared across profiles while several managers coexist, so
-        # the ledger is keyed per (hermes_home, plugin_id) and every inverse is identity-conditional
-        # — one profile's unload can never clear another's registrations.
+        # Ledger per plugin (ownership) plus global order (reverse teardown across plugins). Process-
+        # global registries are shared across profiles while several managers coexist, so the ledger
+        # is keyed per (hermes_home, plugin_id) and every inverse is identity-conditional — one
+        # profile's unload can never clear another's. Persistent registrations that survived an
+        # unload-all park in ``_persistent_carryover`` until force re-discovery evicts the stale ones.
         self._ownership_ledger: Dict[str, List[PluginRegistration]] = {}
         self._registration_order: List[PluginRegistration] = []
-        # Persistent registrations that survived an unload-all; force re-discovery drains this via
-        # _evict_stale_persistent_registrations().
         self._persistent_carryover: List[PluginRegistration] = []
         # Deferred platforms whose client tools registered at discovery (see
         # _register_deferred_platform_tools): imported package (don't re-execute on materialize)
@@ -1234,8 +1132,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
 
     def clear_gateway_message_injector(self, owner: object) -> None:
         """Clear the injector only when it still belongs to ``owner``."""
-        registered = self._gateway_message_injector
-        if registered is not None and registered[0] is owner:
+        if self._gateway_message_injector is not None and self._gateway_message_injector[0] is owner:
             self._gateway_message_injector = None
 
     def inject_gateway_message(self, **kwargs: Any) -> bool:
@@ -1300,24 +1197,22 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             secrets = (load_config() or {}).get("secrets") or {}
         except Exception:
             secrets = {}
-        enabled_names = []
-        for source in plugin_sources:
-            name = getattr(source, "name", "")
-            section = secrets.get(name)
+
+        def _enabled(source) -> bool:
+            section = secrets.get(getattr(source, "name", ""))
             try:
-                if source.is_enabled(section if isinstance(section, dict) else {}):
-                    enabled_names.append(name)
+                return bool(source.is_enabled(section if isinstance(section, dict) else {}))
             except Exception:
-                continue  # mirrors the orchestrator: a raising is_enabled() is skipped
+                return False  # mirrors the orchestrator: a raising is_enabled() is skipped
+
+        enabled_names = [getattr(s, "name", "") for s in plugin_sources if _enabled(s)]
         if not enabled_names:
             return
         try:
             reset_secret_source_cache()
             load_hermes_dotenv()
-            logger.debug(
-                "Re-applied secret sources after plugin discovery for: %s",
-                ", ".join(sorted(enabled_names)),
-            )
+            logger.debug("Re-applied secret sources after plugin discovery for: %s",
+                         ", ".join(sorted(enabled_names)))
         except Exception as exc:
             logger.debug("secret source re-apply after discovery failed: %s", exc)
 
@@ -1333,28 +1228,21 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         enabled = _get_enabled_plugins()  # None = opt-in default (nothing enabled)
         stale_relay_keys = legacy_relay_plugin_keys(enabled)
         if stale_relay_keys:
-            logger.warning(
-                "Removed Hermes plugin %s is still listed in plugins.enabled; "
-                "remove it and configure native Relay plugins with %s", ", ".join(stale_relay_keys),
-                RELAY_PLUGINS_CONFIG_ENV,
-            )
+            logger.warning("Removed Hermes plugin %s is still listed in plugins.enabled; "
+                           "remove it and configure native Relay plugins with %s",
+                           ", ".join(stale_relay_keys), RELAY_PLUGINS_CONFIG_ENV)
         # Later sources win on key collision (project > user > bundled); gate the winners, then
         # load survivors in requires_plugins order (see resolve_plugin_load_order).
         winners = {manifest_key(m): m for m in manifests}
-        to_load = {
-            key: manifest for key, manifest in winners.items()
-            if self._gate_manifest(manifest, disabled, enabled)
-        }
+        to_load = {k: m for k, m in winners.items() if self._gate_manifest(m, disabled, enabled)}
         for lookup_key in resolve_plugin_load_order(to_load):
             manifest = to_load[lookup_key]
             self._warn_python_dependencies(manifest)
             self._validate_plugin_config_schema(manifest)
             self._load_plugin(manifest)
         if manifests:
-            logger.info(
-                "Plugin discovery complete: %d found, %d enabled", len(self._plugins),
-                sum(1 for p in self._plugins.values() if p.enabled),
-            )
+            logger.info("Plugin discovery complete: %d found, %d enabled", len(self._plugins),
+                        sum(1 for p in self._plugins.values() if p.enabled))
 
     def _gate_manifest(
         self, manifest: PluginManifest, disabled: Set[str], enabled: Optional[Set[str]],
@@ -1371,8 +1259,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             self._register_deferred_platform(manifest)
         else:
             self._plugins[manifest_key(manifest)] = LoadedPlugin(
-                manifest=manifest, enabled=verdict.enabled, error=verdict.error,
-            )
+                manifest=manifest, enabled=verdict.enabled, error=verdict.error)
         if verdict.log:
             logger.log(*verdict.log)
         return False
@@ -1404,17 +1291,14 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         disabled = _names(plugins_config.get("disabled", []))
         if not enabled:
             return False
-        winners = {manifest_key(m): m for m in self._collect_directory_manifests()}
-        for lookup_key, manifest in winners.items():
+        for lookup_key, manifest in {manifest_key(m): m for m in self._collect_directory_manifests()}.items():
             names = {lookup_key, manifest.name}
             if not manifest.portable or names & disabled or not names & enabled:
                 continue
-            try:
+            try:  # lazy: this is a startup probe, keep agent_plugins unimported unless needed
                 from hermes_cli.agent_plugins import _discover_mcp
-                if _discover_mcp(
-                    Path(manifest.path), get_hermes_home() / "plugin-data"
-                    / (manifest.skill_namespace or lookup_key), [], create_data=False,
-                ):
+                if _discover_mcp(Path(manifest.path), get_hermes_home() / "plugin-data"
+                                 / (manifest.skill_namespace or lookup_key), [], create_data=False):
                     return True
             except (OSError, RuntimeError, ValueError):
                 continue  # fail closed on an unreadable package; full discovery reports it
@@ -1443,14 +1327,12 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         """Return a list of info dicts for all discovered plugins."""
         return [
             {
-                "name": loaded.manifest.name, "key": manifest_key(loaded.manifest),
-                "kind": loaded.manifest.kind, "version": loaded.manifest.version,
-                "description": loaded.manifest.description, "source": loaded.manifest.source,
-                "enabled": loaded.enabled, "tools": len(loaded.tools_registered),
-                "hooks": len(loaded.hooks_registered),
-                "middleware": len(loaded.middleware_registered),
-                "commands": len(loaded.commands_registered), "error": loaded.error,
-            } for _key, loaded in sorted(self._plugins.items())
+                "name": p.manifest.name, "key": manifest_key(p.manifest), "kind": p.manifest.kind,
+                "version": p.manifest.version, "description": p.manifest.description,
+                "source": p.manifest.source, "enabled": p.enabled, "tools": len(p.tools_registered),
+                "hooks": len(p.hooks_registered), "middleware": len(p.middleware_registered),
+                "commands": len(p.commands_registered), "error": p.error,
+            } for _key, p in sorted(self._plugins.items())
         ]
 
     def find_plugin_skill(self, qualified_name: str) -> Optional[Path]:
@@ -1461,9 +1343,7 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
     def list_plugin_skills(self, plugin_name: str) -> List[str]:
         """Return sorted bare names of all skills registered by *plugin_name*."""
         prefix = f"{plugin_name}:"
-        return sorted(
-            e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix)
-        )
+        return sorted(e["bare_name"] for qn, e in self._plugin_skills.items() if qn.startswith(prefix))
 
     def list_plugin_skill_metadata(self) -> List[Dict[str, Any]]:
         """Return progressive-disclosure metadata for registered plugin skills."""
@@ -1511,7 +1391,7 @@ def _clear_plugin_submodules(manager: Optional[PluginManager]) -> None:
     """
     if manager is None:
         return
-    for loaded in getattr(manager, "_plugins", {}).values():
+    for loaded in getattr(manager, "_plugins", {}).values():  # tolerates test-double managers
         module_name = getattr(getattr(loaded, "module", None), "__name__", None)
         if not module_name or not module_name.startswith(f"{_NS_PARENT}."):
             continue
@@ -1529,9 +1409,7 @@ def get_plugin_manager() -> PluginManager:
     with _plugin_managers_lock:
         # Tests/embedders monkeypatch ``_plugin_manager`` directly: adopt a single-slot manager the
         # keyed cache doesn't know about at all.
-        if (
-            _plugin_manager is not None and _plugin_manager not in _plugin_managers_by_home.values()
-        ):
+        if _plugin_manager is not None and _plugin_manager not in _plugin_managers_by_home.values():
             _plugin_managers_by_home[current_home] = _plugin_manager
             return _plugin_manager
         manager = _plugin_managers_by_home.get(current_home)
@@ -1602,9 +1480,7 @@ def start_background_plugin_discovery() -> None:
             except Exception:
                 logger.warning("background plugin discovery failed", exc_info=True)
 
-        _background_discovery_thread = threading.Thread(
-            target=_run, name="plugin-discovery", daemon=True
-        )
+        _background_discovery_thread = threading.Thread(target=_run, name="plugin-discovery", daemon=True)
         _background_discovery_thread.start()
 
 
@@ -1660,9 +1536,7 @@ def get_plugin_toolset_keys_nowait() -> "set[str]":
     """Plugin toolset keys without blocking on in-flight discovery: live registry when done, last
     launch's persisted set while a background scan runs (callers only EXCLUDE these keys, so a stale
     set is harmless and self-heals), else block via discover_plugins()."""
-    return _nowait_plugin_set(
-        "toolset_keys", lambda _m: {ts_key for ts_key, _, _ in get_plugin_toolsets()}
-    )
+    return _nowait_plugin_set("toolset_keys", lambda _m: {ts_key for ts_key, _, _ in get_plugin_toolsets()})
 
 
 def get_portable_mcp_server_names_nowait() -> "set[str]":
@@ -1686,9 +1560,7 @@ def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
     return _delivery_manager().invoke_hook(hook_name, **kwargs)
 
 
-def render_system_prompt_sections(
-    session_info: Mapping[str, Any],
-) -> List[RenderedPluginSystemPromptSection]:
+def render_system_prompt_sections(session_info: Mapping[str, Any]) -> List[RenderedPluginSystemPromptSection]:
     """Render plugin prompt sections after idempotent plugin discovery."""
     return _ensure_plugins_discovered().render_system_prompt_sections(session_info)
 
@@ -1734,11 +1606,9 @@ def fire_pre_command_hook(
         )
         for result in results:
             if isinstance(result, dict) and ("action" in result or "decision" in result):
-                logger.debug(
-                    "pre_command is observer-only in v1: ignoring directive "
-                    "%r for /%s (surface=%s). Block/rewrite will arrive with "
-                    "the command middleware variant (#64204/#64231).", result, command, surface,
-                )
+                logger.debug("pre_command is observer-only in v1: ignoring directive %r for /%s (surface=%s). "
+                             "Block/rewrite will arrive with the command middleware variant (#64204/#64231).",
+                             result, command, surface)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("pre_command hook dispatch failed (non-fatal): %s", exc)
 
@@ -1796,9 +1666,8 @@ def _get_pre_tool_call_directive_details(
         if action == "modify":
             partial = result.get("args")
             if isinstance(partial, dict) and partial:
-                if modified_args is None:
-                    modified_args = dict(args) if isinstance(args, dict) else {}
-                modified_args.update(partial)
+                modified_args = {**(modified_args if modified_args is not None else
+                                    (args if isinstance(args, dict) else {})), **partial}
             continue
         if action not in ("block", "approve"):
             continue
@@ -1809,9 +1678,7 @@ def _get_pre_tool_call_directive_details(
             continue
         rule_key = result.get("rule_key") if action == "approve" else None
         rule_key = (rule_key.strip() or None) if isinstance(rule_key, str) else None
-        return _PreToolCallDirective(
-            action=action, message=message, rule_key=rule_key, modified_args=modified_args,
-        )
+        return _PreToolCallDirective(action=action, message=message, rule_key=rule_key, modified_args=modified_args)
     return _PreToolCallDirective(modified_args=modified_args)
 
 
@@ -1852,18 +1719,14 @@ def _resolve_block_from_details(
         return None
     try:
         from tools.approval import (
-            request_tool_approval, reset_current_observability_context,
-            set_current_observability_context,
+            request_tool_approval, reset_current_observability_context, set_current_observability_context,
         )
         approval_tokens = None
         with suppress(Exception):
             approval_tokens = set_current_observability_context(
-                turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id,
-            )
+                turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
         try:
-            result = request_tool_approval(
-                tool_name, details.message or "", rule_key=details.rule_key or tool_name,
-            )
+            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name)
         finally:
             if approval_tokens is not None:
                 with suppress(Exception):
@@ -1884,10 +1747,7 @@ def _dispatch_pre_tool_call_hooks(
     block/approve message (``None`` to proceed) and merged ``modify`` args (``None`` if none)."""
     details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
     block_msg = _resolve_block_from_details(
-        details, tool_name,
-        turn_id=hook_kwargs.get("turn_id", ""), tool_call_id=hook_kwargs.get("tool_call_id", ""),
-        session_id=hook_kwargs.get("session_id", ""),
-    )
+        details, tool_name, **{k: hook_kwargs.get(k, "") for k in ("turn_id", "tool_call_id", "session_id")})
     return (block_msg, details.modified_args)
 
 
@@ -1953,11 +1813,8 @@ def get_plugin_error_classification(
     if isinstance(result.get("error_context"), dict):
         winner["error_context"] = result["error_context"]
     if len(valid) > 1:
-        logger.warning(
-            "transform_api_error_classification: skipped %d valid "
-            "classification(s) after the first result in registration order "
-            "won (run-all-then-pick-first)", len(valid) - 1,
-        )
+        logger.warning("transform_api_error_classification: skipped %d valid classification(s) after the "
+                       "first result in registration order won (run-all-then-pick-first)", len(valid) - 1)
     return winner
 
 
@@ -2006,10 +1863,8 @@ def resolve_plugin_command_result(result: Any) -> Any:
 
     threading.Thread(target=_runner, name="hermes-plugin-command-await", daemon=True).start()
     if not done.wait(timeout=_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS):
-        raise TimeoutError(
-            "Plugin command async handler did not complete within "
-            f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s"
-        )
+        raise TimeoutError("Plugin command async handler did not complete within "
+                           f"{_PLUGIN_COMMAND_AWAIT_TIMEOUT_SECS:.0f}s")
     if "exc" in failure:
         raise failure["exc"]
     return outcome.get("value")
@@ -2051,8 +1906,6 @@ def get_plugin_toolsets() -> List[tuple]:
     result = []
     for ts_key in sorted(toolset_tools):
         plugin = toolset_plugin.get(ts_key)
-        desc = (plugin.manifest.description if plugin else "") or ", ".join(
-            sorted(toolset_tools[ts_key])
-        )
+        desc = (plugin.manifest.description if plugin else "") or ", ".join(sorted(toolset_tools[ts_key]))
         result.append((ts_key, f"🔌 {ts_key.replace('_', ' ').title()}", desc))
     return result
