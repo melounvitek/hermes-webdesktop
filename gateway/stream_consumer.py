@@ -847,15 +847,14 @@ class GatewayStreamConsumer(
         self._last_sent_text = ""
         self._last_edit_time = time.monotonic()
         if tick.got_done:
-            tail_delivered = True
-            if self._accumulated:
-                tail_delivered = await self._send_or_edit(self._accumulated, finalize=True)
+            tail_delivered = (
+                await self._send_or_edit(self._accumulated, finalize=True) if self._accumulated else True
+            )
             # ``_already_sent`` may be True from prior state — only heads + tail count.
             self._final_response_sent = heads_delivered and tail_delivered
             if self._final_response_sent:
-                self._final_content_delivered = True
                 self._turn_split_delivery = True
-                self._record_turn_final_payload(self._accumulated)
+                self._mark_final_delivered(record=self._accumulated)
             return "return"
         if tick.got_segment_break:
             self._fallback_final_send = False
@@ -960,8 +959,7 @@ class GatewayStreamConsumer(
             await self._send_fallback_final(self._accumulated)
         elif self._final_response_sent:
             # Fresh-final already delivered; a second finalize would duplicate.
-            self._final_content_delivered = True
-            self._record_turn_final_payload(self._accumulated)
+            self._mark_final_delivered(record=self._accumulated)
         elif tick.update_visible and (
             not self._adapter_requires_finalize
             or self._last_edit_overflowed
