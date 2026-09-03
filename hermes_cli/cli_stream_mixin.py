@@ -377,9 +377,9 @@ class CLIStreamMixin:
 
     def _emit_stream_text(self, text: str) -> None:
         """Emit filtered text to the streaming display."""
+        from agent.markdown_tables import is_table_divider, looks_like_table_row
         from cli import (
-            HermesCLI, _ACCENT, _RST, _STREAM_PARTIAL_PREVIEW_LEN, _cprint, _strip_markdown_syntax,
-            datetime, is_table_divider, looks_like_table_row)
+            HermesCLI, _ACCENT, _RST, _STREAM_PARTIAL_PREVIEW_LEN, _cprint, _strip_markdown_syntax, datetime)
         if not text:
             return
         # Defer content while the reasoning box renders so reasoning always lands BEFORE it.
@@ -451,8 +451,8 @@ class CLIStreamMixin:
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
-        from cli import (
-            _ACCENT, _RST, _cprint, _strip_markdown_syntax, is_table_divider, looks_like_table_row)
+        from agent.markdown_tables import is_table_divider, looks_like_table_row
+        from cli import _ACCENT, _RST, _cprint, _strip_markdown_syntax
         # Still inside a "reasoning block" at end-of-stream = false positive (the model
         # mentioned a tag in prose and never closed it): recover the buffer as regular text.
         if getattr(self, "_in_reasoning_block", False) and getattr(self, "_stream_prefilt", ""):

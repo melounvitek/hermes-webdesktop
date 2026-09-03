@@ -1900,8 +1900,8 @@ class CLICommandsMixin:
     def _handle_background_command(self, cmd: str):
         """Handle /bg <prompt> — run a prompt in a separate background session (its own AIAgent
         on a thread); the result prints here without touching the active history."""
-        from cli import (
-            AIAgent, set_approval_callback, set_secret_capture_callback, set_sudo_password_callback)
+        from cli import set_approval_callback, set_secret_capture_callback, set_sudo_password_callback
+        from run_agent import AIAgent
         prompt = _command_arg(cmd)
         if not prompt:
             return _cp("  Usage: /bg <prompt>", "  Example: /bg Summarize the top HN stories today",

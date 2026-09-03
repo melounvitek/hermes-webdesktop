@@ -404,12 +404,11 @@ _CONTAINER_CONFIG_DEFAULTS = (
 def _get_or_create_env(task_id: str):
     """``(env, env_type)`` — the environment the terminal/file tools share for *task_id*, created on
     first use (same double-checked per-task lock pattern as file_tools._get_file_ops)."""
-    from tools.terminal_tool_backends import _create_environment
+    from tools.terminal_tool_backends import _create_environment, _ssh_config_from_config
     from tools.terminal_tool import (
         _active_environments, _env_lock, _get_env_config, _last_activity,
         _start_cleanup_thread, _creation_locks, _creation_locks_lock, _task_env_overrides,
         _resolve_container_task_id, _resolve_task_host_cwd, _is_container_backend, _select_image,
-        _ssh_config_from_config,
     )
     effective_task_id = _resolve_container_task_id(task_id)
     def _cached():
