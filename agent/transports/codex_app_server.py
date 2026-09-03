@@ -1,22 +1,20 @@
-"""Codex app-server JSON-RPC client.
+"""Codex app-server JSON-RPC client (newline-delimited JSON-RPC 2.0 over stdio, codex 0.125+).
 
-Newline-delimited JSON-RPC 2.0 over stdio to ``codex app-server`` (codex 0.125+):
 ``initialize`` handshake, then ``thread/start`` + ``turn/start`` with streaming
 ``item/*`` notifications until ``turn/completed``. Wire-level speaker only —
 projection, approvals and transcript handling live in sibling modules.
-Opt-in runtime gated behind ``model.openai_runtime == "codex_app_server"``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
 import re
 import subprocess
 import threading
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from tools.environments.local import hermes_subprocess_env
@@ -36,20 +34,12 @@ class CodexAppServerError(RuntimeError):
         return f"codex app-server error {self.code}: {self.message}"
 
 
-@dataclass
-class _Pending:
-    queue: queue.Queue
-    method: str
-    sent_at: float = field(default_factory=time.time)
-
-
 class CodexAppServerClient:
     """Minimal synchronous JSON-RPC 2.0 client for ``codex app-server`` over stdio.
 
-    The caller drives request/response pairs; one reader thread routes replies
-    to pending queues and notifications / server requests to bounded queues;
-    another captures stderr. Intentionally NOT async: AIAgent.run_conversation()
-    is synchronous and cancellation goes through ``turn/interrupt``.
+    One reader thread routes replies to pending queues and notifications / server
+    requests to queues; another captures stderr. Deliberately NOT async:
+    AIAgent.run_conversation() is synchronous and cancels via ``turn/interrupt``.
     """
 
     def __init__(
@@ -57,32 +47,29 @@ class CodexAppServerClient:
         extra_args: Optional[list[str]] = None, env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        # codex needs LLM provider creds (inherit_credentials=True) but must not
-        # receive Tier-1 Hermes secrets (gateway/GitHub/infra tokens) — #29157.
+        # codex needs LLM provider creds but must not receive Tier-1 Hermes secrets (gateway/GitHub/infra tokens).
         spawn_env = hermes_subprocess_env(inherit_credentials=True)
         if env:
             spawn_env.update(env)
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
 
-        app_server_args = list(extra_args or [])
+        cmd = [codex_bin, "app-server", *(extra_args or [])]
         # Kanban workers must write handoff/status to the board DB outside the
         # workspace: keep the sandbox on, add the Kanban root as writable.
         if spawn_env.get("HERMES_KANBAN_TASK"):
             kanban_db = spawn_env.get("HERMES_KANBAN_DB")
             default_root = os.path.join(spawn_env.get("HERMES_HOME", os.path.expanduser("~/.hermes")), "kanban")
             kanban_root = os.path.dirname(kanban_db) if kanban_db else spawn_env.get("HERMES_KANBAN_ROOT", default_root)
-            app_server_args.extend([
+            cmd += [
                 "-c", 'sandbox_mode="workspace-write"',
                 "-c", f'sandbox_workspace_write.writable_roots=["{kanban_root}"]',
                 "-c", "sandbox_workspace_write.network_access=false",
-            ])
-
-        cmd = [codex_bin, "app-server"] + app_server_args
+            ]
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
-        # Hide the console flash on Windows (#56747); stdio pipes stay intact.
+        # Hide the console flash on Windows; stdio pipes stay intact.
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         self._proc = subprocess.Popen(
@@ -90,7 +77,7 @@ class CodexAppServerClient:
             bufsize=0, env=spawn_env, creationflags=windows_hide_flags(),
         )
         self._next_id = 1
-        self._pending: dict[int, _Pending] = {}
+        self._pending: dict[int, queue.Queue] = {}  # request id -> single-slot reply queue
         self._pending_lock = threading.Lock()
         self._notifications: queue.Queue = queue.Queue()
         self._server_requests: queue.Queue = queue.Queue()
@@ -125,20 +112,16 @@ class CodexAppServerClient:
         if self._closed:
             return
         self._closed = True
-        try:
+        with contextlib.suppress(Exception):
             if self._proc.stdin and not self._proc.stdin.closed:
                 self._proc.stdin.close()
-        except Exception:
-            pass
         try:
             self._proc.terminate()
             self._proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            try:
+            with contextlib.suppress(Exception):
                 self._proc.kill()
                 self._proc.wait(timeout=1.0)
-            except Exception:
-                pass
 
     def __enter__(self) -> "CodexAppServerClient":
         return self
@@ -148,10 +131,10 @@ class CodexAppServerClient:
 
     def request(self, method: str, params: Optional[dict] = None, timeout: float = 30.0) -> dict:
         """Send a request and block for ``result``; raise CodexAppServerError on ``error``."""
-        rid = self._take_id()
+        rid, self._next_id = self._next_id, self._next_id + 1
         q: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
-            self._pending[rid] = _Pending(queue=q, method=method)
+            self._pending[rid] = q
         self._send({"id": rid, "method": method, "params": params or {}})
         try:
             msg = q.get(timeout=timeout)
@@ -182,9 +165,7 @@ class CodexAppServerClient:
     @staticmethod
     def _take(q: queue.Queue, timeout: float) -> Optional[dict]:
         try:
-            if timeout <= 0:
-                return q.get_nowait()
-            return q.get(timeout=timeout)
+            return q.get_nowait() if timeout <= 0 else q.get(timeout=timeout)
         except queue.Empty:
             return None
 
@@ -203,11 +184,6 @@ class CodexAppServerClient:
 
     def is_alive(self) -> bool:
         return self._proc.poll() is None
-
-    def _take_id(self) -> int:
-        rid = self._next_id
-        self._next_id += 1
-        return rid
 
     def _send(self, obj: dict) -> None:
         if self._closed:
@@ -249,21 +225,17 @@ class CodexAppServerClient:
             with self._pending_lock:
                 pending = self._pending.pop(msg["id"], None)
             if pending is not None:
-                try:
-                    pending.queue.put_nowait(msg)
-                except queue.Full:  # pragma: no cover - defensive
-                    pass
+                with contextlib.suppress(queue.Full):  # pragma: no cover - defensive
+                    pending.put_nowait(msg)
         elif "method" in msg:  # server-initiated request (has id) or notification
             (self._server_requests if "id" in msg else self._notifications).put(msg)
 
     def _read_stderr(self) -> None:
         if self._proc.stderr is None:
             return
-        try:
+        with contextlib.suppress(Exception):  # pragma: no cover
             for line in iter(self._proc.stderr.readline, b""):
                 self._append_stderr(line.decode("utf-8", "replace").rstrip())
-        except Exception:  # pragma: no cover
-            pass
 
 
 def parse_codex_version(output: str) -> Optional[tuple[int, int, int]]:
@@ -290,7 +262,7 @@ def check_codex_binary(
     version = parse_codex_version(proc.stdout)
     if version is None:
         return False, f"could not parse codex version from: {proc.stdout!r}"
-    have, need = ".".join(map(str, version)), ".".join(map(str, min_version))
+    have = ".".join(map(str, version))
     if version < min_version:
-        return False, f"codex {have} is older than required {need}. Run: npm i -g @openai/codex"
+        return False, f"codex {have} is older than required {'.'.join(map(str, min_version))}. Run: npm i -g @openai/codex"
     return True, have

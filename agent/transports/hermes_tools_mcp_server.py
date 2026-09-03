@@ -1,10 +1,8 @@
 """Hermes-tools-as-MCP server for the codex_app_server runtime.
 
-Under the codex app-server, codex owns the loop and its own tool list, so
-Hermes' richer surface (web search, browser, vision, image gen, skills, TTS,
-kanban handoff) would be unreachable. This module exposes a curated subset over
-stdio MCP; codex registers it via ``~/.codex/config.toml [mcp_servers.hermes-tools]``.
-Run with: ``python -m agent.transports.hermes_tools_mcp_server``.
+Codex owns the loop and tool list there, so a curated subset of Hermes tools is
+exposed over stdio MCP; codex registers it via ``~/.codex/config.toml
+[mcp_servers.hermes-tools]``. Run: ``python -m agent.transports.hermes_tools_mcp_server``.
 """
 
 from __future__ import annotations
@@ -23,8 +21,7 @@ _JSON_TO_PY = {"string": str, "integer": int, "number": float, "boolean": bool, 
 
 
 def _signature_from_schema(schema: dict | None) -> tuple[inspect.Signature, dict[str, type]]:
-    """Build a KEYWORD_ONLY signature + annotations dict from a JSON schema's
-    ``properties`` / ``required`` (optional params default to None)."""
+    """KEYWORD_ONLY signature + annotations from a JSON schema (optional params default to None)."""
     props = (schema or {}).get("properties") or {}
     required = set((schema or {}).get("required") or [])
     params, annots = [], {}
@@ -38,50 +35,25 @@ def _signature_from_schema(schema: dict | None) -> tuple[inspect.Signature, dict
     return inspect.Signature(params, return_annotation=str), annots
 
 
-# Each name MUST match a registered Hermes tool that
-# ``model_tools.handle_function_call()`` can dispatch.
-# Deliberately NOT exposed: terminal/shell, read_file/write_file/patch,
-# search_files/process, clarify — codex's built-ins cover them with codex's own
-# approval UI; delegate_task/memory/session_search/todo — ``_AGENT_LOOP_TOOLS``
-# need the running AIAgent context, which a stateless MCP callback lacks.
+# Each name MUST match a registered Hermes tool ``model_tools.handle_function_call()`` can dispatch.
+# NOT exposed: terminal/file/search/process/clarify (codex built-ins + its own approval UI);
+# delegate_task/memory/session_search/todo (need the running AIAgent context).
 EXPOSED_TOOLS: tuple[str, ...] = (
-    "web_search",
-    "web_extract",
-    "browser_navigate",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_snapshot",
-    "browser_scroll",
-    "browser_back",
-    "browser_get_images",
-    "browser_console",
-    "browser_vision",
-    "vision_analyze",
-    "image_generate",
-    "skill_view",
-    "skills_list",
-    "text_to_speech",
+    "web_search", "web_extract",
+    "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_snapshot", "browser_scroll",
+    "browser_back", "browser_get_images", "browser_console", "browser_vision",
+    "vision_analyze", "image_generate", "skill_view", "skills_list", "text_to_speech",
     # Kanban handoff tools: stateless (read HERMES_KANBAN_TASK, write kanban.db).
     # Without them a codex-runtime worker can't report completion and hangs.
-    "kanban_complete",
-    "kanban_block",
-    "kanban_request_review",
-    "kanban_request_changes",
-    "kanban_comment",
-    "kanban_heartbeat",
-    "kanban_show",
-    "kanban_list",
+    "kanban_complete", "kanban_block", "kanban_request_review", "kanban_request_changes", "kanban_comment",
+    "kanban_heartbeat", "kanban_show", "kanban_list",
     # Orchestrator-only (the kanban tool gates them on HERMES_KANBAN_TASK unset).
-    "kanban_create",
-    "kanban_unblock",
-    "kanban_link",
+    "kanban_create", "kanban_unblock", "kanban_link",
 )
 
 
 def _build_server() -> Any:
-    """Create the MCP server with Hermes tools attached (lazy imports so the module
-    imports without the mcp package; the clear error fires only when run)."""
+    """Create the MCP server with Hermes tools attached (lazy imports: importable without ``mcp``)."""
     try:
         # mcp 2.0 renamed `mcp.server.fastmcp` to `mcp.server.MCPServer` (same surface).
         from mcp.server import MCPServer
@@ -109,8 +81,7 @@ def _build_server() -> Any:
     }
 
     def _make_handler(tool_name: str, schema: dict | None, description: str):
-        # The SDK derives the input schema from the callable's signature (no
-        # inputSchema parameter), so synthesize __signature__ from the Hermes JSON Schema.
+        # The SDK derives the input schema from the callable's signature, so synthesize it from the JSON Schema.
         sig, annots = _signature_from_schema(schema)
 
         def _dispatch(**kwargs: Any) -> str:
@@ -135,9 +106,8 @@ def _build_server() -> Any:
             continue
         description = spec.get("description") or f"Hermes {name} tool"
         params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
-        handler = _make_handler(name, params_schema, description)
         try:
-            mcp.add_tool(handler, name=name, description=description)
+            mcp.add_tool(_make_handler(name, params_schema, description), name=name, description=description)
         except TypeError:
             # Older mcp SDK: decorator-style registration; __signature__ still drives schema.
             mcp.tool(name=name, description=description)(_make_handler(name, params_schema, description))

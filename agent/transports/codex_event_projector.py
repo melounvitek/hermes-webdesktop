@@ -1,14 +1,10 @@
-"""Projects codex app-server events into Hermes' messages list.
+"""Projects codex app-server ``item/*`` notifications into OpenAI-shaped messages.
 
-Converts Codex ``item/*`` notifications into OpenAI-shaped
-``{role, content, tool_calls, tool_call_id}`` entries that memory/skill review
-(agent/curator.py) already reads:
-  userMessage → user; agentMessage → assistant; reasoning → stashed onto the next
-  assistant entry; commandExecution / fileChange / mcpToolCall / dynamicToolCall →
-  assistant tool_call + tool result; anything else → opaque assistant note.
-Each item yields AT MOST one assistant + one tool entry, preserving Hermes'
-message-alternation invariants. ``is_tool_iteration`` ticks once per completed
-tool-shaped item (AIAgent._iters_since_skill skill-nudge gate).
+userMessage → user; agentMessage → assistant; reasoning → stashed onto the next
+assistant entry; commandExecution / fileChange / mcpToolCall / dynamicToolCall →
+assistant tool_call + tool result; anything else → opaque assistant note.
+Each item yields AT MOST one assistant + one tool entry (message-alternation
+invariant). ``is_tool_iteration`` ticks once per completed tool-shaped item.
 """
 
 from __future__ import annotations
@@ -20,8 +16,7 @@ from typing import Any, Callable, Optional
 
 
 def _deterministic_call_id(item_type: str, item_id: str) -> str:
-    """Stable tool_call id: the codex item id when present, else a content hash so
-    replay yields the same id across sessions and prefix caches stay valid."""
+    """Stable tool_call id: the codex item id, else a hash so replay keeps prefix caches valid."""
     return f"codex_{item_type}_{item_id or hashlib.sha256(f'{item_type}'.encode()).hexdigest()[:16]}"
 
 
@@ -37,11 +32,7 @@ def _dict_args(raw: Any) -> dict:
 
 @dataclass
 class ProjectionResult:
-    """Output of projecting one Codex item.
-
-    ``messages`` may hold two entries (assistant tool_call + tool result); empty
-    means the item was ignored (e.g. a streaming delta before ``item/completed``).
-    """
+    """Output of projecting one Codex item; empty ``messages`` = ignored (e.g. a streaming delta)."""
 
     messages: list[dict] = field(default_factory=list)
     is_tool_iteration: bool = False
@@ -49,26 +40,16 @@ class ProjectionResult:
 
 
 class CodexEventProjector:
-    """Stateful projector consuming Codex notifications in arrival order.
-
-    Owns in-progress reasoning: codex emits it as separate items, Hermes stashes
-    it on the next assistant message.
-    """
+    """Stateful projector; stashes codex's separate reasoning items onto the next assistant message."""
 
     def __init__(self) -> None:
         self._pending_reasoning: list[str] = []
 
     def project(self, notification: dict) -> ProjectionResult:
-        """Project one notification; only ``item/completed`` materializes messages.
-
-        Streaming deltas are display-only, mirroring how Hermes writes the
-        assistant message only after the streaming completion event.
-        """
-        method = notification.get("method", "")
-        params = notification.get("params", {}) or {}
-        if method != "item/completed":
+        """Project one notification; only ``item/completed`` materializes messages (deltas are display-only)."""
+        if notification.get("method", "") != "item/completed":
             return ProjectionResult()
-        item = params.get("item") or {}
+        item = (notification.get("params", {}) or {}).get("item") or {}
         item_type = item.get("type") or ""
         item_id = item.get("id") or ""
         if item_type == "agentMessage":
@@ -82,9 +63,7 @@ class CodexEventProjector:
         tool_projection = self._TOOL_PROJECTIONS.get(item_type)
         if tool_projection is not None:
             return self._project_tool_item(item, item_id, tool_projection)
-        # Unknown / rare items (plan, hookPrompt, collabAgentToolCall, ...): keep an
-        # opaque note so memory review sees *something* happened, without
-        # fabricating tool_call structure.
+        # Unknown / rare items (plan, hookPrompt, ...): opaque note, no fabricated tool_call structure.
         return self._project_opaque(item, item_type)
 
     def _assistant_message(self, content: Optional[str], **extra: Any) -> dict[str, Any]:
@@ -98,25 +77,21 @@ class CodexEventProjector:
         text = item.get("text") or ""
         return ProjectionResult(messages=[self._assistant_message(text)], final_text=text)
 
-    def _project_user_message(self, item: dict) -> ProjectionResult:
+    @staticmethod
+    def _project_user_message(item: dict) -> ProjectionResult:
         # userMessage content is a list of UserInput variants; flatten text
         # fragments and drop non-text parts (Hermes' messages store text only).
-        text_parts: list[str] = []
-        for fragment in item.get("content") or []:
-            if isinstance(fragment, dict):
-                if fragment.get("type") == "text":
-                    text_parts.append(fragment.get("text") or "")
-                elif "text" in fragment:
-                    text_parts.append(str(fragment["text"]))
+        text_parts = [
+            (fragment.get("text") or "") if fragment.get("type") == "text" else str(fragment["text"])
+            for fragment in item.get("content") or []
+            if isinstance(fragment, dict) and (fragment.get("type") == "text" or "text" in fragment)
+        ]
         return ProjectionResult(messages=[{"role": "user", "content": "\n".join(text_parts)}])
 
     def _project_tool_item(
         self, item: dict, item_id: str, spec: Callable[[dict], tuple[str, str, dict, str]]
     ) -> ProjectionResult:
-        """Emit the (assistant tool_call, tool result) pair for a tool-shaped item.
-
-        ``spec(item)`` returns ``(call_id_type, tool_name, args, tool_content)``.
-        """
+        """Emit the (assistant tool_call, tool result) pair; ``spec(item)`` -> ``(id_type, name, args, content)``."""
         id_type, name, args, content = spec(item)
         call_id = _deterministic_call_id(id_type, item_id)
         assistant_msg = self._assistant_message(
@@ -139,10 +114,7 @@ class CodexEventProjector:
     def _file_change_spec(item: dict) -> tuple[str, str, dict, str]:
         # Per-file change kinds only — full file contents can be huge.
         changes_summary = [
-            {
-                "kind": (change.get("kind") or {}).get("type") or "update",
-                "path": change.get("path") or "",
-            }
+            {"kind": (change.get("kind") or {}).get("type") or "update", "path": change.get("path") or ""}
             for change in item.get("changes") or []
         ]
         status = item.get("status") or "unknown"
@@ -153,26 +125,22 @@ class CodexEventProjector:
     def _mcp_tool_call_spec(item: dict) -> tuple[str, str, dict, str]:
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        result = item.get("result")
-        error = item.get("error")
+        result, error = item.get("result"), item.get("error")
         if error:
             content = f"[error] {json.dumps(error, ensure_ascii=False)[:1000]}"
-        elif result is not None:
-            content = json.dumps(result, ensure_ascii=False)[:4000]
         else:
-            content = ""
-        # Mirror the native MCP name convention (mcp__server__tool) in the call id
-        # so it stays consistent with registration names.
+            content = json.dumps(result, ensure_ascii=False)[:4000] if result is not None else ""
+        # Call id mirrors the native MCP name convention (mcp__server__tool).
         return f"mcp__{server}__{tool}", f"mcp.{server}.{tool}", _dict_args(item.get("arguments")), content
 
     @staticmethod
     def _dynamic_tool_call_spec(item: dict) -> tuple[str, str, dict, str]:
         tool = item.get("tool") or "unknown"
         content_items = item.get("contentItems") or []
-        if isinstance(content_items, list) and content_items:
-            content = json.dumps(content_items, ensure_ascii=False)[:4000]
-        else:
-            content = f"success={item.get('success')}"
+        content = (
+            json.dumps(content_items, ensure_ascii=False)[:4000] if isinstance(content_items, list) and content_items
+            else f"success={item.get('success')}"
+        )
         return f"dyn_{tool}", tool, _dict_args(item.get("arguments")), content
 
     _TOOL_PROJECTIONS: dict[str, Callable[[dict], tuple[str, str, dict, str]]] = {
@@ -182,7 +150,8 @@ class CodexEventProjector:
         "dynamicToolCall": _dynamic_tool_call_spec,
     }
 
-    def _project_opaque(self, item: dict, item_type: str) -> ProjectionResult:
+    @staticmethod
+    def _project_opaque(item: dict, item_type: str) -> ProjectionResult:
         try:
             payload = json.dumps(item, ensure_ascii=False)[:1500]
         except (TypeError, ValueError):
