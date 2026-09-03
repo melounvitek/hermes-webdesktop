@@ -1,16 +1,11 @@
 """External secret source integrations.
 
-A secret source supplies environment-variable-shaped credentials at process
-startup, _after_ ~/.hermes/.env has loaded.  The contract is
-:class:`agent.secret_sources.base.SecretSource`; the orchestrator (ordering,
-mapped-beats-bulk precedence, first-claim-wins, ``override_existing``,
-provenance) is :func:`agent.secret_sources.registry.apply_all`.  The
-atomic-write / 0600 / TTL disk cache is shared in ``_cache``.
-
-Bundled: ``bitwarden`` (bws CLI), ``onepassword`` (op CLI), ``command`` (user
-helper).  The set is deliberately closed — new third-party managers ship as
-standalone plugin repos that subclass ``SecretSource`` and register through
-``PluginContext.register_secret_source()``.
+A secret source supplies env-var-shaped credentials at process startup, after
+~/.hermes/.env has loaded. Contract: :class:`base.SecretSource`; orchestrator
+(ordering, mapped-beats-bulk, first-claim-wins, provenance): :func:`registry.apply_all`.
+Bundled: ``bitwarden``, ``onepassword``, ``command``. The set is deliberately
+closed — third-party managers ship as plugins that subclass ``SecretSource`` and
+register through ``PluginContext.register_secret_source()``.
 """
 
 from agent.secret_sources.base import (  # noqa: F401
