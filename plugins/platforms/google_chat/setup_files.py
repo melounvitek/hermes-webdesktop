@@ -30,6 +30,15 @@ _START_INSTRUCTIONS = (
     "`/setup-files <PASTE_URL>` (or just the `code=...` value).\n\n"
     "Tip: the URL contains your access grant — keep it private."
 )
+_START_EXIT_TEXT = (
+    "❌ Couldn't generate the OAuth URL. Check the gateway logs and verify the client_secret.json is valid."
+)
+_EXCHANGE_EXIT_TEXT = (
+    "❌ Token exchange failed. The code may have expired or the URL is malformed. "
+    "Send `/setup-files start` to get a fresh OAuth URL."
+)
+_REVOKE_EXIT_OUTPUT = "Revoke completed (some steps may have been skipped)."
+_EXITED = object()  # _run_helper marker: helper called sys.exit but the step tolerates it
 
 
 async def _run_captured(fn: Callable[..., Any], *args: Any) -> str:
@@ -70,6 +79,33 @@ async def handle_setup_files_command(
         except Exception:
             logger.debug("[GoogleChat] /setup-files reply send failed", exc_info=True)
 
+    async def _run_helper(step: str, exit_text: Optional[str], fn: Callable[..., Any], *args: Any):
+        """Captured helper output; ``None`` after replying on failure. ``exit_text``
+        is the reply on ``SystemExit`` (the helpers' failure signal); ``None``
+        tolerates the exit and returns ``_EXITED``."""
+        try:
+            return await _run_captured(fn, *args)
+        except SystemExit:
+            if exit_text is None:
+                return _EXITED
+            await _reply(exit_text)
+        except Exception as exc:
+            logger.warning("[GoogleChat] /setup-files %s failed: %s", step, exc)
+            await _reply(f"❌ Error{' revoking' if step == 'revoke' else ''}: {exc}")
+        return None
+
+    def _set_user_creds(creds: Any, api: Any) -> None:
+        """Set (or evict, with ``None``) only the sender's slot: Bob revoking must not
+        break Alice's per-user token nor the shared legacy fallback."""
+        if not sender_key:
+            adapter._user_credentials, adapter._user_chat_api = creds, api
+        elif creds is None:
+            adapter._user_creds_by_email.pop(sender_key, None)
+            adapter._user_chat_api_by_email.pop(sender_key, None)
+        else:
+            adapter._user_creds_by_email[sender_key] = creds
+            adapter._user_chat_api_by_email[sender_key] = api
+
     if not arg:
         client_secret_present = oauth_helper._client_secret_path().exists()
         token_path = oauth_helper._token_path(sender_key)
@@ -96,75 +132,37 @@ async def handle_setup_files_command(
                 "`/setup-files` (no args) for setup instructions."
             )
             return True
-        try:
-            output = await _run_captured(oauth_helper.get_auth_url, sender_key)
-            auth_url = output.strip().splitlines()[-1]
-        except SystemExit:
-            await _reply(
-                "❌ Couldn't generate the OAuth URL. Check the gateway logs and verify "
-                "the client_secret.json is valid."
-            )
-            return True
-        except Exception as exc:
-            logger.warning("[GoogleChat] /setup-files start failed: %s", exc)
-            await _reply(f"❌ Error: {exc}")
-            return True
-        await _reply(_START_INSTRUCTIONS.format(auth_url=auth_url))
+        output = await _run_helper("start", _START_EXIT_TEXT, oauth_helper.get_auth_url, sender_key)
+        if output is not None:
+            await _reply(_START_INSTRUCTIONS.format(auth_url=output.strip().splitlines()[-1]))
         return True
 
     if arg == "revoke":
-        try:
-            output = (await _run_captured(oauth_helper.revoke, sender_key)).strip() or "Revoked."
-        except SystemExit:
-            output = "Revoke completed (some steps may have been skipped)."
-        except Exception as exc:
-            logger.warning("[GoogleChat] /setup-files revoke failed: %s", exc)
-            await _reply(f"❌ Error revoking: {exc}")
+        output = await _run_helper("revoke", None, oauth_helper.revoke, sender_key)
+        if output is None:
             return True
-        # Evict only the sender's slot: Bob revoking must not break Alice's
-        # per-user token nor the shared legacy fallback.
-        if sender_key:
-            adapter._user_creds_by_email.pop(sender_key, None)
-            adapter._user_chat_api_by_email.pop(sender_key, None)
-        else:
-            adapter._user_credentials = None
-            adapter._user_chat_api = None
+        output = _REVOKE_EXIT_OUTPUT if output is _EXITED else (output.strip() or "Revoked.")
+        _set_user_creds(None, None)
         await _reply(f"✅ Done.\n```\n{output}\n```")
         return True
 
     # Anything else is the auth code or the pasted failed-redirect URL.
-    try:
-        output = (await _run_captured(oauth_helper.exchange_auth_code, arg, sender_key)).strip()
-    except SystemExit:
-        await _reply(
-            "❌ Token exchange failed. The code may have expired or the URL is malformed. "
-            "Send `/setup-files start` to get a fresh OAuth URL."
-        )
+    output = await _run_helper("exchange", _EXCHANGE_EXIT_TEXT, oauth_helper.exchange_auth_code, arg, sender_key)
+    if output is None:
         return True
-    except Exception as exc:
-        logger.warning("[GoogleChat] /setup-files exchange failed: %s", exc)
-        await _reply(f"❌ Error: {exc}")
-        return True
-
     # Re-load credentials so the next file send uses them without a gateway restart.
     try:
         new_creds = await asyncio.to_thread(oauth_helper.load_user_credentials, sender_key)
         if new_creds is not None:
             new_api = await asyncio.to_thread(lambda: oauth_helper.build_user_chat_service(new_creds))
-            if sender_key:
-                adapter._user_creds_by_email[sender_key] = new_creds
-                adapter._user_chat_api_by_email[sender_key] = new_api
-            else:
-                adapter._user_credentials = new_creds
-                adapter._user_chat_api = new_api
+            _set_user_creds(new_creds, new_api)
             await _reply("✅ Authorized! Native attachment delivery is now active. Try asking me to send you a PDF.")
             return True
     except Exception as exc:
         logger.warning("[GoogleChat] post-exchange creds load failed: %s", exc)
-
     await _reply(
         "⚠️ Token exchanged but the gateway couldn't load the new credentials in-memory. "
         f"Restart the gateway and the token at `{oauth_helper._token_path(sender_key)}` will be picked up.\n"
-        f"Helper output:\n```\n{output}\n```"
+        f"Helper output:\n```\n{output.strip()}\n```"
     )
     return True
