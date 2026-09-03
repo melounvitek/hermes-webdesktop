@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -29,14 +30,8 @@ def _win32() -> Any:
     win32security); import is deferred so the module imports on non-Windows hosts."""
     if sys.platform != "win32":
         raise RuntimeError("Windows SSH runtime is only available on Windows")
-    import ntsecuritycon
-    import pywintypes
-    import win32api
-    import win32con
-    import win32file
-    import win32security
-    return SimpleNamespace(ntsecuritycon=ntsecuritycon, pywintypes=pywintypes, win32api=win32api,
-                           win32con=win32con, win32file=win32file, win32security=win32security)
+    names = ("ntsecuritycon", "pywintypes", "win32api", "win32con", "win32file", "win32security")
+    return SimpleNamespace(**{name: importlib.import_module(name) for name in names})
 
 
 def _check(pattern: re.Pattern, value: str, message: str) -> str:
@@ -136,14 +131,10 @@ def _open(path: Path, access: int, creation: int, flags: int, share: int = 0):
     win32file = _win32().win32file
     handle = win32file.CreateFile(str(path), access, share, _security_attributes(), creation, flags, None)
     try:
-        actual = win32file.GetFinalPathNameByHandle(handle, 0)
-        if actual.startswith("\\\\?\\"):
-            actual = actual[4:]
-        expected = os.path.abspath(str(path))
-        if os.path.normcase(actual) != os.path.normcase(expected):
+        actual = win32file.GetFinalPathNameByHandle(handle, 0).removeprefix("\\\\?\\")
+        if os.path.normcase(actual) != os.path.normcase(os.path.abspath(str(path))):
             raise OSError("Windows SSH runtime handle escaped its expected path")
-        attributes = win32file.GetFileInformationByHandle(handle)[0]
-        if attributes & 0x400:
+        if win32file.GetFileInformationByHandle(handle)[0] & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
             raise OSError("Windows SSH runtime path contains a reparse point")
         _verify_security(handle)
         return handle
@@ -152,21 +143,28 @@ def _open(path: Path, access: int, creation: int, flags: int, share: int = 0):
         raise
 
 
-def _read_shared(path: Path, limit: int, share: int) -> bytes | None:
-    """Open ``path`` read-only with ``share`` and read up to ``limit`` bytes; None when missing."""
+def _open_existing(path: Path, access: int, extra_flags: int = 0, share: int = 0):
+    """``_open`` an existing file (FILE_ATTRIBUTE_NORMAL | reparse guard); None when it is missing."""
     w = _win32()
-    pywintypes, win32con, win32file = w.pywintypes, w.win32con, w.win32file
     try:
-        handle = _open(path, win32con.GENERIC_READ | win32con.READ_CONTROL, win32con.OPEN_EXISTING,
-                       win32con.FILE_ATTRIBUTE_NORMAL | _OPEN_REPARSE_POINT, share)
-    except pywintypes.error as exc:
+        return _open(path, access, w.win32con.OPEN_EXISTING,
+                     w.win32con.FILE_ATTRIBUTE_NORMAL | _OPEN_REPARSE_POINT | extra_flags, share)
+    except w.pywintypes.error as exc:
         if exc.winerror in (2, 3):
             return None
         raise
+
+
+def _read_shared(path: Path, limit: int, share: int) -> bytes | None:
+    """Read up to ``limit`` bytes of ``path`` opened read-only with ``share``; None when missing."""
+    w = _win32()
+    handle = _open_existing(path, w.win32con.GENERIC_READ | w.win32con.READ_CONTROL, share=share)
+    if handle is None:
+        return None
     try:
-        return win32file.ReadFile(handle, limit)[1]
+        return w.win32file.ReadFile(handle, limit)[1]
     finally:
-        win32file.CloseHandle(handle)
+        w.win32file.CloseHandle(handle)
 
 
 def _write_new(path: Path, data: bytes, share: int = 0) -> None:
@@ -200,8 +198,7 @@ def _ensure_directory(path: Path) -> None:
 
 
 def _ensure_scope(ownership_id: str) -> Path:
-    root = _root()
-    _ensure_directory(root)
+    _ensure_directory(_root())
     directory = _directory(ownership_id)
     _ensure_directory(directory)
     return directory
@@ -224,9 +221,8 @@ def read_token(path_value: str) -> str:
     w = _win32()
     win32con, win32file = w.win32con, w.win32file
     path = Path(path_value)
-    root = _root()
     try:
-        relative = path.relative_to(root)
+        relative = path.relative_to(_root())
     except ValueError as exc:
         raise SystemExit("--ssh-session-token-file must be under the desktop-ssh directory") from exc
     if len(relative.parts) != 2 or not _HEX32.fullmatch(relative.parts[0]) or not re.fullmatch(r"[0-9a-f]{16}\.token", relative.parts[1]):
@@ -284,15 +280,10 @@ def write_lock(ownership_id: str, payload: dict[str, Any]) -> None:
 
 def remove_artifact(path: Path) -> bool:
     w = _win32()
-    pywintypes, win32con, win32file = w.pywintypes, w.win32con, w.win32file
-    try:
-        handle = _open(path, win32con.DELETE | win32con.READ_CONTROL, win32con.OPEN_EXISTING,
-                       win32con.FILE_ATTRIBUTE_NORMAL | _OPEN_REPARSE_POINT | _DELETE_ON_CLOSE)
-    except pywintypes.error as exc:
-        if exc.winerror in (2, 3):
-            return False
-        raise
-    win32file.CloseHandle(handle)
+    handle = _open_existing(path, w.win32con.DELETE | w.win32con.READ_CONTROL, _DELETE_ON_CLOSE)
+    if handle is None:
+        return False
+    w.win32file.CloseHandle(handle)
     return True
 
 
@@ -388,7 +379,6 @@ def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Hermes path must be absolute")
     hermes_path = os.path.abspath(configured_path)
     token_path = str(_token_path(ownership_id, spawn_nonce))
-    log_path = _log_path(ownership_id, spawn_nonce)
     profile = str(payload.get("profile") or "")
     if len(profile) > 256 or any(ch in profile for ch in "\x00\r\n"):
         raise ValueError("invalid profile")
@@ -412,7 +402,7 @@ def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
     env["VIRTUAL_ENV"] = os.path.dirname(venv_dir)
     env.pop("PYTHONPATH", None)
     _ensure_scope(ownership_id)
-    creationflags = 0x00000008 | 0x00000200 | 0x01000000
+    log_path = _log_path(ownership_id, spawn_nonce)
     win32con = _win32().win32con
     log_handle = _open(log_path, win32con.GENERIC_WRITE | win32con.READ_CONTROL,
                        win32con.CREATE_NEW, win32con.FILE_ATTRIBUTE_NORMAL | _OPEN_REPARSE_POINT,
@@ -420,8 +410,9 @@ def spawn_backend(payload: dict[str, Any]) -> dict[str, Any]:
     import msvcrt
     log_fd = msvcrt.open_osfhandle(int(log_handle), os.O_WRONLY)
     with os.fdopen(log_fd, "wb", buffering=0) as log_stream:
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log_stream, stderr=log_stream,
-                                   close_fds=True, creationflags=creationflags, env=env)
+                                   close_fds=True, creationflags=0x00000008 | 0x00000200 | 0x01000000, env=env)
     creation_time_ns = int(__import__("psutil").Process(process.pid).create_time() * 1_000_000_000)
     return {"pid": process.pid, "creationTimeNs": str(creation_time_ns),
             "logPath": str(log_path), "tokenPath": token_path}

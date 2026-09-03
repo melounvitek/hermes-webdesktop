@@ -3,17 +3,15 @@
 import hashlib
 import hmac
 import json
-import os
 import re
 import secrets
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
 from typing import Dict
 
 from hermes_constants import display_hermes_home
-from utils import atomic_replace
+from utils import atomic_json_write
 from hermes_cli.config import cfg_get
 
 
@@ -21,13 +19,9 @@ _SUBSCRIPTIONS_FILENAME = "webhook_subscriptions.json"
 _SUBSCRIPTIONS_FILE_MODE = 0o600
 
 
-def _hermes_home() -> Path:
-    from hermes_constants import get_hermes_home
-    return get_hermes_home()
-
-
 def _subscriptions_path() -> Path:
-    return _hermes_home() / _SUBSCRIPTIONS_FILENAME
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / _SUBSCRIPTIONS_FILENAME
 
 
 def _load_subscriptions() -> Dict[str, dict]:
@@ -42,27 +36,9 @@ def _load_subscriptions() -> Dict[str, dict]:
 
 
 def _save_subscriptions(subs: Dict[str, dict]) -> None:
-    path = _subscriptions_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # The file holds per-route HMAC secrets: chmod 0o600 the temp file BEFORE the atomic rename so
-    # a permissive umask can't expose them in the create→rename window.
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(subs, fh, indent=2, ensure_ascii=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp_path, _SUBSCRIPTIONS_FILE_MODE)
-        atomic_replace(tmp_path, path)
-        # Re-assert: the destination may have existed with a broader mode that the replace kept.
-        os.chmod(path, _SUBSCRIPTIONS_FILE_MODE)
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    # The file holds per-route HMAC secrets: atomic_json_write fchmods the temp file 0o600 BEFORE the
+    # rename (no umask window) and re-asserts the mode on the destination afterwards.
+    atomic_json_write(_subscriptions_path(), subs, mode=_SUBSCRIPTIONS_FILE_MODE)
 
 
 def _get_webhook_config() -> dict:
@@ -82,11 +58,10 @@ def _is_webhook_enabled() -> bool:
 def _get_webhook_base_url() -> str:
     wh = _get_webhook_config().get("extra", {})
     host = wh.get("host")
-    port = wh.get("port", 8644)
     display_host = "localhost" if not host or host in {"0.0.0.0", "::"} else host
     if ":" in display_host and not display_host.startswith("["):
         display_host = f"[{display_host}]"
-    return f"http://{display_host}:{port}"
+    return f"http://{display_host}:{wh.get('port', 8644)}"
 
 
 def _setup_hint() -> str:
@@ -172,8 +147,7 @@ def _cmd_subscribe(args):
         print("  Mode: direct delivery (no agent, zero LLM cost)")
     if route.get("prompt"):
         prompt_preview = route["prompt"][:80] + ("..." if len(route["prompt"]) > 80 else "")
-        label = "Message" if route.get("deliver_only") else "Prompt"
-        print(f"  {label}: {prompt_preview}")
+        print(f"  {'Message' if route.get('deliver_only') else 'Prompt'}: {prompt_preview}")
     if route.get("script"):
         print(f"  Script: {route['script']}")
     print("\n  Configure your service to POST to the URL above.")

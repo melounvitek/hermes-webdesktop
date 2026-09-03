@@ -60,21 +60,17 @@ class WinPtyBridge:
         spawn_env = (
             build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
             if env is None else dict(env))
-        if not spawn_env.get("TERM"):
-            spawn_env["TERM"] = "xterm-256color"
+        spawn_env["TERM"] = spawn_env.get("TERM") or "xterm-256color"
         # pywinpty mirrors ptyprocess: dimensions=(rows, cols).
-        proc = PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols))  # type: ignore[union-attr]
-        return cls(proc)
+        return cls(PtyProcess.spawn(list(argv), cwd=cwd, env=spawn_env, dimensions=(rows, cols)))  # type: ignore[union-attr]
 
     @property
     def pid(self) -> int:
         return int(self._proc.pid)
 
     def is_alive(self) -> bool:
-        if self._closed:
-            return False
         try:
-            return bool(self._proc.isalive())
+            return not self._closed and bool(self._proc.isalive())
         except Exception:
             return False
 
