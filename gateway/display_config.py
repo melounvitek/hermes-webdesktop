@@ -16,80 +16,57 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "tool_progress_grouping": "accumulate",  # "accumulate" = edit one bubble; "separate" = one msg per tool
     "show_reasoning": False,
-    # "code" (💭 **Reasoning:** + fenced block), "blockquote" ("> "), "subtext" ("-# " Discord).
-    "reasoning_style": "code",
+    "reasoning_style": "code",  # "code" (💭 **Reasoning:** + fence), "blockquote" ("> "), "subtext" ("-# " Discord)
     "tool_preview_length": 0,
     "streaming": None,  # None = follow top-level streaming config
     # Gateway-only assistant/status chatter; mobile platforms opt down to final-answer-first.
     "interim_assistant_messages": True,
     "long_running_notifications": True,
     "busy_ack_detail": True,
-    # busy_input_mode=steer echo ("Steered into current run"); the text still lands in the run.
-    "busy_steer_ack_enabled": True,
-    # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response on
-    # platforms that support deletion (Telegram); failed runs keep them as breadcrumbs.
+    "busy_steer_ack_enabled": True,  # busy_input_mode=steer echo; the text still lands in the run
+    # Delete tool-progress / "⏳ Working" bubbles after a SUCCESSFUL final response where deletion is
+    # supported (Telegram); failed runs keep them as breadcrumbs.
     "cleanup_progress": False,
-    # Working-state text on text-rendering indicators (Slack assistant status):
-    # "full"/true = verb + argument preview, "verb" = verb only (keeps paths out of
-    # shared channels), "off"/false = static text.
+    # Working-state text on text-rendering indicators (Slack assistant status): "full"/true = verb +
+    # argument preview, "verb" = verb only (keeps paths out of shared channels), "off"/false = static.
     "live_status": "full",
 }
 
 # Tiers: HIGH = editing, personal/team use; MEDIUM = editing but customer-facing;
 # LOW = no edit support (progress messages are permanent); MINIMAL = batch delivery.
 _TIER_HIGH = {
-    "tool_progress": "all",
-    "show_reasoning": False,
-    "tool_preview_length": 40,
+    "tool_progress": "all", "show_reasoning": False, "tool_preview_length": 40,
     "streaming": None,  # follow global
-    "interim_assistant_messages": True,
-    "long_running_notifications": True,
-    "busy_ack_detail": True,
+    "interim_assistant_messages": True, "long_running_notifications": True, "busy_ack_detail": True,
 }
 _TIER_MEDIUM = {**_TIER_HIGH, "tool_progress": "new"}
 _TIER_LOW = {
-    **_TIER_HIGH,
-    "tool_progress": "off",
-    "streaming": False,
-    "interim_assistant_messages": False,
-    "long_running_notifications": False,
-    "busy_ack_detail": False,
+    **_TIER_HIGH, "tool_progress": "off", "streaming": False,
+    "interim_assistant_messages": False, "long_running_notifications": False, "busy_ack_detail": False,
 }
 _TIER_MINIMAL = {**_TIER_LOW, "tool_preview_length": 0}
 
 _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
-    # Mobile inbox: quiet tool_progress / busy-ack, but keep interim commentary and
-    # heartbeats so it doesn't look like "typing..." for 30 minutes.
+    # Mobile inbox: quiet tool_progress / busy-ack, but keep interim commentary and heartbeats so it
+    # doesn't look like "typing..." for 30 minutes.
     "telegram": {**_TIER_HIGH, "tool_progress": "off", "busy_ack_detail": False},
-    # Discord's "-# " subtext reads as metadata, so reasoning defaults to it.
-    "discord": {**_TIER_HIGH, "reasoning_style": "subtext"},
-
+    "discord": {**_TIER_HIGH, "reasoning_style": "subtext"},  # "-# " subtext reads as metadata
     # Slack: Bolt posts cannot be edited like CLI; "new"/"all" spam permanent lines.
-    "slack": {
-        **_TIER_MEDIUM,
-        "tool_progress": "off",
-        "long_running_notifications": False,
-        "busy_ack_detail": False,
-    },
+    "slack": {**_TIER_MEDIUM, "tool_progress": "off", "long_running_notifications": False, "busy_ack_detail": False},
     "mattermost": _TIER_MEDIUM,
     "matrix": _TIER_MEDIUM,
     "feishu": _TIER_MEDIUM,
-    # Buzz (Nostr) can edit in place but channels are shared community spaces.
-    "buzz": _TIER_MEDIUM,
-
+    "buzz": _TIER_MEDIUM,  # Nostr: edits in place but channels are shared community spaces
     "signal": _TIER_LOW,
     "whatsapp": _TIER_MEDIUM,  # Baileys bridge supports /edit
     "whatsapp_cloud": _TIER_LOW,  # adapter lacks edit_message; promote once it lands
-    # Permanent-message iMessage inboxes (no edit).
-    "photon": _TIER_LOW,
+    "photon": _TIER_LOW,  # permanent-message iMessage inboxes (no edit)
     "bluebubbles": _TIER_LOW,
     "weixin": _TIER_LOW,
-    # Non-editable, but its native "stream" msgtype gives a typing animation +
-    # cumulative updates instead of a one-shot markdown drop.
+    # Non-editable, but its native "stream" msgtype gives a typing animation + cumulative updates.
     "wecom": {**_TIER_LOW, "streaming": True},
     "wecom_callback": _TIER_LOW,
     "dingtalk": _TIER_LOW,
-
     "email": _TIER_MINIMAL,
     "sms": _TIER_MINIMAL,
     "webhook": _TIER_MINIMAL,
@@ -101,36 +78,22 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
 OVERRIDEABLE_KEYS = frozenset(_GLOBAL_DEFAULTS.keys())
 
 
-def resolve_display_setting(
-    user_config: dict,
-    platform_key: str,
-    setting: str,
-    fallback: Any = None,
-) -> Any:
-    """Resolve a display setting with per-platform override support.
+def resolve_display_setting(user_config: dict, platform_key: str, setting: str, fallback: Any = None) -> Any:
+    """Resolve a display setting with per-platform override support (see module docstring for order).
 
-    ``platform_key`` is the platform config key (``"telegram"``, ``"slack"``;
-    see ``_platform_config_key`` in gateway/run.py).  Returns *fallback* when
-    nothing is configured.
+    ``platform_key`` is the platform config key (``"telegram"``; see ``_platform_config_key`` in
+    gateway/run.py). Returns *fallback* when nothing is configured.
     """
     display_cfg = user_config.get("display") or {}
-
-    # 1. Explicit per-platform override
     plat_overrides = (display_cfg.get("platforms") or {}).get(platform_key)
     if isinstance(plat_overrides, dict) and plat_overrides.get(setting) is not None:
         return _normalise(setting, plat_overrides[setting])
-
-    # 1b. Backward compat: display.tool_progress_overrides.<platform>
-    if setting == "tool_progress":
+    if setting == "tool_progress":  # legacy display.tool_progress_overrides.<platform>
         legacy = display_cfg.get("tool_progress_overrides")
         if isinstance(legacy, dict) and legacy.get(platform_key) is not None:
             return _normalise(setting, legacy[platform_key])
-
-    # 2. Global user setting (display.streaming is CLI-only, see module docstring).
-    if setting != "streaming" and display_cfg.get(setting) is not None:
+    if setting != "streaming" and display_cfg.get(setting) is not None:  # display.streaming is CLI-only
         return _normalise(setting, display_cfg[setting])
-
-    # 3. Built-in platform default, 4. built-in global default
     val = _PLATFORM_DEFAULTS.get(platform_key, {}).get(setting)
     if val is None:
         val = _GLOBAL_DEFAULTS.get(setting)
@@ -143,17 +106,18 @@ _TRUTHY = {"true", "1", "yes", "on"}
 _FALSY = {"false", "0", "no"}
 
 
-def _norm_tool_progress(value: Any) -> str:
-    if value is False:
-        return "off"
-    if value is True:
-        return "all"
-    val = str(value).strip().lower()
-    if val in _FALSY:
-        return "off"
-    if val in _TRUTHY:
-        return "all"
-    return val if val in {"off", "new", "all", "verbose", "log"} else "all"
+def _norm_tristate(on: str, off: str, choices: set, extra_truthy: set = frozenset()):
+    """Normaliser for bool-or-keyword settings: bools/truthy tokens → *on*, falsy → *off*, else a known choice or *on*."""
+    def norm(value: Any) -> str:
+        if isinstance(value, bool):
+            return on if value else off
+        val = str(value).strip().lower()
+        if val in _FALSY:
+            return off
+        if val in _TRUTHY | extra_truthy:
+            return on
+        return val if val in choices else on
+    return norm
 
 
 def _norm_bool(value: Any) -> bool:
@@ -174,20 +138,6 @@ def _norm_cleanup_progress(value: Any) -> bool:
     return bool(value)
 
 
-def _norm_live_status(value: Any) -> str:
-    """Tri-state: "full" (verb + preview), "verb" (verb only), "off"."""
-    if value is True:
-        return "full"
-    if value is False:
-        return "off"
-    val = str(value).strip().lower()
-    if val in _TRUTHY | {"all"}:
-        return "full"
-    if val in _FALSY:
-        return "off"
-    return val if val in {"full", "verb", "off"} else "full"
-
-
 def _norm_choice(choices: tuple[str, ...]) -> Any:
     def norm(value: Any) -> str:
         val = str(value).lower()
@@ -204,7 +154,7 @@ def _norm_int(value: Any) -> int:
 
 
 _NORMALISERS: dict[str, Any] = {
-    "tool_progress": _norm_tool_progress,
+    "tool_progress": _norm_tristate("all", "off", {"off", "new", "all", "verbose", "log"}),
     "show_reasoning": _norm_bool,
     "streaming": _norm_bool,
     "interim_assistant_messages": _norm_bool,
@@ -213,7 +163,7 @@ _NORMALISERS: dict[str, Any] = {
     "busy_steer_ack_enabled": _norm_bool,
     "thinking_progress": _norm_bool,
     "cleanup_progress": _norm_cleanup_progress,
-    "live_status": _norm_live_status,
+    "live_status": _norm_tristate("full", "off", {"full", "verb", "off"}, extra_truthy={"all"}),
     "tool_progress_grouping": _norm_choice(("accumulate", "separate")),
     "reasoning_style": _norm_choice(("code", "blockquote", "subtext")),
     "tool_preview_length": _norm_int,
