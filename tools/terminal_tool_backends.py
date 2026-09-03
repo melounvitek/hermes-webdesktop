@@ -321,9 +321,4 @@ def _check_plugin_requirements(config: Dict[str, Any]) -> bool:
 
 # Built-in backend -> requirements checker; unknown backends go to the plugin registry.
 _REQUIREMENT_CHECKERS = {name: functools.partial(_check_requirements, name) for name in _BACKEND_SPECS}
-_check_docker_requirements = _REQUIREMENT_CHECKERS["docker"]
-_check_singularity_requirements = _REQUIREMENT_CHECKERS["singularity"]
-_check_ssh_requirements = _REQUIREMENT_CHECKERS["ssh"]
-_check_modal_requirements = _REQUIREMENT_CHECKERS["modal"]
-_check_vercel_sandbox_requirements = _REQUIREMENT_CHECKERS["vercel_sandbox"]
-_check_daytona_requirements = _REQUIREMENT_CHECKERS["daytona"]
+_check_vercel_sandbox_requirements = _REQUIREMENT_CHECKERS["vercel_sandbox"]  # used by code_execution_tool
