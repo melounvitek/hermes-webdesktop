@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from agent.think_scrubber import StreamingThinkScrubber
+from agent.think_scrubber import StreamingThinkScrubber as _Scrubber
 
 logger = logging.getLogger("gateway.stream_consumer")
 
@@ -69,7 +69,7 @@ class StreamThinkFilterMixin:
             # Case-insensitive: models emit <Think>, <THINKING>, …
             lower_buf = buf.lower()
             if self._in_think_block:
-                best_idx, best_len = StreamingThinkScrubber._find_first_tag(buf, self._CLOSE_THINK_TAGS)
+                best_idx, best_len = _Scrubber._find_first_tag(buf, self._CLOSE_THINK_TAGS)
                 if best_len:
                     self._in_think_block = False
                     buf = buf[best_idx + best_len:]
@@ -86,7 +86,7 @@ class StreamThinkFilterMixin:
                     buf = buf[best_idx + best_len:]
                 else:
                     # Hold back a partial open tag at the tail.
-                    held_back = StreamingThinkScrubber._max_partial_suffix(buf, self._OPEN_THINK_TAGS)
+                    held_back = _Scrubber._max_partial_suffix(buf, self._OPEN_THINK_TAGS)
                     if held_back:
                         self._append_accumulated(buf[:-held_back])
                         self._think_buffer = buf[-held_back:]
@@ -99,7 +99,7 @@ class StreamThinkFilterMixin:
     @staticmethod
     def _strip_orphan_close_tags(text: str) -> str:
         """Remove close tags (plus trailing whitespace) that have no matching open."""
-        return StreamingThinkScrubber._strip_orphan_close_tags(text)
+        return _Scrubber._strip_orphan_close_tags(text)
 
     def _flush_think_buffer(self) -> None:
         """On stream end, flush text held back waiting for a possible open tag."""

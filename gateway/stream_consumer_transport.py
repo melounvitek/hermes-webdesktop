@@ -160,9 +160,10 @@ class StreamTransportMixin:
         Requires a BasePlatformAdapter subclass with class-level
         SUPPORTS_NATIVE_STREAMING and a truthy supports_native_streaming probe.
         """
-        if not isinstance(self.adapter, _BasePlatformAdapter):
-            return False
-        if not getattr(type(self.adapter), "SUPPORTS_NATIVE_STREAMING", False):
+        if not (
+            isinstance(self.adapter, _BasePlatformAdapter)
+            and getattr(type(self.adapter), "SUPPORTS_NATIVE_STREAMING", False)
+        ):
             return False
         probe = getattr(self.adapter, "supports_native_streaming", None)
         if probe is None:
@@ -242,23 +243,22 @@ class StreamTransportMixin:
 
     def _track_preview_ids_from_result(self, result: Any) -> None:
         """Record the primary id plus any continuation ids from an oversized split."""
-        self._track_preview_id(getattr(result, "message_id", None))
-        for mid in (getattr(result, "continuation_message_ids", None) or ()):
-            self._track_preview_id(mid)
         raw = getattr(result, "raw_response", None) or {}
-        if isinstance(raw, dict):
-            for mid in (raw.get("message_ids") or ()):
-                self._track_preview_id(mid)
+        raw_ids = raw.get("message_ids") if isinstance(raw, dict) else None
+        for mid in (
+            getattr(result, "message_id", None),
+            *(getattr(result, "continuation_message_ids", None) or ()),
+            *(raw_ids or ()),
+        ):
+            self._track_preview_id(mid)
 
     def _adapter_prefers_fresh_final(self, text: str) -> bool:
         """Adapter's prefers_fresh_final_streaming hook (e.g. Telegram's richer send path).
 
         False when there's no real preview, no hook, or on any error.
         """
-        if not self._has_real_preview():
-            return False
         fn = getattr(self.adapter, "prefers_fresh_final_streaming", None)
-        if fn is None:
+        if fn is None or not self._has_real_preview():
             return False
         try:
             try:
@@ -290,9 +290,7 @@ class StreamTransportMixin:
         stale_ids = self._stale_preview_ids()
         try:
             result = await self.adapter.send(
-                chat_id=self.chat_id,
-                content=text,
-                metadata=self._metadata_for_send(final=True),
+                chat_id=self.chat_id, content=text, metadata=self._metadata_for_send(final=True),
             )
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)
@@ -357,18 +355,18 @@ class StreamTransportMixin:
         ):
             return True  # too short for a standalone message — accumulate more
 
+        # A failed native/draft transport disables itself and falls through so the
+        # accumulated text still reaches the user via edit/send.
         if self._use_native_streaming:
             ok = await self._native_push(text, finalize=finalize, is_turn_final=is_turn_final)
             if ok is not None:
                 return ok
-            # Fall through so accumulated text still reaches the user via edit/send.
         if self._use_draft_streaming and self._message_id is None:
             ok = await self._draft_push(
                 text, pre_fence_text, finalize=finalize, is_turn_final=is_turn_final,
             )
             if ok is not None:
                 return ok
-            # Failure disabled drafts; fall through to edit/send.
         self._last_edit_overflowed = False
         try:
             if self._message_id is None:

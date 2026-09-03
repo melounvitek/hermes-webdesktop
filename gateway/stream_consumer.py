@@ -368,7 +368,9 @@ class GatewayStreamConsumer(
         """Return True if *text* was already delivered as visible chat content."""
         target = self._clean_for_display(text or "").strip()
         seen = (
-            self._visible_prefix(), *self._delivered_commentary_texts, *self._delivered_segment_texts,
+            self._visible_prefix(),
+            *self._delivered_commentary_texts,
+            *self._delivered_segment_texts,
         )
         return bool(target) and any(sent.strip() == target for sent in seen)
 
@@ -447,10 +449,9 @@ class GatewayStreamConsumer(
 
     def _notify_new_message(self) -> None:
         """Fire the on_new_message callback, swallowing any errors."""
-        if self._on_new_message is None:
-            return
         try:
-            self._on_new_message()
+            if self._on_new_message is not None:
+                self._on_new_message()
         except Exception:
             logger.debug("on_new_message callback error", exc_info=True)
 
@@ -469,10 +470,9 @@ class GatewayStreamConsumer(
         if preserve_no_edit and self._message_id == "__no_edit__":
             return
         # Retain the segment's visible text so has_delivered_text still matches.
-        if self._last_sent_text:
-            finalized = self._clean_for_display(self._last_sent_text).strip()
-            if finalized:
-                self._delivered_segment_texts.append(finalized)
+        finalized = self._clean_for_display(self._last_sent_text).strip()
+        if finalized:
+            self._delivered_segment_texts.append(finalized)
         # Also clears the final flags: a segment boundary means what we delivered was
         # an interim preamble, so a premature setter can't fool the gateway.  Safe:
         # got_done returns before any reset; run.py reads these after the task exits.
