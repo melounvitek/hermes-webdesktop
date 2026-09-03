@@ -26,6 +26,20 @@ from .shared_metrics_contract import (
 
 logger = logging.getLogger(__name__)
 
+# Contract projections in match order; each yields (metric_name, dimensions) or None.
+_COUNTERS = (
+    client_active_counter,
+    lambda event: _named(MODEL_ROUTE_METRIC, model_call_dimensions(event)),
+    lambda event: _named(TOOL_CALL_METRIC, tool_call_dimensions(event)),
+    task_counter,
+    tool_approval_counter,
+    skill_counter,
+)
+
+
+def _named(metric_name: str, dimensions: dict | None) -> tuple[str, dict] | None:
+    return None if dimensions is None else (metric_name, dimensions)
+
 
 class SharedMetricsSubscriber:
     """Persist validated Hermes counters from Relay lifecycle events."""
@@ -56,17 +70,7 @@ class SharedMetricsSubscriber:
     @staticmethod
     def _classify(event: Any) -> tuple[str, dict] | None:
         """Return ``(metric_name, dimensions)`` for the first matching contract, else None."""
-        metric = client_active_counter(event)
-        if metric is not None:
-            return metric
-        for metric_name, project in (
-            (MODEL_ROUTE_METRIC, model_call_dimensions),
-            (TOOL_CALL_METRIC, tool_call_dimensions),
-        ):
-            dimensions = project(event)
-            if dimensions is not None:
-                return metric_name, dimensions
-        return task_counter(event) or tool_approval_counter(event) or skill_counter(event)
+        return next((m for m in (project(event) for project in _COUNTERS) if m is not None), None)
 
     def __call__(self, event: Any) -> None:
         if self._runtime_id is not None:
@@ -87,14 +91,8 @@ class SharedMetricsSubscriber:
                 if metric_name == CLIENT_ACTIVE_METRIC:
                     self.store.record_client_active(self._client_resource)
                 else:
-                    self.store.record_counter(
-                        metric_name,
-                        dimensions,
-                        self._client_resource,
-                    )
+                    self.store.record_counter(metric_name, dimensions, self._client_resource)
             except Exception:
                 logger.warning(
-                    "Unable to persist the Hermes shared metric: %s",
-                    metric_name,
-                    exc_info=True,
+                    "Unable to persist the Hermes shared metric: %s", metric_name, exc_info=True
                 )
