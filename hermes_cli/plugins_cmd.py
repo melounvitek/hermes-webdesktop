@@ -1409,25 +1409,6 @@ _save_memory_provider = functools.partial(_write_config_value, "memory", "provid
 _save_context_engine = functools.partial(_write_config_value, "context", "engine")
 
 
-def _configure_provider_category(
-    title: str, default_label: str, default_name: str, current: str, choices, save
-) -> bool:
-    """Radio picker: the built-in default first, then *choices*; a current value not among
-    them is appended as ``(not found)``. Calls *save* and returns True when the choice changed."""
-    from hermes_cli.curses_ui import curses_radiolist
-    names = [default_name] + [name for name, _desc in choices]
-    items = [default_label] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
-    if current not in names:
-        names.append(current)
-        items.append(f"{current} (not found)")
-    selected = max(i for i, name in enumerate(names) if name == current)
-    new_value = names[curses_radiolist(title=title, items=items, selected=selected)]
-    if new_value == current:
-        return False
-    save(new_value)
-    return True
-
-
 # (title, default label, default name, current-value reader, discovery fn, saver) per provider
 # category. Readers/savers are looked up at call time so module-level patching still applies.
 _PROVIDER_CATEGORY_SPECS = (
@@ -1439,10 +1420,24 @@ _PROVIDER_CATEGORY_SPECS = (
 
 
 def _configure_category_spec(spec) -> bool:
-    """Launch the radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row. Returns True if changed."""
+    """Radio picker for one ``_PROVIDER_CATEGORY_SPECS`` row: the built-in default first, then the
+    discovered choices; a current value not among them is appended as ``(not found)``. Saves and
+    returns True when the choice changed."""
+    from hermes_cli.curses_ui import curses_radiolist
     title, default_label, default_name, current, discover, save = spec
-    return _configure_provider_category(
-        f"{title} (select one)", f"{default_label} (default)", default_name, current(), discover(), save)
+    current = current()
+    choices = discover()
+    names = [default_name] + [name for name, _desc in choices]
+    items = [f"{default_label} (default)"] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
+    if current not in names:
+        names.append(current)
+        items.append(f"{current} (not found)")
+    selected = max(i for i, name in enumerate(names) if name == current)
+    new_value = names[curses_radiolist(title=f"{title} (select one)", items=items, selected=selected)]
+    if new_value == current:
+        return False
+    save(new_value)
+    return True
 
 
 def _provider_categories() -> list:
