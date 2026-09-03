@@ -163,11 +163,10 @@ def _media_cache_roots() -> list:
 
 
 def _permitted_host_read_target(p: Path, ctx: ResolveContext) -> Optional[Path]:
-    """Host path to read, or ``None`` if a host read is not permitted.
+    """Host path to read, or ``None`` (caller exec-reads inside the sandbox instead).
 
-    Local backend: any path. Non-local: only paths resolving inside a media cache root (a
-    container-visible cache path is first translated back to its host mount); anything else
-    returns ``None`` so the caller exec-reads inside the sandbox instead.
+    Local backend: any path. Non-local: only paths inside a media cache root (a
+    container-visible cache path is first translated back to its host mount).
     """
     if _is_local_terminal_backend():
         try:
@@ -219,9 +218,8 @@ async def _resolve_container_fallback(
     path under a sandbox must never leak via a host fallback).
 
     Cold-start retry: under Docker the first exec against a fresh container can fail (empty
-    pipe) while an identical second call succeeds, so retry once after a short delay. On final
-    failure the container's own output is folded into the error so "no such file" /
-    "permission denied" / "never came up" are distinguishable.
+    pipe) while a second succeeds. On final failure the container's output is folded into the
+    error so "no such file" / "permission denied" / "never came up" are distinguishable.
     """
     import shlex
 
@@ -233,10 +231,9 @@ async def _resolve_container_fallback(
             f"session is available to read it",
             src=src, origin="container")
 
-    # Bound the read INSIDE the sandbox: head -c caps at ingest-limit+1 so /dev/zero can't
-    # stream unbounded base64 into host memory (the +1 distinguishes "at the cap" from
-    # "over"). The input redirect avoids argv, so leading-dash paths can't parse as options;
-    # base64 -w0 is GNU-only, hence tr -d for BusyBox. env.execute blocks — keep it off the loop.
+    # Bound the read INSIDE the sandbox: head -c caps at ingest-limit+1 (+1 distinguishes "at the
+    # cap" from "over") so /dev/zero can't stream unbounded base64 into host memory. The input
+    # redirect avoids argv (leading-dash paths); tr -d instead of GNU-only base64 -w0 (BusyBox).
     cmd = f"head -c {_MAX_INGEST_BYTES + 1} < {shlex.quote(str(p))} | base64 | tr -d '\\n'"
 
     last_res: dict = {"returncode": 1, "output": ""}
@@ -263,12 +260,8 @@ async def _resolve_container_fallback(
 def _finalize(
     data: bytes, declared_mime: str, origin: str, src: str, permitted: tuple = ("image",)
 ) -> ResolvedImage:
-    """Chokepoint: 50MB ingest cap + type check.
-
-    Images are typed by magic bytes. Video (opt-in) is typed by extension plus an mp4
-    container sniff — sufficient because every downstream consumer re-validates, so a wrong
-    guess is a clean rejection there, not a hole here.
-    """
+    """Chokepoint: 50MB ingest cap + type check. Images by magic bytes; video (opt-in) by
+    extension + mp4 sniff — enough because every downstream consumer re-validates."""
     from tools.vision_tools import _detect_image_mime_type_from_bytes
 
     if len(data) > _MAX_INGEST_BYTES:
@@ -310,10 +303,9 @@ async def resolve_local_source_to_data_url(
 ) -> str:
     """Convert a path-like media source into a ``data:`` URL via the resolver.
 
-    Dispatch-layer chokepoint for generation tools: providers historically read model-supplied
-    local paths off the HOST regardless of backend — broken under a sandbox and inconsistent
-    with vision's confinement. URL-shaped sources (http/https/data) pass through untouched.
-    Callers apply this only under a non-local backend (local keeps host reads).
+    Dispatch-layer chokepoint for generation tools so providers never read model-supplied paths
+    off the HOST under a sandbox. URL-shaped sources pass through; callers apply this only under
+    a non-local backend.
     """
     s = (src or "").strip()
     if not s or s.lower().startswith(("http://", "https://", "data:")):

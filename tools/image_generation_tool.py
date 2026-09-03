@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Image generation via FAL.ai (model picked in ``hermes tools``, persisted to ``image_gen.model``).
 
-``FAL_MODELS`` (``tools.image_generation_catalog``) holds per-model metadata;
-``_build_fal_payload()`` / ``_build_fal_edit_payload()`` translate unified inputs into
-the model payload filtered to its ``supports`` whitelist so models never receive rejected
+``_build_fal_payload()`` / ``_build_fal_edit_payload()`` translate unified inputs into the
+``FAL_MODELS`` payload filtered to its ``supports`` whitelist so models never receive rejected
 keys. Clarity upscaling is strictly per-call opt-in: default-on degraded text/CJK/faces.
 """
 
@@ -15,8 +14,8 @@ import threading
 import uuid
 from typing import Any, Dict, Optional
 
-# Imported lazily by _load_fal_client(): the eager import cost ~64 ms on every CLI cold
-# start. Tests that monkeypatch this attribute keep working (loader short-circuits when truthy).
+# Imported lazily by _load_fal_client() (~64 ms on every CLI cold start); a test-monkeypatched
+# value short-circuits the loader.
 fal_client: Any = None
 
 
@@ -58,10 +57,9 @@ _managed_fal_client_lock = threading.Lock()
 def _resolve_managed_fal_gateway():
     """Managed gateway config for the stored `hermes tools` selection, or ``None`` for direct FAL.
 
-    ``"nous"`` (or legacy ``use_gateway: true``) → managed ONLY: not entitled/unreachable is a
-    selection-naming error, never a silent FAL_KEY fallback. Any other stored provider → direct
-    ONLY: missing FAL_KEY is an error naming FAL_KEY and the selection, never a silent managed
-    reroute. Never configured → legacy autodetect: direct if FAL_KEY, else managed if resolvable.
+    ``"nous"`` (or legacy ``use_gateway: true``) → managed ONLY (unreachable = selection-naming
+    error, never a silent FAL_KEY fallback). Other stored provider → direct ONLY (missing FAL_KEY
+    = error naming the selection). Never configured → autodetect: direct if FAL_KEY, else managed.
     """
     selected = read_selection("image_gen")
     if selected == NOUS_MANAGED_PROVIDER:
@@ -73,9 +71,9 @@ def _resolve_managed_fal_gateway():
             ))
         return gateway
     if selected is not None:
-        if not fal_key_is_configured():
-            raise ValueError(selection_error("image_gen", selected, "FAL_KEY is not set"))
-        return None
+        if fal_key_is_configured():
+            return None
+        raise ValueError(selection_error("image_gen", selected, "FAL_KEY is not set"))
     # Never-configured category: legacy credential autodetect (do NOT persist).
     return None if fal_key_is_configured() else resolve_managed_tool_gateway("fal-queue")
 
@@ -103,15 +101,13 @@ class ImageGenerationInterrupted(Exception):
 def _wait_fal_result(handler, *, poll_seconds: float = 0.5):
     """Interrupt-aware ``handler.get()``: the SDK blocks 30-60s, hiding user interrupts.
 
-    Runs the get on a daemon worker and polls the per-thread interrupt bit between join
-    slices; on interrupt the worker is abandoned (remote job keeps running) and
-    ``ImageGenerationInterrupted`` is raised.
+    The get runs on a daemon worker; the interrupt bit is polled between join slices and on
+    interrupt the worker is abandoned (remote job keeps running).
     """
     from tools.interrupt import is_interrupted
 
     result_box: list = []
     error_box: list = []
-
     def _get():
         try:
             result_box.append(handler.get())
@@ -153,13 +149,11 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
                     "managed FAL image generation", force_fresh=True,
                 )
             raise ValueError(
-                f"Nous Subscription gateway rejected model '{model}' "
-                f"(HTTP {status}). This model may not yet be enabled on "
-                f"the Nous Portal's FAL proxy. Either:\n"
+                f"Nous Subscription gateway rejected model '{model}' (HTTP {status}). This model "
+                f"may not yet be enabled on the Nous Portal's FAL proxy. Either:\n"
                 f"  • Set FAL_KEY in your environment to use FAL.ai directly, or\n"
                 f"  • Pick a different model via `hermes tools` → Image Generation."
-                f"{gateway_message}"
-            ) from exc
+                f"{gateway_message}") from exc
         raise
 
 
@@ -184,12 +178,8 @@ def _read_configured_image_model():
 
 
 def _read_configured_image_provider():
-    """``image_gen.provider`` from config.yaml, or None.
-
-    The plugin registry is consulted only when this is explicitly set — unset keeps users on
-    the in-tree FAL fallback even when other providers are registered. ``"fal"`` routes through
-    ``plugins/image_gen/fal/``, which delegates back here via call-time indirection.
-    """
+    """``image_gen.provider`` from config.yaml, or None (unset keeps the in-tree FAL fallback even
+    when other providers are registered; ``"fal"`` routes via ``plugins/image_gen/fal/``)."""
     return _read_image_gen_key("provider")
 
 
@@ -219,9 +209,9 @@ def _build_payload(model_id, prompt, aspect_ratio, seed, overrides, image_urls=N
     """Text-to-image / edit payload (``image_urls`` selects edit mode): defaults + native size
     spec + overrides, filtered to the model whitelist.
 
-    Edit endpoints mostly auto-infer size from the input, so the size key is sent only when
-    ``edit_supports`` advertises it. ``prompt`` (and ``image_urls`` on edits) are required by
-    every FAL endpoint and survive a whitelist gap so a catalog mistake can't send a broken request.
+    Edit endpoints mostly auto-infer size, so the size key is sent only when ``edit_supports``
+    lists it. ``prompt`` (and ``image_urls`` on edits) survive a whitelist gap: every FAL
+    endpoint requires them, so a catalog mistake can't send a broken request.
     """
     meta = FAL_MODELS[model_id]
     edit = image_urls is not None
@@ -265,12 +255,9 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
     try:
         logger.info("Upscaling image with Clarity Upscaler...")
         handler = _submit_fal_request(UPSCALER_MODEL, arguments={
-            "image_url": image_url,
-            "prompt": f"{UPSCALER_DEFAULT_PROMPT}, {original_prompt}",
-            "upscale_factor": UPSCALER_FACTOR,
-            "negative_prompt": UPSCALER_NEGATIVE_PROMPT,
-            "creativity": UPSCALER_CREATIVITY,
-            "resemblance": UPSCALER_RESEMBLANCE,
+            "image_url": image_url, "prompt": f"{UPSCALER_DEFAULT_PROMPT}, {original_prompt}",
+            "upscale_factor": UPSCALER_FACTOR, "negative_prompt": UPSCALER_NEGATIVE_PROMPT,
+            "creativity": UPSCALER_CREATIVITY, "resemblance": UPSCALER_RESEMBLANCE,
             "guidance_scale": UPSCALER_GUIDANCE_SCALE,
             "num_inference_steps": UPSCALER_NUM_INFERENCE_STEPS,
             "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
@@ -296,8 +283,8 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
 
 # --- Artifact path hinting for non-local terminal backends ---
 _CONTAINER_HOME_ENVS = {"DockerEnvironment", "SingularityEnvironment", "ModalEnvironment"}
-# No environment yet: only backends with deterministic cache roots can be translated without
-# side effects. SSH uses a shell-visible tilde path; its first sync uploads the cache file.
+# No env yet: only deterministic cache roots translate side-effect free (SSH: tilde path; its
+# first sync uploads the cache file).
 _CACHE_BASE_BY_BACKEND = {"docker": "/root/.hermes", "singularity": "/root/.hermes",
                           "modal": "/root/.hermes", "ssh": "~/.hermes"}
 
@@ -403,16 +390,13 @@ def _prepare_fal_request(model_id, meta, prompt, aspect_ratio, seed, overrides, 
     if not (fal_key_is_configured() or _resolve_managed_fal_gateway()):
         raise ValueError(_build_no_backend_setup_message())
 
-    edit_endpoint = meta.get("edit_endpoint")
-    display = meta.get("display", model_id)
+    edit_endpoint, display = meta.get("edit_endpoint"), meta.get("display", model_id)
     # Fail clearly rather than silently dropping sources and producing an unrelated picture.
     if source_images and not edit_endpoint:
         raise ValueError(
-            f"Model '{display}' ({model_id}) is not "
-            f"capable of image-to-image / editing. Provide a text-only "
-            f"prompt (omit image_url), or switch to an edit-capable model "
-            f"via `hermes tools` → Image Generation."
-        )
+            f"Model '{display}' ({model_id}) is not capable of image-to-image / editing. "
+            f"Provide a text-only prompt (omit image_url), or switch to an edit-capable model "
+            f"via `hermes tools` → Image Generation.")
 
     aspect_lc = (aspect_ratio or DEFAULT_ASPECT_RATIO).lower().strip()
     if aspect_lc not in VALID_ASPECT_RATIOS:
@@ -442,9 +426,9 @@ def image_generate_tool(
 ) -> str:
     """Generate (or, with source images + an ``edit_endpoint`` model, edit) an image via FAL.
 
-    Extra kwargs are overrides for direct Python callers, filtered per-model via the
-    ``supports`` / ``edit_supports`` whitelist (dropped silently so legacy callers survive
-    model switches). Returns JSON ``{"success", "image", "modality", "error", "error_type"}``.
+    Extra kwargs are overrides filtered per-model via ``supports`` / ``edit_supports`` (dropped
+    silently so callers survive model switches). Returns JSON ``{"success", "image", "modality",
+    "error", "error_type"}``.
     """
     model_id, meta = _resolve_fal_model()
     candidates = [image_url, *(reference_image_urls if isinstance(reference_image_urls, (list, tuple)) else [])]
@@ -483,9 +467,8 @@ def image_generate_tool(
         if not images:
             raise ValueError("No images were generated")
 
-        # An explicit ``upscale`` wins over the catalog default, including for edits. The
-        # catalog default never upscales edits: Clarity is a text-to-image quality pass and
-        # must not silently alter edit compositions.
+        # Explicit ``upscale`` wins, including for edits; the catalog default never upscales
+        # edits (Clarity is a text-to-image pass and must not silently alter compositions).
         if upscale is not None:
             should_upscale = bool(upscale)
         else:
@@ -520,12 +503,11 @@ def check_fal_api_key() -> bool:
     A stored-but-broken selection reports False here (registry gating); the naming error
     surfaces at call time from ``_resolve_managed_fal_gateway``.
     """
-    selected = read_selection("image_gen")
-    if selected == NOUS_MANAGED_PROVIDER:
-        return bool(resolve_managed_tool_gateway("fal-queue"))
-    if selected is not None:
-        return fal_key_is_configured()
-    return bool(fal_key_is_configured() or resolve_managed_tool_gateway("fal-queue"))
+    try:
+        gateway = _resolve_managed_fal_gateway()
+    except ValueError:
+        return False
+    return bool(gateway) or fal_key_is_configured()
 
 
 def _build_no_backend_setup_message() -> str:
@@ -539,22 +521,12 @@ def _build_no_backend_setup_message() -> str:
         gateway_message = nous_tool_gateway_unavailable_message("managed FAL image generation")
         if gateway_message:
             lines.append(f"  - {gateway_message}")
-    lines += [
-        "",
-        "To enable image generation, do one of:",
-        "  1. Get a free API key at https://fal.ai and set "
-        "FAL_KEY=<your-key> (then restart the session)",
-    ]
+    lines += ["", "To enable image generation, do one of:",
+              "  1. Get a free API key at https://fal.ai and set FAL_KEY=<your-key> (then restart the session)"]
     if managed:
-        lines.append(
-            "  2. Sign in to a Nous account that has the managed FAL "
-            "gateway enabled (`hermes setup`)"
-        )
-    lines.append(
-        "  3. Configure a different image_gen provider via `hermes tools` "
-        "→ Image Generation (run `hermes plugins list` to see installed "
-        "backends)"
-    )
+        lines.append("  2. Sign in to a Nous account that has the managed FAL gateway enabled (`hermes setup`)")
+    lines.append("  3. Configure a different image_gen provider via `hermes tools` → Image Generation "
+                 "(run `hermes plugins list` to see installed backends)")
     return "\n".join(lines)
 
 
@@ -661,12 +633,8 @@ def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
 ):
-    """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL.
-
-    Fires when ``image_gen.provider`` is anything but unset / ``"fal"`` / ``"nous"`` (those run
-    the legacy pipeline; ``"nous"`` via the managed fal-queue gateway). Edit args are
-    forwarded for the backend's edit endpoint; providers without ``upscale`` ignore it via ``**kwargs``.
-    """
+    """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
+    (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
     if configured is None:
         return None
@@ -684,11 +652,8 @@ def _dispatch_to_plugin_provider(
             logger.debug("image_gen plugin force-refresh skipped: %s", exc)
     if provider is None:
         return _provider_error(
-            f"image_gen.provider='{configured}' is set but no plugin "
-            f"registered that name. Run `hermes plugins list` to see "
-            f"available image gen backends.",
-            "provider_not_registered",
-        )
+            f"image_gen.provider='{configured}' is set but no plugin registered that name. "
+            f"Run `hermes plugins list` to see available image gen backends.", "provider_not_registered")
 
     pname = getattr(provider, "name", "?")
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
@@ -702,13 +667,10 @@ def _dispatch_to_plugin_provider(
             logger.warning("image_gen provider '%s' rejected image-to-image kwargs "
                            "(signature too narrow): %s", pname, exc)
             return _provider_error(
-                f"Provider '{pname}' does not "
-                f"support image-to-image / editing (its generate() "
-                f"signature is out of date with the image_generate schema). "
-                f"Omit image_url for text-to-image, or pick a backend that "
-                f"supports editing via `hermes tools` → Image Generation.",
-                "modality_unsupported",
-            )
+                f"Provider '{pname}' does not support image-to-image / editing (its generate() "
+                f"signature is out of date with the image_generate schema). Omit image_url for "
+                f"text-to-image, or pick a backend that supports editing via `hermes tools` → "
+                f"Image Generation.", "modality_unsupported")
         logger.warning("Image gen provider '%s' raised TypeError: %s", pname, exc)
         return _provider_error(f"Provider '{pname}' error: {exc}", "provider_exception")
     except Exception as exc:
@@ -734,9 +696,8 @@ def _maybe_route_managed_krea(
 ) -> Optional[str]:
     """JSON result from the managed Krea gateway, or ``None`` to fall through.
 
-    Fires only when the configured model is a native ``krea-2-*`` id AND no
-    ``image_gen.provider`` other than ``"nous"`` is stored (a picker choice dispatches
-    normally) AND the managed Krea gateway is resolvable.
+    Fires only for a native ``krea-2-*`` model with no ``image_gen.provider`` other than
+    ``"nous"`` stored (a picker choice dispatches normally) and a resolvable Krea gateway.
     """
     configured_provider = _read_configured_image_provider()
     if configured_provider is not None and configured_provider != NOUS_MANAGED_PROVIDER:
@@ -772,11 +733,9 @@ def _maybe_route_managed_krea(
 def _confine_source_images(image_url, reference_image_urls, task_id, *, permitted: tuple = ("image",)):
     """Resolve path-like sources to ``data:`` URLs under a non-local terminal backend.
 
-    Goes through ``tools.image_source`` (in-sandbox exec-read, media-cache host reads,
-    credential guard) before any provider sees them, so generation obeys the same
-    confinement boundary as vision/video analysis and sandbox-only files work as edit
-    sources. URLs/data: pass through; the local backend is a no-op (providers keep host reads).
-    Returns ``(image_url, reference_image_urls, error_json_or_None)``.
+    Routes through ``tools.image_source`` (in-sandbox exec-read, media-cache host reads,
+    credential guard) so generation obeys the same confinement as vision. URLs/data: pass
+    through; local backend is a no-op. Returns ``(image_url, reference_image_urls, error_json_or_None)``.
     """
     if (os.getenv("TERMINAL_ENV") or "local").strip().lower() in ("", "local"):
         return image_url, reference_image_urls, None
@@ -806,16 +765,14 @@ def _handle_image_generate(args, **kw):
     upscale = args.get("upscale")
     task_id = kw.get("task_id")
 
-    # Confinement chokepoint BEFORE any dispatch: plugin, managed Krea and in-tree FAL
-    # all receive sandbox-confined bytes.
+    # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
     image_url, reference_image_urls, confine_error = _confine_source_images(
         args.get("image_url"), args.get("reference_image_urls"), task_id)
     if confine_error is not None:
         return confine_error
 
-    # Order matters: explicit plugin provider (incl. provider == "krea"), then
-    # model-driven managed Krea interception (only when no provider is set, so
-    # the BYO/direct FAL path stays untouched), then the in-tree FAL pipeline.
+    # Order matters: explicit plugin provider (incl. "krea"), then model-driven managed Krea
+    # interception (only when no provider is set, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
     raw = None
@@ -827,20 +784,18 @@ def _handle_image_generate(args, **kw):
 
 
 # --- Dynamic schema — reflect the active backend's image-to-image capability ---
-# Telling the model up front whether it can edit saves a wasted turn. Memoized by
-# config.yaml mtime in model_tools.get_tool_definitions(), so it rebuilds on switch.
+# Advertising edit capability up front saves a wasted turn. Memoized by config.yaml mtime in
+# model_tools.get_tool_definitions(), so it rebuilds on switch.
 _NO_CAPABILITIES = {"modalities": ["text"], "max_reference_images": 0, "supports_upscale": False}
 
 
 def _active_image_capabilities() -> Dict[str, Any]:
     """Best-effort capabilities of the active backend/model; never raises.
 
-    Mirrors runtime dispatch: a set ``image_gen.provider`` asks that plugin, otherwise the
-    FAL catalog. Fail-closed: an undeclared capability is advertised as absent (an
-    under-declaring provider is that provider's bug, not a safety problem).
+    Mirrors runtime dispatch: a set ``image_gen.provider`` asks that plugin, else the FAL
+    catalog. Fail-closed: an undeclared capability is advertised as absent.
     """
     info: Dict[str, Any] = dict(_NO_CAPABILITIES)
-
     configured_provider = _read_configured_image_provider()
     if configured_provider and configured_provider != "fal":
         try:
@@ -861,7 +816,6 @@ def _active_image_capabilities() -> Dict[str, Any]:
                 return info
         except Exception:  # noqa: BLE001
             pass
-
     # In-tree FAL path (provider unset or == "fal").
     try:
         model_id, meta = _resolve_fal_model()
@@ -870,8 +824,7 @@ def _active_image_capabilities() -> Dict[str, Any]:
         info["model"] = meta.get("display", model_id)
         info["modalities"] = ["text", "image"] if can_edit else ["text"]
         info["max_reference_images"] = int(meta.get("max_reference_images") or 1) if can_edit else 0
-        # Clarity is a separate endpoint available on request for ANY catalog model
-        # (the per-model ``upscale`` key is only the default flag).
+        # Clarity is available on request for ANY catalog model (``upscale`` is only the default).
         info["supports_upscale"] = True
     except Exception:  # noqa: BLE001
         pass
@@ -945,13 +898,8 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
 
 
 registry.register(
-    name="image_generate",
-    toolset="image_gen",
-    schema=IMAGE_GENERATE_SCHEMA,
-    handler=_handle_image_generate,
-    check_fn=check_image_generation_requirements,
-    requires_env=[],
+    name="image_generate", toolset="image_gen", schema=IMAGE_GENERATE_SCHEMA,
+    handler=_handle_image_generate, check_fn=check_image_generation_requirements, requires_env=[],
     is_async=False,   # sync fal_client API to avoid "Event loop is closed" in gateway
-    emoji="🎨",
-    dynamic_schema_overrides=_build_dynamic_image_schema,
+    emoji="🎨", dynamic_schema_overrides=_build_dynamic_image_schema,
 )

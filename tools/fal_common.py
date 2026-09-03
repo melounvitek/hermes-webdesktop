@@ -15,8 +15,7 @@ from urllib.parse import urlencode
 def import_fal_client() -> Any:
     """Import ``fal_client`` (via ``lazy_deps`` when available); raises ImportError if unavailable.
 
-    Not imported at cold start (~64 ms per CLI invocation). Callers cache the result on their
-    own module global so tests can monkeypatch that module's ``fal_client`` attribute.
+    Callers cache the result on their own module global so tests can monkeypatch it.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -54,11 +53,8 @@ def _require(value: Any, what: str) -> Any:
 
 
 class _ManagedFalSyncClient:
-    """Per-instance wrapper driving a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives.
-
-    Carries its own ``fal_client`` reference instead of a module global so the caller decides
-    which module's (possibly test-patched) ``fal_client`` is used.
-    """
+    """Drives a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives; carries
+    its own ``fal_client`` reference so the caller decides which (possibly test-patched) module is used."""
 
     def __init__(self, fal_client: Any, *, key: str, queue_run_origin: str):
         sync_client_class = _require(getattr(fal_client, "SyncClient", None), "fal_client.SyncClient")
