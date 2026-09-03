@@ -25,16 +25,13 @@ logger = logging.getLogger("cli")
 
 def _cprint(text: str) -> None:
     from cli import _cprint as _impl
-
     _impl(text)
 
 
 def _git(args, cwd, timeout: float = 10, **kwargs):
     """Run ``git *args`` in *cwd* capturing UTF-8 text; raises like ``subprocess.run``."""
-    return subprocess.run(
-        ["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=timeout, cwd=cwd, **kwargs,
-    )
+    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, cwd=cwd, **kwargs)
 
 
 def _git_out(args, cwd, timeout: float = 10, **kwargs) -> Optional[str]:
@@ -59,20 +56,16 @@ def _normalize_git_bash_path(p: Optional[str]) -> Optional[str]:
         return p
     m = re.match(r"^/(?:(?:cygdrive|mnt)/)?([a-zA-Z])/(.*)$", p)
     if m:
-        drive, rest = m.group(1), m.group(2)
-        return f"{drive.upper()}:\\{rest.replace('/', chr(92))}"
+        return f"{m.group(1).upper()}:\\{m.group(2).replace('/', chr(92))}"
     return p
 
 
 def _git_repo_root() -> Optional[str]:
     """Return the git repo root for CWD (Git-Bash-normalized), or None if not in a repo."""
     try:
-        root = _git_out(["rev-parse", "--show-toplevel"], None, timeout=5)
-        if root is not None:
-            return _normalize_git_bash_path(root)
+        return _normalize_git_bash_path(_git_out(["rev-parse", "--show-toplevel"], None, timeout=5))
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _path_is_within_root(path: Path, root: Path) -> bool:
@@ -133,9 +126,8 @@ def _maintain_pack_health(repo_root: str) -> None:
         logger.debug("pack maintenance skipped: %s", e)
 
 
-def _resolve_worktree_base(
-    repo_root: str, fetch_timeout: float = 5, freshness_window: float = 300,
-) -> tuple:
+def _resolve_worktree_base(repo_root: str, fetch_timeout: float = 5,
+                           freshness_window: float = 300) -> tuple:
     """Resolve the freshest base ref to branch a new worktree from -> ``(base_ref, label)``.
 
     The standalone clone's ``HEAD`` can lag the remote by hundreds of commits. Each step
@@ -163,10 +155,7 @@ def _resolve_worktree_base(
             gd = _run(["rev-parse", "--git-dir"])
             if gd.returncode != 0:
                 return None
-            git_dir = Path(gd.stdout.strip())
-            if not git_dir.is_absolute():
-                git_dir = Path(repo_root) / git_dir
-            fetch_head = git_dir / "FETCH_HEAD"
+            fetch_head = Path(repo_root) / gd.stdout.strip() / "FETCH_HEAD"
             if not fetch_head.exists():
                 return None
             return max(0.0, time.time() - fetch_head.stat().st_mtime)
@@ -206,9 +195,8 @@ def _resolve_worktree_base(
     # 2. Remote default branch (origin/HEAD).
     try:
         head_ref = _run(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"])
-        default_ref = ""
-        if head_ref.returncode == 0:
-            default_ref = head_ref.stdout.strip().replace("refs/remotes/", "", 1)
+        default_ref = (head_ref.stdout.strip().replace("refs/remotes/", "", 1)
+                       if head_ref.returncode == 0 else "")
         if not default_ref:
             # origin/HEAD not set locally; ask the remote (network — capped like the fetch).
             show = _run(["remote", "show", "origin"], timeout=max(fetch_timeout, 5))
@@ -291,18 +279,13 @@ def _copy_worktree_includes(repo_root: str, wt_path: Path) -> None:
                     if sys.platform != "win32":
                         raise
                     logger.info(
-                        ".worktreeinclude: symlink failed (%s) — falling back to copytree on Windows.",
-                        _sym_err,
+                        ".worktreeinclude: symlink failed (%s) — falling back to copytree on Windows.", _sym_err
                     )
                     try:
-                        shutil.copytree(
-                            str(src_resolved), str(dst), symlinks=True, dirs_exist_ok=False,
-                        )
+                        shutil.copytree(str(src_resolved), str(dst), symlinks=True, dirs_exist_ok=False)
                     except Exception as _copy_err:
-                        logger.warning(
-                            ".worktreeinclude: copy fallback also failed for %s -> %s: %s",
-                            src, dst, _copy_err,
-                        )
+                        logger.warning(".worktreeinclude: copy fallback also failed for %s -> %s: %s",
+                                       src, dst, _copy_err)
     except Exception as e:
         logger.debug("Error copying .worktreeinclude entries: %s", e)
 
@@ -318,10 +301,8 @@ def _worktree_add(repo_root: str, wt_path: Path, branch_name: str, base_ref: str
     def _add(cfg):
         # 120s, not 30: on a multi-agent box the ~10k-file materialization contends
         # with sibling checkouts for the disk (measured 113s wall under load vs 1.2s idle).
-        return _git(
-            [*cfg, "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
-            repo_root, timeout=120, stdin=subprocess.DEVNULL, env=noninteractive_git_env(),
-        )
+        return _git([*cfg, "worktree", "add", str(wt_path), "-b", branch_name, base_ref], repo_root,
+                    timeout=120, stdin=subprocess.DEVNULL, env=noninteractive_git_env())
 
     # checkout.workers parallelizes file materialization (0.6s serial -> ~0.2s);
     # unknown -c keys are ignored by older git, and the retry drops them anyway.
@@ -331,10 +312,8 @@ def _worktree_add(repo_root: str, wt_path: Path, branch_name: str, base_ref: str
             if base_ref != "HEAD":
                 # A partial fetch can leave the remote ref unusable — retry from local
                 # HEAD so creation never hard-fails on a sync hiccup.
-                logger.warning(
-                    "worktree add from %s failed (%s); retrying from local HEAD",
-                    base_ref, result.stderr.strip(),
-                )
+                logger.warning("worktree add from %s failed (%s); retrying from local HEAD",
+                               base_ref, result.stderr.strip())
                 _cleanup_failed_worktree_add(repo_root, wt_path, branch_name)
                 base_ref, base_label = "HEAD", "HEAD (fallback — remote base failed)"
                 result = _add([])
@@ -381,10 +360,8 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
 
     _ensure_worktrees_gitignored(repo_root)
 
-    if sync_base:
-        base_ref, base_label = _resolve_worktree_base(repo_root)
-    else:
-        base_ref, base_label = "HEAD", "HEAD (local — worktree_sync disabled)"
+    base_ref, base_label = (_resolve_worktree_base(repo_root) if sync_base
+                            else ("HEAD", "HEAD (local — worktree_sync disabled)"))
 
     added = _worktree_add(repo_root, wt_path, branch_name, base_ref, base_label)
     if added is None:
@@ -416,16 +393,14 @@ def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> boo
     it should ``_deepen_shallow_repo`` first (the startup pruner does).
     """
     try:
-        remote_refs = _git_out(
-            ["for-each-ref", "--format=%(refname)", "refs/remotes"], worktree_path, timeout=timeout
-        )
+        remote_refs = _git_out(["for-each-ref", "--format=%(refname)", "refs/remotes"], worktree_path,
+                               timeout=timeout)
         if remote_refs is None:
             return True
         if not remote_refs:
             return False
-        unpushed = _git_out(
-            ["log", "--oneline", "HEAD", "--not", "--remotes"], worktree_path, timeout=timeout
-        )
+        unpushed = _git_out(["log", "--oneline", "HEAD", "--not", "--remotes"], worktree_path,
+                            timeout=timeout)
         return unpushed is None or bool(unpushed)
     except Exception:
         return True
@@ -477,11 +452,8 @@ def _deepen_shallow_repo(repo_root: str, timeout: int = 600) -> bool:
                 return False
             if result.returncode == 0:
                 break
-            logger.debug(
-                "git fetch --unshallow%s failed: %s",
-                " " + " ".join(extra) if extra else "",
-                result.stderr.strip()[-500:],
-            )
+            logger.debug("git fetch --unshallow%s failed: %s", " " + " ".join(extra) if extra else "",
+                         result.stderr.strip()[-500:])
     except Exception as e:
         logger.debug("Deepening shallow repo failed (non-fatal): %s", e)
         return False
@@ -507,10 +479,8 @@ def _load_worktree_merge_cache() -> Dict[str, bool]:
         entries = json.loads(_worktree_merge_cache_path().read_text(encoding="utf-8")).get("verdicts")
     except Exception:
         return {}
-    if not isinstance(entries, dict):
-        return {}
     # A hand-edited or partially written cache must never inject a non-bool verdict.
-    return {k: v for k, v in entries.items() if isinstance(v, bool)}
+    return {k: v for k, v in entries.items() if isinstance(v, bool)} if isinstance(entries, dict) else {}
 
 
 def _save_worktree_merge_cache(verdicts: Dict[str, bool]) -> None:
@@ -545,29 +515,22 @@ def _worktree_commits_all_merged_upstream(
     *cache* memoizes the verdict on ``(base_sha, head_sha, max_ahead)`` — the exact
     inputs ``git cherry`` consumes, so a hit is identical to recomputation.
     """
-    base = None
-    for candidate in ("origin/HEAD", "origin/main", "origin/master"):
-        try:
-            if _git_out(["rev-parse", "--verify", "--quiet", candidate], worktree_path, timeout=timeout):
-                base = candidate
-                break
-        except Exception:
-            return False
-    if base is None:
-        return False
-
     try:
+        base = next((c for c in ("origin/HEAD", "origin/main", "origin/master")
+                     if _git_out(["rev-parse", "--verify", "--quiet", c], worktree_path, timeout=timeout)),
+                    None)
+        if base is None:
+            return False
+
         cache_key = None
         if cache is not None:
-            revs = _git_out(
-                ["rev-parse", f"{base}^{{commit}}", "HEAD^{commit}"], worktree_path, timeout=timeout
-            )
-            if revs is not None:
-                shas = revs.split()
-                if len(shas) == 2:
-                    cache_key = f"{shas[0]}..{shas[1]}:{max_ahead}"
-                    if cache_key in cache:
-                        return cache[cache_key]
+            revs = _git_out(["rev-parse", f"{base}^{{commit}}", "HEAD^{commit}"], worktree_path,
+                            timeout=timeout)
+            shas = (revs or "").split()
+            if len(shas) == 2:
+                cache_key = f"{shas[0]}..{shas[1]}:{max_ahead}"
+                if cache_key in cache:
+                    return cache[cache_key]
 
         def _memo(verdict: bool) -> bool:
             if cache is not None and cache_key is not None:
@@ -596,9 +559,7 @@ def _worktree_commits_all_merged_upstream(
 def _worktree_current_branch(worktree_path: str, timeout: int) -> Optional[str]:
     """Checked-out branch name, or None when detached or git fails. May raise on subprocess errors."""
     branch = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], worktree_path, timeout=timeout)
-    if not branch or branch == "HEAD":  # detached
-        return None
-    return branch
+    return branch if branch and branch != "HEAD" else None  # "HEAD" = detached
 
 
 def _worktree_branch_pr_merged(
@@ -652,12 +613,9 @@ def _fetch_remote_branch_heads(repo_root: str, timeout: int = 20) -> Optional[Di
         result = _git(["ls-remote", "--heads", "origin"], repo_root, timeout=timeout)
         if result.returncode != 0:
             return None
-        heads: Dict[str, str] = {}
-        for line in result.stdout.splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2 and parts[1].startswith("refs/heads/"):
-                heads[parts[1][len("refs/heads/"):].strip()] = parts[0].strip()
-        return heads
+        pairs = (line.split("\t", 1) for line in result.stdout.splitlines())
+        return {p[1][len("refs/heads/"):].strip(): p[0].strip()
+                for p in pairs if len(p) == 2 and p[1].startswith("refs/heads/")}
     except Exception:
         return None
 
@@ -677,13 +635,9 @@ def _worktree_branch_pushed_exact(
         return False
     try:
         branch = _worktree_current_branch(worktree_path, timeout)
-        if branch is None:
-            return False
-        remote_sha = remote_heads.get(branch)
-        if not remote_sha:
-            return False
-        local = _git_out(["rev-parse", "HEAD"], worktree_path, timeout=timeout)
-        return local is not None and local == remote_sha
+        remote_sha = remote_heads.get(branch) if branch is not None else None
+        return bool(remote_sha) and (
+            _git_out(["rev-parse", "HEAD"], worktree_path, timeout=timeout) == remote_sha)
     except Exception:
         return False
 
@@ -744,15 +698,13 @@ def _prune_candidates(worktrees_dir: Path, max_age_hours: int, now: float) -> li
         if not entry.is_dir() or kanban_re.match(entry.name):
             continue
         tier_hours = max_age_hours if entry.name.startswith("hermes-") else max_age_hours * 3
-        soft_cutoff = now - (tier_hours * 3600)
-        hard_cutoff = now - (tier_hours * 3 * 3600)
         try:
             mtime = entry.stat().st_mtime
-            if mtime > soft_cutoff:
+            if mtime > now - (tier_hours * 3600):
                 continue  # Too recent — skip
         except Exception:
             continue
-        candidates.append((entry, mtime, mtime <= hard_cutoff))
+        candidates.append((entry, mtime, mtime <= now - (tier_hours * 3 * 3600)))
     return candidates
 
 
@@ -796,13 +748,12 @@ def _classify_prune_candidates(repo_root: str, candidates: list) -> list:
                 merged = _worktree_branch_pr_merged(str(entry), timeout=15, cache=snapshot)
             with cache_lock:
                 merge_cache.update(snapshot)
-            if not merged:
-                # Pushed-branch tier: head EXACTLY matches origin -> the checkout is
-                # redundant; reap the tree, keep the branch ref (open-PR lane anchor).
-                if _worktree_branch_pushed_exact(str(entry), _get_remote_heads(), timeout=10):
-                    keep_branch = True
-                else:
-                    return (entry, mtime, force, "unpushed", None)
+            # Pushed-branch tier: head EXACTLY matches origin -> the checkout is
+            # redundant; reap the tree, keep the branch ref (open-PR lane anchor).
+            if not merged and not _worktree_branch_pushed_exact(str(entry), _get_remote_heads(),
+                                                                 timeout=10):
+                return (entry, mtime, force, "unpushed", None)
+            keep_branch = not merged
 
         # A live-locked tree is in use by a running hermes; a dead lock is unlocked in phase 3.
         lock_state = _worktree_lock_is_live(repo_root, str(entry), timeout=5)
@@ -909,11 +860,9 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
     preserved_stale, kept_branches = _reap_prune_verdicts(repo_root, verdicts, now - (7 * 24 * 3600))
 
     if preserved_stale:
-        logger.warning(
-            "Preserving %d worktree(s) older than 7 days with unmerged work "
-            "(run `hermes worktree prune` to review and reclaim): %s",
-            len(preserved_stale), ", ".join(sorted(preserved_stale)),
-        )
+        logger.warning("Preserving %d worktree(s) older than 7 days with unmerged work "
+                       "(run `hermes worktree prune` to review and reclaim): %s",
+                       len(preserved_stale), ", ".join(sorted(preserved_stale)))
 
     _prune_orphaned_branches(repo_root, protect=kept_branches)
 
@@ -925,11 +874,8 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
         count, size_mb = worktrees_summary(repo_root)
         if count >= 10 or (size_mb or 0) >= 5120:
             size_txt = f"{size_mb / 1024:.1f}GB" if size_mb else "unknown size"
-            logger.warning(
-                ".worktrees/ holds %d tree(s) (%s) — run `hermes worktree list` "
-                "to audit and `hermes worktree prune` to reclaim safely.",
-                count, size_txt,
-            )
+            logger.warning(".worktrees/ holds %d tree(s) (%s) — run `hermes worktree list` "
+                           "to audit and `hermes worktree prune` to reclaim safely.", count, size_txt)
     except Exception:
         pass
 
@@ -967,12 +913,8 @@ def _prune_orphaned_branches(repo_root: str, protect: Optional[set] = None) -> N
         pass
     active_branches.add("main")
 
-    orphaned = [
-        b for b in all_branches
-        if b not in active_branches
-        and b not in (protect or ())
-        and (b.startswith("hermes/hermes-") or b.startswith("pr-"))
-    ]
+    orphaned = [b for b in all_branches if b not in active_branches and b not in (protect or ())
+                and (b.startswith("hermes/hermes-") or b.startswith("pr-"))]
 
     if not orphaned:
         return
