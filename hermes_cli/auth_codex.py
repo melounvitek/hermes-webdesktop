@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 from hermes_cli.auth_constants import (
@@ -56,11 +57,8 @@ def _clear_pool_entry_status(entry: Dict[str, Any]) -> None:
 
 
 def _codex_access_token_is_expiring(access_token: Any, skew_seconds: int) -> bool:
-    claims = _decode_jwt_claims(access_token)
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)):
-        return False
-    return float(exp) <= (time.time() + max(0, int(skew_seconds)))
+    exp = _decode_jwt_claims(access_token).get("exp")
+    return isinstance(exp, (int, float)) and float(exp) <= (time.time() + max(0, int(skew_seconds)))
 
 
 def _codex_base_url() -> str:
@@ -122,12 +120,8 @@ def _sync_codex_pool_entries(
     if entries is None:
         return
     # None/empty prev_at → no manual entry can be an alias (right default for a first-ever save).
-    prev_at = None
-    if isinstance(previous_singleton_tokens, dict):
-        prev_at = previous_singleton_tokens.get("access_token") or None
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
+    prev_at = (previous_singleton_tokens or {}).get("access_token") or None
+    for entry in _codex_pool_dicts(entries):
         source = entry.get("source")
         is_alias = source == "manual:device_code" and bool(
             prev_at and entry.get("access_token") == prev_at)
@@ -155,9 +149,7 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: 
         # tell legacy singleton-aliases (refresh) from independent ``auth add`` accounts (keep).
         previous_singleton_tokens = (
             state.get("tokens") if isinstance(state.get("tokens"), dict) else None)
-        state["tokens"] = tokens
-        state["last_refresh"] = last_refresh
-        state["auth_mode"] = "chatgpt"
+        state.update(tokens=tokens, last_refresh=last_refresh, auth_mode="chatgpt")
         if label and str(label).strip():
             state["label"] = str(label).strip()
         _save_provider_state(auth_store, "openai-codex", state)
@@ -172,9 +164,8 @@ def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
     imported = _import_codex_cli_tokens()
     # Require BOTH tokens before adopting: persisting a payload without a usable refresh_token
     # would only break the next refresh cycle.
-    if not (
-        imported and _stripped(imported.get("access_token"))
-        and _stripped(imported.get("refresh_token"))):
+    if not (imported and _stripped(imported.get("access_token"))
+            and _stripped(imported.get("refresh_token"))):
         return None
     logger.info("Codex auth recovered from Codex CLI auth.json (%s).", reason)
     _save_codex_tokens(imported)
@@ -231,11 +222,9 @@ def _codex_http_client(**kwargs: Any) -> "httpx.Client":
     racing backend can't be installed (mocked client in tests), serial connect behavior remains.
     """
     client = httpx.Client(**kwargs)
-    try:
+    with suppress(Exception):
         from agent.process_bootstrap import enable_happy_eyeballs_on_client
         enable_happy_eyeballs_on_client(client)
-    except Exception:
-        pass
     return client
 
 
@@ -296,14 +285,11 @@ def refresh_codex_oauth_pure(
     if not _nonempty_str(refresh_token):
         raise _codex_err(
             _MISSING_REFRESH_TOKEN_MSG, "codex_auth_missing_refresh_token", relogin=True)
-    timeout = httpx.Timeout(max(5.0, float(timeout_seconds)))
     with _codex_http_client(
-        timeout=timeout,
-        headers={"Accept": "application/json", "User-Agent": CODEX_OAUTH_USER_AGENT},
-    ) as client:
+        timeout=httpx.Timeout(max(5.0, float(timeout_seconds))),
+        headers={"Accept": "application/json", "User-Agent": CODEX_OAUTH_USER_AGENT}) as client:
         response = client.post(
-            CODEX_OAUTH_TOKEN_URL,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            CODEX_OAUTH_TOKEN_URL, headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
                 "grant_type": "refresh_token", "refresh_token": refresh_token,
                 "client_id": CODEX_OAUTH_CLIENT_ID})
@@ -315,9 +301,8 @@ def refresh_codex_oauth_pure(
     if response.status_code != 200:
         raise _codex_refresh_failure_error(response)
     refresh_payload, refreshed_access = _refresh_payload_access_token(
-        response, provider="openai-codex",
+        response, provider="openai-codex", invalid_response=None,
         invalid_json=("Codex token refresh returned invalid JSON.", "codex_refresh_invalid_json"),
-        invalid_response=None,
         missing_access=(
             "Codex token refresh response was missing access_token.",
             "codex_refresh_missing_access_token"))
@@ -358,10 +343,7 @@ def _refresh_codex_auth_tokens(tokens: Dict[str, str], timeout_seconds: float) -
 
 
 def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
-    """Read tokens from ~/.codex/auth.json (Codex CLI shared file) if valid and not expired.
-
-    Does NOT write to the shared file.
-    """
+    """Read ~/.codex/auth.json (Codex CLI file) tokens if valid and not expired; never writes."""
     from hermes_cli.auth import _codex_access_token_is_expiring
     codex_home = os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
     auth_path = Path(codex_home).expanduser() / "auth.json"
@@ -369,9 +351,8 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
         return None
     try:
         tokens = json.loads(auth_path.read_text(encoding="utf-8-sig")).get("tokens")
-        if not isinstance(tokens, dict):
-            return None
-        if not (tokens.get("access_token") and tokens.get("refresh_token")):
+        if not (isinstance(tokens, dict) and tokens.get("access_token")
+                and tokens.get("refresh_token")):
             return None
         # Importing stale tokens that can't be refreshed would leave the user with
         # "Login successful!" but no working credentials.
@@ -400,11 +381,10 @@ def resolve_codex_runtime_credentials(
         data = _read_codex_tokens()
     except AuthError as exc:
         read_error = exc
-        if getattr(exc, "relogin_required", False) and getattr(exc, "code", None) in {
+        if exc.relogin_required and exc.code in {
             "codex_auth_missing_access_token", "codex_auth_missing_refresh_token",
             "codex_auth_invalid_shape"}:
-            imported = _recover_codex_tokens_from_cli(
-                str(getattr(exc, "code", None) or "auth_error"))
+            imported = _recover_codex_tokens_from_cli(str(exc.code or "auth_error"))
             if imported:
                 data = {"tokens": imported, "last_refresh": imported.get("last_refresh")}
     if data is None:
@@ -426,10 +406,8 @@ def resolve_codex_runtime_credentials(
                     return _codex_runtime_result(
                         pool_token, source="credential_pool", last_refresh=None)
             reset_at = pool_rate_limit.get("reset_at")
-            remaining = (
-                int(reset_at - time.time())
-                if isinstance(reset_at, (int, float)) and reset_at > time.time() else None)
-            raise _codex_quota_exhausted_error(remaining)
+            in_future = isinstance(reset_at, (int, float)) and reset_at > time.time()
+            raise _codex_quota_exhausted_error(int(reset_at - time.time()) if in_future else None)
         if read_error is not None:
             raise read_error
         raise _codex_err(_NO_CREDENTIALS_MSG, "codex_auth_missing", relogin=True)
@@ -447,19 +425,16 @@ def resolve_codex_runtime_credentials(
         with _auth_store_lock(timeout_seconds=lock_timeout):
             data = _read_codex_tokens(_lock=False)
             tokens = dict(data["tokens"])
-            access_token = _stripped(tokens.get("access_token"))
-            if _should_refresh(access_token):
+            if _should_refresh(_stripped(tokens.get("access_token"))):
                 tokens = _refresh_codex_auth_tokens(tokens, refresh_timeout_seconds)
-                access_token = _stripped(tokens.get("access_token"))
-
+            access_token = _stripped(tokens.get("access_token"))
     return _codex_runtime_result(
         access_token, source="hermes-auth-store", last_refresh=data.get("last_refresh"))
 
 
 def _is_codex_rate_limit_shaped(code: Any, reason: Any, message: Any) -> bool:
     """True when persisted pool-entry error metadata describes a 429/quota stop."""
-    reason_l = str(reason or "").lower()
-    message_l = str(message or "").lower()
+    reason_l, message_l = str(reason or "").lower(), str(message or "").lower()
     return (
         code == 429
         or any(k in reason_l for k in ("rate_limit", "usage_limit", "quota"))
@@ -568,10 +543,9 @@ def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
             for entry in _codex_pool_dicts(entries):
                 if access_token and str(entry.get("access_token") or "") != access_token:
                     continue
-                if not _entry_is_rate_limit_exhausted(entry):
-                    continue
-                _clear_pool_entry_status(entry)
-                cleared += 1
+                if _entry_is_rate_limit_exhausted(entry):
+                    _clear_pool_entry_status(entry)
+                    cleared += 1
             if cleared:
                 _save_auth_store(auth_store)
     except Exception:
@@ -604,13 +578,12 @@ def _codex_pool_rate_limit_status() -> Optional[Dict[str, Any]]:
             if not _nonempty_str(token) or not _entry_is_rate_limit_exhausted(entry):
                 continue
             reset_at = _parse_absolute_timestamp(entry.get("last_error_reset_at"))
-            if reset_at is not None and reset_at <= now:
-                continue
-            return {
-                "label": entry.get("label"), "last_refresh": entry.get("last_refresh"),
-                "reset_at": reset_at, "reason": entry.get("last_error_reason"),
-                "message": entry.get("last_error_message"), "access_token": token.strip(),
-                "base_url": entry.get("base_url")}
+            if reset_at is None or reset_at > now:
+                return {
+                    "label": entry.get("label"), "last_refresh": entry.get("last_refresh"),
+                    "reset_at": reset_at, "reason": entry.get("last_error_reason"),
+                    "message": entry.get("last_error_message"), "access_token": token.strip(),
+                    "base_url": entry.get("base_url")}
     except Exception:
         logger.debug("Codex pool rate-limit lookup failed", exc_info=True)
     return None
@@ -631,11 +604,10 @@ def _pool_codex_access_token() -> str:
     from hermes_cli.auth import _nonempty_str
     try:
         for entry in _codex_pool_dicts(_read_codex_pool_entries()):
-            token = entry.get("access_token")
-            reset_at = entry.get("last_error_reset_at")
+            token, reset_at = entry.get("access_token"), entry.get("last_error_reset_at")
             in_cooldown = isinstance(reset_at, (int, float)) and reset_at > time.time()
             if _nonempty_str(token) and not in_cooldown:
-                return str(entry.get("access_token", "")).strip()
+                return token.strip()
     except Exception:
         logger.debug("Codex pool fallback lookup failed", exc_info=True)
     return ""
@@ -682,8 +654,7 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
 
 
 def _codex_login_rate_limited_error(response: "httpx.Response", *, during: str = "") -> AuthError:
-    """AuthError for a 429 from OpenAI's device-auth endpoints (a throttle, not a credential fault).
-    """
+    """AuthError for a 429 from OpenAI's device-auth endpoints (throttle, not credential fault)."""
     retry_after = _parse_retry_after_seconds(getattr(response, "headers", None))
     wait_hint = (
         f" Try again in about {retry_after}s." if retry_after is not None
@@ -700,7 +671,6 @@ def _codex_request_device_code(issuer: str, client_id: str) -> Dict[str, Any]:
     OpenAI rate-limits this request when login is attempted too often from one IP/account — retry
     with capped backoff (honoring ``Retry-After``) before surfacing an actionable message.
     """
-    resp = None
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
         resp = _codex_login_post(
@@ -715,12 +685,11 @@ def _codex_request_device_code(issuer: str, client_id: str) -> Dict[str, Any]:
             delay = max(1, min(int(retry_after if retry_after is not None else 2 ** attempt), 60))
             print(f"OpenAI is rate-limiting login requests (429); retrying in {delay}s...")
             time.sleep(delay)
-    if resp is not None and resp.status_code == 429:
+    if resp.status_code == 429:
         raise _codex_login_rate_limited_error(resp)
-    if resp is None or resp.status_code != 200:
-        status = resp.status_code if resp is not None else "unknown"
+    if resp.status_code != 200:
         raise _codex_err(
-            f"Device code request returned status {status}.", "device_code_request_error")
+            f"Device code request returned status {resp.status_code}.", "device_code_request_error")
     device_data = resp.json()
     device_data["interval"] = max(3, int(device_data.get("interval", "5")))
     if not device_data.get("user_code", "") or not device_data.get("device_auth_id", ""):
@@ -789,8 +758,7 @@ def _codex_exchange_authorization_code(
 def _codex_device_code_login() -> Dict[str, Any]:
     """Run the OpenAI device code login flow and return credentials dict."""
     from hermes_cli.auth import _utc_now_z
-    issuer = "https://auth.openai.com"
-    client_id = CODEX_OAUTH_CLIENT_ID
+    issuer, client_id = "https://auth.openai.com", CODEX_OAUTH_CLIENT_ID
     device_data = _codex_request_device_code(issuer, client_id)
     user_code = device_data["user_code"]
 
