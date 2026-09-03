@@ -280,7 +280,37 @@ function Get-DesktopExe {
     return $null
 }
 
+# Install-side state snapshot, taken BEFORE Test-HermesRuns can throw: on
+# app-update legs the updater runs detached and its transcript lands in the
+# product logs and hand-off files, not in this driver. Copy those plus the
+# venv entry-point dir while the install is still there to inspect, so a
+# failed post-update assertion leaves its evidence in the proof tree.
+function Save-InstallSideState([string]$Label) {
+    $dest = Join-Path $ProofRoot "install-side-$Label"
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    $logsDir = Join-Path $HermesHome "logs"
+    if (Test-Path -LiteralPath $logsDir) {
+        Copy-Item $logsDir (Join-Path $dest "hermes-logs") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $resultFile = Join-Path $HermesHome ".hermes-update-result.json"
+    if (Test-Path -LiteralPath $resultFile) {
+        Copy-Item $resultFile $dest -Force -ErrorAction SilentlyContinue
+    }
+    $venvScripts = Join-Path $InstallDir "venv\Scripts"
+    if (Test-Path -LiteralPath $venvScripts) {
+        Get-ChildItem -LiteralPath $venvScripts |
+            Select-Object Name, Length, LastWriteTime |
+            Format-Table -AutoSize | Out-String |
+            Set-Content (Join-Path $dest "venv-scripts-ls.txt")
+    }
+    Get-ChildItem -LiteralPath $HermesHome -ErrorAction SilentlyContinue |
+        Select-Object Name, Length, LastWriteTime |
+        Format-Table -AutoSize | Out-String |
+        Set-Content (Join-Path $dest "hermes-home-ls.txt")
+}
+
 function Test-HermesRuns([string]$Label) {
+    Save-InstallSideState $Label
     $hermesExe = Join-Path $InstallDir "venv\Scripts\hermes.exe"
     Assert-True (Test-Path -LiteralPath $hermesExe) "$Label -- venv\Scripts\hermes.exe exists"
     & $hermesExe --version 2>&1 | ForEach-Object { Write-Host "    hermes --version| $_" }
