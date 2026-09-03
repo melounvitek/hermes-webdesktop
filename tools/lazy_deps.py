@@ -491,7 +491,6 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
     Independent of ``hermes_cli.tools_config._pip_install`` (no CLI dependency)."""
     if not specs:
         return _InstallResult(True, "", "")
-
     target = _lazy_install_target()
     constraints: Optional[Path] = None
     extra_args: list[str] = []
@@ -601,12 +600,10 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     # burning ~15s on ensurepip — unless a durable target is configured. The reason MUST start
     # with "unsupported ": _refresh_features classifies skips by that prefix.
     if _lazy_install_target() is None:
-        try:
+        managed_by = ""  # config unreadable — proceed with the install
+        with contextlib.suppress(Exception):
             from hermes_cli.config import get_managed_system
-
             managed_by = get_managed_system()
-        except Exception:
-            managed_by = ""  # config unreadable — proceed with the install
         if managed_by:
             raise FeatureUnavailable(
                 feature, missing,
@@ -661,9 +658,7 @@ def feature_install_command(feature: str, *, venv_pip: bool = False) -> Optional
     if feature not in LAZY_DEPS:
         return None
     joined = " ".join(repr(s) for s in LAZY_DEPS[feature])
-    if venv_pip:
-        return f"{sys.executable} -m pip install {joined}"
-    return "uv pip install " + joined
+    return f"{sys.executable} -m pip install {joined}" if venv_pip else "uv pip install " + joined
 
 
 @dataclass
@@ -694,14 +689,11 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
 
     target = _lazy_install_target()
     if not _allow_lazy_installs():
-        if os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1" and target is None:
-            reason = (
-                "runtime installs are disabled on this deployment: the agent "
-                "environment is immutable and no writable install target is "
-                "configured (HERMES_LAZY_INSTALL_TARGET)"
-            )
-        else:
-            reason = "runtime installs disabled (security.allow_lazy_installs=false)"
+        sealed = os.environ.get("HERMES_DISABLE_LAZY_INSTALLS") == "1" and target is None
+        reason = (
+            "runtime installs are disabled on this deployment: the agent environment is immutable "
+            "and no writable install target is configured (HERMES_LAZY_INSTALL_TARGET)"
+        ) if sealed else "runtime installs disabled (security.allow_lazy_installs=false)"
         return InstallSpecsResult(ok=False, blocked=True, reason=reason)
 
     display = "uv pip install " + (f"--target {target} " if target is not None else "") + " ".join(cleaned)

@@ -737,25 +737,19 @@ def _maybe_use_cimd(cfg: dict, storage: "HermesTokenStorage | None" = None) -> "
     ineligible = (
         cfg.get("cimd") is False
         or not _is_valid_cimd_url(url)
-        # A pinned client is the user's explicit choice; a secret means a confidential
-        # client, which the document forbids.
+        # pinned client = explicit choice; a secret = confidential client, which the document forbids
         or cfg.get("client_id") or cfg.get("client_secret")
-        # The document supplies name and auth method; a caller setting either asks for an
-        # identity CIMD cannot present (Figma's DCR name allowlist).
+        # the document supplies name + auth method; setting either asks for an identity CIMD can't present
         or cfg.get("client_name") or (cfg.get("token_endpoint_auth_method") or "none") != "none"
-        # Dashboard/desktop flows redirect to a deployment-specific server URL that can
-        # never appear in a static document.
+        # dashboard/desktop flows redirect to a deployment-specific URL no static document declares
         or get_dashboard_oauth_flow() is not None
         or cfg.get("redirect_uri") or cfg.get("redirect_port")
         or (cfg.get("redirect_host") or "127.0.0.1") not in _CIMD_REDIRECT_HOSTS
-        # An existing registration is bound to its redirect URI; swapping in a CIMD
-        # client_id now would invalidate stored tokens.
+        # an existing registration is bound to its redirect URI; swapping client_id would drop tokens
         or _cached_client_info(storage) is not None
         or (storage is not None and storage.cimd_rejected())
         or _server_declined_cimd(storage))
-    if ineligible:
-        return None
-    port = _pick_cimd_port()
+    port = None if ineligible else _pick_cimd_port()
     return None if port is None else (url, port)
 
 
@@ -796,8 +790,7 @@ def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = N
         cfg["_cimd_url"], port = cimd
     else:
         port = int(cfg.get("redirect_port", 0)) or cached_port or _reserve_callback_port()
-        # A cached port may be a pinned CIMD port left by an earlier CIMD login; claim it so a
-        # sibling's _pick_cimd_port doesn't reuse it.
+        # A cached port may be a pinned CIMD port from an earlier login; claim it from siblings.
         if port in _CIMD_PORTS and port not in _assigned_cimd_ports:
             _assigned_cimd_ports.append(port)
     cfg["_resolved_port"] = port
