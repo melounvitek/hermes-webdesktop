@@ -27,6 +27,14 @@ def _ended_by_compression(row) -> bool:
     return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
 
 
+def _cooldown_row(exists: bool, cooldown_until, error) -> Dict[str, Any]:
+    return {
+        "session_exists": exists,
+        "cooldown_until": float(cooldown_until) if cooldown_until is not None else None,
+        "error": error,
+    }
+
+
 def _claim_lease_row(conn, table: str, key_col: str, key: str, holder: str, now: float, expires_at: float,
                      stale) -> Tuple[bool, Optional[str]]:
     """Single-transaction lease claim: DELETE a stale holder's row (``stale(holder,
@@ -286,24 +294,17 @@ class SessionCompressionMixin:
             return None
         now = time.time()
         row = self._read_one(_COOLDOWN_ROW_SQL, (session_id,))
-        if row is None or row[0] is None:
+        if row is None or row[0] is None or float(row[0]) <= now:
             return None
-        cooldown_until = float(row[0])
-        if cooldown_until <= now:
-            return None
-        return {"cooldown_until": cooldown_until, "remaining_seconds": cooldown_until - now, "error": row[1]}
+        return {"cooldown_until": float(row[0]), "remaining_seconds": float(row[0]) - now, "error": row[1]}
 
     def get_compression_failure_cooldown_row(self, session_id: str) -> Dict[str, Any]:
         """Exact stored cooldown columns, no expiry filtering, so compression
         cancellation can roll back an expired, partially-null, or absent row exactly."""
         row = self._read_one(_COOLDOWN_ROW_SQL, (session_id,)) if session_id else None
         if row is None:
-            return {"session_exists": False, "cooldown_until": None, "error": None}
-        return {
-            "session_exists": True,
-            "cooldown_until": float(row[0]) if row[0] is not None else None,
-            "error": row[1],
-        }
+            return _cooldown_row(False, None, None)
+        return _cooldown_row(True, row[0], row[1])
 
     def restore_compression_failure_cooldown_row(self, session_id: str, snapshot: Dict[str, Any]) -> None:
         """Restore and verify an exact cooldown-row snapshot. Unlike record/clear this
@@ -323,14 +324,9 @@ class SessionCompressionMixin:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"compression cooldown rollback session missing: {session_id}")
-
         self._execute_write(_do)
         actual = self.get_compression_failure_cooldown_row(session_id)
-        expected = {
-            "session_exists": True,
-            "cooldown_until": float(deadline) if deadline is not None else None,
-            "error": error,
-        }
+        expected = _cooldown_row(True, deadline, error)
         if actual != expected:
             raise RuntimeError(
                 f"compression cooldown rollback verification failed: "
@@ -582,11 +578,10 @@ class SessionCompressionMixin:
 
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
-            cursor = conn.execute(
+            return conn.execute(
                 "UPDATE session_turn_leases SET expires_at = ? "
                 "WHERE conversation_id = ? AND holder = ?", (expires_at, conversation_id, holder),
-            )
-            return cursor.rowcount > 0
+            ).rowcount > 0
 
         return bool(self._execute_write(_do))
 
@@ -656,7 +651,7 @@ class SessionCompressionMixin:
         are still live over stale closed siblings such as ``ws_orphan_reap``."""
         current = session_id
         chain = [current] if current else []
-        seen = {current} if current else set()
+        seen = set(chain)
         for _ in range(100):  # defensive bound; chains this deep are pathological
             with self._read_ctx() as conn:
                 row = conn.execute(
@@ -682,9 +677,7 @@ class SessionCompressionMixin:
                     """,
                     (current,),
                 ).fetchone()
-            if row is None:
-                return chain
-            child_id = row["id"]
+            child_id = row["id"] if row is not None else None
             if not child_id or child_id in seen:
                 return chain
             seen.add(child_id)

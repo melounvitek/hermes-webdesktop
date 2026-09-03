@@ -203,9 +203,6 @@ class SessionTitlesMixin:
         )
         if not rows:
             return base
-        max_num = 1  # the unnumbered original counts as #1
-        for row in rows:
-            m = re.match(r'^.* #(\d+)$', row["title"])
-            if m:
-                max_num = max(max_num, int(m.group(1)))
-        return f"{base} #{max_num + 1}"
+        # The unnumbered original counts as #1.
+        numbers = [int(m.group(1)) for m in (re.match(r'^.* #(\d+)$', row["title"]) for row in rows) if m]
+        return f"{base} #{max([1, *numbers]) + 1}"
