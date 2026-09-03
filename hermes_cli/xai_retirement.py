@@ -115,15 +115,15 @@ class ApplyResult:
 
 def _walk_to_parent(yaml_doc: Any, dotted_path: str) -> "tuple[Any, str]":
     """Resolve a dotted slot path to (parent_mapping, leaf_key)."""
-    parts = dotted_path.split(".")
-    if len(parts) < 2:
+    *parents, leaf = dotted_path.split(".")
+    if not parents:
         raise ValueError(f"Path must have at least one parent: {dotted_path!r}")
     node = yaml_doc
-    for segment in parts[:-1]:
+    for segment in parents:
         if not isinstance(node, dict) or segment not in node:
             raise KeyError(f"Path segment {segment!r} missing in {dotted_path!r}")
         node = node[segment]
-    return node, parts[-1]
+    return node, leaf
 
 
 def apply_migration(
@@ -133,7 +133,6 @@ def apply_migration(
     Unless ``backup=False`` a copy goes to ``<config_path>.bak-pre-migrate-xai-YYYYMMDD-HHMMSS``.
     """
     from ruamel.yaml import YAML  # local import — avoid hard dep at module load
-
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(config_path)
@@ -169,7 +168,6 @@ def apply_migration(
 
     from hermes_cli.config import require_readable_config_before_write
     from utils import atomic_write_text
-
     require_readable_config_before_write(config_path)
     # Dump to a buffer, then atomic-write: ``open(path, "w")`` truncates before the dump runs, so a
     # crash mid-write would leave config.yaml empty (and with ``--no-backup`` that is the only

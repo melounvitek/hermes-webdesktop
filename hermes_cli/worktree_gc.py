@@ -97,12 +97,11 @@ def _archive_untracked(tree: Path, untracked: List[str]) -> Optional[Path]:
             src = tree / rel
             if not src.exists() or src.is_symlink():
                 continue
-            target = dest / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
+            (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             if src.is_dir():
-                shutil.copytree(src, target, dirs_exist_ok=True)
+                shutil.copytree(src, dest / rel, dirs_exist_ok=True)
             else:
-                shutil.copy2(src, target)
+                shutil.copy2(src, dest / rel)
         return dest if dest.exists() else None
     except Exception as exc:
         logger.warning("Could not archive untracked files from %s: %s", tree, exc)
@@ -138,7 +137,6 @@ def _classify_tree(_cli, repo_root: str, entry: Path, merge_cache, remote_heads)
 def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeRecord]:
     """Classify every tree under ``.worktrees/`` without mutating anything."""
     import cli as _cli  # lazy: cli.py is heavy
-
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
         return []
@@ -228,7 +226,6 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
     """Classify EVERY local branch: deletable when fully merged OR every commit is patch-equivalent
     upstream (``git cherry``) and not checked out. The gate is content reachability, not name."""
     import cli as _cli
-
     if _cli._repo_is_shallow(repo_root):
         _cli._deepen_shallow_repo(repo_root)
 
@@ -280,7 +277,6 @@ def audit_branches(repo_root: str) -> List[BranchRecord]:
 
     # Read-only, so parallel: hundreds of local branches × ~0.2-1s cherry probes would be minutes.
     import concurrent.futures
-
     workers = max(1, min(8, (os.cpu_count() or 4), len(branches)))
     if workers > 1:
         try:

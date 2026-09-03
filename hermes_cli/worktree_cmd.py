@@ -60,7 +60,6 @@ _ACTIONS = {"list": _list, "prune": _prune}
 
 def cmd_worktree(args) -> int:
     from hermes_cli import worktree_gc
-
     repo_root = getattr(args, "repo", None)
     if not repo_root:
         import cli as _cli

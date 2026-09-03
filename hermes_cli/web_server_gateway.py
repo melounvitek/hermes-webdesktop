@@ -34,11 +34,7 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
     from hermes_cli.web_server import _GATEWAY_HEALTH_TIMEOUT, _GATEWAY_HEALTH_URL
     if not _GATEWAY_HEALTH_URL:
         return False, None
-    base = _GATEWAY_HEALTH_URL.rstrip("/")
-    if base.endswith("/health/detailed"):
-        base = base[: -len("/health/detailed")]
-    elif base.endswith("/health"):
-        base = base[: -len("/health")]
+    base = re.sub(r"/health(/detailed)?$", "", _GATEWAY_HEALTH_URL.rstrip("/"))
     for path in (f"{base}/health/detailed", f"{base}/health"):
         try:
             req = urllib.request.Request(path, method="GET")
@@ -54,16 +50,11 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
 # Mirrors PORT_BINDING_PLATFORM_VALUES (gateway/config.py) and each adapter's DEFAULT_PORT /
 # DEFAULT_WEBHOOK_PORT. Display-only data for the topology readout, not a bind source.
 _PORT_BINDING_PLATFORM_PORTS: Dict[str, Tuple[str, int]] = {
-    "webhook": ("port", 8644),
-    "api_server": ("port", 8642),
-    "msgraph_webhook": ("port", 8646),
-    "feishu": ("webhook_port", 8765),
-    "wecom_callback": ("port", 8645),
-    "bluebubbles": ("webhook_port", 8645),
-    "sms": ("webhook_port", 8080),
-    "whatsapp_cloud": ("webhook_port", 8090),
-    "line": ("port", 8646),
-    "teams": ("port", 3978)}
+    "webhook": ("port", 8644), "api_server": ("port", 8642), "msgraph_webhook": ("port", 8646),
+    "feishu": ("webhook_port", 8765), "wecom_callback": ("port", 8645), "bluebubbles": ("webhook_port", 8645),
+    "sms": ("webhook_port", 8080), "whatsapp_cloud": ("webhook_port", 8090), "line": ("port", 8646),
+    "teams": ("port", 3978),
+}
 
 # Platform states that mean the adapter is NOT serving its port right now.
 _PLATFORM_DEAD_STATES = frozenset({"fatal", "disconnected", "stopped"})
@@ -216,12 +207,9 @@ _TOPOLOGY_CACHE_TTL = 10.0
 
 
 def _topology_cache_get(fn: Any) -> Optional[Dict[str, Any]]:
-    if (
-        _TOPOLOGY_CACHE["data"] is not None
-        and _TOPOLOGY_CACHE["fn"] is fn
-        and time.monotonic() - _TOPOLOGY_CACHE["ts"] < _TOPOLOGY_CACHE_TTL):
-        return _TOPOLOGY_CACHE["data"]
-    return None
+    c = _TOPOLOGY_CACHE
+    fresh = c["fn"] is fn and time.monotonic() - c["ts"] < _TOPOLOGY_CACHE_TTL
+    return c["data"] if fresh and c["data"] is not None else None
 
 
 def _collect_profile_gateway_topology_cached() -> Dict[str, Any]:
@@ -269,11 +257,9 @@ def _display_system_platform(*, system: str, release: str, version: str, platfor
     return {"os": system, "os_release": release, "os_version": version, "platform": platform_label}
 
 
-# ---------------------------------------------------------------------------
 # Gateway + update actions (invoked from the Status page). Spawned detached so the request
 # returns immediately; stdin is DEVNULL so stray input() fails fast; stdout/stderr stream to
 # ~/.hermes/logs/<action>.log which the dashboard tails.
-# ---------------------------------------------------------------------------
 
 _ACTION_LOG_DIR: Path = get_hermes_home() / "logs"
 
@@ -356,18 +342,11 @@ def _spawn_hermes_action(
     # the gateway's own restart watcher does.
     action_env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
     action_env.pop("_HERMES_GATEWAY", None)
-    popen_kwargs: Dict[str, Any] = {
-        "cwd": str(PROJECT_ROOT),
-        "stdin": subprocess.DEVNULL,
-        "stdout": log_file,
-        "stderr": subprocess.STDOUT,
-        "env": {**action_env, **(env_overrides or {})}}
-    if sys.platform == "win32":
-        popen_kwargs["creationflags"] = windows_detach_flags()
-    else:
-        popen_kwargs["start_new_session"] = True
-
-    proc = subprocess.Popen(cmd, **popen_kwargs)
+    detach = {"creationflags": windows_detach_flags()} if sys.platform == "win32" else {"start_new_session": True}
+    proc = subprocess.Popen(
+        cmd, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
+        env={**action_env, **(env_overrides or {})}, **detach,
+    )
     log_file.close()  # child holds its own dup'd fd; keeping ours leaks one per action
     _ACTION_RESULTS.pop(name, None)
     _ACTION_COMMANDS[name] = tuple(subcommand)
@@ -407,7 +386,6 @@ def _split_text_for_speak_stream(text: str, cap: int) -> list:
     reflows whitespace (sentences re-joined with single spaces) and has no fence semantics.
     """
     from tools.tts_streaming import SENTENCE_BOUNDARY_RE as _SENTENCE_BOUNDARY_RE
-
     cap = cap if cap and cap > 0 else 4000
     pieces, buf = [], ""
     for sentence in filter(str.strip, _SENTENCE_BOUNDARY_RE.split(text)):

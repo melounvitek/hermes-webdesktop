@@ -27,15 +27,13 @@ _log = logging.getLogger("hermes_cli.web_server")
 # and pulls required_env from a plugin's PlatformEntry when available.
 _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
     "telegram": {
-        "name": "Telegram",
-        "description": "Run Hermes from Telegram DMs, groups, and topics.",
+        "name": "Telegram", "description": "Run Hermes from Telegram DMs, groups, and topics.",
         "docs_url": "https://core.telegram.org/bots/features#botfather",
         "env_vars": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USERS", "TELEGRAM_PROXY"),
         "required_env": ("TELEGRAM_BOT_TOKEN",),
     },
     "discord": {
-        "name": "Discord",
-        "description": "Connect Hermes to Discord DMs, channels, and threads.",
+        "name": "Discord", "description": "Connect Hermes to Discord DMs, channels, and threads.",
         "docs_url": "https://discord.com/developers/applications",
         "env_vars": ("DISCORD_BOT_TOKEN", "DISCORD_ALLOWED_USERS"),
         "required_env": ("DISCORD_BOT_TOKEN",),
@@ -55,20 +53,15 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "required_env": ("MATTERMOST_URL", "MATTERMOST_TOKEN"),
     },
     "matrix": {
-        "name": "Matrix",
-        "description": "Use Hermes in Matrix rooms and direct messages.",
+        "name": "Matrix", "description": "Use Hermes in Matrix rooms and direct messages.",
         "docs_url": "https://matrix.org/ecosystem/servers/",
         "env_vars": (
-            "MATRIX_HOMESERVER",
-            "MATRIX_ACCESS_TOKEN",
-            "MATRIX_USER_ID",
-            "MATRIX_ALLOWED_USERS",
+            "MATRIX_HOMESERVER", "MATRIX_ACCESS_TOKEN", "MATRIX_USER_ID", "MATRIX_ALLOWED_USERS",
         ),
         "required_env": ("MATRIX_HOMESERVER", "MATRIX_ACCESS_TOKEN", "MATRIX_USER_ID"),
     },
     "signal": {
-        "name": "Signal",
-        "description": "Connect through a signal-cli REST bridge.",
+        "name": "Signal", "description": "Connect through a signal-cli REST bridge.",
         "docs_url": "https://github.com/bbernhard/signal-cli-rest-api",
         "env_vars": ("SIGNAL_HTTP_URL", "SIGNAL_ACCOUNT", "SIGNAL_ALLOWED_USERS"),
         "required_env": ("SIGNAL_HTTP_URL", "SIGNAL_ACCOUNT"),
@@ -78,10 +71,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "description": "Use Hermes through the bundled WhatsApp bridge with QR-based auth.",
         "docs_url": "https://github.com/tulir/whatsmeow",
         "env_vars": (
-            "WHATSAPP_ENABLED",
-            "WHATSAPP_MODE",
-            "WHATSAPP_DM_POLICY",
-            "WHATSAPP_ALLOWED_USERS",
+            "WHATSAPP_ENABLED", "WHATSAPP_MODE", "WHATSAPP_DM_POLICY", "WHATSAPP_ALLOWED_USERS",
         ),
         "required_env": (),
     },
@@ -89,69 +79,52 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "name": "Home Assistant",
         "description": "Control your smart home from Hermes via Home Assistant.",
         "docs_url": "https://www.home-assistant.io/docs/authentication/",
-        "env_vars": ("HASS_URL", "HASS_TOKEN"),
-        "required_env": ("HASS_URL", "HASS_TOKEN"),
+        "env_vars": ("HASS_URL", "HASS_TOKEN"), "required_env": ("HASS_URL", "HASS_TOKEN"),
     },
     "email": {
-        "name": "Email",
-        "description": "Talk to Hermes through an IMAP/SMTP mailbox.",
+        "name": "Email", "description": "Talk to Hermes through an IMAP/SMTP mailbox.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
         "env_vars": ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"),
         "required_env": ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"),
     },
     "sms": {
-        "name": "SMS (Twilio)",
-        "description": "Send and receive text messages via Twilio.",
+        "name": "SMS (Twilio)", "description": "Send and receive text messages via Twilio.",
         "docs_url": "https://www.twilio.com/console",
         "env_vars": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"),
         "required_env": ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"),
     },
     "dingtalk": {
-        "name": "DingTalk",
-        "description": "Connect Hermes to DingTalk groups (钉钉).",
+        "name": "DingTalk", "description": "Connect Hermes to DingTalk groups (钉钉).",
         "docs_url": "https://open.dingtalk.com/document/orgapp/the-robot-development-process",
         "env_vars": ("DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"),
         "required_env": ("DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET"),
     },
     "feishu": {
-        "name": "Feishu / Lark",
-        "description": "Use Hermes inside Feishu / Lark.",
+        "name": "Feishu / Lark", "description": "Use Hermes inside Feishu / Lark.",
         "docs_url": "https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/intro",
         "env_vars": (
-            "FEISHU_APP_ID",
-            "FEISHU_APP_SECRET",
-            "FEISHU_ENCRYPT_KEY",
-            "FEISHU_VERIFICATION_TOKEN",
+            "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_ENCRYPT_KEY", "FEISHU_VERIFICATION_TOKEN",
         ),
         "required_env": ("FEISHU_APP_ID", "FEISHU_APP_SECRET"),
     },
     "google_chat": {
-        "name": "Google Chat",
-        "description": "Connect Hermes to Google Chat via Cloud Pub/Sub.",
+        "name": "Google Chat", "description": "Connect Hermes to Google Chat via Cloud Pub/Sub.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/google_chat",
     },
     "wecom": {
-        "name": "WeCom (group bot)",
-        "description": "Send-only WeCom group bot via webhook.",
+        "name": "WeCom (group bot)", "description": "Send-only WeCom group bot via webhook.",
         "docs_url": "https://developer.work.weixin.qq.com/document/path/91770",
-        "env_vars": ("WECOM_BOT_ID", "WECOM_SECRET"),
-        "required_env": ("WECOM_BOT_ID",),
+        "env_vars": ("WECOM_BOT_ID", "WECOM_SECRET"), "required_env": ("WECOM_BOT_ID",),
     },
     "wecom_callback": {
-        "name": "WeCom (app)",
-        "description": "Two-way WeCom integration via callback app.",
+        "name": "WeCom (app)", "description": "Two-way WeCom integration via callback app.",
         "docs_url": "https://developer.work.weixin.qq.com/document/path/90930",
         "env_vars": (
-            "WECOM_CALLBACK_CORP_ID",
-            "WECOM_CALLBACK_CORP_SECRET",
-            "WECOM_CALLBACK_AGENT_ID",
-            "WECOM_CALLBACK_TOKEN",
-            "WECOM_CALLBACK_ENCODING_AES_KEY",
+            "WECOM_CALLBACK_CORP_ID", "WECOM_CALLBACK_CORP_SECRET", "WECOM_CALLBACK_AGENT_ID",
+            "WECOM_CALLBACK_TOKEN", "WECOM_CALLBACK_ENCODING_AES_KEY",
         ),
         "required_env": (
-            "WECOM_CALLBACK_CORP_ID",
-            "WECOM_CALLBACK_CORP_SECRET",
-            "WECOM_CALLBACK_AGENT_ID",
+            "WECOM_CALLBACK_CORP_ID", "WECOM_CALLBACK_CORP_SECRET", "WECOM_CALLBACK_AGENT_ID",
         ),
     },
     "weixin": {
@@ -166,15 +139,12 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "description": "Use Hermes through iMessage via a BlueBubbles server.",
         "docs_url": "https://bluebubbles.app/",
         "env_vars": (
-            "BLUEBUBBLES_SERVER_URL",
-            "BLUEBUBBLES_PASSWORD",
-            "BLUEBUBBLES_ALLOWED_USERS",
+            "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD", "BLUEBUBBLES_ALLOWED_USERS",
         ),
         "required_env": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"),
     },
     "qqbot": {
-        "name": "QQ Bot",
-        "description": "Connect Hermes to a QQ Bot from the QQ Open Platform.",
+        "name": "QQ Bot", "description": "Connect Hermes to a QQ Bot from the QQ Open Platform.",
         "docs_url": "https://q.qq.com",
         "env_vars": ("QQ_APP_ID", "QQ_CLIENT_SECRET", "QQ_ALLOWED_USERS"),
         "required_env": ("QQ_APP_ID", "QQ_CLIENT_SECRET"),
@@ -214,9 +184,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/simplex",
     },
     "yuanbao": {
-        "name": "Yuanbao (元宝)",
-        "description": "Connect Hermes to Tencent Yuanbao.",
-        "docs_url": "",
+        "name": "Yuanbao (元宝)", "description": "Connect Hermes to Tencent Yuanbao.", "docs_url": "",
         "required_env": (),
     },
     "api_server": {
@@ -224,10 +192,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "description": "Expose Hermes as an OpenAI-compatible HTTP API for tools like Open WebUI.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/",
         "env_vars": (
-            "API_SERVER_ENABLED",
-            "API_SERVER_KEY",
-            "API_SERVER_PORT",
-            "API_SERVER_HOST",
+            "API_SERVER_ENABLED", "API_SERVER_KEY", "API_SERVER_PORT", "API_SERVER_HOST",
             "API_SERVER_MODEL_NAME",
         ),
         "required_env": (),
@@ -236,8 +201,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
         "name": "Webhooks",
         "description": "Receive events from GitHub, GitLab, and other webhook sources.",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/",
-        "env_vars": ("WEBHOOK_ENABLED", "WEBHOOK_PORT", "WEBHOOK_SECRET"),
-        "required_env": (),
+        "env_vars": ("WEBHOOK_ENABLED", "WEBHOOK_PORT", "WEBHOOK_SECRET"), "required_env": (),
     },
     "msgraph_webhook": {
         "name": "Microsoft Graph Webhook",
@@ -253,8 +217,7 @@ _PLATFORM_OVERRIDES: dict[str, dict[str, Any]] = {
     "relay": {
         "name": "Relay (experimental)",
         "description": "Generic relay adapter fronted by the Hermes Relay connector.",
-        "docs_url": "",
-        "required_env": (),
+        "docs_url": "", "required_env": (),
     },
 }
 
@@ -309,10 +272,7 @@ def _channel_managed_env_keys() -> frozenset[str]:
     """Env-var keys owned by a Channels page platform card; the Keys/Env page hides them so the
     same fields aren't duplicated. Best-effort: if the catalog can't be built, nothing is hidden."""
     try:
-        keys: set[str] = set()
-        for entry in _messaging_platform_catalog():
-            keys.update(entry.get("env_vars", ()))
-        return frozenset(keys)
+        return frozenset(k for entry in _messaging_platform_catalog() for k in entry.get("env_vars", ()))
     except Exception:
         _log.debug("could not build channel-managed env key set", exc_info=True)
         return frozenset()
@@ -366,26 +326,18 @@ def _build_catalog_entry(platform_id: str, plugin_entry: Any | None = None) -> d
     override = _PLATFORM_OVERRIDES.get(platform_id, {})
     if "required_env" in override:
         required_env = tuple(override["required_env"])
-    elif plugin_entry is not None:
-        required_env = tuple(plugin_entry.required_env or ())
     else:
-        required_env = ()
-    if override.get("name"):
-        name = override["name"]
-    elif plugin_entry is not None and plugin_entry.label:
-        name = plugin_entry.label
-    else:
-        name = platform_id.replace("_", " ").title()
-    description = override.get("description")
-    if not description and plugin_entry is not None:
-        description = plugin_entry.install_hint or ""
+        required_env = tuple(plugin_entry.required_env or ()) if plugin_entry is not None else ()
+    plugin_label = plugin_entry.label if plugin_entry is not None else None
+    plugin_hint = (plugin_entry.install_hint or "") if plugin_entry is not None else None
     return {
         "id": platform_id,
-        "name": name,
-        "description": description or "",
+        "name": override.get("name") or plugin_label or platform_id.replace("_", " ").title(),
+        "description": override.get("description") or plugin_hint or "",
         "docs_url": override.get("docs_url", ""),
         "env_vars": _merge_platform_env_vars(platform_id, override, plugin_entry),
-        "required_env": required_env}
+        "required_env": required_env,
+    }
 
 
 def _write_platform_enabled(platform_id: str, enabled: bool) -> None:
@@ -414,22 +366,17 @@ _whatsapp_onboarding_sessions: dict[str, _WhatsAppOnboardingSession] = {}
 
 def _whatsapp_session_path() -> Path:
     from hermes_constants import get_hermes_dir
-
     return get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")
 
 
+_WHATSAPP_PAYLOAD_FIELDS = (
+    "status", "qr_payload", "expires_at", "mode", "allowed_users", "account_id", "account_name",
+    "account_phone", "error",
+)
+
+
 def _whatsapp_onboarding_payload(pairing_id: str, record: _WhatsAppOnboardingSession) -> dict[str, Any]:
-    return {
-        "pairing_id": pairing_id,
-        "status": record.status,
-        "qr_payload": record.qr_payload,
-        "expires_at": record.expires_at,
-        "mode": record.mode,
-        "allowed_users": record.allowed_users,
-        "account_id": record.account_id,
-        "account_name": record.account_name,
-        "account_phone": record.account_phone,
-        "error": record.error}
+    return {"pairing_id": pairing_id, **{f: getattr(record, f) for f in _WHATSAPP_PAYLOAD_FIELDS}}
 
 
 def _restart_gateway_after_whatsapp_onboarding(profile: Optional[str] = None) -> dict[str, Any]:
@@ -478,7 +425,6 @@ def _telegram_onboarding_request_sync(
     method: str, path: str, *, body: dict[str, Any] | None = None, bearer_token: str | None = None
 ) -> dict[str, Any]:
     import httpx
-
     headers = {"Accept": "application/json", "User-Agent": _TELEGRAM_ONBOARDING_USER_AGENT}
     request_kwargs: dict[str, Any] = {}
     if body is not None:
@@ -486,11 +432,9 @@ def _telegram_onboarding_request_sync(
         request_kwargs["json"] = body
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
-
-    url = f"{_telegram_onboarding_base_url()}{path}"
     try:
         with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
-            response = client.request(method, url, headers=headers, **request_kwargs)
+            response = client.request(method, f"{_telegram_onboarding_base_url()}{path}", headers=headers, **request_kwargs)
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         try:

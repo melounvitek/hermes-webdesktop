@@ -118,7 +118,6 @@ def _cron_profile_home(profile: Optional[str]) -> Tuple[str, Path]:
     """Resolve a profile query value to (profile_name, HERMES_HOME)."""
     from hermes_cli.web_server import _cron_default_profile
     from hermes_cli import profiles as profiles_mod
-
     raw = (profile or _cron_default_profile()).strip() or "default"
     try:
         canon = profiles_mod.normalize_profile_name(raw)
@@ -148,7 +147,6 @@ def _cron_store_scope(home: Path):
     """
     from cron import jobs as cron_jobs
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
     token = set_hermes_home_override(str(home))
     try:
         with cron_jobs.use_cron_store(home):
@@ -190,18 +188,16 @@ def _notify_cron_provider_for_profile(target_profile: Optional[str]) -> None:
         from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
         with _cron_store_scope(home):
             provider = resolve_cron_scheduler()
-            if not isinstance(provider, InProcessCronScheduler):
-                profile_names = [str(p.get("name") or "") for p in _cron_profile_dicts()]
-                if len([n for n in profile_names if n]) > 1:
-                    _log.warning(
-                        "Skipping cron provider reconcile for profile %s: "
-                        "external provider '%s' reconcile is not "
-                        "profile-scoped and would disarm other profiles' "
-                        "armed one-shots. The mutated profile re-arms "
-                        "idempotently on its next fire/start.",
-                        target_profile,
-                        provider.name)
-                    return
+            external = not isinstance(provider, InProcessCronScheduler)
+            if external and sum(1 for p in _cron_profile_dicts() if p.get("name")) > 1:
+                _log.warning(
+                    "Skipping cron provider reconcile for profile %s: "
+                    "external provider '%s' reconcile is not "
+                    "profile-scoped and would disarm other profiles' "
+                    "armed one-shots. The mutated profile re-arms "
+                    "idempotently on its next fire/start.", target_profile, provider.name,
+                )
+                return
             provider.on_jobs_changed()
     except Exception:
         _log.debug("Cron provider reconciliation failed for profile %s", target_profile, exc_info=True)
@@ -293,7 +289,6 @@ def _fire_cron_job_for_profile(profile: str, job_id: str, *, force: bool = False
     from hermes_cli.web_server import _cron_profile_home
     _profile_name, home = _cron_profile_home(profile)
     from cron.scheduler_provider import provider_supports_force_fire, resolve_cron_scheduler
-
     with _cron_store_scope(home):
         provider = resolve_cron_scheduler()
         if force:
@@ -339,7 +334,6 @@ def _gateway_fire_endpoint(profile: str, home: Path) -> str:
     """
     from hermes_cli.web_server import _cron_default_profile, load_config
     import os as _os
-
     multiplex = False
     try:
         from gateway.config import _env_multiplex_profiles_override
@@ -356,9 +350,8 @@ def _gateway_fire_endpoint(profile: str, home: Path) -> str:
         listener_profile, listener_home = "default", get_default_hermes_root()
         _log.info(
             "cron fire: multiplex gateway — resolving api_server port for %s "
-            "from the default profile's listener (%s)",
-            profile,
-            listener_home)
+            "from the default profile's listener (%s)", profile, listener_home,
+        )
 
     port = 0
     try:
@@ -407,14 +400,11 @@ async def _forward_cron_fire_to_gateway(
     _profile_name, home = _cron_profile_home(profile)
     url = _gateway_fire_endpoint(_profile_name, home)
     import httpx
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, json={"job_id": job_id}, headers={"Authorization": authorization})
     except Exception as exc:
-        _log.warning(
-            "cron fire forward to %s failed (%s: %s); returning 503 for NAS retry",
-            url, type(exc).__name__, exc)
+        _log.warning("cron fire forward to %s failed (%s: %s); returning 503 for NAS retry", url, type(exc).__name__, exc)
         return None
     try:
         body = resp.json()
@@ -437,13 +427,8 @@ def _gateway_intentionally_stopped(profile: Optional[str]) -> bool:
     """
     from hermes_cli.web_server import _cron_profile_home
     import json as _json
-
     try:
-        _name, home = _cron_profile_home(profile)
-        state_file = home / "gateway_state.json"
-        if not state_file.exists():
-            return False
-        data = _json.loads(state_file.read_text(encoding="utf-8"))
+        data = _json.loads((_cron_profile_home(profile)[1] / "gateway_state.json").read_text(encoding="utf-8"))
         return isinstance(data, dict) and data.get("desired_state") == "stopped"
     except Exception:
         return False

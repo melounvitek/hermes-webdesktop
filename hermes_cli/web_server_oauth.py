@@ -37,12 +37,10 @@ def _truncate_token(value: Optional[str], visible: int = 6) -> str:
 
 def _token_status(source: str, source_label: str, creds: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "logged_in": True,
-        "source": source,
-        "source_label": source_label,
+        "logged_in": True, "source": source, "source_label": source_label,
         "token_preview": _truncate_token(creds.get("accessToken")),
-        "expires_at": creds.get("expiresAt"),
-        "has_refresh_token": bool(creds.get("refreshToken"))}
+        "expires_at": creds.get("expiresAt"), "has_refresh_token": bool(creds.get("refreshToken")),
+    }
 
 
 def _anthropic_oauth_status() -> Dict[str, Any]:
@@ -68,17 +66,13 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
         pass
     from hermes_cli.config import get_env_value
     from hermes_cli.env_loader import format_secret_source_suffix
-
     for var in env_var_order:
         value = get_env_value(var) or os.getenv(var)
         if value:
             return {
-                "logged_in": True,
-                "source": "env_var",
-                "source_label": f"{var}{format_secret_source_suffix(var)}",
-                "token_preview": _truncate_token(value),
-                "expires_at": None,
-                "has_refresh_token": False}
+                "logged_in": True, "source": "env_var", "source_label": f"{var}{format_secret_source_suffix(var)}",
+                "token_preview": _truncate_token(value), "expires_at": None, "has_refresh_token": False,
+            }
     return dict(_LOGGED_OUT)
 
 
@@ -113,13 +107,9 @@ def _copilot_acp_status() -> Dict[str, Any]:
     else:
         source_label = "GitHub Copilot CLI not found on PATH"
     return {
-        "logged_in": verified,
-        "source": "copilot_cli",
-        "source_label": source_label,
-        "token_preview": None,
-        "expires_at": None,
-        "has_refresh_token": False,
-        "configured": configured}
+        "logged_in": verified, "source": "copilot_cli", "source_label": source_label, "token_preview": None,
+        "expires_at": None, "has_refresh_token": False, "configured": configured,
+    }
 
 
 def _external_process_cli_command(provider_id: str, default: str) -> str:
@@ -229,20 +219,13 @@ def _nous_poller(session_id: str, sess: Dict[str, Any]) -> None:
     from hermes_cli.web_server import _profile_scope
     from hermes_cli.auth import _poll_for_token, persist_nous_credentials, refresh_nous_oauth_from_state
     import httpx
-    portal_base_url = sess["portal_base_url"]
-    client_id = sess["client_id"]
-    device_code = sess["device_code"]
-    interval = sess["interval"]
-    scope = sess.get("scope")
-    expires_in = max(60, int(sess["expires_at"] - time.time()))
+    portal_base_url, client_id = sess["portal_base_url"], sess["client_id"]
     with httpx.Client(timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}) as client:
         token_data = _poll_for_token(
-            client=client,
-            portal_base_url=portal_base_url,
-            client_id=client_id,
-            device_code=device_code,
-            expires_in=expires_in,
-            poll_interval=interval)
+            client=client, portal_base_url=portal_base_url, client_id=client_id,
+            device_code=sess["device_code"], expires_in=max(60, int(sess["expires_at"] - time.time())),
+            poll_interval=sess["interval"],
+        )
     # Same post-processing as _nous_device_code_login (validate/refresh JWT)
     now = datetime.now(timezone.utc)
     token_ttl = int(token_data.get("expires_in") or 0)
@@ -250,15 +233,17 @@ def _nous_poller(session_id: str, sess: Dict[str, Any]) -> None:
         "portal_base_url": portal_base_url,
         "inference_base_url": token_data.get("inference_base_url"),
         "client_id": client_id,
-        "scope": token_data.get("scope") or scope,
+        "scope": token_data.get("scope") or sess.get("scope"),
         "token_type": token_data.get("token_type", "Bearer"),
         "access_token": token_data["access_token"],
         "refresh_token": token_data.get("refresh_token"),
         "obtained_at": now.isoformat(),
         "expires_at": (
             datetime.fromtimestamp(now.timestamp() + token_ttl, tz=timezone.utc).isoformat()
-            if token_ttl else None),
-        "expires_in": token_ttl}
+            if token_ttl else None
+        ),
+        "expires_in": token_ttl,
+    }
     with _profile_scope(_oauth_session_profile(session_id)):
         full_state = refresh_nous_oauth_from_state(auth_state, timeout_seconds=15.0, force_refresh=False)
         persist_nous_credentials(full_state)
@@ -272,33 +257,21 @@ def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
     Region is fixed to "global" here; cn-region operators use the CLI's ``--region cn``."""
     from hermes_cli.web_server import _profile_scope
     from hermes_cli.auth import (
-        _minimax_poll_token,
-        _minimax_resolve_token_expiry_unix,
-        _minimax_save_auth_state,
-        MINIMAX_OAUTH_GLOBAL_INFERENCE,
-        MINIMAX_OAUTH_SCOPE)
+        _minimax_poll_token, _minimax_resolve_token_expiry_unix, _minimax_save_auth_state,
+        MINIMAX_OAUTH_GLOBAL_INFERENCE, MINIMAX_OAUTH_SCOPE,
+    )
     import httpx
-    portal_base_url = sess["portal_base_url"]
-    client_id = sess["client_id"]
-    user_code = sess["user_code"]
-    code_verifier = sess["code_verifier"]
-    interval_ms = sess.get("interval_ms")
-    expired_in_raw = sess["expired_in_raw"]
+    portal_base_url, client_id = sess["portal_base_url"], sess["client_id"]
     with httpx.Client(
         timeout=httpx.Timeout(15.0), headers={"Accept": "application/json"}, follow_redirects=True
     ) as client:
         token_data = _minimax_poll_token(
-            client=client,
-            portal_base_url=portal_base_url,
-            client_id=client_id,
-            user_code=user_code,
-            code_verifier=code_verifier,
-            expired_in=expired_in_raw,
-            interval_ms=interval_ms)
+            client=client, portal_base_url=portal_base_url, client_id=client_id,
+            user_code=sess["user_code"], code_verifier=sess["code_verifier"],
+            expired_in=sess["expired_in_raw"], interval_ms=sess.get("interval_ms"),
+        )
     now = datetime.now(timezone.utc)
-    expires_at_ts = _minimax_resolve_token_expiry_unix(
-        int(token_data["expired_in"]), now=now)
-    expires_in_s = max(0, int(expires_at_ts - now.timestamp()))
+    expires_at_ts = _minimax_resolve_token_expiry_unix(int(token_data["expired_in"]), now=now)
     auth_state = {
         "provider": "minimax-oauth",
         "region": sess.get("region", "global"),
@@ -311,9 +284,9 @@ def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
         "refresh_token": token_data["refresh_token"],
         "resource_url": token_data.get("resource_url"),
         "obtained_at": now.isoformat(),
-        "expires_at": datetime.fromtimestamp(
-            expires_at_ts, tz=timezone.utc).isoformat(),
-        "expires_in": expires_in_s}
+        "expires_at": datetime.fromtimestamp(expires_at_ts, tz=timezone.utc).isoformat(),
+        "expires_in": max(0, int(expires_at_ts - now.timestamp())),
+    }
     with _profile_scope(_oauth_session_profile(session_id)):
         _minimax_save_auth_state(auth_state)
 
@@ -324,39 +297,29 @@ def _xai_device_poller(session_id: str, sess: Dict[str, Any]) -> None:
     from hermes_cli.web_server import _profile_scope
     import httpx
     from hermes_cli.auth import (
-        _save_xai_oauth_tokens,
-        _xai_oauth_discovery,
-        _xai_oauth_poll_device_token,
-        mark_provider_active_if_unset,
-        unsuppress_credential_source)
+        _save_xai_oauth_tokens, _xai_oauth_discovery, _xai_oauth_poll_device_token,
+        mark_provider_active_if_unset, unsuppress_credential_source,
+    )
 
-    device_code = sess["device_code"]
-    interval = int(sess["interval"])
-    expires_in = max(60, int(sess["expires_at"] - time.time()))
     discovery = _xai_oauth_discovery(20.0)
-    with httpx.Client(
-        timeout=httpx.Timeout(20.0), headers={"Accept": "application/json"}
-    ) as client:
+    with httpx.Client(timeout=httpx.Timeout(20.0), headers={"Accept": "application/json"}) as client:
         token_data = _xai_oauth_poll_device_token(
-            client,
-            token_endpoint=discovery["token_endpoint"],
-            device_code=device_code,
-            expires_in=expires_in,
-            poll_interval=interval)
+            client, token_endpoint=discovery["token_endpoint"], device_code=sess["device_code"],
+            expires_in=max(60, int(sess["expires_at"] - time.time())), poll_interval=int(sess["interval"]),
+        )
     tokens = {
         "access_token": str(token_data.get("access_token", "") or "").strip(),
         "refresh_token": str(token_data.get("refresh_token", "") or "").strip(),
         "id_token": str(token_data.get("id_token", "") or "").strip(),
         "expires_in": token_data.get("expires_in"),
-        "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer"}
+        "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer",
+    }
     with _profile_scope(_oauth_session_profile(session_id)):
         # set_active=False: persist without hijacking an existing active chat provider.
         _save_xai_oauth_tokens(
-            tokens,
-            discovery=discovery,
+            tokens, discovery=discovery, auth_mode="oauth_device_code", set_active=False,
             last_refresh=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            auth_mode="oauth_device_code",
-            set_active=False)
+        )
         # Mirror `hermes auth add xai-oauth`: first credential may become active; never overwrite.
         mark_provider_active_if_unset("xai-oauth")
         # The singleton write is the source of truth (the pool load seeds it as the canonical
