@@ -265,11 +265,10 @@ class CopilotACPClient:
         with self._active_process_lock:
             proc, self._active_process = self._active_process, None
         self.is_closed = True
-        if proc is None:
-            return
         try:
-            proc.terminate()
-            proc.wait(timeout=2)
+            if proc is not None:
+                proc.terminate()
+                proc.wait(timeout=2)
         except Exception:
             with contextlib.suppress(Exception):
                 proc.kill()

@@ -136,12 +136,10 @@ def is_free_tier_quota_error(error_message: str) -> bool:
 
 
 def is_standard_key_auth_error(status: int, error_message: str, reason: str = "") -> bool:
-    """True when a Gemini 401 means Google rejected the key TYPE (legacy "Standard"
-    Cloud key → misleading "expected OAuth 2 access token" / ErrorInfo
-    ``ACCESS_TOKEN_TYPE_UNSUPPORTED``). Narrow so ``API_KEY_INVALID`` keeps its message."""
-    if status != 401:
-        return False
-    return reason == "ACCESS_TOKEN_TYPE_UNSUPPORTED" or "expected oauth 2 access token" in (error_message or "").lower()
+    """True when a Gemini 401 means Google rejected the key TYPE (legacy "Standard" Cloud key → misleading
+    "expected OAuth 2 access token" / ErrorInfo ``ACCESS_TOKEN_TYPE_UNSUPPORTED``). Narrow so ``API_KEY_INVALID``
+    keeps its message."""
+    return status == 401 and (reason == "ACCESS_TOKEN_TYPE_UNSUPPORTED" or "expected oauth 2 access token" in (error_message or "").lower())
 
 
 class GeminiAPIError(Exception):
@@ -684,11 +682,8 @@ class AsyncGeminiNativeClient:
         return self._async_stream(result) if kwargs.get("stream") else result
 
     async def _async_stream(self, iterator: Iterator[_GeminiStreamChunk]) -> Any:
-        while True:
-            done, chunk = await asyncio.to_thread(self._sync._advance_stream_iterator, iterator)
-            if done:
-                return
-            yield chunk
+        while not (step := await asyncio.to_thread(self._sync._advance_stream_iterator, iterator))[0]:
+            yield step[1]
 
     async def close(self) -> None:
         await asyncio.to_thread(self._sync.close)
