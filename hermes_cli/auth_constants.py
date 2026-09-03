@@ -10,14 +10,11 @@ import base64
 import json
 from typing import Any, Callable, Dict, Optional
 
-# httpx is imported lazily: it costs ~30ms at import time and hermes_cli.auth
-# is on the interactive-CLI startup path via credential_pool → auxiliary_client
-# → cli_commands_mixin, where no HTTP request is ever made before first use.
-# The proxy resolves to the real module on first attribute access; every
-# consumer in this file uses `httpx.<attr>` so the swap is transparent.
-# Annotations like ``httpx.Client`` stay valid: `from __future__ import
-# annotations` (above) keeps them unevaluated at runtime, and the
-# TYPE_CHECKING import gives static checkers the real module.
+# httpx is imported lazily: it costs ~30ms and hermes_cli.auth is on the interactive-CLI startup path
+# (credential_pool -> auxiliary_client -> cli_commands_mixin) where no request is made before first
+# use. The proxy resolves to the real module on first attribute access; ``from __future__ import
+# annotations`` keeps ``httpx.Client`` annotations unevaluated and TYPE_CHECKING gives static
+# checkers the real module.
 import importlib as _importlib
 from typing import TYPE_CHECKING
 
@@ -40,8 +37,8 @@ else:
         def __getattr__(self, name):
             return getattr(self._resolve(), name)
 
-        # Forward set/del to the real module so monkeypatch.setattr
-        # ("hermes_cli.auth.httpx.Client", ...) keeps working in tests.
+        # Forward set/del to the real module so monkeypatch.setattr("hermes_cli.auth.httpx.Client",
+        # ...) keeps working in tests.
         def __setattr__(self, name, value):
             setattr(self._resolve(), name, value)
 
@@ -70,10 +67,7 @@ ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120       # refresh 2 min before expiry
 NOUS_INVOKE_JWT_MIN_TTL_SECONDS = ACCESS_TOKEN_REFRESH_SKEW_SECONDS
 DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1     # poll at most every 1s
 DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
-_FORM_JSON_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    "Accept": "application/json",
-}
+_FORM_JSON_HEADERS = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_XAI_OAUTH_BASE_URL = "https://api.x.ai/v1"
 MINIMAX_OAUTH_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
@@ -105,11 +99,9 @@ XAI_OAUTH_DISCOVERY_URL = f"{XAI_OAUTH_ISSUER}/.well-known/openid-configuration"
 XAI_OAUTH_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 XAI_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access"
 XAI_OAUTH_DEVICE_CODE_URL = f"{XAI_OAUTH_ISSUER}/oauth2/device/code"
-# xAI/Grok OAuth access tokens are intentionally short-lived (about 6h in
-# current SuperGrok flows). A two-minute refresh window is too narrow for
-# gateway/cron workloads that may only touch the provider every 30 minutes,
-# leaving brief but noisy credential-expiry gaps. Refresh up to one hour
-# early so ordinary runtime calls keep the token warm without user reauth.
+# xAI/Grok OAuth access tokens are short-lived (~6h). A two-minute refresh window leaves noisy
+# credential-expiry gaps for gateway/cron workloads that touch the provider every ~30 min, so refresh
+# up to an hour early.
 XAI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 3600
 QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
 QWEN_OAUTH_TOKEN_URL = "https://chat.qwen.ai/api/v1/oauth2/token"
@@ -123,32 +115,19 @@ SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 
 OAUTH_OVER_SSH_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh"
 DEFAULT_SPOTIFY_SCOPE = " ".join((
-    "user-modify-playback-state",
-    "user-read-playback-state",
-    "user-read-currently-playing",
-    "user-read-recently-played",
-    "playlist-read-private",
-    "playlist-read-collaborative",
-    "playlist-modify-public",
-    "playlist-modify-private",
-    "user-library-read",
-    "user-library-modify",
+    "user-modify-playback-state", "user-read-playback-state", "user-read-currently-playing",
+    "user-read-recently-played", "playlist-read-private", "playlist-read-collaborative",
+    "playlist-modify-public", "playlist-modify-private", "user-library-read", "user-library-modify",
 ))
-SERVICE_PROVIDER_NAMES: Dict[str, str] = {
-    "spotify": "Spotify",
-}
+SERVICE_PROVIDER_NAMES: Dict[str, str] = {"spotify": "Spotify"}
 
-# LM Studio's default no-auth mode still requires *some* non-empty bearer for
-# the API-key code paths (auxiliary_client, runtime resolver) to treat the
-# provider as configured. This sentinel is sent only to LM Studio, never to
-# any remote service.
+# LM Studio's default no-auth mode still needs *some* non-empty bearer for the API-key code paths to
+# treat the provider as configured. Sent only to LM Studio, never to a remote service.
 LMSTUDIO_NOAUTH_PLACEHOLDER = "dummy-lm-api-key"
 ACTUAL_LOCAL_NOAUTH_PLACEHOLDER = "dummy-actual-local-api-key"
 
-
-# Error code marking upstream rate-limit / usage-quota exhaustion (HTTP 429).
-# Such failures are transient and re-authenticating cannot resolve them, so
-# they must be kept distinct from missing/expired-credential errors.
+# Upstream rate-limit / usage-quota exhaustion (HTTP 429): transient, re-authenticating cannot resolve
+# it, so it must stay distinct from missing/expired-credential errors.
 CODEX_RATE_LIMITED_CODE = "codex_rate_limited"
 
 
@@ -156,12 +135,7 @@ class AuthError(RuntimeError):
     """Structured auth error with UX mapping hints."""
 
     def __init__(
-        self,
-        message: str,
-        *,
-        provider: str = "",
-        code: Optional[str] = None,
-        relogin_required: bool = False,
+        self, message: str, *, provider: str = "", code: Optional[str] = None, relogin_required: bool = False,
     ) -> None:
         super().__init__(message)
         self.provider = provider

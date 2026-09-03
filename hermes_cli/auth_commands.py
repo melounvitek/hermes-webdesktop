@@ -28,8 +28,7 @@ from agent.credential_pool import (
     get_pool_strategy,
     label_from_token,
     list_custom_pool_providers,
-    load_pool,
-)
+    load_pool)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
 from hermes_constants import OPENROUTER_BASE_URL
@@ -50,17 +49,14 @@ def _get_custom_provider_entries() -> list[dict]:
         return []
     result: list[dict] = []
     for entry in get_compatible_custom_providers(config):
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
+        name = entry.get("name") if isinstance(entry, dict) else None
         if not isinstance(name, str) or not name.strip():
             continue
         result.append({
             **entry,
             "name": name.strip(),
             "pool_key": f"{CUSTOM_POOL_PREFIX}{_normalize_custom_pool_name(name)}",
-            "provider_key": str(entry.get("provider_key", "") or "").strip(),
-        })
+            "provider_key": str(entry.get("provider_key", "") or "").strip()})
     return result
 
 
@@ -69,11 +65,7 @@ def _configured_provider_entry(provider: str) -> dict | None:
     normalized = (provider or "").strip().lower()
     if not normalized or normalized.startswith(CUSTOM_POOL_PREFIX):
         return None
-    for entry in _get_custom_provider_entries():
-        provider_key = str(entry.get("provider_key") or "").strip().lower()
-        if provider_key and provider_key == normalized:
-            return entry
-    return None
+    return next((e for e in _get_custom_provider_entries() if e["provider_key"].lower() == normalized), None)
 
 
 def _resolve_custom_provider_input(raw: str) -> str | None:
@@ -81,14 +73,12 @@ def _resolve_custom_provider_input(raw: str) -> str | None:
     normalized = (raw or "").strip().lower().replace(" ", "-")
     if not normalized:
         return None
-    # Direct match on 'custom:name' format
     if normalized.startswith(CUSTOM_POOL_PREFIX):
         return normalized
     for entry in _get_custom_provider_entries():
-        # ``providers:`` entries already have a durable runtime slug. Keep
-        # credentials under that slug instead of leaking the legacy
-        # ``custom:`` compatibility identity into auth.json and discovery.
-        provider_key = entry["provider_key"].strip().lower()
+        # ``providers:`` entries already have a durable runtime slug; keep credentials under it
+        # instead of leaking the legacy ``custom:`` identity into auth.json and discovery.
+        provider_key = entry["provider_key"].lower()
         if provider_key and provider_key == normalized:
             return provider_key
         if _normalize_custom_pool_name(entry["name"]) == normalized:
@@ -97,20 +87,14 @@ def _resolve_custom_provider_input(raw: str) -> str | None:
 
 
 _PROVIDER_ALIASES = {
-    "or": "openrouter",
-    "open-router": "openrouter",
-    "grok-oauth": "xai-oauth",
-    "xai-oauth": "xai-oauth",
-    "x-ai-oauth": "xai-oauth",
-    "xai-grok-oauth": "xai-oauth",
+    "or": "openrouter", "open-router": "openrouter",
+    "grok-oauth": "xai-oauth", "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth", "xai-grok-oauth": "xai-oauth",
 }
 
 
 def _normalize_provider(provider: str) -> str:
     normalized = (provider or "").strip().lower()
-    if normalized in _PROVIDER_ALIASES:
-        return _PROVIDER_ALIASES[normalized]
-    return _resolve_custom_provider_input(normalized) or normalized
+    return _PROVIDER_ALIASES.get(normalized) or _resolve_custom_provider_input(normalized) or normalized
 
 
 def _migrate_legacy_custom_pool_key(provider: str, legacy_key: str) -> None:
@@ -126,11 +110,7 @@ def _migrate_legacy_custom_pool_key(provider: str, legacy_key: str) -> None:
 
         current_entries = credential_pool.get(provider)
         merged = list(current_entries) if isinstance(current_entries, list) else []
-        known_ids = {
-            entry.get("id")
-            for entry in merged
-            if isinstance(entry, dict) and entry.get("id")
-        }
+        known_ids = {e.get("id") for e in merged if isinstance(e, dict) and e.get("id")}
         for entry in legacy_entries:
             entry_id = entry.get("id") if isinstance(entry, dict) else None
             if entry_id and entry_id in known_ids:
@@ -170,8 +150,7 @@ def _is_known_provider(provider: str, configured_provider: dict | None) -> bool:
         provider in PROVIDER_REGISTRY
         or provider == "openrouter"
         or provider.startswith(CUSTOM_POOL_PREFIX)
-        or configured_provider is not None
-    )
+        or configured_provider is not None)
 
 
 def _display_source(source: str) -> str:
@@ -185,8 +164,7 @@ _EXHAUSTED_CLASSES = (
      ("rate limit", "usage limit", "quota", "too many requests")),
     ("auth failed", False, {401, 403},
      ("invalid_token", "invalid_grant", "unauthorized", "forbidden", "auth"),
-     ("unauthorized", "forbidden", "expired", "revoked", "invalid token", "authentication")),
-)
+     ("unauthorized", "forbidden", "expired", "revoked", "invalid token", "authentication")))
 
 
 def _classify_exhausted_status(entry) -> tuple[str, bool]:
@@ -206,21 +184,22 @@ def _format_exhausted_status(entry) -> str:
     reason = getattr(entry, "last_error_reason", None)
     reason_text = f" {reason}" if isinstance(reason, str) and reason.strip() else ""
     code = f" ({entry.last_error_code})" if entry.last_error_code else ""
+    head = f" {label}{reason_text}{code}"
     if not show_retry_window:
-        return f" {label}{reason_text}{code} (re-auth may be required)"
+        return f"{head} (re-auth may be required)"
     exhausted_until = _exhausted_until(entry)
     if exhausted_until is None:
-        return f" {label}{reason_text}{code}"
+        return head
     remaining = max(0, int(math.ceil(exhausted_until - time.time())))
     if remaining <= 0:
-        return f" {label}{reason_text}{code} (ready to retry)"
+        return f"{head} (ready to retry)"
     minutes, seconds = divmod(remaining, 60)
     hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
     parts = [(days, "d"), (hours, "h"), (minutes, "m"), (seconds, "s")]
     first = next(i for i, (value, _) in enumerate(parts) if value or i == 3)
     wait = " ".join(f"{value}{unit}" for value, unit in parts[first:first + 2])
-    return f" {label}{reason_text}{code} ({wait} left)"
+    return f"{head} ({wait} left)"
 
 
 def _anthropic_oauth_login(args) -> dict:
@@ -257,9 +236,7 @@ _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
         fields=lambda creds, provider: {
             "refresh_token": creds.get("refresh_token"),
             "expires_at_ms": creds.get("expires_at_ms"),
-            "base_url": _provider_base_url(provider),
-        },
-    ),
+            "base_url": _provider_base_url(provider)}),
     "openai-codex": _OAuthAddSpec(
         login=lambda args: auth_mod._codex_device_code_login(),
         token=lambda creds: creds["tokens"]["access_token"],
@@ -267,67 +244,52 @@ _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
         fields=lambda creds, provider: {
             "refresh_token": creds["tokens"].get("refresh_token"),
             "base_url": creds.get("base_url"),
-            "last_refresh": creds.get("last_refresh"),
-        },
-        activate_first=True,
-    ),
+            "last_refresh": creds.get("last_refresh")},
+        activate_first=True),
     "xai-oauth": _OAuthAddSpec(
         login=lambda args: auth_mod._xai_oauth_device_code_login(
             timeout_seconds=getattr(args, "timeout", None) or 20.0,
-            open_browser=not getattr(args, "no_browser", False),
-        ),
+            open_browser=not getattr(args, "no_browser", False)),
         token=lambda creds: creds["tokens"]["access_token"],
         source=SOURCE_MANUAL_DEVICE_CODE,
         fields=lambda creds, provider: {
             "refresh_token": creds["tokens"].get("refresh_token"),
             "base_url": creds.get("base_url") or auth_mod.DEFAULT_XAI_OAUTH_BASE_URL,
-            "last_refresh": creds.get("last_refresh"),
-        },
-        activate_first=True,
-    ),
+            "last_refresh": creds.get("last_refresh")},
+        activate_first=True),
     "qwen-oauth": _OAuthAddSpec(
         login=_qwen_oauth_login,
         token=lambda creds: creds["api_key"],
         source=f"{SOURCE_MANUAL}:qwen_cli",
-        fields=lambda creds, provider: {"base_url": creds.get("base_url")},
-    ),
+        fields=lambda creds, provider: {"base_url": creds.get("base_url")}),
     "minimax-oauth": _OAuthAddSpec(
         login=lambda args: auth_mod._minimax_oauth_login(
             open_browser=not getattr(args, "no_browser", False),
-            timeout_seconds=getattr(args, "timeout", None) or 15.0,
-        ),
+            timeout_seconds=getattr(args, "timeout", None) or 15.0),
         token=lambda creds: creds["access_token"],
         source=f"{SOURCE_MANUAL}:minimax_oauth",
         fields=lambda creds, provider: {
-            "refresh_token": creds.get("refresh_token"),
-            "base_url": creds.get("inference_base_url"),
-        },
-    ),
+            "refresh_token": creds.get("refresh_token"), "base_url": creds.get("inference_base_url")}),
 }
 
 
 def _add_nous_oauth_credential(args, provider: str) -> None:
     """``hermes auth add nous --type oauth``: shared-credential import, else device-code login."""
     custom_label = (getattr(args, "label", None) or "").strip() or None
+    timeout = getattr(args, "timeout", None) or 15.0
 
     def _persist(creds: dict, what: str) -> None:
-        # Honor `--label <name>` so nous matches other providers' UX.  The
-        # helper embeds this into providers.nous so that label_from_token
-        # doesn't overwrite it on every subsequent load_pool("nous").
+        # `--label` is embedded into providers.nous so label_from_token doesn't overwrite it on every
+        # subsequent load_pool("nous").
         entry = auth_mod.persist_nous_credentials(creds, label=custom_label)
         shown_label = entry.label if entry is not None else label_from_token(
-            creds.get("access_token", ""), f"{provider}-oauth-1",
-        )
+            creds.get("access_token", ""), f"{provider}-oauth-1")
         print(f'{what} {provider} OAuth {"device-code " if what == "Saved" else ""}credentials: "{shown_label}"')
 
-    # Codex-style auto-import: if a shared Nous credential lives at
-    # <hermes-root>/shared/nous_auth.json (written by any previous
-    # successful login), offer to import it instead of running the
-    # full device-code flow. This makes `hermes --profile <name>
-    # auth add nous --type oauth` a one-tap operation for users who
-    # run multiple profiles.
-    shared = auth_mod._read_shared_nous_state()
-    if shared:
+    # Codex-style auto-import: a shared Nous credential at <hermes-root>/shared/nous_auth.json
+    # (written by any previous login) makes `hermes --profile <name> auth add nous --type oauth`
+    # a one-tap operation for multi-profile users.
+    if auth_mod._read_shared_nous_state():
         try:
             found = f"Found existing Nous OAuth credentials at {auth_mod._nous_shared_store_path()}"
         except RuntimeError:
@@ -340,14 +302,11 @@ def _add_nous_oauth_credential(args, provider: str) -> None:
             do_import = "y"
         if do_import in {"", "y", "yes"}:
             print("Rehydrating Nous session from shared credentials...")
-            rehydrated = auth_mod._try_import_shared_nous_state(
-                timeout_seconds=getattr(args, "timeout", None) or 15.0,
-            )
+            rehydrated = auth_mod._try_import_shared_nous_state(timeout_seconds=timeout)
             if rehydrated is not None:
                 _persist(rehydrated, "Imported")
                 return
-            # Rehydrate failed (expired refresh_token, portal down, etc.)
-            # — fall through to device-code flow.
+            # Expired refresh_token, portal down, etc. — fall through to device-code.
             print("Could not refresh shared credentials — falling back to device-code login.")
 
     creds = auth_mod._nous_device_code_login(
@@ -356,10 +315,9 @@ def _add_nous_oauth_credential(args, provider: str) -> None:
         client_id=getattr(args, "client_id", None),
         scope=getattr(args, "scope", None),
         open_browser=not getattr(args, "no_browser", False),
-        timeout_seconds=getattr(args, "timeout", None) or 15.0,
+        timeout_seconds=timeout,
         insecure=bool(getattr(args, "insecure", False)),
-        ca_bundle=getattr(args, "ca_bundle", None),
-    )
+        ca_bundle=getattr(args, "ca_bundle", None))
     _persist(creds, "Saved")
 
 
@@ -394,8 +352,7 @@ def _add_api_key_credential(args, provider: str, pool) -> None:
         priority=0,
         source=SOURCE_MANUAL,
         access_token=token,
-        base_url=_provider_base_url(provider),
-    )
+        base_url=_provider_base_url(provider))
     pool.add_entry(entry)
     print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
 
@@ -408,22 +365,21 @@ def auth_add_command(args) -> None:
     if configured_provider is not None:
         _migrate_legacy_custom_pool_key(provider, configured_provider["pool_key"])
 
+    is_custom = provider.startswith(CUSTOM_POOL_PREFIX)
     requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
     if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
         requested_type = AUTH_TYPE_API_KEY
     if not requested_type:
-        oauth_default = provider in _OAUTH_CAPABLE_PROVIDERS and not provider.startswith(CUSTOM_POOL_PREFIX)
+        oauth_default = provider in _OAUTH_CAPABLE_PROVIDERS and not is_custom
         requested_type = AUTH_TYPE_OAUTH if oauth_default else AUTH_TYPE_API_KEY
 
     pool = load_pool(provider)
-
-    if not provider.startswith(CUSTOM_POOL_PREFIX):
+    if not is_custom:
         _unsuppress_provider_sources(provider)
 
     if requested_type == AUTH_TYPE_API_KEY:
         _add_api_key_credential(args, provider, pool)
         return
-
     if provider == "nous":
         _add_nous_oauth_credential(args, provider)
         return
@@ -435,30 +391,17 @@ def auth_add_command(args) -> None:
     creds = spec.login(args)
     token = spec.token(creds)
     label = (getattr(args, "label", None) or "").strip() or label_from_token(
-        token, f"{provider}-oauth-{len(pool.entries()) + 1}",
-    )
-    # Every provider gets a distinct, self-contained pool entry per account
-    # instead of routing through a singleton save path. The singleton
-    # round-trip collapsed every added account into the latest login: a
-    # second ``hermes auth add <provider>`` overwrote the first account's
-    # singleton-mirrored entry rather than creating an independent one
-    # (#39236). ``manual:*`` entries refresh from their own token pair, so
-    # they need no singleton shadow.
+        token, f"{provider}-oauth-{len(pool.entries()) + 1}")
+    # Every account gets a distinct, self-contained pool entry instead of routing through a
+    # singleton save path (which collapsed every added account into the latest login).
+    # ``manual:*`` entries refresh from their own token pair, so they need no singleton shadow.
     entry = PooledCredential(
-        provider=provider,
-        id=uuid.uuid4().hex[:6],
-        label=label,
-        auth_type=AUTH_TYPE_OAUTH,
-        priority=0,
-        source=spec.source,
-        access_token=token,
-        **spec.fields(creds, provider),
-    )
+        provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=AUTH_TYPE_OAUTH, priority=0,
+        source=spec.source, access_token=token, **spec.fields(creds, provider))
     first_credential = not pool.entries()
     pool.add_entry(entry)
-    # Adding the first Codex/xAI credential should make it the active
-    # provider (the old singleton save path did this implicitly via
-    # _save_provider_state). Subsequent adds leave the active provider as-is.
+    # The first Codex/xAI credential becomes the active provider (as the old singleton save path
+    # did implicitly); subsequent adds leave the active provider as-is.
     if spec.activate_first and first_credential:
         auth_mod.mark_provider_active_if_unset(provider)
     print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
@@ -470,21 +413,12 @@ def auth_list_command(args) -> None:
         providers = [provider_filter]
     else:
         credential_pool = auth_mod._load_auth_store().get("credential_pool")
-        persisted_providers = (
-            credential_pool.keys() if isinstance(credential_pool, dict) else ()
-        )
-        configured_providers = (
-            entry["provider_key"]
-            for entry in _get_custom_provider_entries()
-            if entry["provider_key"]
-        )
         providers = sorted({
             *PROVIDER_REGISTRY.keys(),
             "openrouter",
             *list_custom_pool_providers(),
-            *configured_providers,
-            *persisted_providers,
-        })
+            *(e["provider_key"] for e in _get_custom_provider_entries() if e["provider_key"]),
+            *(credential_pool.keys() if isinstance(credential_pool, dict) else ())})
     for provider in providers:
         pool = load_pool(provider)
         entries = pool.entries()
@@ -520,20 +454,14 @@ def auth_remove_command(args) -> None:
         raise SystemExit(f'No credential matching "{target}" for provider {provider}.')
     print(f"Removed {provider} credential #{index} ({removed.label})")
 
-    # Unified removal dispatch.  Every credential source Hermes reads from
-    # (env vars, external OAuth files, auth.json blocks, custom config)
-    # has a RemovalStep registered in agent.credential_sources.  The step
-    # handles its source-specific cleanup and we centralise suppression +
-    # user-facing output here so every source behaves identically from
-    # the user's perspective.
+    # Every credential source Hermes reads from (env vars, external OAuth files, auth.json blocks,
+    # custom config) has a RemovalStep in agent.credential_sources; it does the source-specific
+    # cleanup while suppression + user-facing output are centralised here.
     from agent.credential_sources import find_removal_step
 
     step = find_removal_step(provider, removed.source)
-    if step is None:
-        # Unregistered source — e.g. "manual", which has nothing external
-        # to clean up.  The pool entry is already gone; we're done.
+    if step is None:  # unregistered source, e.g. "manual": nothing external to clean up
         return
-
     result = step.remove_fn(provider, removed)
     for line in result.cleaned:
         print(line)
@@ -555,16 +483,13 @@ def auth_status_command(args) -> None:
     if not provider:
         raise SystemExit("Provider is required. Example: `hermes auth status spotify`.")
     if provider in auth_mod.SINGLE_USE_REFRESH_POOL_PROVIDERS:
-        # load_pool() runs the forked-grant heal (#100339); do it before the
-        # status read so the report reflects the consolidated grant.
-        load_pool(provider)
+        load_pool(provider)  # runs the forked-grant heal first so the report reflects the consolidated grant
     status = auth_mod.get_auth_status(provider)
     _print_oauth_heal_notices()
     if not status.get("logged_in"):
         reason = status.get("error")
         print(f"{provider}: logged out" + (f" ({reason})" if reason else ""))
         return
-
     print(f"{provider}: logged in")
     for key in ("auth_type", "client_id", "redirect_uri", "scope", "expires_at", "api_base_url"):
         value = status.get(key)
@@ -616,14 +541,10 @@ def _print_azure_entra_status() -> None:
         model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
         if not isinstance(model_cfg, dict) or (
             str(model_cfg.get("provider") or "").strip().lower() != "azure-foundry"
-            or str(model_cfg.get("auth_mode") or "").strip().lower() != "entra_id"
-        ):
+            or str(model_cfg.get("auth_mode") or "").strip().lower() != "entra_id"):
             return
         from agent.azure_identity_adapter import (
-            EntraIdentityConfig,
-            SCOPE_AI_AZURE_DEFAULT,
-            describe_active_credential,
-            has_azure_identity_installed,
+            EntraIdentityConfig, SCOPE_AI_AZURE_DEFAULT, describe_active_credential, has_azure_identity_installed,
         )
         base_url = str(model_cfg.get("base_url") or "").strip()
         entra = model_cfg.get("entra") or {}
@@ -635,9 +556,7 @@ def _print_azure_entra_status() -> None:
             print("  Status: ⚠ azure-identity not installed "
                   "(pip install azure-identity)")
         else:
-            info = describe_active_credential(
-                config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0
-            )
+            info = describe_active_credential(config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0)
             env_sources = info.get("env_sources") or []
             if info.get("ok"):
                 print(f"  Status: ✓ token acquired ({', '.join(env_sources) if env_sources else 'default chain'})")
@@ -652,40 +571,27 @@ def _print_azure_entra_status() -> None:
 
 def _interactive_auth() -> None:
     """Interactive credential pool management when `hermes auth` is called bare."""
-    # Show current pool status first
     print("Credential Pool Status")
     print("=" * 50)
-
     auth_list_command(SimpleNamespace(provider=None))
     _print_bedrock_status()
     _print_azure_entra_status()
     print()
 
-    # Main menu
     choices = [
-        "Add a credential",
-        "Remove a credential",
-        "Reset cooldowns for a provider",
-        "Set rotation strategy for a provider",
-        "Exit",
-    ]
+        "Add a credential", "Remove a credential", "Reset cooldowns for a provider",
+        "Set rotation strategy for a provider", "Exit"]
     print("What would you like to do?")
     for i, choice in enumerate(choices, 1):
         print(f"  {i}. {choice}")
-
     try:
         raw = input("\nChoice: ").strip()
     except (EOFError, KeyboardInterrupt):
         return
-
     if not raw or raw == str(len(choices)):
         return
-
     handler = {
-        "1": _interactive_add,
-        "2": _interactive_remove,
-        "3": _interactive_reset,
-        "4": _interactive_strategy,
+        "1": _interactive_add, "2": _interactive_remove, "3": _interactive_reset, "4": _interactive_strategy,
     }.get(raw)
     if handler is not None:
         handler()
@@ -711,7 +617,6 @@ def _interactive_add() -> None:
     if not _is_known_provider(provider, configured_provider):
         raise SystemExit(f"Unknown provider: {provider}")
 
-    # For OAuth-capable providers, ask which type
     auth_type = "api_key"
     if provider in _OAUTH_CAPABLE_PROVIDERS:
         print(f"\n{provider} supports both API keys and OAuth login.")
@@ -732,8 +637,7 @@ def _interactive_add() -> None:
     auth_add_command(SimpleNamespace(
         provider=provider, auth_type=auth_type, label=label, api_key=None,
         portal_url=None, inference_url=None, client_id=None, scope=None,
-        no_browser=False, timeout=None, insecure=False, ca_bundle=None,
-    ))
+        no_browser=False, timeout=None, insecure=False, ca_bundle=None))
 
 
 def _interactive_remove() -> None:
@@ -742,20 +646,14 @@ def _interactive_remove() -> None:
     if not pool.has_credentials():
         print(f"No credentials for {provider}.")
         return
-
-    # Show entries with indices
     for i, e in enumerate(pool.entries(), 1):
-        exhausted = _format_exhausted_status(e)
-        print(f"  #{i}  {e.label:25s} {e.auth_type:10s} {e.source}{exhausted} [id:{e.id}]")
-
+        print(f"  #{i}  {e.label:25s} {e.auth_type:10s} {e.source}{_format_exhausted_status(e)} [id:{e.id}]")
     try:
         raw = line_input("Remove #, id, or label (blank to cancel): ").strip()
     except (EOFError, KeyboardInterrupt):
         return
-    if not raw:
-        return
-
-    auth_remove_command(SimpleNamespace(provider=provider, target=raw))
+    if raw:
+        auth_remove_command(SimpleNamespace(provider=provider, target=raw))
 
 
 def _interactive_reset() -> None:
@@ -766,8 +664,7 @@ _STRATEGY_DESCRIPTIONS = {
     STRATEGY_FILL_FIRST: "Use first key until exhausted, then next",
     STRATEGY_ROUND_ROBIN: "Cycle through keys evenly",
     STRATEGY_LEAST_USED: "Always pick the least-used key",
-    STRATEGY_RANDOM: "Random selection",
-}
+    STRATEGY_RANDOM: "Random selection"}
 
 
 def _interactive_strategy() -> None:
@@ -780,14 +677,12 @@ def _interactive_strategy() -> None:
     for i, s in enumerate(strategies, 1):
         marker = " ←" if s == current else ""
         print(f"  {i}. {s:15s} — {_STRATEGY_DESCRIPTIONS[s]}{marker}")
-
     try:
         raw = input("\nStrategy [1-4]: ").strip()
     except (EOFError, KeyboardInterrupt):
         return
     if not raw:
         return
-
     try:
         strategy = strategies[int(raw) - 1]
     except (ValueError, IndexError):
@@ -812,14 +707,12 @@ _AUTH_ACTIONS = {
     "reset": auth_reset_command,
     "status": auth_status_command,
     "logout": auth_logout_command,
-    "spotify": auth_spotify_command,
-}
+    "spotify": auth_spotify_command}
 
 
 def auth_command(args) -> None:
     handler = _AUTH_ACTIONS.get(getattr(args, "auth_action", ""))
     if handler is not None:
         handler(args)
-        return
-    # No subcommand — launch interactive mode
-    _interactive_auth()
+    else:
+        _interactive_auth()  # no subcommand
