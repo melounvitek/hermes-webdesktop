@@ -44,9 +44,7 @@ def _editable_install_is_current(git_cmd, cwd, pre_pull_sha: str | None) -> bool
             text=True, encoding="utf-8", errors="replace")
     except OSError:
         return False
-    if result.returncode != 0:
-        return False
-    return not result.stdout.strip()
+    return result.returncode == 0 and not result.stdout.strip()
 
 
 # Modules imported on every startup. Unlike _UPDATE_CRITICAL_FILES (only parsed) these are
@@ -108,22 +106,16 @@ def _critical_module_import_failures(
             encoding="utf-8", errors="replace", timeout=120,
         )
     except subprocess.TimeoutExpired:
-        return {
-            "critical-module probe": (
-                "TimeoutExpired", "timed out before reporting import health")}
+        return _probe_failure("TimeoutExpired", "timed out before reporting import health")
     except (OSError, subprocess.SubprocessError):
         # Can't run the probe — don't block the update on our own tooling.
         return {}
     output = result.stdout or ""
     if marker not in output:
-        return {
-            "critical-module probe": (
-                "ProbeTerminated",
-                "terminated before reporting import health "
-                f"(exit code {result.returncode})")}
+        return _probe_failure(
+            "ProbeTerminated",
+            f"terminated before reporting import health (exit code {result.returncode})")
     try:
-        import json
-
         failures = json.loads(output.rsplit(marker, 1)[1])
         if not isinstance(failures, list) or any(
             not isinstance(item, list)
@@ -133,9 +125,12 @@ def _critical_module_import_failures(
             raise ValueError("invalid import-health payload")
         return {str(module): (str(kind), str(detail)) for module, kind, detail in failures}
     except (TypeError, ValueError):
-        return {
-            "critical-module probe": ( "MalformedPayload", "reported malformed import health data" )
-        }
+        return _probe_failure("MalformedPayload", "reported malformed import health data")
+
+
+def _probe_failure(kind: str, detail: str) -> dict[str, tuple[str, str]]:
+    """Failure row for the probe itself (as opposed to a module it imported)."""
+    return {"critical-module probe": (kind, detail)}
 
 
 def _validate_critical_modules_import(
@@ -280,9 +275,12 @@ def _restore_active_tool_dependencies(
     if restored:
         print(f"  ✓ {len(restored)} restored: {', '.join(restored)}")
     for name, reason in failed:
-        if len(reason) > 200:
-            reason = reason[:200] + "..."
-        print(f"  ⚠ {name} failed to restore: {reason}")
+        print(f"  ⚠ {name} failed to restore: {_clip(reason)}")
+
+
+def _clip(reason: str, limit: int = 200) -> str:
+    """Bound a failure reason for the one-line report."""
+    return reason if len(reason) <= limit else reason[:limit] + "..."
 
 
 def _refresh_active_lazy_features(
@@ -304,15 +302,13 @@ def _refresh_active_lazy_features(
         logger.debug("Lazy refresh skipped (import failed): %s", exc)
         return True
 
-    if features is None:
+    active = features
+    if active is None:
         try:
             active = lazy_deps.active_features()
         except Exception as exc:
             logger.debug("Lazy refresh skipped (active_features failed): %s", exc)
             return True
-    else:
-        active = features
-
     if not active:
         return True
 
@@ -350,10 +346,7 @@ def _refresh_active_lazy_features(
         return True
 
     for feature, status in failed:
-        reason = status.split(": ", 1)[-1]
-        if len(reason) > 200:
-            reason = reason[:200] + "..."
-        print(f"  ⚠ {feature} failed to refresh: {reason}")
+        print(f"  ⚠ {feature} failed to refresh: {_clip(status.split(': ', 1)[-1])}")
 
     if install_cmd_prefix is None:
         print("  ⚠ Lazy refresh failed; rerun `hermes update` once resolved.")
@@ -521,9 +514,7 @@ def _npm_lockfile_changed(hermes_root: Path) -> bool:
         *_web_toolchain_roots(web_dir)):
         return True
     try:
-        # Key the cache by PROJECT_ROOT so parallel worktrees don't collide.
-        cache_key = hashlib.sha256(str(_m().PROJECT_ROOT).encode()).hexdigest()[:12]
-        cache_file = hermes_root / f".npm_lock_hash_{cache_key}"
+        cache_file = _npm_lock_cache_file(hermes_root)
         if not cache_file.exists():
             return True
         return cache_file.read_text(encoding="utf-8").strip() != current
@@ -531,15 +522,19 @@ def _npm_lockfile_changed(hermes_root: Path) -> bool:
         return True
 
 
-def _record_npm_lockfile_hash(hermes_root: Path) -> None:
+def _npm_lock_cache_file(hermes_root: Path) -> Path:
+    """Per-checkout cache path: keyed by PROJECT_ROOT so parallel worktrees don't collide."""
     from hermes_cli.update_cmd import _m
+    cache_key = hashlib.sha256(str(_m().PROJECT_ROOT).encode()).hexdigest()[:12]
+    return hermes_root / f".npm_lock_hash_{cache_key}"
+
+
+def _record_npm_lockfile_hash(hermes_root: Path) -> None:
     digest = _npm_manifests_digest()
     if digest is None:
         return
     try:
-        cache_key = hashlib.sha256(str(_m().PROJECT_ROOT).encode()).hexdigest()[:12]
-        cache_file = hermes_root / f".npm_lock_hash_{cache_key}"
-        cache_file.write_text(digest, encoding="utf-8")
+        _npm_lock_cache_file(hermes_root).write_text(digest, encoding="utf-8")
     except OSError:
         logger.debug("Could not write npm lockfile hash cache")
 
@@ -608,12 +603,9 @@ def _update_node_dependencies() -> list[str]:
             print("  ⚠ Skipped: only a Windows npm is reachable from this WSL shell.")
             print("    Install Node.js inside the WSL distro (nvm, or your distro's")
             print("    package manager), then re-run `hermes update`.")
-            failed = []
-            if any(
-                (_m().PROJECT_ROOT / workspace / "package.json").exists()
-                for workspace in ("ui-tui", "web")):
-                failed.append("ui-tui, web workspaces")
-            return failed
+            has_workspace = any(
+                (_m().PROJECT_ROOT / ws / "package.json").exists() for ws in ("ui-tui", "web"))
+            return ["ui-tui, web workspaces"] if has_workspace else []
         return []
 
     from hermes_constants import get_default_hermes_root
@@ -662,15 +654,12 @@ def _update_node_dependencies() -> list[str]:
     if result.returncode == 0:
         _record_npm_lockfile_hash(shared_hermes_root)
         print("  ✓ ui-tui, web workspaces installed (desktop skipped)")
-        failures: list[str] = []
-    else:
-        print("  ⚠ npm install failed")
-        stderr = (result.stderr or "").strip() if result.stderr else ""
-        if stderr:
-            print(f"    {stderr.splitlines()[-1]}")
-        failures = _partial_update_failure("ui-tui, web workspaces")
-
-    return failures
+        return []
+    print("  ⚠ npm install failed")
+    stderr = (result.stderr or "").strip()
+    if stderr:
+        print(f"    {stderr.splitlines()[-1]}")
+    return _partial_update_failure("ui-tui, web workspaces")
 
 
 def _venv_core_imports_healthy() -> tuple[bool, str]:
@@ -789,17 +778,12 @@ def _detect_self_loaded_native_modules() -> list[str]:
     from hermes_cli.update_cmd import _m
     if not _m()._is_windows():
         return []
-    found = []
-    for prefix, (display, dist) in _SELF_LOCKING_NATIVE_MODULES.items():
-        if prefix not in sys.modules:
-            continue
-        # Defer ONLY on a CONFIRMED rewrite; unknown fails OPEN (PyYAML is in every process, so
-        # unknown-as-at-risk always fires). A missed deferral only yields the mid-sync os error 5
-        # that marker recovery already handles — far less harmful than an update that never runs.
-        if _m()._dependency_sync_would_rewrite(dist) is not True:
-            continue
-        found.append(display)
-    return sorted(set(found))
+    # Defer ONLY on a CONFIRMED rewrite; unknown fails OPEN (PyYAML is in every process, so
+    # unknown-as-at-risk always fires). A missed deferral only yields the mid-sync os error 5
+    # that marker recovery already handles — far less harmful than an update that never runs.
+    return sorted({
+        display for prefix, (display, dist) in _SELF_LOCKING_NATIVE_MODULES.items()
+        if prefix in sys.modules and _m()._dependency_sync_would_rewrite(dist) is True})
 
 
 def _abort_dependency_sync_if_self_locked(gateway_resume=None) -> None:
@@ -812,14 +796,14 @@ def _abort_dependency_sync_if_self_locked(gateway_resume=None) -> None:
     locked = _m()._detect_self_loaded_native_modules()
     if locked:
         _m()._defer_update_for_self_lock(locked)
-        if gateway_resume is not None:
-            _m()._resume_windows_gateways_after_update(gateway_resume)
-        sys.exit(2)
-
-    if _m()._reexec_dependency_sync_off_windows_shim():
-        if gateway_resume is not None:
-            _m()._resume_windows_gateways_after_update(gateway_resume)
-        sys.exit(0)
+        exit_code = 2
+    elif _m()._reexec_dependency_sync_off_windows_shim():
+        exit_code = 0
+    else:
+        return
+    if gateway_resume is not None:
+        _m()._resume_windows_gateways_after_update(gateway_resume)
+    sys.exit(exit_code)
 
 
 def _defer_update_for_self_lock(loaded: list[str]) -> None:
@@ -866,7 +850,6 @@ def _rebuild_desktop_after_update(
     # Check the content-hash stamp IN-PROCESS first (the subprocess spends ~1-3 s importing the
     # CLI to reach the same check). Update never passes --source, so source_mode=False.
     # Any pre-check error falls through to the subprocess.
-    skip_desktop_build = False
     try:
         skip_desktop_build = not _m()._desktop_build_needed(
             desktop_dir, _m().PROJECT_ROOT, source_mode=False)
@@ -1031,6 +1014,7 @@ def _sync_python_dependencies_after_pull(
 
     uv_bin = ensure_uv()
 
+    # sys.executable -m pip avoids PEP 668 'externally-managed-environment' errors.
     pip_cmd = [sys.executable, "-m", "pip"]
     if not uv_bin:
         uv_bin = _ensure_uv_for_termux(pip_cmd)
@@ -1040,34 +1024,26 @@ def _sync_python_dependencies_after_pull(
         # managed_python_env() isolation so a third-party UV_PYTHON_INSTALL_DIR can't hijack uv.
         from hermes_cli.managed_uv import managed_python_env
 
-        uv_env = managed_python_env()
-        uv_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
-        if _m()._is_termux_env(uv_env):
-            uv_env.pop("PYTHONPATH", None)
-            uv_env.pop("PYTHONHOME", None)
-            install_group = "termux-all"
-            print("  → Termux detected: using uv + curated termux-all optional profile...")
-        if not deps_current:
-            if _m()._is_termux_env(uv_env) and _is_android_python():
-                print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
-                _install_psutil_android_compat([uv_bin, "pip"], env=uv_env)
-            _m()._install_python_dependencies_with_optional_fallback(
-                [uv_bin, "pip"], env=uv_env, group=install_group)
+        install_prefix, lazy_env = [uv_bin, "pip"], managed_python_env()
+        lazy_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
+        termux_note = "  → Termux detected: using uv + curated termux-all optional profile..."
     else:
-        # sys.executable -m pip avoids PEP 668 'externally-managed-environment' errors.
-        pip_cmd = [sys.executable, "-m", "pip"]
         _ensure_venv_pip(pip_cmd, sys.executable)
-        if _m()._is_termux_env():
-            install_group = "termux-all"
-            print("  → Termux detected: using curated termux-all optional profile...")
-        if not deps_current:
-            if _m()._is_termux_env() and _is_android_python():
-                print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
-                _install_psutil_android_compat(pip_cmd)
-            _m()._install_python_dependencies_with_optional_fallback(pip_cmd, group=install_group)
-
-    install_prefix = [uv_bin, "pip"] if uv_bin else pip_cmd
-    lazy_env = uv_env if uv_bin else None
+        install_prefix, lazy_env = pip_cmd, None
+        termux_note = "  → Termux detected: using curated termux-all optional profile..."
+    is_termux = _m()._is_termux_env(lazy_env)
+    if is_termux:
+        if lazy_env is not None:
+            lazy_env.pop("PYTHONPATH", None)
+            lazy_env.pop("PYTHONHOME", None)
+        install_group = "termux-all"
+        print(termux_note)
+    if not deps_current:
+        if is_termux and _is_android_python():
+            print("  → Termux/Android detected: prebuilding psutil with Linux source path compatibility...")
+            _install_psutil_android_compat(install_prefix, env=lazy_env)
+        _m()._install_python_dependencies_with_optional_fallback(
+            install_prefix, env=lazy_env, group=install_group)
 
     if deps_current:
         # Verification normally runs inside the skipped install; run it here so a wrong skip
