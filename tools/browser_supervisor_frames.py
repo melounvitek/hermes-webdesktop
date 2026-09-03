@@ -39,10 +39,8 @@ class FrameInfo:
 
     def to_dict(self) -> Dict[str, Any]:
         d = {"frame_id": self.frame_id, "url": self.url, "origin": self.origin, "is_oopif": self.is_oopif}
-        for key, value in (("session_id", self.cdp_session_id), ("parent_frame_id", self.parent_frame_id),
-                           ("name", self.name)):
-            if value:
-                d[key] = value
+        optional = (("session_id", self.cdp_session_id), ("parent_frame_id", self.parent_frame_id), ("name", self.name))
+        d.update({k: v for k, v in optional if v})
         return d
 
 
@@ -71,33 +69,26 @@ class FrameTrackingMixin:
         if not frame_id:
             return
         with self._state_lock:
-            old = self._frames.get(frame_id)
+            old = self._frames.get(frame_id) or FrameInfo(frame_id, "", "", None, False, session_id)
             self._frames[frame_id] = FrameInfo(
                 frame_id=frame_id, url=str(frame.get("url") or ""),
                 origin=str(frame.get("securityOrigin") or frame.get("origin") or ""),
-                parent_frame_id=frame.get("parentId") or (old.parent_frame_id if old else None),
-                is_oopif=bool(old.is_oopif if old else False),
-                cdp_session_id=old.cdp_session_id if old else session_id,
-                name=str(frame.get("name") or (old.name if old else "")),
+                parent_frame_id=frame.get("parentId") or old.parent_frame_id, is_oopif=old.is_oopif,
+                cdp_session_id=old.cdp_session_id, name=str(frame.get("name") or old.name),
             )
 
     def _on_frame_detached(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
-        """Drop a frame only when it's truly gone.
-
-        ``reason="swap"`` means the frame is migrating processes (e.g. promoted
-        to an OOPIF) — dropping it would hide the iframe. Even with ``remove``
-        the parent only knows the child left ITS process; if we hold a live
-        child session for that frame_id it is still alive, so keep it until
-        Target.detached + a later frameDetached clear it.
-        """
+        """Drop a frame only when it's truly gone. ``reason="swap"`` = migrating processes
+        (e.g. promoted to an OOPIF) — dropping would hide the iframe. Even with ``remove``
+        the parent only knows the child left ITS process; a live child session means it's
+        still alive, so keep it until Target.detached + a later frameDetached clear it."""
         frame_id = params.get("frameId")
         if not frame_id or str(params.get("reason") or "remove").lower() == "swap":
             return
         with self._state_lock:
             old = self._frames.get(frame_id)
-            if old and old.is_oopif and old.cdp_session_id:
-                return
-            self._frames.pop(frame_id, None)
+            if not (old and old.is_oopif and old.cdp_session_id):
+                self._frames.pop(frame_id, None)
 
     async def _on_target_attached(self, params: Dict[str, Any], session_id: Optional[str] = None) -> None:
         info = params.get("targetInfo") or {}
@@ -113,7 +104,7 @@ class FrameTrackingMixin:
                 old = self._frames.get(target_id)
                 self._frames[target_id] = FrameInfo(
                     frame_id=target_id, url=str(info.get("url") or ""), origin="", is_oopif=True, cdp_session_id=sid,
-                    parent_frame_id=(old.parent_frame_id if old else None), name=str(info.get("title") or (old.name if old else "")),
+                    parent_frame_id=old.parent_frame_id if old else None, name=str(info.get("title") or (old.name if old else "")),
                 )
         # Enable child domains off-loop: awaiting the replies here would deadlock
         # because only the reader can resolve those Futures.
@@ -128,20 +119,15 @@ class FrameTrackingMixin:
         await self._install_dialog_bridge(sid)
 
     def _on_target_detached(self, params: Dict[str, Any], session_id: Optional[str] = None) -> None:
-        """Clear the session binding of frames on a detached child session.
-
-        Frames are deliberately NOT dropped: Browserbase fires transient detaches
-        during page transitions while the iframe is still visible. Clearing
-        ``cdp_session_id`` just stops stale routing; ``Page.frameDetached``
-        cleans up if the iframe truly goes away.
-        """
+        """Clear the session binding of frames on a detached child session. Frames are
+        deliberately NOT dropped: Browserbase fires transient detaches during page transitions
+        while the iframe is still visible; ``Page.frameDetached`` cleans up if it truly goes away."""
         sid = params.get("sessionId")
         if not sid:
             return
         with self._state_lock:
-            for fid, frame in list(self._frames.items()):
-                if frame.cdp_session_id == sid:
-                    self._frames[fid] = replace(frame, cdp_session_id=None)
+            self._frames.update({fid: replace(f, cdp_session_id=None) for fid, f in self._frames.items()
+                                 if f.cdp_session_id == sid})
 
     def _build_frame_tree_locked(self) -> Dict[str, Any]:
         """Capped frame_tree payload (must hold state lock). Top frame = one with

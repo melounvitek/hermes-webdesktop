@@ -52,8 +52,8 @@ def extension_controller_available(action: str) -> bool:
 
         if not browser_control_enabled():
             return False
-        session_id, principal_id, transport_family = _bound_identity()
-        if not session_id or not principal_id or not transport_family:
+        session_id, principal_id, transport_family = identity = _bound_identity()
+        if not all(identity):
             return False
         broker = get_browser_control_broker()
         scope = broker.scope_for_session(session_id=session_id, principal_id=principal_id, transport_family=transport_family)

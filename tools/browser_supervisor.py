@@ -1,15 +1,11 @@
 """Persistent CDP supervisor for browser dialog + frame detection.
 
-One ``CDPSupervisor`` runs per Hermes ``task_id`` with a reachable CDP endpoint.
-It holds one persistent WebSocket, subscribes to ``Page`` / ``Runtime`` /
-``Target`` events on every attached session (top page + auto-attached OOPIF /
-worker targets), and exposes pending dialogs + frame tree through a
-thread-safe snapshot that tool handlers read synchronously.
-
-Not in the agent's tool schema: output reaches the agent via ``browser_snapshot``
-and ``browser_dialog``. Dialog capture lives in ``browser_supervisor_dialogs``,
-frame tracking in ``browser_supervisor_frames``; both are mixed into
-``CDPSupervisor`` and their public names are re-exported here.
+One ``CDPSupervisor`` per Hermes ``task_id`` with a reachable CDP endpoint: one
+persistent WebSocket, ``Page`` / ``Runtime`` / ``Target`` events on every attached
+session (top page + auto-attached OOPIF / worker targets), pending dialogs + frame
+tree exposed via a thread-safe snapshot. Not in the tool schema — output reaches the
+agent via ``browser_snapshot`` / ``browser_dialog``. Dialog capture and frame tracking
+are mixins (``browser_supervisor_dialogs`` / ``browser_supervisor_frames``) re-exported here.
 Design spec: ``website/docs/developer-guide/browser-supervisor.md``.
 """
 
@@ -43,12 +39,9 @@ logger = logging.getLogger(__name__)
 
 def _redact_cdp_error_text(exc: object) -> str:
     """Redact CDP endpoint credentials from an exception's (or URL's) string form.
-
-    ``websockets`` bakes the raw target URL (``?token=`` / ``user:pass@``) into
-    its exception messages, so every egress point that turns such an exception
-    into log text or a re-raised message MUST route through here; falls back to
-    a fixed sentinel if redaction itself raises, erring toward masking.
-    """
+    ``websockets`` bakes the raw URL (``?token=`` / ``user:pass@``) into its exception
+    messages, so every egress point turning one into log/re-raise text MUST route through
+    here; falls back to a fixed sentinel if redaction itself raises (err toward masking)."""
     try:
         from agent.redact import redact_cdp_url
 
@@ -148,8 +141,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
             self.stop()
             raise TimeoutError(f"CDP supervisor did not attach within {timeout}s "
                                f"(cdp_url={_redact_cdp_error_text(self.cdp_url)[:80]}...)")
-        if self._start_error is not None:
-            err = self._start_error
+        if (err := self._start_error) is not None:
             self.stop()
             # ``err`` is a raw ``websockets`` exception embedding the full cdp_url (token /
             # userinfo): re-raise redacted, ``from None`` so the traceback chain leaks nothing.
@@ -184,11 +176,8 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
 
     def respond_to_dialog(self, action: str, *, prompt_text: Optional[str] = None,
                           dialog_id: Optional[str] = None, timeout: float = 10.0) -> Dict[str, Any]:
-        """Accept/dismiss a pending dialog (sync bridge onto the supervisor loop).
-
-        Returns ``{"ok": True, "dialog": {...}}`` or ``{"ok": False, "error": ...}``
-        for recoverable errors (no dialog, ambiguous dialog_id, inactive).
-        """
+        """Accept/dismiss a pending dialog (sync bridge onto the supervisor loop). Returns
+        ``{"ok": True, "dialog"}`` or ``{"ok": False, "error"}`` for recoverable errors."""
         if action not in {"accept", "dismiss"}:
             return _fail(f"action must be 'accept' or 'dismiss', got {action!r}")
         with self._state_lock:
@@ -227,9 +216,9 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
         if loop is None or not loop.is_running():
             return _fail("supervisor loop is not running")
         with self._state_lock:
-            if not self._active:
-                return _fail("supervisor is not active")
-            session_id = self._page_session_id
+            active, session_id = self._active, self._page_session_id
+        if not active:
+            return _fail("supervisor is not active")
         if not session_id:
             return _fail("supervisor has no attached page session")
 
@@ -427,8 +416,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
 
 
 class _SupervisorRegistry:
-    """Process-global (task_id → supervisor) map with idempotent start/stop.
-    One instance, exposed as ``SUPERVISOR_REGISTRY``; mutations go through ``_lock``."""
+    """Process-global (task_id → supervisor) map with idempotent start/stop (``SUPERVISOR_REGISTRY``)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -444,9 +432,8 @@ class _SupervisorRegistry:
 
     def get_or_start(self, task_id: str, cdp_url: str, *, dialog_policy: str = DEFAULT_DIALOG_POLICY,
                      dialog_timeout_s: float = DEFAULT_DIALOG_TIMEOUT_S, start_timeout: float = 15.0) -> CDPSupervisor:
-        """Idempotently ensure a supervisor is running for ``(task_id, cdp_url)``.
-        An existing supervisor bound to a different ``cdp_url`` (or unhealthy:
-        dead thread / stopped loop) is stopped and replaced."""
+        """Idempotently ensure a supervisor runs for ``(task_id, cdp_url)``; one bound to a
+        different ``cdp_url`` or unhealthy (dead thread / stopped loop) is stopped and replaced."""
         with self._lock:
             existing = self._by_task.get(task_id)
             if existing is not None:

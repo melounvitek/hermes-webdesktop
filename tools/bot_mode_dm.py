@@ -29,21 +29,18 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-# Top-level imports stay stdlib-only: this module is also executed directly as the
-# background delivery runner (``python bot_mode_dm.py --run-delivery …``), where
-# ``tools.*`` is resolved from whichever install is on sys.path. Hermes-side
-# helpers are imported lazily inside the functions that need them.
+# Top-level imports stay stdlib-only: this module also runs directly as the background
+# delivery runner (``python bot_mode_dm.py --run-delivery …``); Hermes helpers import lazily.
 
 logger = logging.getLogger(__name__)
 
 MESSAGE_AGENT_TOOL_NAME = "message_agent"
 
-# Message body cap — generous for real work products, small enough that a
-# runaway paste can't turn one DM into a context bomb on the recipient.
+# Message body cap — generous for real work, small enough that a runaway paste can't
+# turn one DM into a context bomb on the recipient.
 MESSAGE_MAX_CHARS = 16000
-
-# A runner normally owns and removes each DM file. This bounds the residual
-# plaintext lifetime if the machine dies between spawn ack and the runner's finally.
+# A runner owns and removes each DM file; this bounds residual plaintext lifetime if
+# the machine dies between spawn ack and the runner's finally.
 _DM_DIR_NAME = "hermes-dm"
 _DM_STALE_SECONDS = 24 * 60 * 60
 
@@ -181,8 +178,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     except Exception as exc:  # pragma: no cover — defensive
         return _err(f"Bot Mode gate check failed: {exc}")
 
-    root = _hermes_root(Path(home))
-    me = _self_profile_name(Path(home))
+    root, me = _hermes_root(Path(home)), _self_profile_name(Path(home))
     roster = [name for name, _dir in _roster(root)]
     peers = _peers(root)
     teammates = [_handle(n) for n in roster if n != me]
@@ -200,26 +196,21 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
     raw_target = str(target or "").strip().lstrip("@")
     if not raw_target:
         return _roster_err("target is required.")
-
-    sender_handle = _handle(me)
-    content = f"Message from 🤖 {sender_handle} (@{sender_handle}): " + body
+    content = f"Message from 🤖 {_handle(me)} (@{_handle(me)}): " + body
+    delivery = dict(task_id=task_id, agent=agent)
 
     # Peer target: '<peer>/<agent>' or a bare registered peer name.
     peer_match = _PEER_TARGET_RE.match(raw_target)
-    bare_peer = raw_target.lower() if raw_target.lower() in peers else None
-    if peer_match or bare_peer:
-        peer_name = peer_match.group(1) if peer_match else bare_peer
-        peer_profile = peer_match.group(2) if peer_match else None
+    if peer_match or raw_target.lower() in peers:
+        peer_name, peer_profile = peer_match.groups() if peer_match else (raw_target.lower(), None)
         if peer_name not in peers:
             return _roster_err(f"No registered peer named '{peer_name}'.")
         dm_target = f"{peer_name}/{peer_profile}" if peer_profile else peer_name
-        # Pin the registry-owning profile: `hermes peer` resolves bot_peers via
-        # the profile-scoped load_config(), while the roster above reads the
-        # machine-root config — the CLI must run in that same profile or a
-        # secondary-profile bot sees an empty registry ("No peer named").
+        # Pin the registry-owning profile: `hermes peer` resolves bot_peers via the profile-scoped
+        # load_config(), while the roster above reads the machine-root config — the CLI must run
+        # in that same profile or a secondary-profile bot sees an empty registry.
         return _start_delivery(["hermes", "-p", _self_profile_name(root), "peer", "dm", dm_target], content,
-                               f"@{peer_profile or peer_name} on peer '{peer_name}'",
-                               stdin_file=True, task_id=task_id, agent=agent)
+                               f"@{peer_profile or peer_name} on peer '{peer_name}'", stdin_file=True, **delivery)
 
     # Local teammate.
     is_local_shape = bool(_LOCAL_TARGET_RE.match(raw_target))
@@ -227,11 +218,10 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
         return _roster_err(f"Invalid target: {raw_target!r}.")
     resolved = _resolve_local_name(raw_target, roster) if is_local_shape else None
     if resolved is None or resolved == me:
-        # Unknown locally, or same-name target on ANOTHER connection (this
-        # gateway's 'default' messaging the cloud 'default'): every gateway
-        # connected to the user's Desktop is reachable via the relay roster, so
-        # try that before reporting a resolution failure / self-message.
-        relayed = _try_relay_delivery(root, raw_target, content, me, task_id=task_id, agent=agent)
+        # Unknown locally, or same-name target on ANOTHER connection (this gateway's 'default'
+        # messaging the cloud 'default'): every Desktop-connected gateway is reachable via the
+        # relay roster, so try that before reporting a resolution failure / self-message.
+        relayed = _try_relay_delivery(root, raw_target, content, me, **delivery)
         if relayed is not None:
             return relayed
         if resolved == me:
@@ -240,7 +230,7 @@ def message_agent_tool(target: str = "", message: str = "", task_id: Optional[st
                            "machine, or on a registered peer. Pick a name from the roster "
                            "(roles are listed in your system prompt).")
     return _start_delivery(["hermes", "-p", resolved, *BOT_CHAT_TURN_ARGS], content, f"@{_handle(resolved)}",
-                           stdin_file=False, task_id=task_id, agent=agent)
+                           stdin_file=False, **delivery)
 
 
 def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
@@ -278,8 +268,7 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
 def _dm_dir() -> Path:
     uid_getter = getattr(os, "getuid", None)
     uid = uid_getter() if callable(uid_getter) else None
-    dirname = f"{_DM_DIR_NAME}-{uid}" if uid is not None else _DM_DIR_NAME
-    path = Path(tempfile.gettempdir()) / dirname
+    path = Path(tempfile.gettempdir()) / (f"{_DM_DIR_NAME}-{uid}" if uid is not None else _DM_DIR_NAME)
     path.mkdir(mode=0o700, exist_ok=True)
     # Shared POSIX temp roots need a per-user directory. Fail closed if an
     # attacker pre-created the expected path or replaced it with a symlink.
@@ -320,8 +309,7 @@ def _write_dm_file(content: str) -> str:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(content)
     except BaseException:
-        # fdopen owns the descriptor once it succeeds, but if fdopen itself
-        # failed the raw descriptor is still ours. Closing twice is harmless.
+        # If fdopen itself failed the raw descriptor is still ours; closing twice is harmless.
         with contextlib.suppress(OSError):
             os.close(fd)
         _unlink_dm_file(path)
@@ -359,8 +347,7 @@ def _run_local_turn(argv: list[str], dm_file: str) -> int:
     if proc.returncode != 0:
         from tools.bot_failure_reasons import RETRY_NONE, classify_agent_error, retry_action
 
-        detail = (proc.stderr or proc.stdout or "").strip()[-500:]
-        if retry_action(classify_agent_error(detail)) != RETRY_NONE:
+        if retry_action(classify_agent_error((proc.stderr or proc.stdout or "").strip()[-500:])) != RETRY_NONE:
             proc = _turn()
     if proc.returncode != 0 and "already has a live owner" in (proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
@@ -402,9 +389,8 @@ def _delivery_command(argv: list[str], dm_file: str, *, stdin_file: bool) -> str
     runner_argv = [sys.executable, str(Path(__file__).resolve()), "--run-delivery",
                    "stdin" if stdin_file else "query-file", dm_file, *argv]
     if sys.platform == "win32":
-        # The tracked local backend uses Git Bash on native Windows: forward
-        # slashes keep native drive paths executable there; backslash paths are
-        # parsed as command names and die with exit 127 before the runner starts.
+        # The tracked local backend uses Git Bash on native Windows: forward slashes keep drive
+        # paths executable there; backslash paths are parsed as command names (exit 127).
         runner_argv = [part.replace("\\", "/") for part in runner_argv]
     return shlex.join(runner_argv)
 
@@ -441,8 +427,7 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None,
             return _err(f"Delivery to {label} failed to start: {parsed['error']}")
         if not proc_id:
             return _err(f"Delivery to {label} failed to start: no process id returned")
-        # From here the background runner owns the file and removes it only
-        # after the local query-file or peer stdin consumer has finished.
+        # From here the background runner owns the file (removed after the consumer finishes).
         transferred = True
         return json.dumps({
             "status": "sent",
