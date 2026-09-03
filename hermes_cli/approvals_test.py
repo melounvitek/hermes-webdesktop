@@ -7,7 +7,7 @@ order the runtime guard (``check_all_command_guards``) applies them:
 1. container-skip gate (isolated backends bypass all guards), 2. hardline blocklist (never
 bypassable, fires before yolo/off), 3. sudo-stdin guard (unconditional), 4. user ``approvals.deny``
 rules (fire before yolo/off), 5. yolo / ``approvals.mode: off`` bypass, 6. permanent
-``command_allowlist``, 7.
+``command_allowlist``, 7. dangerous-pattern detection (would prompt).
 """
 
 from __future__ import annotations
@@ -36,8 +36,8 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     """
     import tools.approval as approval
 
-    # Sync config-persisted "always" patterns so the allowlist check below
-    # sees what the runtime would see (load is read-only).
+    # Sync config-persisted "always" patterns so the allowlist check below sees what the runtime
+    # would see (load is read-only).
     try:
         approval.load_permanent_allowlist()
     except Exception:
@@ -56,8 +56,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
             "normalized_variants": variants,
         }
 
-    # 1. Isolated container backends skip every guard (runtime parity:
-    #    this fires BEFORE the hardline floor in check_all_command_guards).
+    # 1. Isolated container backends skip every guard (fires BEFORE the hardline floor at runtime).
     if approval._should_skip_container_guards(env_type):
         return result(
             "allow",
@@ -77,10 +76,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
     # 3. Sudo stdin guard — unconditional, like the hardline floor.
     is_sudo_guess, sudo_desc = approval._check_sudo_stdin_guard(command)
     if is_sudo_guess:
-        return result(
-            "hardline-deny", rule=sudo_desc,
-            detail="sudo stdin guard (unconditional block)",
-        )
+        return result("hardline-deny", rule=sudo_desc, detail="sudo stdin guard (unconditional block)")
 
     # 4. User-defined approvals.deny rules — fire before yolo/off.
     deny_pattern = approval._match_user_deny_rule(command)
@@ -103,11 +99,7 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
 
     # 6. Permanent command_allowlist.
     if approval._command_matches_permanent_allowlist(command):
-        return result(
-            "allow",
-            detail="matches command_allowlist in config.yaml "
-                   "(permanently approved)",
-        )
+        return result("allow", detail="matches command_allowlist in config.yaml (permanently approved)")
 
     # 7. Dangerous-pattern detection → would prompt.
     is_dangerous, pattern_key, description = approval.detect_dangerous_command(command)
@@ -138,18 +130,14 @@ def _render_text(verdict: dict) -> None:
 def approvals_test_command(args) -> int:
     """Handle ``hermes approvals test <command...>``. Returns the exit code."""
     words = list(getattr(args, "command_words", None) or [])
-    # argparse REMAINDER keeps a leading "--" separator; it is not part of
-    # the command being evaluated.
+    # argparse REMAINDER keeps a leading "--" separator; it is not part of the command.
     if words and words[0] == "--":
         words = words[1:]
     if not words:
         print("usage: hermes approvals test [--env-type TYPE] [--json] -- <command...>")
         return EXIT_USAGE
-    command = " ".join(words)
-    env_type = getattr(args, "env_type", None) or "local"
 
-    verdict = evaluate_command(command, env_type=env_type)
-
+    verdict = evaluate_command(" ".join(words), env_type=getattr(args, "env_type", None) or "local")
     if getattr(args, "json", False):
         print(json.dumps(verdict, indent=2))
     else:

@@ -2,12 +2,10 @@
 
 Hermes has no dedicated approval-decision ledger: ``always`` answers land in ``command_allowlist``
 (config.yaml) via :func:`tools.approval.save_permanent_allowlist`, while ``once``/``session``
-approvals are in-memory only.
-
-So this module mines *implied approvals*: a command that matches a dangerous-command class (the same
-:func:`tools.approval.detect_dangerous_command` classifier that triggers the prompt) AND whose tool
-result is not a block/denial marker must have been approved by the user (once, session, always,
-smart-approve, or yolo) before it ran.
+approvals are in-memory only. So this module mines *implied approvals*: a command that matches a
+dangerous-command class (the same :func:`tools.approval.detect_dangerous_command` classifier that
+triggers the prompt) AND whose tool result is not a block/denial marker must have been approved by
+the user (once, session, always, smart-approve, or yolo) before it ran.
 """
 
 from __future__ import annotations
@@ -25,12 +23,10 @@ from typing import Iterable, Iterator, Optional
 # Safety exclusions
 # ---------------------------------------------------------------------------
 
-# Dangerous-class descriptions matching ANY of these are never proposed,
-# regardless of approval frequency.  Matched case-insensitively against the
-# pattern-key/description strings produced by tools.approval's
-# DANGEROUS_PATTERNS / execution-flag findings.  Deliberately conservative:
-# a benign class accidentally excluded costs the user one manual config edit;
-# a destructive class accidentally proposed costs them data.
+# Dangerous-class descriptions matching ANY of these are never proposed, regardless of approval
+# frequency (matched case-insensitively against tools.approval's DANGEROUS_PATTERNS / execution-flag
+# descriptions). Deliberately conservative: a benign class accidentally excluded costs the user
+# one manual config edit; a destructive class accidentally proposed costs them data.
 _UNSAFE_CLASS_PATTERNS = [
     r"delete",              # recursive delete, find -delete, branch force delete, ...
     r"\brm\b",              # xargs with rm, find -exec rm
@@ -71,8 +67,8 @@ _UNSAFE_CLASS_PATTERNS = [
 ]
 _UNSAFE_CLASS_RE = re.compile("|".join(_UNSAFE_CLASS_PATTERNS), re.IGNORECASE)
 
-# Root binaries that must never anchor a proposed command glob, even if the
-# class survived the description filter.  Prefix match for the mkfs family.
+# Root binaries that must never anchor a proposed command glob, even if the class survived the
+# description filter. Prefix match for the mkfs family.
 _UNSAFE_ROOT_BINARIES = {
     "rm", "rmdir", "unlink", "shred", "dd", "fdisk", "parted", "wipefs",
     "sudo", "doas", "su", "chmod", "chown", "chgrp",
@@ -82,9 +78,8 @@ _UNSAFE_ROOT_BINARIES = {
 }
 _UNSAFE_ROOT_PREFIXES = ("mkfs",)
 
-# Substrings in a role='tool' result that mean the command did NOT execute
-# with user consent (blocked, denied, timed out, or still pending).  Kept in
-# sync with the message templates in tools/approval.py.
+# Substrings in a role='tool' result that mean the command did NOT execute with user consent
+# (blocked, denied, timed out, or still pending). Kept in sync with tools/approval.py templates.
 _BLOCK_MARKERS = (
     "BLOCKED (hardline)",
     "BLOCKED: User denied",
@@ -128,22 +123,23 @@ def default_db_path() -> Path:
 
 
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
-    uri = f"file:{db_path}?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
 
 def _fetch_rows(cur) -> Iterator[tuple]:
     """Stream cursor rows in 2000-row batches."""
-    while True:
-        rows = cur.fetchmany(2000)
-        if not rows:
-            return
+    while rows := cur.fetchmany(2000):
         yield from rows
 
 
-def _iter_terminal_calls(
-    con: sqlite3.Connection, since_ts: float
-) -> Iterator[tuple[str, str]]:
+def _json_or_none(raw):
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_terminal_calls(con: sqlite3.Connection, since_ts: float) -> Iterator[tuple[str, str]]:
     """Yield ``(tool_call_id, command)`` for every terminal tool call."""
     cur = con.execute(
         "SELECT tool_calls FROM messages "
@@ -152,21 +148,13 @@ def _iter_terminal_calls(
         (since_ts,),
     )
     for (raw,) in _fetch_rows(cur):
-        try:
-            calls = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(calls, list):
-            continue
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            fn = call.get("function") or {}
+        calls = _json_or_none(raw)
+        for call in calls if isinstance(calls, list) else ():
+            fn = call.get("function") or {} if isinstance(call, dict) else {}
             if fn.get("name") != "terminal":
                 continue
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except (TypeError, ValueError):
+            args = _json_or_none(fn.get("arguments") or "{}")
+            if args is None:
                 continue
             command = args.get("command")
             if isinstance(command, str) and command.strip():
@@ -188,12 +176,9 @@ def _blocked_tool_call_ids(con: sqlite3.Connection, since_ts: float) -> set:
     }
 
 
-def scan_approval_history(
-    db_path: Optional[Path] = None, days: int = 90
-) -> list[tuple[str, str]]:
-    """Return ``(command, dangerous_class_description)`` records mined from the session DB —
-    dangerous-classified terminal commands that actually executed (i.e. carried an implied user
-    approval).
+def scan_approval_history(db_path: Optional[Path] = None, days: int = 90) -> list[tuple[str, str]]:
+    """``(command, dangerous_class_description)`` records for dangerous-classified terminal commands
+    that actually executed (i.e. carried an implied user approval).
     """
     from tools.approval import detect_dangerous_command, detect_hardline_command
 
@@ -210,15 +195,13 @@ def scan_approval_history(
         for tool_call_id, command in _iter_terminal_calls(con, since_ts):
             if tool_call_id in blocked:
                 continue
-            is_hardline, _desc = detect_hardline_command(command)
-            if is_hardline:
-                # Hardline commands are unconditionally blocked at runtime;
-                # never mine them (defense in depth against stale DB rows).
+            # Hardline commands are unconditionally blocked at runtime; never mine them (defense in
+            # depth against stale DB rows).
+            if detect_hardline_command(command)[0]:
                 continue
             is_dangerous, _key, description = detect_dangerous_command(command)
-            if not is_dangerous:
-                continue
-            records.append((command, description))
+            if is_dangerous:
+                records.append((command, description))
     finally:
         con.close()
     return records
@@ -230,13 +213,9 @@ def scan_approval_history(
 
 def normalize_command(command: str) -> str:
     """Fold user/hermes home prefixes and collapse whitespace."""
-    from tools.approval import (
-        _rewrite_resolved_hermes_home,
-        _rewrite_resolved_user_home,
-    )
+    from tools.approval import _rewrite_resolved_hermes_home, _rewrite_resolved_user_home
 
-    folded = _rewrite_resolved_user_home(_rewrite_resolved_hermes_home(command))
-    return " ".join(folded.split())
+    return " ".join(_rewrite_resolved_user_home(_rewrite_resolved_hermes_home(command)).split())
 
 
 def is_unsafe_class(description: str) -> bool:
@@ -257,12 +236,8 @@ def derive_glob(normalized: str) -> Optional[str]:
     """
     from tools.approval import _has_allowlist_shell_operator
 
-    if _has_allowlist_shell_operator(normalized):
-        return None
     tokens = normalized.split()
-    if not tokens:
-        return None
-    if _unsafe_root_binary(tokens[0]):
+    if _has_allowlist_shell_operator(normalized) or not tokens or _unsafe_root_binary(tokens[0]):
         return None
     if len(tokens) == 1:
         return tokens[0]
@@ -292,19 +267,15 @@ def build_proposals(
             continue
         normalized = normalize_command(command)
         glob = derive_glob(normalized)
-        key = (glob, "glob") if glob is not None else (description, "class")
-        pattern, kind = key
+        pattern, kind = (glob, "glob") if glob is not None else (description, "class")
         if pattern in existing:
             continue
-        proposal = by_pattern.get(key)
-        if proposal is None:
-            proposal = by_pattern[key] = Proposal(pattern=pattern, kind=kind)
+        proposal = by_pattern.setdefault((pattern, kind), Proposal(pattern=pattern, kind=kind))
         proposal.count += 1
         proposal.classes.add(description)
         proposal.add_example(normalized)
 
-    ranked = [p for p in by_pattern.values() if p.count >= max(min_count, 1)]
-    ranked.sort(key=lambda p: (-p.count, p.pattern))
+    ranked = sorted((p for p in by_pattern.values() if p.count >= max(min_count, 1)), key=lambda p: (-p.count, p.pattern))
     return ranked[: max(limit, 1)]
 
 
@@ -336,12 +307,10 @@ def apply_proposals(proposals: list[Proposal], indices: list[int]) -> set:
     """Merge chosen proposal patterns into command_allowlist and persist."""
     import tools.approval as approval_module
 
-    merged = set(approval_module.load_permanent_allowlist())
-    for idx in indices:
-        merged.add(proposals[idx].pattern)
+    merged = set(approval_module.load_permanent_allowlist()) | {proposals[idx].pattern for idx in indices}
     approval_module.save_permanent_allowlist(merged)
-    # Keep the in-process allowlist consistent so a long-lived process sees
-    # the new entries immediately (mirrors the interactive 'always' path).
+    # Keep the in-process allowlist consistent so a long-lived process sees the new entries
+    # immediately (mirrors the interactive 'always' path).
     approval_module.load_permanent(merged)
     return merged
 
@@ -382,13 +351,13 @@ def suggest_command(args) -> int:
     import tools.approval as approval_module
 
     existing = set(approval_module.load_permanent_allowlist())
-    records = scan_approval_history(db_path, days=days)
     proposals = build_proposals(
-        records,
+        scan_approval_history(db_path, days=days),
         existing=existing,
         min_count=getattr(args, "min_count", 2),
         limit=getattr(args, "limit", 20),
     )
+    as_json = getattr(args, "json", False)
 
     apply_spec = getattr(args, "apply_indices", None)
     if apply_spec:
@@ -399,17 +368,16 @@ def suggest_command(args) -> int:
             return 1
         merged = apply_proposals(proposals, indices)
         applied = [proposals[i].pattern for i in indices]
-        if getattr(args, "json", False):
+        if as_json:
             print(json.dumps({"applied": applied, "allowlist_size": len(merged)}))
         else:
             print("Added to command_allowlist:")
             for pattern in applied:
                 print(f"  + {pattern}")
-            print(f"\ncommand_allowlist now has {len(merged)} entries "
-                  "(~/.hermes/config.yaml).")
+            print(f"\ncommand_allowlist now has {len(merged)} entries (~/.hermes/config.yaml).")
         return 0
 
-    if getattr(args, "json", False):
+    if as_json:
         payload = {
             "db": str(db_path),
             "days": days,
