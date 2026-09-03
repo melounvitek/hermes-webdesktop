@@ -117,21 +117,18 @@ def _resolve_budget_fallback(
     budget_exhausted = (
         api_call_count >= agent.max_iterations or agent.iteration_budget.remaining <= 0
     )
-    budget_fallback_eligible = (
-        budget_exhausted
-        and not interrupted
-        and not failed
-        and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
-    )
     preserved_verification_fallback = False
-    if final_response is None and budget_fallback_eligible:
+    if (
+        final_response is None and budget_exhausted and not interrupted and not failed
+        and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
+    ):
         _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
         if _pending_verification_response:
             # A verification gate withheld a composed answer, then the budget ran out:
             # preserve it rather than make another fallible call. The explicit pending
             # value is the provenance guard; unrelated error exits never enter here.
-            final_response = _pending_verification_response
             # Previewed only if the reused candidate was actually streamed as interim.
+            final_response = _pending_verification_response
             if _pending_verification_response_previewed:
                 agent._response_was_previewed = True
             preserved_verification_fallback = True
@@ -148,14 +145,11 @@ def _resolve_budget_fallback(
                 )
             final_response = agent._handle_max_iterations(messages, api_call_count)
 
-    if budget_exhausted:
-        # A kanban worker must record a terminal outcome whether or not a fallback
-        # path was eligible, so the dispatcher learns the worker could not complete.
-        _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
-        if _kanban_task:
-            _record_kanban_budget_exhausted(
-                _kanban_task, api_call_count, agent.max_iterations, logger,
-            )
+    # A kanban worker must record a terminal outcome whether or not a fallback path
+    # was eligible, so the dispatcher learns the worker could not complete.
+    _kanban_task = os.environ.get("HERMES_KANBAN_TASK") if budget_exhausted else None
+    if _kanban_task:
+        _record_kanban_budget_exhausted(_kanban_task, api_call_count, agent.max_iterations, logger)
     return final_response, _turn_exit_reason, preserved_verification_fallback
 
 
@@ -193,8 +187,7 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
     if not interrupted and not failed:
         _streamed = getattr(agent, "_current_streamed_assistant_text", "") or ""
         _streamed = _streamed.strip() if isinstance(_streamed, str) else ""
-        _final_visible = flatten_message_text(final_response).strip() if final_response else ""
-        if not _final_visible and _streamed:
+        if not (flatten_message_text(final_response).strip() if final_response else "") and _streamed:
             final_response = _streamed
             _recovered_from_stream = True
 
@@ -417,25 +410,20 @@ def finalize_turn(
     completed = (
         final_response is not None
         and not failed
-        and (
-            api_call_count < agent.max_iterations
-            or str(_turn_exit_reason).startswith("text_response(")
-        )
+        and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 
     _rollback_interrupted_preflight_display(agent, interrupted)
 
     _cleanup_errors: List[str] = []
-    # ``user_message`` may be a multimodal list of parts; the trajectory format wants
-    # a plain string.
+    # ``user_message`` may be a multimodal list of parts; the trajectory format wants a string.
     _guarded_cleanup(
         "save_trajectory",
         lambda: agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed),
         _cleanup_errors, logger,
     )
     _guarded_cleanup(
-        "cleanup_task_resources",
-        lambda: agent._cleanup_task_resources(effective_task_id),
+        "cleanup_task_resources", lambda: agent._cleanup_task_resources(effective_task_id),
         _cleanup_errors, logger,
     )
     # Persist only after the transcript tail is shaped and scaffolding removed.
