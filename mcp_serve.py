@@ -35,9 +35,7 @@ except ImportError:
     MCPServer = None  # type: ignore[assignment,misc]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# --- Helpers -----------------------------------------------------------------
 
 def _hermes_home() -> Path:
     try:
@@ -117,23 +115,16 @@ def _load_sessions_index() -> dict:
 def _row_to_index_entry(row: dict) -> dict:
     """Convert a state.db gateway session row to the sessions.json entry shape."""
     origin = {}
-    origin_json = row.get("origin_json")
-    if origin_json:
+    if row.get("origin_json"):
         try:
-            parsed = json.loads(origin_json)
+            parsed = json.loads(row["origin_json"])
             if isinstance(parsed, dict):
                 origin = parsed
         except (TypeError, ValueError):
             pass
-    if not origin:
-        # Pre-origin_json rows: synthesize the minimal origin from columns.
-        origin = {
-            "platform": row.get("source", ""),
-            "chat_id": row.get("chat_id"),
-            "chat_type": row.get("chat_type"),
-            "thread_id": row.get("thread_id"),
-            "user_id": row.get("user_id"),
-        }
+    if not origin:  # pre-origin_json rows: synthesize the minimal origin from columns
+        origin = {k: row.get(k) for k in ("chat_id", "chat_type", "thread_id", "user_id")}
+        origin["platform"] = row.get("source", "")
 
     def _iso(ts) -> str:
         try:
@@ -144,16 +135,14 @@ def _row_to_index_entry(row: dict) -> dict:
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)
     return {
-        "session_id": str(row.get("id", "")),
-        "session_key": row.get("session_key", ""),
+        "session_id": str(row.get("id", "")), "session_key": row.get("session_key", ""),
         "platform": row.get("source", ""),
         "chat_type": row.get("chat_type") or origin.get("chat_type", ""),
         "display_name": row.get("display_name") or origin.get("chat_name") or "",
         "origin": origin,
         "created_at": _iso(row.get("started_at")),
         "updated_at": _iso(row.get("last_active") or row.get("started_at")),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
     }
 
@@ -221,21 +210,20 @@ def _extract_attachments(msg: dict) -> List[dict]:
     attachments = []
     content = msg.get("content", "")
 
-    if isinstance(content, list):
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            ptype = part.get("type", "")
-            if ptype == "image_url":
-                url = part.get("image_url", {}).get("url", "") if isinstance(part.get("image_url"), dict) else ""
-                if url:
-                    attachments.append({"type": "image", "url": url})
-            elif ptype == "image":
-                url = part.get("url", part.get("source", {}).get("url", ""))
-                if url:
-                    attachments.append({"type": "image", "url": url})
-            elif ptype != "text":
+    for part in content if isinstance(content, list) else ():
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type", "")
+        if ptype == "image_url":
+            url = part.get("image_url", {}).get("url", "") if isinstance(part.get("image_url"), dict) else ""
+        elif ptype == "image":
+            url = part.get("url", part.get("source", {}).get("url", ""))
+        else:
+            if ptype != "text":
                 attachments.append({"type": ptype, "data": part})
+            continue
+        if url:
+            attachments.append({"type": "image", "url": url})
 
     text = _extract_message_content(msg)
     if text:
@@ -245,9 +233,7 @@ def _extract_attachments(msg: dict) -> List[dict]:
     return attachments
 
 
-# ---------------------------------------------------------------------------
-# Event Bridge — polls SessionDB for new messages, maintains event queue
-# ---------------------------------------------------------------------------
+# --- Event Bridge — polls SessionDB for new messages, maintains event queue ---
 
 QUEUE_LIMIT = 1000
 POLL_INTERVAL = 0.2  # seconds between DB polls (200ms)
@@ -269,15 +255,15 @@ def _ts_float(ts) -> float:
     """Normalize a message timestamp (epoch int/float or ISO string) to float."""
     if isinstance(ts, (int, float)):
         return float(ts)
-    if isinstance(ts, str) and ts:
+    if not (isinstance(ts, str) and ts):
+        return 0.0
+    try:
+        return float(ts)
+    except ValueError:
         try:
-            return float(ts)
-        except ValueError:
-            try:
-                return datetime.fromisoformat(ts).timestamp()
-            except Exception:
-                return 0.0
-    return 0.0
+            return datetime.fromisoformat(ts).timestamp()
+        except Exception:
+            return 0.0
 
 
 def _latest_ts(messages) -> float:
@@ -299,8 +285,7 @@ class EventBridge:
         self._thread: Optional[threading.Thread] = None
         self._last_poll_timestamps: Dict[str, float] = {}  # session_key -> unix timestamp
         self._pending_approvals: Dict[str, dict] = {}  # populated from events
-        # mtime cache — skip expensive work when state.db hasn't changed
-        self._state_db_mtime: float = 0.0
+        self._state_db_mtime: float = 0.0  # skip polling work when state.db is unchanged
         self._cached_sessions_index: dict = {}
 
     def start(self):
@@ -336,12 +321,7 @@ class EventBridge:
         events = self._matching(after_cursor, session_key, limit)
         return {"events": events, "next_cursor": events[-1]["cursor"] if events else after_cursor}
 
-    def wait_for_event(
-        self,
-        after_cursor: int = 0,
-        session_key: Optional[str] = None,
-        timeout_ms: int = 30000,
-    ) -> Optional[dict]:
+    def wait_for_event(self, after_cursor: int = 0, session_key: Optional[str] = None, timeout_ms: int = 30000) -> Optional[dict]:
         """Block until a matching event arrives or timeout expires."""
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         while time.monotonic() < deadline:
@@ -366,11 +346,9 @@ class EventBridge:
             approval = self._pending_approvals.pop(approval_id, None)
         if not approval:
             return {"error": f"Approval not found: {approval_id}"}
-        self._enqueue(QueueEvent(
-            cursor=0,  # set by _enqueue
-            type="approval_resolved",
-            session_key=approval.get("session_key", ""),
-            data={"approval_id": approval_id, "decision": decision},
+        self._enqueue(QueueEvent(  # cursor is assigned by _enqueue
+            0, "approval_resolved", approval.get("session_key", ""),
+            {"approval_id": approval_id, "decision": decision},
         ))
         return {"resolved": True, "approval_id": approval_id, "decision": decision}
 
@@ -466,26 +444,17 @@ class EventBridge:
                 content = _extract_message_content(msg)
                 if not content:
                     continue
-                self._enqueue(QueueEvent(
-                    cursor=0,
-                    type="message",
-                    session_key=session_key,
-                    data={
-                        "role": msg.get("role", ""),
-                        "content": content[:500],
-                        "timestamp": str(msg.get("timestamp", "")),
-                        "message_id": str(msg.get("id", "")),
-                    },
-                ))
+                self._enqueue(QueueEvent(0, "message", session_key, {
+                    "role": msg.get("role", ""), "content": content[:500],
+                    "timestamp": str(msg.get("timestamp", "")), "message_id": str(msg.get("id", "")),
+                }))
 
             latest = _latest_ts(messages)
             if latest > last_seen:
                 self._last_poll_timestamps[session_key] = latest
 
 
-# ---------------------------------------------------------------------------
-# MCP Server
-# ---------------------------------------------------------------------------
+# --- MCP Server ---------------------------------------------------------------
 
 def _conversation_messages(session_key: str):
     """(messages, error_json) for a conversation; exactly one is None."""
@@ -515,12 +484,7 @@ class _ToolHandlers:
     def __init__(self, bridge: EventBridge):
         self.bridge = bridge
 
-    def conversations_list(
-        self,
-        platform: Optional[str] = None,
-        limit: int = 50,
-        search: Optional[str] = None,
-    ) -> str:
+    def conversations_list(self, platform: Optional[str] = None, limit: int = 50, search: Optional[str] = None) -> str:
         """List active messaging conversations across connected platforms.
 
         Returns conversations with their session keys (needed for messages_read),
@@ -540,21 +504,13 @@ class _ToolHandlers:
                 continue
             display_name = entry.get("display_name", "")
             chat_name = origin.get("chat_name", "")
-            if search:
-                search_lower = search.lower()
-                if (search_lower not in display_name.lower()
-                        and search_lower not in chat_name.lower()
-                        and search_lower not in key.lower()):
-                    continue
+            if search and not any(search.lower() in s.lower() for s in (display_name, chat_name, key)):
+                continue
             conversations.append({
-                "session_key": key,
-                "session_id": entry.get("session_id", ""),
-                "platform": entry_platform,
+                "session_key": key, "session_id": entry.get("session_id", ""), "platform": entry_platform,
                 "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-                "display_name": display_name,
-                "chat_name": chat_name,
-                "user_name": origin.get("user_name", ""),
-                "updated_at": entry.get("updated_at", ""),
+                "display_name": display_name, "chat_name": chat_name,
+                "user_name": origin.get("user_name", ""), "updated_at": entry.get("updated_at", ""),
             })
 
         conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
@@ -577,22 +533,14 @@ class _ToolHandlers:
             "platform": entry.get("platform") or origin.get("platform", ""),
             "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
             "display_name": entry.get("display_name", ""),
-            "user_name": origin.get("user_name", ""),
-            "chat_name": origin.get("chat_name", ""),
-            "chat_id": origin.get("chat_id", ""),
-            "thread_id": origin.get("thread_id"),
-            "updated_at": entry.get("updated_at", ""),
-            "created_at": entry.get("created_at", ""),
-            "input_tokens": entry.get("input_tokens", 0),
-            "output_tokens": entry.get("output_tokens", 0),
+            "user_name": origin.get("user_name", ""), "chat_name": origin.get("chat_name", ""),
+            "chat_id": origin.get("chat_id", ""), "thread_id": origin.get("thread_id"),
+            "updated_at": entry.get("updated_at", ""), "created_at": entry.get("created_at", ""),
+            "input_tokens": entry.get("input_tokens", 0), "output_tokens": entry.get("output_tokens", 0),
             "total_tokens": entry.get("total_tokens", 0),
         }, indent=2)
 
-    def messages_read(
-        self,
-        session_key: str,
-        limit: int = 50,
-    ) -> str:
+    def messages_read(self, session_key: str, limit: int = 50) -> str:
         """Read recent messages from a conversation.
 
         Returns the message history in chronological order with role, content,
@@ -609,28 +557,19 @@ class _ToolHandlers:
         filtered = []
         for msg in all_messages:
             role = msg.get("role", "")
-            if role in {"user", "assistant"}:
-                content = _extract_message_content(msg)
-                if content:
-                    filtered.append({
-                        "id": str(msg.get("id", "")),
-                        "role": role,
-                        "content": content[:2000],
-                        "timestamp": msg.get("timestamp", ""),
-                    })
+            content = _extract_message_content(msg) if role in {"user", "assistant"} else ""
+            if content:
+                filtered.append({
+                    "id": str(msg.get("id", "")), "role": role,
+                    "content": content[:2000], "timestamp": msg.get("timestamp", ""),
+                })
         messages = filtered[-limit:]
         return json.dumps({
-            "session_key": session_key,
-            "count": len(messages),
-            "total_in_session": len(filtered),
-            "messages": messages,
+            "session_key": session_key, "count": len(messages),
+            "total_in_session": len(filtered), "messages": messages,
         }, indent=2)
 
-    def attachments_fetch(
-        self,
-        session_key: str,
-        message_id: str,
-    ) -> str:
+    def attachments_fetch(self, session_key: str, message_id: str) -> str:
         """List non-text attachments for a message in a conversation.
 
         Extracts images, media files, and other non-text content blocks
@@ -647,18 +586,9 @@ class _ToolHandlers:
         if not target_msg:
             return json.dumps({"error": f"Message not found: {message_id}"})
         attachments = _extract_attachments(target_msg)
-        return json.dumps({
-            "message_id": message_id,
-            "count": len(attachments),
-            "attachments": attachments,
-        }, indent=2)
+        return json.dumps({"message_id": message_id, "count": len(attachments), "attachments": attachments}, indent=2)
 
-    def events_poll(
-        self,
-        after_cursor: int = 0,
-        session_key: Optional[str] = None,
-        limit: int = 20,
-    ) -> str:
+    def events_poll(self, after_cursor: int = 0, session_key: Optional[str] = None, limit: int = 20) -> str:
         """Poll for new conversation events since a cursor position.
 
         Returns events that have occurred since the given cursor. Use the
@@ -676,12 +606,7 @@ class _ToolHandlers:
         result = self.bridge.poll_events(after_cursor=after_cursor, session_key=session_key, limit=limit)
         return json.dumps(result, indent=2)
 
-    def events_wait(
-        self,
-        after_cursor: int = 0,
-        session_key: Optional[str] = None,
-        timeout_ms: int = 30000,
-    ) -> str:
+    def events_wait(self, after_cursor: int = 0, session_key: Optional[str] = None, timeout_ms: int = 30000) -> str:
         """Wait for the next conversation event (long-poll).
 
         Blocks until a matching event arrives or the timeout expires.
@@ -699,11 +624,7 @@ class _ToolHandlers:
             return json.dumps({"event": event}, indent=2)
         return json.dumps({"event": None, "reason": "timeout"}, indent=2)
 
-    def messages_send(
-        self,
-        target: str,
-        message: str,
-    ) -> str:
+    def messages_send(self, target: str, message: str) -> str:
         """Send a message to a platform conversation.
 
         The target format is "platform:chat_id" — same format used by the
@@ -754,8 +675,7 @@ class _ToolHandlers:
                     continue
                 seen.add(target_str)
                 targets.append({
-                    "target": target_str,
-                    "platform": p,
+                    "target": target_str, "platform": p,
                     "name": entry.get("display_name") or origin.get("chat_name", ""),
                     "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
                 })
@@ -769,10 +689,8 @@ class _ToolHandlers:
                 if isinstance(ch, dict):
                     chat_id = ch.get("id", ch.get("chat_id", ""))
                     channels.append({
-                        "target": f"{plat}:{chat_id}" if chat_id else plat,
-                        "platform": plat,
-                        "name": ch.get("name", ch.get("display_name", "")),
-                        "chat_type": ch.get("type", ""),
+                        "target": f"{plat}:{chat_id}" if chat_id else plat, "platform": plat,
+                        "name": ch.get("name", ch.get("display_name", "")), "chat_type": ch.get("type", ""),
                     })
         return json.dumps({"count": len(channels), "channels": channels}, indent=2)
 
@@ -786,11 +704,7 @@ class _ToolHandlers:
         approvals = self.bridge.list_pending_approvals()
         return json.dumps({"count": len(approvals), "approvals": approvals}, indent=2)
 
-    def permissions_respond(
-        self,
-        id: str,
-        decision: str,
-    ) -> str:
+    def permissions_respond(self, id: str, decision: str) -> str:
         """Respond to a pending approval request.
 
         Args:
@@ -820,14 +734,11 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "MCPServer"
             "MCP server requires the 'mcp' package. "
             f"Install with: {sys.executable} -m pip install 'mcp'"
         )
-    mcp = MCPServer(
-        "hermes",
-        instructions=(
-            "Hermes Agent messaging bridge. Use these tools to interact with "
-            "conversations across Telegram, Discord, Slack, WhatsApp, Signal, "
-            "Matrix, and other connected platforms."
-        ),
-    )
+    mcp = MCPServer("hermes", instructions=(
+        "Hermes Agent messaging bridge. Use these tools to interact with "
+        "conversations across Telegram, Discord, Slack, WhatsApp, Signal, "
+        "Matrix, and other connected platforms."
+    ))
     handlers = _ToolHandlers(event_bridge or EventBridge())
     for name in _TOOL_NAMES:
         mcp.tool()(getattr(handlers, name))
