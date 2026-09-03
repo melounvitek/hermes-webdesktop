@@ -55,8 +55,7 @@ def _config_settings() -> tuple[bool, float, int, float]:
         enabled,
         _cooldown_seconds(settings.get("cooldown_seconds")),
         _coerce(settings.get("log_every_n"), _DEFAULT_LOG_EVERY_N, int, 1),
-        _coerce(settings.get("info_log_min_delta_mb"), _DEFAULT_INFO_LOG_MIN_DELTA_MB, float, 0.0),
-    )
+        _coerce(settings.get("info_log_min_delta_mb"), _DEFAULT_INFO_LOG_MIN_DELTA_MB, float, 0.0))
 
 
 def _coerce(value: Any, default, cast, floor):
@@ -89,10 +88,7 @@ def collect_memory_snapshot(history_bytes: int | None = None) -> dict[str, int |
     ``VmRSS`` / ``RssAnon`` are Linux-only best effort; deliberately psutil-free.
     """
     snapshot: dict[str, int | None] = {
-        "rss_kib": None,
-        "rss_anon_kib": None,
-        "thread_count": threading.active_count(),
-    }
+        "rss_kib": None, "rss_anon_kib": None, "thread_count": threading.active_count()}
     status = _read_proc_status()
     if status:
         for line in status.splitlines():
@@ -109,8 +105,7 @@ def collect_memory_snapshot(history_bytes: int | None = None) -> dict[str, int |
 
 def _should_log_trim(
     *, force: bool, log_every_n: int, call_count: int, before: dict[str, int | None],
-    after: dict[str, int | None], info_log_min_delta_mb: float,
-) -> bool:
+    after: dict[str, int | None], info_log_min_delta_mb: float) -> bool:
     # Called only after malloc_trim reported success; a forced successful trim is an
     # explicit observability event regardless of RSS.
     if force:
@@ -145,11 +140,7 @@ def _probe_glibc_malloc_trim() -> Callable[[int], int] | None:
 
 
 def trim_memory(
-    *,
-    force: bool = False,
-    reason: str = "",
-    cooldown_seconds: float | None = None,
-) -> bool:
+    *, force: bool = False, reason: str = "", cooldown_seconds: float | None = None) -> bool:
     """Collect cycles and ask glibc to release free heap pages.
 
     Returns ``True`` only when ``malloc_trim(0)`` ran and reported success. Unsupported allocators,
@@ -184,19 +175,16 @@ def trim_memory(
             _trim_call_count += 1
             if released and _should_log_trim(
                 force=force, log_every_n=log_every_n, call_count=_trim_call_count,
-                before=before, after=after, info_log_min_delta_mb=info_log_min_delta_mb,
-            ):
+                before=before, after=after, info_log_min_delta_mb=info_log_min_delta_mb):
                 logger.info(
                     "memory trim: reason=%s malloc_trim=%s rss_kib=%s->%s "
                     "rss_anon_kib=%s->%s threads=%s duration_ms=%.1f",
                     reason or "cleanup", trim_result,
                     before.get("rss_kib"), after.get("rss_kib"),
                     before.get("rss_anon_kib"), after.get("rss_anon_kib"),
-                    after.get("thread_count"), duration_ms,
-                )
+                    after.get("thread_count"), duration_ms)
             return released
         except Exception as exc:
             logger.warning(
-                "memory trim failed after %s: %s: %s", reason or "cleanup", type(exc).__name__, exc,
-            )
+                "memory trim failed after %s: %s: %s", reason or "cleanup", type(exc).__name__, exc)
             return False

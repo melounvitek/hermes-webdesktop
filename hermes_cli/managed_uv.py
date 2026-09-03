@@ -59,8 +59,7 @@ def managed_python_install_dir(project_root: Path | None = None) -> Path:
 
 def managed_python_env(
     project_root: Path | None = None, *, install_dir: Path | None = None,
-    base_env: dict[str, str] | None = None,
-) -> dict[str, str]:
+    base_env: dict[str, str] | None = None) -> dict[str, str]:
     """Return a sanitized environment for Hermes-private uv Python commands."""
     target = (
         Path(install_dir) if install_dir is not None else managed_python_install_dir(project_root))
@@ -68,13 +67,11 @@ def managed_python_env(
     for key in (
         "CONDA_DEFAULT_ENV", "CONDA_PREFIX", "UV_PROJECT_ENVIRONMENT", "UV_NO_MANAGED_PYTHON",
         "UV_PYTHON", "UV_PYTHON_DOWNLOADS", "UV_SYSTEM_PYTHON", "VIRTUAL_ENV", "PYTHONHOME",
-        "PYTHONPATH",
-    ):
+        "PYTHONPATH"):
         env.pop(key, None)
     env.update({
         "UV_MANAGED_PYTHON": "1", "UV_NO_CONFIG": "1", "UV_PYTHON_INSTALL_BIN": "0",
-        "UV_PYTHON_INSTALL_DIR": str(target), "UV_PYTHON_INSTALL_REGISTRY": "0",
-    })
+        "UV_PYTHON_INSTALL_DIR": str(target), "UV_PYTHON_INSTALL_REGISTRY": "0"})
     return env
 
 
@@ -96,14 +93,12 @@ def _macos_sign_managed_python(python: Path) -> bool:
         sign = [
             codesign, "--force", "--deep", "--sign", "-", "--timestamp=none",
             "--identifier", _MACOS_MANAGED_PYTHON_IDENTIFIER,
-            "--requirements", requirement, str(python),
-        ]
+            "--requirements", requirement, str(python)]
         verify = [codesign, "--verify", "--deep", "--strict", str(python)]
         steps = (
             (sign, "could not stably sign managed Python %s: %s", "codesign failed"),
             (verify, "macOS signature verification failed for managed Python %s: %s",
-             "verification failed"),
-        )
+             "verification failed"))
         for cmd, warning, fallback in steps:
             result = subprocess.run(
                 cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace"
@@ -203,8 +198,7 @@ def _uv_version(uv_bin: str) -> str:
 
 def _run_runtime_repair(
     uv_bin: str, repair_observer: Callable[[RuntimeRepairResult], None] | None,
-    *, print_skip: bool = False,
-) -> None:
+    *, print_skip: bool = False) -> None:
     """Run the vulnerable-runtime repair hook; never raises (repair is non-fatal)."""
     try:
         repair = repair_vulnerable_runtime(uv_bin)
@@ -362,8 +356,7 @@ def _list_available_patches(
         result = subprocess.run(
             [
                 uv_bin, "python", "list", minor, "--all-versions", "--only-downloads",
-                "--output-format", "json", "--no-config",
-            ],
+                "--output-format", "json", "--no-config"],
             cwd=cwd, env=env, capture_output=True, text=True, check=False, timeout=15)
         if result.returncode != 0 or not result.stdout.strip():
             return []
@@ -373,8 +366,7 @@ def _list_available_patches(
                 continue
             # Only default/cpython builds -- skip pypy/graalpy/freethreaded variants.
             if entry.get("implementation") not in (None, "cpython") or (
-                entry.get("variant") not in (None, "default")
-            ):
+                entry.get("variant") not in (None, "default")):
                 continue
             parts = entry.get("version_parts") or {}
             try:
@@ -391,8 +383,7 @@ def _list_available_patches(
 def _attempt_install_generation(
     uv_bin: str, request: str, *, project_root: Path, python_root: Path,
     current: SQLiteRuntimeInfo, allow_minor_upgrade: bool = False,
-    tried_versions: set[tuple[int, int, int]] | None = None,
-) -> _Provisioned | None:
+    tried_versions: set[tuple[int, int, int]] | None = None) -> _Provisioned | None:
     """One install+probe attempt for ``request`` (bare minor "3.11" or explicit patch "3.11.15").
 
     Each attempt gets its own generation directory so a rejected candidate is fully cleaned up
@@ -489,8 +480,7 @@ def _retry_explicit_patches(
 def _provision_line(
     uv_bin: str, request: str, *, tried: set[tuple[int, int, int]],
     allow_minor_upgrade: bool = False, skip_at_or_below: tuple[int, int, int] | None = None,
-    **common,
-) -> _Provisioned | None:
+    **common) -> _Provisioned | None:
     """Try ``request`` once, then its explicit newer patches; None when the whole line fails."""
     result = _attempt_install_generation(
         uv_bin, request, tried_versions=tried, allow_minor_upgrade=allow_minor_upgrade, **common)
@@ -556,8 +546,7 @@ def _smoke_candidate_venv(venv_dir: Path) -> tuple[bool, str, SQLiteRuntimeInfo 
         return False, str(exc), info
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "core import smoke failed").strip()
-        last_line = detail.splitlines()[-1] if detail else "core import smoke failed"
-        return False, last_line, info
+        return False, detail.splitlines()[-1] if detail else "core import smoke failed", info
     return True, "", info
 
 
@@ -568,16 +557,14 @@ def _stage_candidate_venv(
     env = managed_python_env(project_root, install_dir=generation)
     env.update({
         "UV_PROJECT_ENVIRONMENT": str(candidate), "UV_PYTHON": str(python),
-        "UV_PYTHON_DOWNLOADS": "never", "VIRTUAL_ENV": str(candidate),
-    })
+        "UV_PYTHON_DOWNLOADS": "never", "VIRTUAL_ENV": str(candidate)})
 
     reject = partial(_reject, candidate, runtime_root)
     print("  → Building a relocatable replacement environment...")
     created = subprocess.run(
         [
             uv_bin, "venv", str(candidate), "--python", str(python),
-            "--managed-python", "--no-python-downloads", "--relocatable", "--no-config",
-        ],
+            "--managed-python", "--no-python-downloads", "--relocatable", "--no-config"],
         cwd=project_root, env=env, capture_output=True, text=True, check=False)
     if created.returncode != 0:
         return reject(
@@ -741,10 +728,10 @@ def _windows_runtime_self_lock(live: Path) -> tuple[bool, str]:
             resolved = str(path_value).lower()
         return resolved.startswith(live_res)
 
+    why = "Windows cannot rename a directory while a process executes from inside it"
     exe = sys.executable
     if _under_live(exe):
-        return True, (f"the updater itself runs from the live venv it must replace ({exe}); "
-                      "Windows cannot rename a directory while a process executes from inside it")
+        return True, f"the updater itself runs from the live venv it must replace ({exe}); {why}"
     # Belt-and-braces: the venv\Scripts\hermes.exe launcher stays mapped while it waits for this
     # child, so an ancestor started from the venv blocks the rename too.
     with contextlib.suppress(Exception):
@@ -756,8 +743,7 @@ def _windows_runtime_self_lock(live: Path) -> tuple[bool, str]:
                 continue
             if _under_live(anc_exe):
                 return True, (
-                    f"ancestor process PID {anc.pid} runs from the live venv ({anc_exe}); "
-                    "Windows cannot rename a directory while a process executes from inside it")
+                    f"ancestor process PID {anc.pid} runs from the live venv ({anc_exe}); {why}")
     return False, ""
 
 
@@ -818,17 +804,15 @@ def _sweep_stale_runtime_backups(
         if keep is not None and candidate == keep:
             continue
         try:
-            age = now - candidate.stat().st_mtime
+            if now - candidate.stat().st_mtime < min_age_seconds:
+                continue
         except OSError:
-            continue
-        if age < min_age_seconds:
             continue
         _remove_tree(candidate, boundary=root)
 
 
 def _result(
-    status: str, current: SQLiteRuntimeInfo, detail: str = "", **extra
-) -> RuntimeRepairResult:
+    status: str, current: SQLiteRuntimeInfo, detail: str = "", **extra) -> RuntimeRepairResult:
     return RuntimeRepairResult(status, detail, sqlite_before=current.sqlite_version_string, **extra)
 
 
@@ -853,8 +837,7 @@ def _repair_windows_preflight(
             f"      cd {root}",
             "      <system Python> -m hermes_cli.main update",
             "    Sessions stay protected meanwhile: Hermes keeps databases "
-            "out of WAL mode on this SQLite build.",
-        ):
+            "out of WAL mode on this SQLite build."):
             print(line)
         return _result("skipped", current, self_detail)
     return None

@@ -82,8 +82,7 @@ def _cached_read(path: Path, cache: Dict[str, tuple], parse):
         logger.warning(
             "managed scope: failed to parse %s: %s — IGNORING this managed file. "
             "Admin policy from this file is NOT being applied. Fix and restart.",
-            path, exc,
-        )
+            path, exc)
         return None
     with _CACHE_LOCK:
         cache[path_key] = (*key, copy.deepcopy(parsed))
