@@ -234,18 +234,14 @@ def fetch_models_with_pricing(
 
     result: dict[str, dict[str, Any]] = {}
     for item in payload.get("data", []):
-        mid = item.get("id")
-        pricing = item.get("pricing")
+        mid, pricing = item.get("id"), item.get("pricing")
         if mid and isinstance(pricing, dict):
             entry = _pricing_entry(pricing)
             # Sale chrome is Nous Portal-only; never copy pricing.original for other catalogs.
             original = pricing.get("original") if include_sale_original else None
             if isinstance(original, dict):
-                orig_entry = {
-                    key: str(original[key])
-                    for key in ("prompt", "completion", "input_cache_read", "input_cache_write")
-                    if original.get(key) not in (None, "")
-                }
+                orig_entry = {key: str(original[key]) for key in ("prompt", "completion", "input_cache_read", "input_cache_write")
+                              if original.get(key) not in (None, "")}
                 if orig_entry.get("prompt") or orig_entry.get("completion"):
                     entry["original"] = orig_entry
             result[mid] = entry
@@ -270,8 +266,7 @@ def fetch_ai_gateway_pricing(timeout: float = 8.0, *, force_refresh: bool = Fals
 
     result: dict[str, dict[str, str]] = {}
     for item in _catalog_items(payload):
-        mid = item.get("id")
-        pricing = item.get("pricing")
+        mid, pricing = item.get("id"), item.get("pricing")
         if mid and isinstance(pricing, dict):
             result[mid] = _pricing_entry(pricing, "input", "output")
     return _cache_catalog(cache_key, result)

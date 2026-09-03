@@ -160,11 +160,8 @@ def _parse_openrouter_preset(req: _Request) -> Optional[dict[str, Any]]:
     else:
         preset_base, preset_slug = req.requested.split(marker, 1)
     if re.fullmatch(r"[A-Za-z0-9._~-]+", preset_slug) is None:
-        return _reject(
-            "OpenRouter preset slugs must be non-empty URL-safe "
-            "identifiers using only letters, digits, '.', '_', "
-            "'~', or '-'."
-        )
+        return _reject("OpenRouter preset slugs must be non-empty URL-safe identifiers using only "
+                       "letters, digits, '.', '_', '~', or '-'.")
     req.preset_suffix = f"{marker}{preset_slug}"
     if not preset_base:
         return _soft_accept(None)
@@ -185,19 +182,11 @@ def _validate_lmstudio(req: _Request) -> dict[str, Any]:
     if models is None:
         return _reject(f"Could not reach LM Studio's `/api/v1/models` to validate `{req.requested}`.")
     if not models:
-        return _reject(
-            f"LM Studio is reachable but no chat-capable models are loaded. "
-            f"Load `{req.requested}` in LM Studio (Developer tab → Load Model) and try again."
-        )
+        return _reject("LM Studio is reachable but no chat-capable models are loaded. "
+                       f"Load `{req.requested}` in LM Studio (Developer tab → Load Model) and try again.")
     if req.lookup in set(models):
         return _accept()
     return _reject(f"Model `{req.requested}` was not found in LM Studio's model listing.")
-
-
-def _drop_authorization(headers: dict[str, str]) -> None:
-    for key in tuple(headers):
-        if key.lower() == "authorization":
-            del headers[key]
 
 
 def _ollama_probe_headers(req: _Request) -> dict[str, str]:
@@ -205,7 +194,7 @@ def _ollama_probe_headers(req: _Request) -> dict[str, str]:
     when the probed endpoint is the configured one (never leak them to a different host). Caller
     headers win; a caller ``api_key`` becomes the Authorization header unless the caller sent one."""
     from hermes_cli import models as _m
-    from hermes_cli.models_local import _configured_ollama_base_url
+    from hermes_cli.models_local import _configured_ollama_base_url, _drop_authorization
 
     configured_base = _configured_ollama_base_url()
     configured_allowed = not configured_base or _m._same_ollama_native_root(req.base_url or "", configured_base)
@@ -243,8 +232,7 @@ def _validate_ollama_native(req: _Request) -> Optional[dict[str, Any]]:
             f"Note: could not reach this Ollama endpoint's `/api/tags` model listing to validate `{req.requested}`. "
             "Hermes will save the model name, but local Ollama model discovery could not verify it."
         )
-    match = _match_in_catalog(req.lookup, models, auto_correct=False,
-                              suggest_label="Similar local Ollama models")
+    match = _match_in_catalog(req.lookup, models, auto_correct=False, suggest_label="Similar local Ollama models")
     if match.exact:
         return _accept()
     empty_hint = " No models are currently listed by `/api/tags`." if not models else ""
@@ -274,10 +262,8 @@ def _validate_custom(req: _Request) -> dict[str, Any]:
             f"{match.suggestion_text}"
         )
         if probe.get("used_fallback"):
-            message += (
-                f"\n  Endpoint verification succeeded after trying `{probe.get('resolved_base_url')}`. "
-                f"Consider saving that as your base URL."
-            )
+            message += (f"\n  Endpoint verification succeeded after trying `{probe.get('resolved_base_url')}`. "
+                        "Consider saving that as your base URL.")
         return _soft_accept(message)
 
     message = (
@@ -285,10 +271,8 @@ def _validate_custom(req: _Request) -> dict[str, Any]:
         f"Hermes will still save `{req.requested}`, but the endpoint should expose `/models` for verification."
     )
     if anthropic_style:
-        message += (
-            "\n  Many Anthropic-compatible proxies do not implement the Models API "
-            "(GET /v1/models).  The model name has been accepted without verification."
-        )
+        message += ("\n  Many Anthropic-compatible proxies do not implement the Models API (GET /v1/models).  "
+                    "The model name has been accepted without verification.")
     if probe.get("suggested_base_url"):
         message += f"\n  If this server expects `/v1`, try base URL: `{probe.get('suggested_base_url')}`"
     # Anthropic-style proxies routinely lack /v1/models, so only they are accepted unverified.
@@ -328,11 +312,9 @@ def _validate_static_catalog(req: _Request) -> Optional[dict[str, Any]]:
                 return _accept()
             base_guess = req.lookup[: -len(CODEX_CONTEXT_VARIANT_SUFFIX)]
             return _reject(
-                f"`{req.requested}` is not a valid large-context variant — "
-                f"`{base_guess}` enforces the standard 272K window on "
-                f"Codex, so no `-900k` option exists for it. Pick the "
-                f"base model, or a verified variant from the `/model` "
-                f"picker (e.g. `gpt-5.6-sol-900k`)."
+                f"`{req.requested}` is not a valid large-context variant — `{base_guess}` enforces the "
+                "standard 272K window on Codex, so no `-900k` option exists for it. Pick the base model, "
+                "or a verified variant from the `/model` picker (e.g. `gpt-5.6-sol-900k`)."
             )
     if not catalog:
         return None
@@ -349,12 +331,9 @@ def _validate_static_catalog(req: _Request) -> Optional[dict[str, Any]]:
     lower = req.lookup.strip().lower()
     if prefixes and not any(lower.startswith(p) for p in prefixes):
         return _reject(
-            f"`{req.requested}` doesn't look like a {label} model "
-            f"and isn't in its listing, so it was not accepted. If it "
-            f"belongs to another configured provider, switch with "
-            f"`--provider <slug>` (or select it from the `/model` "
-            f"picker)."
-            f"{match.suggestion_text}"
+            f"`{req.requested}` doesn't look like a {label} model and isn't in its listing, so it was not "
+            "accepted. If it belongs to another configured provider, switch with `--provider <slug>` "
+            f"(or select it from the `/model` picker).{match.suggestion_text}"
         )
     return _soft_accept(
         f"Note: `{req.requested}` was not found in the {label} model listing. "
@@ -405,10 +384,9 @@ def _validate_anthropic_messages(req: _Request) -> dict[str, Any]:
     models = _m.fetch_api_models(req.api_key, req.base_url, api_mode=req.api_mode)
     verdict = _match_in_catalog(req.lookup, models).verdict(req) if models is not None else None
     return verdict or _soft_accept(
-        f"Note: could not verify `{req.requested}` against this endpoint's "
-        f"model listing.  Many Anthropic-compatible proxies do not "
-        f"implement GET /v1/models.  The model name has been accepted "
-        f"without verification."
+        f"Note: could not verify `{req.requested}` against this endpoint's model listing.  Many "
+        "Anthropic-compatible proxies do not implement GET /v1/models.  The model name has been accepted "
+        "without verification."
     )
 
 
@@ -437,12 +415,9 @@ def _validate_live_listing(req: _Request) -> Optional[dict[str, Any]]:
     if api_models is None:
         return None
     if req.normalized == "gemini":
-        # Gemini's OpenAI-compat listing prefixes ids with "models/"; curated list and user
-        # input use the bare id, so strip before comparing.
-        api_models = [
-            m[len("models/"):] if isinstance(m, str) and m.startswith("models/") else m
-            for m in api_models
-        ]
+        # Gemini's OpenAI-compat listing prefixes ids with "models/"; curated list and user input
+        # use the bare id, so strip before comparing.
+        api_models = [m[len("models/"):] if isinstance(m, str) and m.startswith("models/") else m for m in api_models]
     match = _match_in_catalog(req.lookup, api_models)
     if match.exact:
         return _accept()
@@ -471,22 +446,15 @@ def _validate_live_listing(req: _Request) -> Optional[dict[str, Any]]:
     if not listing_authoritative and _m._model_in_provider_catalog(
         (variant_base or req.lookup).lower(), _m._provider_keys(req.normalized)
     ):
-        return _accept_with_note(
-            f"Note: `{req.requested}` was not found in the live /v1/models listing "
-            f"but exists in the curated catalog — accepted."
-        )
+        return _accept_with_note(f"Note: `{req.requested}` was not found in the live /v1/models listing "
+                                 "but exists in the curated catalog — accepted.")
     # Nous: the Portal's recommended-models feed can list a model before the curated list or the
     # docs-hosted manifest catches up; `hermes chat` already accepts those at model-list build
     # time, so mirror that source of truth for per-message /model validation.
     if req.normalized == "nous" and req.lookup.lower() in _nous_portal_recommended_names():
-        return _accept_with_note(
-            f"Note: `{req.requested}` was not found in the live /v1/models "
-            f"listing but is a current Nous Portal recommendation — accepted."
-        )
-    return _reject(
-        f"Model `{req.requested}` was not found in this provider's model listing."
-        f"{match.suggestion_text}"
-    )
+        return _accept_with_note(f"Note: `{req.requested}` was not found in the live /v1/models listing "
+                                 "but is a current Nous Portal recommendation — accepted.")
+    return _reject(f"Model `{req.requested}` was not found in this provider's model listing.{match.suggestion_text}")
 
 
 def _validate_bedrock(req: _Request) -> Optional[dict[str, Any]]:
@@ -497,8 +465,7 @@ def _validate_bedrock(req: _Request) -> Optional[dict[str, Any]]:
 
         region = resolve_bedrock_runtime_region()
         discovered_ids = {m["id"] for m in discover_bedrock_models(region)}
-        match = _match_in_catalog(req.requested, list(discovered_ids), auto_correct=False,
-                                  suggest_cutoff=0.4)
+        match = _match_in_catalog(req.requested, list(discovered_ids), auto_correct=False, suggest_cutoff=0.4)
         if match.exact:
             return _accept()
         # Still accept (custom inference profiles / cross-account access), but warn.
@@ -520,10 +487,8 @@ def _validate_catalog_fallback(req: _Request) -> dict[str, Any]:
     label = _m._PROVIDER_LABELS.get(req.normalized, req.normalized)
     catalog = _static_catalog(req.normalized)
     if not catalog:
-        return _soft_accept(
-            f"Note: could not reach the {label} API to validate `{req.requested}`. "
-            f"If the service isn't down, this model may not be valid."
-        )
+        return _soft_accept(f"Note: could not reach the {label} API to validate `{req.requested}`. "
+                            "If the service isn't down, this model may not be valid.")
     match = _match_in_catalog(req.lookup, catalog, case_insensitive=True)
     if match.exact:
         return _accept()

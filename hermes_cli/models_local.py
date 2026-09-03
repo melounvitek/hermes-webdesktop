@@ -112,11 +112,8 @@ def _get_ollama_base_url() -> str:
                 return model_base
         except (OSError, RuntimeError, TypeError, ValueError):
             pass
-
     env_host = os.getenv("OLLAMA_HOST", "").strip()
-    if env_host:
-        return _ollama_host_from_env(env_host)
-    return "http://localhost:11434"
+    return _ollama_host_from_env(env_host) if env_host else "http://localhost:11434"
 
 
 def _api_key_from_provider_config(entry: dict, *env_keys: str) -> str:
@@ -239,7 +236,6 @@ def probe_ollama_local_models(
         if time.monotonic() - failed_at < _OLLAMA_LOCAL_PROBE_FAILURE_TTL:
             return None
         _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.pop(failure_key, None)
-
     try:
         request_headers = {"User-Agent": _HERMES_USER_AGENT, **(headers or {})}
         req = urllib.request.Request(root.rstrip("/") + "/api/tags", headers=request_headers)
@@ -354,10 +350,7 @@ def _ollama_local_catalog(force_refresh: bool) -> list[str]:
     base_url = _get_ollama_base_url()
     headers = _get_ollama_native_headers(base_url)
     if should_use_ollama_native_catalog("ollama", base_url, headers=headers):
-        if headers:
-            native_models = fetch_ollama_local_models(base_url, headers=headers)
-        else:
-            native_models = fetch_ollama_local_models(base_url)
+        native_models = fetch_ollama_local_models(base_url, headers=headers) if headers else fetch_ollama_local_models(base_url)
         native_key = _ollama_probe_cache_key(_root_for_ollama_native_api(base_url), headers or None)
         if native_models or _OLLAMA_LOCAL_PROBE_REACHABLE.get(native_key) is True:
             return native_models or []
@@ -375,13 +368,10 @@ def _lmstudio_server_root(base_url: Optional[str]) -> Optional[str]:
 
 
 def _lmstudio_request_headers(api_key: Optional[str] = None) -> dict:
-    """Build HTTP headers for LM Studio native API requests."""
+    """HTTP headers for LM Studio native API requests."""
     from hermes_cli.models import _HERMES_USER_AGENT
-    headers = {"User-Agent": _HERMES_USER_AGENT}
     token = str(api_key or "").strip()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    return headers
+    return {"User-Agent": _HERMES_USER_AGENT, **({"Authorization": f"Bearer {token}"} if token else {})}
 
 
 def _lmstudio_fetch_raw_models(
@@ -609,9 +599,8 @@ def ollama_model_supports_thinking(
         return None
 
     token = str(api_key or "").strip()
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        with httpx.Client(timeout=timeout, headers=headers) as client:
+        with httpx.Client(timeout=timeout, headers={"Authorization": f"Bearer {token}"} if token else {}) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
             if resp.status_code != 200:
                 return None
@@ -646,9 +635,7 @@ def _load_ollama_cloud_cache(*, ignore_ttl: bool = False) -> Optional[dict]:
 
     try:
         data = _read_json_cache(_ollama_cloud_cache_path())
-        if data is None:
-            return None
-        models = data.get("models")
+        models = data.get("models") if data is not None else None
         if not (isinstance(models, list) and models):
             return None
         if not ignore_ttl and (time.time() - data.get("cached_at", 0)) > _OLLAMA_CLOUD_CACHE_TTL:

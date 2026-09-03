@@ -26,18 +26,16 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
     for mid in (
         "anthropic/claude-fable-5.1", "anthropic/claude-fable-5", "anthropic/claude-opus-5",
         "anthropic/claude-opus-5-fast", "anthropic/claude-opus-4.8", "anthropic/claude-opus-4.8-fast",
-        "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4.5", "openai/gpt-5.6-sol",
-        "openai/gpt-5.6-sol-pro", "openai/gpt-5.6-terra", "openai/gpt-5.6-terra-pro", "openai/gpt-5.6-luna",
-        "openai/gpt-5.6-luna-pro", "openai/gpt-5.5", "openai/gpt-5.5-pro", "openai/gpt-5.4-mini",
-        "google/gemini-3.1-pro-preview", "google/gemini-3.8-flash", "google/gemini-3.7-flash",
-        "x-ai/grok-4.6", "deepseek/deepseek-v4-pro", "deepseek/deepseek-v4-pro-0813",
-        "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731", "qwen/qwen3.8-max",
-        "qwen/qwen3.8-flash", "moonshotai/kimi-k3", "minimax/minimax-m3", "z-ai/glm-5.3",
+        "anthropic/claude-sonnet-5", "anthropic/claude-haiku-4.5", "openai/gpt-5.6-sol", "openai/gpt-5.6-sol-pro",
+        "openai/gpt-5.6-terra", "openai/gpt-5.6-terra-pro", "openai/gpt-5.6-luna", "openai/gpt-5.6-luna-pro",
+        "openai/gpt-5.5", "openai/gpt-5.5-pro", "openai/gpt-5.4-mini", "google/gemini-3.1-pro-preview",
+        "google/gemini-3.8-flash", "google/gemini-3.7-flash", "x-ai/grok-4.6", "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731",
+        "qwen/qwen3.8-max", "qwen/qwen3.8-flash", "moonshotai/kimi-k3", "minimax/minimax-m3", "z-ai/glm-5.3",
         "z-ai/glm-5.3-flash", "z-ai/glm-5.2", "xiaomi/mimo-v2.5-pro", "tencent/hy4-preview", "tencent/hy3",
-        "stepfun/step-3.7-flash", "nvidia/nemotron-3-super-120b-a12b", "meta/muse-spark-1.2",
-        "sakana/fugu-ultra", "openrouter/pareto-code", "thinkingmachines/inkling:free",
-        "thinkingmachines/inkling-small:free", "minimax/minimax-m3:free", "z-ai/glm-5.2:free",
-        "poolside/laguna-s-2.1:free", "poolside/laguna-xs-2.1:free",
+        "stepfun/step-3.7-flash", "nvidia/nemotron-3-super-120b-a12b", "meta/muse-spark-1.2", "sakana/fugu-ultra",
+        "openrouter/pareto-code", "thinkingmachines/inkling:free", "thinkingmachines/inkling-small:free",
+        "minimax/minimax-m3:free", "z-ai/glm-5.2:free", "poolside/laguna-s-2.1:free", "poolside/laguna-xs-2.1:free",
         "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3.5-lightning:free",
     )
@@ -45,8 +43,7 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
 
 # OpenRouter entries the Nous Portal does not carry (routing/fast variants, free tier).
 _OPENROUTER_ONLY = {
-    "anthropic/claude-opus-5-fast", "anthropic/claude-opus-4.8-fast", "meta/muse-spark-1.2",
-    "openrouter/pareto-code",
+    "anthropic/claude-opus-5-fast", "anthropic/claude-opus-4.8-fast", "meta/muse-spark-1.2", "openrouter/pareto-code",
 }
 
 
@@ -124,8 +121,7 @@ def _xai_curated_models() -> list[str]:
 
 # Native OpenAI Chat Completions (api.openai.com); also the head of the Copilot list.
 _OPENAI_CHAT_MODELS = [
-    "gpt-5.4", "gpt-5.4-mini", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "gpt-4o",
-    "gpt-4o-mini",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5-mini", "gpt-5.3-codex", "gpt-5.2-codex", "gpt-4.1", "gpt-4o", "gpt-4o-mini",
 ]
 _MINIMAX_MODELS = ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"]
 _TENCENT_MODELS = ["hy4-preview", "hy3", "hy3-preview"]
@@ -143,9 +139,8 @@ _ALIBABA_CODING_PLAN_MODELS = [
 ]
 # Verified against a live Token Plan subscription (key tier ``sk-sp-...``).
 _ALIBABA_TOKEN_PLAN_MODELS = [
-    "qwen3.8-max-preview", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash",
-    "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v3.2", "kimi-k2.7-code", "kimi-k2.6",
-    "kimi-k2.5", "glm-5.2", "glm-5.1", "glm-5",
+    "qwen3.8-max-preview", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.6-flash", "deepseek-v4-pro",
+    "deepseek-v4-flash", "deepseek-v3.2", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "glm-5.2", "glm-5.1", "glm-5",
 ]
 _XAI_MODELS = _xai_curated_models()
 
@@ -164,13 +159,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "xai-oauth": list(_XAI_MODELS),
     "copilot-acp": ["copilot-acp"],
     "copilot": _OPENAI_CHAT_MODELS + [
-        "claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-4", "claude-sonnet-4.5",
-        "claude-haiku-4.5", "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview",
-        "gemini-2.5-pro",
+        "claude-sonnet-4.6", "claude-sonnet-5", "claude-sonnet-4", "claude-sonnet-4.5", "claude-haiku-4.5",
+        "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro",
     ],
     "gemini": [
-        "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.6-flash",
-        "gemini-3.1-flash-lite-preview",
+        "gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3.6-flash", "gemini-3.1-flash-lite-preview",
     ],
     "zai": [
         "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "glm-5v-turbo", "glm-5-turbo",
@@ -184,9 +177,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "z-ai/glm-5.3", "z-ai/glm-5.2", "moonshotai/kimi-k2.6", "minimaxai/minimax-m3",
     ],
     "kimi-coding": [
-        "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-for-coding",
-        "kimi-for-coding-highspeed", "kimi-k2-thinking", "kimi-k2-thinking-turbo",
-        "kimi-k2-turbo-preview", "kimi-k2-0905-preview",
+        "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "kimi-for-coding", "kimi-for-coding-highspeed",
+        "kimi-k2-thinking", "kimi-k2-thinking-turbo", "kimi-k2-turbo-preview", "kimi-k2-0905-preview",
     ],
     "kimi-coding-cn": [
         "kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "kimi-k2.5",
@@ -194,8 +186,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "stepfun": ["step-3.5-flash", "step-3.5-flash-2603"],
     "moonshot": [
-        "kimi-k3", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview",
-        "kimi-k2-0905-preview",
+        "kimi-k3", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking", "kimi-k2-turbo-preview", "kimi-k2-0905-preview",
     ],
     "minimax": list(_MINIMAX_MODELS),
     "minimax-oauth": ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
@@ -219,19 +210,18 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # _LIVE_FIRST_PICKER_PROVIDERS, so this is a discovery floor: live entries lead in the picker
     # and stale curated names never pollute the top. "x-preview-f-free" = "Ox Alpha" stealth model.
     "opencode-zen": [
-        "x-preview-f-free", "kimi-k3", "kimi-k2.5", "kimi-k2.6", "gpt-5.6-sol", "gpt-5.6-terra",
-        "gpt-5.6-luna", "gpt-5.5", "gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.4", "gpt-5.4-mini",
-        "gpt-5.4-nano", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1",
-        "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5", "gpt-5-codex",
-        "gpt-5-nano", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8",
-        "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5", "claude-sonnet-4-6",
-        "claude-sonnet-4-5", "claude-sonnet-4", "claude-haiku-4-5", "gemini-3.7-flash",
-        "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro",
-        "gemini-3-flash", "grok-4.6", "grok-4.5", "grok-build-0.1", "muse-spark-1.2", "minimax-m3",
-        "minimax-m2.7", "minimax-m2.5", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5",
-        "kimi-k2.7-code", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4-flash-free",
-        "qwen3.6-plus", "qwen3.5-plus", "big-pickle", "mimo-v2.5-free", "hy3-free", "laguna-s-2.1-free",
-        "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "muse-spark-1.2-contributor-free",
+        "x-preview-f-free", "kimi-k3", "kimi-k2.5", "kimi-k2.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        "gpt-5.5", "gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex",
+        "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini", "gpt-5", "gpt-5-codex", "gpt-5-nano", "claude-fable-5", "claude-opus-5",
+        "claude-sonnet-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5",
+        "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4", "claude-haiku-4-5", "gemini-3.7-flash",
+        "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro", "gemini-3-flash",
+        "grok-4.6", "grok-4.5", "grok-build-0.1", "muse-spark-1.2", "minimax-m3", "minimax-m2.7", "minimax-m2.5",
+        "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k2.7-code", "deepseek-v4-pro",
+        "deepseek-v4-flash", "deepseek-v4-flash-free", "qwen3.6-plus", "qwen3.5-plus", "big-pickle", "mimo-v2.5-free",
+        "hy3-free", "laguna-s-2.1-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
+        "muse-spark-1.2-contributor-free",
     ],
     # OpenCode keyless free tier — OFFLINE FLOOR only. provider_model_ids("opencode-free")
     # revalidates live against GET /zen/v1/models and filters to the anonymous tier, so this list
@@ -269,11 +259,10 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # Static fallback when live discovery (ListFoundationModels + ListInferenceProfiles) is
     # unavailable. Inference-profile IDs (us.*) because most models require them.
     "bedrock": [
-        "us.anthropic.claude-sonnet-5", "us.anthropic.claude-sonnet-4-6",
-        "us.anthropic.claude-opus-4-6-v1", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "openai.gpt-5.5", "openai.gpt-5.6-sol",
-        "openai.gpt-5.6-terra", "openai.gpt-5.6-luna", "us.amazon.nova-pro-v1:0",
-        "us.amazon.nova-lite-v1:0", "us.amazon.nova-micro-v1:0", "deepseek.v3.2",
+        "us.anthropic.claude-sonnet-5", "us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-opus-4-6-v1",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0", "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "openai.gpt-5.5", "openai.gpt-5.6-sol", "openai.gpt-5.6-terra", "openai.gpt-5.6-luna",
+        "us.amazon.nova-pro-v1:0", "us.amazon.nova-lite-v1:0", "us.amazon.nova-micro-v1:0", "deepseek.v3.2",
         "us.meta.llama4-maverick-17b-instruct-v1:0", "us.meta.llama4-scout-17b-instruct-v1:0",
     ],
     # Azure Foundry models depend on the user's endpoint configuration.
@@ -329,8 +318,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [ProviderEntry(*row) for row in (
     ("huggingface", "Hugging Face", "Hugging Face Inference Providers"),
     ("gemini", "Google AI Studio", "Google AI Studio (Native Gemini API)"),
     ("vertex", "Google Vertex AI", "Google Vertex AI (Gemini via GCP; OAuth2 service account or ADC, GCP billing/quotas)"),
-    ("deepseek", "DeepSeek", "DeepSeek (V3, R1, coder, direct API)"),
-    ("xai", "xAI", "xAI Grok (Direct API)"),
+    ("deepseek", "DeepSeek", "DeepSeek (V3, R1, coder, direct API)"), ("xai", "xAI", "xAI Grok (Direct API)"),
     ("zai", "Z.AI / GLM", "Z.AI / GLM (Zhipu direct API)"),
     ("kimi-coding", "Kimi / Kimi Coding Plan", "Kimi Coding Plan (api.kimi.com & Moonshot API)"),
     ("kimi-coding-cn", "Kimi / Moonshot (China)", "Kimi / Moonshot China (Domestic direct API)"),
@@ -446,34 +434,31 @@ _PROVIDER_ALIASES = dict((
     ("glm", "zai"), ("z-ai", "zai"), ("z.ai", "zai"), ("zhipu", "zai"), ("github", "copilot"),
     ("github-copilot", "copilot"), ("github-models", "copilot"), ("github-model", "copilot"),
     ("github-copilot-acp", "copilot-acp"), ("copilot-acp-agent", "copilot-acp"), ("google", "gemini"),
-    ("google-gemini", "gemini"), ("google-ai-studio", "gemini"), ("google-vertex", "vertex"),
-    ("vertex-ai", "vertex"), ("gcp-vertex", "vertex"), ("vertexai", "vertex"), ("kimi", "kimi-coding"),
-    ("moonshot", "kimi-coding"), ("kimi-cn", "kimi-coding-cn"), ("moonshot-cn", "kimi-coding-cn"),
-    ("step", "stepfun"), ("stepfun-coding-plan", "stepfun"), ("arcee-ai", "arcee"),
-    ("arceeai", "arcee"), ("gmi-cloud", "gmi"), ("gmicloud", "gmi"), ("fireworks-ai", "fireworks"),
-    ("fw", "fireworks"), ("actual-computer", "actual"), ("actualcomputer", "actual"), ("aci", "actual"),
-    ("nebius", "nebius-token-factory"), ("nebius-tokenfactory", "nebius-token-factory"),
-    ("nebius-tf", "nebius-token-factory"), ("token-factory", "nebius-token-factory"),
-    ("tokenfactory", "nebius-token-factory"), ("minimax-china", "minimax-cn"),
-    ("minimax_cn", "minimax-cn"), ("minimax-portal", "minimax-oauth"),
+    ("google-gemini", "gemini"), ("google-ai-studio", "gemini"), ("google-vertex", "vertex"), ("vertex-ai", "vertex"),
+    ("gcp-vertex", "vertex"), ("vertexai", "vertex"), ("kimi", "kimi-coding"), ("moonshot", "kimi-coding"),
+    ("kimi-cn", "kimi-coding-cn"), ("moonshot-cn", "kimi-coding-cn"), ("step", "stepfun"),
+    ("stepfun-coding-plan", "stepfun"), ("arcee-ai", "arcee"), ("arceeai", "arcee"), ("gmi-cloud", "gmi"),
+    ("gmicloud", "gmi"), ("fireworks-ai", "fireworks"), ("fw", "fireworks"), ("actual-computer", "actual"),
+    ("actualcomputer", "actual"), ("aci", "actual"), ("nebius", "nebius-token-factory"),
+    ("nebius-tokenfactory", "nebius-token-factory"), ("nebius-tf", "nebius-token-factory"),
+    ("token-factory", "nebius-token-factory"), ("tokenfactory", "nebius-token-factory"),
+    ("minimax-china", "minimax-cn"), ("minimax_cn", "minimax-cn"), ("minimax-portal", "minimax-oauth"),
     ("minimax-global", "minimax-oauth"), ("minimax_oauth", "minimax-oauth"), ("claude", "anthropic"),
-    ("claude-code", "anthropic"), ("deep-seek", "deepseek"), ("opencode", "opencode-zen"),
-    ("zen", "opencode-zen"), ("go", "opencode-go"), ("opencode-go-sub", "opencode-go"),
-    ("free", "opencode-free"), ("opencode_free", "opencode-free"), ("aigateway", "ai-gateway"),
-    ("vercel", "ai-gateway"), ("vercel-ai-gateway", "ai-gateway"), ("kilo", "kilocode"),
-    ("kilo-code", "kilocode"), ("kilo-gateway", "kilocode"), ("dashscope", "alibaba"),
-    ("aliyun", "alibaba"), ("qwen", "alibaba"), ("alibaba-cloud", "alibaba"),
-    ("qwen-portal", "qwen-oauth"), ("hf", "huggingface"), ("hugging-face", "huggingface"),
-    ("huggingface-hub", "huggingface"), ("novita-ai", "novita"), ("novitaai", "novita"),
-    ("mimo", "xiaomi"), ("xiaomi-mimo", "xiaomi"), ("tencent", "tencent-tokenhub"),
-    ("tokenhub", "tencent-tokenhub"), ("tencent-cloud", "tencent-tokenhub"),
-    ("tencentmaas", "tencent-tokenhub"), ("tokenplan", "tencent-tokenplan"),
-    ("tencent-lkeap", "tencent-tokenplan"), ("aws", "bedrock"), ("aws-bedrock", "bedrock"),
-    ("amazon-bedrock", "bedrock"), ("amazon", "bedrock"), ("grok", "xai"), ("grok-oauth", "xai-oauth"),
-    ("xai-oauth", "xai-oauth"), ("x-ai-oauth", "xai-oauth"), ("xai-grok-oauth", "xai-oauth"),
-    ("x-ai", "xai"), ("x.ai", "xai"), ("nim", "nvidia"), ("nvidia-nim", "nvidia"),
-    ("build-nvidia", "nvidia"), ("nemotron", "nvidia"), ("lmstudio", "lmstudio"),
-    ("lm-studio", "lmstudio"), ("lm_studio", "lmstudio"),
+    ("claude-code", "anthropic"), ("deep-seek", "deepseek"), ("opencode", "opencode-zen"), ("zen", "opencode-zen"),
+    ("go", "opencode-go"), ("opencode-go-sub", "opencode-go"), ("free", "opencode-free"),
+    ("opencode_free", "opencode-free"), ("aigateway", "ai-gateway"), ("vercel", "ai-gateway"),
+    ("vercel-ai-gateway", "ai-gateway"), ("kilo", "kilocode"), ("kilo-code", "kilocode"),
+    ("kilo-gateway", "kilocode"), ("dashscope", "alibaba"), ("aliyun", "alibaba"), ("qwen", "alibaba"),
+    ("alibaba-cloud", "alibaba"), ("qwen-portal", "qwen-oauth"), ("hf", "huggingface"),
+    ("hugging-face", "huggingface"), ("huggingface-hub", "huggingface"), ("novita-ai", "novita"),
+    ("novitaai", "novita"), ("mimo", "xiaomi"), ("xiaomi-mimo", "xiaomi"), ("tencent", "tencent-tokenhub"),
+    ("tokenhub", "tencent-tokenhub"), ("tencent-cloud", "tencent-tokenhub"), ("tencentmaas", "tencent-tokenhub"),
+    ("tokenplan", "tencent-tokenplan"), ("tencent-lkeap", "tencent-tokenplan"), ("aws", "bedrock"),
+    ("aws-bedrock", "bedrock"), ("amazon-bedrock", "bedrock"), ("amazon", "bedrock"), ("grok", "xai"),
+    ("grok-oauth", "xai-oauth"), ("xai-oauth", "xai-oauth"), ("x-ai-oauth", "xai-oauth"),
+    ("xai-grok-oauth", "xai-oauth"), ("x-ai", "xai"), ("x.ai", "xai"), ("nim", "nvidia"), ("nvidia-nim", "nvidia"),
+    ("build-nvidia", "nvidia"), ("nemotron", "nvidia"), ("lmstudio", "lmstudio"), ("lm-studio", "lmstudio"),
+    ("lm_studio", "lmstudio"),
     ("ollama", "custom"),  # bare "ollama" = local; use "ollama-cloud" for cloud
     ("ollama_cloud", "ollama-cloud"),
 ))
@@ -545,9 +530,8 @@ _OPENAI_FAST_MODE_PREFIXES: tuple[str, ...] = ("gpt-", "o1", "o3", "o4")
 # /models are the subscription-tier source of truth), and providers with dedicated live-endpoint
 # branches (copilot, anthropic, ai-gateway, ollama-cloud, custom, stepfun, openai-codex).
 _MODELS_DEV_PREFERRED: frozenset[str] = frozenset({
-    "opencode-go", "opencode-zen", "deepseek", "kilocode", "fireworks", "mistral", "togetherai",
-    "cohere", "perplexity", "groq", "nvidia", "huggingface", "zai", "gemini", "google", "xai",
-    "xai-oauth",
+    "opencode-go", "opencode-zen", "deepseek", "kilocode", "fireworks", "mistral", "togetherai", "cohere",
+    "perplexity", "groq", "nvidia", "huggingface", "zai", "gemini", "google", "xai", "xai-oauth",
 })
 
 
@@ -561,24 +545,19 @@ _KEYLESS_STABLE_CACHE_PROVIDERS = frozenset({"opencode-free"})
 # Claude IDs use hyphens (Anthropic native) but Copilot's API only accepts dot-notation, so a
 # copilot + hyphenated default would otherwise hit HTTP 400 "model_not_supported".
 _COPILOT_MODEL_ALIASES = dict((
-    ("openai/gpt-5", "gpt-5-mini"), ("openai/gpt-5-chat", "gpt-5-mini"),
-    ("openai/gpt-5-mini", "gpt-5-mini"), ("openai/gpt-5-nano", "gpt-5-mini"),
-    ("openai/gpt-4.1", "gpt-4.1"), ("openai/gpt-4.1-mini", "gpt-4.1"),
-    ("openai/gpt-4.1-nano", "gpt-4.1"), ("openai/gpt-4o", "gpt-4o"),
-    ("openai/gpt-4o-mini", "gpt-4o-mini"), ("openai/o1", "gpt-5.2"), ("openai/o1-mini", "gpt-5-mini"),
-    ("openai/o1-preview", "gpt-5.2"), ("openai/o3", "gpt-5.3-codex"), ("openai/o3-mini", "gpt-5-mini"),
-    ("openai/o4-mini", "gpt-5-mini"), ("anthropic/claude-opus-4.6", "claude-opus-4.6"),
-    ("anthropic/claude-sonnet-5", "claude-sonnet-5"),
-    ("anthropic/claude-sonnet-4.6", "claude-sonnet-4.6"),
-    ("anthropic/claude-sonnet-4", "claude-sonnet-4"),
-    ("anthropic/claude-sonnet-4.5", "claude-sonnet-4.5"),
-    ("anthropic/claude-haiku-4.5", "claude-haiku-4.5"), ("claude-sonnet-5", "claude-sonnet-5"),
-    ("claude-opus-4-6", "claude-opus-4.6"), ("claude-sonnet-4-6", "claude-sonnet-4.6"),
-    ("claude-sonnet-4-0", "claude-sonnet-4"), ("claude-sonnet-4-5", "claude-sonnet-4.5"),
-    ("claude-haiku-4-5", "claude-haiku-4.5"), ("anthropic/claude-opus-4-6", "claude-opus-4.6"),
-    ("anthropic/claude-sonnet-4-6", "claude-sonnet-4.6"),
-    ("anthropic/claude-sonnet-4-0", "claude-sonnet-4"),
-    ("anthropic/claude-sonnet-4-5", "claude-sonnet-4.5"),
+    ("openai/gpt-5", "gpt-5-mini"), ("openai/gpt-5-chat", "gpt-5-mini"), ("openai/gpt-5-mini", "gpt-5-mini"),
+    ("openai/gpt-5-nano", "gpt-5-mini"), ("openai/gpt-4.1", "gpt-4.1"), ("openai/gpt-4.1-mini", "gpt-4.1"),
+    ("openai/gpt-4.1-nano", "gpt-4.1"), ("openai/gpt-4o", "gpt-4o"), ("openai/gpt-4o-mini", "gpt-4o-mini"),
+    ("openai/o1", "gpt-5.2"), ("openai/o1-mini", "gpt-5-mini"), ("openai/o1-preview", "gpt-5.2"),
+    ("openai/o3", "gpt-5.3-codex"), ("openai/o3-mini", "gpt-5-mini"), ("openai/o4-mini", "gpt-5-mini"),
+    ("anthropic/claude-opus-4.6", "claude-opus-4.6"), ("anthropic/claude-sonnet-5", "claude-sonnet-5"),
+    ("anthropic/claude-sonnet-4.6", "claude-sonnet-4.6"), ("anthropic/claude-sonnet-4", "claude-sonnet-4"),
+    ("anthropic/claude-sonnet-4.5", "claude-sonnet-4.5"), ("anthropic/claude-haiku-4.5", "claude-haiku-4.5"),
+    ("claude-sonnet-5", "claude-sonnet-5"), ("claude-opus-4-6", "claude-opus-4.6"),
+    ("claude-sonnet-4-6", "claude-sonnet-4.6"), ("claude-sonnet-4-0", "claude-sonnet-4"),
+    ("claude-sonnet-4-5", "claude-sonnet-4.5"), ("claude-haiku-4-5", "claude-haiku-4.5"),
+    ("anthropic/claude-opus-4-6", "claude-opus-4.6"), ("anthropic/claude-sonnet-4-6", "claude-sonnet-4.6"),
+    ("anthropic/claude-sonnet-4-0", "claude-sonnet-4"), ("anthropic/claude-sonnet-4-5", "claude-sonnet-4.5"),
     ("anthropic/claude-haiku-4-5", "claude-haiku-4.5"),
 ))
 
