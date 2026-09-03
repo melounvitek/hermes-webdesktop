@@ -294,6 +294,64 @@ def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
     )
 
 
+def _refresh_credentials_after_401(
+    agent: Any, api_error: Exception, _retry: TurnRetryState, status_code: Optional[int]
+) -> bool:
+    """Per-provider one-shot credential refresh on 401 (codex/xai, vertex, nous, copilot,
+    anthropic), printing user-facing diagnostics when the nous/anthropic refresh fails.
+    Returns True when a refresh succeeded and the call should be retried."""
+    from agent.conversation_loop import _is_copilot_provider
+
+    if (
+        agent.api_mode == "codex_responses"
+        and agent.provider in {"openai-codex", "xai-oauth"}
+        and status_code == 401
+        and not _retry.codex_auth_retry_attempted
+    ):
+        _retry.codex_auth_retry_attempted = True
+        if agent._try_refresh_codex_client_credentials(force=True):
+            _label = "xAI OAuth" if agent.provider == "xai-oauth" else "Codex"
+            agent._buffer_vprint(f"🔐 {_label} auth refreshed after 401. Retrying request...")
+            return True
+    if (
+        agent.api_mode == "chat_completions"
+        and agent.provider == "vertex"
+        and status_code == 401
+        and not _retry.vertex_auth_retry_attempted
+    ):
+        _retry.vertex_auth_retry_attempted = True
+        if agent._try_refresh_vertex_client_credentials():
+            agent._buffer_vprint("🔐 Vertex AI token refreshed after 401. Retrying request...")
+            return True
+    if (
+        agent.api_mode in ("chat_completions", "anthropic_messages")
+        and agent.provider == "nous"
+        and status_code == 401
+        and not _retry.nous_auth_retry_attempted
+    ):
+        _retry.nous_auth_retry_attempted = True
+        if agent._try_refresh_nous_client_credentials(force=True):
+            agent._buffer_vprint("🔐 Nous agent key refreshed after 401. Retrying request...")
+            return True
+        _print_nous_401_diagnostics(agent, api_error)
+    if _is_copilot_provider(agent) and status_code == 401 and not _retry.copilot_auth_retry_attempted:
+        _retry.copilot_auth_retry_attempted = True
+        if agent._try_refresh_copilot_client_credentials():
+            agent._buffer_vprint("🔐 Copilot credentials refreshed after 401. Retrying request...")
+            return True
+    if (
+        agent.api_mode == "anthropic_messages"
+        and status_code == 401
+        and hasattr(agent, '_anthropic_api_key')
+        and not _retry.anthropic_auth_retry_attempted
+    ):
+        _retry.anthropic_auth_retry_attempted = True
+        if agent._try_refresh_anthropic_client_credentials():
+            _plines(agent, "🔐 Anthropic credentials refreshed after 401. Retrying request...")
+            return True
+        _print_anthropic_401_diagnostics(agent, agent._anthropic_api_key)
+    return False
+
 def recover_after_classification(
     agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, *,
     status_code: Optional[int], error_context: Any, messages: List[Dict[str, Any]],
@@ -308,7 +366,7 @@ def recover_after_classification(
     strip → invalid-encrypted-content replay disable → native-compaction reject →
     llama.cpp grammar strip. Returns ``(retry_now, recovered_with_pool)``;
     ``recovered_with_pool`` is read later by the Nous rate-limit guard."""
-    from agent.conversation_loop import _is_copilot_provider, _is_nous_inference_route
+    from agent.conversation_loop import _is_nous_inference_route
 
     if (
         classified.reason == FailoverReason.billing
@@ -389,54 +447,8 @@ def recover_after_classification(
             _vlines(agent, "🔕 OAuth subscription doesn't support the 1M-context beta — disabled for this session and retrying...")
             return True, recovered_with_pool
 
-    if (
-        agent.api_mode == "codex_responses"
-        and agent.provider in {"openai-codex", "xai-oauth"}
-        and status_code == 401
-        and not _retry.codex_auth_retry_attempted
-    ):
-        _retry.codex_auth_retry_attempted = True
-        if agent._try_refresh_codex_client_credentials(force=True):
-            _label = "xAI OAuth" if agent.provider == "xai-oauth" else "Codex"
-            agent._buffer_vprint(f"🔐 {_label} auth refreshed after 401. Retrying request...")
-            return True, recovered_with_pool
-    if (
-        agent.api_mode == "chat_completions"
-        and agent.provider == "vertex"
-        and status_code == 401
-        and not _retry.vertex_auth_retry_attempted
-    ):
-        _retry.vertex_auth_retry_attempted = True
-        if agent._try_refresh_vertex_client_credentials():
-            agent._buffer_vprint("🔐 Vertex AI token refreshed after 401. Retrying request...")
-            return True, recovered_with_pool
-    if (
-        agent.api_mode in ("chat_completions", "anthropic_messages")
-        and agent.provider == "nous"
-        and status_code == 401
-        and not _retry.nous_auth_retry_attempted
-    ):
-        _retry.nous_auth_retry_attempted = True
-        if agent._try_refresh_nous_client_credentials(force=True):
-            agent._buffer_vprint("🔐 Nous agent key refreshed after 401. Retrying request...")
-            return True, recovered_with_pool
-        _print_nous_401_diagnostics(agent, api_error)
-    if _is_copilot_provider(agent) and status_code == 401 and not _retry.copilot_auth_retry_attempted:
-        _retry.copilot_auth_retry_attempted = True
-        if agent._try_refresh_copilot_client_credentials():
-            agent._buffer_vprint("🔐 Copilot credentials refreshed after 401. Retrying request...")
-            return True, recovered_with_pool
-    if (
-        agent.api_mode == "anthropic_messages"
-        and status_code == 401
-        and hasattr(agent, '_anthropic_api_key')
-        and not _retry.anthropic_auth_retry_attempted
-    ):
-        _retry.anthropic_auth_retry_attempted = True
-        if agent._try_refresh_anthropic_client_credentials():
-            _plines(agent, "🔐 Anthropic credentials refreshed after 401. Retrying request...")
-            return True, recovered_with_pool
-        _print_anthropic_401_diagnostics(agent, agent._anthropic_api_key)
+    if _refresh_credentials_after_401(agent, api_error, _retry, status_code):
+        return True, recovered_with_pool
 
     # Upstream mutation invalidates Anthropic's thinking-block signature (400). Strip
     # ``reasoning_details`` from ``api_messages`` only, never ``messages`` (state.db).
