@@ -31,8 +31,7 @@ def _cmd_status(args) -> int:
     config = load_config() or {}
 
     try:
-        # Read-only status display: refresh-free snapshot (no OAuth refresh).
-        auth = get_nous_auth_status_local() or {}
+        auth = get_nous_auth_status_local() or {}  # refresh-free snapshot
     except Exception:
         auth = {}
 
@@ -133,10 +132,7 @@ def _cmd_tools(args) -> int:
     label_width = max(len(label) for _, label, _ in catalog)
     for key, label, partner in catalog:
         feat = features.features.get(key)
-        if feat is None:
-            state = color("unknown", Colors.DIM)
-        else:
-            state = _feature_state(feat, via_nous="✓ via Nous Portal")
+        state = color("unknown", Colors.DIM) if feat is None else _feature_state(feat, via_nous="✓ via Nous Portal")
         print(f"  {label:<{label_width}}  partner: {partner:<14} {state}")
 
     print()
@@ -146,11 +142,9 @@ def _cmd_tools(args) -> int:
 
 
 def _cmd_login(args) -> int:
-    """Run the one-shot Nous Portal onboarding (login + model + provider + tools).
+    """One-shot Nous Portal onboarding (login + model + provider + tools).
 
-    Front door for ``hermes auth add nous --type oauth``. Reuses the exact wiring behind ``hermes
-    setup --portal`` so the commands stay in lockstep: device-code login, pick a Nous model, switch
-    the inference provider to Nous, then offer the Tool Gateway opt-in.
+    Reuses the exact wiring behind ``hermes setup --portal`` so the commands stay in lockstep.
     """
     from hermes_cli.setup import _run_portal_one_shot
 
@@ -164,9 +158,8 @@ def _cmd_login(args) -> int:
     return 0
 
 
-# Default (None/"") is the one-shot onboarding — `hermes portal` is the
-# human-readable alias for `hermes auth add nous --type oauth` /
-# `hermes setup --portal`. `status` kept as a back-compat alias for `info`.
+# Default (None/"") is the one-shot onboarding (alias for `hermes auth add nous --type oauth` /
+# `hermes setup --portal`). `status` kept as a back-compat alias for `info`.
 _SUBCOMMANDS = {
     None: _cmd_login,
     "": _cmd_login,
@@ -204,8 +197,7 @@ def add_parser(subparsers) -> None:
     )
     portal_sub = portal_parser.add_subparsers(dest="portal_command")
 
-    # `status` retained as a hidden (no help) back-compat alias for `info`;
-    # registration order is the order shown in `hermes portal -h`.
+    # `status` is a hidden (no help) back-compat alias; registration order = `hermes portal -h` order.
     for name, help_text in (
         ("login", "Log in to Nous Portal + set it up (default; one-shot onboarding)"),
         ("info", "Show Portal auth + Tool Gateway routing summary"),

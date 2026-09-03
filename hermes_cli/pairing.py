@@ -5,19 +5,18 @@ def pairing_command(args):
     from gateway.pairing import PairingStore
 
     store = PairingStore()
-    action = getattr(args, "pairing_action", None)
-
-    if action == "list":
-        _cmd_list(store)
-    elif action == "approve":
-        _cmd_approve(store, args.platform, args.code)
-    elif action == "revoke":
-        _cmd_revoke(store, args.platform, args.user_id)
-    elif action == "clear-pending":
-        _cmd_clear_pending(store)
-    else:
+    handlers = {
+        "list": lambda: _cmd_list(store),
+        "approve": lambda: _cmd_approve(store, args.platform, args.code),
+        "revoke": lambda: _cmd_revoke(store, args.platform, args.user_id),
+        "clear-pending": lambda: _cmd_clear_pending(store),
+    }
+    handler = handlers.get(getattr(args, "pairing_action", None))
+    if handler is None:
         print("Usage: hermes pairing {list|approve|revoke|clear-pending}")
         print("Run 'hermes pairing --help' for details.")
+    else:
+        handler()
 
 
 def _cmd_list(store):
@@ -71,9 +70,7 @@ def _cmd_approve(store, platform: str, code: str):
         print(f"\n  Approved! User {display} on {platform} can now use the bot~")
         print("  They'll be recognized automatically on their next message.\n")
     elif store._is_locked_out(platform):
-        # Disambiguate: approve_code returns None for both invalid codes
-        # and lockout. Tell the operator it's lockout so they don't chase
-        # a "wrong code" rabbit hole (#10195).
+        # approve_code returns None for both invalid codes and lockout — say which.
         import time as _time
         limits = store._load_json(store._rate_limit_path())
         lockout_until = limits.get(f"_lockout:{platform}", 0)
