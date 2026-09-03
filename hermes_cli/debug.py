@@ -531,21 +531,18 @@ def _confirm_upload(args) -> bool:
     if bool(getattr(args, "yes", False)):
         return True
     if not sys.stdin.isatty():
-        print(
-            "ERROR: Non-interactive mode requires --yes to confirm upload.\n"
-            "       This prevents accidental exposure of personal data.\n"
-            "       Use --local to view the report without uploading.",
-            file=sys.stderr,
-        )
+        print("ERROR: Non-interactive mode requires --yes to confirm upload.\n"
+              "       This prevents accidental exposure of personal data.\n"
+              "       Use --local to view the report without uploading.", file=sys.stderr)
         sys.exit(1)
     try:
         answer = input("Upload debug report? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         answer = ""
-    if answer not in ("y", "yes"):
-        print("Aborted.")
-        return False
-    return True
+    if answer in ("y", "yes"):
+        return True
+    print("Aborted.")
+    return False
 
 
 def run_debug_share(args):
@@ -574,7 +571,6 @@ def run_debug_share(args):
     if not _confirm_upload(args):
         return
     print("Collecting debug report...\nUploading...")
-
     try:
         result = build_debug_share(log_lines=log_lines, expiry=expiry, redact=redact)
     except RuntimeError as exc:
@@ -618,15 +614,12 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
         print("⚠️  --no-redact is set: secrets in your logs will NOT be redacted before upload.\n")
     print("Collecting debug report...")
     _best_effort_sweep_expired_pastes()
-
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
     if redact:
         logger.info("hermes debug share --nous: applied force-mode redaction before upload")
-    blob = build_nous_bundle(bundle, redact=redact)
-
     print("Uploading to Nous diagnostics storage...")
     try:
-        res = share_to_nous(blob)
+        res = share_to_nous(build_nous_bundle(bundle, redact=redact))
     except Exception as exc:
         print(
             f"\nNous upload failed: {exc}\n"

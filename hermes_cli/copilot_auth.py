@@ -66,13 +66,13 @@ def resolve_copilot_token() -> tuple[str, str]:
     any_env_var_set = False
     for env_var in COPILOT_ENV_VARS:
         val = os.getenv(env_var, "").strip()
-        if val:
-            any_env_var_set = True
-            valid, msg = validate_copilot_token(val)
-            if not valid:
-                logger.warning("Token from %s is not supported: %s", env_var, msg)
-                continue
+        if not val:
+            continue
+        any_env_var_set = True
+        valid, msg = validate_copilot_token(val)
+        if valid:
             return val, env_var
+        logger.warning("Token from %s is not supported: %s", env_var, msg)
 
     # Fall back to gh auth token ONLY when no Copilot env var was explicitly set: an exported
     # GITHUB_TOKEN (even an unsupported classic PAT) means the user intends *that* token, not
@@ -207,7 +207,8 @@ def copilot_device_code_login(
         print("  ✗ GitHub did not return a device code.")
         return None
 
-    print(f"\n  Open this URL in your browser: {verification_uri}\n  Enter this code: {user_code}\n")
+    print(f"\n  Open this URL in your browser: {verification_uri}\n"
+          f"  Enter this code: {user_code}\n")
     print("  Waiting for authorization...", end="", flush=True)
 
     deadline = time.monotonic() + timeout_seconds
@@ -243,7 +244,8 @@ def copilot_device_code_login(
             print(".", end="", flush=True)
             continue
         if error:
-            print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error, f"  ✗ Authorization failed: {error}"))
+            print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error,
+                                                       f"  ✗ Authorization failed: {error}"))
             return None
 
     print("\n  ✗ Timed out waiting for authorization.")
@@ -349,7 +351,7 @@ def _jwt_disk_path() -> Optional[Path]:
 
 
 def _with_jwt_store(verb: str, op):
-    """Run ``op(path, store_or_None)`` against the disk store; any failure is logged, never raised."""
+    """Run ``op(path, store_or_None)`` against the disk store; failures are logged, never raised."""
     path = _jwt_disk_path()
     if not path:
         return None

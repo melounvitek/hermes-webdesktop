@@ -67,7 +67,8 @@ def _builtin_gateway_liveness() -> Optional[bool]:
         # gateway process it short-circuits to True so the in-gateway cron tool never
         # emits a false "gateway not running" (find_gateway_pids can transiently miss the
         # gateway just after a restart).
-        with contextlib.suppress(Exception):  # a crashing probe is "unknown" — let the pid scan decide
+        # A crashing lock probe is "unknown", not "dead" — let the pid scan decide.
+        with contextlib.suppress(Exception):
             from gateway.status import is_gateway_runtime_lock_active
             if is_gateway_runtime_lock_active():
                 return True
@@ -212,7 +213,8 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
     optional = [
         ("Skills", ", ".join(skills) if skills else ""),
         ("Script", job.get("script")),
-        ("Monitor", f"{monitor_source} (agent runs only on output change)" if monitor_source else ""),
+        ("Monitor", f"{monitor_source} (agent runs only on output change)" if monitor_source
+         else ""),
         ("Changed", mon_state.get("last_changed_at") if monitor_source else ""),
         ("Mode", color("no-agent", Colors.DIM) + " (script stdout delivered directly)"
          if job.get("no_agent") else ""),
@@ -318,17 +320,17 @@ def cron_incidents(args) -> int:
     _print_banner("Cron Failure Incidents")
     for inc in incidents:
         state_display = color(inc["state"], _INCIDENT_STATE_COLORS.get(inc["state"], Colors.DIM))
-        print(f"  {color(inc['id'], Colors.YELLOW)}  {state_display}")
-        print(f"    Job:        {inc['job_id']}")
-        print(f"    Type:       {inc.get('failure_type', 'unknown')}")
-        print(f"    First seen: {inc.get('first_seen_at', '?')}")
-        print(f"    Last seen:  {inc.get('last_seen_at', '?')}")
         error_text = re.sub(r"\s+", " ", inc.get("error") or "").strip()
         if len(error_text) > 160:
             error_text = error_text[:157].rstrip() + "..."
-        print(f"    Error:      {error_text}")
-        if inc.get("output_file"):
-            print(f"    Output:     {inc['output_file']}")
+        rows = [("Job", inc["job_id"]), ("Type", inc.get("failure_type", "unknown")),
+                ("First seen", inc.get("first_seen_at", "?")),
+                ("Last seen", inc.get("last_seen_at", "?")), ("Error", error_text),
+                ("Output", inc.get("output_file"))]
+        print(f"  {color(inc['id'], Colors.YELLOW)}  {state_display}")
+        for label, value in rows:
+            if label != "Output" or value:
+                print(f"    {label + ':':<12}{value}")
         print()
     print(color(f"  {len(incidents)} incident(s)  |  ack one with: hermes cron incidents ack <id>",
                 Colors.DIM))
@@ -566,8 +568,8 @@ def cron_doctor() -> int:
 
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
-        print(color(f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured.",
-                    Colors.DIM))
+        summary = f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured."
+        print(color(summary, Colors.DIM))
         return 0
 
     issue_count = sum(len(issues) for _, issues in findings)
