@@ -228,11 +228,7 @@ def _api_key_provider_api_mode(provider: str, model_cfg: Dict[str, Any], api_key
 def _maybe_apply_codex_app_server_runtime(*, provider: str, api_mode: str, model_cfg: Optional[Dict[str, Any]]) -> str:
     """Opt-in rewrite to "codex_app_server" via ``model.openai_runtime``; only ``openai`` /
     ``openai-codex`` are eligible. No-op when unset, "auto", or empty."""
-    if (
-        model_cfg
-        and provider in {"openai", "openai-codex"}
-        and str(model_cfg.get("openai_runtime") or "").strip().lower() == "codex_app_server"
-    ):
+    if model_cfg and provider in {"openai", "openai-codex"} and str(model_cfg.get("openai_runtime") or "").strip().lower() == "codex_app_server":
         return "codex_app_server"
     return api_mode
 
@@ -477,9 +473,7 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
             base_url = _config_base_url_for_provider(model_cfg, "azure-foundry") or base_url
             api_mode = _parse_api_mode(model_cfg.get("api_mode")) or api_mode
         api_mode = _azure_inferred_api_mode(effective_model, api_mode)
-        if api_mode == "anthropic_messages":
-            base_url = re.sub(r"/v1/?$", "", base_url)
-        return api_mode, base_url
+        return api_mode, (re.sub(r"/v1/?$", "", base_url) if api_mode == "anthropic_messages" else base_url)
     # Honour model.base_url only when the pool entry carries no explicit base_url (i.e. it fell
     # back to the registry default). Env var overrides win.
     pconfig = PROVIDER_REGISTRY.get(provider)
@@ -505,7 +499,8 @@ def _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key,
     cfg_base_url = str(model_cfg.get("base_url") or "").strip()
     env_openai_base_url = _getenv("OPENAI_BASE_URL", "").strip()
     env_openrouter_base_url = _getenv("OPENROUTER_BASE_URL", "").strip()
-    has_custom_endpoint = bool(explicit_base_url or env_openai_base_url or env_openrouter_base_url) or bool(cfg_base_url and _cfg_provider(model_cfg) in {"auto", "custom"})
+    has_custom_endpoint = bool(explicit_base_url or env_openai_base_url or env_openrouter_base_url) or bool(
+        cfg_base_url and _cfg_provider(model_cfg) in {"auto", "custom"})
     return requested_provider in {"openrouter", "auto"} and not has_custom_endpoint and not bool(explicit_api_key or explicit_base_url)
 
 
@@ -580,11 +575,8 @@ def _explicit_codex(requested_provider, model_cfg, api_key, explicit_base_url, t
 
 def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, target_model):
     state = auth_mod.get_provider_auth_state("nous") or {}
-    base_url = (
-        explicit_base_url
-        or (_nous_inference_env_override() or "")
-        or str(state.get("inference_base_url") or auth_mod.DEFAULT_NOUS_INFERENCE_URL).strip().rstrip("/")
-    )
+    base_url = (explicit_base_url or _nous_inference_env_override()
+                or str(state.get("inference_base_url") or auth_mod.DEFAULT_NOUS_INFERENCE_URL).strip().rstrip("/"))
     # The agent_key compatibility field is used for inference only when it holds a NAS invoke JWT;
     # raw OAuth access_token fallback is handled by resolve_nous_runtime_credentials().
     api_key = api_key or (str(state.get("agent_key") or "").strip() if _agent_key_is_usable(state, _nous_min_key_ttl()) else "")
@@ -697,9 +689,7 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
             raise
         logger.info("%s; falling through to next provider.", spec.failure_msg)
         return None
-    api_mode = spec.api_mode
-    if callable(api_mode):
-        api_mode = api_mode(_effective_model(model_cfg, target_model))
+    api_mode = spec.api_mode(_effective_model(model_cfg, target_model)) if callable(spec.api_mode) else spec.api_mode
     return _runtime(provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
                     creds.get("api_key", ""), source=creds.get("source", spec.default_source),
                     **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider)
@@ -726,11 +716,8 @@ def _azure_anthropic_env_key(model_cfg: Dict[str, Any]) -> str:
             token = _getenv(env_var, "").strip()
             if token:
                 return token
-    return (
-        str(model_cfg.get("api_key") or "").strip()
-        or _getenv("AZURE_ANTHROPIC_KEY", "").strip()
-        or _getenv("ANTHROPIC_API_KEY", "").strip()
-    )
+    return (str(model_cfg.get("api_key") or "").strip() or _getenv("AZURE_ANTHROPIC_KEY", "").strip()
+            or _getenv("ANTHROPIC_API_KEY", "").strip())
 
 
 def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -> Dict[str, Any]:

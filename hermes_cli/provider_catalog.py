@@ -86,12 +86,8 @@ def provider_catalog() -> list[ProviderDescriptor]:
         prof = profiles.get(slug)
         overlay = HERMES_OVERLAYS.get(slug)
         # auth_type: registry is authoritative; then profile, then overlay (moa → "virtual"), then api_key.
-        auth_type = (
-            (cfg.auth_type if cfg else "")
-            or (prof.auth_type if prof else "")
-            or (overlay.auth_type if overlay else "")
-            or "api_key"
-        )
+        auth_type = ((cfg.auth_type if cfg else "") or (prof.auth_type if prof else "")
+                     or (overlay.auth_type if overlay else "") or "api_key")
         # Credential env vars: registry first (already normalized), else derived from the profile.
         if cfg and cfg.api_key_env_vars:
             api_key_vars, base_url_var = tuple(cfg.api_key_env_vars), cfg.base_url_env_var or ""
