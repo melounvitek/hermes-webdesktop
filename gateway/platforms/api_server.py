@@ -1147,6 +1147,43 @@ class _ProviderAuthResolutionError(RuntimeError):
     run_conversation() (e.g. "Failed to recreate closed OpenAI client") as auth failures."""
 
 
+class _SessionEventQueue:
+    """Ordered SSE event queue for one /api/sessions/{id}/chat/stream run.
+
+    ``payload`` stamps session_id/run_id/seq/ts; ``enqueue`` is safe from the agent's
+    executor thread (hops onto the owning loop) and swallows a closed-loop RuntimeError.
+    """
+
+    def __init__(self, session_id: str, run_id: str):
+        self.loop = asyncio.get_running_loop()
+        self.queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
+        self.session_id = session_id
+        self.run_id = run_id
+        self.seq = 0
+
+    def payload(self, name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        self.seq += 1
+        payload.setdefault("session_id", self.session_id)
+        payload.setdefault("run_id", self.run_id)
+        payload.setdefault("seq", self.seq)
+        payload.setdefault("ts", time.time())
+        return name, payload
+
+    def enqueue(self, name: str, payload: Dict[str, Any]) -> None:
+        event = self.payload(name, payload)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        try:
+            if running_loop is self.loop:
+                self.queue.put_nowait(event)
+            else:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+        except RuntimeError:
+            pass
+
+
 class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     """aiohttp server routing OpenAI-format requests through hermes-agent's AIAgent."""
 
@@ -3265,49 +3302,26 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             requested_runtime=runtime_request.get("requested"),
             route_source=runtime_request.get("route_source") or "global",
             model_lock=("accepted" if ctx["lock_active"] else ""))
-        loop = asyncio.get_running_loop()
-        queue: "asyncio.Queue[Optional[tuple[str, Dict[str, Any]]]]" = asyncio.Queue()
         message_id = f"msg_{uuid.uuid4().hex}"
         run_id = f"run_{uuid.uuid4().hex}"
+        events = _SessionEventQueue(session_id, run_id)
+        queue = events.queue
+        _event_payload = events.payload
         # Claim ownership inside the request's profile scope before any run-keyed state
         # exists, so /v1/runs/{id}* control is confined to the starting profile.
         self._run_owners[run_id] = self._run_idempotency_scope(request)
         self._set_run_status(
             run_id, "queued", session_id=session_id, model=ctx["body"].get("model", self._model_name))
-        seq = 0
-
-        def _event_payload(name: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
-            nonlocal seq
-            seq += 1
-            payload.setdefault("session_id", session_id)
-            payload.setdefault("run_id", run_id)
-            payload.setdefault("seq", seq)
-            payload.setdefault("ts", time.time())
-            return name, payload
-
-        def _enqueue(name: str, payload: Dict[str, Any]) -> None:
-            event = _event_payload(name, payload)
-            try:
-                running_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                running_loop = None
-            try:
-                if running_loop is loop:
-                    queue.put_nowait(event)
-                else:
-                    loop.call_soon_threadsafe(queue.put_nowait, event)
-            except RuntimeError:
-                pass
 
         def _delta(delta: str) -> None:
             if delta:
-                _enqueue("assistant.delta", {"message_id": message_id, "delta": delta})
+                events.enqueue("assistant.delta", {"message_id": message_id, "delta": delta})
 
         def _tool_progress(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs) -> None:
             if event_type == "reasoning.available":
-                _enqueue("tool.progress", {"message_id": message_id, "tool_name": tool_name or "_thinking", "delta": preview or ""})
+                events.enqueue("tool.progress", {"message_id": message_id, "tool_name": tool_name or "_thinking", "delta": preview or ""})
             elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
-                _enqueue(event_type, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+                events.enqueue(event_type, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
 
         async def _run_and_signal() -> None:
             try:
