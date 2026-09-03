@@ -400,15 +400,14 @@ class ClientLifecycleMixin:
             # A worker has this client checked out; close() here would release FDs from a stranger
             # thread. Abort the sockets; the worker's own finally does the real close.
             self._abort_request_openai_client(client, reason=f"{reason}_in_flight")
-            return
-        self._close_openai_client(client, reason=reason, shared=False)
+        else:
+            self._close_openai_client(client, reason=reason, shared=False)
 
     def _abort_request_openai_client(self, client: Any, *, reason: str) -> None:
-        if client is None:
-            return
-        self._abort_request_slot_client(
-            _OPENAI_SLOT, client, reason=reason, label="OpenAI", context=self._client_log_context(),
-        )
+        if client is not None:
+            self._abort_request_slot_client(
+                _OPENAI_SLOT, client, reason=reason, label="OpenAI", context=self._client_log_context(),
+            )
 
     def _request_anthropic_client_key(self) -> tuple:
         """Cache key covering everything that forces a fresh client: credential rotation, base URL /
@@ -485,11 +484,10 @@ class ClientLifecycleMixin:
             pass
 
     def _abort_request_anthropic_client(self, client: Any, *, reason: str) -> None:
-        if client is None:
-            return
-        self._abort_request_slot_client(
-            _ANTHROPIC_SLOT, client, reason=reason, label="Anthropic", context=self._anthropic_log_context(),
-        )
+        if client is not None:
+            self._abort_request_slot_client(
+                _ANTHROPIC_SLOT, client, reason=reason, label="Anthropic", context=self._anthropic_log_context(),
+            )
 
     # ------------------------------------------------------------------ credential refresh
 
@@ -554,8 +552,7 @@ class ClientLifecycleMixin:
             from hermes_cli.auth import resolve_nous_runtime_credentials
 
             creds = resolve_nous_runtime_credentials(
-                timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
-                force_refresh=force,
+                timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15), force_refresh=force,
             )
         except Exception as exc:
             logger.debug("Nous credential refresh failed: %s", exc)
@@ -713,9 +710,9 @@ class ClientLifecycleMixin:
         except Exception as exc:
             logger.debug("Vertex credential refresh failed: %s", exc)
             return False
-        if not _valid_credential_pair(token, base_url):
-            return False
-        if not self._adopt_openai_credentials(token, base_url, reason="vertex_credential_refresh"):
+        if not _valid_credential_pair(token, base_url) or not self._adopt_openai_credentials(
+            token, base_url, reason="vertex_credential_refresh",
+        ):
             return False
         logger.info("Vertex AI OAuth token refreshed")
         return True
@@ -739,11 +736,7 @@ class ClientLifecycleMixin:
         if not self._is_copilot_provider():
             return False
         try:
-            from hermes_cli.copilot_auth import (
-                resolve_copilot_token,
-                get_copilot_api_token,
-                evict_cached_exchanged_token,
-            )
+            from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token, evict_cached_exchanged_token
 
             new_token, token_source = resolve_copilot_token()
         except Exception as exc:
@@ -751,8 +744,7 @@ class ClientLifecycleMixin:
             return False
         if not isinstance(new_token, str) or not new_token.strip():
             return False
-        new_token = new_token.strip()
-        enterprise_base_url = None
+        new_token, enterprise_base_url = new_token.strip(), None
         # Fall back to the raw token only if the exchange itself is unavailable.
         try:
             evict_cached_exchanged_token(new_token)
@@ -761,10 +753,10 @@ class ClientLifecycleMixin:
                 new_token, enterprise_base_url = api_token.strip(), exchanged_base_url
         except Exception as exc:
             logger.debug("Copilot 401 re-exchange failed, using resolved token: %s", exc)
-        if not self._apply_copilot_token(new_token, enterprise_base_url, reason="copilot_credential_refresh"):
-            return False
-        logger.info("Copilot credentials refreshed from %s", token_source)
-        return True
+        if self._apply_copilot_token(new_token, enterprise_base_url, reason="copilot_credential_refresh"):
+            logger.info("Copilot credentials refreshed from %s", token_source)
+            return True
+        return False
 
     def _try_recover_stale_copilot_credential(self) -> bool:
         """Force a fresh Copilot token exchange + client rebuild after a 400.
@@ -776,11 +768,7 @@ class ClientLifecycleMixin:
         if not self._is_copilot_provider():
             return False
         try:
-            from hermes_cli.copilot_auth import (
-                resolve_copilot_token,
-                get_copilot_api_token,
-                evict_cached_exchanged_token,
-            )
+            from hermes_cli.copilot_auth import resolve_copilot_token, get_copilot_api_token, evict_cached_exchanged_token
 
             raw_token, token_source = resolve_copilot_token()
             if not isinstance(raw_token, str) or not raw_token.strip():
@@ -802,12 +790,10 @@ class ClientLifecycleMixin:
                 "raw token; skipping retry (network/exchange endpoint unavailable)."
             )
             return False
-        if not self._apply_copilot_token(
-            api_token.strip(), enterprise_base_url, reason="copilot_stale_credential_recovery",
-        ):
-            return False
-        logger.info("Copilot credentials re-exchanged after stale-credential 400 (source=%s)", token_source)
-        return True
+        if self._apply_copilot_token(api_token.strip(), enterprise_base_url, reason="copilot_stale_credential_recovery"):
+            logger.info("Copilot credentials re-exchanged after stale-credential 400 (source=%s)", token_source)
+            return True
+        return False
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
         if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
