@@ -83,13 +83,11 @@ class _ModelCall:
     handle: Any
     task_id: str
     fields: dict[str, str]
-    retry_ordinal: int | None = None
 
 
 @dataclass
 class _ToolCall:
     handle: Any
-    task_id: str
     category: str
     started_ns: int
     approval_outcome: str = "not_required"
@@ -293,8 +291,6 @@ class _Runtime:
                     # attempt. Provider fallback resets Hermes's provider-local retry
                     # ordinal, so ordinal deltas are not a reliable task-level counter.
                     task.retry_count += 1
-                if retry_ordinal is not None:
-                    existing.retry_ordinal = max(existing.retry_ordinal or 0, retry_ordinal)
                 return
             if task is not None:
                 task.model_call_ids.add(request_id)
@@ -308,9 +304,7 @@ class _Runtime:
                 metadata=self._event_metadata(),
                 model_name=MODEL_CALL_PROFILE_MODEL,
             )
-            session.model_calls[model_call_key] = _ModelCall(
-                handle=handle, task_id=task_id, fields=fields, retry_ordinal=retry_ordinal
-            )
+            session.model_calls[model_call_key] = _ModelCall(handle, task_id, fields)
 
     def record_model_call_error(self, event: dict[str, Any]) -> None:
         """Retain the latest attempt error without closing the logical call."""
@@ -713,7 +707,7 @@ class _Runtime:
             task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
             handle=task.handle, metadata=self._event_metadata(),
         )
-        return _ToolCall(handle, task.task_id, tool_category(event), monotonic_ns())
+        return _ToolCall(handle, tool_category(event), monotonic_ns())
 
     def _finish_tool_call(
         self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
