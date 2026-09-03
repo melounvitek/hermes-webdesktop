@@ -8,6 +8,7 @@ the provider; only --provider → error (ambiguous).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -147,8 +148,6 @@ def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] 
     if not path:
         return
     try:
-        import json
-
         report = {key: result.get(key) for key in _USAGE_KEYS}
         report["failed"] = bool(result.get("failed")) or failure is not None
         report["service_tier"] = result.get("service_tier")
