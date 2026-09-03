@@ -202,11 +202,10 @@ class _BoundedBuffer:
         self.total = 0
 
     def append(self, data: bytes, cap: int) -> None:
-        if self.total >= cap:
-            return
-        keep = data[: cap - self.total]
-        self.chunks.append(keep)
-        self.total += len(keep)
+        keep = data[: max(0, cap - self.total)]
+        if keep:
+            self.chunks.append(keep)
+            self.total += len(keep)
 
     def drain(self) -> str:
         chunks, self.chunks, self.total = self.chunks, [], 0
@@ -414,10 +413,7 @@ def _stdout_reader(kernel: SessionKernel) -> None:
 def _stderr_reader(kernel: SessionKernel) -> None:
     from tools.code_execution_tool import MAX_STDERR_BYTES
     assert kernel.proc is not None and kernel.proc.stderr is not None
-    while True:
-        chunk = kernel.proc.stderr.read1(4096)
-        if not chunk:
-            return
+    while chunk := kernel.proc.stderr.read1(4096):
         kernel.stderr.append(chunk, MAX_STDERR_BYTES)
 
 
