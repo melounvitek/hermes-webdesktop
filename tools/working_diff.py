@@ -88,8 +88,7 @@ def collect_working_diff(cwd: str, mode: str = "working", paths: List[str] | Non
     except OSError as e:
         return {"success": False, "error": f"git failed: {e}"}
 
-    stat = stat_out.strip()
-    diff = diff_out.strip()
+    stat, diff = stat_out.strip(), diff_out.strip()
     if untracked_diff:
         diff = f"{diff}\n{untracked_diff}".strip()
     result = {"success": True, "stat": stat, "diff": diff, "untracked": untracked}

@@ -36,9 +36,7 @@ _HALLUCINATION_REPEAT_RE = re.compile(r'^(?:thank you|thanks|bye|you|ok|okay|the
 def is_whisper_hallucination(transcript: str) -> bool:
     """Check if a transcript is a known Whisper hallucination on silence."""
     cleaned = transcript.strip().lower()
-    if not cleaned:
-        return True
-    return cleaned.rstrip('.!') in WHISPER_HALLUCINATIONS or bool(_HALLUCINATION_REPEAT_RE.match(cleaned))
+    return not cleaned or cleaned.rstrip('.!') in WHISPER_HALLUCINATIONS or bool(_HALLUCINATION_REPEAT_RE.match(cleaned))
 
 
 DEFAULT_VOICE_STOP_PHRASES = ("stop",)
@@ -72,9 +70,7 @@ def is_voice_stop_phrase(transcript: str, stop_phrases: Optional[tuple] = None) 
     utterance — lowercased, surrounding punctuation stripped — must equal a phrase, so "stop doing
     that and try again" still reaches the agent. ``voice.stop_phrases: []`` disables."""
     cleaned = transcript.strip().lower().strip(".,!?;: \t\n\"'") if transcript else ""
-    if not cleaned:
-        return False
-    return cleaned in (_configured_stop_phrases() if stop_phrases is None else stop_phrases)
+    return bool(cleaned) and cleaned in (_configured_stop_phrases() if stop_phrases is None else stop_phrases)
 
 
 # Similarity ratio (difflib.SequenceMatcher) above which a playback-phase barge transcript
@@ -105,10 +101,7 @@ def is_tts_echo(transcript: str, spoken_text: str,
     shorter than `MIN_FRAGMENT_LENGTH_FOR_ECHO` skip the fallback (a short interjection
     trivially matches a short window).
     """
-    if not transcript or not spoken_text:
-        return False
-    a = _normalize_for_echo_compare(transcript)
-    b = _normalize_for_echo_compare(spoken_text)
+    a, b = _normalize_for_echo_compare(transcript or ""), _normalize_for_echo_compare(spoken_text or "")
     if not a or not b:
         return False
 

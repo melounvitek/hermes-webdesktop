@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -206,26 +207,19 @@ def resolve_capture_mode(cfg: Optional[Dict[str, Any]] = None, *, prefer_client:
 
 
 def _input_channels(info: Any) -> int:
-    channels = info.get("max_input_channels") if isinstance(info, dict) else None
-    if channels is None:
-        channels = getattr(info, "max_input_channels", 0)
-    return int(channels or 0)
+    ch = info.get("max_input_channels") if isinstance(info, dict) else getattr(info, "max_input_channels", 0)
+    return int(ch or 0)
 
 
 def _local_input_device_ready() -> bool:
     """True when PortAudio is importable and at least one input device exists."""
     try:
         sd, _ = _import_audio()
-    except (ImportError, OSError):
-        return False
-    try:
         devices = sd.query_devices()
         if isinstance(devices, dict):
             return _input_channels(devices) > 0
-        if any(_input_channels(dev) > 0 for dev in devices):
-            return True
         # Also accept a resolvable default input (some hosts list devices oddly).
-        return _input_channels(sd.query_devices(None, "input")) > 0
+        return any(_input_channels(d) > 0 for d in devices) or _input_channels(sd.query_devices(None, "input")) > 0
     except Exception:
         return False
 
@@ -311,18 +305,16 @@ def _describe_input_device(sd, selector: int | str | None) -> Dict[str, Any]:
     if "hostapi_index" in details:
         try:
             hostapi = sd.query_hostapis(details["hostapi_index"])
-            hostapi_name = hostapi.get("name") if isinstance(hostapi, dict) else None
-            if hostapi_name:
-                details["hostapi"] = str(hostapi_name)
+            if isinstance(hostapi, dict) and hostapi.get("name"):
+                details["hostapi"] = str(hostapi["name"])
         except Exception:
             pass
     return details
 
 
 def _device_label(details: Dict[str, Any]) -> str:
-    name = str(details.get("name") or "").strip()
     selector = details.get("selector")
-    label = name or ("system default" if selector is None else str(selector))
+    label = str(details.get("name") or "").strip() or ("system default" if selector is None else str(selector))
     hostapi = str(details.get("hostapi") or "").strip()
     return f"{label} ({hostapi})" if hostapi else label
 
@@ -401,20 +393,12 @@ def _tts_ready() -> bool:
     ``check_tts_requirements`` lazily pip-installs the SDK, which froze wake.status polls for a whole
     pip run. Uninstalled deps count as ready iff lazy installs are allowed; pip is never touched here."""
     try:
-        from tools.tts_tool import _get_provider, _load_tts_config
-        provider = _get_provider(_load_tts_config())
-    except Exception:
-        return False
-    feature = _LAZY_TTS_FEATURES.get(provider)
-    if feature is not None:
-        try:
+        from tools.tts_tool import _get_provider, _load_tts_config, check_tts_requirements
+        feature = _LAZY_TTS_FEATURES.get(_get_provider(_load_tts_config()))
+        if feature is not None:
             from tools import lazy_deps
             if not lazy_deps.is_available(feature):
                 return lazy_deps._allow_lazy_installs()
-        except Exception:
-            return False
-    try:
-        from tools.tts_tool import check_tts_requirements
         return bool(check_tts_requirements())
     except Exception:
         return False
@@ -517,7 +501,6 @@ class WakeWordDetector:
                  on_failure: Optional[Callable[["WakeWordDetector"], None]] = None,
                  input_device: int | str | None = None,
                  external_audio: bool = False):
-        import queue as _queue
         self.engine, self.on_wake, self.cooldown, self.on_failure = engine, on_wake, cooldown, on_failure
         self.input_device, self.external_audio = input_device, bool(external_audio)
         self.input_device_details: Dict[str, Any] = (
@@ -528,7 +511,7 @@ class WakeWordDetector:
         self._stop, self._callback_inflight = threading.Event(), threading.Event()
         self._lock, self._last_fire = threading.Lock(), 0.0
         # Client-capture PCM queue (int16 mono frames). Local mode ignores this.
-        self._audio_q: "_queue.Queue[Any]" = _queue.Queue(maxsize=64)
+        self._audio_q: "queue.Queue[Any]" = queue.Queue(maxsize=64)
         # True when the stream is open but every frame is (near-)silence, so status
         # surfaces can tell "armed" from "deaf".
         self.audio_silent, self._silent_frames = False, 0
@@ -570,7 +553,7 @@ class WakeWordDetector:
     def start(self) -> None:
         """Open the mic (or client feeder) and begin listening. Idempotent."""
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            if self.running:
                 return
             self._stop.clear()
             ready = threading.Event()
@@ -647,17 +630,19 @@ class WakeWordDetector:
         return cap
 
     def _note_silence(self, frame, silent_alert_frames: int) -> None:
-        """Track consecutive near-zero frames; flag/unflag ``audio_silent``."""
+        """Track consecutive near-zero frames; flag/unflag ``audio_silent``. ``frame`` is None when
+        no client frame arrived (counts as silence for status, but is never logged as a dead mic)."""
         try:
-            peak = int(abs(frame).max()) if len(frame) else 0
+            peak = 0 if frame is None or not len(frame) else int(abs(frame).max())
         except Exception:
             peak = _SILENCE_PEAK + 1
         if peak <= _SILENCE_PEAK:
             self._silent_frames += 1
             if self._silent_frames == silent_alert_frames:
                 self.audio_silent = True
-                logger.warning("wake word: mic delivers only silence (peak<=%d for %ds); %s", _SILENCE_PEAK,
-                               _SILENCE_ALERT_SECONDS, silent_audio_hint(self.input_device_details))
+                if frame is not None:
+                    logger.warning("wake word: mic delivers only silence (peak<=%d for %ds); %s", _SILENCE_PEAK,
+                                   _SILENCE_ALERT_SECONDS, silent_audio_hint(self.input_device_details))
         elif self._silent_frames:
             if self.audio_silent:
                 logger.info("wake word: mic audio detected — stream healthy")
@@ -704,21 +689,17 @@ class WakeWordDetector:
                     failed = not self._stop.is_set()
                     break
                 if data is None:  # no client frames yet — counts as silence for status
-                    self._silent_frames += 1
-                    if self._silent_frames == silent_alert_frames:
-                        self.audio_silent = True
+                    self._note_silence(None, silent_alert_frames)
                     continue
                 frame = data[:, 0] if getattr(data, "ndim", 1) == 2 else data
                 if cap.rate != SAMPLE_RATE:
                     frame = _resample_audio_frame(cap.np, frame, frame_length)
                 self._note_silence(frame, silent_alert_frames)
                 try:
-                    fired = self.engine.process(frame)
+                    if self.engine.process(frame):
+                        self._fire()
                 except Exception as e:
                     logger.debug("wake word: engine error: %s", e)
-                    continue
-                if fired:
-                    self._fire()
         finally:
             cap.close()
             logger.info("wake word: stream closed")
@@ -779,26 +760,20 @@ def _release_machine_lock(handle) -> None:
         handle.close()
 
 
-def _clear_singleton_locked() -> tuple[Optional[WakeWordDetector], Any]:
-    """Forget the armed detector (caller holds ``_detector_lock``); returns (detector, lock handle)."""
+def _teardown_locked(close: Callable[[], None]) -> None:
+    """Forget the singleton and run ``close``, always releasing the machine lease (caller holds the lock)."""
     global _detector, _detector_owner, _detector_file_lock
-    det, handle = _detector, _detector_file_lock
+    lock_handle = _detector_file_lock
     _detector = _detector_owner = _detector_file_lock = None
-    return det, handle
+    try:
+        close()
+    finally:
+        _release_machine_lock(lock_handle)
 
 
 def _owned_detector(owner: object) -> Optional[WakeWordDetector]:
     """The armed detector iff ``owner`` holds the lease (caller holds the lock)."""
     return _detector if _detector is not None and _detector_owner is owner else None
-
-
-def _teardown_locked(close: Callable[[], None]) -> None:
-    """Forget the singleton and run ``close``, always releasing the machine lease (caller holds the lock)."""
-    _, lock_handle = _clear_singleton_locked()
-    try:
-        close()
-    finally:
-        _release_machine_lock(lock_handle)
 
 
 def _detector_failed(detector: WakeWordDetector) -> None:
@@ -824,37 +799,38 @@ def start_listening(on_wake: Callable[[], None], *, owner: object, config: Optio
             _detector.on_wake = on_wake
             _detector.resume()
             return _detector
-        lock_handle = _acquire_machine_lock()
+        _detector_file_lock = _acquire_machine_lock()
         try:
             cfg = config if config is not None else load_wake_word_config()
-            detector = WakeWordDetector(_build_engine(cfg), on_wake, on_failure=_detector_failed,
-                                        input_device=_input_device(cfg), external_audio=external_audio)
-            _detector, _detector_owner, _detector_file_lock = detector, owner, lock_handle
-            detector.start()
-            return detector
+            _detector = WakeWordDetector(_build_engine(cfg), on_wake, on_failure=_detector_failed,
+                                         input_device=_input_device(cfg), external_audio=external_audio)
+            _detector_owner = owner
+            _detector.start()
+            return _detector
         except Exception:
-            det, _ = _clear_singleton_locked()
+            det = _detector
             try:
-                if det is not None:
-                    det.stop()
+                _teardown_locked(det.stop if det is not None else lambda: None)
             except Exception:
                 pass
-            _release_machine_lock(lock_handle)
             raise
 
 
-def owns_listener(owner: object) -> bool:
-    with _detector_lock:
-        return _owned_detector(owner) is not None
-
-
-def _owned_call(owner: object, method: str) -> bool:
+def _owned_call(owner: object, method: Optional[str] = None) -> bool:
+    """Under the lock, True iff ``owner`` holds the lease; also invokes ``detector.<method>()`` when given."""
     with _detector_lock:
         det = _owned_detector(owner)
         if det is None:
             return False
-        getattr(det, method)()
+        if method == "stop":
+            _teardown_locked(det.stop)
+        elif method:
+            getattr(det, method)()
         return True
+
+
+def owns_listener(owner: object) -> bool:
+    return _owned_call(owner)
 
 
 def pause_listening(*, owner: object) -> bool:
@@ -869,12 +845,7 @@ def resume_listening(*, owner: object) -> bool:
 
 def stop_listening(*, owner: object) -> bool:
     """Fully stop the detector only when ``owner`` holds the lease."""
-    with _detector_lock:
-        det = _owned_detector(owner)
-        if det is None:
-            return False
-        _teardown_locked(det.stop)
-        return True
+    return _owned_call(owner, "stop")
 
 
 def _current_detector() -> Optional[WakeWordDetector]:
