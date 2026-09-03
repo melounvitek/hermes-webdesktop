@@ -31,7 +31,6 @@ _TOPIC_TABLES = ("telegram_dm_topic_mode", "telegram_dm_topic_bindings")
 
 def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
     from gateway.delivery_ledger import _initialize_schema
-
     _initialize_schema(conn)
 
 
@@ -86,7 +85,6 @@ def _validate_paths(
     source = source_path.expanduser().resolve(strict=True)
     if not source.is_file():
         raise SessionRecoverySafetyError(f"Source is not a file: {source}")
-
     output: Optional[Path] = None
     if output_path is not None:
         output = _resolved_output_path(output_path)
@@ -99,7 +97,6 @@ def _validate_paths(
             candidate = _sidecar_path(output, suffix)
             if os.path.lexists(candidate):
                 raise SessionRecoverySafetyError(f"Refusing to overwrite existing recovery output: {candidate}")
-
     work_root = (
         work_dir.expanduser().resolve(strict=True)
         if work_dir is not None
@@ -114,10 +111,9 @@ def _source_fingerprint(source: Path) -> dict[str, dict[str, int]]:
     fingerprint: dict[str, dict[str, int]] = {}
     for suffix in _SIDECAR_SUFFIXES:
         path = _sidecar_path(source, suffix)
-        if not path.exists():
-            continue
-        stat = path.stat()
-        fingerprint[suffix or "main"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        if path.exists():
+            stat = path.stat()
+            fingerprint[suffix or "main"] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
     return fingerprint
 
 
@@ -140,22 +136,16 @@ def _same_filesystem(left: Path, right: Path) -> bool:
 
 def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional[Path]) -> dict[str, Any]:
     """Require space for the disposable bundle, output, and safety headroom."""
-    bundle_bytes = sum(
-        _sidecar_path(source, suffix).stat().st_size
-        for suffix in _SIDECAR_SUFFIXES
-        if _sidecar_path(source, suffix).exists()
-    )
+    bundle_bytes = sum(info["size"] for info in _source_fingerprint(source).values())
     # The v23 external-content rebuild is usually much smaller than a legacy database, but estimating
     # with the complete bundle avoids betting the user's disk on that.
     output_allowance = bundle_bytes if output_parent is not None else 0
     headroom = max(_MINIMUM_SPACE_HEADROOM, int((bundle_bytes + output_allowance) * 0.05))
-
     work_free = int(shutil.disk_usage(work_root).free)
     report: dict[str, Any] = {
         "source_bundle_bytes": bundle_bytes, "estimated_output_bytes": output_allowance, "headroom_bytes": headroom,
         "work_dir": str(work_root), "work_dir_free_bytes": work_free,
     }
-
     if output_parent is None or _same_filesystem(work_root, output_parent):
         required = bundle_bytes + output_allowance + headroom
         report.update(shared_filesystem=True, work_dir_required_bytes=required)
@@ -167,7 +157,6 @@ def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional
                 "Use --work-dir or --output on a filesystem with more free space."
             )
         return report
-
     output_free = int(shutil.disk_usage(output_parent).free)
     work_required = bundle_bytes + headroom
     output_required = output_allowance + headroom
@@ -184,9 +173,8 @@ def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional
     ]
     if shortages:
         raise SessionRecoverySafetyError(
-            "Not enough free disk space for safe recovery: "
-            + "; ".join(shortages)
-            + ". Choose work/output filesystems with more free space."
+            f"Not enough free disk space for safe recovery: {'; '.join(shortages)}. "
+            "Choose work/output filesystems with more free space."
         )
     return report
 
@@ -199,7 +187,6 @@ def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[st
     guard keeps this path consistent with ``hermes_state._backup_db_file``.
     """
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
-
     snapshot_source = snapshot_dir / source.name
     copied: list[str] = []
     try:
@@ -283,7 +270,6 @@ def _copy_rows(
         result["status"] = "partial" if result["copied_rows"] else "failed"
         result["error"] = str(exc)
         return result
-
     if expected_rows is None or result["copied_rows"] == expected_rows:
         result["status"] = "complete"
     else:
@@ -298,8 +284,7 @@ def _table_inventory(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
         columns = _table_columns(conn, table)
         if not columns:
             return result
-        result["available"] = True
-        result["columns"] = columns
+        result.update(available=True, columns=columns)
         result["rows"] = _count_rows(conn, table)
     except sqlite3.DatabaseError as exc:
         result["error"] = str(exc)
@@ -320,10 +305,7 @@ def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
         report["journal_mode"] = None
         # Journal metadata is context, not canonical data: a damaged pragma must not block readable rows.
         report["warnings"].append(f"journal mode: {exc}")
-
-    for table in _INVENTORY_TABLES:
-        report["tables"][table] = _table_inventory(conn, table)
-
+    report["tables"] = {table: _table_inventory(conn, table) for table in _INVENTORY_TABLES}
     for required in ("sessions", "messages"):
         table_report = report["tables"][required]
         if not table_report.get("available") or table_report.get("rows") is None:
@@ -348,7 +330,6 @@ def _snapshot_and_inspect(
                 "stopped. Run the recovery from a fresh shell with no `hermes` session open, or point --source at an "
                 "immutable snapshot copy of the database."
             )
-
         conn = _connect(snapshot_source)
         try:
             inspection = _inspect_connection(conn)
@@ -368,10 +349,7 @@ def inspect_session_database(source_path: Path, *, work_dir: Optional[Path] = No
     temp_dir, _, inspection = _snapshot_and_inspect(source, work_root)
     try:
         return {
-            "operation": "inspect",
-            "source": str(source),
-            "disk_space": disk_space,
-            **inspection,
+            "operation": "inspect", "source": str(source), "disk_space": disk_space, **inspection,
             "source_unchanged": _source_fingerprint(source) == inspection["source_fingerprint"],
         }
     finally:
@@ -441,7 +419,6 @@ def _salvage_rowid_bounds(source: sqlite3.Connection, table: str) -> dict[str, A
                 rows[edge] = int(row[0])
         except sqlite3.DatabaseError as exc:
             result["errors"].append(f"{edge} rowid: {exc}")
-
     if rows["low"] is None and rows["high"] is None:
         result["empty" if not result["errors"] else "unavailable"] = True
         return result
@@ -454,7 +431,6 @@ def _salvage_rowid_bounds(source: sqlite3.Connection, table: str) -> dict[str, A
     if rows["high"] is None:
         rows["high"] = _MAX_SQLITE_ROWID
         result["fallback_edges"].append("high")
-
     result.update(rows)
     # Bisecting the whole synthetic domain tail used to exhaust the range-query budget before readable
     # tail rows were copied (#80205); gallop outward from the surviving edge for a finite bound first.
@@ -481,7 +457,6 @@ def _probe_populated_edge(source: sqlite3.Connection, table: str, *, edge: str, 
     )
     domain_limit = _MAX_SQLITE_ROWID if ascending else _MIN_SQLITE_ROWID
     result: dict[str, Any] = {"edge": edge, "probes": 0, "capped": False}
-
     position = anchor
     span = 1
     while True:
@@ -563,7 +538,6 @@ class _RowidRangeSalvage:
             self.stopped_at_query_limit = True
             self._skip(low, high, "salvage range query limit reached")
             return
-
         result["range_queries"] += 1
         last_committed_rowid: Optional[int] = None
         try:
@@ -611,7 +585,6 @@ def _copy_table_salvage(
     columns = _compatible_columns(source, destination, table, result)
     if columns is None:
         return result
-
     bounds = _salvage_rowid_bounds(source, table)
     result["rowid_bounds"] = bounds
     if bounds.get("empty"):
@@ -622,7 +595,6 @@ def _copy_table_salvage(
         result["status"] = "failed"
         result["error"] = "could not determine a rowid range for salvage" + (f": {details}" if details else "")
         return result
-
     salvage = _RowidRangeSalvage(
         source, destination, table, columns, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows,
         insert_prefix=insert_prefix, row_filter=row_filter, result=result,
@@ -631,7 +603,6 @@ def _copy_table_salvage(
     skipped_ranges = result["skipped_rowid_ranges"]
     result["skipped_rowid_span"] = sum(item["high"] - item["low"] + 1 for item in skipped_ranges)
     result["query_limit_reached"] = salvage.stopped_at_query_limit
-
     if skipped_ranges:
         result["status"] = "partial" if result["copied_rows"] else "failed"
         result["error"] = f"{len(skipped_ranges)} rowid range(s) skipped"
@@ -682,11 +653,9 @@ def _copy_state_meta(
     problem = _state_meta_precheck(source, destination, source_rows, salvage=salvage)
     if problem is not None:
         return problem
-
     if salvage:
         def keep_user_meta(row: tuple[Any, ...], columns: tuple[str, ...]) -> bool:
             return str(row[columns.index("key")]) not in _GENERATED_META_KEYS
-
         result = _copy_table_salvage(
             source, destination, "state_meta", chunk_size=chunk_size, progress_cb=progress_cb,
             source_rows=source_rows, insert_prefix="INSERT OR REPLACE", row_filter=keep_user_meta,
@@ -694,7 +663,6 @@ def _copy_state_meta(
         result["source_meta_rows"] = result.pop("source_rows")
         result["excluded_keys"] = sorted(_GENERATED_META_KEYS)
         return result
-
     placeholders = ", ".join("?" for _ in _GENERATED_META_KEYS)
     params = tuple(_GENERATED_META_KEYS)
     filtered_source_rows: Optional[int] = None
@@ -704,7 +672,6 @@ def _copy_state_meta(
         )
     except sqlite3.DatabaseError:
         pass  # the copy loop below will return the concrete read error
-
     return _copy_rows(
         source, destination, f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})", params,
         "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)", table="state_meta", chunk_size=chunk_size,
@@ -732,14 +699,12 @@ def _reconstruct_missing_sessions(destination: sqlite3.Connection) -> dict[str, 
     result: dict[str, Any] = {"sessions_reconstructed": 0, "messages_retained": 0}
     if not (_table_columns(destination, "sessions") and _table_columns(destination, "messages")):
         return result
-
     orphaned = destination.execute(
         "SELECT m.session_id, MIN(m.timestamp), COUNT(*) FROM messages AS m WHERE m.session_id IS NOT NULL AND NOT "
         "EXISTS (SELECT 1 FROM sessions WHERE sessions.id = m.session_id) GROUP BY m.session_id"
     ).fetchall()
     if not orphaned:
         return result
-
     titles = _placeholder_titles(destination, "recovered")
     for session_id, first_timestamp, message_count in orphaned:
         started_at = float(first_timestamp) if first_timestamp is not None else 0.0
@@ -778,36 +743,30 @@ def _cleanup_partial_orphans(destination: sqlite3.Connection) -> dict[str, Any]:
     with _immediate_transaction(destination):
         # Rebuild owners BEFORE any orphan deletion.
         result.update(_reconstruct_missing_sessions(destination))
-
         result["sessions_parent_cleared"] = _reconcile(
-            destination,
-            "sessions",
+            destination, "sessions",
             "parent_session_id IS NOT NULL AND NOT EXISTS ("
             "SELECT 1 FROM sessions AS parent WHERE parent.id = sessions.parent_session_id)",
             "UPDATE sessions SET parent_session_id = NULL",
         )
         result["session_prompt_refs_cleared"] = _reconcile(
-            destination,
-            "sessions",
+            destination, "sessions",
             "system_prompt_hash IS NOT NULL AND NOT EXISTS ("
             "SELECT 1 FROM system_prompts WHERE system_prompts.hash = sessions.system_prompt_hash)",
             "UPDATE sessions SET system_prompt_hash = NULL",
         )
         result["system_prompts_removed"] = _reconcile(
-            destination,
-            "system_prompts",
+            destination, "system_prompts",
             "NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.system_prompt_hash = system_prompts.hash)",
             "DELETE FROM system_prompts",
         )
         for table in _DEPENDENT_TABLES:
-            if not _table_columns(destination, table):
-                continue
-            result[f"{table}_removed"] = _reconcile(
-                destination,
-                table,
-                f'NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = "{table}".session_id)',
-                f'DELETE FROM "{table}"',
-            )
+            if _table_columns(destination, table):
+                result[f"{table}_removed"] = _reconcile(
+                    destination, table,
+                    f'NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = "{table}".session_id)',
+                    f'DELETE FROM "{table}"',
+                )
     # Only destructive/relinking actions count: reconstruction counters describe RETAINED data.
     result["total_removed_or_relinked"] = sum(
         int(result[key]) for key in (*_RELINK_COUNTERS, *(f"{table}_removed" for table in _DEPENDENT_TABLES))
@@ -822,19 +781,15 @@ def _verify_structure(conn: sqlite3.Connection, verification: dict[str, Any]) ->
     verification["integrity_check"] = integrity_rows
     if integrity_rows != ["ok"]:
         errors.append("PRAGMA integrity_check did not return exactly 'ok'")
-
     foreign_key_rows = [list(row) for row in conn.execute("PRAGMA foreign_key_check").fetchall()]
     verification["foreign_key_check"] = foreign_key_rows
     if foreign_key_rows:
         errors.append("foreign key violations remain")
-
     verification["journal_mode"] = _journal_mode(conn)
-
     schema_row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
     verification["schema_version"] = int(schema_row[0]) if schema_row else None
     if verification["schema_version"] != SCHEMA_VERSION:
         errors.append(f"schema version is {verification['schema_version']}, expected {SCHEMA_VERSION}")
-
     meta = dict(conn.execute("SELECT key, value FROM state_meta WHERE key LIKE 'fts_%'").fetchall())
     meta = {str(key): value for key, value in meta.items()}
     verification["fts_meta"] = meta
@@ -876,15 +831,12 @@ def _verify_row_counts(
             verification["loss_detected"] = True
         else:
             verification["errors"].append(message)
-
     counts = {table: _count_rows(conn, table) for table in _INVENTORY_TABLES if _table_columns(conn, table)}
     verification["table_counts"] = counts
-
     for table in ("sessions", "messages", *_AUXILIARY_TABLES):
         expected = expected_counts.get(table)
         if expected is not None and counts.get(table) != expected:
             flag(f"{table} count is {counts.get(table)}, expected {expected}", soft=allow_partial)
-
     cleanup = orphan_cleanup or {}
     rebuilt_sessions = int(cleanup.get("sessions_reconstructed") or 0)
     retained_messages = int(cleanup.get("messages_retained") or 0)
@@ -904,7 +856,6 @@ def _verify_row_counts(
             or (table == "sessions" and sessions_fully_reconstructed)
         )
         flag(f"{table} copy status is {status}", soft=allow_partial and tolerable)
-
     if orphan_cleanup:
         orphan_count = int(orphan_cleanup.get("total_removed_or_relinked") or 0)
         if orphan_count:
@@ -923,12 +874,10 @@ def _verify_recovered_database(
     allow_partial: bool = False, orphan_cleanup: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     verification: dict[str, Any] = {"errors": [], "warnings": [], "loss_detected": False}
-
     open_error = _db_opens_cleanly(output)
     verification["opens_cleanly"] = open_error is None
     if open_error is not None:
         verification["errors"].append(f"database health probe: {open_error}")
-
     conn = sqlite3.connect(str(output), isolation_level=None)
     try:
         _verify_structure(conn, verification)
@@ -941,7 +890,6 @@ def _verify_recovered_database(
         verification["errors"].append(f"verification query failed: {exc}")
     finally:
         conn.close()
-
     verification["healthy"] = not verification["errors"]
     verification["complete"] = bool(verification["healthy"] and not verification["loss_detected"])
     return verification
@@ -959,7 +907,6 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     if fts_tables != {"messages_fts", "messages_fts_trigram"}:
         result["error"] = "fresh destination is missing required FTS tables"
         return result
-
     fts_keys = tuple(key for key in _GENERATED_META_KEYS if key.startswith("fts_"))
     placeholders = ", ".join("?" for _ in fts_keys)
     with _immediate_transaction(destination):
@@ -983,7 +930,6 @@ def _recover_via_lost_and_found(
         SQLITE3_CLI_GUIDANCE, LostAndFoundError, find_sqlite3_cli, map_lost_and_found_rows, rebuild_fts_indexes,
         run_cli_lost_and_found_recover, stub_missing_parent_sessions,
     )
-
     missing = ", ".join(missing_required)
     sqlite3_bin = find_sqlite3_cli()
     if sqlite3_bin is None:
@@ -998,7 +944,6 @@ def _recover_via_lost_and_found(
             f"Partial recovery could not read the table schemas for: {missing}, "
             f"and page-level .recover salvage failed: {exc}"
         ) from exc
-
     lf_conn = sqlite3.connect(str(lf_path), isolation_level=None)
     destination_conn = _fresh_destination(output)
     try:
@@ -1009,7 +954,6 @@ def _recover_via_lost_and_found(
     finally:
         lf_conn.close()
         destination_conn.close()
-
     copy_report: dict[str, dict[str, Any]] = {
         table: {
             "mode": "lost_and_found_salvage",
@@ -1034,7 +978,6 @@ def _recover_via_lost_and_found(
         "pages and mapped heuristically. Review every count before trusting this output."
     )
     verification["complete"] = False
-
     return _recovery_report(
         source, output, inspection, disk_space, verification, on_source_change="healthy",
         allow_partial=True, mode="lost_and_found_salvage", best_effort=True, unreadable_schemas=missing_required,
@@ -1055,13 +998,9 @@ def _recovery_report(
         verification["errors"].append("the source database bundle changed during recovery")
         verification[on_source_change] = False
     return {
-        "operation": "recover",
-        "source": str(source),
-        "output": str(output),
-        "source_bundle": inspection["source_bundle"],
-        "source_fingerprint": inspection["source_fingerprint"],
-        "source_unchanged": source_unchanged,
-        "disk_space": disk_space,
+        "operation": "recover", "source": str(source), "output": str(output),
+        "source_bundle": inspection["source_bundle"], "source_fingerprint": inspection["source_fingerprint"],
+        "source_unchanged": source_unchanged, "disk_space": disk_space,
         "inspection": {
             "journal_mode": inspection.get("journal_mode"), "tables": inspection["tables"],
             "errors": inspection["errors"], "warnings": inspection["warnings"],
@@ -1083,11 +1022,9 @@ def recover_session_database(
     copied before SQLite opens anything; ``output_path`` must not exist and is never swapped into place."""
     if chunk_size <= 0:
         raise SessionRecoverySafetyError("chunk_size must be greater than zero")
-
     source, output, work_root = _validate_paths(source_path, output_path=output_path, work_dir=work_dir)
     assert output is not None
     disk_space = _disk_space_preflight(source, work_root, output.parent)
-
     temp_dir, snapshot_source, inspection = _snapshot_and_inspect(source, work_root)
     try:
         if not inspection.get("recoverable") and not allow_partial:
@@ -1106,7 +1043,6 @@ def recover_session_database(
                     source=source, snapshot_source=snapshot_source, snapshot_dir=Path(temp_dir.name), output=output,
                     inspection=inspection, disk_space=disk_space, missing_required=missing_required,
                 )
-
         source_conn = _connect(snapshot_source)
         source_conn.execute("PRAGMA writable_schema=ON")
         destination_conn: Optional[sqlite3.Connection] = None
@@ -1114,7 +1050,6 @@ def recover_session_database(
             destination_conn = _fresh_destination(
                 output, topic_tables=any(inspection["tables"][table].get("available") for table in _TOPIC_TABLES),
             )
-
             copy_report: dict[str, dict[str, Any]] = {}
             for table in (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES):
                 if table not in _CANONICAL_TABLES and not inspection["tables"][table].get("available"):
@@ -1132,7 +1067,6 @@ def recover_session_database(
             source_conn.close()
             if destination_conn is not None:
                 destination_conn.close()
-
         verification = _verify_recovered_database(
             output,
             expected_counts={
