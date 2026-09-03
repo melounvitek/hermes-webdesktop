@@ -1276,24 +1276,17 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
                 f"  ⚠ {len(_gateway_holders)} gateway process(es) still hold the venv after the pause; stopping them",
                 _gateway_holders, stop=_terminate_leftover_gateways,
             )
-    if _venv_holders:
-        # Positive-identity rung (any context): spawn ledger proves the holder is an
-        # orphaned backend (self-registered, spawner provably dead). No PPID archaeology.
-        _ledger_backends = _m()._ledger_reapable_backend_pids(_venv_holders)
-        if _ledger_backends:
-            _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_ledger_backends)} ledger-identified orphaned "
-                "Hermes backend process(es) hold the venv; stopping their trees", _ledger_backends,
-            )
-    if _venv_holders:
-        # Desktop `serve` backends whose app is GONE: nothing respawns an orphan, so
-        # reap the tree. Live-Desktop backends return None and keep the refusal.
-        _orphan_backends = _m()._orphaned_desktop_backend_pids(_venv_holders)
-        if _orphan_backends:
-            _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_orphan_backends)} orphaned Desktop backend "
-                "process(es) still hold the venv; stopping their trees", _orphan_backends,
-            )
+    # Tree-reap rungs: (classifier, message). Ledger rung = positive identity in any context (self-registered
+    # backend, spawner provably dead; no PPID archaeology). Orphan rung = Desktop `serve` whose app is GONE
+    # (nothing respawns an orphan); live-Desktop backends return None and keep the refusal.
+    for classifier, message in (
+        (_m()._ledger_reapable_backend_pids, "ledger-identified orphaned Hermes backend process(es) hold the venv"),
+        (_m()._orphaned_desktop_backend_pids, "orphaned Desktop backend process(es) still hold the venv"),
+    ):
+        if _venv_holders:
+            backends = classifier(_venv_holders)
+            if backends:
+                _venv_holders = _reap_and_rescan(f"  ⚠ {len(backends)} {message}; stopping their trees", backends)
     if _venv_holders:
         # Manual serve/dashboard rung (e.g. `hermes serve --host <ip>` for a REMOTE Desktop):
         # ledger identity only (spawner dead; Desktop-owned keep the refusal). Stop and
