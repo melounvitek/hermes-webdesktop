@@ -48,10 +48,7 @@ class GatewayTurnMixin:
     """Agent-turn execution (_handle_message_with_agent, _run_agent*, proxy path, background tasks, MCP reload) for GatewayRunner."""
 
     def _resolve_session_agent_runtime(
-        self,
-        *,
-        source: Optional[SessionSource] = None,
-        session_key: Optional[str] = None,
+        self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
         user_config: Optional[dict] = None,
     ) -> tuple[str, dict]:
         """Resolve model/runtime for a session.
@@ -60,11 +57,8 @@ class GatewayTurnMixin:
         (``_resolve_gateway_model(user_config)`` and default provider resolution).
         """
         from gateway.run import (
-            _credential_pool_for_provider,
-            _get_channel_override,
-            _resolve_gateway_model,
-            _resolve_runtime_agent_kwargs,
-            _resolve_runtime_agent_kwargs_for_provider,
+            _credential_pool_for_provider, _get_channel_override, _resolve_gateway_model,
+            _resolve_runtime_agent_kwargs, _resolve_runtime_agent_kwargs_for_provider,
         )
         skey = self._resolve_session_key_or_none(source, session_key)
 
@@ -117,9 +111,7 @@ class GatewayTurnMixin:
         cfg = getattr(self, "config", None)  # getattr: bare object.__new__ test runners
         if cfg and source is not None:
             ch = _get_channel_override(
-                cfg,
-                source.platform,
-                str(source.chat_id) if source.chat_id else "",
+                cfg, source.platform, str(source.chat_id) if source.chat_id else "",
                 thread_id=str(source.thread_id) if getattr(source, "thread_id", None) else None,
                 parent_id=str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None,
             )
@@ -321,8 +313,7 @@ class GatewayTurnMixin:
         a fresh one. Returns the (possibly switched) session entry."""
         try:
             binding = (await self._session_db.get_telegram_topic_binding(
-                chat_id=str(source.chat_id),
-                thread_id=str(source.thread_id),
+                chat_id=str(source.chat_id), thread_id=str(source.thread_id),
                 profile_name=self._telegram_topic_profile_name(source),
             )) if self._session_db else None
         except Exception:
@@ -485,9 +476,7 @@ class GatewayTurnMixin:
             return
         try:
             _lease_token = await _lease_registry.acquire(
-                session_entry.session_id,
-                owner_key=_quick_key,
-                generation=run_generation,
+                session_entry.session_id, owner_key=_quick_key, generation=run_generation,
                 timeout=_float_env("HERMES_TURN_LEASE_TIMEOUT", DEFAULT_LEASE_WAIT),
             )
         except TurnLeaseTimeoutError:
@@ -519,19 +508,10 @@ class GatewayTurnMixin:
         compressor keeps running detached, commit fenced); kept below transport idle-timeouts."""
         from gateway.run import _load_gateway_config
         hs = self._HygieneSettings(
-            model="anthropic/claude-sonnet-4.6",
-            threshold_pct=0.85,
-            compression_enabled=True,
-            hard_msg_limit=5000,
-            timeout_seconds=30.0,
-            total_ceiling_seconds=600.0,
-            max_turn_hold_seconds=10.0,
-            failure_cooldown_seconds=300.0,
-            config_context_length=None,
-            provider=None,
-            base_url=None,
-            api_key=None,
-            data={},
+            model="anthropic/claude-sonnet-4.6", threshold_pct=0.85, compression_enabled=True,
+            hard_msg_limit=5000, timeout_seconds=30.0, total_ceiling_seconds=600.0,
+            max_turn_hold_seconds=10.0, failure_cooldown_seconds=300.0, config_context_length=None,
+            provider=None, base_url=None, api_key=None, data={},
         )
         try:
             hs.data = _load_gateway_config()
@@ -580,8 +560,7 @@ class GatewayTurnMixin:
 
             try:
                 hs.model, _hyg_runtime = self._resolve_session_agent_runtime(
-                    source=source,
-                    session_key=session_key,
+                    source=source, session_key=session_key,
                     user_config=hs.data if isinstance(hs.data, dict) else None,
                 )
                 hs.provider = _hyg_runtime.get("provider") or hs.provider
@@ -633,11 +612,8 @@ class GatewayTurnMixin:
         from agent.model_metadata import estimate_messages_tokens_rough, get_model_context_length_async
 
         _hyg_context_length = await get_model_context_length_async(
-            hs.model,
-            base_url=hs.base_url or "",
-            api_key=hs.api_key or "",
-            config_context_length=hs.config_context_length,
-            provider=hs.provider or "",
+            hs.model, base_url=hs.base_url or "", api_key=hs.api_key or "",
+            config_context_length=hs.config_context_length, provider=hs.provider or "",
         )
         _compress_token_threshold = int(_hyg_context_length * hs.threshold_pct)
         _warn_token_threshold = int(_hyg_context_length * 0.95)
@@ -684,8 +660,7 @@ class GatewayTurnMixin:
             # ceiling behind a commit the fence will refuse, while inbound messages demote to queue.
             logger.info(
                 "Session hygiene: skipping compression for %s; "
-                "another compression is already in flight",
-                session_entry.session_id,
+                "another compression is already in flight", session_entry.session_id,
             )
             _needs_compress = False
 
@@ -750,11 +725,8 @@ class GatewayTurnMixin:
                         f"elapsed after {_hyg_waited:.1f}s"
                     )
                 if hygiene_wait_should_extend(
-                    idle=_idle,
-                    timeout=hs.timeout_seconds,
-                    waited=_hyg_waited,
-                    ceiling=hs.total_ceiling_seconds,
-                    fence_cancelled=fence.is_cancelled,
+                    idle=_idle, timeout=hs.timeout_seconds, waited=_hyg_waited,
+                    ceiling=hs.total_ceiling_seconds, fence_cancelled=fence.is_cancelled,
                 ):
                     if _slice >= _idle_left - 1e-9:
                         logger.info(
@@ -827,9 +799,7 @@ class GatewayTurnMixin:
         watermark fence (no session_db, capture failed, legacy lock API) a late commit could
         clobber newer turns, so cancel."""
         from gateway.run import (
-            _HYGIENE_TURNHOLD_RETRY_SECONDS,
-            _record_hygiene_cooldown,
-            _reset_hygiene_failure_streak,
+            _HYGIENE_TURNHOLD_RETRY_SECONDS, _record_hygiene_cooldown, _reset_hygiene_failure_streak
         )
         fence = attempt.commit_fence
         _hyg_keep_admission = (
@@ -858,8 +828,7 @@ class GatewayTurnMixin:
                     logger.info(
                         "Session hygiene compression for session %s finished after the "
                         "turn-hold was released — summary adopted at the watermark-fenced "
-                        "commit boundary (#97963)",
-                        _sid,
+                        "commit boundary (#97963)", _sid,
                     )
                     try:
                         _reset_hygiene_failure_streak(_gw, _skey)
@@ -951,8 +920,7 @@ class GatewayTurnMixin:
         if _hyg_fence_cancelled:
             logger.warning(
                 "Session hygiene compression for session %s was cancelled at the "
-                "commit fence; continuing without compression",
-                session_entry.session_id,
+                "commit fence; continuing without compression", session_entry.session_id,
             )
             raise
         _hyg_elapsed = time.monotonic() - attempt.wait_started
@@ -972,10 +940,8 @@ class GatewayTurnMixin:
         await self._hmwa_hygiene_notify(
             source, attempt.meta,
             _hygiene_compression_timeout_message(
-                total_exhausted=_hyg_total_exhausted,
-                elapsed=_hyg_elapsed,
-                idle_timeout=hs.timeout_seconds,
-                progress_observed=fence.progress_observed,
+                total_exhausted=_hyg_total_exhausted, elapsed=_hyg_elapsed,
+                idle_timeout=hs.timeout_seconds, progress_observed=fence.progress_observed,
             ),
             "compression-timeout warning",
         )
@@ -1047,8 +1013,7 @@ class GatewayTurnMixin:
                     "compressed transcript for rotated "
                     "session %s → %s; keeping the live "
                     "entry on the original session so the "
-                    "conversation is not dropped",
-                    session_entry.session_id, _hyg_new_sid,
+                    "conversation is not dropped", session_entry.session_id, _hyg_new_sid,
                 )
                 # Fail closed: treat like no rotation.
                 _hyg_rotated = False
@@ -1079,8 +1044,7 @@ class GatewayTurnMixin:
                 "did not rotate or compact in place "
                 "(no session_db on the hygiene agent) — "
                 "preserving the original transcript instead "
-                "of overwriting it with the summary (#21301).",
-                session_entry.session_id,
+                "of overwriting it with the summary (#21301).", session_entry.session_id,
             )
 
         logger.info(
@@ -1108,12 +1072,8 @@ class GatewayTurnMixin:
             # rotated nor compacted in place" path reuses the pre-compression counts, so a
             # numbers-only check would read a no-op as success and clear the streak.
             if hygiene_compaction_recovered(
-                aborted=_hyg_aborted,
-                rotated=_hyg_rotated,
-                in_place=_hyg_in_place,
-                msg_count=plan.msg_count,
-                new_count=_new_count,
-                approx_tokens=plan.approx_tokens,
+                aborted=_hyg_aborted, rotated=_hyg_rotated, in_place=_hyg_in_place,
+                msg_count=plan.msg_count, new_count=_new_count, approx_tokens=plan.approx_tokens,
                 new_tokens=_new_tokens,
             ):
                 await asyncio.to_thread(_reset_hygiene_failure_streak, self, session_key)
@@ -1134,8 +1094,7 @@ class GatewayTurnMixin:
                 from agent.redact import redact_sensitive_text
                 _err = redact_sensitive_text(_err, force=True)
                 await self._hmwa_hygiene_notify(
-                    source, attempt.meta,
-                    "⚠️ Context compression aborted "
+                    source, attempt.meta, "⚠️ Context compression aborted "
                     f"({_err}). No messages were dropped — "
                     "conversation is unchanged. Run /compress "
                     "to retry, /reset for a clean session, or "
@@ -1149,8 +1108,7 @@ class GatewayTurnMixin:
             _aux_model = getattr(_comp, "_last_aux_model_failure_model", "")
             _aux_err = getattr(_comp, "_last_aux_model_failure_error", None) or "unknown error"
             await self._hmwa_hygiene_notify(
-                source, attempt.meta,
-                f"ℹ️ Configured compression model `{_aux_model}` "
+                source, attempt.meta, f"ℹ️ Configured compression model `{_aux_model}` "
                 f"failed ({_aux_err}). Recovered using your main "
                 "model — context is intact — but you may want to "
                 "check `auxiliary.compression.model` in config.yaml.",
@@ -1168,13 +1126,8 @@ class GatewayTurnMixin:
         if isinstance(_hyg_comp_cfg, dict):
             _hyg_codex_auto = str(_hyg_comp_cfg.get("codex_app_server_auto", "native") or "native")
         _hyg_codex_outcome = await run_codex_hygiene_compaction(
-            self,
-            session_key,
-            session_entry.session_id,
-            auto_mode=_hyg_codex_auto,
-            history=history,
-            approx_tokens=plan.approx_tokens,
-            timeout_seconds=hs.total_ceiling_seconds,
+            self, session_key, session_entry.session_id, auto_mode=_hyg_codex_auto, history=history,
+            approx_tokens=plan.approx_tokens, timeout_seconds=hs.total_ceiling_seconds,
             failure_cooldown_seconds=hs.failure_cooldown_seconds,
         )
         logger.info(
@@ -1196,8 +1149,7 @@ class GatewayTurnMixin:
                 "Session hygiene could not restore the system "
                 "prompt for session %s: %s. Preserving an empty "
                 "prompt so the live turn rebuilds it with its "
-                "configured providers.",
-                session_entry.session_id, exc, exc_info=True,
+                "configured providers.", session_entry.session_id, exc, exc_info=True,
             )
         _hyg_session_db = getattr(self._session_db, "_db", self._session_db)
         # Hygiene is the same lossy rewrite as normal compression: with
@@ -1210,14 +1162,9 @@ class GatewayTurnMixin:
             ((_load_cfg() or {}).get("compression") or {}).get("checkpoint_required"), default=False,
         )
         _hyg_agent = AIAgent(
-            **_hyg_runtime,
-            model=_hyg_model,
-            max_iterations=4,
-            quiet_mode=True,
-            skip_memory=not _hyg_checkpoint_required,
-            enabled_toolsets=["memory"],
-            session_id=session_entry.session_id,
-            session_db=_hyg_session_db,
+            **_hyg_runtime, model=_hyg_model, max_iterations=4, quiet_mode=True,
+            skip_memory=not _hyg_checkpoint_required, enabled_toolsets=["memory"],
+            session_id=session_entry.session_id, session_db=_hyg_session_db,
         )
         _seed_hygiene_system_prompt(_hyg_agent, _hyg_session_row)
         # If compression must rebuild instead of retaining the cached prompt, make the persisted
@@ -1278,11 +1225,8 @@ class GatewayTurnMixin:
                 raise
 
             await self._hmwa_hygiene_apply_result(
-                attempt, hs, _compressed, history, plan,
-                session_entry=session_entry,
-                session_key=session_key,
-                source=source,
-                _quick_key=_quick_key,
+                attempt, hs, _compressed, history, plan, session_entry=session_entry,
+                session_key=session_key, source=source, _quick_key=_quick_key,
                 run_generation=run_generation,
             )
         finally:
@@ -1316,8 +1260,7 @@ class GatewayTurnMixin:
         )
         try:
             _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
-                source=source,
-                session_key=session_key,
+                source=source, session_key=session_key,
                 user_config=hs.data if isinstance(hs.data, dict) else None,
             )
             if str(_hyg_runtime.get("api_mode") or "").lower() == "codex_app_server":
@@ -1360,10 +1303,7 @@ class GatewayTurnMixin:
             # offers to build a user profile via memory(target="user"). Fires at most once.
             try:
                 from agent.onboarding import (
-                    PROFILE_BUILD_FLAG,
-                    is_seen,
-                    mark_seen,
-                    profile_build_directive,
+                    PROFILE_BUILD_FLAG, is_seen, mark_seen, profile_build_directive,
                     profile_build_mode,
                 )
                 _onb_cfg = _load_gateway_config()
@@ -1414,8 +1354,7 @@ class GatewayTurnMixin:
             # `/hermes`; bare `/sethome` is not registered and would fail.
             sethome_cmd = "/hermes sethome" if source.platform == Platform.SLACK else "/sethome"
             await self._deliver_platform_notice(
-                source,
-                f"📬 No home channel is set for {platform_name.title()}. "
+                source, f"📬 No home channel is set for {platform_name.title()}. "
                 f"A home channel is where Hermes delivers cron job results "
                 f"and cross-platform messages.\n\n"
                 f"Type {sethome_cmd} to make this chat your home channel, "
@@ -1478,10 +1417,8 @@ class GatewayTurnMixin:
         post-compression session_id propagation. Returns
         ``(response, _intentional_silence, agent_messages)``."""
         from gateway.run import (
-            _is_gateway_hidden_reasoning_incomplete_turn,
-            _normalize_empty_agent_response,
-            _sanitize_gateway_final_response,
-            _should_clear_resume_pending_after_turn,
+            _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
+            _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
         )
         response = agent_result.get("final_response") or ""
         # Hidden-reasoning-only retry exhaustion: the loop's sentinel text doubles as
@@ -1561,11 +1498,8 @@ class GatewayTurnMixin:
         from gateway.run import _load_gateway_config, _platform_config_key, _resolve_gateway_display_bool
         try:
             _show_reasoning_effective = _resolve_gateway_display_bool(
-                _load_gateway_config(),
-                _platform_config_key(source.platform),
-                "show_reasoning",
-                default=bool(getattr(self, "_show_reasoning", False)),
-                platform=source.platform,
+                _load_gateway_config(), _platform_config_key(source.platform), "show_reasoning",
+                default=bool(getattr(self, "_show_reasoning", False)), platform=source.platform,
                 require_platform_override_for={Platform.MATTERMOST},
             )
         except Exception:
@@ -1610,12 +1544,10 @@ class GatewayTurnMixin:
             from gateway.runtime_footer import build_footer_line as _bfl
             return _bfl(
                 user_config=_load_gateway_config(),
-                platform_key=_platform_config_key(source.platform),
-                model=agent_result.get("model"),
+                platform_key=_platform_config_key(source.platform), model=agent_result.get("model"),
                 context_tokens=agent_result.get("last_prompt_tokens", 0) or 0,
                 context_length=agent_result.get("context_length") or None,
-                cwd=_terminal_scope_cwd(""),
-                turn_seconds=_turn_seconds,
+                cwd=_terminal_scope_cwd(""), turn_seconds=_turn_seconds,
             )
         except Exception as _footer_err:
             logger.debug("runtime_footer build failed: %s", _footer_err)
@@ -1624,9 +1556,7 @@ class GatewayTurnMixin:
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
         await self.hooks.emit("agent:end", {
-            **hook_ctx,
-            "response": (response or "")[:500],
-            "model": agent_result.get("model", ""),
+            **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
             "provider": agent_result.get("provider", ""),
         })
 
@@ -1689,8 +1619,7 @@ class GatewayTurnMixin:
         elif agent_failed_early:
             logger.info(
                 "Transient agent failure in session %s — persisting user "
-                "message so conversation context is preserved on retry.",
-                session_entry.session_id,
+                "message so conversation context is preserved on retry.", session_entry.session_id,
             )
         elif hidden_reasoning_incomplete:
             logger.warning(
@@ -1843,8 +1772,7 @@ class GatewayTurnMixin:
         # The agent persists token counts and model itself; keep only last_prompt_tokens here for
         # context-window tracking and compression decisions.
         await store.update_session(
-            session_entry.session_key,
-            last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+            session_entry.session_key, last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
             touch_activity=not bool(getattr(event, "internal", False)),
         )
 
@@ -2123,17 +2051,11 @@ class GatewayTurnMixin:
             _run_start_session_id = session_entry.session_id
             _turn_started_monotonic = time.monotonic()
             agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=_run_start_session_id,
-                session_key=session_key,
-                run_generation=run_generation,
-                event_message_id=self._reply_anchor_for_event(event),
+                message=message_text, context_prompt=context_prompt, history=history, source=source,
+                session_id=_run_start_session_id, session_key=session_key,
+                run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
-                channel_prompt=event.channel_prompt,
-                moa_config=getattr(event, "_moa_config", None),
+                channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
@@ -2165,15 +2087,9 @@ class GatewayTurnMixin:
                 agent_result, response, session_entry, session_key, source,
             )
             await self._hmwa_persist_turn_transcript(
-                event=event,
-                source=source,
-                session_entry=session_entry,
-                session_key=session_key,
-                agent_result=agent_result,
-                agent_messages=agent_messages,
-                history=history,
-                response=response,
-                message_text=message_text,
+                event=event, source=source, session_entry=session_entry, session_key=session_key,
+                agent_result=agent_result, agent_messages=agent_messages, history=history,
+                response=response, message_text=message_text,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
                 persist_user_display_kind=persist_user_display_kind,
