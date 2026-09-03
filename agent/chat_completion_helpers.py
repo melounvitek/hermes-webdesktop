@@ -133,16 +133,16 @@ class ProviderStreamError(Exception):
 
     def _format_message(self) -> str:
         error_obj = self.body.get("error", {}) if isinstance(self.body, dict) else {}
-        code = error_obj.get("code") if isinstance(error_obj, dict) else None
-        message = error_obj.get("message") if isinstance(error_obj, dict) else None
+        if not isinstance(error_obj, dict):
+            error_obj = {}
         parts = ["Provider stream returned an error event"]
         if self.status_code:
             parts.append(f"HTTP {self.status_code}")
-        if code:
-            parts.append(str(code))
+        if error_obj.get("code"):
+            parts.append(str(error_obj["code"]))
         text = " - ".join(parts)
-        if message:
-            text += f": {message}"
+        if error_obj.get("message"):
+            text += f": {error_obj['message']}"
         return text
 
 
@@ -164,21 +164,11 @@ def _status_code_from_payload(payload: Any) -> Optional[int]:
     if not isinstance(payload, dict):
         return None
 
-    candidates = [
-        payload.get("status_code"),
-        payload.get("status"),
-        payload.get("http_status"),
-    ]
+    candidates = [payload.get(k) for k in ("status_code", "status", "http_status")]
     error_obj = payload.get("error")
     if isinstance(error_obj, dict):
-        candidates.extend([
-            error_obj.get("status_code"),
-            error_obj.get("status"),
-            error_obj.get("http_status"),
-            error_obj.get("code"),
-        ])
+        candidates.extend(error_obj.get(k) for k in ("status_code", "status", "http_status", "code"))
     candidates.append(payload.get("code"))
-
     for candidate in candidates:
         status_code = _status_code_from_value(candidate)
         if status_code is not None:
@@ -202,36 +192,21 @@ def _parse_provider_sse_events(text: str) -> list[dict]:
     events: list[dict] = []
     current = {"event": None, "data": [], "comments": [], "fields": {}}
 
-    def _has_event_data(event: dict) -> bool:
-        return bool(
-            event.get("event")
-            or event.get("data")
-            or event.get("comments")
-            or event.get("fields")
-        )
-
     def _flush_current():
         nonlocal current
-        if _has_event_data(current):
-            data_text = "\n".join(current["data"])
-            status_candidates = list(current["comments"])
-            for key in ("status", "status_code", "http_status"):
-                if key in current["fields"]:
-                    status_candidates.append(current["fields"][key])
+        if any(current.values()):
+            status_candidates = list(current["comments"]) + [
+                current["fields"][key]
+                for key in ("status", "status_code", "http_status")
+                if key in current["fields"]
+            ]
             events.append({
                 "event": current["event"],
-                "data": data_text,
+                "data": "\n".join(current["data"]),
                 "comments": list(current["comments"]),
                 "fields": dict(current["fields"]),
                 "status_code": next(
-                    (
-                        status
-                        for status in (
-                            _status_code_from_value(value)
-                            for value in status_candidates
-                        )
-                        if status is not None
-                    ),
+                    (s for s in map(_status_code_from_value, status_candidates) if s is not None),
                     None,
                 ),
             })
@@ -350,13 +325,11 @@ def _payload_has_error_shape(payload: Any) -> bool:
         return False
     if isinstance(payload.get("error"), (dict, str)):
         return True
-    if payload.get("message") and (
+    return bool(payload.get("message")) and bool(
         payload.get("code")
         or payload.get("error_code")
         or _status_code_from_payload(payload) is not None
-    ):
-        return True
-    return False
+    )
 
 
 def _provider_stream_text_may_be_sse(text: str) -> bool:
@@ -409,28 +382,9 @@ def _provider_stream_error_from_text(
     if not has_error_finish:
         return None
 
-    for event in _parse_provider_sse_events(text):
-        event_name = str(event.get("event") or "").strip().lower()
-        payload = _json_object_from_text(event.get("data") or "") or {}
-        status_code = event.get("status_code") or _status_code_from_payload(payload)
-        is_error_event = event_name == "error"
-        is_http_error = status_code is not None and status_code >= 400
-        is_error_payload = _payload_has_error_shape(payload)
-        is_structured_error_event = is_error_event and (
-            has_error_finish or is_http_error or is_error_payload
-        )
-        is_bare_error_finish_payload = (
-            not is_error_event and has_error_finish and is_error_payload
-        )
+    headers = getattr(response, "headers", None) if response is not None else None
 
-        if not (
-            is_http_error
-            or is_structured_error_event
-            or is_bare_error_finish_payload
-        ):
-            continue
-
-        headers = getattr(response, "headers", None) if response is not None else None
+    def _error(payload: dict, status_code: Optional[int]) -> ProviderStreamError:
         return ProviderStreamError(
             status_code=status_code,
             body=_provider_error_body(payload, status_code),
@@ -438,26 +392,23 @@ def _provider_stream_error_from_text(
             headers=headers,
         )
 
+    for event in _parse_provider_sse_events(text):
+        is_error_event = str(event.get("event") or "").strip().lower() == "error"
+        payload = _json_object_from_text(event.get("data") or "") or {}
+        status_code = event.get("status_code") or _status_code_from_payload(payload)
+        is_http_error = status_code is not None and status_code >= 400
+        is_error_payload = _payload_has_error_shape(payload)
+        # has_error_finish is True here, so an error event always qualifies;
+        # a non-error event needs an error-shaped payload or an HTTP error code.
+        if is_http_error or is_error_event or is_error_payload:
+            return _error(payload, status_code)
+
     payload = _json_object_from_text(text)
     if payload is not None:
-        status_code = _status_code_from_payload(payload)
-        if has_error_finish or (status_code is not None and status_code >= 400):
-            headers = getattr(response, "headers", None) if response is not None else None
-            return ProviderStreamError(
-                status_code=status_code,
-                body=_provider_error_body(payload, status_code),
-                raw_text=text,
-                headers=headers,
-            )
+        return _error(payload, _status_code_from_payload(payload))
 
-    if has_error_finish and text.strip():
-        headers = getattr(response, "headers", None) if response is not None else None
-        return ProviderStreamError(
-            status_code=None,
-            body=_provider_error_body({}, None),
-            raw_text=text,
-            headers=headers,
-        )
+    if text.strip():
+        return _error({}, None)
     return None
 
 
@@ -481,37 +432,21 @@ def estimate_request_context_tokens(api_payload: Any) -> int:
     def _chars(value: Any) -> int:
         if value is None:
             return 0
-        if isinstance(value, str):
-            return len(value)
-        return len(str(value))
-
-    def _message_chars(messages: Any) -> int:
-        if not isinstance(messages, list):
-            return _chars(messages)
-        return sum(_chars(item) for item in messages)
+        return len(value if isinstance(value, str) else str(value))
 
     if isinstance(api_payload, list):
-        return _message_chars(api_payload) // 4
-
-    if isinstance(api_payload, dict):
-        messages = api_payload.get("messages")
-        if isinstance(messages, list):
-            total_chars = _message_chars(messages)
-            if "tools" in api_payload:
-                total_chars += _chars(api_payload.get("tools"))
-            return total_chars // 4
-
-        if "input" in api_payload:
-            total_chars = (
-                _chars(api_payload.get("input"))
-                + _chars(api_payload.get("instructions"))
-                + _chars(api_payload.get("tools"))
-            )
-            return total_chars // 4
-
-        return sum(_chars(value) for value in api_payload.values()) // 4
-
-    return _chars(api_payload) // 4
+        return sum(_chars(item) for item in api_payload) // 4
+    if not isinstance(api_payload, dict):
+        return _chars(api_payload) // 4
+    messages = api_payload.get("messages")
+    if isinstance(messages, list):
+        total_chars = sum(_chars(item) for item in messages)
+        if "tools" in api_payload:
+            total_chars += _chars(api_payload.get("tools"))
+        return total_chars // 4
+    if "input" in api_payload:
+        return sum(_chars(api_payload.get(k)) for k in ("input", "instructions", "tools")) // 4
+    return sum(_chars(value) for value in api_payload.values()) // 4
 
 
 def _is_openai_codex_backend(agent) -> bool:
@@ -530,12 +465,9 @@ def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
     floor engages above 10k estimated tokens so those gateway-scale payloads
     are covered; smaller requests keep the generic default.
     """
-    if est_tokens > 100_000:
-        return 1200.0
-    if est_tokens > 50_000:
-        return 900.0
-    if est_tokens > 10_000:
-        return 600.0
+    for threshold, floor in ((100_000, 1200.0), (50_000, 900.0), (10_000, 600.0)):
+        if est_tokens > threshold:
+            return floor
     return 0.0
 
 
@@ -559,19 +491,16 @@ def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
 def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
     """Build the validated provider-routing object shared by request paths."""
     preferences: Dict[str, Any] = {}
-    if agent.providers_allowed:
-        preferences["only"] = agent.providers_allowed
-    if agent.providers_ignored:
-        preferences["ignore"] = agent.providers_ignored
-    if agent.providers_order:
-        preferences["order"] = agent.providers_order
-    provider_sort = _validated_openrouter_provider_sort(agent.provider_sort)
-    if provider_sort:
-        preferences["sort"] = provider_sort
-    if agent.provider_require_parameters:
-        preferences["require_parameters"] = True
-    if agent.provider_data_collection:
-        preferences["data_collection"] = agent.provider_data_collection
+    for key, value in (
+        ("only", agent.providers_allowed),
+        ("ignore", agent.providers_ignored),
+        ("order", agent.providers_order),
+        ("sort", _validated_openrouter_provider_sort(agent.provider_sort)),
+        ("require_parameters", True if agent.provider_require_parameters else None),
+        ("data_collection", agent.provider_data_collection),
+    ):
+        if value:
+            preferences[key] = value
     return preferences
 
 
@@ -628,45 +557,32 @@ def _env_float(name: str, default: float) -> float:
 def _estimate_chunk_bytes(chunk: Any) -> int:
     """Cheap per-chunk size estimate for the stream diagnostic counters.
 
-    The previous implementation used ``len(repr(chunk))`` — a full recursive
-    repr of a pydantic model on EVERY streaming chunk (5.5-8.8 µs each,
-    ~20-30 ms of pure CPU on a 3,000-chunk response, in the hottest loop in
-    the agent). The counter only feeds a retry-diagnostic log line, so an
-    estimate based on the delta payload lengths is plenty (2.1-2.4 µs, ~3x
-    cheaper, and independent of model/pydantic field count). Chat Completions
-    chunks are sized from their delta content/reasoning/tool-argument strings
-    plus a small framing constant; anything shape-unknown (Anthropic events,
-    stub providers) falls back to a flat constant so `bytes` stays monotonic
-    and roughly proportional to traffic.
+    Sized from delta content/reasoning/tool-argument string lengths plus a
+    framing floor — ~3x cheaper than ``len(repr(chunk))`` on a pydantic model
+    in the hottest loop in the agent. The counter only feeds a retry-diagnostic
+    log line, so unknown shapes (Anthropic events, stubs) just keep the floor.
     """
     size = 40  # SSE/JSON framing floor per chunk
+
+    def _add(obj, *attrs):
+        nonlocal size
+        for attr in attrs:
+            v = getattr(obj, attr, None)
+            if isinstance(v, str):
+                size += len(v)
+
     try:
         choices = getattr(chunk, "choices", None)
         if choices:
             delta = getattr(choices[0], "delta", None)
             if delta is not None:
-                for attr in ("content", "reasoning_content", "reasoning"):
-                    v = getattr(delta, attr, None)
-                    if isinstance(v, str):
-                        size += len(v)
-                tool_calls = getattr(delta, "tool_calls", None)
-                if tool_calls:
-                    for tc in tool_calls:
-                        fn = getattr(tc, "function", None)
-                        if fn is not None:
-                            args = getattr(fn, "arguments", None)
-                            if isinstance(args, str):
-                                size += len(args)
-                            name = getattr(fn, "name", None)
-                            if isinstance(name, str):
-                                size += len(name)
+                _add(delta, "content", "reasoning_content", "reasoning")
+                for tc in getattr(delta, "tool_calls", None) or ():
+                    fn = getattr(tc, "function", None)
+                    if fn is not None:
+                        _add(fn, "arguments", "name")
         else:
-            # Non-chat-completions shapes (Anthropic events etc.): try the
-            # common text fields, else keep the framing floor.
-            for attr in ("text", "partial_json"):
-                v = getattr(getattr(chunk, "delta", None), attr, None)
-                if isinstance(v, str):
-                    size += len(v)
+            _add(getattr(chunk, "delta", None), "text", "partial_json")
     except Exception:
         pass
     return size
@@ -698,15 +614,12 @@ def _codex_wait_notice_recovery(
 
 
 # ── Cross-turn stale-call circuit breaker (#58962) ─────────────────────
-# A session wedged against an unresponsive provider hits the stale detector
-# on every call and loops forever (observed: 494 consecutive failures over
-# 3+ days, each burning the full stale timeout × retries with no response).
-# The agent carries ``_consecutive_stale_streams``: incremented on every
-# stale kill, reset only when a call actually completes (or when the
-# provider is swapped — switch_model / try_activate_fallback /
-# restore_primary_runtime — since the streak measured the OLD provider).
-# Past the give-up threshold, calls abort immediately with an actionable
-# error instead of re-waiting out the stale timeout.
+# A session wedged against an unresponsive provider would otherwise hit the
+# stale detector on every call forever. ``agent._consecutive_stale_streams``
+# is bumped on every stale kill and reset only when a call completes or the
+# provider is swapped (switch_model / try_activate_fallback /
+# restore_primary_runtime — the streak measured the OLD provider). Past the
+# give-up threshold, calls abort immediately with an actionable error.
 
 def _stale_streak(agent) -> int:
     try:
@@ -1575,311 +1488,301 @@ def _codex_silent_hang_hint(agent, api_kwargs: dict) -> Optional[str]:
         return None
 
 
-def interruptible_api_call(agent, api_kwargs: dict):
+class _NonStreamRequest:
+    """One non-streaming request on a worker thread, polled by the caller.
+
+    State shared between the worker (``_call``) and the poll loop lives on the
+    instance; ``_abort_request`` may run from the poll (stranger) thread.
     """
-    Run the API call in a background thread so the main conversation loop
-    can detect interrupts without waiting for the full HTTP round-trip.
 
-    Each worker thread gets its own OpenAI client instance. Interrupts only
-    close that worker-local client, so retries and other requests never
-    inherit a closed transport.
+    def __init__(self, agent, api_kwargs: dict):
+        self.agent = agent
+        self.api_kwargs = api_kwargs
+        self.result = {"response": None, "error": None}
+        self.clients = _RequestClientRegistry(agent)
+        # Request-local cancel flag: agent._interrupt_requested is cleared at turn
+        # boundaries but this daemon worker can outlive the turn, so the worker
+        # needs to know THIS request was force-closed and not surface the
+        # resulting transport error as a network bug (#6600).
+        self.cancelled = False
+        # Codex retirement token: the worker checks
+        # ``agent._active_codex_stream_request_token`` to know it still owns the
+        # turn; a watchdog kill clears it so a worker still draining SSE raises
+        # instead of returning partial output as "completed"
+        # (run_codex_stream._request_is_current). ``codex_retired`` is the
+        # request-local mirror used to swallow our own force-close error.
+        self.codex_token = object() if agent.api_mode == "codex_responses" else None
+        self.codex_retired = False
+        self.wd = _resolve_nonstream_watchdogs(agent, api_kwargs)
+        self.call_start = time.time()
+        self.thread = None
 
-    Includes a stale-call detector: if no response arrives within the
-    configured timeout, the connection is killed and an error raised so
-    the main retry loop can try again with backoff / credential rotation /
-    provider fallback.
-    """
-    # Cron and other non-interactive, nested-pool contexts must not spawn the
-    # interrupt worker — it wedges before the socket opens on the 2nd+ call
-    # (#62151). Run inline instead. See should_use_direct_api_call.
-    if should_use_direct_api_call(agent):
-        return direct_api_call(agent, api_kwargs)
+    def _install_codex_request_token(self) -> None:
+        # Already retired before the worker got going — do not re-publish.
+        if self.codex_token is not None and not self.codex_retired:
+            self.agent._active_codex_stream_request_token = self.codex_token
 
-    result = {"response": None, "error": None}
-
-    # Cross-turn stale-call circuit breaker (#58962) — non-streaming sibling
-    # of the guard in interruptible_streaming_api_call.  Quiet-mode /
-    # subagent / no-stream-consumer sessions take THIS path, and a wedged
-    # unattended session here has the same infinite stale-retry class.
-    _check_stale_giveup(agent)
-
-    _clients = _RequestClientRegistry(agent)
-    # Request-local cancel flag: agent._interrupt_requested is cleared at turn
-    # boundaries but this daemon worker can outlive the turn, so the worker
-    # needs to know THIS request was force-closed and not surface the
-    # resulting transport error as a network bug (#6600).
-    _request_cancelled = {"value": False}
-    # Codex retirement token: the worker checks
-    # ``agent._active_codex_stream_request_token`` to know it still owns the
-    # turn; a watchdog kill clears it so a worker still draining SSE raises
-    # instead of returning partial output as "completed"
-    # (run_codex_stream._request_is_current). ``_codex_request_retired`` is
-    # the request-local mirror used to swallow our own force-close error.
-    _codex_request_token = object() if agent.api_mode == "codex_responses" else None
-    _codex_request_retired = {"value": False}
-
-    def _install_codex_request_token() -> None:
-        if _codex_request_token is None:
+    def _retire_codex_request_token(self) -> None:
+        if self.codex_token is None:
             return
-        if _codex_request_retired["value"]:
-            # Already retired before the worker got going — do not re-publish.
-            return
-        agent._active_codex_stream_request_token = _codex_request_token
+        self.codex_retired = True
+        if getattr(self.agent, "_active_codex_stream_request_token", None) is self.codex_token:
+            self.agent._active_codex_stream_request_token = None
 
-    def _retire_codex_request_token() -> None:
-        if _codex_request_token is None:
-            return
-        _codex_request_retired["value"] = True
-        if (
-            getattr(agent, "_active_codex_stream_request_token", None)
-            is _codex_request_token
-        ):
-            agent._active_codex_stream_request_token = None
+    def _make_client(self, reason: str, kind: str = "openai"):
+        # Per-request clients are registered with the abort machinery so the
+        # watchdogs force-close the worker's connection, never the shared
+        # client (#67142).
+        if kind == "anthropic_messages":
+            client = self.agent._create_request_anthropic_client(reason=reason)
+        else:
+            client = self.agent._create_request_openai_client(
+                reason=reason, api_kwargs=self.api_kwargs
+            )
+        return self.clients.set_client(client, kind=kind)
 
-    def _call():
+    def _call(self):
         try:
-            _install_codex_request_token()
-            # Per-request clients are registered with the abort machinery so
-            # the watchdogs force-close the worker's connection, never the
-            # shared client (#67142).
-            result["response"] = _dispatch_nonstreaming_api_request(
-                agent,
-                api_kwargs,
-                make_client=lambda reason, kind="openai": _clients.set_client(
-                    agent._create_request_anthropic_client(reason=reason)
-                    if kind == "anthropic_messages"
-                    else agent._create_request_openai_client(
-                        reason=reason, api_kwargs=api_kwargs
-                    ),
-                    kind=kind,
-                ),
+            self._install_codex_request_token()
+            self.result["response"] = _dispatch_nonstreaming_api_request(
+                self.agent, self.api_kwargs, make_client=self._make_client
             )
         except Exception as e:
             # Our own force-close caused this error: swallow it, the main
             # thread raises InterruptedError (#6600). Retirement logs at info
             # (a watchdog discarded output the provider already sent — what an
             # operator debugging a truncated reply needs); cancellation at debug.
-            if _request_cancelled["value"] or _codex_request_retired["value"]:
-                if _codex_request_retired["value"]:
-                    logger.info(
-                        "Codex worker caught %s after request retirement — "
-                        "discarding the stale partial instead of surfacing it "
-                        "as a completed response. %s",
-                        type(e).__name__,
-                        agent._client_log_context(),
-                    )
-                else:
-                    logger.debug(
-                        "Non-streaming worker caught %s after request "
-                        "cancellation — exiting without surfacing a network "
-                        "error.",
-                        type(e).__name__,
-                    )
+            if self.codex_retired:
+                logger.info(
+                    "Codex worker caught %s after request retirement — "
+                    "discarding the stale partial instead of surfacing it "
+                    "as a completed response. %s",
+                    type(e).__name__,
+                    self.agent._client_log_context(),
+                )
                 return
-            result["error"] = e
+            if self.cancelled:
+                logger.debug(
+                    "Non-streaming worker caught %s after request "
+                    "cancellation — exiting without surfacing a network "
+                    "error.",
+                    type(e).__name__,
+                )
+                return
+            self.result["error"] = e
         finally:
             # Retire first: close_once can raise, and a leaked token would let
             # a later worker mistake itself for the owning attempt.
-            _retire_codex_request_token()
+            self._retire_codex_request_token()
             # Reuse reason only on a clean response; error or cancel-swallow
             # really closes so the next attempt builds a fresh pool.
-            _clients.close_once(
+            self.clients.close_once(
                 "request_complete"
-                if result["response"] is not None
+                if self.result["response"] is not None
                 else "request_error_cleanup"
             )
 
-    wd = _resolve_nonstream_watchdogs(agent, api_kwargs)
-    _stale_timeout = wd.stale_timeout
-    _codex_watchdog_enabled = wd.codex
-    _est_tokens_for_codex_watchdog = wd.est_tokens
-    _ttfb_enabled, _ttfb_timeout = wd.ttfb_enabled, wd.ttfb_timeout
-    _codex_idle_enabled, _codex_idle_timeout = wd.idle_enabled, wd.idle_timeout
-    if _codex_watchdog_enabled:
-        # Reset before the worker starts so a marker left over from a previous
-        # call on this agent can't be misread as first-byte for this one.
-        agent._codex_stream_last_event_ts = None
-        agent._codex_stream_last_progress_ts = None
-
-    _call_start = time.time()
-    agent._touch_activity("waiting for non-streaming API response")
-
-    def _abort_request(reason: str) -> None:
-        """Watchdog/interrupt kill: abort the request client and retire the codex
-        token; the worker sees its own forced close via the cancel flags."""
+    def _abort_request(self, reason: str) -> None:
+        """Watchdog/interrupt kill: abort the request client (kind-aware, #67142)
+        and retire the codex token; the worker sees its own forced close via
+        the cancel flags."""
         try:
-            # #67142: routes by client kind — anthropic aborts the request-local
-            # client's sockets from this poll (stranger) thread instead of
-            # closing the shared _anthropic_client.
-            _clients.close_once(reason)
+            self.clients.close_once(reason)
         except Exception:
             pass
-        _retire_codex_request_token()
+        self._retire_codex_request_token()
 
-    def _await_worker_after_kill(timeout_message: str) -> None:
+    def _await_worker_after_kill(self, timeout_message: str) -> None:
         # Wait briefly for the worker to notice the closed connection.
-        t.join(timeout=2.0)
-        if result["error"] is None and result["response"] is None:
-            result["error"] = TimeoutError(timeout_message)
+        self.thread.join(timeout=2.0)
+        if self.result["error"] is None and self.result["response"] is None:
+            self.result["error"] = TimeoutError(timeout_message)
 
-    t = threading.Thread(target=_context_thread_target(_call), daemon=True)
-    t.start()
-    _poll_count = 0
-    while t.is_alive():
-        t.join(timeout=0.3)
-        _poll_count += 1
+    def _model(self) -> str:
+        return self.api_kwargs.get("model", "unknown")
 
-        # Every ~30s: gateway inactivity heartbeat + rewrite the status line
-        # so users see WHAT the wait is (the "infinite thinking" complaint).
-        if _poll_count % 100 == 0:  # 100 × 0.3s = 30s
-            _elapsed = time.time() - _call_start
-            try:
-                _recovery = _codex_wait_notice_recovery(
-                    stale_timeout=_stale_timeout,
-                    ttfb_enabled=_ttfb_enabled,
-                    ttfb_timeout=_ttfb_timeout,
-                    last_event_ts=getattr(
-                        agent, "_codex_stream_last_event_ts", None
-                    ),
-                    call_start=_call_start,
-                    idle_enabled=_codex_idle_enabled,
-                    idle_timeout=_codex_idle_timeout,
-                    elapsed=_elapsed,
-                )
-                agent._emit_wait_notice(
-                    f"⏳ waiting on {api_kwargs.get('model', 'the provider')} — "
-                    f"{int(_elapsed)}s with no response yet (provider may be slow "
-                    f"or overloaded{_recovery})"
-                )
-            except Exception:
-                logger.debug("wait-notice construction failed", exc_info=True)
+    def _emit_wait_notice(self, elapsed: float) -> None:
+        wd = self.wd
+        try:
+            recovery = _codex_wait_notice_recovery(
+                stale_timeout=wd.stale_timeout,
+                ttfb_enabled=wd.ttfb_enabled,
+                ttfb_timeout=wd.ttfb_timeout,
+                last_event_ts=getattr(self.agent, "_codex_stream_last_event_ts", None),
+                call_start=self.call_start,
+                idle_enabled=wd.idle_enabled,
+                idle_timeout=wd.idle_timeout,
+                elapsed=elapsed,
+            )
+            self.agent._emit_wait_notice(
+                f"⏳ waiting on {self.api_kwargs.get('model', 'the provider')} — "
+                f"{int(elapsed)}s with no response yet (provider may be slow "
+                f"or overloaded{recovery})"
+            )
+        except Exception:
+            logger.debug("wait-notice construction failed", exc_info=True)
 
-        _elapsed = time.time() - _call_start
+    def _ttfb_kill(self, elapsed: float) -> None:
+        """No Codex event past the first-byte cutoff — kill so the retry loop
+        reconnects instead of waiting out the stale timeout."""
+        agent, wd = self.agent, self.wd
+        silent_hint = _codex_silent_hang_hint(agent, self.api_kwargs)
+        logger.warning(
+            "Codex stream produced no bytes within TTFB cutoff "
+            "(%.0fs > %.0fs, model=%s). Backend accepted the connection "
+            "but sent no stream events. Killing connection so the retry "
+            "loop can reconnect.",
+            elapsed, wd.ttfb_timeout, self._model(),
+        )
+        agent._buffer_status(
+            f"⚠️ No first byte from provider in {int(elapsed)}s "
+            f"(codex stream, model: {self._model()}). "
+            f"Reconnecting." + (f" {silent_hint}" if silent_hint else "")
+        )
+        self._abort_request("codex_ttfb_kill")
+        agent._emit_wait_notice(
+            f"⚠ no response from provider in {int(elapsed)}s — "
+            f"reconnecting..."
+        )
+        agent._touch_activity(
+            f"codex stream killed after {int(elapsed)}s with no first byte"
+        )
+        self._await_worker_after_kill(
+            f"Codex stream produced no bytes within {int(elapsed)}s "
+            f"(TTFB threshold: {int(wd.ttfb_timeout)}s)"
+            + (f". {silent_hint}" if silent_hint else "")
+        )
 
-        # TTFB detector: no Codex event past the first-byte cutoff — kill so
-        # the retry loop reconnects instead of waiting out the stale timeout.
-        if (
-            _ttfb_enabled
-            and _elapsed > _ttfb_timeout
-            and getattr(agent, "_codex_stream_last_event_ts", None) is None
-        ):
-            _silent_hint = _codex_silent_hang_hint(agent, api_kwargs)
-            logger.warning(
-                "Codex stream produced no bytes within TTFB cutoff "
-                "(%.0fs > %.0fs, model=%s). Backend accepted the connection "
-                "but sent no stream events. Killing connection so the retry "
-                "loop can reconnect.",
-                _elapsed, _ttfb_timeout, api_kwargs.get("model", "unknown"),
-            )
-            if _silent_hint:
-                agent._buffer_status(
-                    f"⚠️ No first byte from provider in {int(_elapsed)}s "
-                    f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Reconnecting. {_silent_hint}"
-                )
-            else:
-                agent._buffer_status(
-                    f"⚠️ No first byte from provider in {int(_elapsed)}s "
-                    f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
-                    f"Reconnecting."
-                )
-            _abort_request("codex_ttfb_kill")
-            agent._emit_wait_notice(
-                f"⚠ no response from provider in {int(_elapsed)}s — "
-                f"reconnecting..."
-            )
-            agent._touch_activity(
-                f"codex stream killed after {int(_elapsed)}s with no first byte"
-            )
-            _await_worker_after_kill(
-                f"Codex stream produced no bytes within {int(_elapsed)}s "
-                f"(TTFB threshold: {int(_ttfb_timeout)}s)"
-                + (f". {_silent_hint}" if _silent_hint else "")
-            )
-            break
+    def _idle_kill(self, event_stale_elapsed: float) -> None:
+        """First byte arrived, then SSE events stopped (keepalive/in_progress
+        frames refresh the timestamp and don't count)."""
+        agent, wd = self.agent, self.wd
+        logger.warning(
+            "Codex stream produced no SSE events for %.0fs after first byte "
+            "(threshold %.0fs, model=%s, context=~%s tokens). Killing "
+            "connection so the retry loop can reconnect.",
+            event_stale_elapsed,
+            wd.idle_timeout,
+            self._model(),
+            f"{wd.est_tokens:,}",
+        )
+        agent._buffer_status(
+            f"⚠️ Codex stream sent no events for {int(event_stale_elapsed)}s "
+            f"after first byte (model: {self._model()}). "
+            f"Reconnecting."
+        )
+        self._abort_request("codex_stream_idle_kill")
+        agent._touch_activity(
+            f"codex stream killed after {int(event_stale_elapsed)}s with no SSE events"
+        )
+        self._await_worker_after_kill(
+            f"Codex stream produced no SSE events for {int(event_stale_elapsed)}s "
+            f"after first byte (threshold: {int(wd.idle_timeout)}s)"
+        )
 
-        # Stream-idle detector: first byte arrived, then events stopped
-        # (keepalive/in_progress frames refresh the timestamp and don't count).
-        _last_codex_event_ts = getattr(agent, "_codex_stream_last_event_ts", None)
-        if (
-            _codex_idle_enabled
-            and _last_codex_event_ts is not None
-            and (time.time() - _last_codex_event_ts) > _codex_idle_timeout
-        ):
-            _event_stale_elapsed = time.time() - _last_codex_event_ts
-            logger.warning(
-                "Codex stream produced no SSE events for %.0fs after first byte "
-                "(threshold %.0fs, model=%s, context=~%s tokens). Killing "
-                "connection so the retry loop can reconnect.",
-                _event_stale_elapsed,
-                _codex_idle_timeout,
-                api_kwargs.get("model", "unknown"),
-                f"{_est_tokens_for_codex_watchdog:,}",
-            )
-            agent._buffer_status(
-                f"⚠️ Codex stream sent no events for {int(_event_stale_elapsed)}s "
-                f"after first byte (model: {api_kwargs.get('model', 'unknown')}). "
-                f"Reconnecting."
-            )
-            _abort_request("codex_stream_idle_kill")
-            agent._touch_activity(
-                f"codex stream killed after {int(_event_stale_elapsed)}s with no SSE events"
-            )
-            _await_worker_after_kill(
-                f"Codex stream produced no SSE events for {int(_event_stale_elapsed)}s "
-                f"after first byte (threshold: {int(_codex_idle_timeout)}s)"
-            )
-            break
+    def _stale_kill(self, elapsed: float) -> None:
+        """No response within the stale timeout: kill and count toward the
+        circuit breaker (#58962, see ``_stale_streak``)."""
+        agent, wd = self.agent, self.wd
+        silent_hint = _codex_silent_hang_hint(agent, self.api_kwargs)
+        _report_stale_nonstream_kill(
+            agent, self.api_kwargs, elapsed, wd.stale_timeout, hint=silent_hint
+        )
+        self._abort_request("stale_call_kill")
+        _bump_stale_streak(agent)
+        _touch_stale_kill_activity(agent, elapsed)
+        self._await_worker_after_kill(
+            f"Non-streaming API call timed out after {int(elapsed)}s "
+            f"with no response (threshold: {int(wd.stale_timeout)}s)"
+            + (f". {silent_hint}" if silent_hint else "")
+        )
 
-        # Stale-call detector: kill the connection if no response
-        # arrives within the configured timeout.
-        if _elapsed > _stale_timeout:
-            _silent_hint = _codex_silent_hang_hint(agent, api_kwargs)
-            _report_stale_nonstream_kill(
-                agent, api_kwargs, _elapsed, _stale_timeout, hint=_silent_hint
-            )
-            _abort_request("stale_call_kill")
-            # Circuit breaker (#58962): count the stale kill.  See the
-            # canonical comment block above ``_stale_streak()``.
-            _bump_stale_streak(agent)
-            _touch_stale_kill_activity(agent, _elapsed)
-            _await_worker_after_kill(
-                f"Non-streaming API call timed out after {int(_elapsed)}s "
-                f"with no response (threshold: {int(_stale_timeout)}s)"
-                + (f". {_silent_hint}" if _silent_hint else "")
-            )
-            break
+    def _interrupt(self, elapsed: float) -> None:
+        agent = self.agent
+        _record_interrupted_provider_wait(
+            agent,
+            elapsed,
+            response_started=(
+                self.wd.codex
+                and getattr(agent, "_codex_stream_last_event_ts", None) is not None
+            ),
+        )
+        # Mark cancelled BEFORE force-closing so the worker treats the
+        # transport error as a cancel (#6600). Never close the shared client:
+        # releasing a TLS FD mid-SSL-BIO corrupted an unrelated SQLite DB
+        # (#67142). Then let the worker unwind Relay scopes before raising
+        # (#81521).
+        self.cancelled = True
+        logger.debug(
+            "Force-closing httpx client due to interrupt (not a network error)."
+        )
+        self._abort_request("interrupt_abort")
+        _join_worker_for_relay_teardown(self.thread, label="Non-streaming")
+        raise InterruptedError("Agent interrupted during API call")
 
-        if agent._interrupt_requested:
-            _record_interrupted_provider_wait(
-                agent,
-                _elapsed,
-                response_started=(
-                    _codex_watchdog_enabled
-                    and getattr(agent, "_codex_stream_last_event_ts", None) is not None
-                ),
-            )
-            # Mark cancelled BEFORE force-closing so the worker treats the
-            # transport error as a cancel (#6600).
-            _request_cancelled["value"] = True
-            logger.debug(
-                "Force-closing httpx client due to interrupt (not a network error)."
-            )
-            # Force-close the worker-local connection (never the shared client:
-            # releasing a TLS FD mid-SSL-BIO corrupted an unrelated SQLite DB,
-            # #67142), then let the worker unwind Relay scopes before raising
-            # (#81521).
-            _abort_request("interrupt_abort")
-            _join_worker_for_relay_teardown(t, label="Non-streaming")
-            raise InterruptedError("Agent interrupted during API call")
-    if result["error"] is not None:
-        raise result["error"]
-    # Success — clear the circuit breaker (#58962): the provider proved
-    # responsive.  See the canonical comment block above ``_stale_streak()``.
-    if result["response"] is not None:
-        _reset_stale_streak(agent)
-    return result["response"]
+    def run(self):
+        agent, wd = self.agent, self.wd
+        if wd.codex:
+            # Reset before the worker starts so a marker left over from a previous
+            # call on this agent can't be misread as first-byte for this one.
+            agent._codex_stream_last_event_ts = None
+            agent._codex_stream_last_progress_ts = None
+        agent._touch_activity("waiting for non-streaming API response")
 
+        self.thread = t = threading.Thread(target=_context_thread_target(self._call), daemon=True)
+        t.start()
+        poll_count = 0
+        while t.is_alive():
+            t.join(timeout=0.3)
+            poll_count += 1
+            # Every ~30s: gateway inactivity heartbeat + rewrite the status line
+            # so users see WHAT the wait is (the "infinite thinking" complaint).
+            if poll_count % 100 == 0:  # 100 × 0.3s = 30s
+                self._emit_wait_notice(time.time() - self.call_start)
+            elapsed = time.time() - self.call_start
+            last_event_ts = getattr(agent, "_codex_stream_last_event_ts", None)
+            if wd.ttfb_enabled and elapsed > wd.ttfb_timeout and last_event_ts is None:
+                self._ttfb_kill(elapsed)
+                break
+            if (
+                wd.idle_enabled
+                and last_event_ts is not None
+                and (time.time() - last_event_ts) > wd.idle_timeout
+            ):
+                self._idle_kill(time.time() - last_event_ts)
+                break
+            if elapsed > wd.stale_timeout:
+                self._stale_kill(elapsed)
+                break
+            if agent._interrupt_requested:
+                self._interrupt(elapsed)
+        if self.result["error"] is not None:
+            raise self.result["error"]
+        # Success — the provider proved responsive: clear the breaker (#58962).
+        if self.result["response"] is not None:
+            _reset_stale_streak(agent)
+        return self.result["response"]
+
+
+def interruptible_api_call(agent, api_kwargs: dict):
+    """Run the API call on a worker thread so the caller can detect interrupts
+    without waiting for the full HTTP round-trip.
+
+    Each worker gets its own per-request client; interrupts close only that
+    client so retries never inherit a closed transport. A stale-call detector
+    kills the connection and raises so the main retry loop can apply backoff /
+    credential rotation / provider fallback.
+    """
+    # Cron and other non-interactive, nested-pool contexts must not spawn the
+    # interrupt worker — it wedges before the socket opens on the 2nd+ call
+    # (#62151). Run inline instead. See should_use_direct_api_call.
+    if should_use_direct_api_call(agent):
+        return direct_api_call(agent, api_kwargs)
+    # Cross-turn stale-call circuit breaker (#58962) — non-streaming sibling
+    # of the guard in interruptible_streaming_api_call.  Quiet-mode /
+    # subagent / no-stream-consumer sessions take THIS path.
+    _check_stale_giveup(agent)
+    return _NonStreamRequest(agent, api_kwargs).run()
 
 
 def _consume_ephemeral_reasoning_off(agent) -> bool:
