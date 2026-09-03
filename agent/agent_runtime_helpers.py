@@ -18,18 +18,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli.timeouts import get_provider_request_timeout
 from agent.message_sanitization import (
-    _FULL_ARGS_LOG_BOUND,
-    coalesce_tool_call_id,
-    tool_call_id_variants,
-    tool_result_id_variants,
+    _FULL_ARGS_LOG_BOUND, coalesce_tool_call_id, tool_call_id_variants, tool_result_id_variants
 )
 from agent.prompt_builder import format_steer_marker
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.trajectory import convert_scratchpad_to_think
 from agent.credential_pool import (
-    STATUS_EXHAUSTED,
-    credential_pool_matches_provider,
-    resolve_runtime_pool_key,
+    STATUS_EXHAUSTED, credential_pool_matches_provider, resolve_runtime_pool_key
 )
 from agent.error_classifier import FailoverReason
 from agent.turn_context import drop_stale_api_content
@@ -47,8 +42,7 @@ _REASONING_TAG_NAMES = ("think", "thinking", "reasoning", "REASONING_SCRATCHPAD"
 _TOOL_CALL_TAG_NAMES = ("tool_call", "tool_calls", "tool_result", "function_call", "function_calls")
 
 _REASONING_BLOCK_PATTERNS = tuple(
-    re.compile(rf"<{name}>.*?</{name}>", re.DOTALL | re.IGNORECASE)
-    for name in _REASONING_TAG_NAMES
+    re.compile(rf"<{name}>.*?</{name}>", re.DOTALL | re.IGNORECASE) for name in _REASONING_TAG_NAMES
 )
 
 _TOOL_CALL_BLOCK_PATTERNS = tuple(
@@ -66,18 +60,15 @@ _NAMED_FUNCTION_BLOCK_PATTERN = re.compile(
 )
 
 _UNTERMINATED_REASONING_BLOCK_PATTERN = re.compile(
-    rf'(?:^|\n)[ \t]*<(?:{"|".join(_REASONING_TAG_NAMES)})\b[^>]*>.*$',
-    re.DOTALL | re.IGNORECASE,
+    rf'(?:^|\n)[ \t]*<(?:{"|".join(_REASONING_TAG_NAMES)})\b[^>]*>.*$', re.DOTALL | re.IGNORECASE
 )
 
 _ORPHAN_REASONING_TAG_PATTERN = re.compile(
-    rf'</?(?:{"|".join(_REASONING_TAG_NAMES)})>\s*',
-    re.IGNORECASE,
+    rf'</?(?:{"|".join(_REASONING_TAG_NAMES)})>\s*', re.IGNORECASE
 )
 
 _STRAY_TOOL_CALL_CLOSER_PATTERN = re.compile(
-    rf'</(?:{"|".join(_TOOL_CALL_TAG_NAMES)}|function)>\s*',
-    re.IGNORECASE,
+    rf'</(?:{"|".join(_TOOL_CALL_TAG_NAMES)}|function)>\s*', re.IGNORECASE
 )
 
 
@@ -195,7 +186,6 @@ def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_que
     return trajectory
 
 
-
 def _prepend_corruption_marker(tool_msg: dict, marker: str) -> None:
     existing = tool_msg.get("content")
     if isinstance(existing, str):
@@ -237,11 +227,7 @@ def _cursor_skip_prefix(messages: list, cursor: Optional[dict]) -> int:
 
 
 def sanitize_tool_call_arguments(
-    messages: list,
-    *,
-    logger=None,
-    session_id: str = None,
-    cursor: Optional[dict] = None,
+    messages: list, *, logger=None, session_id: str = None, cursor: Optional[dict] = None
 ) -> int:
     """Repair corrupted assistant tool-call argument JSON in-place.
 
@@ -586,9 +572,7 @@ def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
 
 
 _SEQUENCE_REPAIR_PASSES = (
-    _merge_consecutive_assistants,
-    _drop_stray_tool_results,
-    _prune_unanswered_tool_calls,
+    _merge_consecutive_assistants, _drop_stray_tool_results, _prune_unanswered_tool_calls,
     _merge_consecutive_users,
 )
 
@@ -644,7 +628,6 @@ def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
     return repairs
 
 
-
 def _flatten_content_text(content: Any) -> str:
     """Flatten list/dict content (e.g. Anthropic-via-OpenRouter block lists) to text.
 
@@ -676,11 +659,8 @@ def _flatten_content_text(content: Any) -> str:
 # reasoning tags, and finally stray tool-call CLOSERS only (bare/unterminated <function>
 # is kept: a truncated streaming tail may still be valuable, matching OpenClaw's asymmetry).
 _THINK_STRIP_PATTERNS = (
-    *_REASONING_BLOCK_PATTERNS,
-    *_TOOL_CALL_BLOCK_PATTERNS,
-    _NAMED_FUNCTION_BLOCK_PATTERN,
-    _UNTERMINATED_REASONING_BLOCK_PATTERN,
-    _ORPHAN_REASONING_TAG_PATTERN,
+    *_REASONING_BLOCK_PATTERNS, *_TOOL_CALL_BLOCK_PATTERNS, _NAMED_FUNCTION_BLOCK_PATTERN,
+    _UNTERMINATED_REASONING_BLOCK_PATTERN, _ORPHAN_REASONING_TAG_PATTERN,
     _STRAY_TOOL_CALL_CLOSER_PATTERN,
 )
 
@@ -704,7 +684,6 @@ def strip_think_blocks(agent, content: str) -> str:
     return content
 
 
-
 def sync_credential_pool_entry_id(agent) -> None:
     """Rebind ``agent._credential_pool_entry_id`` from the current pool + key.
 
@@ -714,18 +693,14 @@ def sync_credential_pool_entry_id(agent) -> None:
     pool = getattr(agent, "_credential_pool", None)
     try:
         agent._credential_pool_entry_id = (
-            pool.entry_id_for_api_key(getattr(agent, "api_key", None))
-            if pool is not None
-            else None
+            pool.entry_id_for_api_key(getattr(agent, "api_key", None)) if pool is not None else None
         )
     except Exception:
         agent._credential_pool_entry_id = None
 
 
 _STATUS_TO_FAILOVER_REASON = {
-    402: FailoverReason.billing,
-    429: FailoverReason.rate_limit,
-    401: FailoverReason.auth,
+    402: FailoverReason.billing, 429: FailoverReason.rate_limit, 401: FailoverReason.auth,
     403: FailoverReason.auth,
 }
 
@@ -858,13 +833,9 @@ def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, c
 
 
 def recover_with_credential_pool(
-    agent,
-    *,
-    status_code: Optional[int],
-    has_retried_429: bool,
+    agent, *, status_code: Optional[int], has_retried_429: bool,
     classified_reason: Optional[FailoverReason] = None,
-    error_context: Optional[Dict[str, Any]] = None,
-    billing_unverified: bool = False,
+    error_context: Optional[Dict[str, Any]] = None, billing_unverified: bool = False,
 ) -> tuple[bool, bool]:
     """Attempt credential recovery via pool rotation.
 
@@ -960,7 +931,6 @@ def recover_with_credential_pool(
             rotate_and_swap=_rotate_and_swap,
         )
     return False, has_retried_429
-
 
 
 def _apply_primary_runtime_fields(agent, rt: Dict[str, Any]) -> None:
@@ -1066,7 +1036,6 @@ def try_recover_primary_transport(
 # ── End provider fallback ──────────────────────────────────────────────
 
 
-
 def _merge_user_content(prev_content: Any, cur_content: Any) -> Any:
     """Merged content for two adjacent user messages; ``_UNMERGEABLE`` for unknown shapes.
 
@@ -1087,9 +1056,7 @@ _UNMERGEABLE = object()
 
 
 def drop_thinking_only_and_merge_users(
-    messages: List[Dict[str, Any]],
-    *,
-    drop_codex_reasoning_items: bool = True,
+    messages: List[Dict[str, Any]], *, drop_codex_reasoning_items: bool = True
 ) -> List[Dict[str, Any]]:
     """Drop thinking-only assistant turns and merge adjacent user messages left behind.
 
@@ -1127,7 +1094,6 @@ def drop_thinking_only_and_merge_users(
         merges,
     )
     return merged
-
 
 
 def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base_url, matches_primary, load_primary_pool):
@@ -1280,12 +1246,9 @@ def restore_primary_runtime(agent) -> bool:
             agent._use_native_cache_layout = False
         _rebuild_primary_client(agent, rt, reason="restore_primary")
         agent.context_compressor.update_model(
-            model=rt["compressor_model"],
-            context_length=rt["compressor_context_length"],
-            base_url=rt["compressor_base_url"],
-            api_key=rt["compressor_api_key"],
-            provider=rt["compressor_provider"],
-            api_mode=rt.get("compressor_api_mode", ""),
+            model=rt["compressor_model"], context_length=rt["compressor_context_length"],
+            base_url=rt["compressor_base_url"], api_key=rt["compressor_api_key"],
+            provider=rt["compressor_provider"], api_mode=rt.get("compressor_api_mode", ""),
         )
         _rebind_primary_credential_pool(
             agent, primary_provider, _matches_primary, _load_primary_pool, prefetched_pool, prefetched
@@ -1329,7 +1292,6 @@ _TRANSIENT_TRANSPORT_ERRORS = frozenset({
 })
 
 
-
 _INLINE_REASONING_PATTERNS = tuple(
     re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL | re.IGNORECASE)
     for tag in ("think", "thinking", "thought", "reasoning", "REASONING_SCRATCHPAD")
@@ -1369,7 +1331,6 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
     return "\n\n".join(parts) if parts else None
 
 
-
 def _api_error_debug_info(error: Exception) -> Dict[str, Any]:
     info: Dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
     for attr_name in ("status_code", "request_id", "code", "param", "type", "body"):
@@ -1387,11 +1348,7 @@ def _api_error_debug_info(error: Exception) -> Dict[str, Any]:
 
 
 def dump_api_request_debug(
-    agent,
-    api_kwargs: Dict[str, Any],
-    *,
-    reason: str,
-    error: Optional[Exception] = None,
+    agent, api_kwargs: Dict[str, Any], *, reason: str, error: Optional[Exception] = None
 ) -> Optional[Path]:
     """Dump the request body from api_kwargs (minus transport keys) for debugging provider 4xx failures."""
     try:
@@ -1441,14 +1398,9 @@ def dump_api_request_debug(
         return None
 
 
-
 def _direct_native_anthropic_tool_cache_capability(
-    agent,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_mode: Optional[str] = None,
-    model: Optional[str] = None,
+    agent, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_mode: Optional[str] = None, model: Optional[str] = None,
 ) -> bool:
     """Return whether this resolved destination accepts native tool markers."""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
@@ -1516,24 +1468,13 @@ def blank_cache_policy_stub(cache_disabled: Optional[bool] = None):
     if cache_disabled is None:
         cache_disabled = prompt_caching_disabled_from_config()
     return SimpleNamespace(
-        provider="",
-        base_url="",
-        api_mode="",
-        model="",
-        _cache_disabled=bool(cache_disabled),
+        provider="", base_url="", api_mode="", model="", _cache_disabled=bool(cache_disabled)
     )
 
 
 def plan_cache_sections_for_destination(
-    messages: list,
-    tools: Optional[list],
-    *,
-    provider: str,
-    base_url: str,
-    api_mode: str,
-    model: str,
-    cache_disabled: Optional[bool] = None,
-    cache_ttl: Optional[str] = None,
+    messages: list, tools: Optional[list], *, provider: str, base_url: str, api_mode: str,
+    model: str, cache_disabled: Optional[bool] = None, cache_ttl: Optional[str] = None,
     static_system_prefix: Optional[str] = None,
 ) -> Tuple[list, list]:
     """Plan request-local cache sections for one resolved destination (MoA / auxiliary senders).
@@ -1544,20 +1485,13 @@ def plan_cache_sections_for_destination(
     ``static_system_prefix`` gives the system prompt the same early breakpoint as the main loop.
     """
     from agent.prompt_caching import (
-        build_prompt_cache_plan,
-        effective_cache_ttl,
-        envelope_tool_part_cache_markers_supported,
-        strip_anthropic_cache_control,
-        strip_anthropic_tool_cache_control,
+        build_prompt_cache_plan, effective_cache_ttl, envelope_tool_part_cache_markers_supported,
+        strip_anthropic_cache_control, strip_anthropic_tool_cache_control,
     )
 
     stub = blank_cache_policy_stub(cache_disabled)
     should_cache, native_layout = anthropic_prompt_cache_policy(
-        stub,
-        provider=provider,
-        base_url=base_url,
-        api_mode=api_mode,
-        model=model,
+        stub, provider=provider, base_url=base_url, api_mode=api_mode, model=model
     )
     if not should_cache:
         canonical_messages = copy.deepcopy(messages or [])
@@ -1577,11 +1511,7 @@ def plan_cache_sections_for_destination(
             static_system_prefix if isinstance(static_system_prefix, str) else None
         ),
         direct_native_tool_cache=_direct_native_anthropic_tool_cache_capability(
-            stub,
-            provider=provider,
-            base_url=base_url,
-            api_mode=api_mode,
-            model=model,
+            stub, provider=provider, base_url=base_url, api_mode=api_mode, model=model
         ),
         # LiteLLM-style envelope routes forward part-level markers into
         # tool_result.content[] → non-retryable 400 (#89886).
@@ -1684,12 +1614,8 @@ def _route_may_be_custom(agent, eff_provider: str, provider_lower: str, eff_base
 
 
 def anthropic_prompt_cache_policy(
-    agent,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_mode: Optional[str] = None,
-    model: Optional[str] = None,
+    agent, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_mode: Optional[str] = None, model: Optional[str] = None,
 ) -> tuple[bool, bool]:
     """Decide whether to apply Anthropic prompt caching; returns ``(should_cache, use_native_layout)``.
 
@@ -1742,9 +1668,7 @@ def anthropic_prompt_cache_policy(
             from hermes_cli.config import get_custom_provider_model_capability
 
             custom_prompt_caching = get_custom_provider_model_capability(
-                model=eff_model,
-                base_url=eff_base_url,
-                capability="prompt_caching",
+                model=eff_model, base_url=eff_base_url, capability="prompt_caching",
                 custom_providers=getattr(agent, "_custom_providers", None),
             )
             if custom_prompt_caching is not None:
@@ -1796,7 +1720,6 @@ def anthropic_prompt_cache_policy(
     if provider_lower in ALIBABA_FAMILY_PROVIDERS and is_qwen_model(model_lower):
         return True, False
     return False, False
-
 
 
 def _provider_supplied_client(agent, client_kwargs: dict) -> Any | None:
@@ -1948,8 +1871,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     from agent.codex_headers import apply_required_codex_headers
 
     apply_required_codex_headers(
-        client_kwargs,
-        access_token=client_kwargs.get("api_key", ""),
+        client_kwargs, access_token=client_kwargs.get("api_key", ""),
         base_url=str(client_kwargs.get("base_url", "")),
     )
     # Module-level `OpenAI` is resolved lazily via __getattr__; tests patch `run_agent.OpenAI`.
@@ -1978,10 +1900,8 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
             custom_providers = []
 
     new_extra_body = _custom_provider_extra_body_for_agent(
-        provider=new_provider,
-        model=getattr(agent, "model", "") or "",
-        base_url=getattr(agent, "base_url", "") or "",
-        custom_providers=custom_providers or [],
+        provider=new_provider, model=getattr(agent, "model", "") or "",
+        base_url=getattr(agent, "base_url", "") or "", custom_providers=custom_providers or [],
     )
 
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
@@ -2056,9 +1976,7 @@ def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mo
         dict(capabilities)
         if isinstance(capabilities, dict)
         else resolve_native_compaction_capabilities(
-            model=new_model,
-            base_url=effective_base_url,
-            provider=new_provider,
+            model=new_model, base_url=effective_base_url, provider=new_provider,
             is_codex_backend=new_norm == "openai-codex",
         )
     )
@@ -2124,16 +2042,14 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
     agent._client_kwargs = {"api_key": api_key or agent.api_key, "base_url": effective_base}
     try:
         from hermes_cli.config import (
-            apply_custom_provider_tls_to_client_kwargs,
-            get_compatible_custom_providers,
+            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers,
             load_config_readonly,
         )
 
         # Read live config, not agent._custom_providers, so mid-session ssl_ca_cert /
         # ssl_verify edits are honored.
         apply_custom_provider_tls_to_client_kwargs(
-            agent._client_kwargs,
-            str(effective_base or ""),
+            agent._client_kwargs, str(effective_base or ""),
             get_compatible_custom_providers(load_config_readonly()),
         )
     except Exception:
@@ -2197,9 +2113,7 @@ def _resolve_switch_context_length(agent, snapshot):
     custom_providers = None
     try:
         from hermes_cli.config import (
-            get_compatible_custom_providers,
-            get_custom_provider_context_length,
-            load_config,
+            get_compatible_custom_providers, get_custom_provider_context_length, load_config
         )
 
         custom_providers = get_compatible_custom_providers(load_config())
@@ -2242,12 +2156,8 @@ def _update_switch_compressor(agent, custom_providers, effective_context_length,
     ctx_api_key = agent.api_key if isinstance(agent.api_key, str) else ""
     try:
         new_context_length = get_model_context_length(
-            agent.model,
-            base_url=agent.base_url,
-            api_key=ctx_api_key,
-            provider=agent.provider,
-            config_context_length=effective_context_length,
-            custom_providers=custom_providers,
+            agent.model, base_url=agent.base_url, api_key=ctx_api_key, provider=agent.provider,
+            config_context_length=effective_context_length, custom_providers=custom_providers,
         )
         agent.context_compressor.update_model(
             model=agent.model,
@@ -2330,9 +2240,7 @@ def _persist_switch_billing_route(agent) -> None:
         return
     try:
         session_db.update_session_billing_route(
-            session_id,
-            provider=agent.provider,
-            base_url=agent.base_url,
+            session_id, provider=agent.provider, base_url=agent.base_url,
             billing_mode=getattr(agent, "api_mode", None),
         )
     except Exception:
@@ -2340,13 +2248,7 @@ def _persist_switch_billing_route(agent) -> None:
 
 
 def switch_model(
-    agent,
-    new_model,
-    new_provider,
-    api_key='',
-    base_url='',
-    api_mode='',
-    capabilities=None,
+    agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None
 ):
     """Switch the model/provider in-place for a live agent (rebuild clients, caching flags, compressor).
 
@@ -2418,8 +2320,7 @@ def _pre_tool_block_message(agent, function_name, function_args, effective_task_
         from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
         block_message, modified_args = _dispatch_pre_tool_call_hooks(
             function_name, function_args, task_id=effective_task_id or "",
-            session_id=getattr(agent, "session_id", "") or "",
-            tool_call_id=tool_call_id or "",
+            session_id=getattr(agent, "session_id", "") or "", tool_call_id=tool_call_id or "",
             turn_id=getattr(agent, "_current_turn_id", "") or "",
             api_request_id=getattr(agent, "_current_api_request_id", "") or "",
             middleware_trace=list(middleware_trace),
@@ -2441,10 +2342,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     path; the sequential path keeps its own inline invocation for display.
     """
     from agent.inline_tool_executors import (
-        InlineToolContext,
-        emit_terminal_post_tool_call,
-        resolve_invoke_tool_executor,
-        tool_hook_ids,
+        InlineToolContext, emit_terminal_post_tool_call, resolve_invoke_tool_executor, tool_hook_ids
     )
 
     if not isinstance(function_args, dict):
@@ -2469,15 +2367,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     if block_message is not None:
         result = json.dumps({"error": block_message}, ensure_ascii=False)
         emit_terminal_post_tool_call(
-            agent,
-            function_name=function_name,
-            function_args=function_args,
-            result=result,
-            effective_task_id=effective_task_id,
-            tool_call_id=tool_call_id,
-            status="blocked",
-            error_type="plugin_block",
-            error_message=block_message,
+            agent, function_name=function_name, function_args=function_args, result=result,
+            effective_task_id=effective_task_id, tool_call_id=tool_call_id, status="blocked",
+            error_type="plugin_block", error_message=block_message,
             middleware_trace=_tool_middleware_trace,
         )
         return result
@@ -2492,12 +2384,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         def _execute(next_args: dict) -> Any:
             result = inline_executor(agent, next_args, inline_ctx)
             emit_terminal_post_tool_call(
-                agent,
-                function_name=function_name,
+                agent, function_name=function_name,
                 function_args=next_args if isinstance(next_args, dict) else function_args,
-                result=result,
-                effective_task_id=effective_task_id,
-                tool_call_id=tool_call_id,
+                result=result, effective_task_id=effective_task_id, tool_call_id=tool_call_id,
                 duration_ms=int((time.monotonic() - tool_start_time) * 1000),
                 middleware_trace=_tool_middleware_trace,
             )
@@ -2505,13 +2394,11 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     else:
         def _execute(next_args: dict) -> Any:
             dispatch_kwargs = dict(
-                tool_call_id=tool_call_id,
-                session_id=agent.session_id or "",
+                tool_call_id=tool_call_id, session_id=agent.session_id or "",
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
                 enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
-                skip_tool_request_middleware=True,
+                skip_pre_tool_call_hook=True, skip_tool_request_middleware=True,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
@@ -2525,13 +2412,10 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     from hermes_cli.middleware import run_tool_execution_middleware
 
     return run_tool_execution_middleware(
-        function_name,
-        function_args,
+        function_name, function_args,
         lambda next_args: _execute(next_args if isinstance(next_args, dict) else function_args),
-        original_args=function_args,
-        **hook_ids,
+        original_args=function_args, **hook_ids,
     )
-
 
 
 def repair_tool_call(agent, tool_name: str) -> str | None:
@@ -2847,15 +2731,11 @@ def _classify_tool_call_orphans(messages: List[Dict[str, Any]]):
         result_call_ids.update(variants)
 
     orphaned_results = [
-        msg
-        for msg, variants in result_entries
-        if variants and not (variants & surviving_call_ids)
+        msg for msg, variants in result_entries if variants and not (variants & surviving_call_ids)
     ]
     orphaned_ids = {id(msg) for msg in orphaned_results}
     surviving_result_variants = [
-        variants
-        for msg, variants in result_entries
-        if variants and id(msg) not in orphaned_ids
+        variants for msg, variants in result_entries if variants and id(msg) not in orphaned_ids
     ]
     missing_tool_calls = [
         tc
@@ -3138,7 +3018,6 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return _realign_tool_result_names(messages)
 
 
-
 _ACK_FUTURE_RE = re.compile(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b")
 _ACK_ACTION_MARKERS = (
     "look into", "look at", "inspect", "scan", "check", "analyz", "review", "explore", "read", "open",
@@ -3151,10 +3030,7 @@ _ACK_WORKSPACE_MARKERS = (
 
 
 def looks_like_codex_intermediate_ack(
-    agent,
-    user_message: Any,
-    assistant_content: str,
-    messages: List[Dict[str, Any]],
+    agent, user_message: Any, assistant_content: str, messages: List[Dict[str, Any]],
     require_workspace: bool = True,
 ) -> bool:
     """Detect a planning/ack message that should continue instead of ending the turn.
@@ -3398,7 +3274,6 @@ def cleanup_dead_connections(agent) -> bool:
     return False
 
 
-
 _QUOTA_RESET_DELAY_RE = re.compile(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", re.IGNORECASE)
 _RESETS_IN_RE = re.compile(
     r"resets?\s+in\s+"
@@ -3474,7 +3349,6 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
     return context
 
 
-
 def _requeue_pending_steer(agent, steer_text: str) -> None:
     """Put drained steer text back so the caller's fallback delivers it as a next-turn user message."""
     lock = getattr(agent, "_pending_steer_lock", None)
@@ -3530,7 +3404,6 @@ def apply_pending_steer_to_tool_results(agent, messages: list, num_tool_msgs: in
     )
 
 
-
 def force_close_tcp_sockets(client: Any) -> int:
     """Abort in-flight TCP I/O via ``shutdown(SHUT_RDWR)`` WITHOUT closing FDs.
 
@@ -3565,7 +3438,6 @@ def force_close_tcp_sockets(client: Any) -> int:
     except Exception as exc:
         _ra().logger.debug("Force-close TCP sockets sweep error: %s", exc)
     return shutdown_count
-
 
 
 __all__ = [
