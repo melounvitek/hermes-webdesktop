@@ -58,23 +58,19 @@ def check_package_for_malware(command: str, args: list) -> Optional[str]:
     ecosystem = _infer_ecosystem(command)
     if not ecosystem:
         return None  # not npx/uvx — skip
-
     package, version = _parse_package_from_args(args, ecosystem)
     if not package:
         return None
-
     cache_key = (ecosystem, package, version)
     hit, cached = _cache_get(cache_key)
     if hit:
         return cached
-
     try:
         malware = _query_osv(package, ecosystem, version)
     except Exception as exc:
         # Fail-open; deliberately NOT cached — see _CACHE_TTL_S comment.
         logger.debug("OSV check failed for %s/%s (allowing): %s", ecosystem, package, exc)
         return None
-
     result = None
     if malware:
         ids = ", ".join(m["id"] for m in malware[:3])
@@ -115,7 +111,6 @@ def _parse_package_from_args(args: list, ecosystem: str) -> Tuple[Optional[str],
             continue
         package_token = arg
         break
-
     if not package_token:
         return None, None
     parser = _PACKAGE_PARSERS.get(ecosystem)

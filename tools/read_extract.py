@@ -79,7 +79,6 @@ def _anydoc() -> Optional[Any]:
             return None
         try:
             from tools.lazy_deps import ensure as _lazy_ensure
-
             # prompt=False: read_file must never block on an install prompt.
             _lazy_ensure("tool.doc_extract", prompt=False)
             _anydoc_module = importlib.import_module("anydoc")
@@ -345,6 +344,13 @@ def _pdf_coverage_note_from_bytes(data: bytes, display_path: str) -> str:
         return ""
 
 
+def _joined(lines: list[str], empty_error: str) -> str:
+    """Join extracted lines with a single trailing newline; raise when nothing non-blank."""
+    if not any(line.strip() for line in lines):
+        raise ExtractionError(empty_error)
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def _source_text(source) -> str:
     if isinstance(source, str):
         return source
@@ -402,13 +408,9 @@ def _notebook_output_text(output: Any) -> str:
         return ""
 
     data = output.get("data")
-    if not isinstance(data, dict):
-        data = {}
-        if isinstance(output.get("text"), (str, list)):
-            data["text/plain"] = output["text"]
-        for v3_key, mime in _V3_MIME_KEYS:
-            if v3_key in output:
-                data[mime] = output[v3_key]
+    if not isinstance(data, dict):  # legacy v3: mime payloads sit flat on the output dict
+        data = {"text/plain": output["text"]} if isinstance(output.get("text"), (str, list)) else {}
+        data.update((mime, output[k]) for k, mime in _V3_MIME_KEYS if k in output)
     if "application/vnd.jupyter.widget-view+json" in data:
         return "[interactive widget — omitted]"
     # Prefer readable text: models consume text/plain far better than markup.
@@ -454,7 +456,6 @@ def _extract_notebook(path: str) -> str:
         raise ExtractionError(f"Not a valid notebook: {exc}") from exc
     if not isinstance(nb, dict):
         raise ExtractionError("Notebook root is not an object")
-
     raw_cells = nb.get("cells")
     if isinstance(raw_cells, list):
         cells = [(f".cells[{i}].outputs", cell) for i, cell in enumerate(raw_cells)]
@@ -465,7 +466,6 @@ def _extract_notebook(path: str) -> str:
             for ci, cell in enumerate(ws.get("cells", []))]
     if not cells:
         raise ExtractionError("Notebook contains no cells")
-
     nb_name = os.path.basename(path)
     counts = dict.fromkeys(_CELL_LABELS, 0)
     out: list[str] = []
@@ -482,9 +482,7 @@ def _extract_notebook(path: str) -> str:
             rendered = _notebook_outputs(cell, jq_pointer, nb_name)
             if rendered:
                 out.extend((f"# ── Output (cell {counts[typ]}) ──", rendered.rstrip("\n"), ""))
-    if not out:
-        raise ExtractionError("Notebook contains no readable cells")
-    return "\n".join(out).rstrip("\n") + "\n"
+    return _joined(out, "Notebook contains no readable cells")
 
 
 @contextlib.contextmanager
@@ -523,9 +521,7 @@ def _extract_docx(path: str) -> str:
         buf = [(node.text or "") if node.tag == f"{w}t" else breaks.get(node.tag, "")
                for node in para.iter()]
         lines.extend("".join(buf).split("\n"))
-    if not any(line.strip() for line in lines):
-        raise ExtractionError("DOCX contains no extractable text")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    return _joined(lines, "DOCX contains no extractable text")
 
 
 def _extract_xlsx(path: str) -> str:
@@ -556,10 +552,7 @@ def _extract_xlsx(path: str) -> str:
             if not rows:
                 out.append("(empty)")
             out.append("")
-
-    if not out:
-        raise ExtractionError("XLSX has no visible sheets with content")
-    return "\n".join(out).rstrip("\n") + "\n"
+    return _joined(out, "XLSX has no visible sheets with content")
 
 
 def _col_index(ref: str) -> int:
