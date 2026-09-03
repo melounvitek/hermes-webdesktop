@@ -32,33 +32,27 @@ from hermes_cli._secrets_common import (
     section_cfg,
     yn,
 )
-from hermes_cli.config import (
-    get_env_path,
-    load_config,
-    save_config,
-    save_env_value,
-)
+from hermes_cli.config import get_env_path, load_config, save_config, save_env_value
 
 _DEFAULT_TOKEN_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
 _DOCS_URL = "https://developer.1password.com/docs/cli/get-started/"
 
-# Old names kept bound: tests call ``onepassword_secrets_cli._op_version`` directly.
+# Old name kept bound: tests call ``onepassword_secrets_cli._op_version`` directly.
 _op_version = cli_version
-_yn = yn
 
 
-def _op_cfg(cfg: dict) -> dict:
-    return section_cfg(cfg, "onepassword")
+def _op_cfg() -> dict:
+    return section_cfg(load_config(), "onepassword")
+
+
+def _op_cfg_for_write(cfg: dict) -> dict:
+    return cfg.setdefault("secrets", {}).setdefault("onepassword", {})
 
 
 def _references(op_cfg: dict) -> dict:
     env = op_cfg.get("env")
     return env if isinstance(env, dict) else {}
 
-
-# ---------------------------------------------------------------------------
-# Argparse wiring — called from hermes_cli.main
-# ---------------------------------------------------------------------------
 
 
 def register_cli(parent_parser: argparse.ArgumentParser) -> None:
@@ -89,11 +83,6 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
     ))
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
-
-
 def cmd_setup(args: argparse.Namespace) -> int:
     console = Console()
     console.print(
@@ -107,9 +96,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
     )
 
     cfg = load_config()
-    op_cfg = cfg.setdefault("secrets", {}).setdefault("onepassword", {})
+    op_cfg = _op_cfg_for_write(cfg)
 
-    # ------------------------------------------------------------------ binary
     console.print()
     console.print("[bold]Step 1[/bold]  Locate the op CLI")
     binary_path = (args.binary_path or op_cfg.get("binary_path", "") or "").strip()
@@ -126,24 +114,20 @@ def cmd_setup(args: argparse.Namespace) -> int:
     if binary_path:
         op_cfg["binary_path"] = binary_path
 
-    # ----------------------------------------------------------------- account
     if args.account and args.account.strip():
         op_cfg["account"] = args.account.strip()
         console.print(f"  Account: [cyan]{op_cfg['account']}[/cyan]")
 
-    # ------------------------------------------------------------------- token
     console.print()
     console.print("[bold]Step 2[/bold]  Authentication")
-    token_env = (args.token_env or op_cfg.get("service_account_token_env")
-                 or _DEFAULT_TOKEN_ENV).strip()
+    token_env = (args.token_env or op_cfg.get("service_account_token_env") or _DEFAULT_TOKEN_ENV).strip()
     op_cfg["service_account_token_env"] = token_env
 
     token = (args.token or "").strip()
     if token:
         save_env_value(token_env, token)
         os.environ[token_env] = token
-        console.print(f"  [green]✓[/green] service-account token stored in "
-                      f"{get_env_path()} as {token_env}")
+        console.print(f"  [green]✓[/green] service-account token stored in {get_env_path()} as {token_env}")
     elif os.environ.get(token_env):
         console.print(f"  [green]✓[/green] using service-account token from {token_env}")
     else:
@@ -158,7 +142,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 f"service-account token in {token_env}, then re-run status."
             )
 
-    # ----------------------------------------------------------------- enable
     op_cfg["enabled"] = True
     op_cfg.setdefault("env", {})
     op_cfg.setdefault("cache_ttl_seconds", 300)
@@ -178,7 +161,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     console = Console()
-    op_cfg = _op_cfg(load_config())
+    op_cfg = _op_cfg()
 
     enabled = bool(op_cfg.get("enabled"))
     account = cfg_str(op_cfg, "account")
@@ -190,11 +173,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     binary = op_src.find_op(binary_path)
 
     print_status_panel(console, "1Password secret source", (
-        ("Enabled", _yn(enabled)),
+        ("Enabled", yn(enabled)),
         ("Account", account or "[dim]default[/dim]"),
         ("Token env var", token_env),
-        ("Token in env", _yn(token_set)),
-        ("Override existing", _yn(bool(op_cfg.get("override_existing", True)))),
+        ("Token in env", yn(token_set)),
+        ("Override existing", yn(bool(op_cfg.get("override_existing", True)))),
         ("Cache TTL (s)", str(op_cfg.get("cache_ttl_seconds", 300))),
         ("op binary", f"{binary} ({_op_version(binary)})" if binary else "[yellow]not found[/yellow]"),
         ("References", str(len(references))),
@@ -226,9 +209,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_set(args: argparse.Namespace) -> int:
     console = Console()
-    # Reuse the backend validator so the CLI and startup paths agree on what a
-    # valid reference is — and store the *validated/stripped* value, not the
-    # raw arg (so trailing whitespace never lands in config.yaml).
+    # Backend validator keeps CLI and startup in agreement; store the validated/stripped value.
     valid, warnings = op_src._validate_references({args.env_var: args.reference})
     if args.env_var not in valid:
         for w in warnings:
@@ -236,15 +217,12 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 1
 
     cfg = load_config()
-    op_cfg = cfg.setdefault("secrets", {}).setdefault("onepassword", {})
+    op_cfg = _op_cfg_for_write(cfg)
     if not isinstance(op_cfg.get("env"), dict):
         op_cfg["env"] = {}
     op_cfg["env"][args.env_var] = valid[args.env_var]
     save_config(cfg)
-    console.print(
-        f"[green]✓[/green] mapped [cyan]{args.env_var}[/cyan] → "
-        f"{valid[args.env_var]}"
-    )
+    console.print(f"[green]✓[/green] mapped [cyan]{args.env_var}[/cyan] → {valid[args.env_var]}")
     if not op_cfg.get("enabled"):
         console.print(
             "  [yellow]Note: the integration is disabled — run "
@@ -256,7 +234,7 @@ def cmd_set(args: argparse.Namespace) -> int:
 def cmd_remove(args: argparse.Namespace) -> int:
     console = Console()
     cfg = load_config()
-    op_cfg = cfg.setdefault("secrets", {}).setdefault("onepassword", {})
+    op_cfg = _op_cfg_for_write(cfg)
     env_map = op_cfg.get("env")
     if not isinstance(env_map, dict) or args.env_var not in env_map:
         console.print(f"[yellow]{args.env_var} is not mapped.[/yellow]")
@@ -268,14 +246,10 @@ def cmd_remove(args: argparse.Namespace) -> int:
 
 
 def cmd_token(args: argparse.Namespace) -> int:
-    """Rotate the 1Password service-account token without the full setup flow.
-
-    Prompts for (or accepts via ``--token``) a new service-account token, verifies it with ``op
-    whoami`` (unless ``--no-verify``), and only then persists it to .env — so a bad paste never
-    bricks the working token.
-    """
+    """Rotate the service-account token: verify with ``op whoami`` (unless ``--no-verify``) and
+    only then persist to .env, so a bad paste never bricks the working token."""
     console = Console()
-    op_cfg = _op_cfg(load_config())
+    op_cfg = _op_cfg()
     token_env = op_cfg.get("service_account_token_env", _DEFAULT_TOKEN_ENV)
     account = cfg_str(op_cfg, "account")
     binary_path = cfg_str(op_cfg, "binary_path")
@@ -291,9 +265,7 @@ def cmd_token(args: argparse.Namespace) -> int:
         console.print("Verifying with `op whoami`…")
         who = _op_whoami(binary, account, token_value=token)
         if who is None:
-            console.print(
-                "[red]✗ New token was rejected by op — nothing was changed.[/red]"
-            )
+            console.print("[red]✗ New token was rejected by op — nothing was changed.[/red]")
             return False
         console.print(f"[green]✓ Token accepted[/green] ({who}).")
         return True
@@ -317,7 +289,7 @@ def cmd_token(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     console = Console()
-    op_cfg = _op_cfg(load_config())
+    op_cfg = _op_cfg()
     if not require_enabled(console, op_cfg, "1Password", "onepassword"):
         return 1
 
@@ -333,8 +305,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
     token_env = op_cfg.get("service_account_token_env", _DEFAULT_TOKEN_ENV)
     binary_path = cfg_str(op_cfg, "binary_path")
 
-    # --apply delegates to the same code path startup uses, so the skip /
-    # override / token-guard policy lives in exactly one place.
+    # --apply uses the startup code path so the skip/override/token-guard policy lives in one place.
     if args.apply:
         result = op_src.apply_onepassword_secrets(
             enabled=True,
@@ -354,10 +325,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
             + [(name, "[dim]skipped (already set / token var)[/dim]") for name in sorted(result.skipped)],
             result.warnings,
         )
-        console.print(
-            f"\n  [green]Exported {len(result.applied)} secret(s) into current "
-            "process.[/green]"
-        )
+        console.print(f"\n  [green]Exported {len(result.applied)} secret(s) into current process.[/green]")
         return 0
 
     # Dry-run: resolve fresh (no cache) and preview, mutating nothing.
@@ -406,19 +374,9 @@ def cmd_disable(args: argparse.Namespace) -> int:
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _op_whoami(
-    binary: Path, account: str, *, token_value: str = ""
-) -> Optional[str]:
-    """Return a short identity string if op is authenticated, else None.
-
-    ``token_value`` is passed to the child as ``OP_SERVICE_ACCOUNT_TOKEN`` so a candidate token
-    can be probed without touching the caller's environment.
-    """
+def _op_whoami(binary: Path, account: str, *, token_value: str = "") -> Optional[str]:
+    """Short identity string if op is authenticated, else None. ``token_value`` probes a candidate
+    token via the child's ``OP_SERVICE_ACCOUNT_TOKEN`` without touching the caller's environment."""
     cmd = [str(binary), "whoami"]
     if account:
         cmd += ["--account", account]
@@ -434,5 +392,4 @@ def _op_whoami(
         return None
     if res.returncode != 0:
         return None
-    out = (res.stdout or "").strip()
-    return out.replace("\n", " ")[:120] or "authenticated"
+    return (res.stdout or "").strip().replace("\n", " ")[:120] or "authenticated"
