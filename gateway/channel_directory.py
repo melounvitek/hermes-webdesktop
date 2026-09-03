@@ -172,12 +172,10 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     for plat in Platform:
         await _discover(plat.value)
     # Plugin platforms are dynamic enum members missing from Platform.__members__.
-    try:
+    with contextlib.suppress(Exception):
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             await _discover(entry.name)
-    except Exception:
-        pass
 
     _apply_channel_aliases(platforms)
 
@@ -217,11 +215,10 @@ def _build_discord(adapter) -> List[Dict[str, str]]:
 
 def _slack_api_error_code(error: Exception) -> Optional[str]:
     """Slack Web API error code from SlackApiError-like exceptions."""
-    try:
-        value = getattr(error, "response").get("error")
-    except Exception:
-        return None
-    return str(value) if value else None
+    with contextlib.suppress(Exception):
+        value = error.response.get("error")
+        return str(value) if value else None
+    return None
 
 
 def _normalize_adapter_channels(raw_channels: Any) -> List[Dict[str, Any]]:

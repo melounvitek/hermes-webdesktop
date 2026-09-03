@@ -90,14 +90,10 @@ def _allowlist_env_for_platform(platform: str) -> Optional[str]:
     env_var = _PLATFORM_ALLOWLIST_ENV.get(platform)
     if env_var:
         return env_var
-    try:
+    with contextlib.suppress(Exception):
         from gateway.platform_registry import platform_registry
 
-        entry = platform_registry.get(platform)
-        if entry and entry.allowed_users_env:
-            return entry.allowed_users_env
-    except Exception:
-        pass
+        return platform_registry.get(platform).allowed_users_env or None
     return None
 
 
@@ -148,15 +144,13 @@ def _read_allowlist_env(env_var: str) -> str:
     legacy ``os.getenv`` read. Writes go through ``save_env_value``/``remove_env_value``,
     which target the active profile's ``.env`` / installed scope, not ``os.environ``.
     """
-    try:
+    with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
 
         try:
             return (get_secret(env_var) or "").strip()
         except UnscopedSecretError:
             pass
-    except Exception:
-        pass
     return (os.getenv(env_var) or "").strip()
 
 
@@ -192,12 +186,11 @@ def _sync_allowlist_add(platform: str, user_id: str) -> None:
 
 def _iter_live_gateway_adapters():
     """Yield adapters from the in-process GatewayRunner, if one is running."""
-    try:
+    runner = None
+    with contextlib.suppress(Exception):
         from gateway.run import _gateway_runner_ref
 
         runner = _gateway_runner_ref()
-    except Exception:
-        runner = None
     if runner is None:
         return
     mappings = [getattr(runner, "adapters", None) or {}]

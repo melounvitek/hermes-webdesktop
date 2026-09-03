@@ -2,11 +2,12 @@
 policies and delivery preferences, loaded from config.yaml / gateway.json / env.
 """
 
+import contextlib
 import logging
 import math
 import os
 from pathlib import Path
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
@@ -57,10 +58,7 @@ def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
     normalized: List[str] = []
     for entry in value:
         if not isinstance(entry, str):
-            logger.warning(
-                "Skipping invalid gateway.multiplex_profile_allowlist entry %r (expected a profile name)",
-                entry,
-            )
+            logger.warning("Skipping invalid gateway.multiplex_profile_allowlist entry %r (expected a profile name)", entry)
             continue
         try:
             name = normalize_profile_name(entry)
@@ -132,9 +130,7 @@ def _coerce_optional_positive_int(value: Any, key: str) -> Optional[int]:
             raise ValueError(value)
         parsed = int(value.strip(), 10) if isinstance(value, str) else int(value)
     except (TypeError, ValueError):
-        logger.warning(
-            "Ignoring invalid %s=%r (expected a positive integer; 0/null disables)", key, value
-        )
+        logger.warning("Ignoring invalid %s=%r (expected a positive integer; 0/null disables)", key, value)
         return None
     return parsed if parsed > 0 else None
 
@@ -252,12 +248,10 @@ class Platform(Enum):
             _Platform__bundled_plugin_names = cls._scan_bundled_plugin_platforms()
         if value in _Platform__bundled_plugin_names:
             return cls._add_pseudo_member(value)
-        try:
+        with contextlib.suppress(Exception):
             from gateway.platform_registry import platform_registry
             if platform_registry.is_registered(value):
                 return cls._add_pseudo_member(value)
-        except Exception:
-            pass
         return None
 
     @classmethod
@@ -368,20 +362,16 @@ class SessionResetPolicy:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionResetPolicy":
         data = _coerce_dict(data)
-
-        def val(key: str, default: Any) -> Any:
-            # Missing keys and explicit YAML nulls both take the default.
-            value = data.get(key)
-            return default if value is None else value
-
         exclude = data.get("notify_exclude_platforms")
+        # Missing keys and explicit YAML nulls both take the field default.
+        plain = {
+            f.name: f.default if data.get(f.name) is None else data[f.name]
+            for f in fields(cls) if f.name not in ("notify", "notify_exclude_platforms")
+        }
         return cls(
-            mode=val("mode", "none"),
-            at_hour=val("at_hour", 4),
-            idle_minutes=val("idle_minutes", 1440),
             notify=_coerce_bool(data.get("notify"), True),
             notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
-            bg_process_max_age_hours=val("bg_process_max_age_hours", 24),
+            **plain,
         )
 
 
@@ -659,11 +649,9 @@ class GatewayConfig:
         # Plugin platforms; force (idempotent) discovery for directly-constructed configs.
         try:
             from gateway.platform_registry import platform_registry
-            try:
+            with contextlib.suppress(Exception):
                 from hermes_cli.plugins import discover_plugins
                 discover_plugins()
-            except Exception:
-                pass
             entry = platform_registry.get(platform.value)
             if entry:
                 if entry.is_connected is not None:

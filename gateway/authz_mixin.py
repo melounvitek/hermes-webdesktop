@@ -7,6 +7,7 @@ that logs imports its ``logger`` lazily so records keep the ``"gateway.run"`` na
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Optional
 
@@ -52,15 +53,13 @@ def _platform_gate_env(name: str, default: str = "") -> str:
     """
     if not name:
         return default
-    try:
+    with contextlib.suppress(Exception):
         from agent.secret_scope import current_secret_scope, is_multiplex_active
 
         scope = current_secret_scope()
         if scope is not None and is_multiplex_active():
             val = scope.get(name)
             return default if val is None else str(val).strip()
-    except Exception:
-        pass
     return (os.getenv(name) or default).strip()
 
 
@@ -75,12 +74,11 @@ def _registry_entry(platform):
     """Platform-registry entry for a (plugin) platform, or None."""
     if platform is None:
         return None
-    try:
+    with contextlib.suppress(Exception):
         from gateway.platform_registry import platform_registry
 
         return platform_registry.get(platform.value)
-    except Exception:
-        return None
+    return None
 
 
 def _coerce_allow_set(raw) -> set[str]:
@@ -198,12 +196,8 @@ class GatewayAuthorizationMixin:
             # Identity captured at construction, not the per-turn HERMES_HOME-derived name.
             primary_profile = getattr(self, "_primary_profile_name", None)
             if not primary_profile:
-                active_profile_fn = getattr(self, "_active_profile_name", None)
-                if callable(active_profile_fn):
-                    try:
-                        primary_profile = active_profile_fn()
-                    except Exception:
-                        primary_profile = None
+                with contextlib.suppress(Exception):
+                    primary_profile = self._active_profile_name()
             if profile_name == primary_profile:
                 return self._primary_adapters().get(platform)
             # Fail closed: a secondary profile whose adapter failed to connect must NOT
@@ -442,12 +436,10 @@ class GatewayAuthorizationMixin:
                 return True
             # config.yaml fallback (``extra.group_allowed_chats``): Telegram observe-
             # unmentioned mode strips user_id, so the env-only check above misses it.
-            try:
+            with contextlib.suppress(Exception):
                 adapter_group_allowed = self._adapter_extra_for_source(source).get("group_allowed_chats")
                 if adapter_group_allowed and _allows(_coerce_allow_set(adapter_group_allowed), source.chat_id):
                     return True
-            except Exception:
-                pass
 
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist. Also before
         # the no-user-id guard: Slack Workflow Builder posts arrive with user=None.
@@ -463,11 +455,9 @@ class GatewayAuthorizationMixin:
         platform_allow_all_var = _ALLOW_ALL_ENV.get(source.platform, "")
         if source.platform not in _ALLOWED_USERS_ENV:
             entry = _registry_entry(source.platform)
-            try:
+            with contextlib.suppress(Exception):
                 platform_allow_env = getattr(entry, "allowed_users_env", "") or platform_allow_env
                 platform_allow_all_var = getattr(entry, "allow_all_env", "") or platform_allow_all_var
-            except Exception:
-                pass
 
         if platform_allow_all_var and _env_truthy(platform_allow_all_var):
             return True
@@ -542,16 +532,13 @@ class GatewayAuthorizationMixin:
         # Guarded on ``platform_allowlist`` so group/global-only configs never consult
         # adapter memory; type-checked so mock adapters cannot auto-truthy in.
         if platform_allowlist:
-            try:
+            adapter = resolved_ids = None
+            with contextlib.suppress(Exception):
                 adapter = self._adapter_for_source(source)
-            except Exception:
-                adapter = None
             resolver = getattr(adapter, "resolved_allowlist_user_ids", None)
             if callable(resolver):
-                try:
+                with contextlib.suppress(Exception):
                     resolved_ids = resolver()
-                except Exception:
-                    resolved_ids = None
                 if isinstance(resolved_ids, (set, frozenset, list, tuple)):
                     allowed_ids.update(
                         str(entry).strip() for entry in resolved_ids if isinstance(entry, (str, int)) and str(entry).strip()
