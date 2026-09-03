@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli.session_recovery import (
-    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _immediate_transaction, _placeholder_titles,
-    _quoted_columns, _table_columns,
+    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _count_rows, _immediate_transaction,
+    _placeholder_titles, _quoted_columns, _table_columns,
 )
 
 # Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
@@ -233,10 +233,9 @@ def _copy_direct_tables(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -
         if not rows:
             copied[table] = 0
             continue
-        before = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        before = _count_rows(dest, table)
         dest.executemany(f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})', rows)
-        after = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-        copied[table] = after - before
+        copied[table] = _count_rows(dest, table) - before
     return copied
 
 
