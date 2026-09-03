@@ -19,11 +19,8 @@ _MEMORY_FILES = (
 
 class SessionMigrationMixin:
     def migrate_memory_files(self, session_key: str, memory_dir: str) -> bool:
-        """Upload MEMORY.md / USER.md / SOUL.md to Honcho when it activates on an
-        instance with locally consolidated memory. Skips missing/empty files.
-
-        Returns True if at least one file was uploaded.
-        """
+        """Upload MEMORY.md / USER.md / SOUL.md to Honcho when it activates on an instance with
+        locally consolidated memory; skips missing/empty files. True if at least one uploaded."""
         memory_path = Path(memory_dir)
         if not memory_path.exists():
             return False
@@ -36,23 +33,17 @@ class SessionMigrationMixin:
             logger.warning("No Honcho session cached for '%s', skipping memory migration", session_key)
             return False
 
-        # Owner-scoped: these files describe the install owner. Uploading them under a
-        # non-owner's peer (any other human in a shared channel) would make Honcho's
-        # deriver attribute the owner's facts to that person. The owner is the CONFIG
-        # fact peerName — never a re-resolution of the session's own peer, which would
-        # compare the triggering user to themselves and pass for everyone.
-        # No declared owner: without a runtime identity this is the single-operator
-        # path; with one, nobody can be proven to be the owner.
+        # Owner-scoped: these files describe the install owner; uploading them under another
+        # human's peer would make Honcho attribute the owner's facts to that person. The owner is
+        # the CONFIG peerName — never a re-resolution of the session's own peer (that would compare
+        # the triggering user to themselves). No declared owner: single-operator only when there is
+        # no runtime identity; with one, nobody can be proven to be the owner.
         owner_peer_id = self._declared_owner_peer_id()
-        session_is_owner = (
-            session.user_peer_id == owner_peer_id if owner_peer_id is not None else not self._runtime_user_ids()
-        )
+        session_is_owner = (session.user_peer_id == owner_peer_id if owner_peer_id is not None
+                            else not self._runtime_user_ids())
         if not session_is_owner:
-            logger.info(
-                "Skipping memory-file migration: session user peer '%s' is not the "
-                "declared owner (peerName=%s)",
-                session.user_peer_id, owner_peer_id or "unset",
-            )
+            logger.info("Skipping memory-file migration: session user peer '%s' is not the declared owner (peerName=%s)",
+                        session.user_peer_id, owner_peer_id or "unset")
             return False
 
         uploaded = False
@@ -62,12 +53,10 @@ class SessionMigrationMixin:
             if not content:
                 continue
             target_peer_id = session.user_peer_id if target_kind == "user" else session.assistant_peer_id
-            wrapped = (
-                "<prior_memory_file>\n<context>\n"
-                "This file was consolidated from local conversations BEFORE Honcho was activated.\n"
-                f"{description}. Treat as foundational context for this user.\n"
-                f"</context>\n\n{content}\n</prior_memory_file>\n"
-            )
+            wrapped = ("<prior_memory_file>\n<context>\n"
+                       "This file was consolidated from local conversations BEFORE Honcho was activated.\n"
+                       f"{description}. Treat as foundational context for this user.\n"
+                       f"</context>\n\n{content}\n</prior_memory_file>\n")
 
             def _upload() -> None:
                 self._sdk_session(session.honcho_session_id).upload_file(

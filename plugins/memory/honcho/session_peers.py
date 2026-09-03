@@ -26,13 +26,9 @@ class SessionPeersMixin:
         return getattr(self._config, name, default) if self._config is not None else default
 
     def _runtime_user_ids(self) -> list[str]:
-        """Return runtime identity candidates in lookup order (deduped, blanks dropped)."""
-        candidates: list[str] = []
-        for value in (self._runtime_user_peer_name, self._runtime_user_peer_name_alt):
-            candidate = str(value).strip() if value is not None else ""
-            if candidate and candidate not in candidates:
-                candidates.append(candidate)
-        return candidates
+        """Runtime identity candidates in lookup order (deduped, blanks dropped)."""
+        candidates = [str(v).strip() for v in (self._runtime_user_peer_name, self._runtime_user_peer_name_alt) if v is not None]
+        return list(dict.fromkeys(c for c in candidates if c))
 
     def _peer_aliases(self) -> dict:
         aliases = self._cfg("user_peer_aliases", {})
@@ -40,11 +36,8 @@ class SessionPeersMixin:
 
     def _explicit_user_peer_ids(self) -> set[str]:
         """Return sanitized user peer IDs that came from explicit config."""
-        explicit_ids = {
-            self._sanitize_id(alias.strip())
-            for alias in self._peer_aliases().values()
-            if isinstance(alias, str) and alias.strip()
-        }
+        explicit_ids = {self._sanitize_id(alias.strip()) for alias in self._peer_aliases().values()
+                        if isinstance(alias, str) and alias.strip()}
         owner = self._declared_owner_peer_id()
         if owner:
             explicit_ids.add(owner)
@@ -66,17 +59,12 @@ class SessionPeersMixin:
 
     def _declared_owner_peer_id(self) -> str | None:
         """Sanitized ``peerName`` (the install owner), or None when none is declared."""
-        peer_name = self._cfg("peer_name")
-        if peer_name and str(peer_name).strip():
-            return self._sanitize_id(str(peer_name).strip())
-        return None
+        peer_name = str(self._cfg("peer_name") or "").strip()
+        return self._sanitize_id(peer_name) if peer_name else None
 
     def _resolve_user_peer_id(self, key: str) -> str:
-        """Resolve the Honcho user peer ID for this manager/session.
-
-        Order: pinned peerName -> alias of a runtime identity -> (prefixed) runtime
-        identity -> configured peerName -> session-key fallback.
-        """
+        """Honcho user peer ID for this manager/session. Order: pinned peerName -> alias of a
+        runtime identity -> (prefixed) runtime identity -> configured peerName -> session-key fallback."""
         peer_name = self._cfg("peer_name")
         if peer_name and self._cfg("pin_peer_name", False) is True:
             return self._sanitize_id(peer_name)
@@ -104,9 +92,7 @@ class SessionPeersMixin:
         normalized = self._sanitize_id((peer or "user").strip() or "user")
         return {"user": session.user_peer_id, "ai": session.assistant_peer_id}.get(normalized, normalized)
 
-    def _resolve_observer_target(
-        self, session: HonchoSession, peer: str | None,
-    ) -> tuple[str, str | None]:
+    def _resolve_observer_target(self, session: HonchoSession, peer: str | None) -> tuple[str, str | None]:
         """Resolve (observer, target) peer IDs for context/search/profile queries."""
         target_peer_id = self._resolve_peer_id(session, peer)
         if target_peer_id == session.assistant_peer_id:
