@@ -1,9 +1,7 @@
 """Session listing/rich rows, export, and import (portability) for SessionDB.
 
-Plain mixin consumed by ``hermes_state.SessionDB``: no ``__init__``, no state
-of its own; methods use host attributes established by ``SessionDB.__init__``.
-Must never import hermes_state (cycle) — shared constants live in
-hermes_state_common.
+Plain mixin for ``hermes_state.SessionDB`` (no ``__init__``/state of its own).
+Must never import hermes_state (cycle); shared constants live in hermes_state_common.
 """
 
 import logging
@@ -14,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from agent.skill_commands import SKILL_SCAFFOLD_SQL_LIKE
 from hermes_state_common import SCHEMA_SQL, _PREVIEW_RAW_SUBQUERY_SQL, _shape_preview, _sql_session_last_active
 
-# Keep the pre-split logger identity so log filtering/capture is unchanged.
+# Pre-split logger identity so log filtering/capture is unchanged.
 logger = logging.getLogger("hermes_state")
 
 _IMPORT_SESSION_TEXT_FIELDS = (
@@ -64,9 +62,9 @@ _IMPORT_FLOAT_COLS = ("ended_at", "estimated_cost_usd", "actual_cost_usd")
 
 
 def _rich_select(select_cols: str, where: str, tail: str = "", prompt_select: Optional[str] = "") -> str:
-    """``list_sessions_rich``-shaped SELECT: resolved prompt (``prompt_select``
-    fragment; None omits prompt columns AND the join), preview, last_active.
-    Whitespace matches the historical inline queries (SQL text is pinned)."""
+    """``list_sessions_rich``-shaped SELECT: resolved prompt (``prompt_select`` fragment;
+    None omits prompt columns AND the join), preview, last_active. Whitespace matches
+    the historical inline queries (SQL text is pinned)."""
     prompt_join = "" if prompt_select is None else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
     return f"""
             SELECT {select_cols}{prompt_select or ""},
@@ -86,8 +84,8 @@ class SessionPortabilityMixin:
 
     @classmethod
     def _compact_session_cols(cls) -> str:
-        """``s.``-prefixed SELECT list of every SCHEMA_SQL ``sessions`` column
-        except prompt storage internals (the compact_rows projection)."""
+        """``s.``-prefixed SELECT list of every SCHEMA_SQL ``sessions`` column except
+        prompt storage internals (the compact_rows projection)."""
         if cls._session_compact_cols_sql is None:
             declared = cls._parse_schema_columns(SCHEMA_SQL)["sessions"]
             cls._session_compact_cols_sql = ", ".join(
@@ -106,10 +104,12 @@ class SessionPortabilityMixin:
         with self._lock:
             return self._conn.execute(sql, params).fetchall()
 
+    def _rich_rows(self, sql: str, params=()) -> List[Dict[str, Any]]:
+        return [self._rich_row(row) for row in self._locked_rows(sql, params)]
+
     def distinct_session_cwds(self, include_archived: bool = False) -> List[Dict[str, Any]]:
-        """Distinct non-empty session cwds with usage stats, for repo discovery.
-        Aggregates across ALL history so every repo the user worked in
-        surfaces; children/branches count (a worktree session is a real
+        """Distinct non-empty session cwds with usage stats, for repo discovery. Aggregates
+        across ALL history; children/branches count (a worktree session is a real
         workspace signal)."""
         where = "cwd IS NOT NULL AND TRIM(cwd) != ''"
         if not include_archived:
@@ -125,40 +125,34 @@ class SessionPortabilityMixin:
         ]
 
     def list_cron_job_runs(self, job_id: str, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
-        """List the run sessions produced by a single cron job, newest first.
-        Cron runs are flat sessions with id ``cron_{job_id}_{timestamp}``; they
-        never compress or branch, so this skips ``list_sessions_rich``'s
-        compression-chain CTE / leading-wildcard ``id_query`` path (which
-        seeds from EVERY ``source='cron'`` row). Instead a ``[prefix,
-        prefix_hi)`` index range scan on id filtered to ``source='cron'``, so
-        work scales with the requested window. Returns the
-        ``list_sessions_rich`` row shape (``preview`` + ``last_active``)."""
+        """Run sessions of one cron job, newest first, in the ``list_sessions_rich`` row shape.
+        Cron runs are flat ``cron_{job_id}_{timestamp}`` sessions that never compress or
+        branch, so this skips ``list_sessions_rich``'s compression-chain CTE /
+        leading-wildcard ``id_query`` path (which seeds from EVERY ``source='cron'`` row)
+        for a ``[prefix, prefix_hi)`` id range scan that scales with the window."""
         prefix = f"cron_{job_id}_"
-        # Half-open upper bound: bump the final byte so the range covers exactly
-        # the ids starting with ``prefix``.
+        # Half-open upper bound: bump the final byte so the range covers exactly the prefix.
         prefix_hi = prefix[:-1] + chr(ord(prefix[-1]) + 1)
         query = _rich_select(
             "s.*", "s.source = 'cron' AND s.id >= ? AND s.id < ?",
             "\n            ORDER BY s.started_at DESC, s.id DESC\n            LIMIT ? OFFSET ?",
             prompt_select=f",\n                {_PROMPT_RESOLVED_SQL}",
         )
-        rows = self._locked_rows(query, (prefix, prefix_hi, limit, offset))
-        return [self._rich_row(row) for row in rows]
+        return self._rich_rows(query, (prefix, prefix_hi, limit, offset))
 
     def _get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
-        """One session with the ``list_sessions_rich`` enriched columns, or
-        None. ``compact_rows=True`` omits the ``system_prompt`` blob."""
+        """One session with the ``list_sessions_rich`` enriched columns, or None.
+        ``compact_rows=True`` omits the ``system_prompt`` blob."""
         return self._get_session_rich_rows_batch([session_id], compact_rows=compact_rows).get(session_id)
 
     def _get_session_rich_rows_batch(self, session_ids, compact_rows: bool = False) -> Dict[str, Dict[str, Any]]:
-        """Enriched rows for many sessions in one query, keyed by id; missing
-        ids are simply absent. Resolves a page of compression tips in one
-        round trip instead of one query per root row."""
+        """Enriched rows for many sessions in one query, keyed by id; missing ids are absent
+        (a page of compression tips resolves in one round trip)."""
         ids = [sid for sid in session_ids if sid]
         if not ids:
             return {}
-        # Old SQLite caps bound variables at 999 (SQLITE_MAX_VARIABLE_NUMBER);
-        # limit=10000 callers exist. Chunk here — the single choke point.
+        # Old SQLite caps bound variables at 999 (SQLITE_MAX_VARIABLE_NUMBER); limit=10000
+        # callers exist. Chunk here — the single choke point.
         _CHUNK = 900
         if len(ids) > _CHUNK:
             result: Dict[str, Dict[str, Any]] = {}
@@ -172,18 +166,16 @@ class SessionPortabilityMixin:
             f"s.id IN ({','.join('?' for _ in ids)})",
             prompt_select=None if compact_rows else f", {_PROMPT_RESOLVED_SQL}",
         )
-        rows = self._locked_rows(query, ids)
-        return {s["id"]: s for s in map(self._rich_row, rows)}
+        return {s["id"]: s for s in self._rich_rows(query, ids)}
 
     def get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
         """Public wrapper for :meth:`_get_session_rich_row` (web server hydration)."""
         return self._get_session_rich_row(session_id, compact_rows=compact_rows)
 
     def list_skill_scaffolded_sessions(self, limit: int = 200) -> List[Dict[str, Any]]:
-        """Titled sessions whose first user turn was a ``/skill`` invocation.
-        Their titles were generated from the expanded skill body, so they
-        describe the skill, not the request. Returns ``id``, ``title`` and the
-        first-turn ``content`` so callers can re-derive what was typed. Newest first."""
+        """Titled sessions whose first user turn was a ``/skill`` invocation (their titles
+        describe the expanded skill body, not the request). Returns ``id``, ``title`` and
+        the first-turn ``content`` so callers can re-derive what was typed. Newest first."""
         rows = self._locked_rows(
             """
                 SELECT s.id, s.title, m.content
@@ -234,20 +226,15 @@ class SessionPortabilityMixin:
     def adopt_session_lineage_from(
         self, donor_db: Any, session_id: str, *, retire_donor: bool = True
     ) -> Dict[str, Any]:
-        """Adopt *session_id*'s full compression lineage from *donor_db* (a
-        full SessionDB — the mixin cannot import it).
-
-        Stranded-bot-session heal: before the desktop routed session RPCs by
-        target session, a profile bot's rows accumulated in the DEFAULT
-        profile's state.db; this moves the conversation to where routing now
-        looks. Pure composition ``donor_db.export_session_lineage()`` ->
-        ``self.import_sessions()``: routing/handoff/activity fields reset,
-        already-present ids skipped (idempotent re-adoption). With
-        ``retire_donor`` and a complete adoption, donor rows are ARCHIVED
-        (never deleted) with ``end_reason='adopted_by_profile'`` — deliberately
-        NOT in the recoverable set, so resurrection cannot undo an adoption.
-        Returns the ``import_sessions`` dict plus ``adopted`` and
-        ``donor_retired`` (True only when EVERY segment's retirement applied)."""
+        """Adopt *session_id*'s full compression lineage from *donor_db* (stranded-bot-session
+        heal: a profile bot's rows accumulated in the DEFAULT profile's state.db before the
+        desktop routed session RPCs by target session). Pure composition
+        ``donor_db.export_session_lineage()`` -> ``self.import_sessions()``: runtime
+        fields reset, already-present ids skipped (idempotent). With ``retire_donor`` and
+        a complete adoption, donor rows are ARCHIVED (never deleted) with
+        ``end_reason='adopted_by_profile'`` — deliberately NOT in the recoverable set, so
+        resurrection cannot undo an adoption. Returns the ``import_sessions`` dict plus
+        ``adopted`` and ``donor_retired`` (True only when EVERY segment retired)."""
         payload = donor_db.export_session_lineage(session_id)
         if not payload:
             return {
@@ -256,10 +243,9 @@ class SessionPortabilityMixin:
             }
         segments = payload.get("segments") or [payload]
 
-        # Divergence guard: a segment we will SKIP (already here) may have kept
-        # growing in the donor after a partial adoption; retiring it would strand
-        # those messages behind a non-recoverable archive. Still import, but
-        # refuse to retire when the donor is ahead.
+        # Divergence guard: a segment we will SKIP (already here) may have kept growing in
+        # the donor after a partial adoption; retiring it would strand those messages
+        # behind a non-recoverable archive. Still import, but refuse to retire.
         donor_ahead = False
         for seg in segments:
             seg_id = seg.get("id")
@@ -294,12 +280,11 @@ class SessionPortabilityMixin:
         return {**result, "adopted": adopted, "donor_retired": donor_retired}
 
     def _retire_donor_segment(self, donor_db: Any, seg_id: str) -> bool:
-        """Archive one adopted donor segment; False when skipped or failed.
-        TOCTOU close-out: the divergence guard used EXPORT-TIME counts; re-read
-        both stores right before stamping so donor growth never lands behind a
-        non-recoverable archive (equal-count CONTENT divergence is accepted —
-        bytes stay in the donor either way, only reachability differs). A
-        retirement failure must not fail the adoption (a later resume retries
+        """Archive one adopted donor segment; False when skipped or failed. TOCTOU close-out:
+        the divergence guard used EXPORT-TIME counts; re-read both stores right before
+        stamping so donor growth never lands behind a non-recoverable archive
+        (equal-count CONTENT divergence is accepted — bytes stay in the donor either way).
+        A retirement failure must not fail the adoption (a later resume retries
         idempotently), but never claims success it didn't have."""
         try:
             donor_now = len(donor_db.get_messages(seg_id))
@@ -312,8 +297,8 @@ class SessionPortabilityMixin:
                     seg_id, donor_now, local_now,
                 )
                 return False
-            # First end_reason wins in end_session(); reopen so the adoption
-            # boundary is stamped even on ended segments.
+            # First end_reason wins in end_session(); reopen so the adoption boundary is
+            # stamped even on ended segments.
             donor_db.reopen_session(seg_id)
             donor_db.end_session(seg_id, "adopted_by_profile")
             donor_db.set_session_archived(seg_id, True)
@@ -358,14 +343,6 @@ class SessionPortabilityMixin:
             return cast(value)
         except (TypeError, ValueError):
             return default
-
-    @classmethod
-    def _float_or_none(cls, value: Any) -> Optional[float]:
-        return cls._coerce_or(value, float, None)
-
-    @classmethod
-    def _int_or_default(cls, value: Any, default: int = 0) -> int:
-        return cls._coerce_or(value, int, default)
 
     @staticmethod
     def _import_int_or_none(value: Any, field: str) -> Optional[int]:
@@ -415,8 +392,8 @@ class SessionPortabilityMixin:
         return {"session": clean_session, "messages": clean_messages}
 
     def _validate_import_payload(self, sessions: List[Dict[str, Any]]) -> tuple:
-        """Size/shape/type validation of the whole payload; returns
-        ``(normalized_items, errors)``. Every rejected entry is reported."""
+        """Size/shape/type validation of the whole payload; returns ``(normalized_items,
+        errors)``. Every rejected entry is reported."""
         normalized: List[Dict[str, Any]] = []
         errors: List[Dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -474,15 +451,15 @@ class SessionPortabilityMixin:
 
     def _import_session_row(self, conn, raw: Dict[str, Any], messages: List[Dict[str, Any]], session_id: str) -> None:
         """INSERT one normalized session + its messages; counts fixed up after."""
-        started_at = self._float_or_none(raw.get("started_at"))
+        started_at = self._coerce_or(raw.get("started_at"), float, None)
         params = {
             "id": session_id, "source": str(raw.get("source") or "import"),
             "system_prompt_hash": self._store_system_prompt(conn, raw.get("system_prompt")),
             "started_at": time.time() if started_at is None else started_at,
             "archived": 1 if raw.get("archived") else 0,
             **{col: raw.get(col) for col in _IMPORT_PASSTHROUGH_COLS},
-            **{col: self._float_or_none(raw.get(col)) for col in _IMPORT_FLOAT_COLS},
-            **{col: self._int_or_default(raw.get(col)) for col in _IMPORT_INT_COLS},
+            **{col: self._coerce_or(raw.get(col), float, None) for col in _IMPORT_FLOAT_COLS},
+            **{col: self._coerce_or(raw.get(col), int, 0) for col in _IMPORT_INT_COLS},
         }
         conn.execute(_IMPORT_SESSION_INSERT_SQL, params)
         sanitized_messages = [
@@ -497,10 +474,9 @@ class SessionPortabilityMixin:
 
     @staticmethod
     def _attach_import_parents(conn, parent_updates: List[tuple]) -> int:
-        """Re-attach imported children whose parent exists (in the store or
-        the same payload) without creating a cycle; returns the detached count.
-        Only the closing edge of a cycle is dropped, so later entries can
-        still attach to the now-root session."""
+        """Re-attach imported children whose parent exists (in the store or the same payload)
+        without creating a cycle; returns the detached count. Only the closing edge of a
+        cycle is dropped, so later entries can still attach to the now-root session."""
         parent_by_child = dict(parent_updates)
 
         def _would_create_cycle(session_id: str, parent_id: str) -> bool:
@@ -532,17 +508,13 @@ class SessionPortabilityMixin:
         return detached
 
     def import_sessions(self, sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Import sessions exported by :meth:`export_session` or ``export_all``.
-        Existing ids are skipped. A child keeps its parent only when the parent
-        exists or is in the same payload; otherwise it is detached so partial
-        imports pass FK validation. Gateway routing, handoff, rewind and other
-        live runtime state are reset: this restores history, not ownership of
-        a live channel or process.
-
-        Activity contract: export INCLUDES ``last_activity_*`` (durable row
-        fields) but import RESETS them to NULL — resurrecting a stale
-        "working ..." label would fabricate activity the watchdog and listings
-        act on. Intentional asymmetry, pinned by regression test."""
+        """Import sessions exported by :meth:`export_session` or ``export_all``. Existing ids
+        are skipped. A child keeps its parent only when the parent exists or is in the
+        same payload; otherwise it is detached so partial imports pass FK validation.
+        Gateway routing, handoff, rewind and other live runtime state are reset: this
+        restores history, not ownership of a live channel or process. Export INCLUDES
+        ``last_activity_*`` but import RESETS them to NULL — resurrecting a stale
+        "working ..." label would fabricate activity the watchdog acts on (pinned)."""
         if not isinstance(sessions, list):
             raise ValueError("sessions must be a list")
         if len(sessions) > self._IMPORT_MAX_SESSIONS:
