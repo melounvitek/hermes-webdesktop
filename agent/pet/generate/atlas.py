@@ -49,6 +49,11 @@ def _median(values) -> int:
     return ordered[len(ordered) // 2]
 
 
+def _median_box_size(boxes) -> tuple[int, int]:
+    """``(median width, median height)`` of ``(l, t, r, b)`` *boxes*, each at least 1."""
+    return max(1, _median(r - l for l, _t, r, _b in boxes)), max(1, _median(b - t for _l, t, _r, b in boxes))
+
+
 def _blank(size=(CELL_WIDTH, CELL_HEIGHT)):
     return Image.new("RGBA", size, (0, 0, 0, 0))
 
@@ -111,26 +116,10 @@ def _unvisited_components(w: int, h: int, visited: bytearray, accept):
             yield _flood(w, h, visited, [(x, y)], accept)
 
 
-def _has_transparency(image) -> bool:
-    """True if the strip already carries a real alpha background (>5% of pixels at/below the floor)."""
-    alpha = image.getchannel("A")
-    return alpha.getextrema()[0] <= _ALPHA_FLOOR and sum(alpha.histogram()[: _ALPHA_FLOOR + 1]) > image.width * image.height * 0.05
-
-
-def _dominant_corner_color(image) -> tuple[int, int, int]:
-    """Most common opaque color among the four corners."""
-    w, h = image.width, image.height
-    px = image.load()
-    corners = [px[x, y] for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))]
-    counter = Counter(tuple(c[:3]) for c in corners if c[3] > _ALPHA_FLOOR)
-    return counter.most_common(1)[0][0] if counter else (0, 255, 0)
-
-
 def _near_key_mask(image, key: tuple[int, int, int], tol: int = 48):
     """``L`` mask, 255 where a pixel is within *tol* per-channel of *key*.
 
-    Tight on purpose: marks only near-pure backdrop so trapped chroma pockets
-    seed the flood while chroma-tinted character pixels stay outside it.
+    Tight on purpose: marks only near-pure backdrop so trapped chroma pockets seed the flood while chroma-tinted character pixels stay outside it.
     """
     r, g, b = (ch.point(lambda v, k=k: 255 if abs(v - k) <= tol else 0) for ch, k in zip(image.split()[:3], key))
     return ImageChops.darker(ImageChops.darker(r, g), b)
@@ -139,8 +128,7 @@ def _near_key_mask(image, key: tuple[int, int, int], tol: int = 48):
 def _remove_masked(rgba, mask):
     """Clear the pixels *mask* (``L``, 255 = remove) selects, then erode alpha by 1px (3x3 min).
 
-    The erosion drops the antialiased key/sprite blend ring (too far from the key to
-    match); the sprite's own thick outline keeps the silhouette intact.
+    The erosion drops the antialiased key/sprite blend ring (too far from the key to match); the sprite's thick outline keeps the silhouette.
     """
     out = Image.composite(_blank(rgba.size), rgba, mask)
     out.putalpha(out.getchannel("A").filter(ImageFilter.MinFilter(3)))
@@ -150,22 +138,25 @@ def _remove_masked(rgba, mask):
 def remove_background(image, *, chroma_key: tuple[int, int, int] | None = None, threshold: float = 90.0):
     """Return *image* (RGBA) with its flat background keyed out to transparent.
 
-    Already-transparent strips are left alone (holes repaired). Otherwise key out
-    *chroma_key* (or the dominant corner color) from the border inward: a global
-    color match punched holes wherever an interior highlight matched the backdrop.
+    Strips already carrying a real alpha background (>5% of pixels at/below the floor)
+    are left alone (holes repaired). Otherwise key out *chroma_key* (or the most common
+    opaque corner color) from the border inward: a global color match punched holes
+    wherever an interior highlight matched the backdrop.
     """
     rgba = image.convert("RGBA")
-    if _has_transparency(rgba):
+    w, h = rgba.size
+    alpha = rgba.getchannel("A")
+    if alpha.getextrema()[0] <= _ALPHA_FLOOR and sum(alpha.histogram()[: _ALPHA_FLOOR + 1]) > w * h * 0.05:
         return _repair_internal_alpha_holes(rgba)
-    key = chroma_key or _dominant_corner_color(rgba)
+    px = rgba.load()
+    if not (key := chroma_key):
+        corners = Counter(tuple(px[x, y][:3]) for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)) if px[x, y][3] > _ALPHA_FLOOR)
+        key = corners.most_common(1)[0][0] if corners else (0, 255, 0)
     # Fast path for saturated chroma keys (our prompts use hot magenta): C-level
     # channel ops clear border backdrop and enclosed pockets alike, no Python flood.
     if max(key) - min(key) >= 120:
         opaque = rgba.getchannel("A").point(lambda a: 255 if a > _ALPHA_FLOOR else 0)
         return _remove_masked(rgba, ImageChops.darker(_near_key_mask(rgba, key), opaque))
-
-    w, h = rgba.size
-    px = rgba.load()
 
     def _is_bg(x: int, y: int) -> bool:
         r, g, b, a = px[x, y]
@@ -183,17 +174,13 @@ def remove_background(image, *, chroma_key: tuple[int, int, int] | None = None, 
 def _repair_internal_alpha_holes(image):
     """Fill transparent islands fully enclosed by opaque sprite pixels.
 
-    Some providers return "transparent" PNGs with swiss-cheese alpha inside the
-    character; enclosed holes get the average color of their opaque neighbours.
+    Some providers return "transparent" PNGs with swiss-cheese alpha inside the character; enclosed holes take the average opaque-neighbour color.
     """
     rgba = image.convert("RGBA")
     w, h = rgba.size
     px = rgba.load()
     visited = bytearray(w * h)
-
-    def _is_transparent(x: int, y: int) -> bool:
-        return px[x, y][3] <= _ALPHA_FLOOR
-
+    _is_transparent = lambda x, y: px[x, y][3] <= _ALPHA_FLOOR  # noqa: E731
     _border_flood(w, h, visited, _is_transparent)  # edge-connected transparency = background
     for hole in _unvisited_components(w, h, visited, _is_transparent):
         seen = set(hole)
@@ -224,8 +211,7 @@ def _fit_to_cell(image):
 def _drop_side_bleed(image):
     """Remove tiny separated left/right lobes (neighbour-pose slivers) before fitting.
 
-    Component extraction may have grouped a near sliver with the subject; the
-    column profile still shows it as a low-mass lobe. Only those go, so wide poses survive.
+    Component extraction may group a near sliver with the subject; the column profile still shows it as a low-mass lobe. Only those go (wide poses survive).
     """
     rgba = image.convert("RGBA")
     w, h = rgba.size
@@ -270,11 +256,7 @@ def _component_boxes(image) -> list[tuple[tuple[int, int, int, int], int]]:
     w, h = r0 - l0, b0 - t0
     alpha = rgba.getchannel("A").load()
     components = _unvisited_components(w, h, bytearray(w * h), lambda x, y: alpha[l0 + x, t0 + y] > _ALPHA_FLOOR)
-    out: list[tuple[tuple[int, int, int, int], int]] = []
-    for pixels in components:
-        xs, ys = zip(*pixels)
-        out.append(((l0 + min(xs), t0 + min(ys), l0 + max(xs) + 1, t0 + max(ys) + 1), len(pixels)))
-    return out
+    return [((l0 + min(xs), t0 + min(ys), l0 + max(xs) + 1, t0 + max(ys) + 1), len(xs)) for xs, ys in map(lambda p: zip(*p), components)]
 
 
 def _isolate_slot_subject(image):
@@ -286,17 +268,13 @@ def _isolate_slot_subject(image):
     main_box, main_mass = max(comps, key=lambda item: item[1])
     ml, _mt, mr, _mb = main_box
     mw = max(1, mr - ml)
-
-    def _keep(box, mass) -> bool:
+    out = _blank(rgba.size)
+    for box, mass in comps:
         # Keep attached-looking accessories (halos); drop sparkles/tears/noise.
         left, _top, right, _bottom = box
         overlap = max(0, min(right, mr) - max(left, ml))
         near_main = (ml - mw * 0.25) <= (left + right) / 2 <= (mr + mw * 0.25)
-        return box == main_box or (mass >= max(24, main_mass * 0.035) and (overlap >= mw * 0.3 or near_main))
-
-    out = _blank(rgba.size)
-    for box, mass in comps:
-        if _keep(box, mass):
+        if box == main_box or (mass >= max(24, main_mass * 0.035) and (overlap >= mw * 0.3 or near_main)):
             out.alpha_composite(rgba.crop(box), (box[0], box[1]))
     return out
 
@@ -314,7 +292,7 @@ def _group_component_rows(boxes: list[tuple[int, int, int, int]]) -> list[list[t
     if not boxes:
         return []
     cy = lambda b: (b[1] + b[3]) / 2  # noqa: E731
-    row_tol = max(12, _median(max(1, b[3] - b[1]) for b in boxes) * 0.55)
+    row_tol = max(12, _median_box_size(boxes)[1] * 0.55)
     rows: list[list[tuple[int, int, int, int]]] = []
     centers: list[float] = []
     for box in sorted(boxes, key=cy):
@@ -334,10 +312,8 @@ def _group_component_rows(boxes: list[tuple[int, int, int, int]]) -> list[list[t
 def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
     """Merge disconnected parts of one subject (capes, tails, props) on the same row.
 
-    Merges when vertical spans overlap and the horizontal gap is tiny relative to
-    the component size; never bridges the larger gaps between separate poses.
+    Merges when vertical spans overlap and the horizontal gap is tiny relative to component size; never bridges the larger gaps between separate poses.
     """
-
     def related(a, b) -> bool:
         (al, at, ar, ab), (bl, bt, br, bb) = a, b
         v_overlap, min_h = max(0, min(ab, bb) - max(at, bt)), max(1, min(ab - at, bb - bt))
@@ -354,9 +330,8 @@ def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[i
             if used[i]:
                 continue
             used[i] = True
-            for j in range(i + 1, len(boxes)):
-                if not used[j] and related(a, boxes[j]):
-                    b = boxes[j]
+            for j, b in enumerate(boxes[i + 1 :], i + 1):
+                if not used[j] and related(a, b):
                     a = (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
                     used[j] = changed = True
             merged.append(a)
@@ -366,7 +341,6 @@ def _merge_related_boxes(boxes: list[tuple[int, int, int, int]]) -> list[tuple[i
 
 def _component_crops(strip, frame_count: int, *, require_padding: bool = False) -> list | None:
     """Frames as connected subjects in reading order (robust to 2D grids); ``None`` when *frame_count* can't be met."""
-
     def attempt(source) -> list | None:
         subjects = _significant_subject_boxes(source, min_mass=64)
         if len(subjects) < frame_count:
@@ -434,8 +408,7 @@ def _content_runs(profile: list[int], *, threshold: int = 2) -> list[tuple[tuple
 def _frame_x_ranges(strip, frame_count: int) -> list[tuple[int, int]] | None:
     """Per-frame ``(left, right)`` column ranges from the row's empty gutters.
 
-    Extra spans merge across the smallest gaps (a detached halo sits closer to its
-    body than to the next pose); fewer spans than frames → ``None`` (poses touching).
+    Extra spans merge across the smallest gaps (a detached halo sits closer to its body than to the next pose); fewer spans than frames → ``None``.
     """
     runs = _content_runs(_column_profile(strip))
     groups = [[l, r] for (l, r), m in runs if m >= max(m for _run, m in runs) * 0.02] if runs else []
@@ -475,8 +448,7 @@ def _validate_extracted_frames(frames: list, frame_count: int) -> None:
         boxes.append(bbox)
     if frame_count <= 1:
         return
-    med_w = max(1, _median(b[2] - b[0] for b in boxes))
-    med_h = max(1, _median(b[3] - b[1] for b in boxes))
+    med_w, med_h = _median_box_size(boxes)
     for i, (left, top, right, bottom) in enumerate(boxes):
         if _is_multi_pose_outlier(right - left, bottom - top, med_w, med_h):
             raise ValueError(f"frame {i} is a multi-pose width outlier")
@@ -487,16 +459,15 @@ def extract_strip_frames(
 ) -> list:
     """Turn one generated row strip into *frame_count* frames.
 
-    Keys out the background, then isolates padded subjects (components, then equal
-    slots). When that fails ``components`` raises while ``auto`` salvages leniently.
-    *fit* centers each frame into a cell; hatching passes ``fit=False`` so
+    Keys out the background, then isolates padded subjects (components, then equal slots). When that fails ``components``
+    raises while ``auto`` salvages leniently. *fit* centers each frame into a cell; hatching passes ``fit=False`` so
     :func:`normalize_cells` can register the whole pet with one shared scale.
     """
     strip = remove_background(_load_rgba(strip), chroma_key=chroma_key)
     frames = _component_crops(strip, frame_count, require_padding=True) or _slot_crops(strip, frame_count, require_padding=True)
-    if frames is None and method == "components":
-        raise ValueError(f"could not segment {frame_count} padded sprites from strip")
     if frames is None:
+        if method == "components":
+            raise ValueError(f"could not segment {frame_count} padded sprites from strip")
         frames = _component_crops(strip, frame_count, require_padding=False)
     if frames is None:
         frames = _salvage_frames(strip, frame_count)
@@ -506,8 +477,7 @@ def extract_strip_frames(
 
 def _salvage_frames(strip, frame_count: int) -> list:
     """Lenient last resort: gutter ranges (severing expected gutters if needed), else raw slots."""
-    source = strip
-    ranges = _frame_x_ranges(source, frame_count)
+    source, ranges = strip, _frame_x_ranges(strip, frame_count)
     if ranges is None:
         source = _sever_expected_gutters(strip, frame_count)
         ranges = _frame_x_ranges(source, frame_count)
@@ -526,10 +496,7 @@ def _column_profile(image) -> list[int]:
 def _best_shift(ref: list[int], prof: list[int], window: int) -> int:
     """Integer dx that best aligns *prof* onto *ref* (1-D cross-correlation; the body dominates, limbs barely move it)."""
     n = len(ref)
-
-    def score(d: int) -> int:
-        return sum(ref[x] * prof[x - d] for x in range(max(0, d), min(n, n + d)))
-
+    score = lambda d: sum(ref[x] * prof[x - d] for x in range(max(0, d), min(n, n + d)))  # noqa: E731
     return max(range(-window, window + 1), key=score)  # ties → smallest dx
 
 
@@ -554,9 +521,7 @@ def normalize_cells(frames_by_state: dict[str, list], *, pad: int = _NORMALIZE_P
         profiles = [_column_profile(f) for f in canvas]
         ref = [_median(p[x] for p in profiles) for x in range(w0)]
         window = max(8, w0 // 5)
-        aligned = [
-            _place(f, (w0 + 2 * window, h0), (window + _best_shift(ref, prof, window), 0)) for f, prof in zip(canvas, profiles)
-        ]
+        aligned = [_place(f, (w0 + 2 * window, h0), (window + _best_shift(ref, prof, window), 0)) for f, prof in zip(canvas, profiles)]
         boxes = [b for b in (a.getbbox() for a in aligned) if b]
         union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
         prepared[state] = (aligned, union, _median(b[3] - b[1] for b in boxes))
@@ -603,8 +568,7 @@ def compose_atlas(frames_by_state: dict[str, list]):
     atlas = _blank((ATLAS_WIDTH, ATLAS_HEIGHT))
     for state, row, count in ROW_SPECS:
         for col, frame in enumerate((frames_by_state.get(state) or [])[:count]):
-            cell = frame.convert("RGBA")
-            cell = cell if cell.size == (CELL_WIDTH, CELL_HEIGHT) else _fit_to_cell(cell)
+            cell = cell if (cell := frame.convert("RGBA")).size == (CELL_WIDTH, CELL_HEIGHT) else _fit_to_cell(cell)
             atlas.alpha_composite(cell, (col * CELL_WIDTH, row * CELL_HEIGHT))
     return _clear_transparent_rgb(atlas)
 
@@ -621,9 +585,7 @@ def validate_atlas(atlas) -> dict:
 
 def _check_atlas_cells(atlas) -> tuple[list[str], list[str], list[str]]:
     """Occupancy/collapse/residue checks for a correctly-sized atlas → ``(errors, warnings, filled_states)``."""
-    errors: list[str] = []
-    warnings: list[str] = []
-    filled_states: list[str] = []
+    errors, warnings, filled_states = [], [], []
     cell_boxes_by_state: dict[str, list[tuple[int, int, int, int]]] = {}
     for state, row, count in ROW_SPECS:
         cells = [atlas.crop((c * CELL_WIDTH, row * CELL_HEIGHT, (c + 1) * CELL_WIDTH, (row + 1) * CELL_HEIGHT)) for c in range(count)]
@@ -638,16 +600,14 @@ def _check_atlas_cells(atlas) -> tuple[list[str], list[str], list[str]]:
     # A valid pet must occupy the cell: one bad row can poison global
     # normalization and shrink every state while still passing "non-empty".
     all_boxes = [b for boxes in cell_boxes_by_state.values() for b in boxes]
-    global_med_w = _median(r - l for l, _t, r, _b in all_boxes) if all_boxes else 0
-    global_med_h = _median(b - t for _l, t, _r, b in all_boxes) if all_boxes else 0
+    global_med_w, global_med_h = _median_box_size(all_boxes) if all_boxes else (0, 0)
     if all_boxes and global_med_h < max(56, round(CELL_HEIGHT * 0.28)):
         errors.append(f"atlas sprites are too small after normalization (median frame height {global_med_h}px)")
     for state, boxes in cell_boxes_by_state.items():
         if len(boxes) <= 1:
             continue
-        widths, heights = [r - l for l, _t, r, _b in boxes], [b - t for _l, t, _r, b in boxes]
-        med_w, med_h = max(1, _median(widths)), max(1, _median(heights))
-        if _is_multi_pose_outlier(max(widths), max(heights), med_w, med_h):
+        med_w, med_h = _median_box_size(boxes)
+        if _is_multi_pose_outlier(max(r - l for l, _t, r, _b in boxes), max(b - t for _l, t, _r, b in boxes), med_w, med_h):
             errors.append(f"state '{state}' contains a multi-pose frame outlier")
         # Per-state collapse guard: one malformed row must not pass on the
         # strength of the healthy ones.

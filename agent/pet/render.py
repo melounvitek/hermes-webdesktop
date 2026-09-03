@@ -18,7 +18,7 @@ import sys
 import zlib
 from dataclasses import KW_ONLY, dataclass
 from functools import lru_cache
-from itertools import groupby
+from itertools import groupby, takewhile
 from pathlib import Path
 
 from agent.pet.constants import DEFAULT_SCALE, FRAME_H, FRAME_W, FRAMES_PER_STATE, PetState, state_row_index
@@ -43,10 +43,8 @@ def detect_terminal_graphics() -> str:
     # half-blocks; users who enabled them can pin display.pet.render_mode.
     if term_program == "vscode":
         return "unicode"
-    if os.environ.get("KITTY_WINDOW_ID") or "kitty" in term or "ghostty" in term or term_program == "ghostty":
-        return "kitty"
-    if _is_wezterm():  # speaks kitty and iterm; kitty has richer placement
-        return "kitty"
+    if os.environ.get("KITTY_WINDOW_ID") or "kitty" in term or "ghostty" in term or term_program == "ghostty" or _is_wezterm():
+        return "kitty"  # WezTerm speaks kitty and iterm; kitty has richer placement
     if term_program == "iterm.app" or os.environ.get("ITERM_SESSION_ID"):
         return "iterm"
     if term_program == "mintty" or "foot" in term or "mlterm" in term or "sixel" in term:
@@ -63,11 +61,9 @@ def resolve_mode(configured: str | None, *, stream=None) -> str:
     """Effective render mode from ``display.pet.render_mode`` + env; ``off`` when not a TTY."""
     mode = (configured or "auto").strip().lower()
     mode = mode if mode in RENDER_MODES else "auto"
-    if mode == "off":
-        return "off"
     stream = stream or sys.stdout
     try:
-        if not (hasattr(stream, "isatty") and stream.isatty()):
+        if mode == "off" or not (hasattr(stream, "isatty") and stream.isatty()):
             return "off"
     except (ValueError, OSError):
         return "off"
@@ -93,13 +89,8 @@ def _raw_frames(sheet_path: str, state_value: str, frame_w: int, frame_h: int, f
         cols, rows = max(1, sheet.width // frame_w), max(1, sheet.height // frame_h)
         # Clamp to the sheet: some pets ship fewer rows than the taxonomy reserves.
         top = min(state_row_index(state_value, rows) * frame_h, max(0, sheet.height - frame_h))
-        frames = []
-        for i in range(min(frames_per_state, cols)):
-            frame = sheet.crop((i * frame_w, top, (i + 1) * frame_w, top + frame_h))
-            if _frame_is_blank(frame):
-                break
-            frames.append(frame)
-        return tuple(frames)
+        crops = (sheet.crop((i * frame_w, top, (i + 1) * frame_w, top + frame_h)) for i in range(min(frames_per_state, cols)))
+        return tuple(takewhile(lambda f: not _frame_is_blank(f), crops))
     except Exception as exc:  # noqa: BLE001 - cosmetic feature, never fatal
         logger.debug("pet frame decode failed (%s, %s): %s", sheet_path, state_value, exc)
         return ()
@@ -129,27 +120,23 @@ def _png_b64(frame) -> str:
     return base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
 
-def _crop_frames_to_alpha_union(frames):
-    """Crop every frame to the union opaque bbox: kitty paints transparent margins too, so an untrimmed pet looks small and adrift."""
-    boxes = [b for b in (f.getchannel("A").getbbox() for f in frames) if b]
-    if not boxes:
-        return frames
-    union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
-    return [f.crop(union) for f in frames]
-
-
 # Nominal terminal cell size in pixels. kitty fits an image to its cell rectangle
 # preserving aspect, so a frame that isn't a whole cell multiple rounds up, clipping
 # the bottom row ("clipped feet"); snapping to an exact multiple avoids that.
 _CELL_W, _CELL_H = 8, 16
 
 
-def _snap_frames_to_cell_grid(frames):
-    """Resize frames so width/height are exact multiples of the cell box (all frames share the union-cropped size)."""
-    if not frames:
-        return frames
+def _fit_frames_to_cell_grid(frames):
+    """Crop *frames* (non-empty) to their union opaque bbox, then resize so width/height are exact cell-box multiples.
+
+    kitty paints transparent margins too, so an untrimmed pet looks small and adrift.
+    """
     from PIL import Image
 
+    boxes = [b for b in (f.getchannel("A").getbbox() for f in frames) if b]
+    if boxes:
+        union = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+        frames = [f.crop(union) for f in frames]
     w, h = frames[0].size
     target = (max(1, round(w / _CELL_W)) * _CELL_W, max(1, round(h / _CELL_H)) * _CELL_H)
     return frames if (w, h) == target else [f.resize(target, Image.LANCZOS) for f in frames]
@@ -162,10 +149,10 @@ def _kitty_apc(ctrl: str, data: str) -> str:
     return "".join(f"\x1b_G{ctrl + ',' if i == 0 else ''}m={int(i != last)};{piece}\x1b\\" for i, piece in enumerate(pieces))
 
 
-def _encode_kitty(frame, *, cell_cols: int | None = None, cell_rows: int | None = None) -> str:
+def _encode_kitty(frame) -> str:
     """kitty transmit+display at the cursor; ``c``/``r`` pin the cell box so frames overwrite each other."""
-    ctrl = "f=100,a=T,q=2" + (f",c={cell_cols}" if cell_cols else "") + (f",r={cell_rows}" if cell_rows else "")
-    return _kitty_apc(ctrl, _png_b64(frame))
+    cols, rows = _cell_box(frame)
+    return _kitty_apc(f"f=100,a=T,q=2,c={cols},r={rows}", _png_b64(frame))
 
 
 # kitty Unicode placeholders: Ink owns the screen and measures every cell, so it
@@ -218,19 +205,11 @@ def _encode_kitty_virtual(frame, *, image_id: int, cols: int, rows: int) -> str:
     return _kitty_apc(f"a=T,U=1,i={image_id},c={cols},r={rows},f=100,q=2", _png_b64(frame))
 
 
-def _encode_iterm(frame, *, cell_cols: int | None = None, cell_rows: int | None = None) -> str:
-    """iTerm2 inline image (OSC 1337 File)."""
+def _encode_iterm(frame) -> str:
+    """iTerm2 inline image (OSC 1337 File) pinned to the frame's cell box."""
     payload = _png_b64(frame)
-    args = ["inline=1", f"size={len(payload)}", "preserveAspectRatio=1"]
-    args += [f"width={cell_cols}"] if cell_cols else []
-    args += [f"height={cell_rows}"] if cell_rows else []
-    return f"\x1b]1337;File={';'.join(args)}:{payload}\x07"
-
-
-def _sixel_runs(chars: list[str]) -> str:
-    """Run-length encode one sixel band line (``!<n><ch>`` for runs longer than 3)."""
-    runs = ((ch, len(list(group))) for ch, group in groupby(chars))
-    return "".join("!%d%s" % (n, ch) if n > 3 else ch * n for ch, n in runs)
+    cols, rows = _cell_box(frame)
+    return f"\x1b]1337;File=inline=1;size={len(payload)};preserveAspectRatio=1;width={cols};height={rows}:{payload}\x07"
 
 
 def _encode_sixel(frame) -> str:
@@ -252,12 +231,12 @@ def _encode_sixel(frame) -> str:
         ys = range(band, min(band + 6, h))
         for color_idx in used:
             chars = [chr(63 + sum(1 << (y - band) for y in ys if alpha[x, y] > 32 and px[x, y] == color_idx)) for x in range(w)]
-            out.append("#%d" % color_idx + _sixel_runs(chars) + "$")  # carriage return within band
+            runs = ((ch, len(list(group))) for ch, group in groupby(chars))  # run-length: ``!<n><ch>`` for runs longer than 3
+            out.append("#%d" % color_idx + "".join("!%d%s" % (n, ch) if n > 3 else ch * n for ch, n in runs) + "$")  # ``$`` = band CR
         out.append("-")  # next band
     return "".join(out) + "\x1b\\"
 
 
-_HALF_BLOCK = "▀"
 # A single half-block cell: top pixel + bottom pixel as (r, g, b, a) tuples.
 Cell = tuple[tuple[int, int, int, int], tuple[int, int, int, int]]
 
@@ -277,10 +256,9 @@ def _downscale_cells(frame, *, target_cols: int) -> list[list[Cell]]:
 
 def _encode_unicode(frame, *, target_cols: int) -> str:
     """Truecolor ANSI half-blocks (one char = 2 vertical pixels)."""
-
     def cell(top, bottom) -> str:
         (tr, tg, tb, ta), (br, bg, bb, ba) = top, bottom
-        return "\x1b[0m " if ta < 32 and ba < 32 else f"\x1b[38;2;{tr};{tg};{tb}m\x1b[48;2;{br};{bg};{bb}m{_HALF_BLOCK}"
+        return "\x1b[0m " if ta < 32 and ba < 32 else f"\x1b[38;2;{tr};{tg};{tb}m\x1b[48;2;{br};{bg};{bb}m▀"
 
     return "\n".join("".join(cell(t, b) for t, b in row) + "\x1b[0m" for row in _downscale_cells(frame, target_cols=target_cols))
 
@@ -288,10 +266,12 @@ def _encode_unicode(frame, *, target_cols: int) -> str:
 def _cell_box(frame) -> tuple[int, int]:
     """Terminal cell box (~8×16 px per cell) for a scaled frame.
 
-    kitty stretches the image to fill ``c``×``r`` cells, so this must track the
-    scaled pixel size, not a native-aspect column count (that upscales small pets).
+    kitty stretches the image to fill ``c``×``r`` cells, so track the scaled pixel size, not a native-aspect column count (that upscales small pets).
     """
     return max(1, frame.width // _CELL_W), max(1, frame.height // _CELL_H)
+
+
+_ENCODERS = {"kitty": _encode_kitty, "iterm": _encode_iterm, "sixel": _encode_sixel}
 
 
 @dataclass(eq=False)
@@ -309,8 +289,7 @@ class PetRenderer:
 
     def __post_init__(self) -> None:
         self.spritesheet = str(self.spritesheet)
-        if self.mode not in RENDER_MODES:
-            self.mode = "unicode"
+        self.mode = self.mode if self.mode in RENDER_MODES else "unicode"
 
     @property
     def available(self) -> bool:
@@ -327,35 +306,25 @@ class PetRenderer:
     def cells(self, state: PetState | str, index: int, *, cols: int | None = None) -> list[list[Cell]]:
         """One frame as a half-block cell grid for Ink's native color props; ``[]`` when unavailable."""
         frames = self._frames(state)
-        if not frames:
-            return []
-        return _downscale_cells(frames[index % len(frames)], target_cols=cols or self.unicode_cols)
+        return _downscale_cells(frames[index % len(frames)], target_cols=cols or self.unicode_cols) if frames else []
 
     def kitty_payload(self, state: PetState | str, *, image_id: int) -> dict | None:
         """kitty placeholder payload ``{cols, rows, placeholder, frames}`` (transmit escapes + static text grid); ``None`` if no frames."""
-        frames = self._frames(state)
-        if not frames:
+        if not (frames := self._frames(state)):
             return None
-        frames = _snap_frames_to_cell_grid(_crop_frames_to_alpha_union(frames))
+        frames = _fit_frames_to_cell_grid(frames)
         cols, rows = _cell_box(frames[0])
         encoded = [_encode_kitty_virtual(f, image_id=image_id, cols=cols, rows=rows) for f in frames]
         return {"cols": cols, "rows": rows, "placeholder": kitty_placeholder_rows(cols, rows), "frames": encoded}
 
     def frame(self, state: PetState | str, index: int) -> str:
         """Encoded escape string for one frame (``index`` taken modulo the frame count), or ``""``."""
-        if self.mode == "off":
-            return ""
-        frames = self._frames(state)
-        if not frames:
+        if self.mode == "off" or not (frames := self._frames(state)):
             return ""
         frame = frames[index % len(frames)]
         try:
-            if self.mode in ("kitty", "iterm"):
-                cell_cols, cell_rows = _cell_box(frame)
-                encode = _encode_kitty if self.mode == "kitty" else _encode_iterm
-                return encode(frame, cell_cols=cell_cols, cell_rows=cell_rows)
-            if self.mode == "sixel":
-                return _encode_sixel(frame)
+            if self.mode in _ENCODERS:
+                return _ENCODERS[self.mode](frame)
             return _encode_unicode(frame, target_cols=self.unicode_cols)
         except Exception as exc:  # noqa: BLE001 - degrade silently
             logger.debug("pet frame encode failed (mode=%s): %s", self.mode, exc)
