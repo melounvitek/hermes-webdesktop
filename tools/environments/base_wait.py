@@ -1,9 +1,6 @@
-"""Opt-in interrupt/poll tracing for ``BaseEnvironment._wait_for_process``.
-
-Enabled by ``HERMES_DEBUG_INTERRUPT=1`` (see ``tools.environments.base``):
-logs loop entry/exit, interrupt/timeout detection, and ~30s heartbeats so
-"agent never sees the interrupt" reports can be diagnosed from agent.log.
-"""
+"""Opt-in interrupt/poll tracing for ``BaseEnvironment._wait_for_process``
+(``HERMES_DEBUG_INTERRUPT=1``): loop entry/exit, interrupt/timeout detection and ~30s
+heartbeats so "agent never sees the interrupt" reports can be diagnosed from agent.log."""
 
 import threading
 import time
@@ -16,8 +13,7 @@ _FMT = {
     "TIMEOUT": "iter=%d timeout=%ss",
     "HEARTBEAT": "iter=%d elapsed=%.0fs interrupt=%s activity_cb=%s%s",
     "EXCEPTION_EXIT": "iter=%d elapsed=%.1fs — killing subprocess group before re-raise",
-    "EXIT (natural)": "iter=%d elapsed=%.1fs returncode=%s",
-}
+    "EXIT (natural)": "iter=%d elapsed=%.1fs returncode=%s"}
 
 
 class _WaitTrace:
@@ -39,8 +35,7 @@ class _WaitTrace:
     def _emit(self, event: str, *args) -> None:
         self._log.info(
             "[interrupt-debug] _wait_for_process %s tid=%s pid=%s " + _FMT[event],
-            event, self._tid, self._pid, *args,
-        )
+            event, self._tid, self._pid, *args)
 
     def _elapsed(self) -> float:
         return time.monotonic() - self._start
@@ -67,8 +62,7 @@ class _WaitTrace:
         self._emit(
             "HEARTBEAT", self.iterations, self._elapsed(), is_interrupted(),
             "set" if not cb_now_none else "MISSING",
-            " (LOST during run)" if cb_now_none and not self._cb_was_none else "",
-        )
+            " (LOST during run)" if cb_now_none and not self._cb_was_none else "")
         self._last_heartbeat = time.monotonic()
         self._cb_was_none = cb_now_none
 
