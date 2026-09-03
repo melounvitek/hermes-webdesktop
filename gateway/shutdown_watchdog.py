@@ -78,25 +78,17 @@ class _LoopLivenessWatchdogHandle:
 
     def __init__(self, stop_event: threading.Event, thread: threading.Thread):
         self._stop_event = stop_event
-        self._thread = thread
+        self.stop = stop_event.set
         self.join = thread.join
         self.is_alive = thread.is_alive
-
-    def stop(self) -> None:
-        self._stop_event.set()
 
 
 def _arm_loop_floor_timer(
     loop: asyncio.AbstractEventLoop, interval: float = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S
 ) -> _LoopFloorTimerHandle:
     """Keep at least one timer pending so selector waits remain bounded."""
-    try:
-        resolved_interval = float(interval)
-        if resolved_interval <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        resolved_interval = DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S
-    return _LoopFloorTimerHandle(loop, resolved_interval)
+    resolved_interval = _coerce_float(interval, 0.0)
+    return _LoopFloorTimerHandle(loop, resolved_interval if resolved_interval > 0 else DEFAULT_LOOP_FLOOR_TIMER_INTERVAL_S)
 
 
 def start_loop_liveness_watchdog(
@@ -115,15 +107,15 @@ def start_loop_liveness_watchdog(
     stop_event = threading.Event()
 
     def _wait_for_probe(probe_event: threading.Event) -> Optional[bool]:
+        """True/False = probe answered / timed out; None = stop requested mid-wait."""
         deadline = time.monotonic() + probe_timeout
-        while True:
-            if stop_event.is_set():
-                return None
+        while not stop_event.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return probe_event.is_set()
             if probe_event.wait(timeout=min(remaining, 0.05)):
                 return True
+        return None
 
     def _watchdog() -> None:
         strikes = 0
@@ -144,13 +136,13 @@ def start_loop_liveness_watchdog(
             if responded:
                 strikes = 0
                 continue
-
+            # Re-check stop_event between each irreversible step: a late stop()
+            # during the dump must still win over the hard exit.
             if stop_event.is_set():
                 return
             strikes += 1
             if strikes < max_strikes:
                 continue
-
             if stop_event.is_set():
                 return
             with contextlib.suppress(Exception):
@@ -205,11 +197,11 @@ def get_loop_heartbeat_path(home: Optional[Path] = None) -> Path:
 
 
 def get_loop_tick_socket_path(home: Optional[Path] = None, pid: Optional[int] = None) -> Path:
-    """Return ``<HERMES_HOME>/state/gateway.loop-tick.<pid>.sock``.
+    """``<HERMES_HOME>/state/gateway.loop-tick.<pid>.sock``.
 
-    PID-suffixed so a stale node from a previous process is never mistaken for
-    this gateway's witness. Served by the loop itself (``_tick_socket_handler``),
-    so an answer proves the loop dispatches — what the off-loop heartbeat can't.
+    PID-suffixed so a stale node from a previous process is never mistaken for this
+    gateway's witness. Served by the loop itself (``_tick_socket_handler``), so an
+    answer proves the loop dispatches — what the off-loop heartbeat can't.
     """
     return _home(home) / "state" / f"gateway.loop-tick.{int(pid if pid is not None else os.getpid())}.sock"
 
@@ -240,13 +232,12 @@ def write_loop_heartbeat(
         payload["start_time"] = float(start_time)
     # Cheap memory sample (RSS + MemAvailable + swap): after an unclean death the
     # last heartbeat is the closest surviving record of memory pressure.
-    try:
+    with contextlib.suppress(Exception):
         from gateway.lifecycle_ledger import sample_memory
+
         mem = sample_memory()
         if mem:
             payload["mem"] = mem
-    except Exception:
-        pass
     if extra:
         payload.update(extra)
     try:
@@ -323,8 +314,7 @@ def arm_shutdown_watchdog(
         # Chunked wait so a late disarm is observed within ~1s.
         deadline = time.monotonic() + delay
         while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            if done.wait(timeout=min(remaining, 1.0)):
+            if done.wait(timeout=min(deadline - time.monotonic(), 1.0)):
                 return
         if done.is_set():
             return
@@ -375,8 +365,8 @@ def arm_shutdown_watchdog(
 async def _tick_socket_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     """Answer a liveness ping with one byte. Never raises.
 
-    Runs on the gateway loop, so a reply witnesses loop schedulability; the write
-    is a socket-buffer copy (no fsync), immune to the stalls that age the heartbeat.
+    Runs on the gateway loop, so a reply witnesses loop schedulability; the write is
+    a socket-buffer copy (no fsync), immune to the stalls that age the heartbeat.
     """
     with contextlib.suppress(Exception):
         writer.write(b"1")
