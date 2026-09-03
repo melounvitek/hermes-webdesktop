@@ -12,9 +12,6 @@ from .method_ctx import HandlerRegistry, bind_module
 
 _registry = HandlerRegistry()
 
-
-# ── Methods: complete ─────────────────────────────────────────────────
-
 _FUZZY_CACHE_TTL_S = 5.0
 _FUZZY_CACHE_MAX_FILES = 20000
 _FUZZY_FALLBACK_EXCLUDES = frozenset(
@@ -61,9 +58,7 @@ def _walk_repo_files(root: str):
 
 
 def _list_repo_files(root: str) -> list[str]:
-    """File paths relative to ``root`` (tracked + untracked via ``git ls-files`` from the
-    repo top; files outside ``root`` excluded so the picker stays Cmd-P scoped). Falls
-    back to a bounded ``os.walk(root)`` outside a git repo. Cached per-root for
+    """File paths relative to ``root`` (git listing, else a bounded walk), cached per-root for
     ``_FUZZY_CACHE_TTL_S`` so rapid keystrokes don't respawn git."""
     now = time.monotonic()
     with _fuzzy_cache_lock:
@@ -96,27 +91,21 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     buf = ""
     for ch in name:
         if ch in "-_." or (ch.isupper() and buf and not buf[-1].isupper()):
-            if buf:
-                parts.append(buf)
+            parts += [buf] if buf else []
             buf = ch if ch not in "-_." else ""
         else:
             buf += ch
-    if buf:
-        parts.append(buf)
-    if any(p.lower().startswith(ql) for p in parts):
+    if any(p.lower().startswith(ql) for p in parts + ([buf] if buf else [])):
         return (2, len(name))
     if ql in nl:
         return (3, len(name))
     it = iter(nl)
-    if all(any(c == q for c in it) for q in ql):
-        return (4, len(name))
-    return None
+    return (4, len(name)) if all(any(c == q for c in it) for q in ql) else None
 
 
 def _abs_completion_prefix_exists(path_part: str) -> bool:
-    """True when ``path_part`` reads sensibly as an absolute path: the parent dir exists
-    and a partially-typed final segment matches at least one entry. Decides whether
-    `@/foo` is the absolute `/foo` or shorthand for `foo` under the cwd."""
+    """True when ``path_part`` reads sensibly as an absolute path (parent exists and a
+    partially-typed final segment matches an entry): decides `@/foo` = `/foo` vs cwd `foo`."""
     expanded = _normalize_completion_path(path_part)
     parent = os.path.dirname(expanded.rstrip("/")) or "/"
     tail = os.path.basename(expanded.rstrip("/"))
@@ -177,22 +166,16 @@ def _model_picker_context(agent):
     """Layer live session state onto config without losing custom identity."""
     from hermes_cli.inventory import load_picker_context
     ctx = load_picker_context()
-    provider = getattr(agent, "provider", "") if agent else ""
-    base_url = getattr(agent, "base_url", "") if agent else ""
-    model = getattr(agent, "model", "") if agent else ""
+    provider, base_url, model = (getattr(agent, k, "") if agent else "" for k in ("provider", "base_url", "model"))
     if str(provider or "").strip().lower() == "custom":
         try:
             from hermes_cli.runtime_provider import canonical_custom_identity
-            provider = (
-                canonical_custom_identity(
-                    base_url=base_url or None, config_provider=ctx.current_provider, model=model or None
-                )
-                or provider)
+            provider = canonical_custom_identity(
+                base_url=base_url or None, config_provider=ctx.current_provider, model=model or None) or provider
         except Exception:
             logger.debug("custom provider identity recovery failed (model picker)", exc_info=True)
     return ctx.with_overrides(
-        current_provider=provider, current_model=model or _resolve_model(), current_base_url=base_url
-    )
+        current_provider=provider, current_model=model or _resolve_model(), current_base_url=base_url)
 
 
 def register(server) -> None:
