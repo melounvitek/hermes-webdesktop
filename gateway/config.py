@@ -109,21 +109,17 @@ def _normalize_transport_token(value: Any) -> str:
 
 
 def _coerce_float(value: Any, default: float) -> float:
-    if value is None:
-        return default
     try:
-        return float(value)
+        return default if value is None else float(value)
     except (TypeError, ValueError):
         return default
 
 
 def _coerce_int(value: Any, default: int) -> int:
-    if value is None:
-        return default
+    # OverflowError: ``int(float("inf"))`` — non-finite YAML must degrade, not abort loading.
     try:
-        return int(value)
+        return default if value is None else int(value)
     except (TypeError, ValueError, OverflowError):
-        # OverflowError: int(float("inf")) — non-finite YAML must degrade, not abort loading.
         return default
 
 
@@ -441,18 +437,13 @@ class PlatformConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
-            "enabled": self.enabled,
-            "extra": self.extra,
-            "reply_to_mode": self.reply_to_mode,
+            "enabled": self.enabled, "extra": self.extra, "reply_to_mode": self.reply_to_mode,
             "gateway_restart_notification": self.gateway_restart_notification,
             "typing_indicator": self.typing_indicator,
         }
         if self.typing_status_text is not None:
             result["typing_status_text"] = self.typing_status_text
-        if self.token:
-            result["token"] = self.token
-        if self.api_key:
-            result["api_key"] = self.api_key
+        result.update({k: v for k in ("token", "api_key") if (v := getattr(self, k))})
         if self.home_channel:
             result["home_channel"] = self.home_channel.to_dict()
         if self.channel_overrides:
@@ -877,26 +868,25 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         logger.warning("Invalid idle_minutes=%s (must be positive). Using default 1440.", policy.idle_minutes)
         policy.idle_minutes = 1440
 
-    # An empty token won't connect; say so.
-    for platform, pconfig in config.platforms.items():
-        if not pconfig.enabled:
-            continue
-        env_name = PLATFORM_TOKEN_ENV_NAMES.get(platform)
-        if env_name and pconfig.token is not None and not pconfig.token.strip():
-            logger.warning("%s is enabled but %s is empty. The adapter will likely fail to connect.", platform.value, env_name)
-
-    # Reject placeholder tokens (copied .env.example) with a clear startup error.
     try:
         from hermes_cli.auth import has_usable_secret
     except ImportError:
-        return
+        has_usable_secret = None
 
-    for platform, pconfig in config.platforms.items():
-        env_name = PLATFORM_TOKEN_ENV_NAMES.get(platform)
+    token_platforms = [
+        (p, c, PLATFORM_TOKEN_ENV_NAMES[p]) for p, c in config.platforms.items()
+        if c.enabled and p in PLATFORM_TOKEN_ENV_NAMES and c.token is not None
+    ]
+    # An empty token won't connect; say so.
+    for platform, pconfig, env_name in token_platforms:
+        if not pconfig.token.strip():
+            logger.warning("%s is enabled but %s is empty. The adapter will likely fail to connect.", platform.value, env_name)
+    if has_usable_secret is None:
+        return
+    # Reject placeholder tokens (copied .env.example) with a clear startup error.
+    for platform, pconfig, env_name in token_platforms:
         token = pconfig.token
-        if not (pconfig.enabled and env_name and token and token.strip()):
-            continue
-        if not has_usable_secret(token, min_length=4):
+        if token.strip() and not has_usable_secret(token, min_length=4):
             logger.error(
                 "%s is enabled but %s is set to a placeholder value ('%s'). "
                 "Set a real bot token before starting the gateway. "
