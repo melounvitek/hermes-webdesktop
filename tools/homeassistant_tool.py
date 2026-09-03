@@ -25,8 +25,7 @@ def _get_config():
     """Return the active profile's Home Assistant URL and token."""
     return (
         (_HASS_URL or get_secret("HASS_URL", "http://homeassistant.local:8123") or "").rstrip("/"),
-        _HASS_TOKEN or get_secret("HASS_TOKEN", "") or "",
-    )
+        _HASS_TOKEN or get_secret("HASS_TOKEN", "") or "")
 
 
 # Valid HA entity_id (e.g. "light.living_room", "sensor.temperature_1").
@@ -81,15 +80,12 @@ def _filter_and_summarize(states: list, domain: Optional[str] = None, area: Opti
         states = [
             s for s in states
             if area_lower in (s.get("attributes", {}).get("friendly_name", "") or "").lower()
-            or area_lower in (s.get("attributes", {}).get("area", "") or "").lower()
-        ]
+            or area_lower in (s.get("attributes", {}).get("area", "") or "").lower()]
     entities = [
         {
             "entity_id": s["entity_id"], "state": s["state"],
-            "friendly_name": s.get("attributes", {}).get("friendly_name", ""),
-        }
-        for s in states
-    ]
+            "friendly_name": s.get("attributes", {}).get("friendly_name", "")}
+        for s in states]
     return {"count": len(entities), "entities": entities}
 
 
@@ -104,8 +100,7 @@ async def _async_get_state(entity_id: str) -> Dict[str, Any]:
         "state": data["state"],
         "attributes": data.get("attributes", {}),
         "last_changed": data.get("last_changed"),
-        "last_updated": data.get("last_updated"),
-    }
+        "last_updated": data.get("last_updated")}
 
 
 def _build_service_payload(entity_id: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -176,8 +171,7 @@ def _dispatch(coro, log_name: str, fail_msg: str) -> str:
 def _handle_list_entities(args: dict, **kw) -> str:
     return _dispatch(
         _async_list_entities(domain=args.get("domain"), area=args.get("area")),
-        "ha_list_entities", "Failed to list entities",
-    )
+        "ha_list_entities", "Failed to list entities")
 
 
 def _handle_get_state(args: dict, **kw) -> str:
@@ -202,8 +196,7 @@ def _handle_call_service(args: dict, **kw) -> str:
     if domain in _BLOCKED_DOMAINS:
         return tool_error(
             f"Service domain '{domain}' is blocked for security. "
-            f"Blocked domains: {', '.join(sorted(_BLOCKED_DOMAINS))}"
-        )
+            f"Blocked domains: {', '.join(sorted(_BLOCKED_DOMAINS))}")
     entity_id = args.get("entity_id")
     if entity_id and not _ENTITY_ID_RE.match(entity_id):
         return tool_error(f"Invalid entity_id format: {entity_id}")
@@ -215,8 +208,7 @@ def _handle_call_service(args: dict, **kw) -> str:
             return tool_error(f"Invalid JSON string in 'data' parameter: {e}")
     return _dispatch(
         _async_call_service(domain, service, entity_id, data),
-        "ha_call_service", f"Failed to call {domain}.{service}",
-    )
+        "ha_call_service", f"Failed to call {domain}.{service}")
 
 
 def _handle_list_services(args: dict, **kw) -> str:
@@ -355,9 +347,7 @@ for _schema, _handler in (
     (HA_LIST_ENTITIES_SCHEMA, _handle_list_entities),
     (HA_GET_STATE_SCHEMA, _handle_get_state),
     (HA_LIST_SERVICES_SCHEMA, _handle_list_services),
-    (HA_CALL_SERVICE_SCHEMA, _handle_call_service),
-):
+    (HA_CALL_SERVICE_SCHEMA, _handle_call_service)):
     registry.register(
         name=_schema["name"], toolset="homeassistant", schema=_schema, handler=_handler,
-        check_fn=_check_ha_available, emoji="🏠",
-    )
+        check_fn=_check_ha_available, emoji="🏠")

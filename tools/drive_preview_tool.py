@@ -34,8 +34,7 @@ def drive_preview_tool(
     to: Optional[str] = None,
     limit: Optional[int] = None,
     full: Optional[bool] = None,
-    callback: Optional[Callable] = None,
-) -> str:
+    callback: Optional[Callable] = None) -> str:
     """Dispatch one interaction to the desktop renderer and return its outcome."""
     if callback is None:
         return tool_error("drive_preview is only available in the Hermes desktop app.")
@@ -148,5 +147,4 @@ registry.register(
         action=args.get("action", ""), limit=args.get("max"), callback=kw.get("callback"),
         **{k: args.get(k) for k in ("ref", "selector", "text", "key", "submit", "amount", "to", "full")},
     ),
-    emoji="🖱️",
-)
+    emoji="🖱️")
