@@ -42,7 +42,7 @@ def _probe_teams_sdk_available() -> bool:
 
 
 TEAMS_SDK_AVAILABLE = _probe_teams_sdk_available()
-# SDK symbols stay None until check_teams_requirements() binds them.
+# SDK symbols stay None until check_teams_requirements() binds them (via _SDK_IMPORTS below).
 ClientOptions = App = ActivityContext = MessageActivity = ConversationReference = None  # type: ignore[assignment,misc]
 TypingActivityInput = AdaptiveCardInvokeActivity = AdaptiveCardActionCardResponse = None  # type: ignore[assignment,misc]
 AdaptiveCardActionMessageResponse = AdaptiveCardInvokeResponse = InvokeResponse = None  # type: ignore[assignment,misc]
@@ -195,22 +195,20 @@ async def _standalone_send(
         return {"error": "Teams standalone send: TEAMS_CLIENT_ID, TEAMS_CLIENT_SECRET, and TEAMS_TENANT_ID are all required"}
     raw_service_url = os.getenv("TEAMS_SERVICE_URL") or extra.get("service_url", "") or _DEFAULT_TEAMS_SERVICE_URL
     service_url = _validate_teams_service_url(raw_service_url)
-    if service_url is None:
-        return {"error": f"Teams standalone send: TEAMS_SERVICE_URL host is not on the Bot Framework allowlist; "
-                         f"expected one of {sorted(_ALLOWED_TEAMS_SERVICE_HOSTS)}"}
-    if not chat_id:
-        return {"error": "Teams standalone send: chat_id (conversation ID) is required"}
-    if not _TEAMS_CONV_ID_RE.match(chat_id):
-        return {"error": "Teams standalone send: chat_id contains characters outside the Bot Framework conversation ID set"}
-    if not _TEAMS_CONV_ID_RE.match(tenant_id):
-        return {"error": "Teams standalone send: TEAMS_TENANT_ID contains characters outside the expected set"}
+    for failed, error in (
+        (service_url is None, f"TEAMS_SERVICE_URL host is not on the Bot Framework allowlist; "
+                              f"expected one of {sorted(_ALLOWED_TEAMS_SERVICE_HOSTS)}"),
+        (not chat_id, "chat_id (conversation ID) is required"),
+        (not _TEAMS_CONV_ID_RE.match(chat_id or ""), "chat_id contains characters outside the Bot Framework conversation ID set"),
+        (not _TEAMS_CONV_ID_RE.match(tenant_id), "TEAMS_TENANT_ID contains characters outside the expected set"),
+        (not AIOHTTP_AVAILABLE, "aiohttp not installed"),
+    ):
+        if failed:
+            return {"error": f"Teams standalone send: {error}"}
     token_url, token_form = _bf_token_request(tenant_id, client_id, client_secret)
     activities_url = f"{service_url}v3/conversations/{chat_id}/activities"
-    if not AIOHTTP_AVAILABLE:
-        return {"error": "Teams standalone send: aiohttp not installed"}
     try:
         import aiohttp as _aiohttp
-
         # Per-request timeouts so a slow STS endpoint cannot starve the activity POST.
         per_request_timeout = _aiohttp.ClientTimeout(total=15.0)
         async with _aiohttp.ClientSession(trust_env=gateway_trust_env()) as session:
@@ -283,7 +281,6 @@ def check_teams_requirements() -> bool:
 
     def _import() -> dict:
         from aiohttp import web as _web
-
         bindings: dict = {"web": _web, "AIOHTTP_AVAILABLE": True}
         with _suppress_third_party_dotenv():
             for module_name, names in _SDK_IMPORTS.items():
@@ -365,7 +362,6 @@ class TeamsAdapter(BasePlatformAdapter):
             if failed:
                 self._set_fatal_error(code, message, retryable=False)
                 return False
-
         try:
             # aiohttp app first — the bridge adapter wires SDK routes into it.
             aiohttp_app = web.Application(client_max_size=_MAX_BODY_BYTES)
@@ -407,8 +403,7 @@ class TeamsAdapter(BasePlatformAdapter):
         self._running = False
         if self._runner:
             await self._runner.cleanup()
-            self._runner = None
-        self._app = None
+        self._runner = self._app = None
         self._mark_disconnected()
         logger.info("[teams] Disconnected")
 
@@ -418,7 +413,6 @@ class TeamsAdapter(BasePlatformAdapter):
         because ``asyncio.Lock()`` in __init__ may bind the wrong loop."""
         import time
         import httpx
-
         if self._bf_token_lock is None:
             self._bf_token_lock = asyncio.Lock()
         async with self._bf_token_lock:
@@ -432,17 +426,15 @@ class TeamsAdapter(BasePlatformAdapter):
                 resp = await client.post(token_url, data=token_form)
                 resp.raise_for_status()
                 payload = resp.json()
-            token = payload["access_token"]
             expires_in = float(payload.get("expires_in", 3600) or 3600)
-            self._bf_token_cache = (token, time.monotonic() + expires_in)
-            return token
+            self._bf_token_cache = (payload["access_token"], time.monotonic() + expires_in)
+            return self._bf_token_cache[0]
 
     async def _fetch_attachment_bytes(self, url: str, timeout: float = 30.0) -> bytes:
         """Download attachment bytes with SSRF protection. Connector URLs get the bot's bearer token;
         redirects and body size go through the shared guards (as the cache_*_from_url helpers)."""
         from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
         from gateway.platforms.base import _ssrf_redirect_guard, _read_httpx_body_with_limit
-
         if not is_safe_url(url):
             raise ValueError("Blocked unsafe attachment URL (SSRF protection)")
         headers = {"User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)"}
@@ -452,8 +444,7 @@ class TeamsAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[teams] Could not acquire Bot Framework token for attachment: %s", e)
         async with create_ssrf_safe_async_client(
-            timeout=timeout, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]}
-        ) as client:
+            timeout=timeout, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]}) as client:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
                 # Never buffer .content — a lying Content-Length must not OOM the gateway.
@@ -573,10 +564,8 @@ class TeamsAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _invoke_card(body: list) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
-        return InvokeResponse(
-            status=200,
-            body=AdaptiveCardActionCardResponse(value=AdaptiveCard().with_version("1.4").with_body(body)),
-        )
+        card = AdaptiveCard().with_version("1.4").with_body(body)
+        return InvokeResponse(status=200, body=AdaptiveCardActionCardResponse(value=card))
 
     async def _on_card_action(
         self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
@@ -589,23 +578,9 @@ class TeamsAdapter(BasePlatformAdapter):
         session_key = data.get("session_key", "")
         if not hermes_action or not session_key:
             return self._invoke_message("Unknown action.")
-        # Default-deny: approval clicks require TEAMS_ALLOWED_USERS or an explicit
-        # TEAMS_ALLOW_ALL_USERS=true opt-in, else anyone who can message the bot could approve.
-        allowed_csv = os.getenv("TEAMS_ALLOWED_USERS", "").strip()
-        allow_all = os.getenv("TEAMS_ALLOW_ALL_USERS", "").strip().lower() in {"1", "true", "yes"}
-        if not allow_all:
-            if not allowed_csv:
-                logger.warning(
-                    "[teams] card action rejected: TEAMS_ALLOWED_USERS not configured "
-                    "and TEAMS_ALLOW_ALL_USERS not set — default deny")
-                return self._invoke_message("⛔ Approval buttons require TEAMS_ALLOWED_USERS to be configured.")
-            from_account = ctx.activity.from_
-            clicker_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and clicker_id not in allowed_ids:
-                logger.warning("[teams] Unauthorized card action by %s — ignoring", clicker_id)
-                return self._invoke_message("⛔ Not authorized.")
-
+        denied = self._card_action_denied(ctx.activity.from_)
+        if denied:
+            return self._invoke_message(denied)
         choice = _APPROVAL_CHOICES.get(hermes_action)
         if not choice:
             return self._invoke_message("Unknown action.")
@@ -615,6 +590,26 @@ class TeamsAdapter(BasePlatformAdapter):
         body = _approval_body(data.get("cmd", ""), data.get("desc", ""))
         body.append(TextBlock(text=_APPROVAL_LABELS[choice], wrap=True, weight="Bolder"))
         return self._invoke_card(body)
+
+    @staticmethod
+    def _card_action_denied(from_account: Any) -> Optional[str]:
+        """Default-deny gate for approval clicks: require TEAMS_ALLOWED_USERS or an explicit
+        TEAMS_ALLOW_ALL_USERS=true opt-in, else anyone who can message the bot could approve.
+        Returns the user-facing denial text, or ``None`` when allowed."""
+        if os.getenv("TEAMS_ALLOW_ALL_USERS", "").strip().lower() in {"1", "true", "yes"}:
+            return None
+        allowed_csv = os.getenv("TEAMS_ALLOWED_USERS", "").strip()
+        if not allowed_csv:
+            logger.warning(
+                "[teams] card action rejected: TEAMS_ALLOWED_USERS not configured "
+                "and TEAMS_ALLOW_ALL_USERS not set — default deny")
+            return "⛔ Approval buttons require TEAMS_ALLOWED_USERS to be configured."
+        clicker_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
+        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        if "*" not in allowed_ids and clicker_id not in allowed_ids:
+            logger.warning("[teams] Unauthorized card action by %s — ignoring", clicker_id)
+            return "⛔ Not authorized."
+        return None
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
@@ -628,8 +623,7 @@ class TeamsAdapter(BasePlatformAdapter):
 
         def _action(title: str, hermes_action: str, **kw) -> "ExecuteAction":
             return ExecuteAction(
-                title=title, verb="hermes_approve", data={**btn_data_base, "hermes_action": hermes_action}, **kw
-            )
+                title=title, verb="hermes_approve", data={**btn_data_base, "hermes_action": hermes_action}, **kw)
 
         actions = [_action("Allow Once", "approve_once", style="positive")]
         if not smart_denied and allow_session:
@@ -699,7 +693,6 @@ class TeamsAdapter(BasePlatformAdapter):
                 mime_type = mimetypes.guess_type(path)[0] or default_mime
                 with open(path, "rb") as f:
                     content_url = f"data:{mime_type};base64,{base64.b64encode(f.read()).decode()}"
-
             activity = MessageActivityInput().add_attachments(Attachment(content_type=mime_type, content_url=content_url))
             if caption:
                 activity = activity.add_text(caption)
@@ -709,30 +702,24 @@ class TeamsAdapter(BasePlatformAdapter):
             logger.error("[teams] send_%s failed: %s", media_label, e, exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
 
-    async def send_image(
-        self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+    async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         return await self._send_media_attachment(chat_id, image_url, "image/png", caption=caption, media_label="image")
 
-    async def send_image_file(
-        self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, **kwargs
-    ) -> SendResult:
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
+                              reply_to: Optional[str] = None, **kwargs) -> SendResult:
         return await self.send_image(chat_id=chat_id, image_url=image_path, caption=caption, reply_to=reply_to)
 
-    async def send_video(
-        self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
+    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(chat_id, video_path, "video/mp4", caption=caption, media_label="video")
 
-    async def send_voice(
-        self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
+    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(chat_id, audio_path, "audio/mpeg", caption=caption, media_label="voice")
 
-    async def send_document(
-        self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs,
-    ) -> SendResult:
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None,
+                            reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(
             chat_id, file_path, "application/octet-stream", caption=caption, media_label="document")
 
@@ -744,30 +731,22 @@ _SETUP_CREDENTIALS = (
     ("Client ID", "TEAMS_CLIENT_ID", {}),
     ("Client secret", "TEAMS_CLIENT_SECRET", {"password": True}),
     ("Tenant ID", "TEAMS_TENANT_ID", {}))
-_SETUP_INTRO = (
-    "You'll need the Teams CLI. If you haven't already:",
-    "  npm install -g @microsoft/teams.cli@preview",
-    "  teams login",
-    "",
-    "Then expose port 3978 publicly (devtunnel / ngrok / cloudflared),",
-    "and create your bot:",
-    '  teams app create --name "Hermes" --endpoint "https://<tunnel>/api/messages"',
-    "",
-    "The CLI will print CLIENT_ID, CLIENT_SECRET, and TENANT_ID. Paste them below.",
-    "")
+_SETUP_INTRO = (  # "" → blank line
+    "You'll need the Teams CLI. If you haven't already:", "  npm install -g @microsoft/teams.cli@preview",
+    "  teams login", "", "Then expose port 3978 publicly (devtunnel / ngrok / cloudflared),", "and create your bot:",
+    '  teams app create --name "Hermes" --endpoint "https://<tunnel>/api/messages"', "",
+    "The CLI will print CLIENT_ID, CLIENT_SECRET, and TENANT_ID. Paste them below.", "")
 
 
 def interactive_setup() -> None:
     """Guide the user through Teams setup using the Teams CLI."""
     from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli.cli_output import prompt, prompt_yes_no, print_info, print_success, print_warning
-
     existing_id = get_env_value("TEAMS_CLIENT_ID")
     if existing_id:
         print_info(f"Teams: already configured (app ID: {existing_id})")
         if not prompt_yes_no("Reconfigure Teams?", False):
             return
-
     for line in _SETUP_INTRO:
         print_info(line) if line else print()
     for label, env_key, prompt_kwargs in _SETUP_CREDENTIALS:
@@ -776,7 +755,6 @@ def interactive_setup() -> None:
             print_warning(f"{label} is required — skipping Teams setup")
             return
         save_env_value(env_key, value.strip())
-
     print()
     print_info("To find your AAD object ID for the allowlist: teams status --verbose")
     if prompt_yes_no("Restrict access to specific users? (recommended)", True):
@@ -789,7 +767,6 @@ def interactive_setup() -> None:
     else:
         save_env_value("TEAMS_ALLOW_ALL_USERS", "true")
         print_warning("⚠️  Open access — anyone who can message the bot can command it.")
-
     print()
     print_success("Teams configuration saved to ~/.hermes/.env")
     print_info("Install the app in Teams:  teams app install --id <teamsAppId>")
@@ -812,24 +789,18 @@ def _install_hint() -> str:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
-        name="teams",
-        label="Microsoft Teams",
-        adapter_factory=lambda cfg: TeamsAdapter(cfg),
+        name="teams", label="Microsoft Teams", adapter_factory=lambda cfg: TeamsAdapter(cfg),
         check_fn=check_requirements,  # PASSIVE probe — never installs
         ensure_deps_fn=check_teams_requirements,  # ACTIVE lazy-installer, run by create_adapter()
-        validate_config=validate_config,
-        is_connected=is_connected,
+        validate_config=validate_config, is_connected=is_connected,
         required_env=["TEAMS_CLIENT_ID", "TEAMS_CLIENT_SECRET", "TEAMS_TENANT_ID"],
-        install_hint=_install_hint(),
-        setup_fn=interactive_setup,
+        install_hint=_install_hint(), setup_fn=interactive_setup,
         env_enablement_fn=_env_enablement,  # env-only setups show up in gateway status
         cron_deliver_env_var="TEAMS_HOME_CHANNEL",  # deliver=teams cron home-channel routing
         standalone_sender_fn=_standalone_send,  # out-of-process cron delivery via Bot Framework REST
-        allowed_users_env="TEAMS_ALLOWED_USERS",
-        allow_all_env="TEAMS_ALLOW_ALL_USERS",
+        allowed_users_env="TEAMS_ALLOWED_USERS", allow_all_env="TEAMS_ALLOW_ALL_USERS",
         max_message_length=28000,  # Teams supports up to ~28 KB per message
-        emoji="💼",
-        allow_update_command=True,
+        emoji="💼", allow_update_command=True,
         platform_hint=(
             "You are chatting via Microsoft Teams. Teams renders a subset of "
             "markdown — bold (**text**), italic (*text*), and inline code "
