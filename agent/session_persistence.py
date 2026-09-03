@@ -41,6 +41,8 @@ _EPHEMERAL_SCAFFOLDING_FLAGS = (
 )
 
 _IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+# Reasoning/codex fields are role-gated (assistant-only) inside _insert_message_rows.
+_ROW_REASONING_KEYS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items")
 
 
 def _is_ephemeral_scaffolding(msg: Any) -> bool:
@@ -275,6 +277,7 @@ class SessionPersistenceMixin:
             and sanitize_context(content).strip() != content.strip()
         ):
             api_content = content
+        # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
         row = {
             "role": role,
             "content": _durable_content(content),
@@ -282,12 +285,7 @@ class SessionPersistenceMixin:
             "tool_calls": _tool_calls_data(msg),
             "tool_call_id": msg.get("tool_call_id"),
             "finish_reason": msg.get("finish_reason"),
-            # Reasoning/codex fields are role-gated (assistant-only) inside _insert_message_rows.
-            "reasoning": msg.get("reasoning"),
-            "reasoning_content": msg.get("reasoning_content"),
-            "reasoning_details": msg.get("reasoning_details"),
-            "codex_reasoning_items": msg.get("codex_reasoning_items"),
-            "codex_message_items": msg.get("codex_message_items"),
+            **{k: msg.get(k) for k in _ROW_REASONING_KEYS},
             "_compressed_summary": bool(msg.get(COMPRESSED_SUMMARY_METADATA_KEY)),
             "timestamp": timestamp,
             "api_content": api_content,
@@ -495,6 +493,17 @@ class SessionPersistenceMixin:
             redacted.append(part)
         return redacted
 
+    def _session_log_entry(self, msg: Dict[str, Any]) -> Dict[str, Any]:
+        """Copy of ``msg`` with scratchpad tags normalised and credentials redacted
+        (defence-in-depth; respects HERMES_REDACT_SECRETS)."""
+        if msg.get("role") == "assistant" and msg.get("content"):
+            msg = dict(msg)
+            msg["content"] = self._clean_session_content(msg["content"])
+        if "content" in msg:
+            msg = dict(msg)
+            msg["content"] = self._redact_message_content(msg.get("content"))
+        return msg
+
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
         """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False).
 
@@ -515,19 +524,8 @@ class SessionPersistenceMixin:
             return
 
         try:
-            cleaned = []
-            for msg in messages:
-                # Mirror the SQLite flush: scaffolding is never durable transcript content.
-                if _is_ephemeral_scaffolding(msg):
-                    continue
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    msg = dict(msg)
-                    msg["content"] = self._clean_session_content(msg["content"])
-                # Defence-in-depth credential redaction (respects HERMES_REDACT_SECRETS).
-                if "content" in msg:
-                    msg = dict(msg)
-                    msg["content"] = self._redact_message_content(msg.get("content"))
-                cleaned.append(msg)
+            # Mirror the SQLite flush: scaffolding is never durable transcript content.
+            cleaned = [self._session_log_entry(msg) for msg in messages if not _is_ephemeral_scaffolding(msg)]
 
             if log_file.exists():
                 try:
