@@ -199,11 +199,8 @@ def named_profile_home(path: str | Path) -> Path | None:
     """
     current = Path(path)
     for candidate in (current, *current.parents):
-        if (
-            candidate.parent.name == "profiles"
-            and not candidate.name.startswith(".")
-            and _is_hermes_profiles_root(candidate.parent)
-        ):
+        if (candidate.parent.name == "profiles" and not candidate.name.startswith(".")
+                and _is_hermes_profiles_root(candidate.parent)):
             return candidate
         # Stop at a default Hermes home: a coincidental ``profiles/`` ancestor is not a root.
         if candidate.name == ".hermes":
@@ -232,9 +229,7 @@ def clear_named_profile_deleted(profile_home: str | Path) -> None:
 def assert_named_profile_home_live(path: str | Path) -> None:
     """Refuse missing or tombstoned named profile homes."""
     home = named_profile_home(path)
-    if home is None:
-        return
-    if named_profile_is_deleted(home) or not home.exists():
+    if home is not None and (named_profile_is_deleted(home) or not home.exists()):
         raise FileNotFoundError(
             f"Named profile home does not exist: {home}. "
             "Create the profile explicitly before using it."
@@ -256,9 +251,7 @@ def _packaged_dir(env_var: str, default: Path | None, subdir: str) -> Path:
     ``<HERMES_HOME>/<subdir>``.
     """
     override = os.getenv(env_var, "").strip()
-    if override:
-        return Path(override)
-    return default if default is not None else get_hermes_home() / subdir
+    return Path(override) if override else default if default is not None else get_hermes_home() / subdir
 
 
 def get_optional_skills_dir(default: Path | None = None) -> Path:
@@ -276,12 +269,7 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
     return _packaged_dir("HERMES_BUNDLED_SKILLS", default, "skills")
 
 
-def get_hermes_dir(
-    new_subpath: str,
-    old_name: str,
-    *,
-    home: Path | None = None,
-) -> Path:
+def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None) -> Path:
     """Resolve a Hermes subdirectory with backward compatibility.
 
     New installs get the consolidated layout (e.g. ``cache/images``); a populated legacy
@@ -326,9 +314,7 @@ def _iter_managed_node_candidates(names: list[str], home: Path | None = None):
     for directory in iter_hermes_node_dirs(home):
         for name in names:
             candidate = directory / name
-            if candidate.is_file() and (
-                sys.platform == "win32" or os.access(candidate, os.X_OK)
-            ):
+            if candidate.is_file() and (sys.platform == "win32" or os.access(candidate, os.X_OK)):
                 yield candidate
 
 
@@ -351,11 +337,7 @@ def _run_version_probe(argv: list[str], **kwargs):
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         return subprocess.run(
-            argv,
-            capture_output=True,
-            timeout=10,
-            creationflags=windows_hide_flags(),
-            **kwargs,
+            argv, capture_output=True, timeout=10, creationflags=windows_hide_flags(), **kwargs
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return None
@@ -384,12 +366,8 @@ def node_tool_runnable(path: str | None) -> bool:
     """True only when *path* is a Node/npm/npx binary that actually runs (``--version`` probe)."""
     if not path:
         return False
-    if sys.platform == "win32":
-        if not Path(path).is_file():
-            return False
-    elif not _is_executable_file(path):
-        return False
-    return _version_probe_ok(path)
+    present = Path(path).is_file() if sys.platform == "win32" else _is_executable_file(path)
+    return present and _version_probe_ok(path)
 
 
 def hermes_managed_node_tree_present(home: Path | None = None) -> bool:
@@ -467,8 +445,7 @@ def _print_managed_node_in_use_notice() -> None:
     _managed_node_in_use_notice_printed = True
     print(
         "→ Hermes-managed Node.js is in use by a running app; deferring its "
-        "upgrade until the app is closed (re-run `hermes update` afterwards).",
-        flush=True,
+        "upgrade until the app is closed (re-run `hermes update` afterwards).", flush=True,
     )
 
 
@@ -495,10 +472,8 @@ def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     index_bytes = _fetch_url(index_url, 60)
     if index_bytes is None:
         return None
-    match = re.search(
-        rf"node-v{_HERMES_NODE_TARGET_MAJOR}\.\d+\.\d+-win-{node_arch}\.zip",
-        index_bytes.decode("utf-8", errors="replace"),
-    )
+    pattern = rf"node-v{_HERMES_NODE_TARGET_MAJOR}\.\d+\.\d+-win-{node_arch}\.zip"
+    match = re.search(pattern, index_bytes.decode("utf-8", errors="replace"))
     if not match:
         return None
     zip_name = match.group(0)
@@ -618,9 +593,7 @@ def _run_node_bootstrap(func: str, *, timeout: int, **extra_env: str) -> bool:
         result = subprocess.run(
             ["bash", "-c", f'source "{_NODE_BOOTSTRAP_SCRIPT}" && {func}'],
             env={**os.environ, "HERMES_HOME": str(get_hermes_home()), **extra_env},
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            capture_output=True, timeout=timeout, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -832,9 +805,7 @@ def secure_parent_dir(path: Path) -> None:
         logging.getLogger(__name__).warning(
             "Not restricting permissions on %s: it is inside the "
             "hermes-agent install directory (%s). Credential files are "
-            "normally stored under the hermes home directory instead.",
-            parent,
-            _INSTALL_ROOT,
+            "normally stored under the hermes home directory instead.", parent, _INSTALL_ROOT,
         )
         return
     try:
@@ -964,13 +935,9 @@ def parse_reasoning_effort(effort) -> dict | None:
     "none" and its aliases ("false", "disabled", YAML boolean False) — ``reasoning_effort:
     false``/``off``/``no`` must mean disabled, not "keep thinking".
     """
-    if effort is False:
-        return {"enabled": False}
     if effort is None or effort is True:
         return None
-    effort = str(effort).strip().lower()
-    if not effort:
-        return None
+    effort = str(effort).strip().lower()  # False -> "false" -> disabled; "" matches neither set
     if effort in {"none", "false", "disabled"}:
         return {"enabled": False}
     if effort in VALID_REASONING_EFFORTS:
@@ -1040,9 +1007,7 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
     fallback activation): per-model override first, then the global ``agent.reasoning_effort``.
     """
     cfg = cfg if isinstance(cfg, dict) else {}
-    agent_cfg = cfg.get("agent")
-    if not isinstance(agent_cfg, dict):
-        agent_cfg = {}
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
 
     if not model:
         model_cfg = cfg.get("model")
@@ -1247,9 +1212,8 @@ def project_venv_dir(project_root) -> Path | None:
 
 def venv_python_path(venv_dir, *, windows: bool | None = None) -> Path:
     """Path to the Python interpreter inside *venv_dir* (may not exist)."""
-    if windows is None:
-        windows = sys.platform == "win32"
-    return venv_bin_dir(venv_dir, windows=windows) / ("python.exe" if windows else "python")
+    bin_dir = venv_bin_dir(venv_dir, windows=windows)
+    return bin_dir / ("python.exe" if bin_dir.name == "Scripts" else "python")
 
 
 # ─── Partial-update diagnostics ──────────────────────────────────────────────
