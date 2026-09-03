@@ -14,10 +14,6 @@ def _fmt_state(subsystem: str) -> str:
     return f"{subsystem}.write_approval = {'on' if on else 'off'}"
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
 def _fmt_pending_list(subsystem: str) -> str:
     records = wa.list_pending(subsystem)
     if not records:
@@ -34,17 +30,8 @@ def _fmt_pending_list(subsystem: str) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Subcommand dispatch
-# ---------------------------------------------------------------------------
-
 def handle_pending_subcommand(
-    subsystem: str,
-    args: List[str],
-    *,
-    memory_store=None,
-    set_mode_fn=None,
-) -> Optional[str]:
+    subsystem: str, args: List[str], *, memory_store=None, set_mode_fn=None) -> Optional[str]:
     """Dispatch a /memory or /skills write-approval subcommand.
 
     ``memory_store`` applies approved memory writes (CLI passes its live store; gateway a freshly
@@ -53,12 +40,8 @@ def handle_pending_subcommand(
     other handling (e.g. /skills search).
     """
     if not args:
-        # Bare /memory or /skills with no sub → show pending + gate state.
         return f"{_fmt_state(subsystem)}\n\n" + _fmt_pending_list(subsystem)
-
-    sub = args[0].lower()
-    rest = args[1:]
-
+    sub, rest = args[0].lower(), args[1:]
     if sub == "pending":
         return _fmt_pending_list(subsystem)
     if sub in {"approve", "apply"}:
@@ -80,11 +63,9 @@ def _approve(subsystem: str, rest: List[str], memory_store) -> str:
     if not rest:
         return _usage(subsystem)
     target = rest[0]
-
     records = wa.list_pending(subsystem)
     if not records:
         return f"No pending {subsystem} writes."
-
     if target.lower() == "all":
         targets = list(records)
     else:
@@ -143,9 +124,12 @@ def _diff(rest: List[str]) -> str:
     rec = wa.get_pending(wa.SKILLS, rest[0])
     if not rec:
         return f"No pending skill write with id '{rest[0]}'."
-    diff = wa.skill_pending_diff(rec)
-    header = f"# Pending skill write {rec['id']}: {rec.get('summary', '')}\n"
-    return header + "\n" + diff
+    return f"# Pending skill write {rec['id']}: {rec.get('summary', '')}\n\n" + wa.skill_pending_diff(rec)
+
+
+_APPROVAL_VALUES = {
+    **dict.fromkeys(("on", "true", "yes", "1", "enable", "enabled"), True),
+    **dict.fromkeys(("off", "false", "no", "0", "disable", "disabled"), False)}
 
 
 def _set_approval(subsystem: str, rest: List[str], set_mode_fn) -> str:
@@ -154,10 +138,7 @@ def _set_approval(subsystem: str, rest: List[str], set_mode_fn) -> str:
         return (f"{_fmt_state(subsystem)}\n"
                 f"Set with: /{subsystem} approval <on|off>")
     arg = rest[0].strip().lower()
-    enabled = {
-        **dict.fromkeys(("on", "true", "yes", "1", "enable", "enabled"), True),
-        **dict.fromkeys(("off", "false", "no", "0", "disable", "disabled"), False),
-    }.get(arg)
+    enabled = _APPROVAL_VALUES.get(arg)
     if enabled is None:
         return f"Invalid value '{arg}'. Use: on or off."
     if set_mode_fn is None:
