@@ -530,9 +530,8 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
     duration = round(time.monotonic() - exec_start, 2)
     kernel.execution_count = int(payload.get("execution_count", kernel.execution_count + 1))
     stderr_raw = kernel.stderr.drain()
-    stdout_text = clean(str(payload.get("stdout", "")) + kernel.raw.drain())
+    stdout_text, stdout_metadata = _truncate_stdout_text(clean(str(payload.get("stdout", "")) + kernel.raw.drain()))
     cell_stderr = clean(str(payload.get("stderr", "")) + stderr_raw)
-    stdout_text, stdout_metadata = _truncate_stdout_text(stdout_text)
     cell_status = payload.get("status", "")
     result: Dict[str, Any] = {
         "status": status, "output": stdout_text, "exit_code": 0,
@@ -602,9 +601,7 @@ def execute_in_session_kernel(
             assert kernel.proc is not None and kernel.proc.stdin is not None
             # Per-cell tool budget: the RPC loop enforces counter < max; reset without restarting.
             kernel.tool_call_counter[0] = 0
-            # Anything raw that leaked between cells belongs to no cell.
-            kernel.raw.drain()
-            kernel.stderr.drain()
+            kernel.raw.drain(), kernel.stderr.drain()  # raw output leaked between cells belongs to no cell
             kernel.cell_authority = authority
             kernel.proc.stdin.write((json.dumps({"id": uuid.uuid4().hex, "code": code}) + "\n").encode("utf-8"))
             kernel.proc.stdin.flush()
