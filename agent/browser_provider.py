@@ -1,16 +1,12 @@
-"""
-Browser Provider ABC
-====================
+"""Browser Provider ABC: pluggable cloud browser backends (Browserbase, Browser Use, Firecrawl, …).
 
-Pluggable-backend interface for cloud browser providers (Browserbase, Browser
-Use, Firecrawl, …). Providers register via
-:meth:`PluginContext.register_browser_provider`; the active one (selected by
-``browser.cloud_provider`` in ``config.yaml``) services every cloud-mode
-``browser_*`` tool call. Providers live in ``<repo>/plugins/browser/<name>/``
-(built-in) or ``~/.hermes/plugins/browser/<name>/`` (user, opt-in).
+Providers register via :meth:`PluginContext.register_browser_provider`; the active one (selected by
+``browser.cloud_provider``) services every cloud-mode ``browser_*`` tool call. They live in
+``<repo>/plugins/browser/<name>/`` (built-in) or ``~/.hermes/plugins/browser/<name>/`` (user).
 
-Session metadata contract (preserved from the legacy ``CloudBrowserProvider``
-so :mod:`tools.browser_tool` needs no translation)::
+Session metadata contract (legacy ``CloudBrowserProvider`` shape; ``tools.browser_tool`` needs no
+translation). ``bb_session_id`` is a legacy key name kept verbatim — it holds the provider's session ID
+regardless of provider::
 
     {
         "session_name": str,        # unique name for agent-browser --session
@@ -20,9 +16,6 @@ so :mod:`tools.browser_tool` needs no translation)::
         "features": dict,           # feature flags that were enabled
         "external_call_id": str,    # optional, managed-gateway billing key
     }
-
-``bb_session_id`` is a legacy key name kept verbatim for backward compat — it
-holds the provider's session ID regardless of which provider is in use.
 """
 
 from __future__ import annotations
@@ -36,46 +29,34 @@ from agent.provider_base import ProviderBase
 class BrowserProvider(ProviderBase):
     """Abstract base class for a cloud browser backend.
 
-    Subclasses implement :attr:`name` (the ``browser.cloud_provider`` value,
-    e.g. ``browserbase``, ``browser-use``, ``firecrawl``), :meth:`is_available`,
-    and the lifecycle trio :meth:`create_session` / :meth:`close_session` /
-    :meth:`emergency_cleanup`. ``get_setup_schema`` may add ``"post_setup"``
-    (e.g. ``"agent_browser"``) to trigger the install hook.
+    Subclasses implement :attr:`name` (the ``browser.cloud_provider`` value), :meth:`is_available`, and
+    the lifecycle trio :meth:`create_session` / :meth:`close_session` / :meth:`emergency_cleanup`.
+    ``get_setup_schema`` may add ``"post_setup"`` (e.g. ``"agent_browser"``) to trigger the install hook.
     """
 
     @abc.abstractmethod
     def is_available(self) -> bool:
-        """True when this provider can service calls.
-
-        Cheap check only (env var present, managed-gateway token readable, dep
-        importable) — must NOT make network calls; runs at tool-registration
-        time and on every ``hermes tools`` paint.
-        """
+        """True when this provider can service calls. Cheap check only (env var, token readable, dep
+        importable) — must NOT make network calls; runs at tool-registration time and on every
+        ``hermes tools`` paint."""
 
     @abc.abstractmethod
     def create_session(self, task_id: str) -> Dict[str, object]:
-        """Create a cloud browser session and return the session metadata dict
-        described in the module docstring.
-
-        May raise ``ValueError`` (missing credentials) or ``RuntimeError``
-        (network / API failure); the dispatcher surfaces these to the user.
-        """
+        """Create a cloud browser session and return the metadata dict from the module docstring.
+        May raise ``ValueError`` (missing credentials) or ``RuntimeError`` (network / API failure);
+        the dispatcher surfaces these to the user."""
 
     @abc.abstractmethod
     def close_session(self, session_id: str) -> bool:
-        """Release a cloud session by provider session ID.
-
-        Returns True on success, False on failure. Should not raise — log and
-        return False so the dispatcher's cleanup loop keeps moving.
-        """
+        """Release a cloud session by provider session ID. Returns True on success, False on failure;
+        should not raise (log and return False so the dispatcher's cleanup loop keeps moving)."""
 
     @abc.abstractmethod
     def emergency_cleanup(self, session_id: str) -> None:
-        """Best-effort teardown from atexit / signal handlers. Must tolerate
-        missing credentials and network errors; must not raise."""
+        """Best-effort teardown from atexit / signal handlers. Must tolerate missing credentials and
+        network errors; must not raise."""
 
-    # Legacy ``CloudBrowserProvider`` names still used by ``tools.browser_tool``
-    # and out-of-tree subclasses; thin delegations to the current API.
+    # Legacy ``CloudBrowserProvider`` names still used by ``tools.browser_tool`` and out-of-tree subclasses.
 
     def is_configured(self) -> bool:
         """Backward-compat alias for :meth:`is_available`."""

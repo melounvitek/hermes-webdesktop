@@ -31,9 +31,7 @@ def is_official_codex_base_url(base_url: str) -> bool:
         return False
 
 
-def codex_cloudflare_headers(
-    access_token: str, *, base_url: str = CODEX_AUX_BASE_URL,
-) -> Dict[str, str]:
+def codex_cloudflare_headers(access_token: str, *, base_url: str = CODEX_AUX_BASE_URL) -> Dict[str, str]:
     """Identity and account headers for chatgpt.com/backend-api/codex.
 
     OpenAI requires third-party harnesses to identify themselves: the official
@@ -45,7 +43,6 @@ def codex_cloudflare_headers(
     """
     if is_official_codex_base_url(base_url):
         from hermes_cli import __version__
-
         headers = {"User-Agent": f"HermesAgent/{__version__}", "originator": "hermes-agent"}
     else:
         headers = {"User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)", "originator": "codex_cli_rs"}
@@ -65,9 +62,7 @@ def codex_cloudflare_headers(
     return headers
 
 
-def apply_required_codex_headers(
-    client_kwargs: Dict[str, Any], *, access_token: str, base_url: str,
-) -> None:
+def apply_required_codex_headers(client_kwargs: Dict[str, Any], *, access_token: str, base_url: str) -> None:
     """Keep required Codex identity after user/provider header overrides."""
     if not is_official_codex_base_url(base_url):
         return
