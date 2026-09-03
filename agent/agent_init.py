@@ -52,10 +52,9 @@ _warned_unavailable_providers: set[str] = set()
 def _warn_memory_provider_unavailable(name: str, reason: str = "") -> None:
     """Warn once per provider that a configured memory provider is unavailable.
 
-    ``is_available()`` is a side-effect-free hot-path check and can't log itself; without
-    this the provider is silently dropped (common trigger: systemd/gateway services not
-    inheriting ``~/.hermes/.env``). ``reason`` is the provider's ``unavailable_reason()``
-    hint — this is the only place it can reach the user, so it is appended when present.
+    ``is_available()`` is a side-effect-free hot-path check and can't log itself; without this
+    the provider is silently dropped. ``reason`` (the provider's ``unavailable_reason()`` hint)
+    can only reach the user here, so it is appended when present.
     """
     if name in _warned_unavailable_providers:
         return
@@ -186,13 +185,11 @@ def _custom_provider_runtime_ids(value: Any) -> set[str]:
 def _build_codex_gpt5_autoraise_notice(
     autoraise: Dict[str, Any], context_length: Optional[int] = None
 ) -> str:
-    """Build the one-time notice shown when Codex gpt-5.x raises compaction.
+    """One-time notice when Codex gpt-5.x raises compaction (``autoraise``: model/from/to).
 
-    ``autoraise`` is ``{"model", "from", "to"}``. ``context_length`` is the live-resolved
-    window (Codex's /models catalog is authoritative and shifts server-side), so the banner
-    reports what this session actually got. The same text is printed for CLI users and
-    replayed via ``status_callback`` for gateway users, so it must be self-contained and
-    include the exact opt-back-out command.
+    ``context_length`` is the live-resolved window (Codex's catalog shifts server-side) so the
+    banner reports what this session got. Printed for CLI and replayed via status_callback for
+    gateway users, so it must be self-contained and include the exact opt-back-out command.
     """
     model = str(autoraise.get("model") or "gpt-5.4/5.5").strip().lower().rsplit("/", 1)[-1]
     if isinstance(context_length, int) and context_length > 0:
@@ -214,12 +211,11 @@ def _resolve_compression_threshold(
     global_threshold: float, model_cthresh: Optional[float], *, model: Optional[str] = None,
     is_codex_autoraise: bool,
 ) -> tuple[float, Optional[Dict[str, Any]]]:
-    """Combine the user's global compaction threshold with a per-model override.
+    """Global compaction threshold merged with a per-model override.
 
-    Returns ``(effective_threshold, autoraise_notice)``; the notice is
-    ``{"model", "from", "to"}`` only when a Codex autoraise actually RAISES the threshold.
-    Codex overrides never LOWER a higher user-configured threshold (the user deliberately
-    keeps more raw context); other overrides (e.g. Arcee Trinity) stay unconditional.
+    Returns ``(threshold, autoraise_notice)``; the notice is set only when a Codex autoraise
+    actually RAISES the threshold — it never lowers a higher user value (the user deliberately
+    keeps more raw context). Other overrides (Arcee Trinity) stay unconditional.
     """
     if model_cthresh is None:
         return global_threshold, None
@@ -367,13 +363,9 @@ def _normalize_run_budget_seconds(value) -> Optional[float]:
 def _refuse_checkpoint_required_on_codex_app_server(
     checkpoint_required: bool, api_mode: Optional[str]
 ) -> None:
-    """Fail closed at init when the checkpoint gate cannot be honored.
-
-    The codex app-server compacts its own thread without a truthful pre-compaction
-    transcript boundary (in default "native" mode Hermes never initiates it), so refusing
-    here keeps a turn from ever reaching a codex-owned compaction boundary — the
-    compress_context() guard alone cannot cover native turns.
-    """
+    """Fail closed at init: the codex app-server compacts its own thread without a truthful
+    pre-compaction boundary (default "native" mode), so a required checkpoint can't be
+    guaranteed — the compress_context() guard alone cannot cover native turns."""
     if checkpoint_required and api_mode == "codex_app_server":
         raise RuntimeError(
             "BLOCKED_MISSING_PREREQUISITE: compression.checkpoint_required "
@@ -1014,10 +1006,7 @@ def _build_client(agent, api_key, base_url, fallback_model):
 
 def _lazy_headers(module: str, name: str, pass_key: bool = False, pass_base: bool = False):
     """Header factory ``(api_key, base_url) -> dict`` importing ``module.name`` at call time.
-
-    ``pass_key`` forwards ``(key, base_url=base)`` (Codex Cloudflare headers); ``pass_base``
-    forwards ``(base)`` (NVIDIA NIM); neither forwards nothing.
-    """
+    ``pass_key`` forwards ``(key, base_url=base)``; ``pass_base`` forwards ``(base)``."""
     def factory(key, base):
         import importlib
         fn = getattr(importlib.import_module(module), name)
@@ -1051,12 +1040,8 @@ def _host_default_headers_factory(base_url: str):
 
 
 def _client_kwargs_from_routed(client, timeout) -> Dict[str, Any]:
-    """OpenAI-client kwargs mirroring a router-resolved client.
-
-    Preserves provider-specific headers the router set: the OpenAI SDK stores caller-provided
-    default_headers in ``_custom_headers``; older/mocked clients may expose
-    ``default_headers`` / ``_default_headers`` instead.
-    """
+    """OpenAI-client kwargs mirroring a router-resolved client, keeping its provider headers
+    (SDK stores them in ``_custom_headers``; older/mocked clients expose ``default_headers``)."""
     kwargs = {"api_key": client.api_key, "base_url": str(client.base_url)}
     if timeout is not None:
         kwargs["timeout"] = timeout
@@ -1165,11 +1150,10 @@ def _load_tools(agent, enabled_toolsets, disabled_toolsets):
 
 
 def _publish_session_id(session_id: str) -> None:
-    """Expose the session ID to tools (terminal, execute_code) via ContextVar + os.environ.
+    """Expose the session ID to tools via ContextVar (+ legacy os.environ fallback).
 
-    Both are kept in sync because different tool paths still read both. If the ContextVar
-    bridge fails to import, keep the root-agent legacy env fallback but never let delegated
-    construction publish a child ID process-wide.
+    If the ContextVar bridge fails to import, keep the root-agent env fallback but never let
+    delegated construction publish a child ID process-wide.
     """
     try:
         from gateway.session_context import set_current_session_id
@@ -1281,11 +1265,8 @@ def _apply_display_config(agent, _agent_cfg, platform):
 
 
 def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
-    """Scoping kwargs for ``MemoryManager.initialize_all``.
-
-    status_callback (deterministic retain indicator) is CLI-only — gateway status travels a
-    different path and the indicator no-ops without it.
-    """
+    """Scoping kwargs for ``MemoryManager.initialize_all`` (status_callback is CLI-only:
+    gateway status travels a different path and the indicator no-ops without it)."""
     kwargs = {
         "session_id": agent.session_id,
         "platform": platform or "cli",
@@ -1468,11 +1449,8 @@ def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
 
 def _compression_threshold(agent, cfg: Dict[str, Any]) -> tuple[float, bool]:
     """Global threshold merged with the per-model override; stashes the autoraise notice.
-
-    Codex gpt-5.4/5.5 raise to 85% (backend caps at 272K, so 50% would compact at ~136K).
-    The opt-out flag restores the global threshold; when the raise fires a one-time notice
-    is stashed on the agent for the first turn, with its own display gate.
-    """
+    Codex gpt-5.4/5.5 raise to 85% (272K cap → 50% would compact at ~136K); the opt-out flag
+    restores the global value, and the notice has its own display gate."""
     threshold = float(cfg.get("threshold", 0.50))
     autoraise = _cfg_flag(cfg, "codex_gpt55_autoraise", True)
     notice_enabled = _cfg_flag(cfg, "codex_gpt55_autoraise_notice", True)
@@ -1609,11 +1587,8 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
 def _warn_invalid_config_int(
     what: str, value: Any, requirement: str, fallback: str, print_fallback: str = "",
 ) -> None:
-    """Log + stderr-print an invalid integer config value.
-
-    ``print_fallback`` lets the user-facing line keep its historical wording where it
-    differs from the log line.
-    """
+    """Log + stderr-print an invalid integer config value (``print_fallback``: user-facing
+    wording where it differs from the log line)."""
     _ra().logger.warning(
         "Invalid %s: %r — %s. Falling back to %s.", what, value, requirement, fallback,
     )
@@ -1718,11 +1693,9 @@ def _scope_context_length_to_default_runtime(
 ) -> Optional[int]:
     """Return ``model.context_length`` only if it describes the active runtime.
 
-    ``model.context_length`` describes the configured default model. A process launched
-    with ``--model`` has already replaced ``agent.model`` before config loads, so carrying
-    the default model's explicit window into that runtime is stale. Live switch/fallback
-    paths already clear this override; direct-start stays consistent with them and lets
-    provider metadata resolve the active model's window.
+    It describes the configured default model; a ``--model`` launch has already replaced
+    ``agent.model``, so carrying the default's window into that runtime is stale. Live
+    switch/fallback paths already clear it — direct-start stays consistent with them.
     """
     _default = _model_cfg.get("default")
     if isinstance(_default, dict):
@@ -1923,12 +1896,9 @@ def _select_context_engine(_agent_cfg):
 
 
 def _compressor_max_tokens(agent):
-    """``agent.max_tokens``, or the native-Gemini adapter default when unset.
-
-    With model.max_tokens unset the generateContent adapter still sends maxOutputTokens=65,535
-    and the threshold is pct×(window − max_tokens): reserving 0 here let the provider 400
-    before compaction fired, so mirror the adapter's default (native Gemini only).
-    """
+    """``agent.max_tokens``, or the native-Gemini adapter default when unset: generateContent
+    still sends maxOutputTokens=65,535 and the threshold is pct×(window − max_tokens), so
+    reserving 0 let the provider 400 before compaction fired."""
     if agent.max_tokens is not None:
         return agent.max_tokens
     try:
@@ -2383,19 +2353,14 @@ def init_agent(
     """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
 
     Non-obvious parameters:
-      requested_provider: original provider identity before runtime canonicalization.
-      openrouter_min_coding_score: coding-score floor for ``openrouter/pareto-code``
-        only; None/empty lets OpenRouter pick.
-      clarify_callback: ``(question, choices) -> str`` from the platform layer; if
-        None the clarify tool returns an error.
-      reasoning_config: None defaults to ``{"enabled": True, "effort": "medium"}``
-        on OpenRouter.
-      prefill_messages: prepended to history as priming context. Anthropic Sonnet/
-        Opus 4.6+ reject a conversation ending on an assistant message (400) — use
-        structured outputs instead of a trailing-assistant prefill there.
-      skip_context_files: skip SOUL.md/.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules
-        injection (batch/data-generation runs). load_soul_identity keeps
-        ~/.hermes/SOUL.md as identity even when skip_context_files=True.
+      requested_provider: provider identity before runtime canonicalization.
+      openrouter_min_coding_score: coding-score floor for ``openrouter/pareto-code`` only.
+      clarify_callback: ``(question, choices) -> str``; None → the clarify tool errors.
+      reasoning_config: None → ``{"enabled": True, "effort": "medium"}`` on OpenRouter.
+      prefill_messages: priming history. Anthropic Sonnet/Opus 4.6+ 400 on a trailing
+        assistant message — use structured outputs there instead.
+      skip_context_files: skip SOUL.md/.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules injection;
+        load_soul_identity keeps ~/.hermes/SOUL.md as identity regardless.
     """
     _install_safe_stdio()
 
